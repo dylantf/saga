@@ -482,32 +482,23 @@ mod tests {
 
     #[test]
     fn float() {
-        assert_eq!(toks("3.14"), vec![Float(3.14), Eof]);
+        assert_eq!(toks("3.144"), vec![Float(3.144), Eof]);
     }
 
     #[test]
     fn integer_then_dot_ident() {
         // 3.foo should be int, dot, ident — not a float
-        assert_eq!(
-            toks("3.foo"),
-            vec![Int(3), Dot, Ident("foo".into()), Eof]
-        );
+        assert_eq!(toks("3.foo"), vec![Int(3), Dot, Ident("foo".into()), Eof]);
     }
 
     #[test]
     fn string_simple() {
-        assert_eq!(
-            toks(r#""hello""#),
-            vec![String("hello".into()), Eof]
-        );
+        assert_eq!(toks(r#""hello""#), vec![String("hello".into()), Eof]);
     }
 
     #[test]
     fn string_escape_sequences() {
-        assert_eq!(
-            toks(r#""\n\t\\\"""#),
-            vec![String("\n\t\\\"".into()), Eof]
-        );
+        assert_eq!(toks(r#""\n\t\\\"""#), vec![String("\n\t\\\"".into()), Eof]);
     }
 
     #[test]
@@ -602,7 +593,10 @@ mod tests {
 
     #[test]
     fn single_char_operators() {
-        assert_eq!(toks("+ - * / %"), vec![Plus, Minus, Star, Slash, Modulo, Eof]);
+        assert_eq!(
+            toks("+ - * / %"),
+            vec![Plus, Minus, Star, Slash, Modulo, Eof]
+        );
         assert_eq!(toks("= < >"), vec![Eq, Lt, Gt, Eof]);
     }
 
@@ -640,10 +634,7 @@ mod tests {
     #[test]
     fn inline_comment_after_code() {
         // "42" then newline-after-comment triggers terminator
-        assert_eq!(
-            toks("42 # comment\n"),
-            vec![Int(42), Terminator, Eof]
-        );
+        assert_eq!(toks("42 # comment\n"), vec![Int(42), Terminator, Eof]);
     }
 
     // --- Terminators ---
@@ -651,12 +642,15 @@ mod tests {
     #[test]
     fn terminator_after_expression_ending_tokens() {
         assert_eq!(toks("42\n"), vec![Int(42), Terminator, Eof]);
-        assert_eq!(toks("3.14\n"), vec![Float(3.14), Terminator, Eof]);
+        assert_eq!(toks("3.144\n"), vec![Float(3.144), Terminator, Eof]);
         assert_eq!(toks("\"hi\"\n"), vec![String("hi".into()), Terminator, Eof]);
         assert_eq!(toks("True\n"), vec![True, Terminator, Eof]);
         assert_eq!(toks("False\n"), vec![False, Terminator, Eof]);
         assert_eq!(toks("foo\n"), vec![Ident("foo".into()), Terminator, Eof]);
-        assert_eq!(toks("Foo\n"), vec![UpperIdent("Foo".into()), Terminator, Eof]);
+        assert_eq!(
+            toks("Foo\n"),
+            vec![UpperIdent("Foo".into()), Terminator, Eof]
+        );
     }
 
     #[test]
@@ -687,7 +681,13 @@ mod tests {
     fn no_terminator_inside_parens() {
         assert_eq!(
             toks("(foo\nbar)"),
-            vec![LParen, Ident("foo".into()), Ident("bar".into()), RParen, Eof]
+            vec![
+                LParen,
+                Ident("foo".into()),
+                Ident("bar".into()),
+                RParen,
+                Eof
+            ]
         );
     }
 
@@ -695,7 +695,15 @@ mod tests {
     fn nested_parens_suppress_terminators() {
         assert_eq!(
             toks("((x\ny))"),
-            vec![LParen, LParen, Ident("x".into()), Ident("y".into()), RParen, RParen, Eof]
+            vec![
+                LParen,
+                LParen,
+                Ident("x".into()),
+                Ident("y".into()),
+                RParen,
+                RParen,
+                Eof
+            ]
         );
     }
 
@@ -717,8 +725,16 @@ mod tests {
         assert_eq!(
             toks("let x = 1\nlet y = 2"),
             vec![
-                Let, Ident("x".into()), Eq, Int(1), Terminator,
-                Let, Ident("y".into()), Eq, Int(2), Eof,
+                Let,
+                Ident("x".into()),
+                Eq,
+                Int(1),
+                Terminator,
+                Let,
+                Ident("y".into()),
+                Eq,
+                Int(2),
+                Eof,
             ]
         );
     }
@@ -728,10 +744,22 @@ mod tests {
         assert_eq!(
             toks("pub fun add (a: Int) (b: Int) -> Int"),
             vec![
-                Pub, Fun, Ident("add".into()),
-                LParen, Ident("a".into()), Colon, UpperIdent("Int".into()), RParen,
-                LParen, Ident("b".into()), Colon, UpperIdent("Int".into()), RParen,
-                Arrow, UpperIdent("Int".into()), Eof,
+                Pub,
+                Fun,
+                Ident("add".into()),
+                LParen,
+                Ident("a".into()),
+                Colon,
+                UpperIdent("Int".into()),
+                RParen,
+                LParen,
+                Ident("b".into()),
+                Colon,
+                UpperIdent("Int".into()),
+                RParen,
+                Arrow,
+                UpperIdent("Int".into()),
+                Eof,
             ]
         );
     }
@@ -741,7 +769,12 @@ mod tests {
         assert_eq!(
             toks("x |> f |> g"),
             vec![
-                Ident("x".into()), Pipe, Ident("f".into()), Pipe, Ident("g".into()), Eof,
+                Ident("x".into()),
+                Pipe,
+                Ident("f".into()),
+                Pipe,
+                Ident("g".into()),
+                Eof,
             ]
         );
     }
