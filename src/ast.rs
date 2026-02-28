@@ -4,14 +4,14 @@ pub type Program = Vec<Decl>;
 
 // --- Top-level ---
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub declarations: Vec<Decl>,
 }
 
 // --- Declarations ---
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Decl {
     /// `pub fun add (a: Int) (b: Int) -> Int`
     FunAnnotation {
@@ -100,7 +100,7 @@ pub enum Decl {
 
 // --- Expressions ---
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     /// `42`, `3.14`, `"hello"`, `True`
     Lit { value: Lit, span: Span },
@@ -206,7 +206,7 @@ impl Expr {
 
 // --- Statements (inside blocks) ---
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// `let x = expr`
     Let {
@@ -221,7 +221,7 @@ pub enum Stmt {
 
 // --- Patterns ---
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Pat {
     /// `_`
     Wildcard { span: Span },
@@ -249,7 +249,7 @@ pub enum Pat {
 
 // --- Types ---
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypeExpr {
     /// Concrete type: `Int`, `String`, `Option`
     Named(String),
@@ -266,7 +266,7 @@ pub enum TypeExpr {
 
 // --- Supporting types ---
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Lit {
     Int(i64),
     Float(f64),
@@ -274,7 +274,7 @@ pub enum Lit {
     Bool(bool),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BinOp {
     Add,    // +
     Sub,    // -
@@ -293,14 +293,14 @@ pub enum BinOp {
 }
 
 /// A constructor in a type definition, e.g. Some(a) or None
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TypeConstructor {
     pub name: String,
     pub fields: Vec<TypeExpr>, // empty = bare variant like None
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CaseArm {
     pub pattern: Pat,
     pub guard: Option<Expr>,
@@ -308,7 +308,7 @@ pub struct CaseArm {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EffectOp {
     pub name: String,
     pub params: Vec<(String, TypeExpr)>,
@@ -316,7 +316,7 @@ pub struct EffectOp {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HandlerArm {
     pub op_name: String,
     pub params: Vec<String>,
@@ -324,7 +324,7 @@ pub struct HandlerArm {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TraitMethod {
     pub name: String,
     pub params: Vec<(String, TypeExpr)>,

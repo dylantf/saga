@@ -6,6 +6,7 @@ pub struct Parser {
     pos: usize,
 }
 
+#[derive(Debug)]
 pub struct ParseError {
     pub message: String,
     pub span: Span,
@@ -88,7 +89,6 @@ impl Parser {
                 | Token::Ident(_)
                 | Token::UpperIdent(_)
                 | Token::LParen
-                | Token::LBrace
         )
     }
 
@@ -667,6 +667,687 @@ impl Parser {
                     span: self.tokens[self.pos].span,
                 })
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+
+    fn parse(source: &str) -> Program {
+        let tokens = Lexer::new(source).lex().unwrap();
+        Parser::new(tokens).parse_program().unwrap()
+    }
+
+    fn parse_expr(source: &str) -> Expr {
+        let tokens = Lexer::new(source).lex().unwrap();
+        Parser::new(tokens).parse_expr(0).unwrap()
+    }
+
+    fn parse_pattern(source: &str) -> Pat {
+        let tokens = Lexer::new(source).lex().unwrap();
+        Parser::new(tokens).parse_pattern().unwrap()
+    }
+
+    // --- Literals ---
+
+    #[test]
+    fn literal_int() {
+        let expr = parse_expr("42");
+        assert!(matches!(
+            expr,
+            Expr::Lit {
+                value: Lit::Int(42),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn literal_float() {
+        let expr = parse_expr("1.5");
+        assert!(matches!(expr, Expr::Lit { value: Lit::Float(f), .. } if f == 1.5));
+    }
+
+    #[test]
+    fn literal_string() {
+        let expr = parse_expr("\"hello\"");
+        assert!(matches!(expr, Expr::Lit { value: Lit::String(s), .. } if s == "hello"));
+    }
+
+    #[test]
+    fn literal_bool() {
+        let t = parse_expr("True");
+        let f = parse_expr("False");
+        assert!(matches!(
+            t,
+            Expr::Lit {
+                value: Lit::Bool(true),
+                ..
+            }
+        ));
+        assert!(matches!(
+            f,
+            Expr::Lit {
+                value: Lit::Bool(false),
+                ..
+            }
+        ));
+    }
+
+    // --- Variables and constructors ---
+
+    #[test]
+    fn variable() {
+        let expr = parse_expr("foo");
+        assert!(matches!(expr, Expr::Var { name, .. } if name == "foo"));
+    }
+
+    #[test]
+    fn constructor() {
+        let expr = parse_expr("Some");
+        assert!(matches!(expr, Expr::Constructor { name, .. } if name == "Some"));
+    }
+
+    // --- Binary operators ---
+
+    #[test]
+    fn binary_add() {
+        let expr = parse_expr("1 + 2");
+        assert!(matches!(expr, Expr::BinOp { op: BinOp::Add, .. }));
+    }
+
+    #[test]
+    fn binary_precedence_mul_over_add() {
+        // 1 + 2 * 3 should parse as 1 + (2 * 3)
+        let expr = parse_expr("1 + 2 * 3");
+        match expr {
+            Expr::BinOp {
+                op: BinOp::Add,
+                left,
+                right,
+                ..
+            } => {
+                assert!(matches!(
+                    *left,
+                    Expr::Lit {
+                        value: Lit::Int(1),
+                        ..
+                    }
+                ));
+                assert!(matches!(*right, Expr::BinOp { op: BinOp::Mul, .. }));
+            }
+            _ => panic!("expected Add at top level, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn binary_precedence_comparison_over_logic() {
+        // x == 1 && y == 2 should parse as (x == 1) && (y == 2)
+        let expr = parse_expr("x == 1 && y == 2");
+        match expr {
+            Expr::BinOp {
+                op: BinOp::And,
+                left,
+                right,
+                ..
+            } => {
+                assert!(matches!(*left, Expr::BinOp { op: BinOp::Eq, .. }));
+                assert!(matches!(*right, Expr::BinOp { op: BinOp::Eq, .. }));
+            }
+            _ => panic!("expected And at top level, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn binary_left_associative() {
+        // 1 - 2 - 3 should parse as (1 - 2) - 3
+        let expr = parse_expr("1 - 2 - 3");
+        match expr {
+            Expr::BinOp {
+                op: BinOp::Sub,
+                left,
+                right,
+                ..
+            } => {
+                assert!(matches!(*left, Expr::BinOp { op: BinOp::Sub, .. }));
+                assert!(matches!(
+                    *right,
+                    Expr::Lit {
+                        value: Lit::Int(3),
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected Sub at top level, got {:?}", expr),
+        }
+    }
+
+    // --- Parenthesized expressions ---
+
+    #[test]
+    fn parenthesized() {
+        // (1 + 2) * 3 should have Mul at top
+        let expr = parse_expr("(1 + 2) * 3");
+        match expr {
+            Expr::BinOp {
+                op: BinOp::Mul,
+                left,
+                ..
+            } => {
+                assert!(matches!(*left, Expr::BinOp { op: BinOp::Add, .. }));
+            }
+            _ => panic!("expected Mul at top level, got {:?}", expr),
+        }
+    }
+
+    // --- Unary minus ---
+
+    #[test]
+    fn unary_minus() {
+        let expr = parse_expr("-x");
+        assert!(matches!(expr, Expr::UnaryMinus { .. }));
+    }
+
+    #[test]
+    fn unary_minus_precedence() {
+        // -x + 1 should parse as (-x) + 1
+        let expr = parse_expr("-x + 1");
+        match expr {
+            Expr::BinOp {
+                op: BinOp::Add,
+                left,
+                ..
+            } => {
+                assert!(matches!(*left, Expr::UnaryMinus { .. }));
+            }
+            _ => panic!("expected Add at top level, got {:?}", expr),
+        }
+    }
+
+    // --- Function application ---
+
+    #[test]
+    fn application_single_arg() {
+        let expr = parse_expr("f x");
+        match expr {
+            Expr::App { func, arg, .. } => {
+                assert!(matches!(*func, Expr::Var { name, .. } if name == "f"));
+                assert!(matches!(*arg, Expr::Var { name, .. } if name == "x"));
+            }
+            _ => panic!("expected App, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn application_curried() {
+        // f x y should parse as App(App(f, x), y)
+        let expr = parse_expr("f x y");
+        match expr {
+            Expr::App { func, arg, .. } => {
+                assert!(matches!(*arg, Expr::Var { name, .. } if name == "y"));
+                assert!(matches!(*func, Expr::App { .. }));
+            }
+            _ => panic!("expected nested App, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn application_binds_tighter_than_binop() {
+        // f x + g y should parse as (f x) + (g y)
+        let expr = parse_expr("f x + g y");
+        match expr {
+            Expr::BinOp {
+                op: BinOp::Add,
+                left,
+                right,
+                ..
+            } => {
+                assert!(matches!(*left, Expr::App { .. }));
+                assert!(matches!(*right, Expr::App { .. }));
+            }
+            _ => panic!("expected Add at top level, got {:?}", expr),
+        }
+    }
+
+    // --- Pipes ---
+
+    #[test]
+    fn forward_pipe() {
+        // x |> f desugars to App(f, x)
+        let expr = parse_expr("x |> f");
+        match expr {
+            Expr::App { func, arg, .. } => {
+                assert!(matches!(*func, Expr::Var { name, .. } if name == "f"));
+                assert!(matches!(*arg, Expr::Var { name, .. } if name == "x"));
+            }
+            _ => panic!("expected App from pipe, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn backward_pipe() {
+        // f <| x desugars to App(f, x)
+        let expr = parse_expr("f <| x");
+        match expr {
+            Expr::App { func, arg, .. } => {
+                assert!(matches!(*func, Expr::Var { name, .. } if name == "f"));
+                assert!(matches!(*arg, Expr::Var { name, .. } if name == "x"));
+            }
+            _ => panic!("expected App from backward pipe, got {:?}", expr),
+        }
+    }
+
+    // --- If/else ---
+
+    #[test]
+    fn if_else() {
+        let expr = parse_expr("if True then 1 else 2");
+        match expr {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                assert!(matches!(
+                    *cond,
+                    Expr::Lit {
+                        value: Lit::Bool(true),
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    *then_branch,
+                    Expr::Lit {
+                        value: Lit::Int(1),
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    *else_branch,
+                    Expr::Lit {
+                        value: Lit::Int(2),
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected If, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn if_else_if() {
+        let expr = parse_expr("if x then 1 else if y then 2 else 3");
+        match expr {
+            Expr::If { else_branch, .. } => {
+                assert!(matches!(*else_branch, Expr::If { .. }));
+            }
+            _ => panic!("expected If, got {:?}", expr),
+        }
+    }
+
+    // --- Blocks ---
+
+    #[test]
+    fn block_single_expr() {
+        let expr = parse_expr("{ 42 }");
+        match expr {
+            Expr::Block { stmts, .. } => {
+                assert_eq!(stmts.len(), 1);
+                assert!(matches!(
+                    stmts[0],
+                    Stmt::Expr(Expr::Lit {
+                        value: Lit::Int(42),
+                        ..
+                    })
+                ));
+            }
+            _ => panic!("expected Block, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn block_with_let() {
+        let expr = parse_expr("{\n  let x = 1\n  x + 2\n}");
+        match expr {
+            Expr::Block { stmts, .. } => {
+                assert_eq!(stmts.len(), 2);
+                assert!(matches!(&stmts[0], Stmt::Let { name, .. } if name == "x"));
+                assert!(matches!(
+                    &stmts[1],
+                    Stmt::Expr(Expr::BinOp { op: BinOp::Add, .. })
+                ));
+            }
+            _ => panic!("expected Block, got {:?}", expr),
+        }
+    }
+
+    // --- Patterns ---
+
+    #[test]
+    fn pattern_wildcard() {
+        let pat = parse_pattern("_");
+        assert!(matches!(pat, Pat::Wildcard { .. }));
+    }
+
+    #[test]
+    fn pattern_wildcard_prefixed() {
+        let pat = parse_pattern("_unused");
+        assert!(matches!(pat, Pat::Wildcard { .. }));
+    }
+
+    #[test]
+    fn pattern_var() {
+        let pat = parse_pattern("x");
+        assert!(matches!(pat, Pat::Var { name, .. } if name == "x"));
+    }
+
+    #[test]
+    fn pattern_lit_int() {
+        let pat = parse_pattern("42");
+        assert!(matches!(
+            pat,
+            Pat::Lit {
+                value: Lit::Int(42),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pattern_lit_bool() {
+        let pat = parse_pattern("True");
+        assert!(matches!(
+            pat,
+            Pat::Lit {
+                value: Lit::Bool(true),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pattern_bare_constructor() {
+        let pat = parse_pattern("None");
+        match pat {
+            Pat::Constructor { name, args, .. } => {
+                assert_eq!(name, "None");
+                assert!(args.is_empty());
+            }
+            _ => panic!("expected Constructor, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn pattern_constructor_with_args() {
+        let pat = parse_pattern("Some(x)");
+        match pat {
+            Pat::Constructor { name, args, .. } => {
+                assert_eq!(name, "Some");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(&args[0], Pat::Var { name, .. } if name == "x"));
+            }
+            _ => panic!("expected Constructor, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn pattern_constructor_multiple_args() {
+        let pat = parse_pattern("Cons(a, b)");
+        match pat {
+            Pat::Constructor { name, args, .. } => {
+                assert_eq!(name, "Cons");
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("expected Constructor, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn pattern_nested_constructor() {
+        let pat = parse_pattern("Some(Cons(a, b))");
+        match pat {
+            Pat::Constructor { name, args, .. } => {
+                assert_eq!(name, "Some");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(&args[0], Pat::Constructor { name, .. } if name == "Cons"));
+            }
+            _ => panic!("expected Constructor, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn pattern_record() {
+        let pat = parse_pattern("User { name, age }");
+        match pat {
+            Pat::Record { name, fields, .. } => {
+                assert_eq!(name, "User");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0], ("name".to_string(), None));
+                assert_eq!(fields[1], ("age".to_string(), None));
+            }
+            _ => panic!("expected Record pattern, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn pattern_record_with_alias() {
+        let pat = parse_pattern("Error { code: c }");
+        match pat {
+            Pat::Record { name, fields, .. } => {
+                assert_eq!(name, "Error");
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].0, "code");
+                assert!(matches!(&fields[0].1, Some(Pat::Var { name, .. }) if name == "c"));
+            }
+            _ => panic!("expected Record pattern, got {:?}", pat),
+        }
+    }
+
+    // --- Declarations ---
+
+    #[test]
+    fn fun_annotation_simple() {
+        let decls = parse("fun add (a: Int) (b: Int) -> Int");
+        assert_eq!(decls.len(), 1);
+        match &decls[0] {
+            Decl::FunAnnotation {
+                name,
+                params,
+                return_type,
+                public,
+                effects,
+                ..
+            } => {
+                assert_eq!(name, "add");
+                assert!(!public);
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0].0, "a");
+                assert!(matches!(&params[0].1, TypeExpr::Named(n) if n == "Int"));
+                assert!(matches!(return_type, TypeExpr::Named(n) if n == "Int"));
+                assert!(effects.is_empty());
+            }
+            _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
+        }
+    }
+
+    #[test]
+    fn fun_annotation_public_with_effects() {
+        let decls = parse("pub fun print (msg: String) -> Unit with { Console }");
+        assert_eq!(decls.len(), 1);
+        match &decls[0] {
+            Decl::FunAnnotation {
+                public, effects, ..
+            } => {
+                assert!(public);
+                assert_eq!(effects, &vec!["Console".to_string()]);
+            }
+            _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
+        }
+    }
+
+    #[test]
+    fn fun_binding_simple() {
+        let decls = parse("add x y = x + y");
+        assert_eq!(decls.len(), 1);
+        match &decls[0] {
+            Decl::FunBinding {
+                name,
+                params,
+                guard,
+                body,
+                ..
+            } => {
+                assert_eq!(name, "add");
+                assert_eq!(params.len(), 2);
+                assert!(guard.is_none());
+                assert!(matches!(body, Expr::BinOp { op: BinOp::Add, .. }));
+            }
+            _ => panic!("expected FunBinding, got {:?}", decls[0]),
+        }
+    }
+
+    #[test]
+    fn fun_binding_with_guard() {
+        let decls = parse("abs n if n < 0 = -n");
+        assert_eq!(decls.len(), 1);
+        match &decls[0] {
+            Decl::FunBinding { name, guard, .. } => {
+                assert_eq!(name, "abs");
+                assert!(guard.is_some());
+            }
+            _ => panic!("expected FunBinding, got {:?}", decls[0]),
+        }
+    }
+
+    // --- Type definitions ---
+
+    #[test]
+    fn type_def_simple() {
+        let decls = parse("type Option a {\n  Some(a)\n  None\n}");
+        assert_eq!(decls.len(), 1);
+        match &decls[0] {
+            Decl::TypeDef {
+                name,
+                type_params,
+                variants,
+                ..
+            } => {
+                assert_eq!(name, "Option");
+                assert_eq!(type_params, &vec!["a".to_string()]);
+                assert_eq!(variants.len(), 2);
+                assert_eq!(variants[0].name, "Some");
+                assert_eq!(variants[0].fields.len(), 1);
+                assert_eq!(variants[1].name, "None");
+                assert!(variants[1].fields.is_empty());
+            }
+            _ => panic!("expected TypeDef, got {:?}", decls[0]),
+        }
+    }
+
+    // --- Case expressions ---
+
+    #[test]
+    fn case_simple() {
+        let expr = parse_expr("case x {\n  Some(v) -> v\n  None -> 0\n}");
+        match expr {
+            Expr::Case { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                assert!(arms[0].guard.is_none());
+                assert!(
+                    matches!(&arms[0].pattern, Pat::Constructor { name, .. } if name == "Some")
+                );
+                assert!(
+                    matches!(&arms[1].pattern, Pat::Constructor { name, .. } if name == "None")
+                );
+            }
+            _ => panic!("expected Case, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn case_with_guard() {
+        let expr = parse_expr("case x {\n  n if n > 0 -> n\n  _ -> 0\n}");
+        match expr {
+            Expr::Case { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                assert!(arms[0].guard.is_some());
+                assert!(arms[1].guard.is_none());
+                assert!(matches!(&arms[1].pattern, Pat::Wildcard { .. }));
+            }
+            _ => panic!("expected Case, got {:?}", expr),
+        }
+    }
+
+    // --- Type expressions ---
+
+    #[test]
+    fn type_expr_named() {
+        let decls = parse("fun id (x: Int) -> Int");
+        match &decls[0] {
+            Decl::FunAnnotation {
+                params,
+                return_type,
+                ..
+            } => {
+                assert!(matches!(&params[0].1, TypeExpr::Named(n) if n == "Int"));
+                assert!(matches!(return_type, TypeExpr::Named(n) if n == "Int"));
+            }
+            _ => panic!("expected FunAnnotation"),
+        }
+    }
+
+    #[test]
+    fn type_expr_application() {
+        let decls = parse("fun unwrap (x: Option a) -> a");
+        match &decls[0] {
+            Decl::FunAnnotation {
+                params,
+                return_type,
+                ..
+            } => {
+                assert!(matches!(&params[0].1, TypeExpr::App(_, _)));
+                assert!(matches!(return_type, TypeExpr::Var(v) if v == "a"));
+            }
+            _ => panic!("expected FunAnnotation"),
+        }
+    }
+
+    #[test]
+    fn type_expr_arrow() {
+        let decls = parse("fun apply (f: a -> b) (x: a) -> b");
+        match &decls[0] {
+            Decl::FunAnnotation { params, .. } => {
+                assert!(matches!(&params[0].1, TypeExpr::Arrow(_, _)));
+            }
+            _ => panic!("expected FunAnnotation"),
+        }
+    }
+
+    // --- Combined programs ---
+
+    #[test]
+    fn annotation_and_binding() {
+        let decls = parse("fun add (a: Int) (b: Int) -> Int\nadd x y = x + y");
+        assert_eq!(decls.len(), 2);
+        assert!(matches!(&decls[0], Decl::FunAnnotation { .. }));
+        assert!(matches!(&decls[1], Decl::FunBinding { .. }));
+    }
+
+    #[test]
+    fn multiple_bindings_pattern_match() {
+        let decls = parse("abs n if n < 0 = -n\nabs n = n");
+        assert_eq!(decls.len(), 2);
+        match &decls[0] {
+            Decl::FunBinding { guard, .. } => assert!(guard.is_some()),
+            _ => panic!("expected FunBinding"),
+        }
+        match &decls[1] {
+            Decl::FunBinding { guard, .. } => assert!(guard.is_none()),
+            _ => panic!("expected FunBinding"),
         }
     }
 }
