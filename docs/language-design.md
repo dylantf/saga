@@ -110,7 +110,7 @@ is_valid s = String.length s > 0 && String.length s < 100
 
 pub fun describe (s: String) -> String
 describe s = case s {
-  s if is_valid s  -> "valid: " ++ s
+  s if is_valid s  -> "valid: " <> s
   _               -> "invalid"
 }
 
@@ -137,7 +137,7 @@ let u = User { name = "Dylan", age = 30, email = "d@d.com" }
 
 # Dot access
 pub fun greet (user: User) -> String
-greet user = "Hello, " ++ user.name
+greet user = "Hello, " <> user.name
 
 # Record update syntax
 pub fun birthday (user: User) -> User
@@ -162,14 +162,14 @@ type ApiResponse {
 # Pattern matching on record variants
 pub fun describe (resp: ApiResponse) -> String
 describe resp = case resp {
-  Success { status, body } -> "OK " ++ show status
-  ApiError { code, message } -> "Error " ++ show code ++ ": " ++ message
+  Success { status, body } -> "OK " <> show status
+  ApiError { code, message } -> "Error " <> show code <> ": " <> message
 }
 
 # Field aliasing in patterns
 describe resp = case resp {
-  Success { status: s, body: b } -> "OK " ++ show s
-  ApiError { code: c }           -> "Error " ++ show c
+  Success { status: s, body: b } -> "OK " <> show s
+  ApiError { code: c }           -> "Error " <> show c
 }
 
 # Record matches are always partial — unmentioned fields are ignored
@@ -225,7 +225,7 @@ effect Fail {
 # Functions declare which effects they use
 pub fun greet (name: String) -> String with {Console}
 greet name = {
-  print ("Hello, " ++ name)
+  print ("Hello, " <> name)
   "greeted"
 }
 
@@ -261,7 +261,7 @@ main () = {
 
   # Fail handler
   fail reason -> {
-    print ("Error: " ++ reason)
+    print ("Error: " <> reason)
     exit 1
   }
 }
@@ -331,7 +331,7 @@ handler with_retry : Http {
         sleep 1000
         case http_get url {
           Ok(body) -> resume body
-          Err(e)   -> fail ("gave up: " ++ e)
+          Err(e)   -> fail ("gave up: " <> e)
         }
       }
     }
@@ -372,7 +372,7 @@ main () = {
   let result = safe_divide 10 0 with to_result
   case result {
     Ok(n)  -> print (show n)
-    Err(e) -> print ("Error: " ++ e)
+    Err(e) -> print ("Error: " <> e)
   }
 }
 
@@ -401,7 +401,7 @@ load_user_profile id = with {
 } then {
   Ok { user, profile, settings }
 } else {
-  Err(reason) -> Err("Failed: " ++ reason)
+  Err(reason) -> Err("Failed: " <> reason)
 }
 
 # It's just an expression — use it in let bindings
@@ -491,7 +491,7 @@ trait Ord a where Eq a {
 
 # Implementing for a type
 impl Show for User {
-  show user = user.name ++ " (age " ++ show user.age ++ ")"
+  show user = user.name <> " (age " <> show user.age <> ")"
 }
 
 # Used as constraints with `where`
@@ -538,17 +538,17 @@ effect Log {
 
 pub fun fetch_user (id: Int) -> User with {Http, Fail, Log}
 fetch_user id = {
-  log ("Fetching user " ++ show id)
-  let response = get ("/api/users/" ++ show id)
+  log ("Fetching user " <> show id)
+  let response = get ("/api/users/" <> show id)
   case parse_json response {
     Ok(user) -> user
-    Err(e)   -> fail ("Parse error: " ++ e)
+    Err(e)   -> fail ("Parse error: " <> e)
   }
 }
 
 pub fun save_user (user: User) -> Unit with {Db, Fail, Log}
 save_user user = {
-  log ("Saving user " ++ user.name)
+  log ("Saving user " <> user.name)
   db_execute "INSERT INTO users VALUES (?, ?, ?)"
     [user.id, user.name, user.email]
 }
@@ -557,7 +557,7 @@ save_user user = {
 handler timed_log : Log {
   log msg -> {
     let time = now ()
-    stderr_print ("[" ++ format_time time ++ "] " ++ msg)
+    stderr_print ("[" <> format_time time <> "] " <> msg)
   }
 }
 
@@ -574,7 +574,7 @@ main () = {
   let user = fetch_user 42
   let updated = { user | name = "New Name" }
   save_user updated
-  print ("Done: " ++ updated.name)
+  print ("Done: " <> updated.name)
 } with {
   timed_log,
   real_http,
