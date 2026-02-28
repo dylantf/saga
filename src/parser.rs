@@ -116,6 +116,7 @@ impl Parser {
     fn parse_decl(&mut self) -> Result<Decl, ParseError> {
         match self.peek() {
             Token::Type => self.parse_type_def(),
+            Token::Record => self.parse_record_def(),
             Token::Pub => {
                 let start = self.tokens[self.pos].span;
                 self.advance(); // consume 'pub'
@@ -131,6 +132,39 @@ impl Parser {
                 span: self.tokens[self.pos].span,
             }),
         }
+    }
+
+    // Parses: record <Name> { <field>: <Type>, ... }
+    fn parse_record_def(&mut self) -> Result<Decl, ParseError> {
+        let start = self.tokens[self.pos].span;
+        self.advance(); // consume 'record'
+        let name = self.expect_upper_ident()?;
+        self.expect(Token::LBrace)?;
+        self.skip_terminators();
+
+        let mut fields = Vec::new();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let field_name = self.expect_ident()?;
+            self.expect(Token::Colon)?;
+            let field_type = self.parse_type_expr()?;
+            fields.push((field_name, field_type));
+            if matches!(self.peek(), Token::Comma) {
+                self.advance();
+            }
+            self.skip_terminators();
+        }
+
+        let end = self.tokens[self.pos].span;
+        self.expect(Token::RBrace)?;
+
+        Ok(Decl::RecordDef {
+            name,
+            fields,
+            span: Span {
+                start: start.start,
+                end: end.end,
+            },
+        })
     }
 
     fn parse_type_def(&mut self) -> Result<Decl, ParseError> {
@@ -386,10 +420,10 @@ impl Parser {
     /// Function application: `f x y` → App(App(f, x), y)
     /// Greedily consumes arguments while the next token can start a primary.
     fn parse_application(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_primary()?;
+        let mut expr = self.parse_postfix()?;
 
         while self.can_start_primary() {
-            let arg = self.parse_primary()?;
+            let arg = self.parse_postfix()?;
             let span = Span {
                 start: expr.span().start,
                 end: arg.span().end,
@@ -398,6 +432,29 @@ impl Parser {
                 func: Box::new(expr),
                 arg: Box::new(arg),
                 span,
+            };
+        }
+
+        Ok(expr)
+    }
+
+    /// Postfix operators: field access via `.`
+    /// `user.name.first` → FieldAccess(FieldAccess(user, "name"), "first")
+    fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_primary()?;
+
+        while matches!(self.peek(), Token::Dot) {
+            self.advance(); // consume '.'
+            let field = self.expect_ident()?;
+            let end = self.tokens[self.pos - 1].span;
+            let start = expr.span().start;
+            expr = Expr::FieldAccess {
+                expr: Box::new(expr),
+                field,
+                span: Span {
+                    start,
+                    end: end.end,
+                },
             };
         }
 
@@ -429,7 +486,36 @@ impl Parser {
                 span,
             }),
             Token::Ident(i) => Ok(Expr::Var { name: i, span }),
-            Token::UpperIdent(i) => Ok(Expr::Constructor { name: i, span }),
+            Token::UpperIdent(i) => {
+                if matches!(self.peek(), Token::LBrace) {
+                    // Record create: User { name: "Dylan", age: 30 }
+                    self.advance(); // consume '{'
+                    self.skip_terminators();
+                    let mut fields = Vec::new();
+                    while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                        let field_name = self.expect_ident()?;
+                        self.expect(Token::Colon)?;
+                        let value = self.parse_expr(0)?;
+                        fields.push((field_name, value));
+                        if matches!(self.peek(), Token::Comma) {
+                            self.advance();
+                        }
+                        self.skip_terminators();
+                    }
+                    let end = self.tokens[self.pos].span;
+                    self.expect(Token::RBrace)?;
+                    Ok(Expr::RecordCreate {
+                        name: i,
+                        fields,
+                        span: Span {
+                            start: span.start,
+                            end: end.end,
+                        },
+                    })
+                } else {
+                    Ok(Expr::Constructor { name: i, span })
+                }
+            }
 
             Token::LParen => {
                 let inner = self.parse_expr(0)?;
@@ -459,6 +545,43 @@ impl Parser {
 
             Token::LBrace => {
                 self.skip_terminators();
+
+                // Check for record update: { expr | field: val, ... }
+                // We don't start with `let`, so try parsing an expression,
+                // then check if the next token is `|`
+                if !matches!(self.peek(), Token::Let | Token::RBrace) {
+                    let save = self.pos;
+                    let first_expr = self.parse_expr(0);
+                    if first_expr.is_ok() && matches!(self.peek(), Token::Bar) {
+                        let record = first_expr.unwrap();
+                        self.advance(); // consume '|'
+                        self.skip_terminators();
+                        let mut fields = Vec::new();
+                        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                            let field_name = self.expect_ident()?;
+                            self.expect(Token::Colon)?;
+                            let value = self.parse_expr(0)?;
+                            fields.push((field_name, value));
+                            if matches!(self.peek(), Token::Comma) {
+                                self.advance();
+                            }
+                            self.skip_terminators();
+                        }
+                        let end = self.tokens[self.pos].span;
+                        self.expect(Token::RBrace)?;
+                        return Ok(Expr::RecordUpdate {
+                            record: Box::new(record),
+                            fields,
+                            span: Span {
+                                start: span.start,
+                                end: end.end,
+                            },
+                        });
+                    }
+                    // Not a record update — backtrack and parse as block
+                    self.pos = save;
+                }
+
                 let mut stmts: Vec<Stmt> = Vec::new();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                     if matches!(self.peek(), Token::Let) {
@@ -1348,6 +1471,266 @@ mod tests {
         match &decls[1] {
             Decl::FunBinding { guard, .. } => assert!(guard.is_none()),
             _ => panic!("expected FunBinding"),
+        }
+    }
+
+    // --- Record create ---
+
+    #[test]
+    fn record_create_simple() {
+        let expr = parse_expr("User { name: \"Dylan\", age: 30 }");
+        match expr {
+            Expr::RecordCreate { name, fields, .. } => {
+                assert_eq!(name, "User");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "name");
+                assert!(matches!(&fields[0].1, Expr::Lit { value: Lit::String(s), .. } if s == "Dylan"));
+                assert_eq!(fields[1].0, "age");
+                assert!(matches!(
+                    &fields[1].1,
+                    Expr::Lit {
+                        value: Lit::Int(30),
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected RecordCreate, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn record_create_single_field() {
+        let expr = parse_expr("Point { x: 1 }");
+        match expr {
+            Expr::RecordCreate { name, fields, .. } => {
+                assert_eq!(name, "Point");
+                assert_eq!(fields.len(), 1);
+            }
+            _ => panic!("expected RecordCreate, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn record_create_with_expr_values() {
+        let expr = parse_expr("Point { x: 1 + 2, y: 3 * 4 }");
+        match expr {
+            Expr::RecordCreate { fields, .. } => {
+                assert_eq!(fields.len(), 2);
+                assert!(matches!(
+                    &fields[0].1,
+                    Expr::BinOp {
+                        op: BinOp::Add,
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    &fields[1].1,
+                    Expr::BinOp {
+                        op: BinOp::Mul,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected RecordCreate, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn record_create_multiline() {
+        let expr = parse_expr("User {\n  name: \"Dylan\"\n  age: 30\n}");
+        match expr {
+            Expr::RecordCreate { name, fields, .. } => {
+                assert_eq!(name, "User");
+                assert_eq!(fields.len(), 2);
+            }
+            _ => panic!("expected RecordCreate, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn bare_constructor_without_braces() {
+        let expr = parse_expr("None");
+        assert!(matches!(expr, Expr::Constructor { name, .. } if name == "None"));
+    }
+
+    // --- Record update ---
+
+    #[test]
+    fn record_update_simple() {
+        let expr = parse_expr("{ user | age: 31 }");
+        match expr {
+            Expr::RecordUpdate {
+                record, fields, ..
+            } => {
+                assert!(matches!(*record, Expr::Var { name, .. } if name == "user"));
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].0, "age");
+                assert!(matches!(
+                    &fields[0].1,
+                    Expr::Lit {
+                        value: Lit::Int(31),
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected RecordUpdate, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn record_update_multiple_fields() {
+        let expr = parse_expr("{ user | name: \"New\", age: 31 }");
+        match expr {
+            Expr::RecordUpdate { fields, .. } => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "name");
+                assert_eq!(fields[1].0, "age");
+            }
+            _ => panic!("expected RecordUpdate, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn record_update_with_expr_value() {
+        let expr = parse_expr("{ user | age: user.age + 1 }");
+        match expr {
+            Expr::RecordUpdate { fields, .. } => {
+                assert_eq!(fields.len(), 1);
+                assert!(matches!(
+                    &fields[0].1,
+                    Expr::BinOp {
+                        op: BinOp::Add,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected RecordUpdate, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn block_still_works() {
+        // Make sure blocks didn't break with record update disambiguation
+        let expr = parse_expr("{\n  let x = 1\n  x\n}");
+        assert!(matches!(expr, Expr::Block { .. }));
+    }
+
+    #[test]
+    fn block_single_expr_still_works() {
+        let expr = parse_expr("{ 42 }");
+        match expr {
+            Expr::Block { stmts, .. } => {
+                assert_eq!(stmts.len(), 1);
+                assert!(matches!(
+                    &stmts[0],
+                    Stmt::Expr(Expr::Lit {
+                        value: Lit::Int(42),
+                        ..
+                    })
+                ));
+            }
+            _ => panic!("expected Block, got {:?}", expr),
+        }
+    }
+
+    // --- Field access ---
+
+    #[test]
+    fn field_access_simple() {
+        let expr = parse_expr("user.name");
+        match expr {
+            Expr::FieldAccess { expr, field, .. } => {
+                assert!(matches!(*expr, Expr::Var { name, .. } if name == "user"));
+                assert_eq!(field, "name");
+            }
+            _ => panic!("expected FieldAccess, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn field_access_chained() {
+        let expr = parse_expr("user.profile.name");
+        match expr {
+            Expr::FieldAccess { expr: inner, field, .. } => {
+                assert_eq!(field, "name");
+                match *inner {
+                    Expr::FieldAccess { expr: innermost, field: mid_field, .. } => {
+                        assert!(matches!(*innermost, Expr::Var { name, .. } if name == "user"));
+                        assert_eq!(mid_field, "profile");
+                    }
+                    _ => panic!("expected nested FieldAccess"),
+                }
+            }
+            _ => panic!("expected FieldAccess, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn field_access_in_application() {
+        // `f user.name` should be App(f, FieldAccess(user, name))
+        let expr = parse_expr("f user.name");
+        match expr {
+            Expr::App { func, arg, .. } => {
+                assert!(matches!(*func, Expr::Var { name, .. } if name == "f"));
+                assert!(matches!(*arg, Expr::FieldAccess { field, .. } if field == "name"));
+            }
+            _ => panic!("expected App, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn field_access_in_binop() {
+        let expr = parse_expr("user.age + 1");
+        match expr {
+            Expr::BinOp { left, op: BinOp::Add, .. } => {
+                assert!(matches!(*left, Expr::FieldAccess { field, .. } if field == "age"));
+            }
+            _ => panic!("expected BinOp, got {:?}", expr),
+        }
+    }
+
+    // --- Record definitions ---
+
+    #[test]
+    fn record_def_simple() {
+        let decls = parse("record User {\n  name: String,\n  age: Int,\n}");
+        assert_eq!(decls.len(), 1);
+        match &decls[0] {
+            Decl::RecordDef { name, fields, .. } => {
+                assert_eq!(name, "User");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "name");
+                assert!(matches!(&fields[0].1, TypeExpr::Named(n) if n == "String"));
+                assert_eq!(fields[1].0, "age");
+                assert!(matches!(&fields[1].1, TypeExpr::Named(n) if n == "Int"));
+            }
+            _ => panic!("expected RecordDef, got {:?}", decls[0]),
+        }
+    }
+
+    #[test]
+    fn record_def_no_trailing_comma() {
+        let decls = parse("record Point {\n  x: Int\n  y: Int\n}");
+        assert_eq!(decls.len(), 1);
+        match &decls[0] {
+            Decl::RecordDef { name, fields, .. } => {
+                assert_eq!(name, "Point");
+                assert_eq!(fields.len(), 2);
+            }
+            _ => panic!("expected RecordDef, got {:?}", decls[0]),
+        }
+    }
+
+    #[test]
+    fn record_def_with_type_app() {
+        let decls = parse("record Container {\n  value: Option Int,\n}");
+        assert_eq!(decls.len(), 1);
+        match &decls[0] {
+            Decl::RecordDef { fields, .. } => {
+                assert_eq!(fields.len(), 1);
+                assert!(matches!(&fields[0].1, TypeExpr::App(_, _)));
+            }
+            _ => panic!("expected RecordDef, got {:?}", decls[0]),
         }
     }
 }

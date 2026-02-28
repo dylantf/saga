@@ -55,6 +55,7 @@ pub enum Token {
     Dot,       // .
     DotDot,    // ..
     Backslash, // \
+    Bar,       // |
 
     // Delimiters
     LParen, // (

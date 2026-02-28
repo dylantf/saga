@@ -427,6 +427,7 @@ impl Lexer {
                         ':' => Token::Colon,
                         '.' => Token::Dot,
                         '\\' => Token::Backslash,
+                        '|' => Token::Bar,
                         ',' => Token::Comma,
                         '(' => {
                             self.nesting += 1;

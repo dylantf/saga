@@ -161,14 +161,14 @@ pub enum Expr {
         span: Span,
     },
 
-    /// `User { name = "Dylan", age = 30 }`
+    /// `User { name: "Dylan", age: 30 }`
     RecordCreate {
         name: String,
         fields: Vec<(String, Expr)>,
         span: Span,
     },
 
-    /// `{ user | age = user.age + 1 }`
+    /// `{ user | age: user.age + 1 }`
     RecordUpdate {
         record: Box<Expr>,
         fields: Vec<(String, Expr)>,

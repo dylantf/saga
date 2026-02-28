@@ -133,7 +133,7 @@ record User {
 }
 
 # Constructor uses the record name
-let u = User { name = "Dylan", age = 30, email = "d@d.com" }
+let u = User { name: "Dylan", age: 30, email: "d@d.com" }
 
 # Dot access
 pub fun greet (user: User) -> String
@@ -141,7 +141,7 @@ greet user = "Hello, " <> user.name
 
 # Record update syntax
 pub fun birthday (user: User) -> User
-birthday user = { user | age = user.age + 1 }
+birthday user = { user | age: user.age + 1 }
 
 # ADTs can reference records as variants
 record Success {
@@ -572,7 +572,7 @@ handler collect_logs : Log {
 pub fun main () -> Unit
 main () = {
   let user = fetch_user 42
-  let updated = { user | name = "New Name" }
+  let updated = { user | name: "New Name" }
   save_user updated
   print ("Done: " <> updated.name)
 } with {
