@@ -174,13 +174,6 @@ pub enum Expr {
         fields: Vec<(String, Expr)>,
         span: Span,
     },
-
-    /// `x |> f` / `f <| x`
-    Pipe {
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
-        span: Span,
-    },
 }
 
 impl Expr {
@@ -198,8 +191,7 @@ impl Expr {
             | Expr::Lambda { span, .. }
             | Expr::FieldAccess { span, .. }
             | Expr::RecordCreate { span, .. }
-            | Expr::RecordUpdate { span, .. }
-            | Expr::Pipe { span, .. } => *span,
+            | Expr::RecordUpdate { span, .. } => *span,
         }
     }
 }
@@ -272,6 +264,7 @@ pub enum Lit {
     Float(f64),
     String(String),
     Bool(bool),
+    Unit,
 }
 
 #[derive(Debug, Clone, PartialEq)]

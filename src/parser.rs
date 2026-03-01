@@ -117,6 +117,21 @@ impl Parser {
         match self.peek() {
             Token::Type => self.parse_type_def(),
             Token::Record => self.parse_record_def(),
+            Token::Let => {
+                let start = self.tokens[self.pos].span;
+                self.advance(); // consume 'let'
+                let name = self.expect_ident()?;
+                self.expect(Token::Eq)?;
+                let value = self.parse_expr(0)?;
+                Ok(Decl::Let {
+                    span: Span {
+                        start: start.start,
+                        end: value.span().end,
+                    },
+                    name,
+                    value,
+                })
+            }
             Token::Pub => {
                 let start = self.tokens[self.pos].span;
                 self.advance(); // consume 'pub'
@@ -267,17 +282,17 @@ impl Parser {
         })
     }
 
-    // Parses: <name> <pat> ... [if <guard>] = <body>
+    // Parses: <name> <pat> ... [| <guard>] = <body>
     fn parse_fun_binding(&mut self) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         let name = self.expect_ident()?;
 
         let mut params = Vec::new();
-        while !matches!(self.peek(), Token::Eq | Token::If | Token::Eof) {
+        while !matches!(self.peek(), Token::Eq | Token::Bar | Token::Eof) {
             params.push(self.parse_pattern()?);
         }
 
-        let guard = if matches!(self.peek(), Token::If) {
+        let guard = if matches!(self.peek(), Token::Bar) {
             self.advance();
             Some(Box::new(self.parse_expr(0)?))
         } else {
@@ -518,9 +533,17 @@ impl Parser {
             }
 
             Token::LParen => {
-                let inner = self.parse_expr(0)?;
-                self.expect(Token::RParen)?;
-                Ok(inner)
+                if matches!(self.peek(), Token::RParen) {
+                    self.advance(); // consume ')'
+                    Ok(Expr::Lit {
+                        value: Lit::Unit,
+                        span,
+                    })
+                } else {
+                    let inner = self.parse_expr(0)?;
+                    self.expect(Token::RParen)?;
+                    Ok(inner)
+                }
             }
 
             Token::Fun => {
@@ -553,7 +576,7 @@ impl Parser {
                     let save = self.pos;
                     let first_expr = self.parse_expr(0);
                     if first_expr.is_ok() && matches!(self.peek(), Token::Bar) {
-                        let record = first_expr.unwrap();
+                        let record = self.parse_expr(0).unwrap();
                         self.advance(); // consume '|'
                         self.skip_terminators();
                         let mut fields = Vec::new();
@@ -783,6 +806,13 @@ impl Parser {
                 value: Lit::Bool(false),
                 span,
             }),
+            Token::LParen => {
+                self.expect(Token::RParen)?;
+                Ok(Pat::Lit {
+                    value: Lit::Unit,
+                    span,
+                })
+            }
             tok => {
                 self.pos -= 1;
                 Err(ParseError {
@@ -1484,7 +1514,9 @@ mod tests {
                 assert_eq!(name, "User");
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0].0, "name");
-                assert!(matches!(&fields[0].1, Expr::Lit { value: Lit::String(s), .. } if s == "Dylan"));
+                assert!(
+                    matches!(&fields[0].1, Expr::Lit { value: Lit::String(s), .. } if s == "Dylan")
+                );
                 assert_eq!(fields[1].0, "age");
                 assert!(matches!(
                     &fields[1].1,
@@ -1516,20 +1548,8 @@ mod tests {
         match expr {
             Expr::RecordCreate { fields, .. } => {
                 assert_eq!(fields.len(), 2);
-                assert!(matches!(
-                    &fields[0].1,
-                    Expr::BinOp {
-                        op: BinOp::Add,
-                        ..
-                    }
-                ));
-                assert!(matches!(
-                    &fields[1].1,
-                    Expr::BinOp {
-                        op: BinOp::Mul,
-                        ..
-                    }
-                ));
+                assert!(matches!(&fields[0].1, Expr::BinOp { op: BinOp::Add, .. }));
+                assert!(matches!(&fields[1].1, Expr::BinOp { op: BinOp::Mul, .. }));
             }
             _ => panic!("expected RecordCreate, got {:?}", expr),
         }
@@ -1559,9 +1579,7 @@ mod tests {
     fn record_update_simple() {
         let expr = parse_expr("{ user | age: 31 }");
         match expr {
-            Expr::RecordUpdate {
-                record, fields, ..
-            } => {
+            Expr::RecordUpdate { record, fields, .. } => {
                 assert!(matches!(*record, Expr::Var { name, .. } if name == "user"));
                 assert_eq!(fields.len(), 1);
                 assert_eq!(fields[0].0, "age");
@@ -1596,13 +1614,7 @@ mod tests {
         match expr {
             Expr::RecordUpdate { fields, .. } => {
                 assert_eq!(fields.len(), 1);
-                assert!(matches!(
-                    &fields[0].1,
-                    Expr::BinOp {
-                        op: BinOp::Add,
-                        ..
-                    }
-                ));
+                assert!(matches!(&fields[0].1, Expr::BinOp { op: BinOp::Add, .. }));
             }
             _ => panic!("expected RecordUpdate, got {:?}", expr),
         }
@@ -1651,10 +1663,16 @@ mod tests {
     fn field_access_chained() {
         let expr = parse_expr("user.profile.name");
         match expr {
-            Expr::FieldAccess { expr: inner, field, .. } => {
+            Expr::FieldAccess {
+                expr: inner, field, ..
+            } => {
                 assert_eq!(field, "name");
                 match *inner {
-                    Expr::FieldAccess { expr: innermost, field: mid_field, .. } => {
+                    Expr::FieldAccess {
+                        expr: innermost,
+                        field: mid_field,
+                        ..
+                    } => {
                         assert!(matches!(*innermost, Expr::Var { name, .. } if name == "user"));
                         assert_eq!(mid_field, "profile");
                     }
@@ -1682,7 +1700,11 @@ mod tests {
     fn field_access_in_binop() {
         let expr = parse_expr("user.age + 1");
         match expr {
-            Expr::BinOp { left, op: BinOp::Add, .. } => {
+            Expr::BinOp {
+                left,
+                op: BinOp::Add,
+                ..
+            } => {
                 assert!(matches!(*left, Expr::FieldAccess { field, .. } if field == "age"));
             }
             _ => panic!("expected BinOp, got {:?}", expr),

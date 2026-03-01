@@ -96,13 +96,13 @@ eval expr = case expr {
   Mul(a, b) -> eval a * eval b
 }
 
-# Guards in patterns — yes, with `if`
+# Guards in case arms use `if`
 # Any pure function (no effects) can be used in guards
 pub fun clamp (n: Int) -> Int
 clamp n = case n {
-  n if n < 0   -> 0
+  n if n < 0 -> 0
   n if n > 100 -> 100
-  n            -> n
+  n -> n
 }
 
 # Arbitrary pure functions in guards
@@ -110,14 +110,14 @@ is_valid s = String.length s > 0 && String.length s < 100
 
 pub fun describe (s: String) -> String
 describe s = case s {
-  s if is_valid s  -> "valid: " <> s
-  _               -> "invalid"
+  s if is_valid s -> "valid: " <> s
+  _ -> "invalid"
 }
 
-# Guards on function definitions too
+# Guards on function definitions use `|`
 pub fun abs (n: Int) -> Int
-abs n if n < 0 = -n
-abs n          = n
+abs n | n < 0 = -n
+abs n = n
 ```
 
 ---
@@ -169,14 +169,14 @@ describe resp = case resp {
 # Field aliasing in patterns
 describe resp = case resp {
   Success { status: s, body: b } -> "OK " <> show s
-  ApiError { code: c }           -> "Error " <> show c
+  ApiError { code: c } -> "Error " <> show c
 }
 
 # Record matches are always partial — unmentioned fields are ignored
 # No special syntax needed, just match what you care about
 header_only resp = case resp {
   Success { status } -> status
-  ApiError {}        -> 0
+  ApiError {} -> 0
 }
 
 # Exhaustiveness is at the variant level, not field level
@@ -189,7 +189,7 @@ header_only resp = case resp {
 fun has_value (opt: Option a) -> Bool
 has_value opt = case opt {
   Some(_) -> True
-  None    -> False
+  None -> False
 }
 
 # ADTs can still have simple positional variants
@@ -252,12 +252,12 @@ main () = {
   process_file "data.txt"
 } with {
   # Console handler
-  print msg   -> stdout_print msg
+  print msg -> stdout_print msg
   read_line () -> stdout_read_line ()
 
   # FileSystem handler
-  read_file path        -> os_read_file path
-  write_file path data  -> os_write_file path data
+  read_file path -> os_read_file path
+  write_file path data -> os_write_file path data
 
   # Fail handler
   fail reason -> {
@@ -269,12 +269,12 @@ main () = {
 # QUESTION: should handlers be named/reusable?
 
 handler std_io : Console {
-  print msg   -> stdout_print msg
+  print msg -> stdout_print msg
   read_line () -> stdout_read_line ()
 }
 
 handler mock_console : Console {
-  print msg   -> ()   # swallow output
+  print msg -> () # swallow output
   read_line () -> "mock input"
 }
 
@@ -327,11 +327,11 @@ handler with_retry : Http {
   get url -> {
     case http_get url {
       Ok(body) -> resume body
-      Err(_)   -> {
+      Err(_) -> {
         sleep 1000
         case http_get url {
           Ok(body) -> resume body
-          Err(e)   -> fail ("gave up: " <> e)
+          Err(e) -> fail ("gave up: " <> e)
         }
       }
     }
@@ -371,7 +371,7 @@ safe_divide x y =
 main () = {
   let result = safe_divide 10 0 with to_result
   case result {
-    Ok(n)  -> print (show n)
+    Ok(n) -> print (show n)
     Err(e) -> print ("Error: " <> e)
   }
 }
@@ -416,7 +416,7 @@ main () = {
   }
 
   case result {
-    Ok(n)  -> print (show n)
+    Ok(n) -> print (show n)
     Err(e) -> print e
   }
 }
@@ -447,8 +447,8 @@ module Foo.Bar.SomeModule
 
 # pub fun = public, fun = private annotation, bare = private inferred
 pub fun abs (n: Int) -> Int
-abs n if n < 0 = -n
-abs n          = n
+abs n | n < 0 = -n
+abs n = n
 
 pub fun max (a: Int) (b: Int) -> Int
 max a b = if a > b then a else b
@@ -542,7 +542,7 @@ fetch_user id = {
   let response = get ("/api/users/" <> show id)
   case parse_json response {
     Ok(user) -> user
-    Err(e)   -> fail ("Parse error: " <> e)
+    Err(e) -> fail ("Parse error: " <> e)
   }
 }
 

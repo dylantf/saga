@@ -1,4 +1,4 @@
-use crate::{ast::*, eval};
+use crate::ast::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
@@ -139,6 +139,7 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             Lit::Float(n) => Ok(Value::Float(*n)),
             Lit::String(s) => Ok(Value::String(s.clone())),
             Lit::Bool(b) => Ok(Value::Bool(*b)),
+            Lit::Unit => Ok(Value::Unit),
         },
 
         Expr::Var { name, .. } => match env.get(name) {
@@ -187,12 +188,11 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             message: format!("undefined constructor: {}", name),
         }),
 
-        Expr::Pipe { lhs, rhs, .. } => {
-            let arg = eval_expr(lhs, env)?;
-            let func = eval_expr(rhs, env)?;
-            apply(func, arg)
-        }
-
+        // Expr::Pipe { lhs, rhs, .. } => {
+        //     let arg = eval_expr(lhs, env)?;
+        //     let func = eval_expr(rhs, env)?;
+        //     apply(func, arg)
+        // }
         Expr::Lambda { params, body, .. } => Ok(Value::Closure(vec![ClosureArm {
             params: params.clone(),
             body: *body.clone(),
@@ -507,6 +507,7 @@ fn match_pattern(pattern: &Pat, value: &Value) -> Option<HashMap<String, Value>>
         Pat::Var { name, .. } => Some(HashMap::from([(name.clone(), value.clone())])),
 
         Pat::Lit { value: lit, .. } => match (lit, value) {
+            (Lit::Unit, Value::Unit) => Some(HashMap::new()),
             (Lit::Int(n1), Value::Int(n2)) if n1 == n2 => Some(HashMap::new()),
             // Pattern matching uses structural equality, not IEEE numeric equality.
             // NaN patterns match NaN values even though NaN != NaN in expressions.
