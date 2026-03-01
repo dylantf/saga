@@ -1,7 +1,4 @@
-# dylang — Language Design Exploration
-
-These are fake programs to explore how the syntax and features fit together.
-Nothing here is implemented — it's all vibes and iteration.
+# dylang - Language Design
 
 ---
 
@@ -13,7 +10,7 @@ Nothing here is implemented — it's all vibes and iteration.
 #@ Doc comments with hash-at
 #@ They attach to the next definition
 
-# Function definitions — three levels:
+# Function definitions - three levels:
 
 # Public, annotated (required for public API)
 pub fun add (a: Int) (b: Int) -> Int
@@ -172,7 +169,7 @@ describe resp = case resp {
   ApiError { code: c } -> "Error " <> show c
 }
 
-# Record matches are always partial — unmentioned fields are ignored
+# Record matches are always partial - unmentioned fields are ignored
 # No special syntax needed, just match what you care about
 header_only resp = case resp {
   Success { status } -> status
@@ -180,9 +177,9 @@ header_only resp = case resp {
 }
 
 # Exhaustiveness is at the variant level, not field level
-# This warns — missing ApiError case:
+# This warns - missing ApiError case:
 #   case resp { Success { status } -> status }
-# This is fine — matches all variants:
+# This is fine - matches all variants:
 #   case resp { Success { status } -> status, _ -> 0 }
 
 # `_` for positional ADT discards
@@ -204,7 +201,7 @@ type Option a {
 
 ---
 
-## 4. Effects — The Core Idea
+## 4. Effects - The Core Idea
 
 ```
 # Effects are declared like traits/interfaces
@@ -293,12 +290,12 @@ test () = {
 
 ---
 
-## 6. Effect Handlers — Advanced (Continuations)
+## 6. Effect Handlers - Advanced (Continuations)
 
 ```
 # `resume` is a keyword available in any handler
 # It sends a value back to the point where the effect was performed
-# Think of it like async/await — but for everything
+# Think of it like async/await - but for everything
 
 effect Ask {
   fun ask (question: String) -> String
@@ -312,13 +309,13 @@ handler collect_questions : Ask {
   }
 }
 
-# A handler that doesn't resume — computation stops
+# A handler that doesn't resume - computation stops
 # (like a catch block that doesn't rethrow)
 handler to_result : Fail {
   fail reason -> Err(reason)
 }
 
-# Retry logic — resume on success, fail on second attempt
+# Retry logic - resume on success, fail on second attempt
 effect Http {
   fun get (url: String) -> String
 }
@@ -350,7 +347,7 @@ handler with_retry : Http {
 ## 7. Error Handling via Effects
 
 ```
-# No exceptions, no special syntax — errors are just effects
+# No exceptions, no special syntax - errors are just effects
 
 effect Fail {
   fun fail (reason: String) -> Never
@@ -378,7 +375,7 @@ main () = {
 
 # `return` in a handler intercepts the final value of the computation
 # Without it, the value passes through unchanged
-# Most handlers don't need it — to_result is the classic case that does
+# Most handlers don't need it - to_result is the classic case that does
 ```
 
 ---
@@ -389,7 +386,7 @@ main () = {
 # `with` is sugar for chaining Result-returning functions
 # Short-circuits on the first Err, like Elixir's `with`
 
-# Pure effect-based code doesn't need this — fail handles it.
+# Pure effect-based code doesn't need this - fail handles it.
 # But at the boundary with Result-returning code (libraries, FFI),
 # it's really nice.
 
@@ -404,7 +401,7 @@ load_user_profile id = with {
   Err(reason) -> Err("Failed: " <> reason)
 }
 
-# It's just an expression — use it in let bindings
+# It's just an expression - use it in let bindings
 main () = {
   let result = with {
     x <- parse_int input,
@@ -440,7 +437,7 @@ with {
 ---
 
 ```
-# Explicit module naming — file path doesn't matter
+# Explicit module naming - file path doesn't matter
 # File: foo/bar/some_module.dy
 
 module Foo.Bar.SomeModule
@@ -453,7 +450,7 @@ abs n = n
 pub fun max (a: Int) (b: Int) -> Int
 max a b = if a > b then a else b
 
-# Private — not visible outside module
+# Private - not visible outside module
 helper x = x + 1
 
 # Importing
@@ -472,9 +469,9 @@ main () = {
 ## 10. Traits
 
 ```
-# Traits are for type-driven dispatch — the implementation is
+# Traits are for type-driven dispatch - the implementation is
 # determined by the type, not the call site.
-# Effects are for context-driven dispatch — the caller provides
+# Effects are for context-driven dispatch - the caller provides
 # the implementation via handlers.
 
 trait Show a {
@@ -511,7 +508,7 @@ print_all items = case items {
 
 ---
 
-## 11. Putting It All Together — A Realistic Program
+## 11. Putting It All Together - A Realistic Program
 
 ```
 module UserService
@@ -585,9 +582,73 @@ main () = {
 
 ---
 
-## 12. Settled Decisions & Notes
+## 12. Concurrency & Actors
 
-1. **Effect polymorphism** — higher-order functions explicitly propagate
+Concurrency follows the actor model, but falls out of the effect system
+rather than being a separate language primitive. Actors are just an effect:
+
+```
+effect Actor {
+  fun spawn (f: () -> Unit with e) -> Pid
+  fun send (pid: Pid) (msg: Msg) -> Unit
+  fun receive () -> Msg
+}
+```
+
+Each actor is isolated - no shared memory, only immutable messages passed
+between them. This means no data races by construction.
+
+`receive` suspends the actor by storing its continuation; the runtime resumes
+it when a message arrives. A simple example:
+
+```
+worker () = {
+  let msg = perform receive
+  case msg {
+    Shutdown -> ()
+    Work(data) -> {
+      process data
+      worker ()
+    }
+  }
+}
+
+main () = {
+  let pid = perform (spawn worker)
+  perform (send pid (Work "hello"))
+  perform (send pid Shutdown)
+} with real_actor_runtime
+```
+
+**Supervision** is just a handler that catches failures and re-invokes the
+computation. No special syntax - it's library code:
+
+```
+supervise f =
+  f () with {
+    fail reason -> {
+      log ("Crashed: " <> reason)
+      supervise f   # restart from scratch
+    }
+  }
+
+main () = {
+  supervise (fun () -> {
+    let data = perform (Http.get "/api/data")
+    process data
+  })
+} with real_http, timed_log
+```
+
+This could implement the "let it crash" philosophy expressed as an effect handler. A more
+sophisticated supervisor could track restart counts, apply backoff, or give
+up after N failures - all in userspace, no language support needed.
+
+---
+
+## 13. Settled Decisions & Notes
+
+1. **Effect polymorphism** - higher-order functions explicitly propagate
    effects from callbacks using an effect variable `e`:
 
    ```
@@ -598,16 +659,16 @@ main () = {
    If `f` has effects, `map` has those same effects.
    The caller always sees the full picture.
 
-2. **Effect subtyping** — yes. A function with fewer effects can be used
+2. **Effect subtyping** - yes. A function with fewer effects can be used
    where more effects are allowed. `{Console}` is accepted where
-   `{Console, FileSystem}` is expected. A function that does _less_
+   `{Console, FileSystem}` is expected. A function that does less
    is always safe where _more_ is permitted.
 
-3. **Do-notation / block syntax** — not needed. Effectful code is just
+3. **Do-notation / block syntax** - not needed. Effectful code is just
    normal code in blocks. For Result chaining at effect boundaries,
    `with` expressions handle it (see section 8).
 
-4. **Async** — yes, it's just another effect. Lives in the prelude
+4. **Async** - yes, it's just another effect. Lives in the prelude
    alongside Result, Option, print, etc.
 
    ```
@@ -617,7 +678,7 @@ main () = {
    }
    ```
 
-5. **Mutability** — yes, local mutable state is an effect.
+5. **Mutability** - yes, local mutable state is an effect.
 
    ```
    effect State s {
@@ -633,28 +694,29 @@ main () = {
    }
    ```
 
-6. **String interpolation** — `${expr}` inside double-quoted strings.
+6. **String interpolation** - `${expr}` inside double-quoted strings.
 
    ```
    greet name = print "Hello, ${name}!"
    debug x y = print "x = ${show x}, y = ${show y}"
    ```
 
-7. **Lambdas** — use `fun`, no trailing lambda syntax.
+7. **Lambdas** - use `fun`, no trailing lambda syntax.
    Pipes with `fun` read cleanly enough.
 
    ```
    items |> List.map (fun x -> x * 2)
    ```
 
-8. **Backward pipes** — `<|` for lowering precedence, avoids parens.
+8. **Backward pipes** - `<|` for lowering precedence, avoids parens.
+
    ```
    # These are equivalent:
    print (show (add 1 2))
    print <| show <| add 1 2
    ```
 
-9. **Negative literals as arguments** — require parentheses, same as Elm/Haskell.
+9. **Negative literals as arguments** - require parentheses, same as Elm/Haskell.
    `-` is always binary minus in application position; wrap negatives in parens.
    ```
    f (-5)    # fine
