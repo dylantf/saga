@@ -130,22 +130,129 @@ pub struct EvalError {
     pub message: String,
 }
 
-// --- Declarations ---
-
-pub fn eval_decl(decl: &Decl, env: &Env) -> Result<(), EvalError> {
-    todo!()
-}
-
 // --- Expressions ---
 
 pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
-    todo!()
+    match expr {
+        Expr::Lit { value, .. } => match value {
+            Lit::Int(n) => Ok(Value::Int(*n)),
+            Lit::Float(n) => Ok(Value::Float(*n)),
+            Lit::String(s) => Ok(Value::String(s.clone())),
+            Lit::Bool(b) => Ok(Value::Bool(*b)),
+        },
+
+        Expr::Var { name, .. } => match env.get(name) {
+            Some(value) => Ok(value),
+            None => Err(EvalError {
+                message: format!("Undefined variable: {}", name),
+            }),
+        },
+
+        Expr::BinOp {
+            op, left, right, ..
+        } => {
+            let left_value = eval_expr(left, env)?;
+            let right_value = eval_expr(right, env)?;
+            eval_binop(op, left_value, right_value)
+        }
+
+        Expr::App { func, arg, .. } => {
+            let f = eval_expr(func, env)?;
+            let arg = eval_expr(arg, env)?;
+            apply(f, arg)
+        }
+
+        Expr::UnaryMinus { expr, .. } => match eval_expr(expr, env)? {
+            Value::Int(n) => Ok(Value::Int(-n)),
+            Value::Float(n) => Ok(Value::Float(-n)),
+            _ => Err(EvalError {
+                message: "Unary minus requires a number".to_string(),
+            }),
+        },
+
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => match eval_expr(cond, env)? {
+            Value::Bool(true) => eval_expr(then_branch, env),
+            Value::Bool(false) => eval_expr(else_branch, env),
+            other => Err(EvalError {
+                message: format!("If condition must evaluate to a Boolean, got: {}", other),
+            }),
+        },
+
+        Expr::Constructor { name, .. } => env.get(name).ok_or_else(|| EvalError {
+            message: format!("undefined constructor: {}", name),
+        }),
+
+        Expr::Pipe { lhs, rhs, .. } => {
+            let arg = eval_expr(lhs, env)?;
+            let func = eval_expr(rhs, env)?;
+            apply(func, arg)
+        }
+
+        Expr::Lambda { params, body, .. } => Ok(Value::Closure(vec![ClosureArm {
+            params: params.clone(),
+            body: *body.clone(),
+            guard: None,
+            env: env.clone(),
+        }])),
+
+        // Evaluate each expression in sequence in a new scope
+        Expr::Block { stmts, .. } => {
+            let block_env = env.extend();
+            let mut result = Value::Unit;
+            for stmt in stmts {
+                result = match stmt {
+                    Stmt::Let { name, value, .. } => {
+                        let binding_value = eval_expr(value, &block_env)?;
+                        block_env.set(name.clone(), binding_value);
+                        Value::Unit // let-bindings don't evaluate to anything themselves
+                    }
+                    Stmt::Expr(expr) => eval_expr(expr, &block_env)?,
+                }
+            }
+            Ok(result)
+        }
+
+        Expr::Case { .. } => todo!(),
+        Expr::FieldAccess { .. } => todo!(),
+        Expr::RecordCreate { .. } => todo!(),
+        Expr::RecordUpdate { .. } => todo!(),
+    }
 }
 
 // --- Function application
 
 fn apply(func: Value, arg: Value) -> Result<Value, EvalError> {
     todo!()
+}
+
+// --- Declarations ---
+
+pub fn eval_decl(decl: &Decl, env: &Env) -> Result<(), EvalError> {
+    match decl {
+        // Ignored at runtime
+        Decl::FunAnnotation { .. } => Ok(()),
+        Decl::ModuleDecl { .. } => Ok(()),
+        Decl::TraitDef { .. } => Ok(()),
+
+        Decl::Let { name, value, .. } => todo!(),
+
+        Decl::FunBinding { .. } => todo!(),
+
+        Decl::TypeDef { .. } => todo!(),
+        Decl::RecordDef { .. } => todo!(),
+
+        // TODO, the whole algebraic effect system lol
+        Decl::EffectDef { .. } => todo!(),
+        Decl::HandlerDef { .. } => todo!(),
+        Decl::ImplDef { .. } => todo!(),
+
+        Decl::Import { .. } => todo!(),
+    }
 }
 
 // --- Builtin functions
