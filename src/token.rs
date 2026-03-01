@@ -82,6 +82,13 @@ pub struct Span {
     pub end: usize,
 }
 
+impl Span {
+    /// Extend this span to cover up to the end of `other`.
+    pub fn to(self, other: Span) -> Span {
+        Span { start: self.start, end: other.end }
+    }
+}
+
 /// A token tagged with its location in source
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spanned {
