@@ -1,0 +1,74 @@
+# --- Insertion sort ---
+
+insert_sorted x xs = case xs {
+  [] -> [x]
+  h :: t -> if x <= h then x :: xs else h :: insert_sorted x t
+}
+
+insertion_sort xs = foldl (fun sorted x -> insert_sorted x sorted) [] xs
+
+# --- Bubble sort ---
+
+bubble_pass xs = case xs {
+  [] -> []
+  [x] -> [x]
+  x :: y :: rest ->
+    if x <= y then x :: bubble_pass (y :: rest)
+    else y :: bubble_pass (x :: rest)
+}
+
+bubble_times n xs =
+  if n == 0 then xs
+  else bubble_times (n - 1) (bubble_pass xs)
+
+bubblesort xs = bubble_times (length xs) xs
+
+# --- Quicksort ---
+
+quicksort xs = case xs {
+  [] -> []
+  h :: t -> {
+    let smaller = filter (fun x -> x <= h) t
+    let larger = filter (fun x -> x > h) t
+    append (quicksort smaller) (h :: quicksort larger)
+  }
+}
+
+# --- Merge sort ---
+
+record Split { left: List Int, right: List Int }
+
+split xs = case xs {
+  [] -> Split { left: [], right: [] }
+  [x] -> Split { left: [x], right: [] }
+  x :: y :: rest -> {
+    let s = split rest
+    Split { left: x :: s.left, right: y :: s.right }
+  }
+}
+
+merge xs ys = case xs {
+  [] -> ys
+  h :: t -> case ys {
+    [] -> xs
+    h2 :: t2 -> if h <= h2 then h :: merge t ys else h2 :: merge xs t2
+  }
+}
+
+mergesort xs = case xs {
+  [] -> []
+  [x] -> [x]
+  _ -> {
+    let s = split xs
+    merge (mergesort s.left) (mergesort s.right)
+  }
+}
+
+main () = {
+  let nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
+
+  show (insertion_sort nums) |> print
+  show (bubblesort nums) |> print
+  show (quicksort nums) |> print
+  show (mergesort nums) |> print
+}

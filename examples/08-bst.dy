@@ -1,0 +1,36 @@
+type Tree {
+  Empty
+  Node(Tree, Int, Tree)
+}
+
+insert t x = case t {
+  Empty -> Node(Empty, x, Empty)
+  Node(l, v, r) ->
+    if x < v then Node(insert l x, v, r)
+    else if x > v then Node(l, v, insert r x)
+    else t
+}
+
+contains t x = case t {
+  Empty -> False
+  Node(l, v, r) ->
+    if x == v then True
+    else if x < v then contains l x
+    else contains r x
+}
+
+# In-order traversal produces a sorted list
+to_list t = case t {
+  Empty -> []
+  Node(l, v, r) -> append (to_list l) (v :: to_list r)
+}
+
+main () = {
+  let t = foldl insert Empty [5, 3, 7, 1, 4, 6, 8]
+
+  # In-order traversal should give sorted output
+  show (to_list t) |> print
+
+  show (contains t 4) |> print
+  show (contains t 9) |> print
+}

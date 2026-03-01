@@ -1,3 +1,53 @@
+# --- Maybe ---
+
+type Maybe a {
+  None
+  Some(a)
+}
+
+maybe_map f m = case m {
+  None -> None
+  Some(x) -> Some(f x)
+}
+
+maybe_unwrap_or default m = case m {
+  None -> default
+  Some(x) -> x
+}
+
+maybe_and_then f m = case m {
+  None -> None
+  Some(x) -> f x
+}
+
+# --- Result ---
+
+type Result a b {
+  Ok(a)
+  Err(b)
+}
+
+result_map f r = case r {
+  Ok(x) -> Ok(f x)
+  Err(e) -> Err(e)
+}
+
+result_map_err f r = case r {
+  Ok(x) -> Ok(x)
+  Err(e) -> Err(f e)
+}
+
+result_unwrap_or default r = case r {
+  Ok(x) -> x
+  Err(_) -> default
+}
+
+result_and_then f r = case r {
+  Ok(x) -> f x
+  Err(e) -> Err(e)
+}
+
+# --- List ---
 # Built-in list constructors: Nil, Cons(head, tail)
 
 fun head (xs: List a) -> a
