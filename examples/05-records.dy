@@ -1,0 +1,27 @@
+record Point {
+  x: Int,
+  y: Int,
+}
+
+show_point p = "(" <> show p.x <> ", " <> show p.y <> ")"
+
+translate dx dy p = { p | x: p.x + dx, y: p.y + dy }
+
+quadrant p = case p {
+  Point { x, y } if x > 0 && y > 0 -> "I"
+  Point { x, y } if x < 0 && y > 0 -> "II"
+  Point { x, y } if x < 0 && y < 0 -> "III"
+  Point { x, y } if x > 0 && y < 0 -> "IV"
+  _ -> "origin or axis"
+}
+
+main () = {
+  let p = Point { x: 3, y: 4 }
+  show_point p |> print
+
+  let p2 = translate 1 (-5) p  # negative args need parens, like Elm/Haskell
+  show_point p2 |> print
+
+  quadrant p |> print
+  quadrant p2 |> print
+}

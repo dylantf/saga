@@ -576,7 +576,7 @@ impl Parser {
                     let save = self.pos;
                     let first_expr = self.parse_expr(0);
                     if first_expr.is_ok() && matches!(self.peek(), Token::Bar) {
-                        let record = self.parse_expr(0).unwrap();
+                        let record = first_expr.unwrap();
                         self.advance(); // consume '|'
                         self.skip_terminators();
                         let mut fields = Vec::new();

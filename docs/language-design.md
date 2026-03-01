@@ -653,3 +653,11 @@ main () = {
    print (show (add 1 2))
    print <| show <| add 1 2
    ```
+
+9. **Negative literals as arguments** — require parentheses, same as Elm/Haskell.
+   `-` is always binary minus in application position; wrap negatives in parens.
+   ```
+   f (-5)    # fine
+   f -5      # parse error: binary minus with missing right operand
+   -x        # fine: unary negation in expression position
+   ```
