@@ -1,0 +1,22 @@
+main () = {
+  let nums = [1, 2, 3, 4, 5]
+  show nums |> print
+
+  let doubled = map (fun x -> x * 2) nums
+  show doubled |> print
+
+  let evens = filter (fun x -> x % 2 == 0) nums
+  show evens |> print
+
+  let total = foldl (fun acc x -> acc + x) 0 nums
+  show total |> print
+
+  let rev = reverse nums
+  show rev |> print
+
+  let empty = []
+  show empty |> print
+
+  let words = ["hello", "world"]
+  show words |> print
+}

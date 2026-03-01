@@ -191,6 +191,7 @@ impl Lexer {
                     | Token::UpperIdent(_)
                     | Token::RParen
                     | Token::RBrace
+                    | Token::RBracket
             ),
         }
     }
@@ -387,6 +388,18 @@ impl Lexer {
                     });
                     prev_token = Some(Token::And);
                 }
+                Some(':') if self.peek_next() == Some(':') => {
+                    self.advance();
+                    self.advance();
+                    tokens.push(Spanned {
+                        token: Token::DoubleColon,
+                        span: Span {
+                            start,
+                            end: self.pos,
+                        },
+                    });
+                    prev_token = Some(Token::DoubleColon);
+                }
                 Some('.') if self.peek_next() == Some('.') => {
                     self.advance();
                     self.advance();
@@ -436,6 +449,14 @@ impl Lexer {
                         ')' => {
                             self.nesting -= 1;
                             Token::RParen
+                        }
+                        '[' => {
+                            self.nesting += 1;
+                            Token::LBracket
+                        }
+                        ']' => {
+                            self.nesting -= 1;
+                            Token::RBracket
                         }
                         '{' => Token::LBrace,
                         '}' => Token::RBrace,
@@ -582,6 +603,7 @@ mod tests {
         assert_eq!(toks("&&"), vec![And, Eof]);
         assert_eq!(toks("||"), vec![Or, Eof]);
         assert_eq!(toks(".."), vec![DotDot, Eof]);
+        assert_eq!(toks("::"), vec![DoubleColon, Eof]);
     }
 
     #[test]

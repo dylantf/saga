@@ -1,0 +1,50 @@
+# Built-in list constructors: Nil, Cons(head, tail)
+
+fun head (xs: List a) -> a
+head xs = case xs {
+  Cons(h, _) -> h
+}
+
+fun tail (xs: List a) -> List a
+tail xs = case xs {
+  Cons(_, t) -> t
+}
+
+fun length (xs: List a) -> Int
+length xs = case xs {
+  Nil -> 0
+  Cons(_, t) -> 1 + length t
+}
+
+fun map (f: a -> b) (xs: List a) -> List b
+map f xs = case xs {
+  Nil -> Nil
+  Cons(h, t) -> Cons (f h) (map f t)
+}
+
+fun filter (pred: a -> Bool) (xs: List a) -> List a
+filter pred xs = case xs {
+  Nil -> Nil
+  Cons(h, t) -> if pred h then Cons h (filter pred t) else filter pred t
+}
+
+fun foldl (f: b -> a -> b) (acc: b) (xs: List a) -> b
+foldl f acc xs = case xs {
+  Nil -> acc
+  Cons(h, t) -> foldl f (f acc h) t
+}
+
+fun foldr (f: a -> b -> b) (acc: b) (xs: List a) -> b
+foldr f acc xs = case xs {
+  Nil -> acc
+  Cons(h, t) -> f h (foldr f acc t)
+}
+
+fun reverse (xs: List a) -> List a
+reverse xs = foldl (fun acc x -> Cons x acc) Nil xs
+
+fun append (xs: List a) (ys: List a) -> List a
+append xs ys = case xs {
+  Nil -> ys
+  Cons(h, t) -> Cons h (append t ys)
+}

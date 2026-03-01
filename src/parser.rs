@@ -89,6 +89,7 @@ impl Parser {
                 | Token::Ident(_)
                 | Token::UpperIdent(_)
                 | Token::LParen
+                | Token::LBracket
         )
     }
 
@@ -375,8 +376,9 @@ impl Parser {
             }
 
             let (op, bp) = match self.peek() {
-                Token::Pipe => (None, 1),     // desugars to App(right, left)
-                Token::PipeBack => (None, 1), // desugars to App(left, right)
+                Token::Pipe => (None, 1),           // desugars to App(right, left)
+                Token::PipeBack => (None, 1),       // desugars to App(left, right)
+                Token::DoubleColon => (None, 1),    // desugars to Cons(left, right), right-assoc
                 Token::Or => (Some(BinOp::Or), 2),
                 Token::And => (Some(BinOp::And), 3),
                 Token::EqEq => (Some(BinOp::Eq), 4),
@@ -398,16 +400,35 @@ impl Parser {
                 break;
             }
 
-            // Remember if this is a backward pipe before consuming
+            // Remember operator kind before consuming
             let is_backward_pipe = matches!(self.peek(), Token::PipeBack);
+            let is_cons = matches!(self.peek(), Token::DoubleColon);
             self.advance(); // consume operator
-            let right = self.parse_expr(bp + 1)?; // +1 = left-associative
+            // :: is right-associative (recurse at same bp); everything else is left-associative
+            let right = self.parse_expr(if is_cons { bp } else { bp + 1 })?;
 
             let span = Span {
                 start: left.span().start,
                 end: right.span().end,
             };
             left = match op {
+                // x :: xs  →  Cons x xs  (right-associative)
+                None if is_cons => {
+                    let cons = Expr::Constructor {
+                        name: "Cons".to_string(),
+                        span,
+                    };
+                    let app1 = Expr::App {
+                        func: Box::new(cons),
+                        arg: Box::new(left),
+                        span,
+                    };
+                    Expr::App {
+                        func: Box::new(app1),
+                        arg: Box::new(right),
+                        span,
+                    }
+                }
                 // |> forward pipe: `x |> f` becomes `App(f, x)`
                 // <| backward pipe: `f <| x` becomes `App(f, x)`
                 None if is_backward_pipe => Expr::App {
@@ -544,6 +565,47 @@ impl Parser {
                     self.expect(Token::RParen)?;
                     Ok(inner)
                 }
+            }
+
+            // List literal: [e1, e2, e3]
+            // Desugars to: Cons(e1, Cons(e2, Cons(e3, Nil)))
+            Token::LBracket => {
+                let mut elements = Vec::new();
+                while !matches!(self.peek(), Token::RBracket | Token::Eof) {
+                    elements.push(self.parse_expr(0)?);
+                    if matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                    }
+                }
+                let end = self.tokens[self.pos].span;
+                self.expect(Token::RBracket)?;
+
+                // Build from right to left: Nil, then wrap each element
+                let mut result = Expr::Constructor {
+                    name: "Nil".to_string(),
+                    span: end,
+                };
+                for elem in elements.into_iter().rev() {
+                    let elem_span = elem.span();
+                    let cons = Expr::Constructor {
+                        name: "Cons".to_string(),
+                        span: elem_span,
+                    };
+                    let app1 = Expr::App {
+                        func: Box::new(cons),
+                        arg: Box::new(elem),
+                        span: elem_span,
+                    };
+                    result = Expr::App {
+                        func: Box::new(app1),
+                        arg: Box::new(result),
+                        span: Span {
+                            start: elem_span.start,
+                            end: end.end,
+                        },
+                    };
+                }
+                Ok(result)
             }
 
             Token::Fun => {
@@ -732,6 +794,28 @@ impl Parser {
     // --- Patterns ---
 
     fn parse_pattern(&mut self) -> Result<Pat, ParseError> {
+        let start = self.tokens[self.pos].span;
+        let pat = self.parse_pattern_atom()?;
+
+        // x :: xs  -> Cons(x, xs)  (right-associative: recurse into parse_pattern)
+        if matches!(self.peek(), Token::DoubleColon) {
+            self.advance(); // consume ::
+            let tail = self.parse_pattern()?;
+            let end = self.tokens[self.pos - 1].span;
+            return Ok(Pat::Constructor {
+                name: "Cons".to_string(),
+                args: vec![pat, tail],
+                span: Span {
+                    start: start.start,
+                    end: end.end,
+                },
+            });
+        }
+
+        Ok(pat)
+    }
+
+    fn parse_pattern_atom(&mut self) -> Result<Pat, ParseError> {
         let span = self.tokens[self.pos].span;
 
         match self.advance() {
@@ -812,6 +896,35 @@ impl Parser {
                     value: Lit::Unit,
                     span,
                 })
+            }
+            Token::LBracket => {
+                let mut elements = Vec::new();
+                while !matches!(self.peek(), Token::RBracket | Token::Eof) {
+                    elements.push(self.parse_pattern()?);
+                    if matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                    }
+                }
+                let end = self.tokens[self.pos].span;
+                self.expect(Token::RBracket)?;
+
+                // Build from right to left: Nil, then wrap each element in Cons
+                let mut result = Pat::Constructor {
+                    name: "Nil".to_string(),
+                    args: vec![],
+                    span: end,
+                };
+                for elem in elements.into_iter().rev() {
+                    result = Pat::Constructor {
+                        name: "Cons".to_string(),
+                        args: vec![elem, result],
+                        span: Span {
+                            start: span.start,
+                            end: end.end,
+                        },
+                    };
+                }
+                Ok(result)
             }
             tok => {
                 self.pos -= 1;
@@ -1093,6 +1206,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cons_operator_expr() {
+        // x :: xs  desugars to  App(App(Cons, x), xs)
+        let expr = parse_expr("x :: xs");
+        match expr {
+            Expr::App { func, arg, .. } => {
+                assert!(matches!(*arg, Expr::Var { name, .. } if name == "xs"));
+                match *func {
+                    Expr::App { func, arg, .. } => {
+                        assert!(matches!(*func, Expr::Constructor { name, .. } if name == "Cons"));
+                        assert!(matches!(*arg, Expr::Var { name, .. } if name == "x"));
+                    }
+                    _ => panic!("expected inner App"),
+                }
+            }
+            _ => panic!("expected App from ::, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn cons_operator_right_associative() {
+        // 1 :: 2 :: xs  =>  Cons(1, Cons(2, xs))
+        let expr = parse_expr("1 :: 2 :: xs");
+        // Outer: App(App(Cons, 1), <inner>)
+        match expr {
+            Expr::App { arg, .. } => {
+                // arg is Cons(2, xs)
+                assert!(matches!(*arg, Expr::App { .. }));
+            }
+            _ => panic!("expected App, got {:?}", expr),
+        }
+    }
+
     // --- If/else ---
 
     #[test]
@@ -1300,6 +1446,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pattern_cons_operator() {
+        let pat = parse_pattern("x :: xs");
+        match pat {
+            Pat::Constructor { name, args, .. } => {
+                assert_eq!(name, "Cons");
+                assert_eq!(args.len(), 2);
+                assert!(matches!(&args[0], Pat::Var { name, .. } if name == "x"));
+                assert!(matches!(&args[1], Pat::Var { name, .. } if name == "xs"));
+            }
+            _ => panic!("expected Constructor, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn pattern_cons_right_associative() {
+        // x :: y :: zs  =>  Cons(x, Cons(y, zs))
+        let pat = parse_pattern("x :: y :: zs");
+        match pat {
+            Pat::Constructor { name, args, .. } => {
+                assert_eq!(name, "Cons");
+                assert!(matches!(&args[0], Pat::Var { name, .. } if name == "x"));
+                assert!(matches!(&args[1], Pat::Constructor { name, .. } if name == "Cons"));
+            }
+            _ => panic!("expected Constructor, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn pattern_list_empty() {
+        let pat = parse_pattern("[]");
+        match pat {
+            Pat::Constructor { name, args, .. } => {
+                assert_eq!(name, "Nil");
+                assert!(args.is_empty());
+            }
+            _ => panic!("expected Constructor, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn pattern_list_single() {
+        let pat = parse_pattern("[x]");
+        match pat {
+            Pat::Constructor { name, args, .. } => {
+                assert_eq!(name, "Cons");
+                assert_eq!(args.len(), 2);
+                assert!(matches!(&args[0], Pat::Var { name, .. } if name == "x"));
+                assert!(matches!(&args[1], Pat::Constructor { name, .. } if name == "Nil"));
+            }
+            _ => panic!("expected Constructor, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn pattern_list_two_elements() {
+        let pat = parse_pattern("[x, y]");
+        match pat {
+            Pat::Constructor { name, args, .. } => {
+                assert_eq!(name, "Cons");
+                assert_eq!(args.len(), 2);
+                assert!(matches!(&args[0], Pat::Var { name, .. } if name == "x"));
+                match &args[1] {
+                    Pat::Constructor { name, args, .. } => {
+                        assert_eq!(name, "Cons");
+                        assert_eq!(args.len(), 2);
+                        assert!(matches!(&args[0], Pat::Var { name, .. } if name == "y"));
+                        assert!(matches!(&args[1], Pat::Constructor { name, .. } if name == "Nil"));
+                    }
+                    _ => panic!("expected inner Cons, got {:?}", args[1]),
+                }
+            }
+            _ => panic!("expected Constructor, got {:?}", pat),
+        }
+    }
+
     // --- Declarations ---
 
     #[test]
@@ -1365,7 +1587,7 @@ mod tests {
 
     #[test]
     fn fun_binding_with_guard() {
-        let decls = parse("abs n if n < 0 = -n");
+        let decls = parse("abs n | n < 0 = -n");
         assert_eq!(decls.len(), 1);
         match &decls[0] {
             Decl::FunBinding { name, guard, .. } => {
@@ -1492,7 +1714,7 @@ mod tests {
 
     #[test]
     fn multiple_bindings_pattern_match() {
-        let decls = parse("abs n if n < 0 = -n\nabs n = n");
+        let decls = parse("abs n | n < 0 = -n\nabs n = n");
         assert_eq!(decls.len(), 2);
         match &decls[0] {
             Decl::FunBinding { guard, .. } => assert!(guard.is_some()),

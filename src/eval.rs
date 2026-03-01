@@ -38,6 +38,30 @@ pub enum Value {
     BuiltIn(String),
 }
 
+fn is_list_value(v: &Value) -> bool {
+    match v {
+        Value::Constructor { name, args, .. } if name == "Nil" && args.is_empty() => true,
+        Value::Constructor { name, args, .. } if name == "Cons" && args.len() == 2 => {
+            is_list_value(&args[1])
+        }
+        _ => false,
+    }
+}
+
+fn fmt_list_elements(v: &Value, f: &mut fmt::Formatter<'_>, first: bool) -> fmt::Result {
+    match v {
+        Value::Constructor { name, args, .. } if name == "Nil" && args.is_empty() => Ok(()),
+        Value::Constructor { name, args, .. } if name == "Cons" && args.len() == 2 => {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", args[0])?;
+            fmt_list_elements(&args[1], f, false)
+        }
+        _ => Ok(()),
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -49,7 +73,13 @@ impl fmt::Display for Value {
             Value::Closure { .. } => write!(f, "<function>"),
             Value::BuiltIn(name) => write!(f, "<built-in: {}>", name),
             Value::Constructor { name, args, .. } => {
-                if args.is_empty() {
+                if name == "Nil" && args.is_empty() {
+                    write!(f, "[]")
+                } else if name == "Cons" && args.len() == 2 && is_list_value(self) {
+                    write!(f, "[")?;
+                    fmt_list_elements(self, f, true)?;
+                    write!(f, "]")
+                } else if args.is_empty() {
                     write!(f, "{}", name)
                 } else {
                     write!(f, "{}(", name)?;
@@ -572,9 +602,43 @@ fn match_pattern(pattern: &Pat, value: &Value) -> Option<HashMap<String, Value>>
 pub fn eval_program(program: &Program) -> Result<(), EvalError> {
     let env = Env::new();
 
-    // Register builins
+    // Register builtins
     env.set("print".to_string(), Value::BuiltIn("print".to_string()));
     env.set("show".to_string(), Value::BuiltIn("show".to_string()));
+
+    // Register built-in list constructors
+    env.set(
+        "Nil".to_string(),
+        Value::Constructor {
+            name: "Nil".to_string(),
+            arity: 0,
+            args: vec![],
+        },
+    );
+    env.set(
+        "Cons".to_string(),
+        Value::Constructor {
+            name: "Cons".to_string(),
+            arity: 2,
+            args: vec![],
+        },
+    );
+
+    // Load and evaluate the standard prelude (written in dylang)
+    let prelude_src = include_str!("prelude.dy");
+    let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
+        .lex()
+        .map_err(|e| EvalError {
+            message: format!("Prelude lex error: {}", e.message),
+        })?;
+    let prelude_program = crate::parser::Parser::new(prelude_tokens)
+        .parse_program()
+        .map_err(|e| EvalError {
+            message: format!("Prelude parse error: {}", e.message),
+        })?;
+    for decl in &prelude_program {
+        eval_decl(decl, &env)?;
+    }
 
     // First pass: register all declarations
     // Since env is registered as an Rc, any closures captured will see bindings added later

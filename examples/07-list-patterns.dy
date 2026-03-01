@@ -1,0 +1,31 @@
+fun describe (xs: List Int) -> String
+describe xs = case xs {
+  [] -> "empty"
+  [x] -> "one element"
+  [x, y] -> "two elements"
+  _ :: _ -> "many elements"
+}
+
+fun sum_two (xs: List Int) -> Int
+sum_two xs = case xs {
+  [a, b] -> a + b
+  _ -> 0
+}
+
+fun first_two (xs: List Int) -> String
+first_two xs = case xs {
+  x :: y :: _ -> show x <> " and " <> show y
+  _ -> "fewer than two elements"
+}
+
+main () = {
+  describe [] |> print
+  describe [42] |> print
+  describe [1, 2] |> print
+  describe [1, 2, 3] |> print
+
+  show (sum_two [3, 4]) |> print
+
+  first_two [10, 20, 30] |> print
+  first_two [5] |> print
+}

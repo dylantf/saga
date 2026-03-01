@@ -56,14 +56,17 @@ pub enum Token {
     DotDot,    // ..
     Backslash, // \
     Bar,       // |
+    DoubleColon, // ::
 
     // Delimiters
     LParen, // (
     RParen, // )
-    LBrace, // {
-    RBrace, // }
-    Comma,  // ,
-    Colon,  // :
+    LBrace,   // {
+    RBrace,   // }
+    LBracket, // [
+    RBracket, // ]
+    Comma,    // ,
+    Colon,    // :
 
     // End of statement/line
     Terminator,
