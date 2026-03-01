@@ -376,9 +376,9 @@ impl Parser {
             }
 
             let (op, bp) = match self.peek() {
-                Token::Pipe => (None, 1),           // desugars to App(right, left)
-                Token::PipeBack => (None, 1),       // desugars to App(left, right)
-                Token::DoubleColon => (None, 1),    // desugars to Cons(left, right), right-assoc
+                Token::Pipe => (None, 1),        // desugars to App(right, left)
+                Token::PipeBack => (None, 1),    // desugars to App(left, right)
+                Token::DoubleColon => (None, 1), // desugars to Cons(left, right), right-assoc
                 Token::Or => (Some(BinOp::Or), 2),
                 Token::And => (Some(BinOp::And), 3),
                 Token::EqEq => (Some(BinOp::Eq), 4),
@@ -637,8 +637,10 @@ impl Parser {
                 if !matches!(self.peek(), Token::Let | Token::RBrace) {
                     let save = self.pos;
                     let first_expr = self.parse_expr(0);
-                    if first_expr.is_ok() && matches!(self.peek(), Token::Bar) {
-                        let record = first_expr.unwrap();
+
+                    if let Ok(record) = first_expr
+                        && matches!(self.peek(), Token::Bar)
+                    {
                         self.advance(); // consume '|'
                         self.skip_terminators();
                         let mut fields = Vec::new();
@@ -663,6 +665,7 @@ impl Parser {
                             },
                         });
                     }
+
                     // Not a record update — backtrack and parse as block
                     self.pos = save;
                 }

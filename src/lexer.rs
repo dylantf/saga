@@ -45,6 +45,17 @@ impl Lexer {
         }
     }
 
+    fn emit(&self, token: Token, start: usize) -> (Spanned, Token) {
+        let spanned = Spanned {
+            token: token.clone(),
+            span: Span {
+                start,
+                end: self.pos,
+            },
+        };
+        (spanned, token)
+    }
+
     fn skip_comment(&mut self) {
         while let Some(ch) = self.peek() {
             if ch == '\n' {
@@ -207,26 +218,16 @@ impl Lexer {
 
             match self.peek() {
                 None => {
-                    tokens.push(Spanned {
-                        token: Token::Eof,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
+                    let (spanned, _) = self.emit(Token::Eof, start);
+                    tokens.push(spanned);
                     return Ok(tokens);
                 }
                 Some('\n') => {
                     self.advance();
                     if self.should_emit_terminator(&prev_token) {
-                        tokens.push(Spanned {
-                            token: Token::Terminator,
-                            span: Span {
-                                start,
-                                end: self.pos,
-                            },
-                        });
-                        prev_token = Some(Token::Terminator);
+                        let (spanned, tok) = self.emit(Token::Terminator, start);
+                        tokens.push(spanned);
+                        prev_token = Some(tok);
                     }
                     continue;
                 }
@@ -235,35 +236,20 @@ impl Lexer {
                 }
                 Some('"') => {
                     let tok = self.read_string()?;
-                    tokens.push(Spanned {
-                        token: tok.clone(),
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
+                    let (spanned, tok) = self.emit(tok, start);
+                    tokens.push(spanned);
                     prev_token = Some(tok);
                 }
                 Some(ch) if ch.is_ascii_digit() => {
                     let tok = self.read_number();
-                    tokens.push(Spanned {
-                        token: tok.clone(),
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
+                    let (spanned, tok) = self.emit(tok, start);
+                    tokens.push(spanned);
                     prev_token = Some(tok);
                 }
                 Some(ch) if ch.is_alphabetic() || ch == '_' => {
                     let tok = self.read_identifier();
-                    tokens.push(Spanned {
-                        token: tok.clone(),
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
+                    let (spanned, tok) = self.emit(tok, start);
+                    tokens.push(spanned);
                     prev_token = Some(tok);
                 }
 
@@ -271,158 +257,93 @@ impl Lexer {
                 Some('-') if self.peek_next() == Some('>') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::Arrow,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::Arrow);
+                    let (spanned, tok) = self.emit(Token::Arrow, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
                 Some('|') if self.peek_next() == Some('>') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::Pipe,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::Pipe);
+                    let (spanned, tok) = self.emit(Token::Pipe, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
                 Some('<') if self.peek_next() == Some('-') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::ArrowBack,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::ArrowBack);
+                    let (spanned, tok) = self.emit(Token::ArrowBack, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
                 Some('<') if self.peek_next() == Some('>') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::Concat,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::Concat);
+                    let (spanned, tok) = self.emit(Token::Concat, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
                 Some('<') if self.peek_next() == Some('|') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::PipeBack,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::PipeBack);
+                    let (spanned, tok) = self.emit(Token::PipeBack, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
                 Some('=') if self.peek_next() == Some('=') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::EqEq,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::EqEq);
+                    let (spanned, tok) = self.emit(Token::EqEq, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
                 Some('!') if self.peek_next() == Some('=') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::NotEq,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::NotEq);
+                    let (spanned, tok) = self.emit(Token::NotEq, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
                 Some('<') if self.peek_next() == Some('=') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::LtEq,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::LtEq);
+                    let (spanned, tok) = self.emit(Token::LtEq, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
                 Some('>') if self.peek_next() == Some('=') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::GtEq,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::GtEq);
+                    let (spanned, tok) = self.emit(Token::GtEq, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
                 Some('&') if self.peek_next() == Some('&') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::And,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::And);
+                    let (spanned, tok) = self.emit(Token::And, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
                 Some(':') if self.peek_next() == Some(':') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::DoubleColon,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::DoubleColon);
+                    let (spanned, tok) = self.emit(Token::DoubleColon, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
                 Some('.') if self.peek_next() == Some('.') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::DotDot,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::DotDot);
+                    let (spanned, tok) = self.emit(Token::DotDot, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
                 Some('|') if self.peek_next() == Some('|') => {
                     self.advance();
                     self.advance();
-                    tokens.push(Spanned {
-                        token: Token::Or,
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
-                    prev_token = Some(Token::Or);
+                    let (spanned, tok) = self.emit(Token::Or, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
                 }
 
                 // Single-character tokens
@@ -467,13 +388,8 @@ impl Lexer {
                             });
                         }
                     };
-                    tokens.push(Spanned {
-                        token: tok.clone(),
-                        span: Span {
-                            start,
-                            end: self.pos,
-                        },
-                    });
+                    let (spanned, tok) = self.emit(tok, start);
+                    tokens.push(spanned);
                     prev_token = Some(tok);
                 }
             }
