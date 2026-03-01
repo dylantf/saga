@@ -376,12 +376,53 @@ pub fn eval_decl(decl: &Decl, env: &Env) -> Result<(), EvalError> {
         Decl::ModuleDecl { .. } => Ok(()),
         Decl::TraitDef { .. } => Ok(()),
 
-        Decl::Let { name, value, .. } => todo!(),
+        Decl::Let { name, value, .. } => {
+            let val = eval_expr(value, env)?;
+            env.set(name.clone(), val);
+            Ok(())
+        }
 
-        Decl::FunBinding { .. } => todo!(),
+        Decl::FunBinding {
+            name,
+            params,
+            guard,
+            body,
+            ..
+        } => {
+            let arm = ClosureArm {
+                params: params.clone(),
+                guard: guard.clone().map(|g| *g),
+                body: body.clone(),
+                env: env.clone(),
+            };
 
-        Decl::TypeDef { .. } => todo!(),
-        Decl::RecordDef { .. } => todo!(),
+            if let Some(Value::Closure(mut arms)) = env.get(name) {
+                arms.push(arm);
+                env.set(name.clone(), Value::Closure(arms));
+            } else {
+                env.set(name.clone(), Value::Closure(vec![arm]));
+            }
+
+            Ok(())
+        }
+
+        Decl::TypeDef { variants, .. } => {
+            for v in variants {
+                let arity = v.fields.len();
+                env.set(
+                    v.name.clone(),
+                    Value::Constructor {
+                        name: v.name.clone(),
+                        arity,
+                        args: Vec::new(),
+                    },
+                )
+            }
+            Ok(())
+        }
+
+        // Handled at the call site
+        Decl::RecordDef { .. } => Ok(()),
 
         // TODO, the whole algebraic effect system lol
         Decl::EffectDef { .. } => todo!(),
@@ -528,5 +569,30 @@ fn match_pattern(pattern: &Pat, value: &Value) -> Option<HashMap<String, Value>>
 }
 
 pub fn eval_program(program: &Program) -> Result<(), EvalError> {
-    todo!()
+    let env = Env::new();
+
+    // Register builins
+    env.set("print".to_string(), Value::BuiltIn("print".to_string()));
+    env.set("show".to_string(), Value::BuiltIn("show".to_string()));
+
+    // First pass: register all declarations
+    // Since env is registered as an Rc, any closures captured will see bindings added later
+    // This allows for mutual recursion
+    for decl in program {
+        eval_decl(decl, &env)?;
+    }
+
+    // Run main function
+    match env.get("main") {
+        Some(main_val @ Value::Closure(_)) => {
+            apply(main_val, Value::Unit)?;
+            Ok(())
+        }
+        Some(_) => Err(EvalError {
+            message: "`main` must be a function".to_string(),
+        }),
+        None => Err(EvalError {
+            message: "No main function defined".to_string(),
+        }),
+    }
 }
