@@ -1,0 +1,82 @@
+# Pattern matching examples
+
+# --- Custom types ---
+
+type Shape {
+  Circle(Float)
+  Rect(Float, Float)
+  Triangle(Float, Float, Float)
+}
+
+area shape = case shape {
+  Circle(r) -> 3 * r * r
+  Rect(w, h) -> w * h
+  Triangle(b, h, _) -> (b * h) / 2
+}
+
+describe_shape shape = case shape {
+  Circle(_) -> "circle"
+  Rect(_, _) -> "rectangle"
+  Triangle(_, _, _) -> "triangle"
+}
+
+# --- Records ---
+
+record Point { x: Int, y: Int }
+
+quadrant p = case p {
+  Point { x, y } if x > 0 && y > 0 -> "Q1"
+  Point { x, y } if x < 0 && y > 0 -> "Q2"
+  Point { x, y } if x < 0 && y < 0 -> "Q3"
+  Point { x, y } if x > 0 && y < 0 -> "Q4"
+  _ -> "origin or axis"
+}
+
+# --- List patterns ---
+
+fun describe (xs: List Int) -> String
+describe xs = case xs {
+  [] -> "empty"
+  [x] -> "one element"
+  [x, y] -> "two elements"
+  _ :: _ -> "many elements"
+}
+
+fun sum_two (xs: List Int) -> Int
+sum_two xs = case xs {
+  [a, b] -> a + b
+  _ -> 0
+}
+
+fun first_two (xs: List Int) -> String
+first_two xs = case xs {
+  x :: y :: _ -> show x <> " and " <> show y
+  _ -> "fewer than two elements"
+}
+
+main () = {
+  # Custom type patterns
+  let c = Circle(5)
+  let r = Rect(3, 4)
+  let t = Triangle(6, 8, 10)
+  describe_shape c |> print
+  describe_shape r |> print
+  describe_shape t |> print
+
+  # Record patterns with guards
+  let p1 = Point { x: 3, y: 4 }
+  let p2 = Point { x: (-2), y: 5 }
+  quadrant p1 |> print
+  quadrant p2 |> print
+
+  # List patterns
+  describe [] |> print
+  describe [42] |> print
+  describe [1, 2] |> print
+  describe [1, 2, 3] |> print
+
+  show (sum_two [3, 4]) |> print
+
+  first_two [10, 20, 30] |> print
+  first_two [5] |> print
+}

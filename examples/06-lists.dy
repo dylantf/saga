@@ -11,8 +11,23 @@ main () = {
   let total = foldl (fun acc x -> acc + x) 0 nums
   show total |> print
 
+  let summed = foldr (fun x acc -> acc + x) 0 nums
+  show summed |> print
+
   let rev = reverse nums
   show rev |> print
+
+  let appended = append [1, 2] [3, 4]
+  show appended |> print
+
+  let h = head nums
+  show h |> print
+
+  let t = tail nums
+  show t |> print
+
+  let len = length nums
+  show len |> print
 
   let empty = []
   show empty |> print

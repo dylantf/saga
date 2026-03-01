@@ -521,6 +521,24 @@ impl Parser {
                         fields,
                         span: span.to(end),
                     })
+                } else if matches!(self.peek(), Token::LParen) {
+                    // Constructor call: Circle(5), Rect(3, 4)
+                    self.advance(); // consume '('
+                    let mut args = Vec::new();
+                    if !matches!(self.peek(), Token::RParen) {
+                        args.push(self.parse_expr(0)?);
+                        while matches!(self.peek(), Token::Comma) {
+                            self.advance();
+                            args.push(self.parse_expr(0)?);
+                        }
+                    }
+                    let end = self.tokens[self.pos].span;
+                    self.expect(Token::RParen)?;
+                    let mut expr = Expr::Constructor { name: i, span };
+                    for arg in args {
+                        expr = Expr::App { func: Box::new(expr), arg: Box::new(arg), span: span.to(end) };
+                    }
+                    Ok(expr)
                 } else {
                     Ok(Expr::Constructor { name: i, span })
                 }
