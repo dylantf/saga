@@ -217,10 +217,78 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             Ok(result)
         }
 
-        Expr::Case { .. } => todo!(),
-        Expr::FieldAccess { .. } => todo!(),
-        Expr::RecordCreate { .. } => todo!(),
-        Expr::RecordUpdate { .. } => todo!(),
+        Expr::Case {
+            scrutinee, arms, ..
+        } => {
+            let val = eval_expr(scrutinee, env)?;
+            for arm in arms {
+                if let Some(bindings) = match_pattern(&arm.pattern, &val) {
+                    let case_env = env.extend();
+                    for (name, value) in bindings {
+                        case_env.set(name, value);
+                    }
+
+                    if let Some(guard) = &arm.guard {
+                        match eval_expr(guard, &case_env)? {
+                            Value::Bool(true) => {} // passed guard
+                            Value::Bool(false) => continue,
+                            other => {
+                                return Err(EvalError {
+                                    message: format!(
+                                        "Guard must evaluate to a Bool, got: {}",
+                                        other
+                                    ),
+                                });
+                            }
+                        }
+                    }
+
+                    return eval_expr(&arm.body, &case_env);
+                }
+            }
+
+            Err(EvalError {
+                message: format!("No pattern matched for {}", val),
+            })
+        }
+
+        Expr::FieldAccess { expr, field, .. } => match eval_expr(expr, env)? {
+            Value::Record { fields, .. } => fields.get(field).cloned().ok_or_else(|| EvalError {
+                message: format!("Record has no field '{}'", field),
+            }),
+            other => Err(EvalError {
+                message: format!("Cannot access field '{}' on {}", field, other),
+            }),
+        },
+
+        Expr::RecordCreate { name, fields, .. } => {
+            let mut record_fields = HashMap::new();
+            for (field_name, field_expr) in fields {
+                record_fields.insert(field_name.clone(), eval_expr(field_expr, env)?);
+            }
+            Ok(Value::Record {
+                name: name.clone(),
+                fields: record_fields,
+            })
+        }
+
+        Expr::RecordUpdate { record, fields, .. } => match eval_expr(record, env)? {
+            Value::Record {
+                name,
+                fields: mut record_fields,
+            } => {
+                for (field_name, field_expr) in fields {
+                    record_fields.insert(field_name.clone(), eval_expr(field_expr, env)?);
+                }
+                Ok(Value::Record {
+                    name,
+                    fields: record_fields,
+                })
+            }
+            other => Err(EvalError {
+                message: format!("Cannot update fields on {}", other),
+            }),
+        },
     }
 }
 
