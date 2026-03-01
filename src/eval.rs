@@ -227,7 +227,76 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 // --- Function application
 
 fn apply(func: Value, arg: Value) -> Result<Value, EvalError> {
-    todo!()
+    match func {
+        Value::Closure(closure_arms) => {
+            for arm in &closure_arms {
+                let Some(bindings) = match_pattern(&arm.params[0], &arg) else {
+                    continue;
+                };
+
+                let local_env = arm.env.extend();
+                for (name, val) in bindings {
+                    local_env.set(name, val);
+                }
+
+                // Only one param to be applied, try to evaluate
+                if arm.params.len() == 1 {
+                    // Check guard expr if present
+                    if let Some(guard) = &arm.guard {
+                        match eval_expr(guard, &local_env)? {
+                            Value::Bool(true) => {}
+                            Value::Bool(false) => continue, // Guard failed
+                            other => {
+                                return Err(EvalError {
+                                    message: format!("Guard must be a Bool, got: {}", other),
+                                });
+                            }
+                        }
+                    }
+                    return eval_expr(&arm.body, &local_env);
+                } else {
+                    // More params to be applied, return a new closure with current env
+                    return Ok(Value::Closure(vec![ClosureArm {
+                        params: arm.params[1..].to_vec(),
+                        body: arm.body.clone(),
+                        guard: arm.guard.clone(),
+                        env: local_env,
+                    }]));
+                }
+            }
+
+            // No arm matched
+            Err(EvalError {
+                message: "Non-exhaustive patterns in function".to_string(),
+            })
+        }
+
+        Value::Constructor {
+            name,
+            arity,
+            mut args,
+        } => {
+            args.push(arg);
+            if args.len() > arity {
+                Err(EvalError {
+                    message: format!(
+                        "Constructor {} expects {} args, got {}.",
+                        name,
+                        arity,
+                        args.len()
+                    ),
+                })
+            } else {
+                Ok(Value::Constructor { name, arity, args })
+            }
+        }
+
+        Value::BuiltIn(name) => eval_builtin(&name, arg),
+
+        not_a_func => Err(EvalError {
+            message: format!("Cannot call {} as a function", not_a_func),
+        }),
+    }
 }
 
 // --- Declarations ---
