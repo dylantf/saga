@@ -65,7 +65,7 @@ main () = {
 
   # Record patterns with guards
   let p1 = Point { x: 3, y: 4 }
-  let p2 = Point { x: (-2), y: 5 }
+  let p2 = Point { x: -2, y: 5 }
   quadrant p1 |> print
   quadrant p2 |> print
 
