@@ -222,7 +222,7 @@ effect Fail {
 }
 
 # Functions declare which effects they use
-pub fun greet (name: String) -> String : {Console}
+pub fun greet (name: String) -> String needs {Console}
 greet name = {
   print! ("Hello, " <> name)
   "greeted"
@@ -230,7 +230,7 @@ greet name = {
 
 # Effect operations use ! to mark the perform site
 # Pure function calls don't get it
-pub fun process_file (path: String) -> Unit : {Console, FileSystem, Fail}
+pub fun process_file (path: String) -> Unit needs {Console, FileSystem, Fail}
 process_file path = {
   let contents = read_file! path
   if contents == "" then
@@ -248,26 +248,26 @@ process_file path = {
 # Handlers provide implementations for effects.
 # Two forms: named (reusable) and inline (one-off).
 
-# Named handler -defined once, used by name
-handler std_io : Console {
+# Named handler - defined once, used by name
+handler std_io for Console {
   print msg -> stdout_print! msg; resume ()
   read_line () -> read_stdin! () |> resume
 }
 
-handler mock_console : Console {
+handler mock_console for Console {
   print msg -> resume ()       # swallow output
   read_line () -> resume "mock input"
 }
 
-# Inline handler -anonymous, defined at the use site
+# Inline handler - anonymous, defined at the use site
 main () = {
   process_file! "data.txt"
 } with {
-  print msg -> stdout_print! msg; resume ()
-  read_line () -> read_stdin! () |> resume
-  read_file path -> os_read_file! path |> resume
-  write_file path data -> os_write_file! path data; resume ()
-  fail reason -> Err(reason)   # no resume -aborts the computation
+  print msg -> stdout_print! msg; resume (),
+  read_line () -> read_stdin! () |> resume,
+  read_file path -> os_read_file! path |> resume,
+  write_file path data -> os_write_file! path data; resume (),
+  fail reason -> Err(reason),   # no resume - aborts the computation
 }
 
 # Attach a named handler
@@ -276,17 +276,19 @@ main () = {
   greet "Dylan"
 } with std_io
 
-# For testing -swap the handler, not the code
+# For testing - swap the handler, not the code
 test () = {
   let result = greet "Dylan" with mock_console
   assert (result == "greeted")
 }
 
-# Stack handlers -comma-separated, with optional inline block at end
+# Stack handlers - named refs and inline arms mix in a block
 main () = {
   run_server ()
-} with std_io, real_db, {
-  fail reason -> { print! ("Error: " <> reason); exit! 1 }
+} with {
+  std_io,
+  real_db,
+  fail reason -> { print! ("Error: " <> reason); exit! 1 },
 }
 ```
 
@@ -304,7 +306,7 @@ effect Ask {
 }
 
 # A handler that intercepts and continues
-handler interactive : Ask {
+handler interactive for Ask {
   ask prompt -> {
     print! prompt
     let answer = read_line! ()
@@ -312,14 +314,14 @@ handler interactive : Ask {
   }
 }
 
-# A handler that doesn't resume -computation is aborted
-handler to_result : Fail {
+# A handler that doesn't resume - computation is aborted
+handler to_result for Fail {
   fail reason -> Err(reason)
   return value -> Ok(value)
 }
 
-# Retry logic -resume on success, give up on second failure
-handler with_retry : Http {
+# Retry logic - resume on success, give up on second failure
+handler with_retry for Http {
   get url -> {
     case http_get! url {
       Ok(body) -> resume body
@@ -346,9 +348,9 @@ handler with_retry : Http {
 ## 7. Error Handling via Effects
 
 ```
-# No exceptions, no special syntax -errors are just effects
+# No exceptions, no special syntax - errors are just effects
 
-fun safe_divide (x: Int) (y: Int) -> Int : {Fail}
+fun safe_divide (x: Int) (y: Int) -> Int needs {Fail}
 safe_divide x y =
   if y == 0 then fail! "division by zero"
   else x / y
@@ -425,7 +427,7 @@ impl Show for User {
 }
 
 # Used as constraints with `where`
-pub fun print_all (items: List a) -> Unit : {Console} where Show a
+pub fun print_all (items: List a) -> Unit needs {Console} where Show a
 print_all items = case items {
   Cons(x, rest) -> {
     print (show x)
@@ -466,7 +468,7 @@ effect Log {
   fun log (msg: String) -> Unit
 }
 
-pub fun fetch_user (id: Int) -> User : {Http, Fail, Log}
+pub fun fetch_user (id: Int) -> User needs {Http, Fail, Log}
 fetch_user id = {
   log! ("Fetching user " <> show id)
   let response = get! ("/api/users/" <> show id)
@@ -476,7 +478,7 @@ fetch_user id = {
   }
 }
 
-pub fun save_user (user: User) -> Unit : {Db, Fail, Log}
+pub fun save_user (user: User) -> Unit needs {Db, Fail, Log}
 save_user user = {
   log! ("Saving user " <> user.name)
   db_execute! "INSERT INTO users VALUES (?, ?, ?)"
@@ -484,7 +486,7 @@ save_user user = {
 }
 
 # A handler that logs to stderr with timestamps
-handler timed_log : Log {
+handler timed_log for Log {
   log msg -> {
     let time = now! ()
     stderr_print! ("[" <> format_time time <> "] " <> msg)
@@ -493,7 +495,7 @@ handler timed_log : Log {
 }
 
 # A handler that collects logs into a list (for testing)
-handler collect_logs : Log {
+handler collect_logs for Log {
   log msg -> {
     append_to_state msg
     resume ()
@@ -506,7 +508,7 @@ main () = {
   let updated = { user | name: "New Name" }
   save_user updated
   print! ("Done: " <> updated.name)
-} with timed_log, real_http, real_db, to_result
+} with {timed_log, real_http, real_db, to_result}
 ```
 
 ---
@@ -518,7 +520,7 @@ rather than being a separate language primitive. Actors are just an effect:
 
 ```
 effect Actor {
-  fun spawn (f: () -> Unit : e) -> Pid
+  fun spawn (f: () -> Unit needs e) -> Pid
   fun send (pid: Pid) (msg: Msg) -> Unit
   fun receive () -> Msg
 }
@@ -566,7 +568,7 @@ main () = {
     let data = Http.get! "/api/data"
     process data
   })
-} with real_http, timed_log
+} with {real_http, timed_log}
 ```
 
 This could implement the "let it crash" philosophy expressed as an effect handler. A more
@@ -581,7 +583,7 @@ up after N failures - all in userspace, no language support needed.
    effects from callbacks using an effect variable `e`:
 
    ```
-   pub fun map (f: a -> b : e) (xs: List a) -> List b : e
+   pub fun map (f: a -> b needs e) (xs: List a) -> List b needs e
    ```
 
    If `f` is pure, `e` is empty and `map` is pure.
@@ -602,7 +604,7 @@ up after N failures - all in userspace, no language support needed.
 
    ```
    effect Async {
-     fun spawn (f: () -> a : e) -> Future a
+     fun spawn (f: () -> a needs e) -> Future a
      fun await (future: Future a) -> a
    }
    ```
@@ -615,7 +617,7 @@ up after N failures - all in userspace, no language support needed.
      fun put (value: s) -> Unit
    }
 
-   fun counter () -> Int : {State Int}
+   fun counter () -> Int needs {State Int}
    counter () = {
      let n = get! ()
      put! (n + 1)
@@ -630,10 +632,10 @@ up after N failures - all in userspace, no language support needed.
    `effect` block) use it -calling a function that internally uses
    effects is a normal call.
 
-7. **Effect annotation syntax** - functions declare effects with `:` after
-   the return type: `fun f () -> T : {Log, Http}`. This is consistent with
-   handler declarations (`handler foo : Log`). `with` is reserved exclusively
-   for handler attachment (`expr with handler`).
+7. **Effect annotation syntax** - functions declare effects with `needs`
+   after the return type: `fun f () -> T needs {Log, Http}`. Handlers use
+   `for`: `handler foo for Log { ... }`. This aligns with `impl Show for User`.
+   `with` is reserved exclusively for handler attachment (`expr with handler`).
 
 8. **String interpolation** - `${expr}` inside double-quoted strings.
 

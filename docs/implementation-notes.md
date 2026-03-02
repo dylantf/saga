@@ -98,14 +98,14 @@ with effects propagated via `Result<Value, EffectSignal>`.
 
 ### Phase 3: Named handlers
 
-1. Parse `handler name : Effect { ... }` declarations.
+1. Parse `handler name for Effect { ... }` declarations.
 2. Store named handlers in the environment (they're values/closures).
 3. `expr with name` looks up the handler and installs it.
 4. Handler stacking: comma-separated list after `with` (`expr with h1, h2, { ... }`).
 
-### Phase 4: Parser updates for `:` effect annotations
+### Phase 4: Parser updates for `needs` effect annotations
 
-1. Parse `fun f () -> T : {Effect1, Effect2}` syntax.
+1. Parse `fun f () -> T needs {Effect1, Effect2}` syntax.
 2. Store effect annotations in the AST (alongside existing type annotations).
 3. Ignored by evaluator (like type annotations today) - for future type checker.
 

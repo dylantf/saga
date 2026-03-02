@@ -35,7 +35,7 @@ provides no implementation. The implementation comes from handlers.
 Effect operations are called with `!` to distinguish them from pure functions:
 
 ```
-fun run_server () -> Unit : {Log, Http, Fail}
+fun run_server () -> Unit needs {Log, Http, Fail}
 run_server () = {
   log! "info" "server starting"
   let data = get! "/api/health"
@@ -59,7 +59,7 @@ process () = {
 
 Only primitive effect operations (those declared in an `effect` block) get `!`.
 Calling a function that _internally_ uses effects is a normal call - its
-signature (`: {Log}`) tells you it has effects, but the call site is just
+signature (`needs {Log}`) tells you it has effects, but the call site is just
 `run_server ()`.
 
 ---
@@ -74,14 +74,14 @@ A handler provides implementations for effect operations. There are two forms:
 Define a reusable handler with the `handler` keyword:
 
 ```
-handler console_log : Log {
+handler console_log for Log {
   log level msg -> {
     print! ("[" <> level <> "] " <> msg)
     resume ()
   }
 }
 
-handler sentry_log : Log {
+handler sentry_log for Log {
   log level msg -> {
     sentry_send! level msg
     resume ()
@@ -127,7 +127,7 @@ effect Ask {
   fun ask (prompt: String) -> String
 }
 
-handler interactive : Ask {
+handler interactive for Ask {
   ask prompt -> {
     print! prompt
     let answer = read_line! ()
@@ -148,7 +148,7 @@ The computation is **aborted**. The handler's return value becomes the result
 of the entire `with` block:
 
 ```
-handler to_result : Fail {
+handler to_result for Fail {
   fail reason -> Err(reason)
   return value -> Ok(value)
 }
@@ -177,7 +177,7 @@ A handler can include a `return` clause that intercepts the final value of a
 successful computation (one that completes without triggering the effect):
 
 ```
-handler to_result : Fail {
+handler to_result for Fail {
   fail reason -> Err(reason)
   return value -> Ok(value)
 }
@@ -195,7 +195,7 @@ Effects act as namespaces for their operations. When there's no ambiguity, use
 bare names:
 
 ```
-fun process () -> Unit : {Log}
+fun process () -> Unit needs {Log}
 process () = {
   log! "info" "working"    # unambiguous - only Log has `log`
 }
@@ -213,7 +213,7 @@ effect Cache {
   fun get (key: String) -> String
 }
 
-fun fetch (key: String) -> String : {Database, Cache}
+fun fetch (key: String) -> String needs {Database, Cache}
 fetch key = {
   let cached = Cache.get! key
   let fresh = Database.get! key
@@ -225,8 +225,8 @@ Handlers mirror this:
 
 ```
 } with {
-  Cache.get key -> lookup_cache! key; resume result
-  Database.get key -> query_db! key; resume result
+  Cache.get key -> lookup_cache! key; resume result,
+  Database.get key -> query_db! key; resume result,
 }
 ```
 
@@ -234,35 +234,47 @@ Handlers mirror this:
 
 ## Stacking and Composing Handlers
 
-Real programs use multiple effects. Attach multiple named handlers with a
-comma-separated list:
+Real programs use multiple effects. Use a `with` block to attach multiple
+handlers - named references and inline arms can mix freely:
 
 ```
 main () = {
   run_server ()
-} with console_log, real_db, real_http
-```
-
-Mix named handlers with an inline block at the end:
-
-```
-main () = {
-  run_server ()
-} with sentry_log, real_db, {
-  get url -> http_get! url |> resume
+} with {
+  console_log,
+  real_db,
+  real_http,
 }
+```
+
+Mix named handlers with inline arms in the same block:
+
+```
+main () = {
+  run_server ()
+} with {
+  sentry_log,
+  real_db,
+  get url -> http_get! url |> resume,
+}
+```
+
+For a single handler, skip the block:
+
+```
+run_server () with console_log
 ```
 
 Or bundle multiple effects into a single named handler:
 
 ```
-handler dev_env : Log, Database, Http {
+handler dev_env for Log, Database, Http {
   log level msg -> print! ("[" <> level <> "] " <> msg); resume ()
   query sql -> sqlite_query! sql |> resume
   get url -> http_get! url |> resume
 }
 
-handler prod_env : Log, Database, Http {
+handler prod_env for Log, Database, Http {
   log level msg -> sentry_send! level msg; resume ()
   query sql -> postgres_query! sql |> resume
   get url -> http_get! url |> resume
@@ -293,7 +305,7 @@ main () = {
   query sql -> {
     if debug then log! "debug" sql else ()
     pg_execute! db_conn sql |> resume
-  }
+  },
 }
 ```
 
@@ -304,10 +316,10 @@ scope).
 
 ## Effect Signatures on Functions
 
-Functions declare which effects they require with `:` in the type signature:
+Functions declare which effects they require with `needs` in the type signature:
 
 ```
-fun run_server () -> Unit : {Log, Http}
+fun run_server () -> Unit needs {Log, Http}
 run_server () = {
   log! "info" "starting"
   let data = get! "/api/health"
@@ -323,7 +335,7 @@ itself):
 # start_app calls run_server (which needs Log, Http)
 # and also uses Database directly
 # it handles Log itself, so only Http and Database bubble up
-fun start_app () -> Unit : {Http, Database}
+fun start_app () -> Unit needs {Http, Database}
 start_app () = {
   init_db! ()
   run_server () with console_log   # handles Log here
@@ -339,7 +351,7 @@ Higher-order functions propagate effects from their callbacks using an effect
 variable:
 
 ```
-fun map (f: a -> b : e) (xs: List a) -> List b : e
+fun map (f: a -> b needs e) (xs: List a) -> List b needs e
 ```
 
 If `f` is pure, `map` is pure. If `f` uses `Log`, `map` requires `Log`. The
@@ -352,12 +364,12 @@ caller always sees the full picture.
 Effects make testing natural - swap the handler, not the code:
 
 ```
-handler mock_http : Http {
+handler mock_http for Http {
   get url -> resume "{\"status\": \"ok\"}"
   post url body -> resume "created"
 }
 
-handler collect_logs : Log {
+handler collect_logs for Log {
   log level msg -> {
     # swallow logs silently
     resume ()
@@ -366,7 +378,7 @@ handler collect_logs : Log {
 
 test_server () = {
   run_server ()
-} with mock_http, collect_logs
+} with {mock_http, collect_logs}
 ```
 
 No mocking frameworks, no dependency injection containers. The function under
@@ -376,16 +388,16 @@ test is unchanged - only the handler differs.
 
 ## Summary
 
-| Concept               | Syntax                                         |
-| --------------------- | ---------------------------------------------- |
-| Define an effect      | `effect Log { fun log (msg: String) -> Unit }` |
-| Perform an effect     | `log! "hello"`                                 |
-| Named handler         | `handler console_log : Log { log msg -> ... }` |
-| Inline handler        | `expr with { log msg -> ... }`                 |
-| Attach named handler  | `expr with console_log`                        |
-| Stack handlers        | `expr with h1, h2, { ... }`                    |
-| Continue computation  | `resume value`                                 |
-| Abort computation     | (just don't call `resume`)                     |
-| Intercept success     | `return value -> Ok(value)`                    |
-| Qualify ambiguous ops | `Cache.get! key`                               |
-| Declare effects on fn | `fun f () -> T : {Log, Http}`                  |
+| Concept               | Syntax                                             |
+| --------------------- | -------------------------------------------------- |
+| Define an effect      | `effect Log { fun log (msg: String) -> Unit }`     |
+| Perform an effect     | `log! "hello"`                                     |
+| Named handler         | `handler console_log for Log { log msg -> ... }`   |
+| Inline handler        | `expr with { log msg -> ... }`                     |
+| Attach named handler  | `expr with console_log`                            |
+| Stack handlers        | `expr with { h1, h2, op args -> ... }`             |
+| Continue computation  | `resume value`                                     |
+| Abort computation     | (just don't call `resume`)                         |
+| Intercept success     | `return value -> Ok(value)`                        |
+| Qualify ambiguous ops | `Cache.get! key`                                   |
+| Declare effects on fn | `fun f () -> T needs {Log, Http}`                  |
