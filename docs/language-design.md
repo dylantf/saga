@@ -250,7 +250,10 @@ process_file path = {
 
 # Named handler - defined once, used by name
 handler std_io for Console {
-  print msg -> stdout_print! msg; resume ()
+  print msg -> {
+    stdout_print! msg
+    resume ()
+  }
   read_line () -> read_stdin! () |> resume
 }
 
@@ -263,10 +266,16 @@ handler mock_console for Console {
 main () = {
   process_file! "data.txt"
 } with {
-  print msg -> stdout_print! msg; resume (),
+  print msg -> {
+    stdout_print! msg
+    resume ()
+  },
   read_line () -> read_stdin! () |> resume,
   read_file path -> os_read_file! path |> resume,
-  write_file path data -> os_write_file! path data; resume (),
+  write_file path data -> {
+    os_write_file! path data
+    resume ()
+  },
   fail reason -> Err(reason),   # no resume - aborts the computation
 }
 
@@ -288,7 +297,10 @@ main () = {
 } with {
   std_io,
   real_db,
-  fail reason -> { print! ("Error: " <> reason); exit! 1 },
+  fail reason -> {
+    print! ("Error: " <> reason)
+    exit! 1
+  },
 }
 ```
 

@@ -101,7 +101,7 @@ with effects propagated via `Result<Value, EffectSignal>`.
 1. Parse `handler name for Effect { ... }` declarations.
 2. Store named handlers in the environment (they're values/closures).
 3. `expr with name` looks up the handler and installs it.
-4. Handler stacking: comma-separated list after `with` (`expr with h1, h2, { ... }`).
+4. Handler stacking: `with` block containing mixed named refs and inline arms (`expr with { h1, h2, op args -> body }`).
 
 ### Phase 4: Parser updates for `needs` effect annotations
 

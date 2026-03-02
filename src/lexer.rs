@@ -222,7 +222,7 @@ impl Lexer {
                     tokens.push(spanned);
                     return Ok(tokens);
                 }
-                Some('\n') => {
+                Some('\n') | Some(';') => {
                     self.advance();
                     if self.should_emit_terminator(&prev_token) {
                         let (spanned, tok) = self.emit(Token::Terminator, start);

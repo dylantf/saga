@@ -225,8 +225,14 @@ Handlers mirror this:
 
 ```
 } with {
-  Cache.get key -> lookup_cache! key; resume result,
-  Database.get key -> query_db! key; resume result,
+  Cache.get key -> {
+    let result = lookup_cache! key
+    resume result
+  },
+  Database.get key -> {
+    let result = query_db! key
+    resume result
+  },
 }
 ```
 
@@ -269,13 +275,19 @@ Or bundle multiple effects into a single named handler:
 
 ```
 handler dev_env for Log, Database, Http {
-  log level msg -> print! ("[" <> level <> "] " <> msg); resume ()
+  log level msg -> {
+    print! ("[" <> level <> "] " <> msg)
+    resume ()
+  }
   query sql -> sqlite_query! sql |> resume
   get url -> http_get! url |> resume
 }
 
 handler prod_env for Log, Database, Http {
-  log level msg -> sentry_send! level msg; resume ()
+  log level msg -> {
+    sentry_send! level msg
+    resume ()
+  }
   query sql -> postgres_query! sql |> resume
   get url -> http_get! url |> resume
 }
