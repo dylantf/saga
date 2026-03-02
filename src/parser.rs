@@ -227,7 +227,7 @@ impl Parser {
         })
     }
 
-    // Parses: [pub] fun <name> (<p>: <Type>) ... -> <ReturnType> [with {Effect, ...}]
+    // Parses: [pub] fun <name> (<p>: <Type>) ... -> <ReturnType> [needs {Effect, ...}]
     fn parse_fun_annotation(&mut self, public: bool, start: Span) -> Result<Decl, ParseError> {
         self.advance(); // consume 'fun'
         let name = self.expect_ident()?;
@@ -246,8 +246,8 @@ impl Parser {
         let return_type = self.parse_type_expr()?;
 
         let mut effects = Vec::new();
-        if matches!(self.peek(), Token::With) {
-            self.advance(); // consume 'with'
+        if matches!(self.peek(), Token::Needs) {
+            self.advance(); // consume 'needs'
             self.expect(Token::LBrace)?;
             effects.push(self.expect_upper_ident()?);
             while matches!(self.peek(), Token::Comma) {

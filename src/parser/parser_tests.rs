@@ -610,7 +610,7 @@ fn fun_annotation_simple() {
 
 #[test]
 fn fun_annotation_public_with_effects() {
-    let decls = parse("pub fun print (msg: String) -> Unit with { Console }");
+    let decls = parse("pub fun print (msg: String) -> Unit needs { Console }");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::FunAnnotation {

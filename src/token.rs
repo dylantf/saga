@@ -31,6 +31,8 @@ pub enum Token {
     Impl,
     Return,
     Resume,
+    Needs,
+    EffectCall(String),
 
     // Operators
     Plus,      // +

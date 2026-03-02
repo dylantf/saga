@@ -127,6 +127,7 @@ impl Lexer {
             "impl" => Token::Impl,
             "return" => Token::Return,
             "resume" => Token::Resume,
+            "needs" => Token::Needs,
             // Lex True/False as keywords even though they are treated as types
             "True" => Token::True,
             "False" => Token::False,
@@ -200,6 +201,7 @@ impl Lexer {
                     | Token::False
                     | Token::Ident(_)
                     | Token::UpperIdent(_)
+                    | Token::EffectCall(_)
                     | Token::RParen
                     | Token::RBrace
                     | Token::RBracket
@@ -247,7 +249,15 @@ impl Lexer {
                     prev_token = Some(tok);
                 }
                 Some(ch) if ch.is_alphabetic() || ch == '_' => {
-                    let tok = self.read_identifier();
+                    let mut tok = self.read_identifier();
+                    // ident! (no space) → EffectCall, but not ident!=
+                    if let Token::Ident(ref name) = tok {
+                        if self.peek() == Some('!') && self.peek_next() != Some('=') {
+                            let name = name.clone();
+                            self.advance(); // consume '!'
+                            tok = Token::EffectCall(name);
+                        }
+                    }
                     let (spanned, tok) = self.emit(tok, start);
                     tokens.push(spanned);
                     prev_token = Some(tok);
