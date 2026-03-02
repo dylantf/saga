@@ -1,0 +1,27 @@
+{
+  "name": "dylang",
+  "displayName": "dylang",
+  "description": "Syntax highlighting for the dylang programming language",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "dylang",
+        "aliases": ["dylang"],
+        "extensions": [".dy"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "dylang",
+        "scopeName": "source.dylang",
+        "path": "./syntaxes/dylang.tmLanguage.json"
+      }
+    ]
+  }
+}
