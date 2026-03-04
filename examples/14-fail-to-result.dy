@@ -1,0 +1,68 @@
+# Fail effect: turn exceptions into Result values
+#
+# The handler aborts the computation (no resume) and wraps
+# the outcome in Ok/Err. This is the effectful equivalent
+# of try/catch, but composable and explicit.
+
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+# Run a computation that might fail, returning a Result
+fun try (computation: () -> a needs {Fail}) -> Result a String
+try computation = {
+  let result = computation () with {
+    fail msg -> Err msg
+  }
+
+  # If we got here without failing, wrap in Ok
+  case result {
+    Err(e) -> Err e
+    _      -> Ok result
+  }
+}
+
+# --- Some functions that can fail ---
+
+safe_div _ 0 = fail! "division by zero"
+safe_div x y = x / y
+
+parse_positive x =
+  if x > 0 then x
+  else fail! ("expected positive number, got " <> show x)
+
+# --- Putting it together ---
+
+main () = {
+  # Successful computation
+  let a = try (fun () -> {
+    let x = safe_div 100 4
+    let y = parse_positive x
+    y * 2
+  })
+  print ("success: " <> show a)
+
+  # Failing computation -- div by zero
+  let b = try (fun () -> {
+    let x = safe_div 100 0
+    x * 2
+  })
+  print ("div by zero: " <> show b)
+
+  # Failing computation -- negative number
+  let c = try (fun () -> {
+    let x = safe_div 100 4
+    parse_positive (0 - x)
+  })
+  print ("negative: " <> show c)
+
+  # Pipe results through transformations
+  let d = try (fun () -> safe_div 42 6)
+    |> result_map (fun x -> x * 10)
+  print ("piped ok: " <> show d)
+
+  let e = try (fun () -> safe_div 42 0)
+    |> result_map (fun x -> x * 10)
+    |> result_map_err (fun msg -> "FAILED: " <> msg)
+  print ("piped err: " <> show e)
+}

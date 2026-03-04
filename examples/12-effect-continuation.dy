@@ -1,17 +1,51 @@
+# Log effect with multiple named handlers
+#
+# The same computation can be run with different handlers:
+# one that prints to console, one that silently counts.
+
 effect Log {
   fun log (msg: String) -> Unit
 }
 
+# Handler that prints each message with a prefix
 handler console_log for Log {
   log msg -> {
-    print msg
+    print ("[LOG] " <> msg)
     resume ()
   }
 }
 
+# Handler that silently counts log messages using mutable state
+# Not sure if we want to allow this?
+count_logs computation = {
+  let mut count = 0
+  computation () with {
+    log _ -> {
+      count <- count + 1
+      resume ()
+    }
+  }
+  count
+}
+
+# A computation that uses logging
+do_work () = {
+  log! "starting"
+  let x = 10 + 20
+  log! ("computed x = " <> show x)
+  let y = x * 2
+  log! ("computed y = " <> show y)
+  y
+}
+
 main () = {
-  {
-    log! "hello" 
-    print "world"
-  } with console_log
+  # Run with console logging
+  print "--- with console_log ---"
+  let result = do_work () with console_log
+  print ("result: " <> show result)
+
+  # Run the same computation, but count logs instead
+  print "--- with count_logs ---"
+  let n = count_logs (fun () -> do_work ())
+  print ("log count: " <> show n)
 }
