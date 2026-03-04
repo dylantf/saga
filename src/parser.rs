@@ -123,6 +123,10 @@ impl Parser {
             Token::Let => {
                 let start = self.tokens[self.pos].span;
                 self.advance(); // consume 'let'
+                let mutable = matches!(self.peek(), Token::Mut);
+                if mutable {
+                    self.advance(); // consume 'mut'
+                }
                 let name = self.expect_ident()?;
                 self.expect(Token::Eq)?;
                 let value = self.parse_expr(0)?;
@@ -130,6 +134,7 @@ impl Parser {
                     span: start.to(value.span()),
                     name,
                     value,
+                    mutable,
                 })
             }
             Token::Pub => {
@@ -316,13 +321,19 @@ impl Parser {
             let op_name = self.expect_ident()?;
 
             let mut params = Vec::new();
-            while matches!(self.peek(), Token::LParen) {
-                self.advance();
-                let param_name = self.expect_ident()?;
-                self.expect(Token::Colon)?;
-                let param_type = self.parse_type_expr()?;
-                self.expect(Token::RParen)?;
-                params.push((param_name, param_type));
+            // Allow zero-param ops: `fun get () -> Int`
+            if matches!(self.peek(), Token::LParen) && matches!(self.peek_at(1), Token::RParen) {
+                self.advance(); // consume '('
+                self.advance(); // consume ')'
+            } else {
+                while matches!(self.peek(), Token::LParen) {
+                    self.advance();
+                    let param_name = self.expect_ident()?;
+                    self.expect(Token::Colon)?;
+                    let param_type = self.parse_type_expr()?;
+                    self.expect(Token::RParen)?;
+                    params.push((param_name, param_type));
+                }
             }
 
             self.expect(Token::Arrow)?;
@@ -459,7 +470,20 @@ impl Parser {
         if matches!(self.peek(), Token::Arrow) {
             self.advance();
             let right = self.parse_type_expr()?; // recurse = right-associative
-            Ok(TypeExpr::Arrow(Box::new(left), Box::new(right)))
+            let arrow = TypeExpr::Arrow(Box::new(left), Box::new(right));
+            // Consume optional `needs { Effect1, Effect2 }` (ignored until type checker)
+            if matches!(self.peek(), Token::Needs) {
+                self.advance();
+                self.expect(Token::LBrace)?;
+                while !matches!(self.peek(), Token::RBrace) {
+                    self.advance(); // consume effect name
+                    if matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                    }
+                }
+                self.expect(Token::RBrace)?;
+            }
+            Ok(arrow)
         } else {
             Ok(left)
         }
@@ -470,6 +494,11 @@ impl Parser {
             Token::UpperIdent(s) => Ok(TypeExpr::Named(s)),
             Token::Ident(s) => Ok(TypeExpr::Var(s)),
             Token::LParen => {
+                // () is the Unit type
+                if matches!(self.peek(), Token::RParen) {
+                    self.advance();
+                    return Ok(TypeExpr::Named("Unit".to_string()));
+                }
                 let inner = self.parse_type_expr()?;
                 self.expect(Token::RParen)?;
                 Ok(inner)
@@ -877,7 +906,7 @@ impl Parser {
                 // Check for record update: { expr | field: val, ... }
                 // We don't start with `let`, so try parsing an expression,
                 // then check if the next token is `|`
-                if !matches!(self.peek(), Token::Let | Token::RBrace) {
+                if !matches!(self.peek(), Token::Let | Token::RBrace | Token::Mut) {
                     let save = self.pos;
                     let first_expr = self.parse_expr(0);
 
@@ -915,6 +944,10 @@ impl Parser {
                     if matches!(self.peek(), Token::Let) {
                         let let_start = self.tokens[self.pos].span;
                         self.advance(); // consume 'let'
+                        let mutable = matches!(self.peek(), Token::Mut);
+                        if mutable {
+                            self.advance(); // consume 'mut'
+                        }
                         let name = self.expect_ident()?;
                         self.expect(Token::Eq)?;
                         let value = self.parse_expr(0)?;
@@ -922,10 +955,33 @@ impl Parser {
                         stmts.push(Stmt::Let {
                             name,
                             value,
+                            mutable,
                             span: stmt_span,
                         });
                     } else {
-                        stmts.push(Stmt::Expr(self.parse_expr(0)?));
+                        // Parse expression, then check for `<-` assignment
+                        let expr = self.parse_expr(0)?;
+                        if matches!(self.peek(), Token::ArrowBack) {
+                            // name <- value (assignment to mutable binding)
+                            if let Expr::Var { name, .. } = &expr {
+                                let name = name.clone();
+                                self.advance(); // consume '<-'
+                                let value = self.parse_expr(0)?;
+                                let stmt_span = expr.span().to(value.span());
+                                stmts.push(Stmt::Assign {
+                                    name,
+                                    value,
+                                    span: stmt_span,
+                                });
+                            } else {
+                                return Err(ParseError {
+                                    message: "left side of <- must be a variable name".to_string(),
+                                    span: expr.span(),
+                                });
+                            }
+                        } else {
+                            stmts.push(Stmt::Expr(expr));
+                        }
                     }
                     self.skip_terminators();
                 }

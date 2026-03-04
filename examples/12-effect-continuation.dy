@@ -1,0 +1,17 @@
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler console_log for Log {
+  log msg -> {
+    print msg
+    resume ()
+  }
+}
+
+main () = {
+  {
+    log! "hello" 
+    print "world"
+  } with console_log
+}

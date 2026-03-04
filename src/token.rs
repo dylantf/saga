@@ -33,6 +33,7 @@ pub enum Token {
     Resume,
     Needs,
     For,
+    Mut,
     EffectCall(String),
 
     // Operators

@@ -40,11 +40,15 @@ fn main() {
         }
     };
 
-    if let Err(e) = eval::eval_program(&program) {
-        match e {
-            eval::EvalSignal::Error(err) => eprintln!("Runtime error: {}", err.message),
-            eval::EvalSignal::Effect { name, .. } => eprintln!("Unhandled effect: {}", name),
-        };
-        std::process::exit(1);
+    match eval::eval_program(&program) {
+        eval::EvalResult::Ok(_) => {}
+        eval::EvalResult::Error(err) => {
+            eprintln!("Runtime error: {}", err.message);
+            std::process::exit(1);
+        }
+        eval::EvalResult::Effect { name, .. } => {
+            eprintln!("Unhandled effect: {}", name);
+            std::process::exit(1);
+        }
     }
 }

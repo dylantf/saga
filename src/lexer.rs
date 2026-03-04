@@ -4,6 +4,9 @@ pub struct Lexer {
     source: Vec<char>,
     pos: usize,
     nesting: i32,
+    // Stack of saved nesting levels: `{` pushes and resets, `}` pops and restores.
+    // This ensures blocks inside parens still get their terminators.
+    nesting_stack: Vec<i32>,
 }
 
 #[derive(Debug)]
@@ -18,6 +21,7 @@ impl Lexer {
             source: source.chars().collect(),
             pos: 0,
             nesting: 0,
+            nesting_stack: Vec::new(),
         }
     }
 
@@ -129,6 +133,7 @@ impl Lexer {
             "resume" => Token::Resume,
             "needs" => Token::Needs,
             "for" => Token::For,
+            "mut" => Token::Mut,
             // Lex True/False as keywords even though they are treated as types
             "True" => Token::True,
             "False" => Token::False,
@@ -390,8 +395,15 @@ impl Lexer {
                             self.nesting -= 1;
                             Token::RBracket
                         }
-                        '{' => Token::LBrace,
-                        '}' => Token::RBrace,
+                        '{' => {
+                            self.nesting_stack.push(self.nesting);
+                            self.nesting = 0;
+                            Token::LBrace
+                        }
+                        '}' => {
+                            self.nesting = self.nesting_stack.pop().unwrap_or(0);
+                            Token::RBrace
+                        }
                         _ => {
                             return Err(LexError {
                                 message: format!("unexpected character: {:?}", ch),
