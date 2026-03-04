@@ -429,7 +429,8 @@ trait Eq a {
   fun eq (x: a) (y: a) -> Bool
 }
 
-trait Ord a where Eq a {
+# Trait inheritance - Ord requires Eq
+trait Ord a where {a: Eq} {
   fun compare (x: a) (y: a) -> Ordering
 }
 
@@ -438,15 +439,42 @@ impl Show for User {
   show user = user.name <> " (age " <> show user.age <> ")"
 }
 
-# Used as constraints with `where`
-pub fun print_all (items: List a) -> Unit needs {Console} where Show a
+impl Eq for User {
+  eq a b = a.id == b.id
+}
+
+# --- Trait bounds on functions ---
+
+# Single bound
+pub fun to_string (x: a) -> String where {a: Show}
+to_string x = show x
+
+# Multiple bounds on one type variable - use `+`
+pub fun print_if_equal (x: a) (y: a) -> Unit needs {Console} where {a: Show + Eq}
+print_if_equal x y =
+  if eq x y then print! (show x)
+  else print! "not equal"
+
+# Bounds on multiple type variables
+pub fun convert (x: a) (y: b) -> String where {a: Show, b: Show + Eq}
+convert x y = show x <> " -> " <> show y
+
+# `needs` and `where` are independent - effects and traits together
+# `needs` comes first (what the function does), `where` second (what the types must support)
+pub fun print_all (items: List a) -> Unit needs {Console} where {a: Show}
 print_all items = case items {
   Cons(x, rest) -> {
-    print (show x)
+    print! (show x)
     print_all rest
   }
   Nil -> ()
 }
+
+# --- Why `where` and not `needs`? ---
+# `needs` = runtime context: "this function needs these effects to be handled"
+# `where` = compile-time constraint: "these types must support these operations"
+# They answer different questions and appear at different phases,
+# so they get different syntax.
 
 # Rule of thumb:
 # - "How do I convert X to a string?" -> trait (Show), determined by type
