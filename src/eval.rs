@@ -13,6 +13,19 @@ pub struct ClosureArm {
 }
 
 #[derive(Clone)]
+pub struct HandlerVal {
+    pub arms: Vec<crate::ast::HandlerArm>,
+    pub return_clause: Option<Box<crate::ast::HandlerArm>>,
+    pub env: Env,
+}
+
+impl fmt::Display for HandlerVal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<handler>")
+    }
+}
+
+#[derive(Clone)]
 pub enum Value {
     Unit,
     Bool(bool),
@@ -34,6 +47,15 @@ pub enum Value {
         name: String,
         fields: HashMap<String, Value>,
     },
+
+    EffectFn {
+        name: String,
+        qualifier: Option<String>,
+        arity: usize,
+        args: Vec<Value>,
+    },
+
+    Handler(HandlerVal),
 
     BuiltIn(String),
 }
@@ -102,6 +124,8 @@ impl fmt::Display for Value {
                 }
                 write!(f, " }}")
             }
+            Value::EffectFn { name, .. } => write!(f, "<effect-fn: {}>", name),
+            Value::Handler(h) => write!(f, "{}", h),
         }
     }
 }
@@ -160,9 +184,32 @@ pub struct EvalError {
     pub message: String,
 }
 
+pub enum EvalSignal {
+    Error(EvalError),
+    Effect {
+        name: String,
+        qualifier: Option<String>,
+        args: Vec<Value>,
+    },
+}
+
+impl From<EvalError> for EvalSignal {
+    fn from(e: EvalError) -> Self {
+        EvalSignal::Error(e)
+    }
+}
+
+impl EvalSignal {
+    fn error(message: impl Into<String>) -> EvalSignal {
+        EvalSignal::Error(EvalError {
+            message: message.into(),
+        })
+    }
+}
+
 // --- Expressions ---
 
-pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
+pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalSignal> {
     match expr {
         Expr::Lit { value, .. } => match value {
             Lit::Int(n) => Ok(Value::Int(*n)),
@@ -174,9 +221,7 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 
         Expr::Var { name, .. } => match env.get(name) {
             Some(value) => Ok(value),
-            None => Err(EvalError {
-                message: format!("Undefined variable: {}", name),
-            }),
+            None => Err(EvalSignal::error(format!("Undefined variable: {}", name))),
         },
 
         Expr::BinOp {
@@ -196,9 +241,9 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::UnaryMinus { expr, .. } => match eval_expr(expr, env)? {
             Value::Int(n) => Ok(Value::Int(-n)),
             Value::Float(n) => Ok(Value::Float(-n)),
-            _ => Err(EvalError {
-                message: "Unary minus requires a number".to_string(),
-            }),
+            _ => Err(EvalSignal::error(
+                "Unary minus requires a number".to_string(),
+            )),
         },
 
         Expr::If {
@@ -209,20 +254,16 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         } => match eval_expr(cond, env)? {
             Value::Bool(true) => eval_expr(then_branch, env),
             Value::Bool(false) => eval_expr(else_branch, env),
-            other => Err(EvalError {
-                message: format!("If condition must evaluate to a Boolean, got: {}", other),
-            }),
+            other => Err(EvalSignal::error(format!(
+                "If condition must evaluate to a Boolean, got: {}",
+                other
+            ))),
         },
 
-        Expr::Constructor { name, .. } => env.get(name).ok_or_else(|| EvalError {
-            message: format!("undefined constructor: {}", name),
-        }),
+        Expr::Constructor { name, .. } => env
+            .get(name)
+            .ok_or_else(|| EvalSignal::error(format!("undefined constructor: {}", name))),
 
-        // Expr::Pipe { lhs, rhs, .. } => {
-        //     let arg = eval_expr(lhs, env)?;
-        //     let func = eval_expr(rhs, env)?;
-        //     apply(func, arg)
-        // }
         Expr::Lambda { params, body, .. } => Ok(Value::Closure(vec![ClosureArm {
             params: params.clone(),
             body: *body.clone(),
@@ -263,12 +304,10 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                             Value::Bool(true) => {} // passed guard
                             Value::Bool(false) => continue,
                             other => {
-                                return Err(EvalError {
-                                    message: format!(
-                                        "Guard must evaluate to a Bool, got: {}",
-                                        other
-                                    ),
-                                });
+                                return Err(EvalSignal::error(format!(
+                                    "Guard must evaluate to a Bool, got: {}",
+                                    other
+                                )));
                             }
                         }
                     }
@@ -277,18 +316,18 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 }
             }
 
-            Err(EvalError {
-                message: format!("No pattern matched for {}", val),
-            })
+            Err(EvalSignal::error(format!("No pattern matched for {}", val)))
         }
 
         Expr::FieldAccess { expr, field, .. } => match eval_expr(expr, env)? {
-            Value::Record { fields, .. } => fields.get(field).cloned().ok_or_else(|| EvalError {
-                message: format!("Record has no field '{}'", field),
-            }),
-            other => Err(EvalError {
-                message: format!("Cannot access field '{}' on {}", field, other),
-            }),
+            Value::Record { fields, .. } => fields
+                .get(field)
+                .cloned()
+                .ok_or_else(|| EvalSignal::error(format!("Record has no field '{}'", field))),
+            other => Err(EvalSignal::error(format!(
+                "Cannot access field '{}' on {}",
+                field, other
+            ))),
         },
 
         Expr::RecordCreate { name, fields, .. } => {
@@ -315,61 +354,129 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     fields: record_fields,
                 })
             }
-            other => Err(EvalError {
-                message: format!("Cannot update fields on {}", other),
-            }),
+            other => Err(EvalSignal::error(format!(
+                "Cannot update fields on {}",
+                other
+            ))),
         },
-        Expr::EffectCall { .. } => todo!("effect call evaluation"),
-        Expr::With { .. } => todo!("with handler evaluation"),
-        Expr::Resume { .. } => todo!("resume evaluation"),
+
+        Expr::EffectCall { name, args, .. } => {
+            let func = env
+                .get(name)
+                .ok_or_else(|| EvalSignal::error(format!("Unknown effect operation: {}", name)))?;
+
+            let mut result = func;
+            for arg in args {
+                let val = eval_expr(arg, env)?;
+                result = apply(result, val)?;
+            }
+            Ok(result)
+        }
+
+        Expr::With { expr, handler, .. } => {
+            // Resolve the handler to its registered value
+            let handler_val = match handler.as_ref() {
+                Handler::Named(name) => match env.get(name) {
+                    Some(Value::Handler(h)) => h,
+                    _ => return Err(EvalSignal::error(format!("Unknown handler: {}", name))),
+                },
+                Handler::Inline { arms, .. } => HandlerVal {
+                    arms: arms.clone(),
+                    return_clause: None,
+                    env: env.clone(),
+                },
+            };
+
+            // Catch effect signals and bubble up to the right handler arm
+            match eval_expr(expr, env) {
+                Ok(val) => Ok(val),
+                Err(EvalSignal::Effect { name, args, .. }) => {
+                    for arm in &handler_val.arms {
+                        if arm.op_name == name {
+                            let handler_env = handler_val.env.extend();
+                            for (param, arg) in arm.params.iter().zip(args.iter()) {
+                                handler_env.set(param.clone(), arg.clone());
+                            }
+                            return eval_expr(&arm.body, &handler_env);
+                        }
+                    }
+                    // No handler, just re-raise the signal
+                    Err(EvalSignal::Effect {
+                        name,
+                        qualifier: None,
+                        args,
+                    })
+                }
+                Err(e) => {
+                    // Regular errors just pass through
+                    Err(e)
+                }
+            }
+        }
+
+        Expr::Resume { .. } => Err(EvalSignal::error(
+            "resume not supported yet, abort-only mode :(",
+        )),
     }
 }
 
 // --- Function application
 
-fn apply(func: Value, arg: Value) -> Result<Value, EvalError> {
+fn apply(func: Value, arg: Value) -> Result<Value, EvalSignal> {
     match func {
         Value::Closure(closure_arms) => {
-            for arm in &closure_arms {
-                let Some(bindings) = match_pattern(&arm.params[0], &arg) else {
-                    continue;
-                };
-
-                let local_env = arm.env.extend();
-                for (name, val) in bindings {
-                    local_env.set(name, val);
+            // If still currying (more than 1 param), bind first param in all arms
+            // and return a new closure with the remaining params
+            if closure_arms.first().map_or(false, |a| a.params.len() > 1) {
+                let mut remaining_arms = Vec::new();
+                for arm in &closure_arms {
+                    if let Some(bindings) = match_pattern(&arm.params[0], &arg) {
+                        let env = arm.env.extend();
+                        for (name, val) in bindings {
+                            env.set(name, val);
+                        }
+                        remaining_arms.push(ClosureArm {
+                            params: arm.params[1..].to_vec(),
+                            body: arm.body.clone(),
+                            guard: arm.guard.clone(),
+                            env,
+                        });
+                    }
                 }
+                if remaining_arms.is_empty() {
+                    Err(EvalSignal::error("Non-exhaustive patterns in function"))
+                } else {
+                    Ok(Value::Closure(remaining_arms))
+                }
+            } else {
+                // Last param -- try each arm until one matches (with guard)
+                for arm in &closure_arms {
+                    let Some(bindings) = match_pattern(&arm.params[0], &arg) else {
+                        continue;
+                    };
 
-                // Only one param to be applied, try to evaluate
-                if arm.params.len() == 1 {
-                    // Check guard expr if present
+                    let local_env = arm.env.extend();
+                    for (name, val) in bindings {
+                        local_env.set(name, val);
+                    }
+
                     if let Some(guard) = &arm.guard {
                         match eval_expr(guard, &local_env)? {
                             Value::Bool(true) => {}
-                            Value::Bool(false) => continue, // Guard failed
+                            Value::Bool(false) => continue,
                             other => {
-                                return Err(EvalError {
-                                    message: format!("Guard must be a Bool, got: {}", other),
-                                });
+                                return Err(EvalSignal::error(format!(
+                                    "Guard must be a Bool, got: {}",
+                                    other
+                                )));
                             }
                         }
                     }
                     return eval_expr(&arm.body, &local_env);
-                } else {
-                    // More params to be applied, return a new closure with current env
-                    return Ok(Value::Closure(vec![ClosureArm {
-                        params: arm.params[1..].to_vec(),
-                        body: arm.body.clone(),
-                        guard: arm.guard.clone(),
-                        env: local_env,
-                    }]));
                 }
-            }
 
-            // No arm matched
-            Err(EvalError {
-                message: "Non-exhaustive patterns in function".to_string(),
-            })
+                Err(EvalSignal::error("Non-exhaustive patterns in function"))
+            }
         }
 
         Value::Constructor {
@@ -379,14 +486,12 @@ fn apply(func: Value, arg: Value) -> Result<Value, EvalError> {
         } => {
             args.push(arg);
             if args.len() > arity {
-                Err(EvalError {
-                    message: format!(
-                        "Constructor {} expects {} args, got {}.",
-                        name,
-                        arity,
-                        args.len()
-                    ),
-                })
+                Err(EvalSignal::error(format!(
+                    "Constructor {} expects {} args, got {}.",
+                    name,
+                    arity,
+                    args.len()
+                )))
             } else {
                 Ok(Value::Constructor { name, arity, args })
             }
@@ -394,15 +499,40 @@ fn apply(func: Value, arg: Value) -> Result<Value, EvalError> {
 
         Value::BuiltIn(name) => eval_builtin(&name, arg),
 
-        not_a_func => Err(EvalError {
-            message: format!("Cannot call {} as a function", not_a_func),
-        }),
+        // Effect ops accumulate args like constructors, but fire a signal instead of returning a value
+        Value::EffectFn {
+            name,
+            qualifier,
+            arity,
+            mut args,
+        } => {
+            args.push(arg);
+            if args.len() == arity {
+                Err(EvalSignal::Effect {
+                    name,
+                    qualifier,
+                    args,
+                })
+            } else {
+                Ok(Value::EffectFn {
+                    name,
+                    qualifier,
+                    arity,
+                    args,
+                })
+            }
+        }
+
+        not_a_func => Err(EvalSignal::error(format!(
+            "Cannot call {} as a function",
+            not_a_func
+        ))),
     }
 }
 
 // --- Declarations ---
 
-pub fn eval_decl(decl: &Decl, env: &Env) -> Result<(), EvalError> {
+pub fn eval_decl(decl: &Decl, env: &Env) -> Result<(), EvalSignal> {
     match decl {
         // Ignored at runtime
         Decl::FunAnnotation { .. } => Ok(()),
@@ -457,9 +587,31 @@ pub fn eval_decl(decl: &Decl, env: &Env) -> Result<(), EvalError> {
         // Handled at the call site
         Decl::RecordDef { .. } => Ok(()),
 
-        // TODO, the whole algebraic effect system lol
-        Decl::EffectDef { .. } => todo!(),
-        Decl::HandlerDef { .. } => todo!(),
+        Decl::EffectDef {
+            name, operations, ..
+        } => {
+            for op in operations {
+                let val = Value::EffectFn {
+                    name: op.name.clone(),
+                    qualifier: Some(name.clone()),
+                    arity: op.params.len(),
+                    args: vec![],
+                };
+                env.set(op.name.clone(), val);
+            }
+            Ok(())
+        }
+
+        Decl::HandlerDef { name, arms, .. } => {
+            let handler = HandlerVal {
+                arms: arms.clone(),
+                return_clause: None,
+                env: env.clone(),
+            };
+            env.set(name.clone(), Value::Handler(handler));
+            Ok(())
+        }
+
         Decl::ImplDef { .. } => todo!(),
 
         Decl::Import { .. } => todo!(),
@@ -468,22 +620,20 @@ pub fn eval_decl(decl: &Decl, env: &Env) -> Result<(), EvalError> {
 
 // --- Builtin functions
 
-fn eval_builtin(name: &str, arg: Value) -> Result<Value, EvalError> {
+fn eval_builtin(name: &str, arg: Value) -> Result<Value, EvalSignal> {
     match name {
         "print" => {
             println!("{}", arg);
             Ok(Value::Unit)
         }
         "show" => Ok(Value::String(format!("{}", arg))),
-        _ => Err(EvalError {
-            message: format!("Unknown builtin {}", name),
-        }),
+        _ => Err(EvalSignal::error(format!("Unknown builtin {}", name))),
     }
 }
 
 // --- Binary operators
 
-fn eval_binop(op: &BinOp, left: Value, right: Value) -> Result<Value, EvalError> {
+fn eval_binop(op: &BinOp, left: Value, right: Value) -> Result<Value, EvalSignal> {
     match (op, &left, &right) {
         // Boolean operators
         (BinOp::And, Value::Bool(false), _) => Ok(Value::Bool(false)),
@@ -498,13 +648,9 @@ fn eval_binop(op: &BinOp, left: Value, right: Value) -> Result<Value, EvalError>
         (BinOp::Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
         (BinOp::Sub, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
         (BinOp::Mul, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
-        (BinOp::Div, Value::Int(_), Value::Int(0)) => Err(EvalError {
-            message: "division by zero".into(),
-        }),
+        (BinOp::Div, Value::Int(_), Value::Int(0)) => Err(EvalSignal::error("division by zero")),
         (BinOp::Div, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a / b)),
-        (BinOp::Mod, Value::Int(_), Value::Int(0)) => Err(EvalError {
-            message: "modulo by zero".into(),
-        }),
+        (BinOp::Mod, Value::Int(_), Value::Int(0)) => Err(EvalSignal::error("modulo by zero")),
         (BinOp::Mod, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
 
         // Integer comparison
@@ -527,9 +673,10 @@ fn eval_binop(op: &BinOp, left: Value, right: Value) -> Result<Value, EvalError>
             Ok(Value::String(format!("{}{}", a, b)))
         }
 
-        _ => Err(EvalError {
-            message: format!("cannot apply {:?} to {} and {}", op, left, right),
-        }),
+        _ => Err(EvalSignal::error(format!(
+            "cannot apply {:?} to {} and {}",
+            op, left, right
+        ))),
     }
 }
 
@@ -602,7 +749,7 @@ fn match_pattern(pattern: &Pat, value: &Value) -> Option<HashMap<String, Value>>
     }
 }
 
-pub fn eval_program(program: &Program) -> Result<(), EvalError> {
+pub fn eval_program(program: &Program) -> Result<(), EvalSignal> {
     let env = Env::new();
 
     // Register builtins
@@ -656,11 +803,7 @@ pub fn eval_program(program: &Program) -> Result<(), EvalError> {
             apply(main_val, Value::Unit)?;
             Ok(())
         }
-        Some(_) => Err(EvalError {
-            message: "`main` must be a function".to_string(),
-        }),
-        None => Err(EvalError {
-            message: "No main function defined".to_string(),
-        }),
+        Some(_) => Err(EvalSignal::error("`main` must be a function")),
+        None => Err(EvalSignal::error("No main function defined")),
     }
 }

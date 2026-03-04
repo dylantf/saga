@@ -41,7 +41,10 @@ fn main() {
     };
 
     if let Err(e) = eval::eval_program(&program) {
-        eprintln!("Runtime error: {}", e.message);
+        match e {
+            eval::EvalSignal::Error(err) => eprintln!("Runtime error: {}", err.message),
+            eval::EvalSignal::Effect { name, .. } => eprintln!("Unhandled effect: {}", name),
+        };
         std::process::exit(1);
     }
 }
