@@ -257,6 +257,34 @@ impl Parser {
             self.expect(Token::RBrace)?;
         }
 
+        // Parse optional `where {a: Show + Eq, b: Ord}`
+        let where_clause = if *self.peek() == Token::Where {
+            self.advance();
+            self.expect(Token::LBrace)?;
+            let mut bounds = Vec::new();
+            while *self.peek() != Token::RBrace {
+                if !bounds.is_empty() {
+                    self.expect(Token::Comma)?;
+                    if *self.peek() == Token::RBrace {
+                        // trailing comma
+                        break;
+                    }
+                }
+                let type_var = self.expect_ident()?;
+                self.expect(Token::Colon)?;
+                let mut traits = vec![self.expect_upper_ident()?];
+                while *self.peek() == Token::Plus {
+                    self.advance();
+                    traits.push(self.expect_upper_ident()?);
+                }
+                bounds.push(crate::ast::TraitBound { type_var, traits });
+            }
+            self.expect(Token::RBrace)?;
+            bounds
+        } else {
+            Vec::new()
+        };
+
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::FunAnnotation {
             public,
@@ -264,6 +292,7 @@ impl Parser {
             params,
             return_type,
             effects,
+            where_clause,
             span: start.to(end),
         })
     }
@@ -536,7 +565,11 @@ impl Parser {
                     self.expect(Token::RParen)?;
                     let mut expr = Expr::Constructor { name: i, span };
                     for arg in args {
-                        expr = Expr::App { func: Box::new(expr), arg: Box::new(arg), span: span.to(end) };
+                        expr = Expr::App {
+                            func: Box::new(expr),
+                            arg: Box::new(arg),
+                            span: span.to(end),
+                        };
                     }
                     Ok(expr)
                 } else {

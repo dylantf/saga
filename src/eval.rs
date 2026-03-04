@@ -319,6 +319,9 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 message: format!("Cannot update fields on {}", other),
             }),
         },
+        Expr::EffectCall { .. } => todo!("effect call evaluation"),
+        Expr::With { .. } => todo!("with handler evaluation"),
+        Expr::Resume { .. } => todo!("resume evaluation"),
     }
 }
 

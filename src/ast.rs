@@ -13,13 +13,15 @@ pub struct Module {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decl {
-    /// `pub fun add (a: Int) (b: Int) -> Int`
+    /// `pub fun add (a: Int) (b: Int) -> Int needs {Log} where {a: Show + Eq}`
     FunAnnotation {
         public: bool,
         name: String,
         params: Vec<(String, TypeExpr)>,
         return_type: TypeExpr,
         effects: Vec<String>,
+        /// `where {a: Show + Eq, b: Ord}` - trait bounds on type variables
+        where_clause: Vec<TraitBound>,
         span: Span,
     },
 
@@ -61,11 +63,13 @@ pub enum Decl {
         span: Span,
     },
 
-    /// `handler std_io : Console { ... }`
+    /// `handler console_log for Log { ... }`
     HandlerDef {
         name: String,
-        effect: String,
+        effects: Vec<String>,
         arms: Vec<HandlerArm>,
+        /// `return value -> Ok(value)` clause
+        return_clause: Option<Box<HandlerArm>>,
         span: Span,
     },
 
@@ -174,6 +178,28 @@ pub enum Expr {
         fields: Vec<(String, Expr)>,
         span: Span,
     },
+
+    /// `log! "hello"`, `Cache.get! key`
+    EffectCall {
+        name: String,
+        /// Optional namespace qualifier: `Cache` in `Cache.get!`
+        qualifier: Option<String>,
+        args: Vec<Expr>,
+        span: Span,
+    },
+
+    /// `expr with handler_name` or `expr with { ... }`
+    With {
+        expr: Box<Expr>,
+        handler: Box<Handler>,
+        span: Span,
+    },
+
+    /// `resume value`
+    Resume {
+        value: Box<Expr>,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -191,7 +217,10 @@ impl Expr {
             | Expr::Lambda { span, .. }
             | Expr::FieldAccess { span, .. }
             | Expr::RecordCreate { span, .. }
-            | Expr::RecordUpdate { span, .. } => *span,
+            | Expr::RecordUpdate { span, .. }
+            | Expr::EffectCall { span, .. }
+            | Expr::With { span, .. }
+            | Expr::Resume { span, .. } => *span,
         }
     }
 }
@@ -313,8 +342,33 @@ pub struct EffectOp {
 pub struct HandlerArm {
     pub op_name: String,
     pub params: Vec<String>,
-    pub body: Expr,
+    pub body: Box<Expr>,
     pub span: Span,
+}
+
+/// `a: Show + Eq` in a `where` clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitBound {
+    /// The type variable being constrained (e.g. `a`)
+    pub type_var: String,
+    /// The required traits (e.g. `["Show", "Eq"]`)
+    pub traits: Vec<String>,
+}
+
+/// The handler in a `with` expression
+#[derive(Debug, Clone, PartialEq)]
+pub enum Handler {
+    /// `expr with handler_name`
+    Named(String),
+    /// `expr with { h1, h2, op args -> body }`
+    Inline {
+        /// Named handler references (e.g. `h1, h2`)
+        named: Vec<String>,
+        /// Inline handler arms (e.g. `op args -> body`)
+        arms: Vec<HandlerArm>,
+        /// `return value -> Ok(value)` clause
+        return_clause: Option<Box<HandlerArm>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
