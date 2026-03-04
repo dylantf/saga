@@ -128,6 +128,7 @@ impl Lexer {
             "return" => Token::Return,
             "resume" => Token::Resume,
             "needs" => Token::Needs,
+            "for" => Token::For,
             // Lex True/False as keywords even though they are treated as types
             "True" => Token::True,
             "False" => Token::False,

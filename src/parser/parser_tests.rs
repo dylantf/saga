@@ -1,4 +1,5 @@
 use super::*;
+use crate::ast::Handler;
 use crate::lexer::Lexer;
 
 fn parse(source: &str) -> Program {
@@ -1030,5 +1031,255 @@ fn record_def_with_type_app() {
             assert!(matches!(&fields[0].1, TypeExpr::App(_, _)));
         }
         _ => panic!("expected RecordDef, got {:?}", decls[0]),
+    }
+}
+
+// --- Effect definitions ---
+
+#[test]
+fn effect_def_single_op() {
+    let decls = parse("effect Log {\n  fun log (level: String) (msg: String) -> Unit\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::EffectDef { name, operations, .. } => {
+            assert_eq!(name, "Log");
+            assert_eq!(operations.len(), 1);
+            assert_eq!(operations[0].name, "log");
+            assert_eq!(operations[0].params.len(), 2);
+            assert_eq!(operations[0].params[0].0, "level");
+            assert_eq!(operations[0].params[1].0, "msg");
+        }
+        _ => panic!("expected EffectDef, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn effect_def_multiple_ops() {
+    let decls = parse("effect Http {\n  fun get (url: String) -> String\n  fun post (url: String) (body: String) -> String\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::EffectDef { name, operations, .. } => {
+            assert_eq!(name, "Http");
+            assert_eq!(operations.len(), 2);
+            assert_eq!(operations[0].name, "get");
+            assert_eq!(operations[1].name, "post");
+            assert_eq!(operations[1].params.len(), 2);
+        }
+        _ => panic!("expected EffectDef, got {:?}", decls[0]),
+    }
+}
+
+// --- Handler definitions ---
+
+#[test]
+fn handler_def_simple() {
+    let decls = parse("handler console_log for Log {\n  log level msg -> print! (level <> msg)\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::HandlerDef { name, effects, arms, return_clause, .. } => {
+            assert_eq!(name, "console_log");
+            assert_eq!(effects, &["Log"]);
+            assert_eq!(arms.len(), 1);
+            assert_eq!(arms[0].op_name, "log");
+            assert_eq!(arms[0].params, vec!["level", "msg"]);
+            assert!(return_clause.is_none());
+        }
+        _ => panic!("expected HandlerDef, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn handler_def_with_return_clause() {
+    let decls = parse("handler to_result for Fail {\n  fail reason -> Err(reason)\n  return value -> Ok(value)\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::HandlerDef { name, arms, return_clause, .. } => {
+            assert_eq!(name, "to_result");
+            assert_eq!(arms.len(), 1);
+            assert_eq!(arms[0].op_name, "fail");
+            assert!(return_clause.is_some());
+            let rc = return_clause.as_ref().unwrap();
+            assert_eq!(rc.params, vec!["value"]);
+        }
+        _ => panic!("expected HandlerDef, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn handler_def_multi_effect() {
+    let decls = parse("handler dev_env for Log, Http {\n  log level msg -> resume ()\n  get url -> resume \"ok\"\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::HandlerDef { effects, arms, .. } => {
+            assert_eq!(effects, &["Log", "Http"]);
+            assert_eq!(arms.len(), 2);
+        }
+        _ => panic!("expected HandlerDef, got {:?}", decls[0]),
+    }
+}
+
+// --- Effect call expressions ---
+
+#[test]
+fn effect_call_simple() {
+    let expr = parse_expr("log! \"hello\"");
+    match &expr {
+        Expr::App { func, arg, .. } => {
+            match func.as_ref() {
+                Expr::EffectCall { name, qualifier, .. } => {
+                    assert_eq!(name, "log");
+                    assert!(qualifier.is_none());
+                }
+                _ => panic!("expected EffectCall, got {:?}", func),
+            }
+            assert!(matches!(arg.as_ref(), Expr::Lit { value: Lit::String(s), .. } if s == "hello"));
+        }
+        _ => panic!("expected App(EffectCall, _), got {:?}", expr),
+    }
+}
+
+#[test]
+fn effect_call_no_args() {
+    let expr = parse_expr("read_line!");
+    match &expr {
+        Expr::EffectCall { name, qualifier, .. } => {
+            assert_eq!(name, "read_line");
+            assert!(qualifier.is_none());
+        }
+        _ => panic!("expected EffectCall, got {:?}", expr),
+    }
+}
+
+#[test]
+fn effect_call_qualified() {
+    let expr = parse_expr("Cache.get! \"key\"");
+    match &expr {
+        Expr::App { func, .. } => match func.as_ref() {
+            Expr::EffectCall { name, qualifier, .. } => {
+                assert_eq!(name, "get");
+                assert_eq!(qualifier.as_deref(), Some("Cache"));
+            }
+            _ => panic!("expected EffectCall, got {:?}", func),
+        },
+        _ => panic!("expected App(EffectCall, _), got {:?}", expr),
+    }
+}
+
+// --- Resume ---
+
+#[test]
+fn resume_expr() {
+    let expr = parse_expr("resume ()");
+    match &expr {
+        Expr::Resume { value, .. } => {
+            assert!(matches!(value.as_ref(), Expr::Lit { value: Lit::Unit, .. }));
+        }
+        _ => panic!("expected Resume, got {:?}", expr),
+    }
+}
+
+#[test]
+fn resume_with_value() {
+    let expr = parse_expr("resume answer");
+    match &expr {
+        Expr::Resume { value, .. } => {
+            assert!(matches!(value.as_ref(), Expr::Var { name, .. } if name == "answer"));
+        }
+        _ => panic!("expected Resume, got {:?}", expr),
+    }
+}
+
+// --- With expressions ---
+
+#[test]
+fn with_named_handler() {
+    // `with` has lowest precedence — wraps the entire expression
+    let expr = parse_expr("run_server () with console_log");
+    match &expr {
+        Expr::With { expr: inner, handler, .. } => {
+            assert!(matches!(inner.as_ref(), Expr::App { .. }));
+            assert!(matches!(handler.as_ref(), Handler::Named(n) if n == "console_log"));
+        }
+        _ => panic!("expected With, got {:?}", expr),
+    }
+}
+
+#[test]
+fn with_inline_handler() {
+    let expr = parse_expr("run_server () with {\n  log level msg -> print! msg\n}");
+    match &expr {
+        Expr::With { handler, .. } => match handler.as_ref() {
+            Handler::Inline { named, arms, return_clause } => {
+                assert!(named.is_empty());
+                assert_eq!(arms.len(), 1);
+                assert_eq!(arms[0].op_name, "log");
+                assert_eq!(arms[0].params, vec!["level", "msg"]);
+                assert!(return_clause.is_none());
+            }
+            _ => panic!("expected Inline handler, got {:?}", handler),
+        },
+        _ => panic!("expected With, got {:?}", expr),
+    }
+}
+
+#[test]
+fn with_mixed_handlers() {
+    let expr = parse_expr("run () with {\n  console_log,\n  get url -> resume \"ok\"\n}");
+    match &expr {
+        Expr::With { handler, .. } => match handler.as_ref() {
+            Handler::Inline { named, arms, .. } => {
+                assert_eq!(named, &["console_log"]);
+                assert_eq!(arms.len(), 1);
+                assert_eq!(arms[0].op_name, "get");
+            }
+            _ => panic!("expected Inline handler, got {:?}", handler),
+        },
+        _ => panic!("expected With, got {:?}", expr),
+    }
+}
+
+// --- Where clause on annotations ---
+
+#[test]
+fn fun_annotation_with_where_clause() {
+    let decls = parse("fun show (x: a) -> String where {a: Show}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::FunAnnotation { where_clause, .. } => {
+            assert_eq!(where_clause.len(), 1);
+            assert_eq!(where_clause[0].type_var, "a");
+            assert_eq!(where_clause[0].traits, vec!["Show"]);
+        }
+        _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn fun_annotation_where_multiple_bounds() {
+    let decls = parse("fun compare (x: a) (y: b) -> Int where {a: Show + Eq, b: Ord}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::FunAnnotation { where_clause, .. } => {
+            assert_eq!(where_clause.len(), 2);
+            assert_eq!(where_clause[0].type_var, "a");
+            assert_eq!(where_clause[0].traits, vec!["Show", "Eq"]);
+            assert_eq!(where_clause[1].type_var, "b");
+            assert_eq!(where_clause[1].traits, vec!["Ord"]);
+        }
+        _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn fun_annotation_needs_and_where() {
+    let decls = parse("fun f (x: a) -> Unit needs {Log} where {a: Show}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::FunAnnotation { effects, where_clause, .. } => {
+            assert_eq!(effects, &["Log"]);
+            assert_eq!(where_clause.len(), 1);
+            assert_eq!(where_clause[0].type_var, "a");
+        }
+        _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
     }
 }

@@ -90,6 +90,8 @@ impl Parser {
                 | Token::UpperIdent(_)
                 | Token::LParen
                 | Token::LBracket
+                | Token::EffectCall(_)
+                | Token::Resume
         )
     }
 
@@ -139,6 +141,8 @@ impl Parser {
                 let start = self.tokens[self.pos].span;
                 self.parse_fun_annotation(false, start)
             }
+            Token::Effect => self.parse_effect_def(),
+            Token::Handler => self.parse_handler_def(),
             Token::Ident(_) => self.parse_fun_binding(),
             _ => Err(ParseError {
                 message: format!("Expected declaration, got {:?}", self.peek()),
@@ -293,6 +297,120 @@ impl Parser {
             return_type,
             effects,
             where_clause,
+            span: start.to(end),
+        })
+    }
+
+    // Parses: effect <Name> { fun <op> (<p>: <T>) ... -> <T> ... }
+    fn parse_effect_def(&mut self) -> Result<Decl, ParseError> {
+        let start = self.tokens[self.pos].span;
+        self.advance(); // consume 'effect'
+        let name = self.expect_upper_ident()?;
+        self.expect(Token::LBrace)?;
+        self.skip_terminators();
+
+        let mut operations = Vec::new();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let op_start = self.tokens[self.pos].span;
+            self.expect(Token::Fun)?;
+            let op_name = self.expect_ident()?;
+
+            let mut params = Vec::new();
+            while matches!(self.peek(), Token::LParen) {
+                self.advance();
+                let param_name = self.expect_ident()?;
+                self.expect(Token::Colon)?;
+                let param_type = self.parse_type_expr()?;
+                self.expect(Token::RParen)?;
+                params.push((param_name, param_type));
+            }
+
+            self.expect(Token::Arrow)?;
+            let return_type = self.parse_type_expr()?;
+            let op_end = self.tokens[self.pos - 1].span;
+
+            operations.push(EffectOp {
+                name: op_name,
+                params,
+                return_type,
+                span: op_start.to(op_end),
+            });
+            self.skip_terminators();
+        }
+
+        let end = self.tokens[self.pos].span;
+        self.expect(Token::RBrace)?;
+
+        Ok(Decl::EffectDef {
+            name,
+            operations,
+            span: start.to(end),
+        })
+    }
+
+    // Parses: handler <name> for <Effect>, ... { <op> <params> -> <body> ... }
+    fn parse_handler_def(&mut self) -> Result<Decl, ParseError> {
+        let start = self.tokens[self.pos].span;
+        self.advance(); // consume 'handler'
+        let name = self.expect_ident()?;
+        self.expect(Token::For)?;
+
+        let mut effects = vec![self.expect_upper_ident()?];
+        while matches!(self.peek(), Token::Comma) {
+            self.advance();
+            effects.push(self.expect_upper_ident()?);
+        }
+
+        self.expect(Token::LBrace)?;
+        self.skip_terminators();
+
+        let mut arms = Vec::new();
+        let mut return_clause = None;
+
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let arm_start = self.tokens[self.pos].span;
+
+            if matches!(self.peek(), Token::Return) {
+                // return clause: `return value -> body`
+                self.advance();
+                let param = self.expect_ident()?;
+                self.expect(Token::Arrow)?;
+                let body = self.parse_expr(0)?;
+                let arm_end = body.span();
+                return_clause = Some(Box::new(HandlerArm {
+                    op_name: "return".to_string(),
+                    params: vec![param],
+                    body: Box::new(body),
+                    span: arm_start.to(arm_end),
+                }));
+            } else {
+                let op_name = self.expect_ident()?;
+                let mut params = Vec::new();
+                while !matches!(self.peek(), Token::Arrow | Token::Eof) {
+                    params.push(self.expect_ident()?);
+                }
+                self.expect(Token::Arrow)?;
+                let body = self.parse_expr(0)?;
+                let arm_end = body.span();
+                arms.push(HandlerArm {
+                    op_name,
+                    params,
+                    body: Box::new(body),
+                    span: arm_start.to(arm_end),
+                });
+            }
+
+            self.skip_terminators();
+        }
+
+        let end = self.tokens[self.pos].span;
+        self.expect(Token::RBrace)?;
+
+        Ok(Decl::HandlerDef {
+            name,
+            effects,
+            arms,
+            return_clause,
             span: start.to(end),
         })
     }
@@ -458,6 +576,18 @@ impl Parser {
             };
         }
 
+        // `with` has lowest precedence — checked after all binary ops
+        if matches!(self.peek(), Token::With) {
+            self.advance();
+            let handler = self.parse_handler_ref()?;
+            let end = self.tokens[self.pos - 1].span;
+            left = Expr::With {
+                span: left.span().to(end),
+                expr: Box::new(left),
+                handler: Box::new(handler),
+            };
+        }
+
         Ok(left)
     }
 
@@ -479,16 +609,35 @@ impl Parser {
         Ok(expr)
     }
 
-    /// Postfix operators: field access via `.`
-    /// `user.name.first` → FieldAccess(FieldAccess(user, "name"), "first")
+    /// Postfix operators: field access `.` and qualified effect calls
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_primary()?;
 
         while matches!(self.peek(), Token::Dot) {
             self.advance(); // consume '.'
+
+            // Qualified effect call: `Cache.get! key`
+            if let Token::EffectCall(name) = self.peek().clone()
+                && let Expr::Constructor {
+                    name: qualifier, ..
+                } = &expr
+            {
+                let qualifier = qualifier.clone();
+                let start_span = expr.span();
+                let effect_span = self.tokens[self.pos].span;
+                self.advance(); // consume effect call token
+                expr = Expr::EffectCall {
+                    name,
+                    qualifier: Some(qualifier),
+                    args: Vec::new(),
+                    span: start_span.to(effect_span),
+                };
+                continue;
+            }
+
+            let start = expr.span().start;
             let field = self.expect_ident()?;
             let end = self.tokens[self.pos - 1].span;
-            let start = expr.span().start;
             expr = Expr::FieldAccess {
                 expr: Box::new(expr),
                 field,
@@ -500,6 +649,82 @@ impl Parser {
         }
 
         Ok(expr)
+    }
+
+    /// Parses the handler reference after `with`:
+    /// - `with console_log` -> Handler::Named
+    /// - `with { h1, h2, op args -> body }` -> Handler::Inline
+    fn parse_handler_ref(&mut self) -> Result<Handler, ParseError> {
+        if matches!(self.peek(), Token::LBrace) {
+            self.advance(); // consume '{'
+            self.skip_terminators();
+
+            let mut named = Vec::new();
+            let mut arms = Vec::new();
+            let mut return_clause = None;
+
+            while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                let arm_start = self.tokens[self.pos].span;
+
+                if matches!(self.peek(), Token::Return) {
+                    // return clause: `return value -> body`
+                    self.advance();
+                    let param = self.expect_ident()?;
+                    self.expect(Token::Arrow)?;
+                    let body = self.parse_expr(0)?;
+                    let arm_end = body.span();
+                    return_clause = Some(Box::new(HandlerArm {
+                        op_name: "return".to_string(),
+                        params: vec![param],
+                        body: Box::new(body),
+                        span: arm_start.to(arm_end),
+                    }));
+                } else {
+                    // Could be a named handler ref or an inline arm.
+                    // Named ref: just an ident followed by `,` or `}` or newline
+                    // Inline arm: ident [params...] -> body
+                    let name = self.expect_ident()?;
+
+                    if matches!(
+                        self.peek(),
+                        Token::Comma | Token::RBrace | Token::Terminator
+                    ) {
+                        named.push(name);
+                    } else {
+                        // Inline arm: op params -> body
+                        let mut params = Vec::new();
+                        while !matches!(self.peek(), Token::Arrow | Token::Eof) {
+                            params.push(self.expect_ident()?);
+                        }
+                        self.expect(Token::Arrow)?;
+                        let body = self.parse_expr(0)?;
+                        let arm_end = body.span();
+                        arms.push(HandlerArm {
+                            op_name: name,
+                            params,
+                            body: Box::new(body),
+                            span: arm_start.to(arm_end),
+                        });
+                    }
+                }
+
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                }
+                self.skip_terminators();
+            }
+            self.expect(Token::RBrace)?;
+
+            Ok(Handler::Inline {
+                named,
+                arms,
+                return_clause,
+            })
+        } else {
+            // Single named handler: `with console_log`
+            let name = self.expect_ident()?;
+            Ok(Handler::Named(name))
+        }
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
@@ -784,6 +1009,24 @@ impl Parser {
                         start: span.start,
                         end: end_span,
                     },
+                })
+            }
+
+            // Effect call: `log! "hello"` args handled by parse_application
+            Token::EffectCall(name) => Ok(Expr::EffectCall {
+                name,
+                qualifier: None,
+                args: Vec::new(),
+                span,
+            }),
+
+            // Resume: `resume value`
+            Token::Resume => {
+                let value = self.parse_expr(0)?;
+                let end = value.span();
+                Ok(Expr::Resume {
+                    value: Box::new(value),
+                    span: span.to(end),
                 })
             }
 
