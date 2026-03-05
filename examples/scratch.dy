@@ -1,0 +1,106 @@
+# Effects
+
+effect Database {
+  fun query (sql: String) -> List Row
+  fun execute (sql: String) -> Int
+}
+
+effect Http {
+  fun listen (port: Int, handler: Request -> Unit) -> Unit
+  fun send_response (status: Int, body: String) -> Unit
+}
+
+# Handlers
+
+handler postgres_handler for Database {
+  query sql -> todo! "connect to postgres and run query"
+  execute sql -> todo! "connect to postgres and run execute"
+}
+
+handler http_handler for Http {
+  listen port handler -> todo! "bind to port and dispatch requests"
+  send_response status body -> todo! "write http response to socket"
+}
+
+# Types
+
+record User {
+  name: String,
+  email: String,
+}
+
+record Post {
+  title: String,
+  body: String,
+  user_id: Int,
+}
+
+# Deserializing Db rows into record instances
+
+trait FromRow a {
+  fun from_row (row: Row) -> a
+}
+
+impl FromRow for User {
+  from_row row = User {
+    name: get row "name", 
+    email: get row "email",
+  }
+}
+
+impl FromRow for Post {
+  from_row row = Post {
+    title: get row "title", 
+    body: get row "body", 
+    user_id: get row "user_id"
+  }
+}
+
+# Database layer
+
+fun get_user (id: Int) -> User needs {Database}
+get_user id = {
+  query! "SELECT * FROM users WHERE id = ?"
+  |> head
+  |> from_row
+}
+
+fun get_posts_for_user (id: Int) -> List Post needs {Database}
+get_posts_for_user id = {
+  query! "SELECT * FROM posts WHERE user_id = ?"
+  |> map from_row
+}
+
+fun get_user_with_posts (id: Int) -> (User, List Post) needs {Database}
+get_user_with_posts id = {
+  user = get_user id
+  posts = get_posts_for_user id
+  (user, posts)
+}
+
+# Controller
+
+fun get_user_route (request: Request) -> Unit needs {Database, Http}
+get_user_route request = {
+  request.params.id
+  |> get_user_with_posts
+  |> to_json
+  |> send_response! 200
+}
+
+# Router
+
+fun router (request: Request) -> Unit needs {Database, Http}
+router request = {
+  case (request.method, request.path) of
+    ("GET", "/users/:id") -> get_user_route request
+    ("POST", "/users") -> create_user_controller request
+    ("GET", "/posts/:id") -> get_post_controller request
+    _ -> send_response! 404 "not found"
+}
+
+# App entry point
+
+main () = {
+  listen! 8080 router
+} with {postgres_handler, http_handler}

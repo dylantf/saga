@@ -334,7 +334,26 @@ The `Rc<RefCell<Option<>>>` approach is cleanest for single-shot semantics.
 
 ---
 
-## 6. Explicitly Out of Scope
+## 6. Built-in `panic` and `todo`
+
+Both are language builtins that halt execution immediately. They exist
+outside the effect system (no `!`, no handler, no `needs` propagation).
+
+```rust
+// In eval_expr, these are special forms:
+Expr::Panic(msg) => EvalResult::Error(EvalError::Panic(msg)),
+Expr::Todo(msg) => EvalResult::Error(EvalError::Todo(msg)),
+```
+
+- Return type `Never` - type checker allows them anywhere a value is expected.
+- `todo` can be distinguished from `panic` for tooling: the type checker
+  can warn about remaining `todo`s, list them as incomplete work, or
+  reject them in release builds.
+- Parser: `panic "msg"` and `todo "msg"` are keywords, not function calls.
+
+---
+
+## 7. Explicitly Out of Scope
 
 - **Multishot continuations** - calling `resume` more than once. Not needed
   for practical effects (I/O, logging, state, errors, async). Could be added

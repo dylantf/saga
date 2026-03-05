@@ -339,9 +339,36 @@ run_server () = {
 }
 ```
 
-This tells callers what handlers they need to provide. When a function calls
-another effectful function, it inherits those effects (minus any it handles
-itself):
+This tells callers what handlers they need to provide.
+
+### Effect propagation
+
+Effects propagate virally through function signatures. If a function calls
+another function that needs an effect, it must either handle it (with `with`)
+or declare it in its own `needs`:
+
+```
+fun get_user (id: Int) -> User needs {Database}
+get_user id = {
+  query! "SELECT * FROM users WHERE id = ?"
+  |> head
+  |> from_row
+}
+
+# get_user_route calls get_user (needs Database)
+# and calls send_response! (needs Http)
+# it doesn't handle either, so both propagate
+fun get_user_route (request: Request) -> Unit needs {Database, Http}
+get_user_route request = {
+  request.params.id
+  |> get_user_with_posts
+  |> to_json
+  |> send_response! 200
+}
+```
+
+When a function handles an effect at the call site, that effect is peeled off
+and doesn't propagate:
 
 ```
 # start_app calls run_server (which needs Log, Http)
@@ -354,8 +381,7 @@ start_app () = {
 }
 ```
 
-Each `with` on a handler peels off the effects it covers. The program's entry
-point must handle everything - nothing escapes unhandled.
+The program's entry point must handle everything - nothing escapes unhandled.
 
 ### Effect polymorphism
 
@@ -395,6 +421,34 @@ test_server () = {
 
 No mocking frameworks, no dependency injection containers. The function under
 test is unchanged - only the handler differs.
+
+---
+
+## What Isn't an Effect: `panic` and `todo`
+
+Not everything that interrupts execution is an effect. `panic` and `todo` are
+language builtins that halt the program immediately. They exist outside the
+effect system - no `!`, no handler, no `needs` propagation:
+
+```
+handler postgres_handler for Database {
+  query sql -> todo "connect to postgres and run query"
+  execute sql -> todo "connect to postgres and run execute"
+}
+
+fun impossible (x: Int) -> String
+impossible x = panic "this case should never happen"
+```
+
+Both return `Never`, so they work anywhere a value is expected. The difference
+is intent:
+
+- `panic "msg"` - logic error, unreachable code. Something is fundamentally wrong.
+- `todo "msg"` - unfinished code. The type checker can treat this as a type hole,
+  warn about remaining `todo`s, or reject them in release builds.
+
+If you want recoverable errors, use the `Fail` effect instead - that's what
+handlers are for.
 
 ---
 

@@ -649,21 +649,13 @@ up after N failures - all in userspace, no language support needed.
    }
    ```
 
-5. **Mutability** - yes, local mutable state is an effect.
-
-   ```
-   effect State s {
-     fun get () -> s
-     fun put (value: s) -> Unit
-   }
-
-   fun counter () -> Int needs {State Int}
-   counter () = {
-     let n = get! ()
-     put! (n + 1)
-     n
-   }
-   ```
+5. **No mutability** - no `let mut`, no `State` effect. State is
+   managed through recursion with accumulator arguments, the standard
+   ML/functional approach. Handlers don't need mutable state either -
+   they define behavior for each effect operation independently.
+   If a handler needs to "accumulate" something, that's a sign the
+   accumulation belongs in the calling code via recursion, not in the
+   handler.
 
 6. **Effect call syntax** - effect operations use `!` at the call site:
    `log! "hello"`, `fail! "oops"`, `get! key`. This marks the exact
@@ -699,7 +691,22 @@ up after N failures - all in userspace, no language support needed.
    print <| show <| add 1 2
    ```
 
-11. **Negative literals as arguments** - require parentheses, same as Elm/Haskell.
+11. **Effect propagation** - effects propagate virally through function
+    signatures. If `fn3` needs `{Log}` and `fn2` calls `fn3` without
+    handling it, `fn2` must also declare `needs {Log}`. This continues
+    up the call chain until a handler is attached via `with`. This is
+    intentional: every function signature tells you exactly what effects
+    it requires. The handler can be attached at any level - the direct
+    caller, or further up.
+
+12. **`panic` and `todo` builtins** - `panic "msg"` and `todo "msg"` are
+    language builtins, not effects. They halt the program immediately
+    with no handler, no propagation, no `!`. Return type is `Never` so
+    they work in any position. `panic` is for unreachable code / logic
+    errors. `todo` is for unfinished code - the type checker can treat
+    it as a type hole and warn about remaining `todo`s in release builds.
+
+13. **Negative literals as arguments** - require parentheses, same as Elm/Haskell.
    `-` is always binary minus in application position; wrap negatives in parens.
    ```
    f (-5)    # fine
