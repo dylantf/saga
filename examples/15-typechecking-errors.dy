@@ -1,10 +1,10 @@
 # Type checker demo
 #
 # This example runs successfully -- it demonstrates the type system
-# working on valid code. Comments show what WOULD be caught.
+# working on valid code. Uncomment any line at the bottom to see
+# an error with file:line:col location, e.g.:
 #
-# To see an actual type error with line numbers, try changing any
-# of the commented-out lines.
+#   Type error at examples/15-typechecking-errors.dy:70:13: type mismatch: expected Int, got String
 
 type Maybe a {
   Just(a)
@@ -66,10 +66,10 @@ main () = {
   }
   print ("safe_div result: " <> show result)
 
-  # --- Lines that would cause type errors: ---
-  let bad = 1 + "hello"          # type mismatch: expected Int, got String
-  let bad = if True then 1 else "no"  # branch type mismatch
-  let bad = add 1 "two"          # expected Int, got String
-  let bad = Point { x: "bad", y: 2.0 }  # field type mismatch
-  let bad = nope                  # undefined variable
+  # --- Uncomment any line below to see a type error: ---
+  # let bad = 1 + "hello"               # type mismatch: expected Int, got String
+  # let bad = if True then 1 else "no"   # branch type mismatch
+  # let bad = add 1 "two"               # expected Int, got String
+  # let bad = Point { x: "bad", y: 2.0 } # field type mismatch
+  # let bad = nope                       # undefined variable
 }
