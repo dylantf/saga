@@ -522,12 +522,12 @@ impl Checker {
                 })?;
 
                 for (fname, fexpr) in fields {
-                    let expected = def
-                        .iter()
-                        .find(|(n, _)| n == fname)
-                        .ok_or_else(|| TypeError {
-                            message: format!("unknown field '{}' on record {}", fname, name),
-                        })?;
+                    let expected =
+                        def.iter()
+                            .find(|(n, _)| n == fname)
+                            .ok_or_else(|| TypeError {
+                                message: format!("unknown field '{}' on record {}", fname, name),
+                            })?;
                     let actual = self.infer_expr(fexpr)?;
                     self.unify(&expected.1, &actual)?;
                 }
@@ -541,14 +541,15 @@ impl Checker {
 
                 match &resolved {
                     Type::Con(name, _) => {
-                        let def =
-                            self.records.get(name).cloned().ok_or_else(|| TypeError {
-                                message: format!("type {} is not a record", name),
-                            })?;
+                        let def = self.records.get(name).cloned().ok_or_else(|| TypeError {
+                            message: format!("type {} is not a record", name),
+                        })?;
                         let (_, field_ty) =
-                            def.iter().find(|(n, _)| n == field).ok_or_else(|| TypeError {
-                                message: format!("no field '{}' on record {}", field, name),
-                            })?;
+                            def.iter()
+                                .find(|(n, _)| n == field)
+                                .ok_or_else(|| TypeError {
+                                    message: format!("no field '{}' on record {}", field, name),
+                                })?;
                         Ok(field_ty.clone())
                     }
                     Type::Var(_) => {
@@ -586,44 +587,41 @@ impl Checker {
                 }
             }
 
-            Expr::RecordUpdate {
-                record, fields, ..
-            } => {
+            Expr::RecordUpdate { record, fields, .. } => {
                 let rec_ty = self.infer_expr(record)?;
                 let mut resolved = self.sub.apply(&rec_ty);
 
                 // If type is still a var, try to infer record from first updated field
-                if matches!(&resolved, Type::Var(_)) {
-                    if let Some((fname, _)) = fields.first() {
-                        let candidates: Vec<_> = self
-                            .records
-                            .iter()
-                            .filter(|(_, flds)| flds.iter().any(|(n, _)| n == fname))
-                            .map(|(rname, _)| rname.clone())
-                            .collect();
-                        if candidates.len() == 1 {
-                            self.unify(&resolved, &Type::Con(candidates[0].clone(), vec![]))?;
-                            resolved = self.sub.apply(&rec_ty);
-                        }
+                if matches!(&resolved, Type::Var(_))
+                    && let Some((fname, _)) = fields.first()
+                {
+                    let candidates: Vec<_> = self
+                        .records
+                        .iter()
+                        .filter(|(_, flds)| flds.iter().any(|(n, _)| n == fname))
+                        .map(|(rname, _)| rname.clone())
+                        .collect();
+                    if candidates.len() == 1 {
+                        self.unify(&resolved, &Type::Con(candidates[0].clone(), vec![]))?;
+                        resolved = self.sub.apply(&rec_ty);
                     }
                 }
 
                 match &resolved {
                     Type::Con(name, _) => {
-                        let def =
-                            self.records.get(name).cloned().ok_or_else(|| TypeError {
-                                message: format!("type {} is not a record", name),
-                            })?;
+                        let def = self.records.get(name).cloned().ok_or_else(|| TypeError {
+                            message: format!("type {} is not a record", name),
+                        })?;
                         for (fname, fexpr) in fields {
-                            let expected = def
-                                .iter()
-                                .find(|(n, _)| n == fname)
-                                .ok_or_else(|| TypeError {
-                                    message: format!(
-                                        "unknown field '{}' on record {}",
-                                        fname, name
-                                    ),
-                                })?;
+                            let expected =
+                                def.iter()
+                                    .find(|(n, _)| n == fname)
+                                    .ok_or_else(|| TypeError {
+                                        message: format!(
+                                            "unknown field '{}' on record {}",
+                                            fname, name
+                                        ),
+                                    })?;
                             let actual = self.infer_expr(fexpr)?;
                             self.unify(&expected.1, &actual)?;
                         }
@@ -727,9 +725,11 @@ impl Checker {
 
                 for (fname, alias_pat) in fields {
                     let (_, field_ty) =
-                        def.iter().find(|(n, _)| n == fname).ok_or_else(|| TypeError {
-                            message: format!("unknown field '{}' on record {}", fname, name),
-                        })?;
+                        def.iter()
+                            .find(|(n, _)| n == fname)
+                            .ok_or_else(|| TypeError {
+                                message: format!("unknown field '{}' on record {}", fname, name),
+                            })?;
                     match alias_pat {
                         Some(pat) => self.bind_pattern(pat, field_ty)?,
                         // No alias: bind field name as variable
@@ -793,18 +793,18 @@ impl Checker {
         // Second pass: pre-bind all function names with fresh vars (enables mutual recursion)
         let mut fun_vars: HashMap<std::string::String, Type> = HashMap::new();
         for decl in program {
-            if let Decl::FunBinding { name, .. } = decl {
-                if !fun_vars.contains_key(name) {
-                    let var = self.fresh_var();
-                    fun_vars.insert(name.clone(), var.clone());
-                    self.env.insert(
-                        name.clone(),
-                        Scheme {
-                            forall: vec![],
-                            ty: var,
-                        },
-                    );
-                }
+            if let Decl::FunBinding { name, .. } = decl
+                && !fun_vars.contains_key(name)
+            {
+                let var = self.fresh_var();
+                fun_vars.insert(name.clone(), var.clone());
+                self.env.insert(
+                    name.clone(),
+                    Scheme {
+                        forall: vec![],
+                        ty: var,
+                    },
+                );
             }
         }
 
@@ -816,11 +816,11 @@ impl Checker {
                 let name = name.clone();
                 let start = i;
                 while i < program.len() {
-                    if let Decl::FunBinding { name: n, .. } = &program[i] {
-                        if *n == name {
-                            i += 1;
-                            continue;
-                        }
+                    if let Decl::FunBinding { name: n, .. } = &program[i]
+                        && *n == name
+                    {
+                        i += 1;
+                        continue;
                     }
                     break;
                 }
@@ -899,7 +899,11 @@ impl Checker {
     }
 
     /// Convert a surface TypeExpr to our internal Type representation.
-    fn convert_type_expr(&mut self, texpr: &ast::TypeExpr, params: &mut Vec<(String, u32)>) -> Type {
+    fn convert_type_expr(
+        &mut self,
+        texpr: &ast::TypeExpr,
+        params: &mut Vec<(String, u32)>,
+    ) -> Type {
         match texpr {
             ast::TypeExpr::Named(name) => match name.as_str() {
                 "Int" => Type::Int,
@@ -972,7 +976,6 @@ impl Checker {
         fun_var: &Type,
         annotation: Option<&Type>,
     ) -> Result<(), TypeError> {
-
         // All clauses must have the same arity
         let arity = match clauses[0] {
             Decl::FunBinding { params, .. } => params.len(),
@@ -1008,7 +1011,10 @@ impl Checker {
 
         for clause in clauses {
             let Decl::FunBinding {
-                params, guard, body, ..
+                params,
+                guard,
+                body,
+                ..
             } = clause
             else {
                 unreachable!()
@@ -1054,10 +1060,7 @@ impl Checker {
         // Check against type annotation if present
         if let Some(ann_ty) = annotation {
             self.unify(&fun_ty, ann_ty).map_err(|e| TypeError {
-                message: format!(
-                    "type annotation mismatch for '{}': {}",
-                    name, e.message
-                ),
+                message: format!("type annotation mismatch for '{}': {}", name, e.message),
             })?;
         }
 
@@ -1067,11 +1070,6 @@ impl Checker {
         let scheme = self.generalize(&fun_ty);
         self.env.insert(name.into(), scheme);
         Ok(())
-    }
-
-    /// Resolve a type fully (apply all substitutions).
-    pub fn resolve(&self, ty: &Type) -> Type {
-        self.sub.apply(ty)
     }
 }
 
@@ -1272,7 +1270,9 @@ mod tests {
 
     #[test]
     fn case_with_guard() {
-        let ty = infer_expr_type("case 5 {\n  x if x > 0 -> \"positive\"\n  _ -> \"non-positive\"\n}").unwrap();
+        let ty =
+            infer_expr_type("case 5 {\n  x if x > 0 -> \"positive\"\n  _ -> \"non-positive\"\n}")
+                .unwrap();
         assert_eq!(ty, Type::String);
     }
 
@@ -1327,9 +1327,15 @@ mod tests {
     fn mutual_recursion() {
         let checker = check("is_even n = if n == 0 then True else is_odd (n - 1)\nis_odd n = if n == 0 then False else is_even (n - 1)").unwrap();
         let even_ty = checker.sub.apply(&checker.env.get("is_even").unwrap().ty);
-        assert_eq!(even_ty, Type::Arrow(Box::new(Type::Int), Box::new(Type::Bool)));
+        assert_eq!(
+            even_ty,
+            Type::Arrow(Box::new(Type::Int), Box::new(Type::Bool))
+        );
         let odd_ty = checker.sub.apply(&checker.env.get("is_odd").unwrap().ty);
-        assert_eq!(odd_ty, Type::Arrow(Box::new(Type::Int), Box::new(Type::Bool)));
+        assert_eq!(
+            odd_ty,
+            Type::Arrow(Box::new(Type::Int), Box::new(Type::Bool))
+        );
     }
 
     #[test]
@@ -1388,10 +1394,9 @@ mod tests {
 
     #[test]
     fn record_pattern() {
-        let checker = check(
-            "record Point { x: Int, y: Int }\nget_x p = case p {\n  Point { x, y } -> x\n}",
-        )
-        .unwrap();
+        let checker =
+            check("record Point { x: Int, y: Int }\nget_x p = case p {\n  Point { x, y } -> x\n}")
+                .unwrap();
         let ty = checker.sub.apply(&checker.env.get("get_x").unwrap().ty);
         assert_eq!(
             ty,
@@ -1420,9 +1425,10 @@ mod tests {
 
     #[test]
     fn annotation_correct() {
-        let checker =
-            check("fun fib (n: Int) -> Int\nfib 0 = 0\nfib 1 = 1\nfib n = fib (n - 1) + fib (n - 2)")
-                .unwrap();
+        let checker = check(
+            "fun fib (n: Int) -> Int\nfib 0 = 0\nfib 1 = 1\nfib n = fib (n - 1) + fib (n - 2)",
+        )
+        .unwrap();
         let ty = checker.sub.apply(&checker.env.get("fib").unwrap().ty);
         assert_eq!(ty, Type::Arrow(Box::new(Type::Int), Box::new(Type::Int)));
     }
@@ -1435,8 +1441,7 @@ mod tests {
 
     #[test]
     fn annotation_multi_param() {
-        let checker =
-            check("fun add (a: Int) (b: Int) -> Int\nadd a b = a + b").unwrap();
+        let checker = check("fun add (a: Int) (b: Int) -> Int\nadd a b = a + b").unwrap();
         let ty = checker.sub.apply(&checker.env.get("add").unwrap().ty);
         assert_eq!(
             ty,
