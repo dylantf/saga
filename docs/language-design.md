@@ -249,7 +249,8 @@ process_file path = {
 # Two forms: named (reusable) and inline (one-off).
 
 # Named handler - defined once, used by name
-handler std_io for Console {
+# Handlers declare `needs` when they use other effects
+handler std_io for Console needs {Stdout, Stdin} {
   print msg -> {
     stdout_print! msg
     resume ()
@@ -257,6 +258,7 @@ handler std_io for Console {
   read_line () -> read_stdin! () |> resume
 }
 
+# Pure handler - no `needs` clause
 handler mock_console for Console {
   print msg -> resume ()       # swallow output
   read_line () -> resume "mock input"
@@ -318,7 +320,7 @@ effect Ask {
 }
 
 # A handler that intercepts and continues
-handler interactive for Ask {
+handler interactive for Ask needs {Console} {
   ask prompt -> {
     print! prompt
     let answer = read_line! ()
@@ -333,7 +335,7 @@ handler to_result for Fail {
 }
 
 # Retry logic - resume on success, give up on second failure
-handler with_retry for Http {
+handler with_retry for Http needs {Net, Timer, Fail} {
   get url -> {
     case http_get! url {
       Ok(body) -> resume body
@@ -526,7 +528,7 @@ save_user user = {
 }
 
 # A handler that logs to stderr with timestamps
-handler timed_log for Log {
+handler timed_log for Log needs {Clock, Stderr} {
   log msg -> {
     let time = now! ()
     stderr_print! ("[" <> format_time time <> "] " <> msg)
@@ -534,12 +536,9 @@ handler timed_log for Log {
   }
 }
 
-# A handler that collects logs into a list (for testing)
+# Pure handler - just swallows logs (for testing)
 handler collect_logs for Log {
-  log msg -> {
-    append_to_state msg
-    resume ()
-  }
+  log msg -> resume ()
 }
 
 pub fun main () -> Unit
@@ -668,6 +667,8 @@ up after N failures - all in userspace, no language support needed.
    after the return type: `fun f () -> T needs {Log, Http}`. Handlers use
    `for`: `handler foo for Log { ... }`. This aligns with `impl Show for User`.
    `with` is reserved exclusively for handler attachment (`expr with handler`).
+   Handlers that use effects in their body also declare `needs`:
+   `handler foo for Log needs {Console} { ... }`. Pure handlers omit it.
 
 8. **String interpolation** - `${expr}` inside double-quoted strings.
 

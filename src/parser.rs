@@ -372,6 +372,21 @@ impl Parser {
             effects.push(self.expect_upper_ident()?);
         }
 
+        let mut needs = Vec::new();
+        if matches!(self.peek(), Token::Needs) {
+            self.advance(); // consume 'needs'
+            self.expect(Token::LBrace)?;
+            needs.push(self.expect_upper_ident()?);
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                if matches!(self.peek(), Token::RBrace) {
+                    break; // trailing comma
+                }
+                needs.push(self.expect_upper_ident()?);
+            }
+            self.expect(Token::RBrace)?;
+        }
+
         self.expect(Token::LBrace)?;
         self.skip_terminators();
 
@@ -420,6 +435,7 @@ impl Parser {
         Ok(Decl::HandlerDef {
             name,
             effects,
+            needs,
             arms,
             return_clause,
             span: start.to(end),

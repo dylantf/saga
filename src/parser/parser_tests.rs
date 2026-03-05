@@ -1118,6 +1118,44 @@ fn handler_def_multi_effect() {
     }
 }
 
+#[test]
+fn handler_def_with_needs() {
+    let decls = parse("handler stripe for Billing needs {Log, Http} {\n  charge account amount -> resume (fake_receipt ())\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::HandlerDef { name, effects, needs, arms, .. } => {
+            assert_eq!(name, "stripe");
+            assert_eq!(effects, &["Billing"]);
+            assert_eq!(needs, &["Log", "Http"]);
+            assert_eq!(arms.len(), 1);
+            assert_eq!(arms[0].op_name, "charge");
+        }
+        _ => panic!("expected HandlerDef, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn handler_def_without_needs() {
+    let decls = parse("handler mock for Billing {\n  charge account amount -> resume (fake_receipt ())\n}");
+    match &decls[0] {
+        Decl::HandlerDef { needs, .. } => {
+            assert!(needs.is_empty());
+        }
+        _ => panic!("expected HandlerDef"),
+    }
+}
+
+#[test]
+fn handler_def_needs_trailing_comma() {
+    let decls = parse("handler stripe for Billing needs {Log, Http,} {\n  charge a b -> resume ()\n}");
+    match &decls[0] {
+        Decl::HandlerDef { needs, .. } => {
+            assert_eq!(needs, &["Log", "Http"]);
+        }
+        _ => panic!("expected HandlerDef"),
+    }
+}
+
 // --- Effect call expressions ---
 
 #[test]

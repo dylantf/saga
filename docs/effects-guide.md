@@ -74,14 +74,14 @@ A handler provides implementations for effect operations. There are two forms:
 Define a reusable handler with the `handler` keyword:
 
 ```
-handler console_log for Log {
+handler console_log for Log needs {Console} {
   log level msg -> {
     print! ("[" <> level <> "] " <> msg)
     resume ()
   }
 }
 
-handler sentry_log for Log {
+handler sentry_log for Log needs {Sentry} {
   log level msg -> {
     sentry_send! level msg
     resume ()
@@ -127,7 +127,7 @@ effect Ask {
   fun ask (prompt: String) -> String
 }
 
-handler interactive for Ask {
+handler interactive for Ask needs {Console} {
   ask prompt -> {
     print! prompt
     let answer = read_line! ()
@@ -274,7 +274,7 @@ run_server () with console_log
 Or bundle multiple effects into a single named handler:
 
 ```
-handler dev_env for Log, Database, Http {
+handler dev_env for Log, Database, Http needs {Console, Sqlite, Net} {
   log level msg -> {
     print! ("[" <> level <> "] " <> msg)
     resume ()
@@ -283,7 +283,7 @@ handler dev_env for Log, Database, Http {
   get url -> http_get! url |> resume
 }
 
-handler prod_env for Log, Database, Http {
+handler prod_env for Log, Database, Http needs {Sentry, Postgres, Net} {
   log level msg -> {
     sentry_send! level msg
     resume ()
@@ -298,6 +298,44 @@ main () = {
     run_server () with prod_env
   else
     run_server () with dev_env
+}
+```
+
+---
+
+## Effect Requirements on Handlers
+
+Handlers that use effects in their implementation declare them with `needs`,
+just like functions. This makes the handler's dependencies visible:
+
+```
+handler stripe_billing for Billing needs {Log, Http} {
+  charge account amount -> {
+    log! ("Charging ${show amount}")
+    let result = http_post! "/stripe/charge" (to_json { account, amount })
+    resume (parse_receipt result)
+  }
+}
+```
+
+If the handler is pure (no effects in its body), no `needs` clause:
+
+```
+handler mock_billing for Billing {
+  charge account amount -> resume (fake_receipt ())
+}
+```
+
+When you attach a handler that has `needs`, those effects must also be handled
+somewhere in the handler stack:
+
+```
+main () = {
+  run_app ()
+} with {
+  stripe_billing,    # needs Log and Http
+  console_log,       # handles Log (including from stripe_billing)
+  real_http,         # handles Http (including from stripe_billing)
 }
 ```
 
@@ -407,6 +445,7 @@ handler mock_http for Http {
   post url body -> resume "created"
 }
 
+
 handler collect_logs for Log {
   log level msg -> {
     # swallow logs silently
@@ -458,7 +497,8 @@ handlers are for.
 | --------------------- | -------------------------------------------------- |
 | Define an effect      | `effect Log { fun log (msg: String) -> Unit }`     |
 | Perform an effect     | `log! "hello"`                                     |
-| Named handler         | `handler console_log for Log { log msg -> ... }`   |
+| Named handler         | `handler h for Log { log msg -> ... }`              |
+| Handler with effects  | `handler h for Log needs {X} { ... }`               |
 | Inline handler        | `expr with { log msg -> ... }`                     |
 | Attach named handler  | `expr with console_log`                            |
 | Stack handlers        | `expr with { h1, h2, op args -> ... }`             |

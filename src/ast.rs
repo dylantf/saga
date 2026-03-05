@@ -64,10 +64,11 @@ pub enum Decl {
         span: Span,
     },
 
-    /// `handler console_log for Log { ... }`
+    /// `handler console_log for Log needs {Http} { ... }`
     HandlerDef {
         name: String,
         effects: Vec<String>,
+        needs: Vec<String>,
         arms: Vec<HandlerArm>,
         /// `return value -> Ok(value)` clause
         return_clause: Option<Box<HandlerArm>>,
