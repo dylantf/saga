@@ -3,6 +3,7 @@ mod eval;
 mod lexer;
 mod parser;
 mod token;
+mod typechecker;
 
 use std::env;
 use std::fs;
@@ -39,6 +40,24 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    let mut checker = typechecker::Checker::new();
+
+    // Type-check the prelude first
+    let prelude_src = include_str!("prelude.dy");
+    let prelude_tokens = lexer::Lexer::new(prelude_src).lex().expect("prelude lex error");
+    let prelude_program = parser::Parser::new(prelude_tokens)
+        .parse_program()
+        .expect("prelude parse error");
+    if let Err(e) = checker.check_program(&prelude_program) {
+        eprintln!("Prelude type error: {}", e);
+        std::process::exit(1);
+    }
+
+    if let Err(e) = checker.check_program(&program) {
+        eprintln!("Type error: {}", e);
+        std::process::exit(1);
+    }
 
     match eval::eval_program(&program) {
         eval::EvalResult::Ok(_) => {}

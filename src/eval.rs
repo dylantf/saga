@@ -316,37 +316,7 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> EvalResult {
             let arms = arms.clone();
             let env = env.clone();
             eval_expr(scrutinee, &env).then(move |val| {
-                for arm in &arms {
-                    if let Some(bindings) = match_pattern(&arm.pattern, &val) {
-                        let case_env = env.extend();
-                        for (name, value) in bindings {
-                            case_env.set(name, value);
-                        }
-
-                        if let Some(guard) = &arm.guard {
-                            let arm_body = arm.body.clone();
-                            let case_env2 = case_env.clone();
-                            return eval_expr(guard, &case_env).then(move |guard_val| {
-                                match guard_val {
-                                    Value::Bool(true) => eval_expr(&arm_body, &case_env2),
-                                    Value::Bool(false) => {
-                                        // Guard failed -- but we can't continue the for loop from inside a closure.
-                                        // This is a known limitation; for now, treat as no match.
-                                        EvalResult::error(format!("No pattern matched for {}", val))
-                                    }
-                                    other => EvalResult::error(format!(
-                                        "Guard must evaluate to a Bool, got: {}",
-                                        other
-                                    )),
-                                }
-                            });
-                        }
-
-                        return eval_expr(&arm.body, &case_env);
-                    }
-                }
-
-                EvalResult::error(format!("No pattern matched for {}", val))
+                eval_case_arms(&arms, &val, &env, 0)
             })
         }
 
@@ -849,6 +819,38 @@ fn eval_binop(op: &BinOp, left: Value, right: Value) -> EvalResult {
 
         _ => EvalResult::error(format!("cannot apply {:?} to {} and {}", op, left, right)),
     }
+}
+
+fn eval_case_arms(arms: &[CaseArm], val: &Value, env: &Env, start: usize) -> EvalResult {
+    for i in start..arms.len() {
+        let arm = &arms[i];
+        if let Some(bindings) = match_pattern(&arm.pattern, val) {
+            let case_env = env.extend();
+            for (name, value) in bindings {
+                case_env.set(name, value);
+            }
+
+            if let Some(guard) = &arm.guard {
+                let arm_body = arm.body.clone();
+                let case_env2 = case_env.clone();
+                let arms = arms.to_vec();
+                let val = val.clone();
+                let env = env.clone();
+                return eval_expr(guard, &case_env).then(move |guard_val| match guard_val {
+                    Value::Bool(true) => eval_expr(&arm_body, &case_env2),
+                    Value::Bool(false) => eval_case_arms(&arms, &val, &env, i + 1),
+                    other => EvalResult::error(format!(
+                        "Guard must evaluate to a Bool, got: {}",
+                        other
+                    )),
+                });
+            }
+
+            return eval_expr(&arm.body, &case_env);
+        }
+    }
+
+    EvalResult::error(format!("No pattern matched for {}", val))
 }
 
 fn match_pattern(pattern: &Pat, value: &Value) -> Option<HashMap<String, Value>> {
