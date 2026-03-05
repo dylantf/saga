@@ -205,6 +205,29 @@ pub struct Checker {
     constructors: HashMap<std::string::String, Scheme>,
     /// Record definitions: record name -> vec of (field_name, field_type)
     records: HashMap<std::string::String, Vec<(std::string::String, Type)>>,
+    /// Effect definitions: effect name -> vec of (op_name, param_types, return_type)
+    effects: HashMap<std::string::String, Vec<EffectOpSig>>,
+    /// Named handler definitions: handler name -> info
+    handlers: HashMap<std::string::String, HandlerInfo>,
+    /// Context for resume typing: when inside a handler arm, the return type of the op being handled
+    resume_type: Option<Type>,
+}
+
+#[derive(Debug, Clone)]
+struct EffectOpSig {
+    name: std::string::String,
+    params: Vec<Type>,
+    return_type: Type,
+}
+
+#[derive(Debug, Clone)]
+struct HandlerInfo {
+    /// Which effects this handler handles
+    effects: Vec<std::string::String>,
+    /// Arms: op_name -> (param_names, body) -- already type-checked at definition
+    ops: Vec<std::string::String>,
+    /// Does it have a return clause?
+    has_return_clause: bool,
 }
 
 impl Checker {
@@ -215,6 +238,9 @@ impl Checker {
             env: TypeEnv::new(),
             constructors: HashMap::new(),
             records: HashMap::new(),
+            effects: HashMap::new(),
+            handlers: HashMap::new(),
+            resume_type: None,
         };
         checker.register_builtins();
         checker
@@ -633,10 +659,37 @@ impl Checker {
                 }
             }
 
-            // TODO: EffectCall, With, Resume
-            _ => {
+            Expr::EffectCall {
+                name,
+                qualifier,
+                ..
+            } => {
+                let op_sig = self.lookup_effect_op(name, qualifier.as_deref())?;
+                // Build curried function type: param1 -> param2 -> ... -> return_type
+                // Args are applied via App nodes from parse_application
+                let mut ty = op_sig.return_type.clone();
+                if op_sig.params.is_empty() {
+                    // Zero-param ops like `get! ()` still take a Unit argument
+                    ty = Type::Arrow(Box::new(Type::Unit), Box::new(ty));
+                } else {
+                    for param_ty in op_sig.params.iter().rev() {
+                        ty = Type::Arrow(Box::new(param_ty.clone()), Box::new(ty));
+                    }
+                }
+                Ok(ty)
+            }
+
+            Expr::With { expr, handler, .. } => self.infer_with(expr, handler),
+
+            Expr::Resume { value, .. } => {
+                let val_ty = self.infer_expr(value)?;
+                if let Some(expected) = &self.resume_type.clone() {
+                    self.unify(&val_ty, expected)?;
+                }
+                // resume transfers control; its own type is a fresh var
+                // (the handler arm body continues after resume, so this is the "result" of resume)
                 let ty = self.fresh_var();
-                Ok(ty) // placeholder: return unknown type
+                Ok(ty)
             }
         }
     }
@@ -765,6 +818,11 @@ impl Checker {
                 }
                 Decl::RecordDef { name, fields, .. } => {
                     self.register_record_def(name, fields)?;
+                }
+                Decl::EffectDef {
+                    name, operations, ..
+                } => {
+                    self.register_effect_def(name, operations)?;
                 }
                 _ => {}
             }
@@ -898,6 +956,227 @@ impl Checker {
         Ok(())
     }
 
+    fn register_effect_def(
+        &mut self,
+        name: &str,
+        operations: &[ast::EffectOp],
+    ) -> Result<(), TypeError> {
+        let mut ops = Vec::new();
+        for op in operations {
+            let mut params_list: Vec<(String, u32)> = vec![];
+            let param_types: Vec<Type> = op
+                .params
+                .iter()
+                .map(|(_, texpr)| self.convert_type_expr(texpr, &mut params_list))
+                .collect();
+            let return_type = self.convert_type_expr(&op.return_type, &mut params_list);
+            ops.push(EffectOpSig {
+                name: op.name.clone(),
+                params: param_types,
+                return_type,
+            });
+        }
+        self.effects.insert(name.into(), ops);
+        Ok(())
+    }
+
+    fn register_handler(
+        &mut self,
+        name: &str,
+        effect_names: &[String],
+        arms: &[ast::HandlerArm],
+        return_clause: Option<&ast::HandlerArm>,
+    ) -> Result<(), TypeError> {
+        let mut op_names = Vec::new();
+        // Type-check each handler arm against its effect operation
+        for arm in arms {
+            let op_sig = self.lookup_effect_op(&arm.op_name, None)?;
+            op_names.push(arm.op_name.clone());
+
+            // Bind op params and set resume context, then check body
+            let saved_env = self.env.clone();
+            let saved_resume = self.resume_type.take();
+            self.resume_type = Some(op_sig.return_type.clone());
+
+            for (i, param_name) in arm.params.iter().enumerate() {
+                let param_ty = if i < op_sig.params.len() {
+                    op_sig.params[i].clone()
+                } else {
+                    self.fresh_var()
+                };
+                self.env.insert(
+                    param_name.clone(),
+                    Scheme {
+                        forall: vec![],
+                        ty: param_ty,
+                    },
+                );
+            }
+
+            self.infer_expr(&arm.body)?;
+            self.resume_type = saved_resume;
+            self.env = saved_env;
+        }
+
+        self.handlers.insert(
+            name.into(),
+            HandlerInfo {
+                effects: effect_names.to_vec(),
+                ops: op_names,
+                has_return_clause: return_clause.is_some(),
+            },
+        );
+
+        // Put the handler name in the env so it can be referenced
+        self.env.insert(
+            name.into(),
+            Scheme {
+                forall: vec![],
+                ty: Type::Unit, // handlers don't have a meaningful standalone type
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Infer the type of a `with` expression: `expr with handler`
+    fn infer_with(&mut self, expr: &Expr, handler: &ast::Handler) -> Result<Type, TypeError> {
+        let expr_ty = self.infer_expr(expr)?;
+
+        match handler {
+            ast::Handler::Named(name) => {
+                // Verify the handler exists
+                if self.handlers.get(name).is_none() && self.env.get(name).is_none() {
+                    return Err(TypeError {
+                        message: format!("undefined handler: {}", name),
+                    });
+                }
+                // The with expression's type is the inner expression's type
+                // (unless the handler has a return clause that transforms it,
+                // but we'd need to track that -- for now, pass through)
+                Ok(expr_ty)
+            }
+            ast::Handler::Inline {
+                named,
+                arms,
+                return_clause,
+            } => {
+                // Check named handler references exist
+                for name in named {
+                    if self.handlers.get(name).is_none() && self.env.get(name).is_none() {
+                        return Err(TypeError {
+                            message: format!("undefined handler: {}", name),
+                        });
+                    }
+                }
+
+                // Type-check inline arms (check bodies are well-typed, set up resume context)
+                for arm in arms {
+                    let op_sig = self.lookup_effect_op(&arm.op_name, None).ok();
+
+                    let saved_env = self.env.clone();
+                    let saved_resume = self.resume_type.take();
+
+                    if let Some(ref sig) = op_sig {
+                        self.resume_type = Some(sig.return_type.clone());
+                        for (i, param_name) in arm.params.iter().enumerate() {
+                            let param_ty = if i < sig.params.len() {
+                                sig.params[i].clone()
+                            } else {
+                                self.fresh_var()
+                            };
+                            self.env.insert(
+                                param_name.clone(),
+                                Scheme {
+                                    forall: vec![],
+                                    ty: param_ty,
+                                },
+                            );
+                        }
+                    } else {
+                        // Unknown op -- bind params as fresh vars
+                        for param_name in &arm.params {
+                            let param_ty = self.fresh_var();
+                            self.env.insert(
+                                param_name.clone(),
+                                Scheme {
+                                    forall: vec![],
+                                    ty: param_ty,
+                                },
+                            );
+                        }
+                    }
+
+                    // Check the arm body is well-typed.
+                    // We don't unify arm types with the result -- aborting handlers
+                    // (no resume) can return a different type than the computation,
+                    // and the runtime dispatches dynamically.
+                    self.infer_expr(&arm.body)?;
+
+                    self.resume_type = saved_resume;
+                    self.env = saved_env;
+                }
+
+                // Return clause transforms the result type
+                if let Some(ret_arm) = return_clause {
+                    let saved_env = self.env.clone();
+                    if let Some(param_name) = ret_arm.params.first() {
+                        self.env.insert(
+                            param_name.clone(),
+                            Scheme {
+                                forall: vec![],
+                                ty: expr_ty.clone(),
+                            },
+                        );
+                    }
+                    let ret_ty = self.infer_expr(&ret_arm.body)?;
+                    self.env = saved_env;
+                    Ok(ret_ty)
+                } else {
+                    Ok(expr_ty)
+                }
+            }
+        }
+    }
+
+    /// Look up an effect operation by name, optionally qualified (e.g. `Cache.get`).
+    /// Returns a fresh copy of the op signature (type vars instantiated).
+    fn lookup_effect_op(
+        &mut self,
+        op_name: &str,
+        qualifier: Option<&str>,
+    ) -> Result<EffectOpSig, TypeError> {
+        if let Some(effect_name) = qualifier {
+            // Qualified: look in specific effect
+            let ops = self.effects.get(effect_name).ok_or_else(|| TypeError {
+                message: format!("undefined effect: {}", effect_name),
+            })?;
+            let op = ops.iter().find(|o| o.name == op_name).ok_or_else(|| TypeError {
+                message: format!("effect '{}' has no operation '{}'", effect_name, op_name),
+            })?;
+            Ok(op.clone())
+        } else {
+            // Unqualified: search all effects
+            let mut found: Option<EffectOpSig> = None;
+            for ops in self.effects.values() {
+                if let Some(op) = ops.iter().find(|o| o.name == op_name) {
+                    if found.is_some() {
+                        return Err(TypeError {
+                            message: format!(
+                                "ambiguous effect operation '{}': found in multiple effects",
+                                op_name
+                            ),
+                        });
+                    }
+                    found = Some(op.clone());
+                }
+            }
+            found.ok_or_else(|| TypeError {
+                message: format!("undefined effect operation: {}", op_name),
+            })
+        }
+    }
+
     /// Convert a surface TypeExpr to our internal Type representation.
     fn convert_type_expr(
         &mut self,
@@ -961,7 +1240,18 @@ impl Checker {
                 Ok(())
             }
 
-            // Type annotations, type defs (already registered), effects, handlers, traits, impls,
+            Decl::HandlerDef {
+                name,
+                effects: effect_names,
+                arms,
+                return_clause,
+                ..
+            } => {
+                self.register_handler(name, effect_names, arms, return_clause.as_deref())?;
+                Ok(())
+            }
+
+            // Type annotations, type defs (already registered), effects, traits, impls,
             // imports, modules -- skip for now
             _ => Ok(()),
         }

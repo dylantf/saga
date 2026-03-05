@@ -11,14 +11,9 @@ effect Fail {
 # Run a computation that might fail, returning a Result
 fun try (computation: () -> a needs {Fail}) -> Result a String
 try computation = {
-  let result = computation () with {
+  computation () with {
     fail msg -> Err msg
-  }
-
-  # If we got here without failing, wrap in Ok
-  case result {
-    Err(e) -> Err e
-    _      -> Ok result
+    return value -> Ok value
   }
 }
 

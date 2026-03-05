@@ -380,9 +380,13 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> EvalResult {
                     Some(Value::Handler(h)) => h,
                     _ => return EvalResult::error(format!("Unknown handler: {}", name)),
                 },
-                Handler::Inline { arms, .. } => HandlerVal {
+                Handler::Inline {
+                    arms,
+                    return_clause,
+                    ..
+                } => HandlerVal {
                     arms: arms.clone(),
-                    return_clause: None,
+                    return_clause: return_clause.clone(),
                     env: env.clone(),
                 },
             };
@@ -409,7 +413,18 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> EvalResult {
 // continuation so the handler is re-installed when computation resumes.
 fn handle_effect(result: EvalResult, handler_val: &HandlerVal) -> EvalResult {
     match result {
-        EvalResult::Ok(val) => EvalResult::Ok(val),
+        EvalResult::Ok(val) => {
+            // Apply return clause if present
+            if let Some(ret_arm) = &handler_val.return_clause {
+                let ret_env = handler_val.env.extend();
+                if let Some(param_name) = ret_arm.params.first() {
+                    ret_env.set(param_name.clone(), val);
+                }
+                eval_expr(&ret_arm.body, &ret_env)
+            } else {
+                EvalResult::Ok(val)
+            }
+        }
         EvalResult::Error(e) => EvalResult::Error(e),
         EvalResult::Effect {
             name,
@@ -746,10 +761,15 @@ pub fn eval_decl(decl: &Decl, env: &Env) -> EvalResult {
             EvalResult::Ok(Value::Unit)
         }
 
-        Decl::HandlerDef { name, arms, .. } => {
+        Decl::HandlerDef {
+            name,
+            arms,
+            return_clause,
+            ..
+        } => {
             let handler = HandlerVal {
                 arms: arms.clone(),
-                return_clause: None,
+                return_clause: return_clause.clone(),
                 env: env.clone(),
             };
             env.set(name.clone(), Value::Handler(handler));
