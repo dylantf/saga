@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, Lit, Pat, Stmt};
+use crate::token::Span;
 
 // --- Type representation ---
 
@@ -89,9 +90,10 @@ impl Substitution {
         }
 
         if self.occurs(id, ty) {
-            return Err(TypeError {
-                message: format!("infinite type: ?{} occurs in {}", id, ty),
-            });
+            return Err(TypeError::new(format!(
+                "infinite type: ?{} occurs in {}",
+                id, ty
+            )));
         }
         self.map.insert(id, ty.clone());
         Ok(())
@@ -187,6 +189,30 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
 #[derive(Debug, Clone)]
 pub struct TypeError {
     pub message: std::string::String,
+    pub span: Option<Span>,
+}
+
+impl TypeError {
+    fn new(message: impl Into<std::string::String>) -> Self {
+        TypeError {
+            message: message.into(),
+            span: None,
+        }
+    }
+
+    fn at(span: Span, message: impl Into<std::string::String>) -> Self {
+        TypeError {
+            message: message.into(),
+            span: Some(span),
+        }
+    }
+
+    fn with_span(mut self, span: Span) -> Self {
+        if self.span.is_none() {
+            self.span = Some(span);
+        }
+        self
+    }
 }
 
 impl std::fmt::Display for TypeError {
@@ -355,10 +381,16 @@ impl Checker {
                 Ok(())
             }
 
-            _ => Err(TypeError {
-                message: format!("type mismatch: expected {}, got {}", a, b),
-            }),
+            _ => Err(TypeError::new(format!(
+                "type mismatch: expected {}, got {}",
+                a, b
+            ))),
         }
+    }
+
+    /// Unify with span context: if unification fails, attach the span to the error.
+    fn unify_at(&mut self, a: &Type, b: &Type, span: Span) -> Result<(), TypeError> {
+        self.unify(a, b).map_err(|e| e.with_span(span))
     }
 
     // --- Instantiation & Generalization ---
@@ -413,67 +445,65 @@ impl Checker {
                 Lit::Unit => Type::Unit,
             }),
 
-            Expr::Var { name, .. } => {
+            Expr::Var { name, span } => {
                 if let Some(scheme) = self.env.get(name) {
                     let scheme = scheme.clone();
                     Ok(self.instantiate(&scheme))
                 } else {
-                    Err(TypeError {
-                        message: format!("undefined variable: {}", name),
-                    })
+                    Err(TypeError::at(*span, format!("undefined variable: {}", name)))
                 }
             }
 
-            Expr::Constructor { name, .. } => {
+            Expr::Constructor { name, span } => {
                 if let Some(scheme) = self.constructors.get(name) {
                     let scheme = scheme.clone();
                     Ok(self.instantiate(&scheme))
                 } else {
-                    Err(TypeError {
-                        message: format!("undefined constructor: {}", name),
-                    })
+                    Err(TypeError::at(
+                        *span,
+                        format!("undefined constructor: {}", name),
+                    ))
                 }
             }
 
-            Expr::App { func, arg, .. } => {
+            Expr::App { func, arg, span } => {
                 let func_ty = self.infer_expr(func)?;
                 let arg_ty = self.infer_expr(arg)?;
                 let ret_ty = self.fresh_var();
-                self.unify(
+                self.unify_at(
                     &func_ty,
                     &Type::Arrow(Box::new(arg_ty), Box::new(ret_ty.clone())),
+                    *span,
                 )?;
                 Ok(ret_ty)
             }
 
             Expr::BinOp {
-                op, left, right, ..
+                op, left, right, span,
             } => {
                 let left_ty = self.infer_expr(left)?;
                 let right_ty = self.infer_expr(right)?;
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                        // Numeric: both sides must match, result is same type
-                        // Allows Int or Float (proper Num constraint comes with traits)
-                        self.unify(&left_ty, &right_ty)?;
+                        self.unify_at(&left_ty, &right_ty, *span)?;
                         Ok(left_ty)
                     }
                     BinOp::Eq | BinOp::NotEq => {
-                        self.unify(&left_ty, &right_ty)?;
+                        self.unify_at(&left_ty, &right_ty, *span)?;
                         Ok(Type::Bool)
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
-                        self.unify(&left_ty, &right_ty)?;
+                        self.unify_at(&left_ty, &right_ty, *span)?;
                         Ok(Type::Bool)
                     }
                     BinOp::And | BinOp::Or => {
-                        self.unify(&left_ty, &Type::Bool)?;
-                        self.unify(&right_ty, &Type::Bool)?;
+                        self.unify_at(&left_ty, &Type::Bool, *span)?;
+                        self.unify_at(&right_ty, &Type::Bool, *span)?;
                         Ok(Type::Bool)
                     }
                     BinOp::Concat => {
-                        self.unify(&left_ty, &Type::String)?;
-                        self.unify(&right_ty, &Type::String)?;
+                        self.unify_at(&left_ty, &Type::String, *span)?;
+                        self.unify_at(&right_ty, &Type::String, *span)?;
                         Ok(Type::String)
                     }
                 }
@@ -488,13 +518,13 @@ impl Checker {
                 cond,
                 then_branch,
                 else_branch,
-                ..
+                span,
             } => {
                 let cond_ty = self.infer_expr(cond)?;
-                self.unify(&cond_ty, &Type::Bool)?;
+                self.unify_at(&cond_ty, &Type::Bool, cond.span())?;
                 let then_ty = self.infer_expr(then_branch)?;
                 let else_ty = self.infer_expr(else_branch)?;
-                self.unify(&then_ty, &else_ty)?;
+                self.unify_at(&then_ty, &else_ty, *span)?;
                 Ok(then_ty)
             }
 
@@ -518,7 +548,7 @@ impl Checker {
             }
 
             Expr::Case {
-                scrutinee, arms, ..
+                scrutinee, arms, span: _,
             } => {
                 let scrut_ty = self.infer_expr(scrutinee)?;
                 let result_ty = self.fresh_var();
@@ -530,11 +560,11 @@ impl Checker {
 
                     if let Some(guard) = &arm.guard {
                         let guard_ty = self.infer_expr(guard)?;
-                        self.unify(&guard_ty, &Type::Bool)?;
+                        self.unify_at(&guard_ty, &Type::Bool, guard.span())?;
                     }
 
                     let body_ty = self.infer_expr(&arm.body)?;
-                    self.unify(&result_ty, &body_ty)?;
+                    self.unify_at(&result_ty, &body_ty, arm.body.span())?;
 
                     self.env = saved_env;
                 }
@@ -542,44 +572,49 @@ impl Checker {
                 Ok(result_ty)
             }
 
-            Expr::RecordCreate { name, fields, .. } => {
-                let def = self.records.get(name).cloned().ok_or_else(|| TypeError {
-                    message: format!("undefined record type: {}", name),
+            Expr::RecordCreate { name, fields, span } => {
+                let def = self.records.get(name).cloned().ok_or_else(|| {
+                    TypeError::at(*span, format!("undefined record type: {}", name))
                 })?;
 
                 for (fname, fexpr) in fields {
                     let expected =
                         def.iter()
                             .find(|(n, _)| n == fname)
-                            .ok_or_else(|| TypeError {
-                                message: format!("unknown field '{}' on record {}", fname, name),
+                            .ok_or_else(|| {
+                                TypeError::at(
+                                    fexpr.span(),
+                                    format!("unknown field '{}' on record {}", fname, name),
+                                )
                             })?;
                     let actual = self.infer_expr(fexpr)?;
-                    self.unify(&expected.1, &actual)?;
+                    self.unify_at(&expected.1, &actual, fexpr.span())?;
                 }
 
                 Ok(Type::Con(name.clone(), vec![]))
             }
 
-            Expr::FieldAccess { expr, field, .. } => {
+            Expr::FieldAccess { expr, field, span } => {
                 let expr_ty = self.infer_expr(expr)?;
                 let resolved = self.sub.apply(&expr_ty);
 
                 match &resolved {
                     Type::Con(name, _) => {
-                        let def = self.records.get(name).cloned().ok_or_else(|| TypeError {
-                            message: format!("type {} is not a record", name),
+                        let def = self.records.get(name).cloned().ok_or_else(|| {
+                            TypeError::at(*span, format!("type {} is not a record", name))
                         })?;
                         let (_, field_ty) =
                             def.iter()
                                 .find(|(n, _)| n == field)
-                                .ok_or_else(|| TypeError {
-                                    message: format!("no field '{}' on record {}", field, name),
+                                .ok_or_else(|| {
+                                    TypeError::at(
+                                        *span,
+                                        format!("no field '{}' on record {}", field, name),
+                                    )
                                 })?;
                         Ok(field_ty.clone())
                     }
                     Type::Var(_) => {
-                        // Type not yet resolved -- find records that have this field
                         let candidates: Vec<_> = self
                             .records
                             .iter()
@@ -596,28 +631,30 @@ impl Checker {
                                 self.unify(&resolved, &Type::Con(rname.clone(), vec![]))?;
                                 Ok(field_ty.clone())
                             }
-                            0 => Err(TypeError {
-                                message: format!("no record has field '{}'", field),
-                            }),
-                            _ => Err(TypeError {
-                                message: format!(
+                            0 => Err(TypeError::at(
+                                *span,
+                                format!("no record has field '{}'", field),
+                            )),
+                            _ => Err(TypeError::at(
+                                *span,
+                                format!(
                                     "ambiguous field '{}': found in multiple records",
                                     field
                                 ),
-                            }),
+                            )),
                         }
                     }
-                    _ => Err(TypeError {
-                        message: format!("cannot access field '{}' on type {}", field, resolved),
-                    }),
+                    _ => Err(TypeError::at(
+                        *span,
+                        format!("cannot access field '{}' on type {}", field, resolved),
+                    )),
                 }
             }
 
-            Expr::RecordUpdate { record, fields, .. } => {
+            Expr::RecordUpdate { record, fields, span } => {
                 let rec_ty = self.infer_expr(record)?;
                 let mut resolved = self.sub.apply(&rec_ty);
 
-                // If type is still a var, try to infer record from first updated field
                 if matches!(&resolved, Type::Var(_))
                     && let Some((fname, _)) = fields.first()
                 {
@@ -635,36 +672,43 @@ impl Checker {
 
                 match &resolved {
                     Type::Con(name, _) => {
-                        let def = self.records.get(name).cloned().ok_or_else(|| TypeError {
-                            message: format!("type {} is not a record", name),
+                        let def = self.records.get(name).cloned().ok_or_else(|| {
+                            TypeError::at(*span, format!("type {} is not a record", name))
                         })?;
                         for (fname, fexpr) in fields {
                             let expected =
                                 def.iter()
                                     .find(|(n, _)| n == fname)
-                                    .ok_or_else(|| TypeError {
-                                        message: format!(
-                                            "unknown field '{}' on record {}",
-                                            fname, name
-                                        ),
+                                    .ok_or_else(|| {
+                                        TypeError::at(
+                                            fexpr.span(),
+                                            format!(
+                                                "unknown field '{}' on record {}",
+                                                fname, name
+                                            ),
+                                        )
                                     })?;
                             let actual = self.infer_expr(fexpr)?;
-                            self.unify(&expected.1, &actual)?;
+                            self.unify_at(&expected.1, &actual, fexpr.span())?;
                         }
                         Ok(resolved.clone())
                     }
-                    _ => Err(TypeError {
-                        message: format!("cannot update non-record type {}", resolved),
-                    }),
+                    _ => Err(TypeError::at(
+                        *span,
+                        format!("cannot update non-record type {}", resolved),
+                    )),
                 }
             }
 
             Expr::EffectCall {
                 name,
                 qualifier,
+                span,
                 ..
             } => {
-                let op_sig = self.lookup_effect_op(name, qualifier.as_deref())?;
+                let op_sig = self
+                    .lookup_effect_op(name, qualifier.as_deref())
+                    .map_err(|e| e.with_span(*span))?;
                 // Build curried function type: param1 -> param2 -> ... -> return_type
                 // Args are applied via App nodes from parse_application
                 let mut ty = op_sig.return_type.clone();
@@ -681,10 +725,10 @@ impl Checker {
 
             Expr::With { expr, handler, .. } => self.infer_with(expr, handler),
 
-            Expr::Resume { value, .. } => {
+            Expr::Resume { value, span } => {
                 let val_ty = self.infer_expr(value)?;
                 if let Some(expected) = &self.resume_type.clone() {
-                    self.unify(&val_ty, expected)?;
+                    self.unify_at(&val_ty, expected, *span)?;
                 }
                 // resume transfers control; its own type is a fresh var
                 // (the handler arm body continues after resume, so this is the "result" of resume)
@@ -730,7 +774,7 @@ impl Checker {
                 );
                 Ok(())
             }
-            Pat::Lit { value, .. } => {
+            Pat::Lit { value, span } => {
                 let lit_ty = match value {
                     Lit::Int(_) => Type::Int,
                     Lit::Float(_) => Type::Float,
@@ -738,18 +782,20 @@ impl Checker {
                     Lit::Bool(_) => Type::Bool,
                     Lit::Unit => Type::Unit,
                 };
-                self.unify(ty, &lit_ty)
+                self.unify_at(ty, &lit_ty, *span)
             }
-            Pat::Constructor { name, args, .. } => {
+            Pat::Constructor { name, args, span } => {
                 let ctor_scheme =
                     self.constructors
                         .get(name)
                         .cloned()
-                        .ok_or_else(|| TypeError {
-                            message: format!("undefined constructor in pattern: {}", name),
+                        .ok_or_else(|| {
+                            TypeError::at(
+                                *span,
+                                format!("undefined constructor in pattern: {}", name),
+                            )
                         })?;
                 let ctor_ty = self.instantiate(&ctor_scheme);
-                // Peel off arrow types for each argument
                 let mut current = ctor_ty;
                 for arg_pat in args {
                     match current {
@@ -758,30 +804,36 @@ impl Checker {
                             current = *ret_ty;
                         }
                         _ => {
-                            return Err(TypeError {
-                                message: format!(
+                            return Err(TypeError::at(
+                                *span,
+                                format!(
                                     "constructor {} applied to too many arguments",
                                     name
                                 ),
-                            });
+                            ));
                         }
                     }
                 }
-                self.unify(ty, &current)
+                self.unify_at(ty, &current, *span)
             }
-            Pat::Record { name, fields, .. } => {
-                let def = self.records.get(name).cloned().ok_or_else(|| TypeError {
-                    message: format!("undefined record type in pattern: {}", name),
+            Pat::Record { name, fields, span } => {
+                let def = self.records.get(name).cloned().ok_or_else(|| {
+                    TypeError::at(
+                        *span,
+                        format!("undefined record type in pattern: {}", name),
+                    )
                 })?;
-                // Unify scrutinee with this record type
-                self.unify(ty, &Type::Con(name.clone(), vec![]))?;
+                self.unify_at(ty, &Type::Con(name.clone(), vec![]), *span)?;
 
                 for (fname, alias_pat) in fields {
                     let (_, field_ty) =
                         def.iter()
                             .find(|(n, _)| n == fname)
-                            .ok_or_else(|| TypeError {
-                                message: format!("unknown field '{}' on record {}", fname, name),
+                            .ok_or_else(|| {
+                                TypeError::at(
+                                    *span,
+                                    format!("unknown field '{}' on record {}", fname, name),
+                                )
                             })?;
                     match alias_pat {
                         Some(pat) => self.bind_pattern(pat, field_ty)?,
@@ -1043,17 +1095,15 @@ impl Checker {
     fn infer_with(&mut self, expr: &Expr, handler: &ast::Handler) -> Result<Type, TypeError> {
         let expr_ty = self.infer_expr(expr)?;
 
+        let with_span = expr.span();
         match handler {
             ast::Handler::Named(name) => {
-                // Verify the handler exists
                 if self.handlers.get(name).is_none() && self.env.get(name).is_none() {
-                    return Err(TypeError {
-                        message: format!("undefined handler: {}", name),
-                    });
+                    return Err(TypeError::at(
+                        with_span,
+                        format!("undefined handler: {}", name),
+                    ));
                 }
-                // The with expression's type is the inner expression's type
-                // (unless the handler has a return clause that transforms it,
-                // but we'd need to track that -- for now, pass through)
                 Ok(expr_ty)
             }
             ast::Handler::Inline {
@@ -1061,12 +1111,12 @@ impl Checker {
                 arms,
                 return_clause,
             } => {
-                // Check named handler references exist
                 for name in named {
                     if self.handlers.get(name).is_none() && self.env.get(name).is_none() {
-                        return Err(TypeError {
-                            message: format!("undefined handler: {}", name),
-                        });
+                        return Err(TypeError::at(
+                            with_span,
+                            format!("undefined handler: {}", name),
+                        ));
                     }
                 }
 
@@ -1147,32 +1197,31 @@ impl Checker {
         qualifier: Option<&str>,
     ) -> Result<EffectOpSig, TypeError> {
         if let Some(effect_name) = qualifier {
-            // Qualified: look in specific effect
-            let ops = self.effects.get(effect_name).ok_or_else(|| TypeError {
-                message: format!("undefined effect: {}", effect_name),
+            let ops = self.effects.get(effect_name).ok_or_else(|| {
+                TypeError::new(format!("undefined effect: {}", effect_name))
             })?;
-            let op = ops.iter().find(|o| o.name == op_name).ok_or_else(|| TypeError {
-                message: format!("effect '{}' has no operation '{}'", effect_name, op_name),
+            let op = ops.iter().find(|o| o.name == op_name).ok_or_else(|| {
+                TypeError::new(format!(
+                    "effect '{}' has no operation '{}'",
+                    effect_name, op_name
+                ))
             })?;
             Ok(op.clone())
         } else {
-            // Unqualified: search all effects
             let mut found: Option<EffectOpSig> = None;
             for ops in self.effects.values() {
                 if let Some(op) = ops.iter().find(|o| o.name == op_name) {
                     if found.is_some() {
-                        return Err(TypeError {
-                            message: format!(
-                                "ambiguous effect operation '{}': found in multiple effects",
-                                op_name
-                            ),
-                        });
+                        return Err(TypeError::new(format!(
+                            "ambiguous effect operation '{}': found in multiple effects",
+                            op_name
+                        )));
                     }
                     found = Some(op.clone());
                 }
             }
-            found.ok_or_else(|| TypeError {
-                message: format!("undefined effect operation: {}", op_name),
+            found.ok_or_else(|| {
+                TypeError::new(format!("undefined effect operation: {}", op_name))
             })
         }
     }
@@ -1304,6 +1353,7 @@ impl Checker {
                 params,
                 guard,
                 body,
+                span,
                 ..
             } = clause
             else {
@@ -1311,14 +1361,15 @@ impl Checker {
             };
 
             if params.len() != arity {
-                return Err(TypeError {
-                    message: format!(
+                return Err(TypeError::at(
+                    *span,
+                    format!(
                         "clause for '{}' has {} params, expected {}",
                         name,
                         params.len(),
                         arity
                     ),
-                });
+                ));
             }
 
             let saved_env = self.env.clone();
@@ -1329,11 +1380,11 @@ impl Checker {
 
             if let Some(guard) = guard {
                 let guard_ty = self.infer_expr(guard)?;
-                self.unify(&guard_ty, &Type::Bool)?;
+                self.unify_at(&guard_ty, &Type::Bool, guard.span())?;
             }
 
             let body_ty = self.infer_expr(body)?;
-            self.unify(&result_ty, &body_ty)?;
+            self.unify_at(&result_ty, &body_ty, body.span())?;
 
             self.env = saved_env;
         }
@@ -1349,8 +1400,15 @@ impl Checker {
 
         // Check against type annotation if present
         if let Some(ann_ty) = annotation {
-            self.unify(&fun_ty, ann_ty).map_err(|e| TypeError {
-                message: format!("type annotation mismatch for '{}': {}", name, e.message),
+            self.unify(&fun_ty, ann_ty).map_err(|e| {
+                let span = match clauses[0] {
+                    Decl::FunBinding { span, .. } => *span,
+                    _ => unreachable!(),
+                };
+                TypeError::at(
+                    span,
+                    format!("type annotation mismatch for '{}': {}", name, e.message),
+                )
             })?;
         }
 

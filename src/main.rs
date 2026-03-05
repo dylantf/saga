@@ -8,6 +8,23 @@ mod typechecker;
 use std::env;
 use std::fs;
 
+fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, ch) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {
@@ -55,7 +72,12 @@ fn main() {
     }
 
     if let Err(e) = checker.check_program(&program) {
-        eprintln!("Type error: {}", e);
+        if let Some(span) = e.span {
+            let (line, col) = byte_offset_to_line_col(&source, span.start);
+            eprintln!("Type error at {}:{}:{}: {}", args[1], line, col, e);
+        } else {
+            eprintln!("Type error: {}", e);
+        }
         std::process::exit(1);
     }
 

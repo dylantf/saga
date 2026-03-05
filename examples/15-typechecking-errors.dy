@@ -1,0 +1,75 @@
+# Type checker demo
+#
+# This example runs successfully -- it demonstrates the type system
+# working on valid code. Comments show what WOULD be caught.
+#
+# To see an actual type error with line numbers, try changing any
+# of the commented-out lines.
+
+type Maybe a {
+  Just(a)
+  Nothing
+}
+
+# Polymorphic functions inferred correctly
+id x = x
+const x _ = x
+
+# Annotated function: type checker verifies body matches signature
+fun add (a: Int) (b: Int) -> Int
+add a b = a + b
+
+# Record with typed fields
+record Point { x: Float, y: Float }
+
+distance p = {
+  let dx = p.x
+  let dy = p.y
+  dx + dy
+}
+
+# Pattern matching: all branches must return the same type
+describe m = case m {
+  Just(x) -> "got: " <> show x
+  Nothing -> "nothing"
+}
+
+# Effect ops get proper types through the handler
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+safe_div _ 0 = fail! "division by zero"
+safe_div x y = x / y
+
+main () = {
+  # Polymorphism: id works on any type
+  print (show (id 42))
+  print (id "hello")
+
+  # Type-safe arithmetic
+  print (show (add 10 20))
+
+  # Records
+  let p = Point { x: 1.0, y: 2.0 }
+  print (show (distance p))
+
+  # Pattern matching
+  print (describe (Just 99))
+  print (describe Nothing)
+
+  # Effects with handler
+  let result = {
+    safe_div 100 4
+  } with {
+    fail msg -> 0 - 1
+  }
+  print ("safe_div result: " <> show result)
+
+  # --- Lines that would cause type errors: ---
+  let bad = 1 + "hello"          # type mismatch: expected Int, got String
+  let bad = if True then 1 else "no"  # branch type mismatch
+  let bad = add 1 "two"          # expected Int, got String
+  let bad = Point { x: "bad", y: 2.0 }  # field type mismatch
+  let bad = nope                  # undefined variable
+}
