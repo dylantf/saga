@@ -11,29 +11,32 @@ use crate::token::Span;
 
 /// Internal type representation used during inference.
 /// Separate from ast::TypeExpr, which is surface syntax.
+/// All types (including primitives like Int, Bool) are represented as `Con`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
-    Int,
-    Float,
-    String,
-    Bool,
-    Unit,
     /// Unification variable, solved during inference
     Var(u32),
     /// Function type: a -> b
     Arrow(Box<Type>, Box<Type>),
-    /// Named type constructor with args: Option Int, Result String Int, List a
+    /// Named type constructor with args: Int = Con("Int", []), List a = Con("List", [a])
     Con(std::string::String, Vec<Type>),
+}
+
+/// Convenience constructors for built-in types
+impl Type {
+    pub fn con(name: &str) -> Type {
+        Type::Con(name.into(), vec![])
+    }
+    pub fn int() -> Type { Type::con("Int") }
+    pub fn float() -> Type { Type::con("Float") }
+    pub fn string() -> Type { Type::con("String") }
+    pub fn bool() -> Type { Type::con("Bool") }
+    pub fn unit() -> Type { Type::con("Unit") }
 }
 
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Type::Int => write!(f, "Int"),
-            Type::Float => write!(f, "Float"),
-            Type::String => write!(f, "String"),
-            Type::Bool => write!(f, "Bool"),
-            Type::Unit => write!(f, "Unit"),
             Type::Var(id) => write!(f, "?{}", id),
             Type::Arrow(a, b) => match a.as_ref() {
                 Type::Arrow(_, _) => write!(f, "({}) -> {}", a, b),
@@ -81,7 +84,6 @@ impl Substitution {
             Type::Con(name, args) => {
                 Type::Con(name.clone(), args.iter().map(|a| self.apply(a)).collect())
             }
-            _ => ty.clone(),
         }
     }
 
@@ -118,7 +120,6 @@ impl Substitution {
             }
             Type::Arrow(a, b) => self.occurs(id, a) || self.occurs(id, b),
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
-            _ => false,
         }
     }
 }
@@ -186,7 +187,6 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                 free_vars_in_type(arg, bound, out);
             }
         }
-        _ => {}
     }
 }
 
@@ -317,7 +317,21 @@ impl Checker {
     }
 
     fn register_builtins(&mut self) {
-        // print : a -> Unit (polymorphic, accepts anything)
+        // Built-in Show trait and impls for primitives
+        self.traits.insert(
+            "Show".into(),
+            TraitInfo {
+                type_param: "a".into(),
+                supertraits: vec![],
+                methods: vec![("show".into(), vec![Type::Var(u32::MAX)], Type::string())],
+            },
+        );
+        for prim in &["Int", "Float", "String", "Bool", "Unit"] {
+            self.trait_impls
+                .insert(("Show".into(), prim.to_string()), ImplInfo);
+        }
+
+        // print : Show a => a -> Unit
         let a = self.fresh_var();
         let a_id = match &a {
             Type::Var(id) => *id,
@@ -327,12 +341,12 @@ impl Checker {
             "print".into(),
             Scheme {
                 forall: vec![a_id],
-                constraints: vec![],
-                ty: Type::Arrow(Box::new(a), Box::new(Type::Unit)),
+                constraints: vec![("Show".into(), a_id)],
+                ty: Type::Arrow(Box::new(a), Box::new(Type::unit())),
             },
         );
 
-        // show : a -> String
+        // show : Show a => a -> String
         let a = self.fresh_var();
         let a_id = match &a {
             Type::Var(id) => *id,
@@ -342,8 +356,8 @@ impl Checker {
             "show".into(),
             Scheme {
                 forall: vec![a_id],
-                constraints: vec![],
-                ty: Type::Arrow(Box::new(a), Box::new(Type::String)),
+                constraints: vec![("Show".into(), a_id)],
+                ty: Type::Arrow(Box::new(a), Box::new(Type::string())),
             },
         );
 
@@ -386,7 +400,7 @@ impl Checker {
             Scheme {
                 forall: vec![],
                 constraints: vec![],
-                ty: Type::Bool,
+                ty: Type::bool(),
             },
         );
         self.constructors.insert(
@@ -394,7 +408,7 @@ impl Checker {
             Scheme {
                 forall: vec![],
                 constraints: vec![],
-                ty: Type::Bool,
+                ty: Type::bool(),
             },
         );
     }
@@ -470,7 +484,6 @@ impl Checker {
                 name.clone(),
                 args.iter().map(|a| self.replace_vars(a, mapping)).collect(),
             ),
-            _ => ty.clone(),
         }
     }
 
@@ -495,14 +508,7 @@ impl Checker {
         params: &mut Vec<(String, u32)>,
     ) -> Type {
         match texpr {
-            crate::ast::TypeExpr::Named(name) => match name.as_str() {
-                "Int" => Type::Int,
-                "Float" => Type::Float,
-                "String" => Type::String,
-                "Bool" => Type::Bool,
-                "Unit" => Type::Unit,
-                _ => Type::Con(name.clone(), vec![]),
-            },
+            crate::ast::TypeExpr::Named(name) => Type::Con(name.clone(), vec![]),
             crate::ast::TypeExpr::Var(name) => {
                 if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
                     Type::Var(*id)
@@ -554,6 +560,5 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
                 collect_free_vars(arg, out);
             }
         }
-        _ => {}
     }
 }

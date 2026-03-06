@@ -10,11 +10,11 @@ impl Checker {
     pub fn infer_expr(&mut self, expr: &Expr) -> Result<Type, TypeError> {
         match expr {
             Expr::Lit { value, .. } => Ok(match value {
-                Lit::Int(_) => Type::Int,
-                Lit::Float(_) => Type::Float,
-                Lit::String(_) => Type::String,
-                Lit::Bool(_) => Type::Bool,
-                Lit::Unit => Type::Unit,
+                Lit::Int(_) => Type::int(),
+                Lit::Float(_) => Type::float(),
+                Lit::String(_) => Type::string(),
+                Lit::Bool(_) => Type::bool(),
+                Lit::Unit => Type::unit(),
             }),
 
             Expr::Var { name, span } => {
@@ -77,21 +77,21 @@ impl Checker {
                     }
                     BinOp::Eq | BinOp::NotEq => {
                         self.unify_at(&left_ty, &right_ty, *span)?;
-                        Ok(Type::Bool)
+                        Ok(Type::bool())
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         self.unify_at(&left_ty, &right_ty, *span)?;
-                        Ok(Type::Bool)
+                        Ok(Type::bool())
                     }
                     BinOp::And | BinOp::Or => {
-                        self.unify_at(&left_ty, &Type::Bool, *span)?;
-                        self.unify_at(&right_ty, &Type::Bool, *span)?;
-                        Ok(Type::Bool)
+                        self.unify_at(&left_ty, &Type::bool(), *span)?;
+                        self.unify_at(&right_ty, &Type::bool(), *span)?;
+                        Ok(Type::bool())
                     }
                     BinOp::Concat => {
-                        self.unify_at(&left_ty, &Type::String, *span)?;
-                        self.unify_at(&right_ty, &Type::String, *span)?;
-                        Ok(Type::String)
+                        self.unify_at(&left_ty, &Type::string(), *span)?;
+                        self.unify_at(&right_ty, &Type::string(), *span)?;
+                        Ok(Type::string())
                     }
                 }
             }
@@ -108,7 +108,7 @@ impl Checker {
                 span,
             } => {
                 let cond_ty = self.infer_expr(cond)?;
-                self.unify_at(&cond_ty, &Type::Bool, cond.span())?;
+                self.unify_at(&cond_ty, &Type::bool(), cond.span())?;
                 let then_ty = self.infer_expr(then_branch)?;
                 let else_ty = self.infer_expr(else_branch)?;
                 self.unify_at(&then_ty, &else_ty, *span)?;
@@ -152,7 +152,7 @@ impl Checker {
 
                     if let Some(guard) = &arm.guard {
                         let guard_ty = self.infer_expr(guard)?;
-                        self.unify_at(&guard_ty, &Type::Bool, guard.span())?;
+                        self.unify_at(&guard_ty, &Type::bool(), guard.span())?;
                     }
 
                     let body_ty = self.infer_expr(&arm.body)?;
@@ -303,7 +303,7 @@ impl Checker {
                 let mut ty = op_sig.return_type.clone();
                 if op_sig.params.is_empty() {
                     // Zero-param ops like `get! ()` still take a Unit argument
-                    ty = Type::Arrow(Box::new(Type::Unit), Box::new(ty));
+                    ty = Type::Arrow(Box::new(Type::unit()), Box::new(ty));
                 } else {
                     for param_ty in op_sig.params.iter().rev() {
                         ty = Type::Arrow(Box::new(param_ty.clone()), Box::new(ty));
@@ -328,18 +328,18 @@ impl Checker {
     }
 
     fn infer_block(&mut self, stmts: &[Stmt]) -> Result<Type, TypeError> {
-        let mut last_ty = Type::Unit;
+        let mut last_ty = Type::unit();
         for stmt in stmts {
             match stmt {
                 Stmt::Let { name, value, .. } => {
                     let ty = self.infer_expr(value)?;
                     let scheme = self.generalize(&ty);
                     self.env.insert(name.clone(), scheme);
-                    last_ty = Type::Unit;
+                    last_ty = Type::unit();
                 }
                 Stmt::Assign { value, .. } => {
                     self.infer_expr(value)?;
-                    last_ty = Type::Unit;
+                    last_ty = Type::unit();
                 }
                 Stmt::Expr(expr) => {
                     last_ty = self.infer_expr(expr)?;
@@ -368,11 +368,11 @@ impl Checker {
             }
             Pat::Lit { value, span } => {
                 let lit_ty = match value {
-                    Lit::Int(_) => Type::Int,
-                    Lit::Float(_) => Type::Float,
-                    Lit::String(_) => Type::String,
-                    Lit::Bool(_) => Type::Bool,
-                    Lit::Unit => Type::Unit,
+                    Lit::Int(_) => Type::int(),
+                    Lit::Float(_) => Type::float(),
+                    Lit::String(_) => Type::string(),
+                    Lit::Bool(_) => Type::bool(),
+                    Lit::Unit => Type::unit(),
                 };
                 self.unify_at(ty, &lit_ty, *span)
             }
@@ -709,7 +709,7 @@ impl Checker {
 
             if let Some(guard) = guard {
                 let guard_ty = self.infer_expr(guard)?;
-                self.unify_at(&guard_ty, &Type::Bool, guard.span())?;
+                self.unify_at(&guard_ty, &Type::bool(), guard.span())?;
             }
 
             let body_ty = self.infer_expr(body)?;
@@ -986,7 +986,7 @@ impl Checker {
             Scheme {
                 forall: vec![],
                 constraints: vec![],
-                ty: Type::Unit, // handlers don't have a meaningful standalone type
+                ty: Type::unit(), // handlers don't have a meaningful standalone type
             },
         );
 
@@ -1203,31 +1203,11 @@ impl Checker {
         for (trait_name, ty, span) in constraints {
             let resolved = self.sub.apply(&ty);
             match &resolved {
-                // Concrete type: check that an impl exists
+                // Concrete type (includes primitives): check that an impl exists
                 Type::Con(type_name, _) => {
                     if !self
                         .trait_impls
                         .contains_key(&(trait_name.clone(), type_name.clone()))
-                    {
-                        return Err(TypeError::at(
-                            span,
-                            format!("no impl of {} for {}", trait_name, type_name),
-                        ));
-                    }
-                }
-                // Primitive types
-                Type::Int | Type::Float | Type::String | Type::Bool | Type::Unit => {
-                    let type_name = match &resolved {
-                        Type::Int => "Int",
-                        Type::Float => "Float",
-                        Type::String => "String",
-                        Type::Bool => "Bool",
-                        Type::Unit => "Unit",
-                        _ => unreachable!(),
-                    };
-                    if !self
-                        .trait_impls
-                        .contains_key(&(trait_name.clone(), type_name.to_string()))
                     {
                         return Err(TypeError::at(
                             span,
@@ -1311,7 +1291,6 @@ impl Checker {
                     .map(|a| self.substitute_trait_param(replacement, a))
                     .collect(),
             ),
-            _ => ty.clone(),
         }
     }
 

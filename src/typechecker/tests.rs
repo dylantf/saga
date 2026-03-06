@@ -23,38 +23,38 @@ fn infer_expr_type(src: &str) -> Result<Type, TypeError> {
 #[test]
 fn literal_int() {
     let ty = infer_expr_type("42").unwrap();
-    assert_eq!(ty, Type::Int);
+    assert_eq!(ty, Type::int());
 }
 
 #[test]
 fn literal_float() {
     let ty = infer_expr_type("3.14").unwrap();
-    assert_eq!(ty, Type::Float);
+    assert_eq!(ty, Type::float());
 }
 
 #[test]
 fn literal_string() {
     let ty = infer_expr_type("\"hello\"").unwrap();
-    assert_eq!(ty, Type::String);
+    assert_eq!(ty, Type::string());
 }
 
 #[test]
 fn literal_bool() {
     let ty = infer_expr_type("True").unwrap();
-    assert_eq!(ty, Type::Bool);
+    assert_eq!(ty, Type::bool());
 }
 
 #[test]
 fn literal_unit() {
     let ty = infer_expr_type("()").unwrap();
-    assert_eq!(ty, Type::Unit);
+    assert_eq!(ty, Type::unit());
 }
 
 #[test]
 fn variable_lookup() {
     let checker = check("let x = 42\nlet y = x").unwrap();
     let ty = checker.sub.apply(&checker.env.get("y").unwrap().ty);
-    assert_eq!(ty, Type::Int);
+    assert_eq!(ty, Type::int());
 }
 
 #[test]
@@ -66,25 +66,25 @@ fn undefined_variable() {
 #[test]
 fn binary_add() {
     let ty = infer_expr_type("1 + 2").unwrap();
-    assert_eq!(ty, Type::Int);
+    assert_eq!(ty, Type::int());
 }
 
 #[test]
 fn binary_comparison() {
     let ty = infer_expr_type("1 < 2").unwrap();
-    assert_eq!(ty, Type::Bool);
+    assert_eq!(ty, Type::bool());
 }
 
 #[test]
 fn binary_concat() {
     let ty = infer_expr_type("\"a\" <> \"b\"").unwrap();
-    assert_eq!(ty, Type::String);
+    assert_eq!(ty, Type::string());
 }
 
 #[test]
 fn if_expression() {
     let ty = infer_expr_type("if True then 1 else 2").unwrap();
-    assert_eq!(ty, Type::Int);
+    assert_eq!(ty, Type::int());
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn function_identity() {
 fn function_application() {
     let checker = check("id x = x\nlet y = id 42").unwrap();
     let ty = checker.sub.apply(&checker.env.get("y").unwrap().ty);
-    assert_eq!(ty, Type::Int);
+    assert_eq!(ty, Type::int());
 }
 
 #[test]
@@ -121,26 +121,26 @@ fn type_mismatch_in_addition() {
 #[test]
 fn lambda_simple() {
     let ty = infer_expr_type("fun x -> x + 1").unwrap();
-    assert_eq!(ty, Type::Arrow(Box::new(Type::Int), Box::new(Type::Int)));
+    assert_eq!(ty, Type::Arrow(Box::new(Type::int()), Box::new(Type::int())));
 }
 
 #[test]
 fn block_returns_last() {
     let ty = infer_expr_type("{\n  let x = 1\n  x + 2\n}").unwrap();
-    assert_eq!(ty, Type::Int);
+    assert_eq!(ty, Type::int());
 }
 
 #[test]
 fn constructor_type() {
     let checker = check("type Maybe a {\n  Just(a)\n  Nothing\n}\nlet x = Just 42").unwrap();
     let ty = checker.sub.apply(&checker.env.get("x").unwrap().ty);
-    assert_eq!(ty, Type::Con("Maybe".into(), vec![Type::Int]));
+    assert_eq!(ty, Type::Con("Maybe".into(), vec![Type::int()]));
 }
 
 #[test]
 fn case_literal_patterns() {
     let ty = infer_expr_type("case 1 {\n  0 -> \"zero\"\n  _ -> \"other\"\n}").unwrap();
-    assert_eq!(ty, Type::String);
+    assert_eq!(ty, Type::string());
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn case_constructor_patterns() {
         check("type Maybe a {\n  Just(a)\n  Nothing\n}\nlet x = case Just 42 {\n  Just(n) -> n + 1\n  Nothing -> 0\n}")
             .unwrap();
     let ty = checker.sub.apply(&checker.env.get("x").unwrap().ty);
-    assert_eq!(ty, Type::Int);
+    assert_eq!(ty, Type::int());
 }
 
 #[test]
@@ -166,7 +166,7 @@ fn case_binds_pattern_vars() {
         check("type Maybe a {\n  Just(a)\n  Nothing\n}\nlet x = case Just \"hello\" {\n  Just(s) -> s <> \" world\"\n  Nothing -> \"default\"\n}")
             .unwrap();
     let ty = checker.sub.apply(&checker.env.get("x").unwrap().ty);
-    assert_eq!(ty, Type::String);
+    assert_eq!(ty, Type::string());
 }
 
 #[test]
@@ -174,7 +174,7 @@ fn case_with_guard() {
     let ty =
         infer_expr_type("case 5 {\n  x if x > 0 -> \"positive\"\n  _ -> \"non-positive\"\n}")
             .unwrap();
-    assert_eq!(ty, Type::String);
+    assert_eq!(ty, Type::string());
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn recursive_function() {
     let checker = check("factorial n = if n == 0 then 1 else n * factorial (n - 1)").unwrap();
     let scheme = checker.env.get("factorial").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
-    assert_eq!(ty, Type::Arrow(Box::new(Type::Int), Box::new(Type::Int)));
+    assert_eq!(ty, Type::Arrow(Box::new(Type::int()), Box::new(Type::int())));
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn multi_clause_with_guards() {
     let checker = check("abs n | n < 0 = 0 - n\nabs n = n").unwrap();
     let scheme = checker.env.get("abs").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
-    assert_eq!(ty, Type::Arrow(Box::new(Type::Int), Box::new(Type::Int)));
+    assert_eq!(ty, Type::Arrow(Box::new(Type::int()), Box::new(Type::int())));
 }
 
 #[test]
@@ -221,7 +221,7 @@ fn multi_clause_literal_patterns() {
     let checker = check("fib 0 = 0\nfib 1 = 1\nfib n = fib (n - 1) + fib (n - 2)").unwrap();
     let scheme = checker.env.get("fib").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
-    assert_eq!(ty, Type::Arrow(Box::new(Type::Int), Box::new(Type::Int)));
+    assert_eq!(ty, Type::Arrow(Box::new(Type::int()), Box::new(Type::int())));
 }
 
 #[test]
@@ -230,12 +230,12 @@ fn mutual_recursion() {
     let even_ty = checker.sub.apply(&checker.env.get("is_even").unwrap().ty);
     assert_eq!(
         even_ty,
-        Type::Arrow(Box::new(Type::Int), Box::new(Type::Bool))
+        Type::Arrow(Box::new(Type::int()), Box::new(Type::bool()))
     );
     let odd_ty = checker.sub.apply(&checker.env.get("is_odd").unwrap().ty);
     assert_eq!(
         odd_ty,
-        Type::Arrow(Box::new(Type::Int), Box::new(Type::Bool))
+        Type::Arrow(Box::new(Type::int()), Box::new(Type::bool()))
     );
 }
 
@@ -243,7 +243,7 @@ fn mutual_recursion() {
 fn list_cons_expression() {
     let checker = check("let xs = 1 :: 2 :: Nil").unwrap();
     let ty = checker.sub.apply(&checker.env.get("xs").unwrap().ty);
-    assert_eq!(ty, Type::Con("List".into(), vec![Type::Int]));
+    assert_eq!(ty, Type::Con("List".into(), vec![Type::int()]));
 }
 
 #[test]
@@ -260,7 +260,7 @@ fn record_field_access() {
         check("record Point { x: Int, y: Int }\nlet p = Point { x: 3, y: 4 }\nlet a = p.x")
             .unwrap();
     let ty = checker.sub.apply(&checker.env.get("a").unwrap().ty);
-    assert_eq!(ty, Type::Int);
+    assert_eq!(ty, Type::int());
 }
 
 #[test]
@@ -303,7 +303,7 @@ fn record_pattern() {
         ty,
         Type::Arrow(
             Box::new(Type::Con("Point".into(), vec![])),
-            Box::new(Type::Int)
+            Box::new(Type::int())
         )
     );
 }
@@ -319,7 +319,7 @@ fn record_pattern_with_alias() {
         ty,
         Type::Arrow(
             Box::new(Type::Con("User".into(), vec![])),
-            Box::new(Type::String)
+            Box::new(Type::string())
         )
     );
 }
@@ -331,7 +331,7 @@ fn annotation_correct() {
     )
     .unwrap();
     let ty = checker.sub.apply(&checker.env.get("fib").unwrap().ty);
-    assert_eq!(ty, Type::Arrow(Box::new(Type::Int), Box::new(Type::Int)));
+    assert_eq!(ty, Type::Arrow(Box::new(Type::int()), Box::new(Type::int())));
 }
 
 #[test]
@@ -347,8 +347,8 @@ fn annotation_multi_param() {
     assert_eq!(
         ty,
         Type::Arrow(
-            Box::new(Type::Int),
-            Box::new(Type::Arrow(Box::new(Type::Int), Box::new(Type::Int)))
+            Box::new(Type::int()),
+            Box::new(Type::Arrow(Box::new(Type::int()), Box::new(Type::int())))
         )
     );
 }
@@ -358,7 +358,7 @@ fn annotation_constrains_polymorphism() {
     // id without annotation is polymorphic; with annotation it's constrained to Int -> Int
     let checker = check("fun myid (x: Int) -> Int\nmyid x = x").unwrap();
     let ty = checker.sub.apply(&checker.env.get("myid").unwrap().ty);
-    assert_eq!(ty, Type::Arrow(Box::new(Type::Int), Box::new(Type::Int)));
+    assert_eq!(ty, Type::Arrow(Box::new(Type::int()), Box::new(Type::int())));
 }
 
 #[test]
@@ -377,7 +377,7 @@ fn annotation_polymorphic() {
 fn pipe_operator() {
     let checker = check("let x = 42 |> show").unwrap();
     let ty = checker.sub.apply(&checker.env.get("x").unwrap().ty);
-    assert_eq!(ty, Type::String);
+    assert_eq!(ty, Type::string());
 }
 
 // --- Effect needs tracking ---
@@ -527,7 +527,7 @@ fn trait_method_in_env() {
     let scheme = checker.env.get("greet").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
     match ty {
-        Type::Arrow(_, ret) => assert_eq!(*ret, Type::String),
+        Type::Arrow(_, ret) => assert_eq!(*ret, Type::string()),
         _ => panic!("expected arrow, got {}", ty),
     }
 }
@@ -849,6 +849,65 @@ main () = special (Bar { val: 1 })",
     let err = result.err().unwrap();
     assert!(
         err.message.contains("requires impl Eq for Bar"),
+        "got: {}",
+        err.message
+    );
+}
+
+// --- Built-in Show constraint ---
+
+#[test]
+fn show_works_for_primitives() {
+    check("main () = print 42").unwrap();
+    check("main () = print 3.14").unwrap();
+    check("main () = print \"hello\"").unwrap();
+    check("main () = print True").unwrap();
+    check("main () = print ()").unwrap();
+    check("let x = show 42\nmain () = print x").unwrap();
+}
+
+#[test]
+fn show_fails_for_custom_type_without_impl() {
+    let result = check(
+        "record Foo { x: Int }
+main () = print (Foo { x: 1 })",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("no impl of Show for Foo"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn show_works_for_custom_type_with_impl() {
+    check(
+        "record Foo { x: Int }
+trait Describe a {
+  fun describe (x: a) -> String
+}
+impl Show for Foo {
+  show f = \"Foo\"
+}
+main () = print (Foo { x: 1 })",
+    )
+    .unwrap();
+}
+
+#[test]
+fn show_constraint_propagates() {
+    // Function using show on polymorphic arg should infer Show constraint
+    let result = check(
+        "record Foo { x: Int }
+display x = show x
+main () = display (Foo { x: 1 })",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("no impl of Show for Foo"),
         "got: {}",
         err.message
     );

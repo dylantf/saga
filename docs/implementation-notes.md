@@ -432,11 +432,23 @@ checker. Runtime dispatch uses mangled environment keys in the interpreter.
   are registered (order-independent). Verifies that for every `impl Trait for X`,
   all supertraits of `Trait` also have impls for `X`.
 
+- **Unified type representation**: primitive types (Int, Float, String, Bool,
+  Unit) are no longer separate `Type` enum variants. All types are `Type::Con`,
+  e.g. `Type::Con("Int", [])`. Convenience helpers: `Type::int()`, etc.
+  Simplifies trait constraint checking (single `Con` match arm instead of
+  separate primitive and user-defined arms).
+
+- **Built-in Show trait**: registered in `register_builtins` with impls for
+  Int, Float, String, Bool, Unit. `show` and `print` now require `Show a`
+  constraint. Custom types need `impl Show for T` to be printable. Show
+  constraints propagate through inference like user-defined traits.
+
 **Still needed:**
 
-- **Built-in trait constraints**: `show`/`print` are maximally polymorphic (no
-  `Show` constraint). Numeric ops have no `Num` constraint. Design decision
-  about when/whether to tighten these.
+- **Numeric trait constraints**: arithmetic ops have no `Num` constraint,
+  comparison ops have no `Eq`/`Ord` constraint. Design decision about
+  when/whether to tighten these (requires desugaring BinOps to trait method
+  calls, or pushing constraints from BinOp inference).
 
 **Core traits for the stdlib:**
 
