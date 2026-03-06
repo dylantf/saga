@@ -479,11 +479,13 @@ impl Checker {
             if let Decl::ImplDef {
                 trait_name,
                 target_type,
+                type_params,
+                where_clause,
                 methods,
                 span,
             } = decl
             {
-                self.register_impl(trait_name, target_type, methods, *span)?;
+                self.register_impl(trait_name, target_type, type_params, where_clause, methods, *span)?;
             }
         }
 
@@ -1399,6 +1401,8 @@ impl Checker {
         &mut self,
         trait_name: &str,
         target_type: &str,
+        type_params: &[String],
+        where_clause: &[ast::TraitBound],
         methods: &[(String, Vec<ast::Pat>, ast::Expr)],
         span: crate::token::Span,
     ) -> Result<(), TypeError> {
@@ -1436,6 +1440,14 @@ impl Checker {
 
         // Type-check each method body against the trait's expected signature.
         // Substitute the trait's type param with the concrete target type.
+        // For parameterized impls (e.g. `impl Show for Box a`), use fresh vars for type params.
+        let target = if type_params.is_empty() {
+            Type::Con(target_type.into(), vec![])
+        } else {
+            let param_vars: Vec<Type> = type_params.iter().map(|_| self.fresh_var()).collect();
+            Type::Con(target_type.into(), param_vars)
+        };
+
         for (method_name, params, body) in methods {
             let trait_method = trait_info
                 .methods
@@ -1443,8 +1455,6 @@ impl Checker {
                 .find(|(n, _, _)| n == method_name)
                 .unwrap(); // already validated above
 
-            // Build expected param types with trait type param replaced by target_type
-            let target = Type::Con(target_type.into(), vec![]);
             let expected_params: Vec<Type> = trait_method
                 .1
                 .iter()
@@ -1477,8 +1487,30 @@ impl Checker {
             self.env = saved_env;
         }
 
+        // Build param_constraints from where clause
+        let mut param_constraints = Vec::new();
+        for bound in where_clause {
+            let param_idx = type_params.iter().position(|p| p == &bound.type_var);
+            match param_idx {
+                Some(idx) => {
+                    for trait_req in &bound.traits {
+                        param_constraints.push((trait_req.clone(), idx));
+                    }
+                }
+                None => {
+                    return Err(TypeError::at(
+                        span,
+                        format!(
+                            "where clause references unknown type variable '{}' (params: {:?})",
+                            bound.type_var, type_params
+                        ),
+                    ));
+                }
+            }
+        }
+
         self.trait_impls
-            .insert((trait_name.into(), target_type.into()), super::ImplInfo { param_constraints: vec![] });
+            .insert((trait_name.into(), target_type.into()), super::ImplInfo { param_constraints });
         Ok(())
     }
 }

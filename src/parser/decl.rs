@@ -165,32 +165,7 @@ impl Parser {
         }
 
         // Parse optional `where {a: Show + Eq, b: Ord}`
-        let where_clause = if *self.peek() == Token::Where {
-            self.advance();
-            self.expect(Token::LBrace)?;
-            let mut bounds = Vec::new();
-            while *self.peek() != Token::RBrace {
-                if !bounds.is_empty() {
-                    self.expect(Token::Comma)?;
-                    if *self.peek() == Token::RBrace {
-                        // trailing comma
-                        break;
-                    }
-                }
-                let type_var = self.expect_ident()?;
-                self.expect(Token::Colon)?;
-                let mut traits = vec![self.expect_upper_ident()?];
-                while *self.peek() == Token::Plus {
-                    self.advance();
-                    traits.push(self.expect_upper_ident()?);
-                }
-                bounds.push(crate::ast::TraitBound { type_var, traits });
-            }
-            self.expect(Token::RBrace)?;
-            bounds
-        } else {
-            Vec::new()
-        };
+        let where_clause = self.parse_where_clause()?;
 
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::FunAnnotation {
@@ -422,6 +397,34 @@ impl Parser {
         })
     }
 
+    /// Parse `where {a: Show + Eq, b: Ord}` clause, returns empty vec if no `where` keyword
+    fn parse_where_clause(&mut self) -> Result<Vec<crate::ast::TraitBound>, ParseError> {
+        if *self.peek() != Token::Where {
+            return Ok(Vec::new());
+        }
+        self.advance();
+        self.expect(Token::LBrace)?;
+        let mut bounds = Vec::new();
+        while *self.peek() != Token::RBrace {
+            if !bounds.is_empty() {
+                self.expect(Token::Comma)?;
+                if *self.peek() == Token::RBrace {
+                    break;
+                }
+            }
+            let type_var = self.expect_ident()?;
+            self.expect(Token::Colon)?;
+            let mut traits = vec![self.expect_upper_ident()?];
+            while *self.peek() == Token::Plus {
+                self.advance();
+                traits.push(self.expect_upper_ident()?);
+            }
+            bounds.push(crate::ast::TraitBound { type_var, traits });
+        }
+        self.expect(Token::RBrace)?;
+        Ok(bounds)
+    }
+
     fn parse_impl_def(&mut self) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume impl
@@ -429,6 +432,14 @@ impl Parser {
         let trait_name = self.expect_upper_ident()?;
         self.expect(Token::For)?;
         let target_type = self.expect_upper_ident()?;
+
+        // Parse optional type params: `impl Show for Box a b`
+        let mut type_params = Vec::new();
+        while matches!(self.peek(), Token::Ident(_)) {
+            type_params.push(self.expect_ident()?);
+        }
+
+        let where_clause = self.parse_where_clause()?;
 
         self.expect(Token::LBrace)?;
         self.skip_terminators();
@@ -453,6 +464,8 @@ impl Parser {
         Ok(Decl::ImplDef {
             trait_name,
             target_type,
+            type_params,
+            where_clause,
             methods,
             span: start.to(end),
         })

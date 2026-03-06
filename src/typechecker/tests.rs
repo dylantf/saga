@@ -1085,3 +1085,56 @@ fn show_nested_list() {
     // List (List Int) -- Show propagates through both layers
     assert!(check("main () = show [[1, 2], [3]]").is_ok());
 }
+
+// --- User-defined conditional impl tests ---
+
+#[test]
+fn user_conditional_impl_satisfied() {
+    // impl Show for Box a where {a: Show} -- show (Box 1) should work
+    let result = check(
+        "type Box a { Box(a) }
+impl Show for Box a where {a: Show} {
+  show box = \"box\"
+}
+main () = show (Box 1)",
+    );
+    assert!(result.is_ok(), "got: {}", result.err().unwrap().message);
+}
+
+#[test]
+fn user_conditional_impl_unsatisfied() {
+    // show (Box (Foo {})) should fail -- Foo has no Show impl
+    let result = check(
+        "record Foo { x: Int }
+type Box a { Box(a) }
+impl Show for Box a where {a: Show} {
+  show box = \"box\"
+}
+main () = show (Box (Foo { x: 1 }))",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Show") && err.message.contains("Foo"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn user_conditional_impl_unknown_type_var() {
+    let result = check(
+        "type Box a { Box(a) }
+impl Show for Box a where {b: Show} {
+  show box = \"box\"
+}
+main () = ()",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("unknown type variable") && err.message.contains("'b'"),
+        "got: {}",
+        err.message
+    );
+}

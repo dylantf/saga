@@ -88,6 +88,8 @@ pub enum Decl {
     ImplDef {
         trait_name: String,
         target_type: String,
+        type_params: Vec<String>,
+        where_clause: Vec<TraitBound>,
         methods: Vec<(String, Vec<Pat>, Expr)>,
         span: Span,
     },
