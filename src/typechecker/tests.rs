@@ -579,3 +579,34 @@ fn impl_for_undefined_trait() {
     let err = result.err().unwrap();
     assert!(err.message.contains("undefined trait"), "got: {}", err.message);
 }
+
+#[test]
+fn trait_constraint_no_impl() {
+    // Calling a trait method on a type with no impl should fail
+    let result = check(
+        "record User { name: String }
+trait Describe a {
+  fun describe (x: a) -> String
+}
+main () = describe (User { name: \"Alice\" })",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(err.message.contains("no impl of Describe for User"), "got: {}", err.message);
+}
+
+#[test]
+fn trait_constraint_with_impl_ok() {
+    // Calling a trait method on a type with an impl should succeed
+    check(
+        "record User { name: String }
+trait Describe a {
+  fun describe (x: a) -> String
+}
+impl Describe for User {
+  describe u = u.name
+}
+main () = describe (User { name: \"Alice\" })",
+    )
+    .unwrap();
+}

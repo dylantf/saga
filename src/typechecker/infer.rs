@@ -24,7 +24,11 @@ impl Checker {
                     if let Some(effects) = self.fun_effects.get(name).cloned() {
                         self.current_effects.extend(effects);
                     }
-                    Ok(self.instantiate(&scheme))
+                    let (ty, constraints) = self.instantiate(&scheme);
+                    for (trait_name, trait_ty) in constraints {
+                        self.pending_constraints.push((trait_name, trait_ty, *span));
+                    }
+                    Ok(ty)
                 } else {
                     Err(TypeError::at(
                         *span,
@@ -36,7 +40,8 @@ impl Checker {
             Expr::Constructor { name, span } => {
                 if let Some(scheme) = self.constructors.get(name) {
                     let scheme = scheme.clone();
-                    Ok(self.instantiate(&scheme))
+                    let (ty, _) = self.instantiate(&scheme);
+                    Ok(ty)
                 } else {
                     Err(TypeError::at(
                         *span,
@@ -355,6 +360,7 @@ impl Checker {
                     name.clone(),
                     Scheme {
                         forall: vec![],
+                        constraints: vec![],
                         ty: ty.clone(),
                     },
                 );
@@ -374,7 +380,7 @@ impl Checker {
                 let ctor_scheme = self.constructors.get(name).cloned().ok_or_else(|| {
                     TypeError::at(*span, format!("undefined constructor in pattern: {}", name))
                 })?;
-                let ctor_ty = self.instantiate(&ctor_scheme);
+                let (ctor_ty, _) = self.instantiate(&ctor_scheme);
                 let mut current = ctor_ty;
                 for arg_pat in args {
                     match current {
@@ -413,6 +419,7 @@ impl Checker {
                                 fname.clone(),
                                 Scheme {
                                     forall: vec![],
+                                    constraints: vec![],
                                     ty: field_ty.clone(),
                                 },
                             );
@@ -509,6 +516,7 @@ impl Checker {
                     name.clone(),
                     Scheme {
                         forall: vec![],
+                        constraints: vec![],
                         ty: var,
                     },
                 );
@@ -540,6 +548,10 @@ impl Checker {
                 i += 1;
             }
         }
+
+        // Check all accumulated trait constraints now that types are resolved
+        self.check_pending_constraints()?;
+
         Ok(())
     }
 
@@ -769,6 +781,7 @@ impl Checker {
                 variant.name.clone(),
                 Scheme {
                     forall: forall.clone(),
+                    constraints: vec![],
                     ty: ctor_ty,
                 },
             );
@@ -843,6 +856,7 @@ impl Checker {
                     param_name.clone(),
                     Scheme {
                         forall: vec![],
+                        constraints: vec![],
                         ty: param_ty,
                     },
                 );
@@ -867,6 +881,7 @@ impl Checker {
             name.into(),
             Scheme {
                 forall: vec![],
+                constraints: vec![],
                 ty: Type::Unit, // handlers don't have a meaningful standalone type
             },
         );
@@ -937,6 +952,7 @@ impl Checker {
                                 param_name.clone(),
                                 Scheme {
                                     forall: vec![],
+                                    constraints: vec![],
                                     ty: param_ty,
                                 },
                             );
@@ -949,6 +965,7 @@ impl Checker {
                                 param_name.clone(),
                                 Scheme {
                                     forall: vec![],
+                                    constraints: vec![],
                                     ty: param_ty,
                                 },
                             );
@@ -973,6 +990,7 @@ impl Checker {
                             param_name.clone(),
                             Scheme {
                                 forall: vec![],
+                                constraints: vec![],
                                 ty: expr_ty.clone(),
                             },
                         );
@@ -989,10 +1007,10 @@ impl Checker {
 
     /// Find which effect an operation belongs to.
     fn effect_for_op(&self, op_name: &str, qualifier: Option<&str>) -> Option<String> {
-        if let Some(effect_name) = qualifier {
-            if self.effects.contains_key(effect_name) {
-                return Some(effect_name.to_string());
-            }
+        if let Some(effect_name) = qualifier
+            && self.effects.contains_key(effect_name)
+        {
+            return Some(effect_name.to_string());
         }
         for (effect_name, ops) in &self.effects {
             if ops.iter().any(|o| o.name == op_name) {
@@ -1063,23 +1081,72 @@ impl Checker {
         }
     }
 
+    // --- Trait constraint checking ---
+
+    fn check_pending_constraints(&mut self) -> Result<(), TypeError> {
+        let constraints = std::mem::take(&mut self.pending_constraints);
+        for (trait_name, ty, span) in constraints {
+            let resolved = self.sub.apply(&ty);
+            match &resolved {
+                // Concrete type: check that an impl exists
+                Type::Con(type_name, _) => {
+                    if !self
+                        .trait_impls
+                        .contains_key(&(trait_name.clone(), type_name.clone()))
+                    {
+                        return Err(TypeError::at(
+                            span,
+                            format!("no impl of {} for {}", trait_name, type_name),
+                        ));
+                    }
+                }
+                // Primitive types
+                Type::Int | Type::Float | Type::String | Type::Bool | Type::Unit => {
+                    let type_name = match &resolved {
+                        Type::Int => "Int",
+                        Type::Float => "Float",
+                        Type::String => "String",
+                        Type::Bool => "Bool",
+                        Type::Unit => "Unit",
+                        _ => unreachable!(),
+                    };
+                    if !self
+                        .trait_impls
+                        .contains_key(&(trait_name.clone(), type_name.to_string()))
+                    {
+                        return Err(TypeError::at(
+                            span,
+                            format!("no impl of {} for {}", trait_name, type_name),
+                        ));
+                    }
+                }
+                // Still a type variable: unconstrained polymorphic use without where clause
+                Type::Var(_) => {
+                    // TODO: check where clause bounds when we support them on functions
+                    // For now, allow it (runtime dispatch will catch errors)
+                }
+                Type::Arrow(_, _) => {
+                    return Err(TypeError::at(
+                        span,
+                        format!("no impl of {} for function type", trait_name),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     // --- Trait & impl helpers ---
 
     /// Replace occurrences of a trait's type param variable with a concrete type.
     /// Used when checking impl bodies: if the trait says `(x: a) -> String`
     /// and the impl is `for User`, we substitute a -> User to get `(x: User) -> String`.
-    fn substitute_trait_param(&self, param_name: &str, replacement: &Type, ty: &Type) -> Type {
+    fn substitute_trait_param(&self, replacement: &Type, ty: &Type) -> Type {
         match ty {
-            Type::Var(id) => {
-                // Check if this var corresponds to the trait's type param
-                // by looking at what convert_type_expr assigned to it
+            Type::Var(_) => {
                 let resolved = self.sub.apply(ty);
                 if resolved == *ty {
-                    // Unresolved var -- check if it was the trait param
-                    // We stored it during register_trait_def via convert_type_expr
-                    // The TraitInfo.methods have raw type vars from that conversion.
-                    // We need to check if this var id was assigned to param_name.
-                    // For simplicity, just replace all free vars (trait methods only
+                    // Unresolved var -- replace all free vars (trait methods only
                     // have the one type param).
                     replacement.clone()
                 } else {
@@ -1087,13 +1154,13 @@ impl Checker {
                 }
             }
             Type::Arrow(a, b) => Type::Arrow(
-                Box::new(self.substitute_trait_param(param_name, replacement, a)),
-                Box::new(self.substitute_trait_param(param_name, replacement, b)),
+                Box::new(self.substitute_trait_param(replacement, a)),
+                Box::new(self.substitute_trait_param(replacement, b)),
             ),
             Type::Con(name, args) => Type::Con(
                 name.clone(),
                 args.iter()
-                    .map(|a| self.substitute_trait_param(param_name, replacement, a))
+                    .map(|a| self.substitute_trait_param(replacement, a))
                     .collect(),
             ),
             _ => ty.clone(),
@@ -1119,22 +1186,41 @@ impl Checker {
                 .map(|(_, texpr)| self.convert_type_expr(texpr, &mut params_list))
                 .collect();
             let return_type = self.convert_type_expr(&method.return_type, &mut params_list);
-            method_sigs.push((method.name.clone(), param_types, return_type));
+
+            // Find the var ID assigned to the trait's type param
+            let trait_param_id = params_list
+                .iter()
+                .find(|(pname, _)| pname == type_param)
+                .map(|(_, id)| *id);
+
+            method_sigs.push((
+                method.name.clone(),
+                param_types,
+                return_type,
+                trait_param_id,
+            ));
         }
 
-        // Add each method to the env as a polymorphic function.
-        // e.g. `fun show (x: a) -> String` becomes `show : forall a. a -> String`
-        for (method_name, param_types, return_type) in &method_sigs {
+        // Add each method to the env as a polymorphic function with trait constraint.
+        // e.g. `fun show (x: a) -> String` becomes `show : forall a. Describe a => a -> String`
+        for (method_name, param_types, return_type, trait_param_id) in &method_sigs {
             let mut fun_ty = return_type.clone();
             for pt in param_types.iter().rev() {
                 fun_ty = Type::Arrow(Box::new(pt.clone()), Box::new(fun_ty));
             }
             let mut forall = Vec::new();
             super::collect_free_vars(&fun_ty, &mut forall);
+
+            let constraints = match trait_param_id {
+                Some(id) => vec![(name.to_string(), *id)],
+                None => vec![],
+            };
+
             self.env.insert(
                 method_name.clone(),
                 super::Scheme {
                     forall,
+                    constraints,
                     ty: fun_ty,
                 },
             );
@@ -1145,7 +1231,10 @@ impl Checker {
             super::TraitInfo {
                 type_param: type_param.into(),
                 supertraits: supertraits.to_vec(),
-                methods: method_sigs,
+                methods: method_sigs
+                    .into_iter()
+                    .map(|(n, pts, rt, _)| (n, pts, rt))
+                    .collect(),
             },
         );
         Ok(())
@@ -1204,10 +1293,9 @@ impl Checker {
             let expected_params: Vec<Type> = trait_method
                 .1
                 .iter()
-                .map(|t| self.substitute_trait_param(&trait_info.type_param, &target, t))
+                .map(|t| self.substitute_trait_param(&target, t))
                 .collect();
-            let expected_return =
-                self.substitute_trait_param(&trait_info.type_param, &target, &trait_method.2);
+            let expected_return = self.substitute_trait_param(&target, &trait_method.2);
 
             let saved_env = self.env.clone();
 
@@ -1220,15 +1308,16 @@ impl Checker {
 
             // Infer body and check it matches the expected return type
             let body_ty = self.infer_expr(body)?;
-            self.unify_at(&body_ty, &expected_return, body.span()).map_err(|e| {
-                TypeError::at(
-                    span,
-                    format!(
-                        "in impl {} for {}, method '{}': {}",
-                        trait_name, target_type, method_name, e.message
-                    ),
-                )
-            })?;
+            self.unify_at(&body_ty, &expected_return, body.span())
+                .map_err(|e| {
+                    TypeError::at(
+                        span,
+                        format!(
+                            "in impl {} for {}, method '{}': {}",
+                            trait_name, target_type, method_name, e.message
+                        ),
+                    )
+                })?;
 
             self.env = saved_env;
         }

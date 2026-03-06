@@ -125,11 +125,13 @@ impl Substitution {
 
 // --- Type scheme (polymorphism) ---
 
-/// A polymorphic type: forall [vars]. ty
-/// e.g. `forall a. a -> a` for the identity function
+/// A polymorphic type: forall [vars]. constraints => ty
+/// e.g. `forall a. Show a => a -> String`
 #[derive(Debug, Clone)]
 pub struct Scheme {
     pub forall: Vec<u32>,
+    /// Trait constraints: (trait_name, type_var_id)
+    pub constraints: Vec<(String, u32)>,
     pub ty: Type,
 }
 
@@ -283,6 +285,8 @@ pub struct Checker {
     pub(crate) traits: HashMap<String, TraitInfo>,
     /// Impl registry: (trait_name, target_type) -> impl info
     pub(crate) trait_impls: HashMap<(String, String), ImplInfo>,
+    /// Pending trait constraints to check: (trait_name, type, span)
+    pub(crate) pending_constraints: Vec<(String, Type, Span)>,
 }
 
 impl Checker {
@@ -300,6 +304,7 @@ impl Checker {
             fun_effects: HashMap::new(),
             traits: HashMap::new(),
             trait_impls: HashMap::new(),
+            pending_constraints: Vec::new(),
         };
         checker.register_builtins();
         checker
@@ -322,6 +327,7 @@ impl Checker {
             "print".into(),
             Scheme {
                 forall: vec![a_id],
+                constraints: vec![],
                 ty: Type::Arrow(Box::new(a), Box::new(Type::Unit)),
             },
         );
@@ -336,6 +342,7 @@ impl Checker {
             "show".into(),
             Scheme {
                 forall: vec![a_id],
+                constraints: vec![],
                 ty: Type::Arrow(Box::new(a), Box::new(Type::String)),
             },
         );
@@ -350,6 +357,7 @@ impl Checker {
             "Nil".into(),
             Scheme {
                 forall: vec![a_id],
+                constraints: vec![],
                 ty: Type::Con("List".into(), vec![a.clone()]),
             },
         );
@@ -364,6 +372,7 @@ impl Checker {
             "Cons".into(),
             Scheme {
                 forall: vec![a_id],
+                constraints: vec![],
                 ty: Type::Arrow(
                     Box::new(a),
                     Box::new(Type::Arrow(Box::new(list_a.clone()), Box::new(list_a))),
@@ -376,6 +385,7 @@ impl Checker {
             "True".into(),
             Scheme {
                 forall: vec![],
+                constraints: vec![],
                 ty: Type::Bool,
             },
         );
@@ -383,6 +393,7 @@ impl Checker {
             "False".into(),
             Scheme {
                 forall: vec![],
+                constraints: vec![],
                 ty: Type::Bool,
             },
         );
@@ -429,13 +440,26 @@ impl Checker {
     // --- Instantiation & Generalization ---
 
     /// Replace forall'd variables with fresh type variables.
-    pub(crate) fn instantiate(&mut self, scheme: &Scheme) -> Type {
+    /// Returns the instantiated type and any trait constraints (remapped to fresh vars).
+    pub(crate) fn instantiate(&mut self, scheme: &Scheme) -> (Type, Vec<(String, Type)>) {
         let mapping: HashMap<u32, Type> = scheme
             .forall
             .iter()
             .map(|&id| (id, self.fresh_var()))
             .collect();
-        self.replace_vars(&scheme.ty, &mapping)
+        let ty = self.replace_vars(&scheme.ty, &mapping);
+        let constraints = scheme
+            .constraints
+            .iter()
+            .map(|(trait_name, var_id)| {
+                let fresh = mapping
+                    .get(var_id)
+                    .cloned()
+                    .unwrap_or(Type::Var(*var_id));
+                (trait_name.clone(), fresh)
+            })
+            .collect();
+        (ty, constraints)
     }
 
     fn replace_vars(&self, ty: &Type, mapping: &HashMap<u32, Type>) -> Type {
@@ -462,6 +486,7 @@ impl Checker {
         forall.retain(|v| !env_vars.contains(v));
         Scheme {
             forall,
+            constraints: vec![],
             ty: resolved,
         }
     }
