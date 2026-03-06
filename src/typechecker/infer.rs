@@ -479,14 +479,18 @@ impl Checker {
             }
         }
 
-        // Collect function annotations: name -> declared type, and effects
+        // Collect function annotations: name -> declared type, effects, and where constraints
         let mut annotations: HashMap<std::string::String, Type> = HashMap::new();
+        let mut annotation_constraints: HashMap<std::string::String, Vec<(String, u32)>> =
+            HashMap::new();
         for decl in program {
             if let Decl::FunAnnotation {
                 name,
                 params,
                 return_type,
                 effects,
+                where_clause,
+                span,
                 ..
             } = decl
             {
@@ -500,6 +504,29 @@ impl Checker {
                 if !effects.is_empty() {
                     self.fun_effects
                         .insert(name.clone(), effects.iter().cloned().collect());
+                }
+
+                // Process where clause into (trait_name, var_id) constraints
+                if !where_clause.is_empty() {
+                    let mut constraints = Vec::new();
+                    for bound in where_clause {
+                        if let Some((_, var_id)) =
+                            params_list.iter().find(|(n, _)| *n == bound.type_var)
+                        {
+                            for trait_name in &bound.traits {
+                                constraints.push((trait_name.clone(), *var_id));
+                            }
+                        } else {
+                            return Err(TypeError::at(
+                                *span,
+                                format!(
+                                    "where clause references unknown type variable '{}'",
+                                    bound.type_var
+                                ),
+                            ));
+                        }
+                    }
+                    annotation_constraints.insert(name.clone(), constraints);
                 }
             }
         }
@@ -542,7 +569,11 @@ impl Checker {
                 let clauses: Vec<&Decl> = program[start..i].iter().collect();
                 let fun_var = fun_vars[&name].clone();
                 let annotation = annotations.get(&name).cloned();
-                self.check_fun_clauses(&name, &clauses, &fun_var, annotation.as_ref())?;
+                let where_cons = annotation_constraints
+                    .get(&name)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                self.check_fun_clauses(&name, &clauses, &fun_var, annotation.as_ref(), where_cons)?;
             } else {
                 self.check_decl(&program[i])?;
                 i += 1;
@@ -594,6 +625,7 @@ impl Checker {
         clauses: &[&Decl],
         fun_var: &Type,
         annotation: Option<&Type>,
+        where_constraints: &[(String, u32)],
     ) -> Result<(), TypeError> {
         // All clauses must have the same arity
         let arity = match clauses[0] {
@@ -627,6 +659,17 @@ impl Checker {
             }
             self.unify(fun_var, &pre_ty)?;
         }
+
+        // Register where clause bounds on type variable IDs
+        for (trait_name, var_id) in where_constraints {
+            self.where_bounds
+                .entry(*var_id)
+                .or_default()
+                .insert(trait_name.clone());
+        }
+
+        // Snapshot pending constraints so we can partition new ones after body checking
+        let constraints_before = self.pending_constraints.len();
 
         // Save and clear effect tracking for this function body
         let saved_effects = std::mem::take(&mut self.current_effects);
@@ -731,10 +774,69 @@ impl Checker {
             })?;
         }
 
+        // Partition new pending constraints: vars go to scheme, concrete stay for global check
+        let new_constraints = self.pending_constraints.split_off(constraints_before);
+        let mut scheme_constraints: Vec<(String, u32)> = Vec::new();
+        for (trait_name, ty, span) in new_constraints {
+            let resolved = self.sub.apply(&ty);
+            match resolved {
+                Type::Var(id) => {
+                    // Covered by where clause -- satisfied, don't propagate
+                    if self
+                        .where_bounds
+                        .get(&id)
+                        .is_some_and(|b| b.contains(&trait_name))
+                    {
+                        continue;
+                    }
+                    if annotation.is_some() {
+                        // Function has a type annotation: where clause must be explicit
+                        return Err(TypeError::at(
+                            span,
+                            format!(
+                                "trait {} required but not declared in where clause for '{}'",
+                                trait_name, name
+                            ),
+                        ));
+                    }
+                    // No annotation -- infer as scheme constraint
+                    scheme_constraints.push((trait_name, id));
+                }
+                _ => {
+                    // Concrete type -- push back for global checking
+                    self.pending_constraints.push((trait_name, ty, span));
+                }
+            }
+        }
+
         // Remove the function's own pre-bound entry before generalizing,
         // otherwise its type vars appear in env_vars and block generalization
         self.env.remove(name);
-        let scheme = self.generalize(&fun_ty);
+        let mut scheme = self.generalize(&fun_ty);
+
+        // Add explicit where clause constraints
+        for (trait_name, var_id) in where_constraints {
+            let resolved_id = match self.sub.apply(&Type::Var(*var_id)) {
+                Type::Var(id) => id,
+                _ => continue,
+            };
+            if scheme.forall.contains(&resolved_id) {
+                scheme.constraints.push((trait_name.clone(), resolved_id));
+            }
+        }
+
+        // Add inferred constraints from body
+        for (trait_name, var_id) in scheme_constraints {
+            if scheme.forall.contains(&var_id)
+                && !scheme
+                    .constraints
+                    .iter()
+                    .any(|(t, v)| t == &trait_name && *v == var_id)
+            {
+                scheme.constraints.push((trait_name, var_id));
+            }
+        }
+
         self.env.insert(name.into(), scheme);
         Ok(())
     }
@@ -835,11 +937,9 @@ impl Checker {
         arms: &[ast::HandlerArm],
         return_clause: Option<&ast::HandlerArm>,
     ) -> Result<(), TypeError> {
-        let mut op_names = Vec::new();
         // Type-check each handler arm against its effect operation
         for arm in arms {
             let op_sig = self.lookup_effect_op(&arm.op_name, None)?;
-            op_names.push(arm.op_name.clone());
 
             // Bind op params and set resume context, then check body
             let saved_env = self.env.clone();
@@ -867,6 +967,7 @@ impl Checker {
             self.env = saved_env;
         }
 
+        let op_names = arms.iter().map(|a| a.op_name.clone()).collect();
         self.handlers.insert(
             name.into(),
             HandlerInfo {
@@ -1084,6 +1185,17 @@ impl Checker {
     // --- Trait constraint checking ---
 
     fn check_pending_constraints(&mut self) -> Result<(), TypeError> {
+        // Build resolved where bounds (substitution may have chained var IDs)
+        let mut resolved_bounds: HashMap<u32, HashSet<String>> = HashMap::new();
+        for (&var_id, traits) in &self.where_bounds {
+            if let Type::Var(resolved_id) = self.sub.apply(&Type::Var(var_id)) {
+                resolved_bounds
+                    .entry(resolved_id)
+                    .or_default()
+                    .extend(traits.iter().cloned());
+            }
+        }
+
         let constraints = std::mem::take(&mut self.pending_constraints);
         for (trait_name, ty, span) in constraints {
             let resolved = self.sub.apply(&ty);
@@ -1120,10 +1232,20 @@ impl Checker {
                         ));
                     }
                 }
-                // Still a type variable: unconstrained polymorphic use without where clause
-                Type::Var(_) => {
-                    // TODO: check where clause bounds when we support them on functions
-                    // For now, allow it (runtime dispatch will catch errors)
+                // Still a type variable: check where clause bounds
+                Type::Var(id) => {
+                    let covered = resolved_bounds
+                        .get(id)
+                        .is_some_and(|b| b.contains(&trait_name));
+                    if !covered {
+                        return Err(TypeError::at(
+                            span,
+                            format!(
+                                "trait {} required but no impl or where clause bound for this type",
+                                trait_name
+                            ),
+                        ));
+                    }
                 }
                 Type::Arrow(_, _) => {
                     return Err(TypeError::at(
@@ -1322,13 +1444,8 @@ impl Checker {
             self.env = saved_env;
         }
 
-        self.trait_impls.insert(
-            (trait_name.into(), target_type.into()),
-            super::ImplInfo {
-                target_type: target_type.into(),
-                methods: provided.iter().map(|s| s.to_string()).collect(),
-            },
-        );
+        self.trait_impls
+            .insert((trait_name.into(), target_type.into()), super::ImplInfo);
         Ok(())
     }
 }

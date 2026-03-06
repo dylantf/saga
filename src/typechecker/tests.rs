@@ -610,3 +610,142 @@ main () = describe (User { name: \"Alice\" })",
     )
     .unwrap();
 }
+
+// --- Where clause tests ---
+
+#[test]
+fn where_clause_satisfies_constraint() {
+    check(
+        "trait Describe a {
+  fun describe (x: a) -> String
+}
+fun show_it (x: a) -> String where {a: Describe}
+show_it x = describe x",
+    )
+    .unwrap();
+}
+
+#[test]
+fn where_clause_missing_bound_fails() {
+    let result = check(
+        "trait Describe a {
+  fun describe (x: a) -> String
+}
+fun show_it (x: a) -> String
+show_it x = describe x",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("trait Describe required but not declared in where clause"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn where_clause_propagates_to_callers() {
+    check(
+        "record User { name: String }
+trait Describe a {
+  fun describe (x: a) -> String
+}
+impl Describe for User {
+  describe u = u.name
+}
+fun show_it (x: a) -> String where {a: Describe}
+show_it x = describe x
+main () = show_it (User { name: \"Alice\" })",
+    )
+    .unwrap();
+}
+
+#[test]
+fn where_clause_propagates_missing_impl() {
+    let result = check(
+        "record User { name: String }
+trait Describe a {
+  fun describe (x: a) -> String
+}
+fun show_it (x: a) -> String where {a: Describe}
+show_it x = describe x
+main () = show_it (User { name: \"Alice\" })",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("no impl of Describe for User"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn where_clause_multiple_bounds() {
+    check(
+        "trait Describe a {
+  fun describe (x: a) -> String
+}
+trait Greet a {
+  fun greet (x: a) -> String
+}
+fun both (x: a) -> String where {a: Describe + Greet}
+both x = describe x",
+    )
+    .unwrap();
+}
+
+#[test]
+fn where_clause_unknown_type_var() {
+    let result = check(
+        "trait Describe a {
+  fun describe (x: a) -> String
+}
+fun show_it (x: a) -> String where {b: Describe}
+show_it x = describe x",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("unknown type variable 'b'"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn inferred_constraint_propagation() {
+    // Function without where clause infers constraint; caller with impl succeeds
+    check(
+        "record User { name: String }
+trait Describe a {
+  fun describe (x: a) -> String
+}
+impl Describe for User {
+  describe u = u.name
+}
+wrapper x = describe x
+main () = wrapper (User { name: \"Alice\" })",
+    )
+    .unwrap();
+}
+
+#[test]
+fn inferred_constraint_no_impl() {
+    // Function without where clause infers constraint; caller without impl fails
+    let result = check(
+        "record User { name: String }
+trait Describe a {
+  fun describe (x: a) -> String
+}
+wrapper x = describe x
+main () = wrapper (User { name: \"Alice\" })",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("no impl of Describe for User"),
+        "got: {}",
+        err.message
+    );
+}

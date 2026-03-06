@@ -236,7 +236,7 @@ pub(crate) struct EffectOpSig {
     pub return_type: Type,
 }
 
-// TODO: fields will be used for `needs` effect set tracking
+// TODO: fields will be used for handler `needs` checking
 #[derive(Debug, Clone)]
 pub(crate) struct HandlerInfo {
     /// Which effects this handler handles
@@ -246,6 +246,7 @@ pub(crate) struct HandlerInfo {
     pub has_return_clause: bool,
 }
 
+// TODO: fields will be used for supertrait enforcement
 #[derive(Debug, Clone)]
 pub(crate) struct TraitInfo {
     pub type_param: String,
@@ -255,11 +256,7 @@ pub(crate) struct TraitInfo {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ImplInfo {
-    pub target_type: String,
-    /// Method names provided by this impl
-    pub methods: Vec<String>,
-}
+pub(crate) struct ImplInfo;
 
 // --- Inference engine ---
 
@@ -287,6 +284,8 @@ pub struct Checker {
     pub(crate) trait_impls: HashMap<(String, String), ImplInfo>,
     /// Pending trait constraints to check: (trait_name, type, span)
     pub(crate) pending_constraints: Vec<(String, Type, Span)>,
+    /// Where clause bounds: var_id -> set of trait names assumed satisfied
+    pub(crate) where_bounds: HashMap<u32, HashSet<String>>,
 }
 
 impl Checker {
@@ -305,6 +304,7 @@ impl Checker {
             traits: HashMap::new(),
             trait_impls: HashMap::new(),
             pending_constraints: Vec::new(),
+            where_bounds: HashMap::new(),
         };
         checker.register_builtins();
         checker
@@ -452,10 +452,7 @@ impl Checker {
             .constraints
             .iter()
             .map(|(trait_name, var_id)| {
-                let fresh = mapping
-                    .get(var_id)
-                    .cloned()
-                    .unwrap_or(Type::Var(*var_id));
+                let fresh = mapping.get(var_id).cloned().unwrap_or(Type::Var(*var_id));
                 (trait_name.clone(), fresh)
             })
             .collect();
