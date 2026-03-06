@@ -517,20 +517,27 @@ fn eval_block_stmts(stmts: &[Stmt], index: usize, env: &Env) -> EvalResult {
 
     match &stmts[index] {
         Stmt::Let {
-            name,
+            pattern,
             value,
             mutable,
             ..
         } => {
-            let name = name.clone();
+            let pattern = pattern.clone();
             let mutable = *mutable;
             let stmts = stmts.to_vec();
             let env = env.clone();
             eval_expr(value, &env).then(move |val| {
                 if mutable {
-                    env.set(name, Value::Ref(Rc::new(RefCell::new(val))));
+                    // Mutable only makes sense for simple variable patterns
+                    if let Pat::Var { name, .. } = &pattern {
+                        env.set(name.clone(), Value::Ref(Rc::new(RefCell::new(val))));
+                    }
                 } else {
-                    env.set(name, val);
+                    if let Some(bindings) = match_pattern(&pattern, &val) {
+                        for (name, val) in bindings {
+                            env.set(name, val);
+                        }
+                    }
                 }
                 eval_block_stmts(&stmts, index + 1, &env)
             })

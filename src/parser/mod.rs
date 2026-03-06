@@ -569,12 +569,12 @@ impl Parser {
                         if mutable {
                             self.advance(); // consume 'mut'
                         }
-                        let name = self.expect_ident()?;
+                        let pattern = self.parse_pattern()?;
                         self.expect(Token::Eq)?;
                         let value = self.parse_expr(0)?;
                         let stmt_span = let_start.to(value.span());
                         stmts.push(Stmt::Let {
-                            name,
+                            pattern,
                             value,
                             mutable,
                             span: stmt_span,

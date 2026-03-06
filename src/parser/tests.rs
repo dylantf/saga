@@ -374,7 +374,7 @@ fn block_with_let() {
     match expr {
         Expr::Block { stmts, .. } => {
             assert_eq!(stmts.len(), 2);
-            assert!(matches!(&stmts[0], Stmt::Let { name, .. } if name == "x"));
+            assert!(matches!(&stmts[0], Stmt::Let { pattern: Pat::Var { name, .. }, .. } if name == "x"));
             assert!(matches!(
                 &stmts[1],
                 Stmt::Expr(Expr::BinOp { op: BinOp::Add, .. })

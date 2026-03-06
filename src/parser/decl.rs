@@ -90,6 +90,9 @@ impl Parser {
         self.skip_terminators();
         let mut variants = Vec::new();
         while !matches!(self.peek(), Token::RBrace) {
+            if matches!(self.peek(), Token::Bar) {
+                self.advance(); // skip optional `|` separator
+            }
             variants.push(self.parse_type_constructor_def()?);
             self.skip_terminators();
         }

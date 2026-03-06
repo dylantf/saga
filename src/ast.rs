@@ -240,9 +240,9 @@ impl Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    /// `let x = expr` or `let mut x = expr`
+    /// `let x = expr`, `let (a, b) = expr`, or `let mut x = expr`
     Let {
-        name: String,
+        pattern: Pat,
         value: Expr,
         mutable: bool,
         span: Span,

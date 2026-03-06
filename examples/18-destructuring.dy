@@ -1,0 +1,51 @@
+# Pattern destructuring -- let, function args, and case all use the same patterns
+
+record Point {
+  x: Int,
+  y: Int,
+}
+
+type Shape {
+  Circle(Float)
+  Rect(Float, Float)
+}
+
+# --- Function argument destructuring ---
+
+add_points (x1, y1) (x2, y2) = (x1 + x2, y1 + y2)
+
+area Circle(r) = r * r * 3.14
+area Rect(w, h) = w * h
+
+# --- Main ---
+
+main () = {
+  # Let with tuples
+  let (name, age) = ("Alice", 30)
+  name <> " is " <> show age |> print
+
+  # Let with records
+  let origin = Point { x: 0, y: 0 }
+  let Point { x, y } = origin
+  "origin: " <> show x <> ", " <> show y |> print
+
+  # Let with constructors
+  let Circle(r) = Circle(5.0)
+  "radius: " <> show r |> print
+
+  # Let with list cons
+  let h :: t = [1, 2, 3, 4, 5]
+  "head: " <> show h |> print
+  "tail: " <> show t |> print
+
+  # Nested destructuring
+  let ((a, b), (c, d)) = ((1, 2), (3, 4))
+  "sum: " <> show (a + b + c + d) |> print
+
+  # Function arg destructuring
+  let result = add_points (1, 2) (3, 4)
+  "added: " <> show result |> print
+
+  print <| "circle area: " <> (Circle 10.0 |> area |> show)
+  print <| "rect area: " <> (Rect 3.0 4.0 |> area |> show)
+}

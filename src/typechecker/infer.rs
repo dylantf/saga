@@ -347,10 +347,16 @@ impl Checker {
         let mut last_ty = Type::unit();
         for stmt in stmts {
             match stmt {
-                Stmt::Let { name, value, .. } => {
+                Stmt::Let { pattern, value, .. } => {
                     let ty = self.infer_expr(value)?;
-                    let scheme = self.generalize(&ty);
-                    self.env.insert(name.clone(), scheme);
+                    // Simple variable binding: generalize for polymorphism
+                    // Destructuring: use bind_pattern (monomorphic)
+                    if let Pat::Var { name, .. } = pattern {
+                        let scheme = self.generalize(&ty);
+                        self.env.insert(name.clone(), scheme);
+                    } else {
+                        self.bind_pattern(pattern, &ty)?;
+                    }
                     last_ty = Type::unit();
                 }
                 Stmt::Assign { value, .. } => {
