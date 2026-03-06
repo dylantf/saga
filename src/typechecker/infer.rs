@@ -73,14 +73,20 @@ impl Checker {
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                         self.unify_at(&left_ty, &right_ty, *span)?;
+                        self.pending_constraints
+                            .push(("Num".into(), left_ty.clone(), *span));
                         Ok(left_ty)
                     }
                     BinOp::Eq | BinOp::NotEq => {
                         self.unify_at(&left_ty, &right_ty, *span)?;
+                        self.pending_constraints
+                            .push(("Eq".into(), left_ty.clone(), *span));
                         Ok(Type::bool())
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         self.unify_at(&left_ty, &right_ty, *span)?;
+                        self.pending_constraints
+                            .push(("Ord".into(), left_ty.clone(), *span));
                         Ok(Type::bool())
                     }
                     BinOp::And | BinOp::Or => {
@@ -96,8 +102,10 @@ impl Checker {
                 }
             }
 
-            Expr::UnaryMinus { expr, .. } => {
+            Expr::UnaryMinus { expr, span } => {
                 let ty = self.infer_expr(expr)?;
+                self.pending_constraints
+                    .push(("Num".into(), ty.clone(), *span));
                 Ok(ty)
             }
 
@@ -1199,22 +1207,41 @@ impl Checker {
             }
         }
 
-        let constraints = std::mem::take(&mut self.pending_constraints);
-        for (trait_name, ty, span) in constraints {
-            let resolved = self.sub.apply(&ty);
-            match &resolved {
-                // Concrete type (includes primitives): check that an impl exists
-                Type::Con(type_name, _) => {
-                    if !self
-                        .trait_impls
-                        .contains_key(&(trait_name.clone(), type_name.clone()))
-                    {
-                        return Err(TypeError::at(
-                            span,
-                            format!("no impl of {} for {}", trait_name, type_name),
-                        ));
+        // Process constraints in a loop since conditional impls may push new ones
+        loop {
+            let constraints = std::mem::take(&mut self.pending_constraints);
+            if constraints.is_empty() {
+                break;
+            }
+            for (trait_name, ty, span) in constraints {
+                let resolved = self.sub.apply(&ty);
+                match &resolved {
+                    // Concrete type (includes primitives): check that an impl exists
+                    Type::Con(type_name, args) => {
+                        let impl_info = self
+                            .trait_impls
+                            .get(&(trait_name.clone(), type_name.clone()));
+                        match impl_info {
+                            None => {
+                                return Err(TypeError::at(
+                                    span,
+                                    format!("no impl of {} for {}", trait_name, type_name),
+                                ));
+                            }
+                            Some(info) => {
+                                // Push conditional constraints for type parameters
+                                for (req_trait, param_idx) in &info.param_constraints {
+                                    if let Some(arg_ty) = args.get(*param_idx) {
+                                        self.pending_constraints.push((
+                                            req_trait.clone(),
+                                            arg_ty.clone(),
+                                            span,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                     }
-                }
                 // Still a type variable: check where clause bounds
                 Type::Var(id) => {
                     let covered = resolved_bounds
@@ -1237,6 +1264,7 @@ impl Checker {
                     ));
                 }
             }
+        }
         }
         Ok(())
     }
@@ -1450,7 +1478,7 @@ impl Checker {
         }
 
         self.trait_impls
-            .insert((trait_name.into(), target_type.into()), super::ImplInfo);
+            .insert((trait_name.into(), target_type.into()), super::ImplInfo { param_constraints: vec![] });
         Ok(())
     }
 }

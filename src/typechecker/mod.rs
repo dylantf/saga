@@ -256,7 +256,11 @@ pub(crate) struct TraitInfo {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ImplInfo;
+pub(crate) struct ImplInfo {
+    /// Constraints on type parameters: (trait_name, param_index)
+    /// e.g. Show for List requires Show on param 0 (the element type)
+    pub param_constraints: Vec<(String, usize)>,
+}
 
 // --- Inference engine ---
 
@@ -328,7 +332,65 @@ impl Checker {
         );
         for prim in &["Int", "Float", "String", "Bool", "Unit"] {
             self.trait_impls
-                .insert(("Show".into(), prim.to_string()), ImplInfo);
+                .insert(("Show".into(), prim.to_string()), ImplInfo { param_constraints: vec![] });
+        }
+        // Show for compound types requires Show on type params
+        // List a: Show on param 0
+        self.trait_impls.insert(
+            ("Show".into(), "List".into()),
+            ImplInfo { param_constraints: vec![("Show".into(), 0)] },
+        );
+        // Maybe a: Show on param 0
+        self.trait_impls.insert(
+            ("Show".into(), "Maybe".into()),
+            ImplInfo { param_constraints: vec![("Show".into(), 0)] },
+        );
+        // Result a b: Show on params 0 and 1
+        self.trait_impls.insert(
+            ("Show".into(), "Result".into()),
+            ImplInfo { param_constraints: vec![("Show".into(), 0), ("Show".into(), 1)] },
+        );
+
+        // Built-in Num trait (arithmetic: +, -, *, /, %, unary -)
+        self.traits.insert(
+            "Num".into(),
+            TraitInfo {
+                type_param: "a".into(),
+                supertraits: vec![],
+                methods: vec![],
+            },
+        );
+        for prim in &["Int", "Float"] {
+            self.trait_impls
+                .insert(("Num".into(), prim.to_string()), ImplInfo { param_constraints: vec![] });
+        }
+
+        // Built-in Eq trait (==, !=)
+        self.traits.insert(
+            "Eq".into(),
+            TraitInfo {
+                type_param: "a".into(),
+                supertraits: vec![],
+                methods: vec![],
+            },
+        );
+        for prim in &["Int", "Float", "String", "Bool", "Unit"] {
+            self.trait_impls
+                .insert(("Eq".into(), prim.to_string()), ImplInfo { param_constraints: vec![] });
+        }
+
+        // Built-in Ord trait (<, >, <=, >=)
+        self.traits.insert(
+            "Ord".into(),
+            TraitInfo {
+                type_param: "a".into(),
+                supertraits: vec![],
+                methods: vec![],
+            },
+        );
+        for prim in &["Int", "Float", "String"] {
+            self.trait_impls
+                .insert(("Ord".into(), prim.to_string()), ImplInfo { param_constraints: vec![] });
         }
 
         // print : Show a => a -> Unit

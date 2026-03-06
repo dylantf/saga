@@ -29,9 +29,6 @@ main () = {
   let len = length nums
   show len |> print
 
-  let empty = []
-  show empty |> print
-
   let words = ["hello", "world"]
   show words |> print
 }

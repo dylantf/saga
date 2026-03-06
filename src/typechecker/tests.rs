@@ -912,3 +912,176 @@ main () = display (Foo { x: 1 })",
         err.message
     );
 }
+
+// --- Num constraint tests ---
+
+#[test]
+fn num_arithmetic_on_int() {
+    assert!(check("main () = 1 + 2 * 3 - 4 / 2 % 3").is_ok());
+}
+
+#[test]
+fn num_arithmetic_on_float() {
+    assert!(check("main () = 1.0 + 2.0 * 3.0").is_ok());
+}
+
+#[test]
+fn num_arithmetic_on_string_fails() {
+    let result = check("main () = \"a\" + \"b\"");
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Num") && err.message.contains("String"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn num_arithmetic_on_bool_fails() {
+    let result = check("main () = True + False");
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Num") && err.message.contains("Bool"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn num_unary_minus() {
+    assert!(check("main () = -(5)").is_ok());
+}
+
+#[test]
+fn num_constraint_propagates() {
+    // Polymorphic function using + should infer Num constraint
+    let result = check(
+        "record Foo { x: Int }
+add a b = a + b
+main () = add (Foo { x: 1 }) (Foo { x: 2 })",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Num") && err.message.contains("Foo"),
+        "got: {}",
+        err.message
+    );
+}
+
+// --- Eq constraint tests ---
+
+#[test]
+fn eq_comparison_on_int() {
+    assert!(check("main () = 1 == 1").is_ok());
+}
+
+#[test]
+fn eq_comparison_on_string() {
+    assert!(check("main () = \"a\" != \"b\"").is_ok());
+}
+
+#[test]
+fn eq_comparison_on_bool() {
+    assert!(check("main () = True == False").is_ok());
+}
+
+#[test]
+fn eq_comparison_on_custom_type_fails() {
+    let result = check(
+        "record Foo { x: Int }
+main () = (Foo { x: 1 }) == (Foo { x: 2 })",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Eq") && err.message.contains("Foo"),
+        "got: {}",
+        err.message
+    );
+}
+
+// --- Ord constraint tests ---
+
+#[test]
+fn ord_comparison_on_int() {
+    assert!(check("main () = 1 < 2").is_ok());
+}
+
+#[test]
+fn ord_comparison_on_string() {
+    assert!(check("main () = \"a\" < \"b\"").is_ok());
+}
+
+#[test]
+fn ord_comparison_on_bool_fails() {
+    let result = check("main () = True < False");
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Ord") && err.message.contains("Bool"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn ord_constraint_propagates() {
+    // Polymorphic function using < should infer Ord constraint
+    assert!(check(
+        "smaller a b = if a < b then a else b
+main () = smaller 1 2"
+    )
+    .is_ok());
+}
+
+#[test]
+fn ord_constraint_propagates_missing_impl() {
+    let result = check(
+        "record Foo { x: Int }
+smaller a b = if a < b then a else b
+main () = smaller (Foo { x: 1 }) (Foo { x: 2 })",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Ord") && err.message.contains("Foo"),
+        "got: {}",
+        err.message
+    );
+}
+
+// --- Conditional impl tests ---
+
+#[test]
+fn show_list_of_ints() {
+    assert!(check("main () = show [1, 2, 3]").is_ok());
+}
+
+#[test]
+fn show_list_of_strings() {
+    assert!(check("main () = show [\"a\", \"b\"]").is_ok());
+}
+
+#[test]
+fn show_list_of_custom_type_fails() {
+    let result = check(
+        "record Foo { x: Int }
+main () = show [Foo { x: 1 }]",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Show") && err.message.contains("Foo"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn show_nested_list() {
+    // List (List Int) -- Show propagates through both layers
+    assert!(check("main () = show [[1, 2], [3]]").is_ok());
+}
