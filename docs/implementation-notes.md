@@ -353,7 +353,52 @@ Expr::Todo(msg) => EvalResult::Error(EvalError::Todo(msg)),
 
 ---
 
-## 7. Explicitly Out of Scope
+## 7. `needs` Effect Set Tracking (Implemented)
+
+The type checker tracks which effects each function body uses and checks
+them against the declared `needs` clause.
+
+**What's tracked:**
+
+- **Direct effect calls**: `fail! "oops"` adds `Fail` to the current
+  function's effect set.
+- **Named function calls**: if `bar` has `needs {Fail}` and you call `bar x`,
+  `Fail` propagates to your function's effect set.
+- **`with` subtraction**: `expr with handler` removes the handler's effects
+  from the inner expression's set before merging back.
+- **Lambda isolation**: effects inside a lambda body don't propagate to the
+  enclosing function. The lambda's effects are deferred until it's called.
+- **Function boundary check**: after inferring a function body, if it uses
+  effects not in the declared `needs`, the checker reports an error. If there's
+  no `needs` declaration at all, any effect usage is an error.
+
+**Known limitation -- higher-order effect tracking:**
+
+Effects on function parameters are not tracked through calls. If a function
+takes an effectful callback and calls it, the checker can't see the callback's
+effects:
+
+```
+fun run_twice (f: () -> a needs {Fail}) -> a needs {Fail}
+run_twice f = f ()
+```
+
+Inside `run_twice`, `f ()` calls a local parameter. The checker doesn't know
+`f` carries `Fail` because that information is in the arrow type's `needs`
+annotation, which the checker doesn't inspect yet. The `needs {Fail}` on
+`run_twice` is correct but unverified.
+
+This works in practice because:
+- The common pattern (`try`, `run_with_state`) wraps the callback in a
+  `with` handler, so the effect is subtracted before reaching the boundary.
+- Direct effect calls (`fail!`, `log!`) and calls to named effectful
+  functions are fully tracked.
+- Fixing this properly requires effect annotations on arrow types in the
+  internal `Type` representation, which is a larger change.
+
+---
+
+## 8. Explicitly Out of Scope
 
 - **Multishot continuations** - calling `resume` more than once. Not needed
   for practical effects (I/O, logging, state, errors, async). Could be added
