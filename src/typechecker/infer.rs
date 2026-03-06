@@ -479,6 +479,9 @@ impl Checker {
             }
         }
 
+        // Check supertrait requirements (after all impls are registered so order doesn't matter)
+        self.check_supertrait_impls()?;
+
         // Collect function annotations: name -> declared type, effects, and where constraints
         let mut annotations: HashMap<std::string::String, Type> = HashMap::new();
         let mut annotation_constraints: HashMap<std::string::String, Vec<(String, u32)>> =
@@ -1252,6 +1255,29 @@ impl Checker {
                         span,
                         format!("no impl of {} for function type", trait_name),
                     ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // --- Supertrait checking ---
+
+    /// Verify that every impl's trait has its supertraits also implemented for the same type.
+    /// e.g. `trait Ord a where {a: Eq}` requires `impl Eq for X` when `impl Ord for X` exists.
+    fn check_supertrait_impls(&self) -> Result<(), TypeError> {
+        for ((trait_name, target_type), _) in &self.trait_impls {
+            if let Some(trait_info) = self.traits.get(trait_name) {
+                for supertrait in &trait_info.supertraits {
+                    if !self
+                        .trait_impls
+                        .contains_key(&(supertrait.clone(), target_type.clone()))
+                    {
+                        return Err(TypeError::new(format!(
+                            "impl {} for {} requires impl {} for {} (supertrait)",
+                            trait_name, target_type, supertrait, target_type
+                        )));
+                    }
                 }
             }
         }

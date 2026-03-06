@@ -22,10 +22,20 @@ impl Describe for Point {
   describe p = "(" <> show p.x <> ", " <> show p.y <> ")"
 }
 
+# Supertrait: Verbose requires Describe
+trait Verbose a where {a: Describe} {
+  fun verbose (x: a) -> String
+}
+
+impl Verbose for User {
+  verbose user = "User: " <> describe user <> ", registered=true"
+}
+
 main () = {
   let alice = User { name: "Alice", age: 30 }
   let origin = Point { x: 0, y: 0 }
 
   print <| describe alice
   print <| describe origin
+  print <| verbose alice
 }

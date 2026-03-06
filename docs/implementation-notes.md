@@ -400,27 +400,43 @@ This works in practice because:
 
 ## 8. Type System Roadmap
 
-### Phase 1: Traits and Impls
+### Phase 1: Traits and Impls (Implemented)
 
-Add trait definitions, impl blocks, and constraint solving to the type checker.
-This is required before the BEAM backend since codegen needs to know how to
-dispatch polymorphic operations like `+`, `==`, `show`.
+Trait definitions, impl blocks, and constraint solving are working in the type
+checker. Runtime dispatch uses mangled environment keys in the interpreter.
 
-**What's needed:**
+**What's implemented:**
 
-- **Trait registry**: store trait name, type parameter, method signatures.
-- **Impl checking**: verify that an impl satisfies its trait (correct methods,
-  correct types).
-- **Constraint solving**: when the checker sees `a + b` where `a` is polymorphic,
-  emit a `Num` (or `Add`) constraint. Constraints are checked at call sites
-  where concrete types are known.
-- **Dictionary passing (codegen)**: at runtime, trait methods dispatch via
-  dictionaries (records of functions) passed as implicit arguments. This is
-  the standard Haskell/GHC approach and maps cleanly to BEAM (dictionaries
-  are just Erlang tuples/maps). Alternative: monomorphization (specialize at
-  each call site), but dictionary passing is simpler for a BEAM target.
-- **Where clauses**: already parsed. The checker needs to collect `where`
-  constraints and use them when checking the function body.
+- **Trait registry**: stores trait name, type parameter, supertraits, method
+  signatures. Methods added to env as polymorphic schemes with trait constraints.
+- **Impl checking**: verifies correct methods (no missing, no extra), type-checks
+  each body against the trait's expected signature with type param substituted.
+- **Constraint solving**: deferred via `pending_constraints`. When a trait method
+  is referenced (e.g. `describe x`), a constraint is pushed. After all types
+  settle, constraints are checked against the impl registry. Unresolved type
+  vars are checked against where clause bounds.
+- **Where clauses**: extracted from `FunAnnotation`, mapped to type var IDs.
+  Annotated functions require explicit where clauses; unannotated functions get
+  automatic constraint inference. Constraints propagate to callers via scheme
+  instantiation.
+- **Runtime dispatch (interpreter)**: `TraitDef` registers methods as
+  `Value::TraitMethod` dispatchers. `ImplDef` stores closures under mangled
+  keys (`__impl_Trait_Type_method`). On application, the dispatcher looks up
+  the right impl based on the argument's runtime type.
+- **Dictionary passing (codegen)**: for a future compiled backend, trait methods
+  would dispatch via dictionaries (records of functions) passed as implicit
+  arguments. This is the standard Haskell/GHC approach and maps cleanly to
+  BEAM (dictionaries are just Erlang tuples/maps).
+
+- **Supertrait enforcement**: `check_supertrait_impls()` runs after all impls
+  are registered (order-independent). Verifies that for every `impl Trait for X`,
+  all supertraits of `Trait` also have impls for `X`.
+
+**Still needed:**
+
+- **Built-in trait constraints**: `show`/`print` are maximally polymorphic (no
+  `Show` constraint). Numeric ops have no `Num` constraint. Design decision
+  about when/whether to tighten these.
 
 **Core traits for the stdlib:**
 

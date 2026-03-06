@@ -246,9 +246,9 @@ pub(crate) struct HandlerInfo {
     pub has_return_clause: bool,
 }
 
-// TODO: fields will be used for supertrait enforcement
 #[derive(Debug, Clone)]
 pub(crate) struct TraitInfo {
+    // TODO: type_param will be used for kind checking
     pub type_param: String,
     pub supertraits: Vec<String>,
     /// Method signatures: name -> (param_types, return_type)

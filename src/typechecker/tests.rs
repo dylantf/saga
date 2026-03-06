@@ -749,3 +749,107 @@ main () = wrapper (User { name: \"Alice\" })",
         err.message
     );
 }
+
+// --- Supertrait enforcement ---
+
+#[test]
+fn supertrait_satisfied() {
+    let result = check(
+        "trait Eq a {
+  fun eq (x: a) (y: a) -> Bool
+}
+trait Ord a where {a: Eq} {
+  fun compare (x: a) (y: a) -> Int
+}
+record Foo { x: Int }
+impl Eq for Foo {
+  eq a b = a.x == b.x
+}
+impl Ord for Foo {
+  compare a b = a.x - b.x
+}
+main () = compare (Foo { x: 1 }) (Foo { x: 2 })",
+    );
+    assert!(result.is_ok(), "got: {:?}", result.err());
+}
+
+#[test]
+fn supertrait_missing_impl_fails() {
+    let result = check(
+        "trait Eq a {
+  fun eq (x: a) (y: a) -> Bool
+}
+trait Ord a where {a: Eq} {
+  fun compare (x: a) (y: a) -> Int
+}
+record Foo { x: Int }
+impl Ord for Foo {
+  compare a b = a.x - b.x
+}
+main () = compare (Foo { x: 1 }) (Foo { x: 2 })",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("requires impl Eq for Foo"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn supertrait_multiple_supertraits() {
+    let result = check(
+        "trait Show a {
+  fun show (x: a) -> String
+}
+trait Eq a {
+  fun eq (x: a) (y: a) -> Bool
+}
+trait Special a where {a: Show + Eq} {
+  fun special (x: a) -> String
+}
+record Bar { val: Int }
+impl Show for Bar {
+  show b = \"Bar\"
+}
+impl Eq for Bar {
+  eq a b = a.val == b.val
+}
+impl Special for Bar {
+  special b = show b
+}
+main () = special (Bar { val: 1 })",
+    );
+    assert!(result.is_ok(), "got: {:?}", result.err());
+}
+
+#[test]
+fn supertrait_one_of_multiple_missing() {
+    let result = check(
+        "trait Show a {
+  fun show (x: a) -> String
+}
+trait Eq a {
+  fun eq (x: a) (y: a) -> Bool
+}
+trait Special a where {a: Show + Eq} {
+  fun special (x: a) -> String
+}
+record Bar { val: Int }
+impl Show for Bar {
+  show b = \"Bar\"
+}
+impl Special for Bar {
+  special b = show b
+}
+main () = special (Bar { val: 1 })",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("requires impl Eq for Bar"),
+        "got: {}",
+        err.message
+    );
+}
