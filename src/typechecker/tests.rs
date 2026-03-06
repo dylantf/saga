@@ -1138,3 +1138,63 @@ main () = ()",
         err.message
     );
 }
+
+// --- Tuple tests ---
+
+#[test]
+fn tuple_pair() {
+    let result = check("main () = (1, \"hello\")");
+    assert!(result.is_ok(), "got: {}", result.err().unwrap().message);
+}
+
+#[test]
+fn tuple_triple() {
+    let result = check("main () = (1, 2.0, True)");
+    assert!(result.is_ok(), "got: {}", result.err().unwrap().message);
+}
+
+#[test]
+fn tuple_pattern_in_case() {
+    let result = check(
+        "main () = case (1, \"hi\") {
+  (x, y) -> x
+}",
+    );
+    assert!(result.is_ok(), "got: {}", result.err().unwrap().message);
+}
+
+#[test]
+fn tuple_show() {
+    assert!(check("main () = show (1, 2)").is_ok());
+}
+
+#[test]
+fn tuple_show_fails_without_element_show() {
+    let result = check(
+        "record Foo { x: Int }
+main () = show (Foo { x: 1 }, 2)",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Show") && err.message.contains("Foo"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn tuple_any_arity() {
+    let result = check("main () = (1, 2, 3, 4, 5)");
+    assert!(result.is_ok(), "got: {}", result.err().unwrap().message);
+}
+
+#[test]
+fn tuple_type_annotation() {
+    let result = check(
+        "fun fst (p: (Int, String)) -> Int
+fst p = case p { (x, _) -> x }
+main () = fst (1, \"hello\")",
+    );
+    assert!(result.is_ok(), "got: {}", result.err().unwrap().message);
+}

@@ -122,7 +122,16 @@ impl fmt::Display for Value {
             Value::BuiltIn(name) => write!(f, "<built-in: {}>", name),
             Value::TraitMethod { method_name, .. } => write!(f, "<trait-method: {}>", method_name),
             Value::Constructor { name, args, .. } => {
-                if name == "Nil" && args.is_empty() {
+                if name == "Tuple" {
+                    write!(f, "(")?;
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", arg)?;
+                    }
+                    return write!(f, ")");
+                } else if name == "Nil" && args.is_empty() {
                     write!(f, "[]")
                 } else if name == "Cons" && args.len() == 2 && is_list_value(self) {
                     write!(f, "[")?;
@@ -428,6 +437,19 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> EvalResult {
                 _ => EvalResult::error("resume used outside of a handler"),
             })
         }
+
+        Expr::Tuple { elements, .. } => {
+            let elements = elements.clone();
+            let env = env.clone();
+            eval_exprs(&elements, 0, Vec::new(), &env, |vals| {
+                let arity = vals.len();
+                EvalResult::Ok(Value::Constructor {
+                    name: "Tuple".into(),
+                    arity,
+                    args: vals,
+                })
+            })
+        }
     }
 }
 
@@ -565,6 +587,25 @@ fn eval_record_fields(
     eval_expr(&fields[index].1, &env).then(move |val| {
         acc.insert(field_name, val);
         eval_record_fields(&fields, index + 1, acc, &env, finish)
+    })
+}
+
+// Helper: evaluate a list of expressions into a Vec<Value>
+fn eval_exprs(
+    exprs: &[Expr],
+    index: usize,
+    mut acc: Vec<Value>,
+    env: &Env,
+    finish: impl FnOnce(Vec<Value>) -> EvalResult + 'static,
+) -> EvalResult {
+    if index >= exprs.len() {
+        return finish(acc);
+    }
+    let exprs = exprs.to_vec();
+    let env = env.clone();
+    eval_expr(&exprs[index], &env).then(move |val| {
+        acc.push(val);
+        eval_exprs(&exprs, index + 1, acc, &env, finish)
     })
 }
 
@@ -1016,6 +1057,18 @@ fn match_pattern(pattern: &Pat, value: &Value) -> Option<HashMap<String, Value>>
                         None => HashMap::from([(field_name.clone(), field_value.clone())]),
                         Some(pat) => match_pattern(pat, field_value)?,
                     };
+                    all_bindings.extend(bindings);
+                }
+                Some(all_bindings)
+            }
+            _ => None,
+        },
+
+        Pat::Tuple { elements, .. } => match value {
+            Value::Constructor { name, args, .. } if name == "Tuple" && args.len() == elements.len() => {
+                let mut all_bindings = HashMap::new();
+                for (pat, val) in elements.iter().zip(args.iter()) {
+                    let bindings = match_pattern(pat, val)?;
                     all_bindings.extend(bindings);
                 }
                 Some(all_bindings)

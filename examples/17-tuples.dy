@@ -1,0 +1,45 @@
+# Tuples -- any arity, no predefinition needed
+
+fun distance (p: (Float, Float)) -> Float
+distance (x, y) = x * x + y * y
+
+fun swap (p: (a, b)) -> (b, a)
+swap (x, y) = (y, x)
+
+fun fst (p: (a, b)) -> a
+fst (x, _) = x
+
+fun snd (p: (a, b)) -> b
+snd (_, y) = y
+
+main () = {
+  # Pair
+  let point = (3.0, 4.0)
+  print ("point: " <> show point)
+  print ("distance squared: " <> show (distance point))
+
+  # Swap
+  let flipped = swap point
+  print ("swapped: " <> show flipped)
+
+  # Triple
+  let rgb = (255, 128, 0)
+  print ("color: " <> show rgb)
+
+  # Accessors
+  let pair = ("hello", 42)
+  print ("fst: " <> fst pair)
+  print ("snd: " <> show (snd pair))
+
+  # 5-tuple (no size limit)
+  print (show (1, 2, 3, 4, 5))
+
+  # Nested
+  let nested = ((1, 2), (3, 4))
+  print ("nested: " <> show nested)
+
+  # Pattern matching in case
+  case nested {
+    ((a, b), (c, d)) -> print ("sum: " <> show (a + b + c + d))
+  }
+}

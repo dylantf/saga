@@ -544,9 +544,27 @@ impl Parser {
                     self.advance();
                     return Ok(TypeExpr::Named("Unit".to_string()));
                 }
-                let inner = self.parse_type_expr()?;
-                self.expect(Token::RParen)?;
-                Ok(inner)
+                let first = self.parse_type_expr()?;
+                if matches!(self.peek(), Token::Comma) {
+                    // Tuple type: (Int, String, ...)
+                    let mut elements = vec![first];
+                    while matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                        if matches!(self.peek(), Token::RParen) {
+                            break;
+                        }
+                        elements.push(self.parse_type_expr()?);
+                    }
+                    self.expect(Token::RParen)?;
+                    let mut result = TypeExpr::Named("Tuple".into());
+                    for elem in elements {
+                        result = TypeExpr::App(Box::new(result), Box::new(elem));
+                    }
+                    Ok(result)
+                } else {
+                    self.expect(Token::RParen)?;
+                    Ok(first)
+                }
             }
             tok => {
                 self.pos -= 1; // put back

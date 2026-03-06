@@ -204,6 +204,12 @@ pub enum Expr {
         value: Box<Expr>,
         span: Span,
     },
+
+    /// `(a, b)`, `(1, "hello", True)`
+    Tuple {
+        elements: Vec<Expr>,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -224,7 +230,8 @@ impl Expr {
             | Expr::RecordUpdate { span, .. }
             | Expr::EffectCall { span, .. }
             | Expr::With { span, .. }
-            | Expr::Resume { span, .. } => *span,
+            | Expr::Resume { span, .. }
+            | Expr::Tuple { span, .. } => *span,
         }
     }
 }
@@ -276,6 +283,12 @@ pub enum Pat {
     Record {
         name: String,
         fields: Vec<(String, Option<Pat>)>, // (field_name, optional alias pattern)
+        span: Span,
+    },
+
+    /// `(a, b)`, `(x, y, z)`
+    Tuple {
+        elements: Vec<Pat>,
         span: Span,
     },
 }

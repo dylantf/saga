@@ -332,6 +332,14 @@ impl Checker {
                 let ty = self.fresh_var();
                 Ok(ty)
             }
+
+            Expr::Tuple { elements, .. } => {
+                let tys: Vec<Type> = elements
+                    .iter()
+                    .map(|e| self.infer_expr(e))
+                    .collect::<Result<_, _>>()?;
+                Ok(Type::Con("Tuple".into(), tys))
+            }
         }
     }
 
@@ -433,6 +441,16 @@ impl Checker {
                             );
                         }
                     }
+                }
+                Ok(())
+            }
+
+            Pat::Tuple { elements, span } => {
+                let elem_tys: Vec<Type> = elements.iter().map(|_| self.fresh_var()).collect();
+                let tuple_ty = Type::Con("Tuple".into(), elem_tys.clone());
+                self.unify_at(ty, &tuple_ty, *span)?;
+                for (pat, elem_ty) in elements.iter().zip(elem_tys.iter()) {
+                    self.bind_pattern(pat, elem_ty)?;
                 }
                 Ok(())
             }
@@ -1232,13 +1250,24 @@ impl Checker {
                             }
                             Some(info) => {
                                 // Push conditional constraints for type parameters
-                                for (req_trait, param_idx) in &info.param_constraints {
-                                    if let Some(arg_ty) = args.get(*param_idx) {
+                                if type_name == "Tuple" {
+                                    // Tuples: propagate the trait to all elements
+                                    for arg_ty in args {
                                         self.pending_constraints.push((
-                                            req_trait.clone(),
+                                            trait_name.clone(),
                                             arg_ty.clone(),
                                             span,
                                         ));
+                                    }
+                                } else {
+                                    for (req_trait, param_idx) in &info.param_constraints {
+                                        if let Some(arg_ty) = args.get(*param_idx) {
+                                            self.pending_constraints.push((
+                                                req_trait.clone(),
+                                                arg_ty.clone(),
+                                                span,
+                                            ));
+                                        }
                                     }
                                 }
                             }

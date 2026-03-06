@@ -442,9 +442,27 @@ impl Parser {
                         span,
                     })
                 } else {
-                    let inner = self.parse_expr(0)?;
-                    self.expect(Token::RParen)?;
-                    Ok(inner)
+                    let first = self.parse_expr(0)?;
+                    if matches!(self.peek(), Token::Comma) {
+                        // Tuple: (a, b, ...)
+                        let mut elements = vec![first];
+                        while matches!(self.peek(), Token::Comma) {
+                            self.advance();
+                            if matches!(self.peek(), Token::RParen) {
+                                break; // trailing comma
+                            }
+                            elements.push(self.parse_expr(0)?);
+                        }
+                        let end = self.tokens[self.pos].span;
+                        self.expect(Token::RParen)?;
+                        Ok(Expr::Tuple {
+                            elements,
+                            span: span.to(end),
+                        })
+                    } else {
+                        self.expect(Token::RParen)?;
+                        Ok(first)
+                    }
                 }
             }
 
@@ -790,11 +808,35 @@ impl Parser {
                 span,
             }),
             Token::LParen => {
-                self.expect(Token::RParen)?;
-                Ok(Pat::Lit {
-                    value: Lit::Unit,
-                    span,
-                })
+                if matches!(self.peek(), Token::RParen) {
+                    self.advance();
+                    Ok(Pat::Lit {
+                        value: Lit::Unit,
+                        span,
+                    })
+                } else {
+                    let first = self.parse_pattern()?;
+                    if matches!(self.peek(), Token::Comma) {
+                        // Tuple pattern: (a, b, ...)
+                        let mut elements = vec![first];
+                        while matches!(self.peek(), Token::Comma) {
+                            self.advance();
+                            if matches!(self.peek(), Token::RParen) {
+                                break;
+                            }
+                            elements.push(self.parse_pattern()?);
+                        }
+                        let end = self.tokens[self.pos].span;
+                        self.expect(Token::RParen)?;
+                        Ok(Pat::Tuple {
+                            elements,
+                            span: span.to(end),
+                        })
+                    } else {
+                        self.expect(Token::RParen)?;
+                        Ok(first)
+                    }
+                }
             }
             Token::LBracket => {
                 let mut elements = Vec::new();
