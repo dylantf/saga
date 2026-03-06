@@ -236,14 +236,27 @@ pub(crate) struct EffectOpSig {
 
 // TODO: fields will be used for `needs` effect set tracking
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct HandlerInfo {
     /// Which effects this handler handles
     pub effects: Vec<std::string::String>,
     /// Arms: op_name -> (param_names, body) -- already type-checked at definition
     pub ops: Vec<std::string::String>,
-    /// Does it have a return clause?
     pub has_return_clause: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TraitInfo {
+    pub type_param: String,
+    pub supertraits: Vec<String>,
+    /// Method signatures: name -> (param_types, return_type)
+    pub methods: Vec<(String, Vec<Type>, Type)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ImplInfo {
+    pub target_type: String,
+    /// Method names provided by this impl
+    pub methods: Vec<String>,
 }
 
 // --- Inference engine ---
@@ -266,6 +279,10 @@ pub struct Checker {
     pub(crate) current_effects: HashSet<String>,
     /// Known effect requirements for named functions: name -> set of effect names
     pub(crate) fun_effects: HashMap<String, HashSet<String>>,
+    /// Trait definitions: trait name -> info
+    pub(crate) traits: HashMap<String, TraitInfo>,
+    /// Impl registry: (trait_name, target_type) -> impl info
+    pub(crate) trait_impls: HashMap<(String, String), ImplInfo>,
 }
 
 impl Checker {
@@ -281,6 +298,8 @@ impl Checker {
             resume_type: None,
             current_effects: HashSet::new(),
             fun_effects: HashMap::new(),
+            traits: HashMap::new(),
+            trait_impls: HashMap::new(),
         };
         checker.register_builtins();
         checker

@@ -518,3 +518,64 @@ fn pure_function_no_needs_ok() {
     // Pure functions without effects don't need any annotation
     check("add a b = a + b").unwrap();
 }
+
+// --- Traits ---
+
+#[test]
+fn trait_method_in_env() {
+    let checker = check("trait Greet a {\n  fun greet (x: a) -> String\n}").unwrap();
+    let scheme = checker.env.get("greet").unwrap();
+    let ty = checker.sub.apply(&scheme.ty);
+    match ty {
+        Type::Arrow(_, ret) => assert_eq!(*ret, Type::String),
+        _ => panic!("expected arrow, got {}", ty),
+    }
+}
+
+#[test]
+fn impl_missing_method() {
+    let result = check(
+        "record User { name: String }\ntrait Greet a {\n  fun greet (x: a) -> String\n}\nimpl Greet for User {\n}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(err.message.contains("missing method"), "got: {}", err.message);
+}
+
+#[test]
+fn impl_extra_method() {
+    let result = check(
+        "record User { name: String }\ntrait Greet a {\n  fun greet (x: a) -> String\n}\nimpl Greet for User {\n  greet u = u.name\n  bogus u = u.name\n}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(err.message.contains("not defined in trait"), "got: {}", err.message);
+}
+
+#[test]
+fn impl_wrong_return_type() {
+    let result = check(
+        "record User { name: String }\ntrait Greet a {\n  fun greet (x: a) -> String\n}\nimpl Greet for User {\n  greet u = 42\n}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(err.message.contains("type mismatch"), "got: {}", err.message);
+}
+
+#[test]
+fn impl_correct() {
+    check(
+        "record User { name: String }\ntrait Greet a {\n  fun greet (x: a) -> String\n}\nimpl Greet for User {\n  greet u = u.name\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn impl_for_undefined_trait() {
+    let result = check(
+        "record User { name: String }\nimpl Bogus for User {\n  foo u = u.name\n}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(err.message.contains("undefined trait"), "got: {}", err.message);
+}

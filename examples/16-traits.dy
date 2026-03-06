@@ -1,0 +1,31 @@
+# Traits and implementations
+
+record User {
+  name: String,
+  age: Int,
+}
+
+record Point {
+  x: Int,
+  y: Int,
+}
+
+trait Describe a {
+  fun describe (x: a) -> String
+}
+
+impl Describe for User {
+  describe user = user.name <> " (age " <> show user.age <> ")"
+}
+
+impl Describe for Point {
+  describe p = "(" <> show p.x <> ", " <> show p.y <> ")"
+}
+
+main () = {
+  let alice = User { name: "Alice", age: 30 }
+  let origin = Point { x: 0, y: 0 }
+
+  print <| describe alice
+  print <| describe origin
+}

@@ -59,10 +59,31 @@ pub enum Value {
 
     BuiltIn(String),
 
+    /// Trait method that dispatches based on the argument's runtime type
+    TraitMethod {
+        trait_name: String,
+        method_name: String,
+        env: Env,
+    },
+
     Continuation(Rc<RefCell<Option<Continuation>>>),
 
     // Mutable reference cell (created by `let mut`)
     Ref(Rc<RefCell<Value>>),
+}
+
+/// Extract a type name from a runtime value for trait dispatch.
+fn value_type_name(v: &Value) -> String {
+    match v {
+        Value::Int(_) => "Int".into(),
+        Value::Float(_) => "Float".into(),
+        Value::String(_) => "String".into(),
+        Value::Bool(_) => "Bool".into(),
+        Value::Unit => "Unit".into(),
+        Value::Record { name, .. } => name.clone(),
+        Value::Constructor { name, .. } => name.clone(),
+        _ => "<unknown>".into(),
+    }
 }
 
 fn is_list_value(v: &Value) -> bool {
@@ -99,6 +120,7 @@ impl fmt::Display for Value {
             Value::Unit => write!(f, "()"),
             Value::Closure { .. } => write!(f, "<function>"),
             Value::BuiltIn(name) => write!(f, "<built-in: {}>", name),
+            Value::TraitMethod { method_name, .. } => write!(f, "<trait-method: {}>", method_name),
             Value::Constructor { name, args, .. } => {
                 if name == "Nil" && args.is_empty() {
                     write!(f, "[]")
@@ -647,6 +669,32 @@ fn apply(func: Value, arg: Value) -> EvalResult {
 
         Value::BuiltIn(name) => eval_builtin(&name, arg),
 
+        Value::TraitMethod {
+            trait_name,
+            method_name,
+            env,
+        } => {
+            let raw_name = value_type_name(&arg);
+            // Constructors return their own name (e.g. "Some"), not the type name ("Option").
+            // Look up __ctor_type_{name} entries stored during TypeDef eval to resolve.
+            let type_name = env
+                .get(&format!("__ctor_type_{}", raw_name))
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s),
+                    _ => None,
+                })
+                .unwrap_or(raw_name);
+            let key = format!("__impl_{}_{}_{}", trait_name, type_name, method_name);
+            if let Some(impl_fn) = env.get(&key) {
+                apply(impl_fn, arg)
+            } else {
+                EvalResult::error(format!(
+                    "no impl of {} for type {}",
+                    trait_name, type_name
+                ))
+            }
+        }
+
         // Effect ops accumulate args like constructors, but fire a signal instead of returning a value
         Value::EffectFn {
             name,
@@ -683,7 +731,19 @@ pub fn eval_decl(decl: &Decl, env: &Env) -> EvalResult {
         // Ignored at runtime
         Decl::FunAnnotation { .. } => EvalResult::Ok(Value::Unit),
         Decl::ModuleDecl { .. } => EvalResult::Ok(Value::Unit),
-        Decl::TraitDef { .. } => EvalResult::Ok(Value::Unit),
+        Decl::TraitDef { name, methods, .. } => {
+            for method in methods {
+                env.set(
+                    method.name.clone(),
+                    Value::TraitMethod {
+                        trait_name: name.clone(),
+                        method_name: method.name.clone(),
+                        env: env.clone(),
+                    },
+                );
+            }
+            EvalResult::Ok(Value::Unit)
+        }
 
         Decl::Let {
             name,
@@ -728,7 +788,7 @@ pub fn eval_decl(decl: &Decl, env: &Env) -> EvalResult {
             EvalResult::Ok(Value::Unit)
         }
 
-        Decl::TypeDef { variants, .. } => {
+        Decl::TypeDef { name, variants, .. } => {
             for v in variants {
                 let arity = v.fields.len();
                 env.set(
@@ -738,7 +798,12 @@ pub fn eval_decl(decl: &Decl, env: &Env) -> EvalResult {
                         arity,
                         args: Vec::new(),
                     },
-                )
+                );
+                // Map constructor name -> type name for trait dispatch
+                env.set(
+                    format!("__ctor_type_{}", v.name),
+                    Value::String(name.clone()),
+                );
             }
             EvalResult::Ok(Value::Unit)
         }
@@ -776,7 +841,25 @@ pub fn eval_decl(decl: &Decl, env: &Env) -> EvalResult {
             EvalResult::Ok(Value::Unit)
         }
 
-        Decl::ImplDef { .. } => todo!(),
+        Decl::ImplDef {
+            trait_name,
+            target_type,
+            methods,
+            ..
+        } => {
+            for (method_name, params, body) in methods {
+                // Store as a closure under a mangled name: __impl_Show_User_show
+                let key = format!("__impl_{}_{}_{}", trait_name, target_type, method_name);
+                let arm = ClosureArm {
+                    params: params.clone(),
+                    guard: None,
+                    body: body.clone(),
+                    env: env.clone(),
+                };
+                env.set(key, Value::Closure(vec![arm]));
+            }
+            EvalResult::Ok(Value::Unit)
+        }
 
         Decl::Import { .. } => todo!(),
     }

@@ -1342,3 +1342,57 @@ fn fun_annotation_needs_and_where() {
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
     }
 }
+
+// --- Trait definitions ---
+
+#[test]
+fn trait_def_simple() {
+    let decls = parse("trait Show a {\n  fun show (x: a) -> String\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::TraitDef { name, type_param, supertraits, methods, .. } => {
+            assert_eq!(name, "Show");
+            assert_eq!(type_param, "a");
+            assert!(supertraits.is_empty());
+            assert_eq!(methods.len(), 1);
+            assert_eq!(methods[0].name, "show");
+            assert_eq!(methods[0].params.len(), 1);
+        }
+        _ => panic!("expected TraitDef, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn trait_def_with_supertraits() {
+    let decls = parse("trait Ord a where {a: Eq} {\n  fun compare (x: a) (y: a) -> Ordering\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::TraitDef { name, type_param, supertraits, methods, .. } => {
+            assert_eq!(name, "Ord");
+            assert_eq!(type_param, "a");
+            assert_eq!(supertraits, &["Eq"]);
+            assert_eq!(methods.len(), 1);
+            assert_eq!(methods[0].name, "compare");
+            assert_eq!(methods[0].params.len(), 2);
+        }
+        _ => panic!("expected TraitDef, got {:?}", decls[0]),
+    }
+}
+
+// --- Impl definitions ---
+
+#[test]
+fn impl_def_simple() {
+    let decls = parse("impl Show for User {\n  show user = user.name\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::ImplDef { trait_name, target_type, methods, .. } => {
+            assert_eq!(trait_name, "Show");
+            assert_eq!(target_type, "User");
+            assert_eq!(methods.len(), 1);
+            assert_eq!(methods[0].0, "show");
+            assert_eq!(methods[0].1.len(), 1);
+        }
+        _ => panic!("expected ImplDef, got {:?}", decls[0]),
+    }
+}

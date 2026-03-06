@@ -398,7 +398,179 @@ This works in practice because:
 
 ---
 
-## 8. Explicitly Out of Scope
+## 8. Type System Roadmap
+
+### Phase 1: Traits and Impls
+
+Add trait definitions, impl blocks, and constraint solving to the type checker.
+This is required before the BEAM backend since codegen needs to know how to
+dispatch polymorphic operations like `+`, `==`, `show`.
+
+**What's needed:**
+
+- **Trait registry**: store trait name, type parameter, method signatures.
+- **Impl checking**: verify that an impl satisfies its trait (correct methods,
+  correct types).
+- **Constraint solving**: when the checker sees `a + b` where `a` is polymorphic,
+  emit a `Num` (or `Add`) constraint. Constraints are checked at call sites
+  where concrete types are known.
+- **Dictionary passing (codegen)**: at runtime, trait methods dispatch via
+  dictionaries (records of functions) passed as implicit arguments. This is
+  the standard Haskell/GHC approach and maps cleanly to BEAM (dictionaries
+  are just Erlang tuples/maps). Alternative: monomorphization (specialize at
+  each call site), but dictionary passing is simpler for a BEAM target.
+- **Where clauses**: already parsed. The checker needs to collect `where`
+  constraints and use them when checking the function body.
+
+**Core traits for the stdlib:**
+
+```
+trait Eq a        { eq : a -> a -> Bool }
+trait Ord a       where {a: Eq} { compare : a -> a -> Ordering }
+trait Num a       { add : a -> a -> a, sub : a -> a -> a, mul : a -> a -> a }
+trait Show a      { show : a -> String }
+trait Semigroup a { concat : a -> a -> a }
+trait Monoid a    where {a: Semigroup} { empty : a }
+```
+
+### Phase 2: Higher-Kinded Types (Kinds)
+
+Add kind inference so trait type parameters can be type constructors
+(`* -> *`), not just concrete types (`*`). This enables `Functor`,
+`Applicative`, and friends.
+
+**What's needed:**
+
+- **Kind representation**: `Kind::Star`, `Kind::Arrow(Kind, Kind)`. Most
+  types are `*`. `Maybe` is `* -> *`. `Result` is `* -> * -> *`.
+- **Kind inference**: mostly mechanical. If the checker sees `f a` in a type
+  position, it infers `f : * -> *` and `a : *`. Uses unification at the kind
+  level (same algorithm as type unification, just simpler).
+- **Kind checking**: reject nonsense like `Int Int` (applying a `*` to a `*`).
+- **Update trait definitions**: trait type parameters carry a kind. `trait
+  Functor f` means `f : * -> *`.
+
+**Key traits this enables (library code, not compiler):**
+
+```
+trait Functor f {
+    map : (a -> b) -> f a -> f b
+}
+
+trait Applicative f where {f: Functor} {
+    pure : a -> f a
+    apply : f (a -> b) -> f a -> f b
+}
+```
+
+`Monad` can also be defined as a trait but is less necessary since algebraic
+effects cover most of its use cases (IO, error handling, state, async).
+Applicative is the more important one -- it enables patterns like parallel
+validation / error accumulation that effects don't naturally express.
+
+**Important**: traits (Phase 1) should not hardcode the assumption that type
+parameters are kind `*`. Keep them as type variables and the kind system
+will constrain them in Phase 2.
+
+### Phase 3: Exhaustiveness Checking
+
+Verify that pattern matches cover all cases. Not strictly required for the
+backend but important for real-world use. Can be implemented independently
+of the other phases.
+
+---
+
+## 9. BEAM Backend
+
+Replace the tree-walking interpreter (`eval.rs`) with a codegen pass that
+emits Core Erlang (`.core` files). The Erlang compiler handles optimization
+and BEAM bytecode generation from there.
+
+**Pipeline:**
+
+```
+source -> lexer -> parser -> typechecker -> codegen -> .core files
+           |___________________________________________|
+                          all Rust
+```
+
+Types are erased at the Core Erlang boundary. The BEAM runtime is untyped,
+same as Gleam's approach. All type checking happens in Rust.
+
+**What BEAM gives us for free:**
+
+- Garbage collection (per-process, no stop-the-world)
+- Lightweight processes and preemptive scheduling
+- Tail call optimization
+- Pattern matching compilation
+- Hot code reloading
+- Distribution / clustering
+- The entire OTP library ecosystem
+
+**Codegen approach:**
+
+Emit Core Erlang as text (string templates). Walk the AST, emit corresponding
+Core Erlang constructs. Can optionally add a structured IR (Rust enums
+representing Core Erlang nodes) between AST and text if direct emission
+gets messy.
+
+Core Erlang is a stable, well-documented format. Gleam's Rust compiler
+(targeting Core Erlang) is the closest reference implementation.
+
+**Key translation concerns:**
+
+- **Closures**: Core Erlang has `fun` -- direct mapping.
+- **ADTs**: tagged tuples, e.g. `Just(5)` becomes `{'Just', 5}`.
+- **Pattern matching**: Core Erlang `case` expressions.
+- **Currying**: emit nested `fun`s or use Erlang's `fun F/N` with partial
+  application wrappers.
+- **Effects/handlers**: map to processes, message passing, or CPS depending
+  on the approach. Processes are the most natural fit on BEAM.
+- **Trait dictionaries**: passed as extra arguments (tuples/maps of functions).
+- **Tail calls**: free on BEAM, no special handling needed.
+
+**Build tooling:**
+
+Need to decide whether to lean on rebar3/mix for project management and
+dependencies, or build custom tooling. Can use Hex (Erlang package registry)
+for interop with existing BEAM packages.
+
+### FFI
+
+Foreign function interface for calling Erlang/OTP libraries. Minimal syntax
+for declaring external functions with type signatures:
+
+```
+effect FileSystem {
+    read_file(path: String) -> String
+}
+
+foreign erlang "file" "read_file" as read_file in FileSystem
+```
+
+FFI functions slot into the effect system -- the user maps foreign functions
+to effect operations. This means:
+
+- FFI calls are tracked by the type checker like any other effect.
+- Handlers can swap FFI-backed effects for pure implementations in tests.
+- Pure FFI (math, string ops) needs no effect annotation.
+
+Type safety at the FFI boundary is trust-based: the programmer declares the
+type, the checker believes it. Same approach as Gleam.
+
+### JavaScript Backend (Future)
+
+Second codegen backend emitting JS instead of Core Erlang. Enables fullstack
+development: BEAM server + JS client, shared types, compiler-inferred RPC
+boundaries (functions with server-side `needs` automatically become HTTP
+calls from the client).
+
+Not planned until the BEAM backend is solid. The AST, type checker, and
+trait system are fully shared -- only the codegen pass differs.
+
+---
+
+## 10. Explicitly Out of Scope
 
 - **Multishot continuations** - calling `resume` more than once. Not needed
   for practical effects (I/O, logging, state, errors, async). Could be added

@@ -446,7 +446,29 @@ impl Checker {
                 } => {
                     self.register_effect_def(name, operations)?;
                 }
+                Decl::TraitDef {
+                    name,
+                    type_param,
+                    supertraits,
+                    methods,
+                    ..
+                } => {
+                    self.register_trait_def(name, type_param, supertraits, methods)?;
+                }
                 _ => {}
+            }
+        }
+
+        // Register impls (after traits so we can validate against them)
+        for decl in program {
+            if let Decl::ImplDef {
+                trait_name,
+                target_type,
+                methods,
+                span,
+            } = decl
+            {
+                self.register_impl(trait_name, target_type, methods, *span)?;
             }
         }
 
@@ -1039,5 +1061,185 @@ impl Checker {
             }
             found.ok_or_else(|| TypeError::new(format!("undefined effect operation: {}", op_name)))
         }
+    }
+
+    // --- Trait & impl helpers ---
+
+    /// Replace occurrences of a trait's type param variable with a concrete type.
+    /// Used when checking impl bodies: if the trait says `(x: a) -> String`
+    /// and the impl is `for User`, we substitute a -> User to get `(x: User) -> String`.
+    fn substitute_trait_param(&self, param_name: &str, replacement: &Type, ty: &Type) -> Type {
+        match ty {
+            Type::Var(id) => {
+                // Check if this var corresponds to the trait's type param
+                // by looking at what convert_type_expr assigned to it
+                let resolved = self.sub.apply(ty);
+                if resolved == *ty {
+                    // Unresolved var -- check if it was the trait param
+                    // We stored it during register_trait_def via convert_type_expr
+                    // The TraitInfo.methods have raw type vars from that conversion.
+                    // We need to check if this var id was assigned to param_name.
+                    // For simplicity, just replace all free vars (trait methods only
+                    // have the one type param).
+                    replacement.clone()
+                } else {
+                    resolved
+                }
+            }
+            Type::Arrow(a, b) => Type::Arrow(
+                Box::new(self.substitute_trait_param(param_name, replacement, a)),
+                Box::new(self.substitute_trait_param(param_name, replacement, b)),
+            ),
+            Type::Con(name, args) => Type::Con(
+                name.clone(),
+                args.iter()
+                    .map(|a| self.substitute_trait_param(param_name, replacement, a))
+                    .collect(),
+            ),
+            _ => ty.clone(),
+        }
+    }
+
+    // --- Trait & impl registration ---
+
+    fn register_trait_def(
+        &mut self,
+        name: &str,
+        type_param: &str,
+        supertraits: &[String],
+        methods: &[ast::TraitMethod],
+    ) -> Result<(), TypeError> {
+        let mut method_sigs = Vec::new();
+
+        for method in methods {
+            let mut params_list: Vec<(String, u32)> = vec![];
+            let param_types: Vec<Type> = method
+                .params
+                .iter()
+                .map(|(_, texpr)| self.convert_type_expr(texpr, &mut params_list))
+                .collect();
+            let return_type = self.convert_type_expr(&method.return_type, &mut params_list);
+            method_sigs.push((method.name.clone(), param_types, return_type));
+        }
+
+        // Add each method to the env as a polymorphic function.
+        // e.g. `fun show (x: a) -> String` becomes `show : forall a. a -> String`
+        for (method_name, param_types, return_type) in &method_sigs {
+            let mut fun_ty = return_type.clone();
+            for pt in param_types.iter().rev() {
+                fun_ty = Type::Arrow(Box::new(pt.clone()), Box::new(fun_ty));
+            }
+            let mut forall = Vec::new();
+            super::collect_free_vars(&fun_ty, &mut forall);
+            self.env.insert(
+                method_name.clone(),
+                super::Scheme {
+                    forall,
+                    ty: fun_ty,
+                },
+            );
+        }
+
+        self.traits.insert(
+            name.into(),
+            super::TraitInfo {
+                type_param: type_param.into(),
+                supertraits: supertraits.to_vec(),
+                methods: method_sigs,
+            },
+        );
+        Ok(())
+    }
+
+    fn register_impl(
+        &mut self,
+        trait_name: &str,
+        target_type: &str,
+        methods: &[(String, Vec<ast::Pat>, ast::Expr)],
+        span: crate::token::Span,
+    ) -> Result<(), TypeError> {
+        // Check the trait exists
+        let trait_info = self.traits.get(trait_name).cloned().ok_or_else(|| {
+            TypeError::at(span, format!("impl for undefined trait: {}", trait_name))
+        })?;
+
+        // Check all required methods are provided
+        let provided: Vec<&str> = methods.iter().map(|(n, _, _)| n.as_str()).collect();
+        for (required_name, _, _) in &trait_info.methods {
+            if !provided.contains(&required_name.as_str()) {
+                return Err(TypeError::at(
+                    span,
+                    format!(
+                        "impl {} for {} is missing method '{}'",
+                        trait_name, target_type, required_name
+                    ),
+                ));
+            }
+        }
+
+        // Check for extra methods not in the trait
+        for name in &provided {
+            if !trait_info.methods.iter().any(|(n, _, _)| n == name) {
+                return Err(TypeError::at(
+                    span,
+                    format!(
+                        "impl {} for {} has method '{}' not defined in trait",
+                        trait_name, target_type, name
+                    ),
+                ));
+            }
+        }
+
+        // Type-check each method body against the trait's expected signature.
+        // Substitute the trait's type param with the concrete target type.
+        for (method_name, params, body) in methods {
+            let trait_method = trait_info
+                .methods
+                .iter()
+                .find(|(n, _, _)| n == method_name)
+                .unwrap(); // already validated above
+
+            // Build expected param types with trait type param replaced by target_type
+            let target = Type::Con(target_type.into(), vec![]);
+            let expected_params: Vec<Type> = trait_method
+                .1
+                .iter()
+                .map(|t| self.substitute_trait_param(&trait_info.type_param, &target, t))
+                .collect();
+            let expected_return =
+                self.substitute_trait_param(&trait_info.type_param, &target, &trait_method.2);
+
+            let saved_env = self.env.clone();
+
+            // Bind params with expected types
+            for (i, pat) in params.iter().enumerate() {
+                if i < expected_params.len() {
+                    self.bind_pattern(pat, &expected_params[i])?;
+                }
+            }
+
+            // Infer body and check it matches the expected return type
+            let body_ty = self.infer_expr(body)?;
+            self.unify_at(&body_ty, &expected_return, body.span()).map_err(|e| {
+                TypeError::at(
+                    span,
+                    format!(
+                        "in impl {} for {}, method '{}': {}",
+                        trait_name, target_type, method_name, e.message
+                    ),
+                )
+            })?;
+
+            self.env = saved_env;
+        }
+
+        self.trait_impls.insert(
+            (trait_name.into(), target_type.into()),
+            super::ImplInfo {
+                target_type: target_type.into(),
+                methods: provided.iter().map(|s| s.to_string()).collect(),
+            },
+        );
+        Ok(())
     }
 }

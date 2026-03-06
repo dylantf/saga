@@ -38,6 +38,8 @@ impl Parser {
             }
             Token::Effect => self.parse_effect_def(),
             Token::Handler => self.parse_handler_def(),
+            Token::Trait => self.parse_trait_def(),
+            Token::Impl => self.parse_impl_def(),
             Token::Ident(_) => self.parse_fun_binding(),
             _ => Err(ParseError {
                 message: format!("Expected declaration, got {:?}", self.peek()),
@@ -334,6 +336,124 @@ impl Parser {
             needs,
             arms,
             return_clause,
+            span: start.to(end),
+        })
+    }
+
+    fn parse_trait_def(&mut self) -> Result<Decl, ParseError> {
+        let start = self.tokens[self.pos].span;
+        self.advance(); // consume 'trait'
+        let name = self.expect_upper_ident()?;
+        let type_param = self.expect_ident()?;
+
+        let mut supertraits = Vec::new();
+        if *self.peek() == Token::Where {
+            self.advance();
+            self.expect(Token::LBrace)?;
+
+            while *self.peek() != Token::RBrace {
+                if !supertraits.is_empty() {
+                    self.expect(Token::Comma)?;
+                    if *self.peek() == Token::RBrace {
+                        break;
+                    }
+                }
+
+                // `a: Show + Eq` we ignore the type var since it must be the trait's param
+                self.expect_ident()?;
+                self.expect(Token::Colon)?;
+                supertraits.push(self.expect_upper_ident()?);
+
+                while *self.peek() == Token::Plus {
+                    self.advance();
+                    supertraits.push(self.expect_upper_ident()?);
+                }
+            }
+
+            self.expect(Token::RBrace)?;
+        }
+
+        self.expect(Token::LBrace)?;
+        self.skip_terminators();
+
+        let mut methods = Vec::new();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let method_start = self.tokens[self.pos].span;
+            self.expect(Token::Fun)?;
+            let method_name = self.expect_ident()?;
+
+            let mut params = Vec::new();
+            while matches!(self.peek(), Token::LParen) {
+                self.advance();
+                if matches!(self.peek(), Token::RParen) {
+                    self.advance();
+                    params.push(("_".into(), TypeExpr::Named("Unit".into())));
+                } else {
+                    let param_name = self.expect_ident()?;
+                    self.expect(Token::Colon)?;
+                    let param_type = self.parse_type_expr()?;
+                    self.expect(Token::RParen)?;
+                    params.push((param_name, param_type));
+                }
+            }
+
+            self.expect(Token::Arrow)?;
+            let return_type = self.parse_type_expr()?;
+            let method_end = self.tokens[self.pos - 1].span;
+
+            methods.push(TraitMethod {
+                name: method_name,
+                params,
+                return_type,
+                span: method_start.to(method_end),
+            });
+            self.skip_terminators();
+        }
+
+        let end = self.tokens[self.pos].span;
+        self.expect(Token::RBrace)?;
+
+        Ok(Decl::TraitDef {
+            name,
+            type_param,
+            supertraits,
+            methods,
+            span: start.to(end),
+        })
+    }
+
+    fn parse_impl_def(&mut self) -> Result<Decl, ParseError> {
+        let start = self.tokens[self.pos].span;
+        self.advance(); // consume impl
+
+        let trait_name = self.expect_upper_ident()?;
+        self.expect(Token::For)?;
+        let target_type = self.expect_upper_ident()?;
+
+        self.expect(Token::LBrace)?;
+        self.skip_terminators();
+
+        let mut methods = Vec::new();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let name = self.expect_ident()?;
+            let mut params = Vec::new();
+            while !matches!(self.peek(), Token::Eq | Token::Eof) {
+                params.push(self.parse_pattern()?);
+            }
+
+            self.expect(Token::Eq)?;
+            let body = self.parse_expr(0)?;
+            methods.push((name, params, body));
+            self.skip_terminators();
+        }
+
+        let end = self.tokens[self.pos].span;
+        self.expect(Token::RBrace)?;
+
+        Ok(Decl::ImplDef {
+            trait_name,
+            target_type,
+            methods,
             span: start.to(end),
         })
     }
