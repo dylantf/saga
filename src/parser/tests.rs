@@ -625,6 +625,27 @@ fn fun_annotation_public_with_effects() {
 }
 
 #[test]
+fn fun_annotation_unit_param() {
+    let decls = parse("fun do_work () -> Int needs { Log }");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::FunAnnotation {
+            name,
+            params,
+            effects,
+            ..
+        } => {
+            assert_eq!(name, "do_work");
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0].0, "_");
+            assert_eq!(params[0].1, TypeExpr::Named("Unit".into()));
+            assert_eq!(effects, &vec!["Log".to_string()]);
+        }
+        _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
+    }
+}
+
+#[test]
 fn fun_binding_simple() {
     let decls = parse("add x y = x + y");
     assert_eq!(decls.len(), 1);

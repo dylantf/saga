@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, BinOp, Decl, Expr, Lit, Pat, Stmt};
 
@@ -20,6 +20,10 @@ impl Checker {
             Expr::Var { name, span } => {
                 if let Some(scheme) = self.env.get(name) {
                     let scheme = scheme.clone();
+                    // Propagate effects from functions with known needs
+                    if let Some(effects) = self.fun_effects.get(name).cloned() {
+                        self.current_effects.extend(effects);
+                    }
                     Ok(self.instantiate(&scheme))
                 } else {
                     Err(TypeError::at(
@@ -116,7 +120,10 @@ impl Checker {
                     self.bind_pattern(pat, &ty)?;
                     param_types.push(ty);
                 }
+                // Lambda bodies are isolated: effects inside are deferred until call
+                let saved_effects = std::mem::take(&mut self.current_effects);
                 let body_ty = self.infer_expr(body)?;
+                self.current_effects = saved_effects;
                 // Build curried arrow: a -> b -> c -> ret
                 let mut result = body_ty;
                 for param_ty in param_types.into_iter().rev() {
@@ -280,6 +287,12 @@ impl Checker {
                 let op_sig = self
                     .lookup_effect_op(name, qualifier.as_deref())
                     .map_err(|e| e.with_span(*span))?;
+
+                // Track which effect this op belongs to
+                if let Some(effect_name) = self.effect_for_op(name, qualifier.as_deref()) {
+                    self.current_effects.insert(effect_name);
+                }
+
                 // Build curried function type: param1 -> param2 -> ... -> return_type
                 // Args are applied via App nodes from parse_application
                 let mut ty = op_sig.return_type.clone();
@@ -437,13 +450,14 @@ impl Checker {
             }
         }
 
-        // Collect function annotations: name -> declared type
+        // Collect function annotations: name -> declared type, and effects
         let mut annotations: HashMap<std::string::String, Type> = HashMap::new();
         for decl in program {
             if let Decl::FunAnnotation {
                 name,
                 params,
                 return_type,
+                effects,
                 ..
             } = decl
             {
@@ -454,6 +468,10 @@ impl Checker {
                     fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
                 }
                 annotations.insert(name.clone(), fun_ty);
+                if !effects.is_empty() {
+                    self.fun_effects
+                        .insert(name.clone(), effects.iter().cloned().collect());
+                }
             }
         }
 
@@ -576,6 +594,9 @@ impl Checker {
             self.unify(fun_var, &pre_ty)?;
         }
 
+        // Save and clear effect tracking for this function body
+        let saved_effects = std::mem::take(&mut self.current_effects);
+
         for clause in clauses {
             let Decl::FunBinding {
                 params,
@@ -615,6 +636,42 @@ impl Checker {
             self.unify_at(&result_ty, &body_ty, body.span())?;
 
             self.env = saved_env;
+        }
+
+        // Check effect requirements against declared needs
+        let body_effects = std::mem::replace(&mut self.current_effects, saved_effects);
+        let declared_effects = self.fun_effects.get(name).cloned().unwrap_or_default();
+
+        if !body_effects.is_empty() || !declared_effects.is_empty() {
+            // Check for effects used but not declared
+            let undeclared: Vec<_> = body_effects.difference(&declared_effects).collect();
+            if !undeclared.is_empty() {
+                let span = match clauses[0] {
+                    Decl::FunBinding { span, .. } => *span,
+                    _ => unreachable!(),
+                };
+                let mut effects: Vec<_> = undeclared.into_iter().cloned().collect();
+                effects.sort();
+                if declared_effects.is_empty() {
+                    return Err(TypeError::at(
+                        span,
+                        format!(
+                            "function '{}' uses effects {{{}}} but has no 'needs' declaration",
+                            name,
+                            effects.join(", ")
+                        ),
+                    ));
+                } else {
+                    return Err(TypeError::at(
+                        span,
+                        format!(
+                            "function '{}' uses effect{{{}}} not declared in its 'needs' clause",
+                            name,
+                            effects.join(", ")
+                        ),
+                    ));
+                }
+            }
         }
 
         // Build curried function type
@@ -799,7 +856,20 @@ impl Checker {
 
     /// Infer the type of a `with` expression: `expr with handler`
     fn infer_with(&mut self, expr: &Expr, handler: &ast::Handler) -> Result<Type, TypeError> {
+        // Save outer effects, clear for inner expression
+        let saved_effects = std::mem::take(&mut self.current_effects);
+
         let expr_ty = self.infer_expr(expr)?;
+
+        // Determine which effects this handler handles and subtract them
+        let handled = self.handler_handled_effects(handler);
+        for eff in &handled {
+            self.current_effects.remove(eff);
+        }
+
+        // Merge remaining (unhandled) effects back into outer set
+        let inner_effects = std::mem::replace(&mut self.current_effects, saved_effects);
+        self.current_effects.extend(inner_effects);
 
         let with_span = expr.span();
         match handler {
@@ -893,6 +963,46 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// Find which effect an operation belongs to.
+    fn effect_for_op(&self, op_name: &str, qualifier: Option<&str>) -> Option<String> {
+        if let Some(effect_name) = qualifier {
+            if self.effects.contains_key(effect_name) {
+                return Some(effect_name.to_string());
+            }
+        }
+        for (effect_name, ops) in &self.effects {
+            if ops.iter().any(|o| o.name == op_name) {
+                return Some(effect_name.clone());
+            }
+        }
+        None
+    }
+
+    /// Determine which effects a handler handles.
+    fn handler_handled_effects(&self, handler: &ast::Handler) -> HashSet<String> {
+        let mut handled = HashSet::new();
+        match handler {
+            ast::Handler::Named(name) => {
+                if let Some(info) = self.handlers.get(name) {
+                    handled.extend(info.effects.iter().cloned());
+                }
+            }
+            ast::Handler::Inline { named, arms, .. } => {
+                for name in named {
+                    if let Some(info) = self.handlers.get(name) {
+                        handled.extend(info.effects.iter().cloned());
+                    }
+                }
+                for arm in arms {
+                    if let Some(effect_name) = self.effect_for_op(&arm.op_name, None) {
+                        handled.insert(effect_name);
+                    }
+                }
+            }
+        }
+        handled
     }
 
     /// Look up an effect operation by name, optionally qualified (e.g. `Cache.get`).

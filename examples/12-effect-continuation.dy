@@ -29,6 +29,7 @@ count_logs computation = {
 }
 
 # A computation that uses logging
+fun do_work () -> Int needs {Log}
 do_work () = {
   log! "starting"
   let x = 10 + 20

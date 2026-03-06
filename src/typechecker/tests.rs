@@ -379,3 +379,142 @@ fn pipe_operator() {
     let ty = checker.sub.apply(&checker.env.get("x").unwrap().ty);
     assert_eq!(ty, Type::String);
 }
+
+// --- Effect needs tracking ---
+
+#[test]
+fn effect_call_without_needs_is_error() {
+    let result = check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfoo x = fail! \"oops\"",
+    );
+    assert!(result.is_err());
+    let err = result.err().expect("expected error");
+    assert!(
+        err.message.contains("needs"),
+        "expected needs error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn effect_call_with_correct_needs() {
+    check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun foo (x: Int) -> Int needs {Fail}\nfoo x = fail! \"oops\"",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_call_with_wrong_needs() {
+    let result = check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\neffect Log {\n  fun log (msg: String) -> Unit\n}\nfun foo (x: Int) -> Int needs {Log}\nfoo x = fail! \"oops\"",
+    );
+    assert!(result.is_err());
+    let err = result.err().expect("expected error");
+    assert!(
+        err.message.contains("Fail"),
+        "expected Fail in error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn effect_handled_with_named_handler() {
+    // Effect is handled inline, so the enclosing function doesn't need it
+    check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nhandler catch_fail for Fail {\n  fail msg -> 0\n}\nmain x = (fail! \"oops\") with catch_fail",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_handled_with_inline_handler() {
+    check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nmain x = (fail! \"oops\") with {\n  fail msg -> 0\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_propagates_through_function_call() {
+    // Calling a function that needs {Fail} requires the caller to also declare needs {Fail}
+    let result = check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun bar (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfoo x = bar x",
+    );
+    assert!(result.is_err());
+    let err = result.err().expect("expected error");
+    assert!(
+        err.message.contains("Fail"),
+        "expected Fail propagation error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn effect_propagation_with_needs_declared() {
+    check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun bar (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfun foo (x: Int) -> Int needs {Fail}\nfoo x = bar x",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_propagation_handled_by_caller() {
+    // Caller handles the effect, so doesn't need to declare it
+    check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun bar (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfoo x = (bar x) with {\n  fail msg -> 0\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn lambda_effects_isolated() {
+    // Effects inside a lambda don't propagate to the enclosing function
+    check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfoo x = fun y -> fail! \"oops\"",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multiple_effects_needs_all() {
+    let result = check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\neffect Log {\n  fun log (msg: String) -> Unit\n}\nfun foo (x: Int) -> Int needs {Fail}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n}",
+    );
+    assert!(result.is_err());
+    let err = result.err().expect("expected error");
+    assert!(
+        err.message.contains("Log"),
+        "expected Log in error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn multiple_effects_all_declared() {
+    check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\neffect Log {\n  fun log (msg: String) -> Unit\n}\nfun foo (x: Int) -> Unit needs {Fail, Log}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn with_subtracts_only_handled_effect() {
+    // Handler handles Log but not Fail, so Fail still needs declaration
+    let result = check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\neffect Log {\n  fun log (msg: String) -> Unit\n}\nhandler console for Log {\n  log msg -> print msg\n}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n} with console",
+    );
+    assert!(result.is_err());
+    let err = result.err().expect("expected error");
+    assert!(
+        err.message.contains("Fail"),
+        "expected Fail in error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn pure_function_no_needs_ok() {
+    // Pure functions without effects don't need any annotation
+    check("add a b = a + b").unwrap();
+}

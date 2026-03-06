@@ -3,7 +3,7 @@ mod infer;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::token::Span;
 
@@ -262,6 +262,10 @@ pub struct Checker {
     pub(crate) handlers: HashMap<std::string::String, HandlerInfo>,
     /// Context for resume typing: when inside a handler arm, the return type of the op being handled
     pub(crate) resume_type: Option<Type>,
+    /// Effects used in the current function body (accumulated during inference)
+    pub(crate) current_effects: HashSet<String>,
+    /// Known effect requirements for named functions: name -> set of effect names
+    pub(crate) fun_effects: HashMap<String, HashSet<String>>,
 }
 
 impl Checker {
@@ -275,6 +279,8 @@ impl Checker {
             effects: HashMap::new(),
             handlers: HashMap::new(),
             resume_type: None,
+            current_effects: HashSet::new(),
+            fun_effects: HashMap::new(),
         };
         checker.register_builtins();
         checker

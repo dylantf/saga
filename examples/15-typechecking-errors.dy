@@ -39,6 +39,7 @@ effect Fail {
   fun fail (msg: String) -> a
 }
 
+fun safe_div (x: Int) (y: Int) -> Int needs {Fail}
 safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 

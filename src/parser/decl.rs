@@ -134,11 +134,17 @@ impl Parser {
         let mut params = Vec::new();
         while matches!(self.peek(), Token::LParen) {
             self.advance(); // consume '('
-            let param_name = self.expect_ident()?;
-            self.expect(Token::Colon)?;
-            let param_type = self.parse_type_expr()?;
-            self.expect(Token::RParen)?;
-            params.push((param_name, param_type));
+            if matches!(self.peek(), Token::RParen) {
+                // `()` -- unit parameter
+                self.advance(); // consume ')'
+                params.push(("_".into(), TypeExpr::Named("Unit".into())));
+            } else {
+                let param_name = self.expect_ident()?;
+                self.expect(Token::Colon)?;
+                let param_type = self.parse_type_expr()?;
+                self.expect(Token::RParen)?;
+                params.push((param_name, param_type));
+            }
         }
 
         self.expect(Token::Arrow)?;
