@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::{self, BinOp, Decl, Expr, Lit, Pat, Stmt};
 
 use super::{Checker, EffectOpSig, HandlerInfo, Scheme, Type, TypeError};
+use crate::token::Span;
 
 impl Checker {
     // --- Expression inference ---
@@ -298,8 +299,7 @@ impl Checker {
                 ..
             } => {
                 let op_sig = self
-                    .lookup_effect_op(name, qualifier.as_deref())
-                    .map_err(|e| e.with_span(*span))?;
+                    .lookup_effect_op(name, qualifier.as_deref(), *span)?;
 
                 // Track which effect this op belongs to
                 if let Some(effect_name) = self.effect_for_op(name, qualifier.as_deref()) {
@@ -974,9 +974,29 @@ impl Checker {
         arms: &[ast::HandlerArm],
         return_clause: Option<&ast::HandlerArm>,
     ) -> Result<(), TypeError> {
-        // Type-check each handler arm against its effect operation
+        // Validate that each arm's operation belongs to the handler's declared effects
         for arm in arms {
-            let op_sig = self.lookup_effect_op(&arm.op_name, None)?;
+            let mut belongs_to_declared = false;
+            for effect_name in effect_names {
+                if let Some(ops) = self.effects.get(effect_name) {
+                    if ops.iter().any(|o| o.name == arm.op_name) {
+                        belongs_to_declared = true;
+                        break;
+                    }
+                }
+            }
+            if !belongs_to_declared {
+                return Err(TypeError::at(
+                    arm.span,
+                    format!(
+                        "handler arm '{}' is not an operation of {}",
+                        arm.op_name,
+                        effect_names.iter().map(|e| format!("'{}'", e)).collect::<Vec<_>>().join(", ")
+                    ),
+                ));
+            }
+
+            let op_sig = self.lookup_effect_op(&arm.op_name, None, arm.span)?;
 
             // Bind op params and set resume context, then check body
             let saved_env = self.env.clone();
@@ -1073,7 +1093,7 @@ impl Checker {
 
                 // Type-check inline arms (check bodies are well-typed, set up resume context)
                 for arm in arms {
-                    let op_sig = self.lookup_effect_op(&arm.op_name, None).ok();
+                    let op_sig = self.lookup_effect_op(&arm.op_name, None, arm.span).ok();
 
                     let saved_env = self.env.clone();
                     let saved_resume = self.resume_type.take();
@@ -1189,14 +1209,15 @@ impl Checker {
         &mut self,
         op_name: &str,
         qualifier: Option<&str>,
+        span: Span,
     ) -> Result<EffectOpSig, TypeError> {
         if let Some(effect_name) = qualifier {
             let ops = self
                 .effects
                 .get(effect_name)
-                .ok_or_else(|| TypeError::new(format!("undefined effect: {}", effect_name)))?;
+                .ok_or_else(|| TypeError::at(span, format!("undefined effect: {}", effect_name)))?;
             let op = ops.iter().find(|o| o.name == op_name).ok_or_else(|| {
-                TypeError::new(format!(
+                TypeError::at(span, format!(
                     "effect '{}' has no operation '{}'",
                     effect_name, op_name
                 ))
@@ -1207,7 +1228,7 @@ impl Checker {
             for ops in self.effects.values() {
                 if let Some(op) = ops.iter().find(|o| o.name == op_name) {
                     if found.is_some() {
-                        return Err(TypeError::new(format!(
+                        return Err(TypeError::at(span, format!(
                             "ambiguous effect operation '{}': found in multiple effects",
                             op_name
                         )));
@@ -1215,7 +1236,7 @@ impl Checker {
                     found = Some(op.clone());
                 }
             }
-            found.ok_or_else(|| TypeError::new(format!("undefined effect operation: {}", op_name)))
+            found.ok_or_else(|| TypeError::at(span, format!("undefined effect operation: {}", op_name)))
         }
     }
 
@@ -1311,17 +1332,21 @@ impl Checker {
     /// Verify that every impl's trait has its supertraits also implemented for the same type.
     /// e.g. `trait Ord a where {a: Eq}` requires `impl Eq for X` when `impl Ord for X` exists.
     fn check_supertrait_impls(&self) -> Result<(), TypeError> {
-        for ((trait_name, target_type), _) in &self.trait_impls {
+        for ((trait_name, target_type), impl_info) in &self.trait_impls {
             if let Some(trait_info) = self.traits.get(trait_name) {
                 for supertrait in &trait_info.supertraits {
                     if !self
                         .trait_impls
                         .contains_key(&(supertrait.clone(), target_type.clone()))
                     {
-                        return Err(TypeError::new(format!(
+                        let msg = format!(
                             "impl {} for {} requires impl {} for {} (supertrait)",
                             trait_name, target_type, supertrait, target_type
-                        )));
+                        );
+                        return Err(match impl_info.span {
+                            Some(span) => TypeError::at(span, msg),
+                            None => TypeError::new(msg),
+                        });
                     }
                 }
             }
@@ -1545,7 +1570,7 @@ impl Checker {
         }
 
         self.trait_impls
-            .insert((trait_name.into(), target_type.into()), super::ImplInfo { param_constraints });
+            .insert((trait_name.into(), target_type.into()), super::ImplInfo { param_constraints, span: Some(span) });
         Ok(())
     }
 }

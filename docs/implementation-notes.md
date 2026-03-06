@@ -443,20 +443,41 @@ checker. Runtime dispatch uses mangled environment keys in the interpreter.
   constraint. Custom types need `impl Show for T` to be printable. Show
   constraints propagate through inference like user-defined traits.
 
+- **Built-in trait constraints on operators**: `Num` (arithmetic: +, -, *, /,
+  %, unary -), `Eq` (==, !=), `Ord` (<, >, <=, >=) are registered as built-in
+  traits with impls for Int, Float, String (Eq/Ord only), Bool (Eq only).
+  BinOp inference pushes constraints to `pending_constraints`.
+
+- **Conditional impls**: `ImplInfo` carries `param_constraints: Vec<(String, usize)>`
+  mapping trait names to type parameter indices. `check_pending_constraints`
+  loops until stable, since resolving e.g. `Show for List Int` pushes `Show for
+  Int`. Works for built-in types (Show for List/Maybe/Result, Show/Eq for Tuple)
+  and user-defined impls (`impl Show for Box a where {a: Show}`).
+
+- **Tuples**: `Type::Con("Tuple", vec![...])` with any arity. No predefined
+  Tuple2/Tuple3 types. Trait constraints on Tuple propagate to all elements.
+  Tuple patterns work in let, case, and function args.
+
 **Still needed:**
 
-- **Numeric trait constraints**: arithmetic ops have no `Num` constraint,
-  comparison ops have no `Eq`/`Ord` constraint. Design decision about
-  when/whether to tighten these (requires desugaring BinOps to trait method
-  calls, or pushing constraints from BinOp inference).
+- **`needs` on handler bodies**: parsed and stored in `HandlerDef.needs`, but
+  the typechecker ignores it. Handler arms should have their effects tracked
+  and checked against the declared `needs` clause, same as function bodies.
 
-**Core traits for the stdlib:**
+- **`needs` on impl blocks**: not parsed yet. Different impls of the same trait
+  may use different effects (e.g. a pure `Store` impl vs one using `Http`).
+  `needs` should go on `ImplDef`, mirroring handlers. Requires higher-order
+  effect tracking to work with polymorphic trait method calls.
+
+- **Higher-order effect tracking**: effects on arrow types are not tracked
+  through calls. If a function takes an effectful callback, the checker can't
+  see its effects. Fixing this requires effect annotations on arrow types in
+  the internal `Type` representation. This also blocks polymorphic trait method
+  dispatch knowing which effects an impl uses.
+
+**Core traits for the stdlib (future):**
 
 ```
-trait Eq a        { eq : a -> a -> Bool }
-trait Ord a       where {a: Eq} { compare : a -> a -> Ordering }
-trait Num a       { add : a -> a -> a, sub : a -> a -> a, mul : a -> a -> a }
-trait Show a      { show : a -> String }
 trait Semigroup a { concat : a -> a -> a }
 trait Monoid a    where {a: Semigroup} { empty : a }
 ```
