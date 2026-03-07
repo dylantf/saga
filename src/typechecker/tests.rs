@@ -1222,3 +1222,83 @@ main () = fst (1, \"hello\")",
     );
     assert!(result.is_ok(), "got: {}", result.err().unwrap().message);
 }
+
+// --- Handler needs checking ---
+
+#[test]
+fn handler_uses_effect_without_needs_is_error() {
+    // Handler body uses an effect but declares no needs
+    let result = check(
+        "effect Log { fun log (msg: String) -> Unit }
+effect Http { fun get (url: String) -> String }
+handler my_http for Http {
+  get url -> {
+    log! \"fetching\"
+    resume \"ok\"
+  }
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Log"),
+        "expected Log in error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn handler_uses_effect_with_correct_needs_ok() {
+    // Handler body uses Log and declares needs {Log}
+    let result = check(
+        "effect Log { fun log (msg: String) -> Unit }
+effect Http { fun get (url: String) -> String }
+handler console for Log {
+  log msg -> resume ()
+}
+handler my_http for Http needs {Log} {
+  get url -> {
+    log! \"fetching\"
+    resume \"ok\"
+  }
+}",
+    );
+    assert!(result.is_ok(), "got: {}", result.err().unwrap().message);
+}
+
+#[test]
+fn pure_handler_no_needs_ok() {
+    // Handler body has no effects -- no needs clause needed
+    let result = check(
+        "effect Http { fun get (url: String) -> String }
+handler mock_http for Http {
+  get url -> resume \"mocked\"
+}",
+    );
+    assert!(result.is_ok(), "got: {}", result.err().unwrap().message);
+}
+
+#[test]
+fn handler_needs_missing_one_effect_is_error() {
+    // Handler uses Log and Http but only declares needs {Log}
+    let result = check(
+        "effect Log { fun log (msg: String) -> Unit }
+effect Http { fun get (url: String) -> String }
+effect Db { fun query (sql: String) -> String }
+handler log_impl for Log { log msg -> resume () }
+handler my_db for Db needs {Log} {
+  query sql -> {
+    log! \"querying\"
+    get! \"/check\"
+    resume \"row\"
+  }
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Http"),
+        "expected Http in error, got: {}",
+        err.message
+    );
+}

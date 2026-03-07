@@ -189,11 +189,13 @@ impl Checker {
             Decl::HandlerDef {
                 name,
                 effects: effect_names,
+                needs,
                 arms,
                 return_clause,
+                span,
                 ..
             } => {
-                self.register_handler(name, effect_names, arms, return_clause.as_deref())?;
+                self.register_handler(name, effect_names, needs, arms, return_clause.as_deref(), *span)?;
                 Ok(())
             }
 
@@ -529,9 +531,14 @@ impl Checker {
         &mut self,
         name: &str,
         effect_names: &[String],
+        needs: &[String],
         arms: &[ast::HandlerArm],
         return_clause: Option<&ast::HandlerArm>,
+        span: crate::token::Span,
     ) -> Result<(), TypeError> {
+        // Save and clear effect tracking for this handler body
+        let saved_effects = std::mem::take(&mut self.current_effects);
+
         // Validate that each arm's operation belongs to the handler's declared effects
         for arm in arms {
             let mut belongs_to_declared = false;
@@ -586,6 +593,60 @@ impl Checker {
             self.env = saved_env;
         }
 
+        // Check the return clause body if present
+        if let Some(rc) = return_clause {
+            let saved_env = self.env.clone();
+            let saved_resume = self.resume_type.take();
+            // Bind the return value param (single param, fresh type)
+            if let Some(param_name) = rc.params.first() {
+                let param_ty = self.fresh_var();
+                self.env.insert(
+                    param_name.clone(),
+                    Scheme {
+                        forall: vec![],
+                        constraints: vec![],
+                        ty: param_ty,
+                    },
+                );
+            }
+            self.infer_expr(&rc.body)?;
+            self.resume_type = saved_resume;
+            self.env = saved_env;
+        }
+
+        // Check effect requirements against declared needs
+        let body_effects = std::mem::replace(&mut self.current_effects, saved_effects);
+        let declared_effects: std::collections::HashSet<String> =
+            needs.iter().cloned().collect();
+
+        if !body_effects.is_empty() || !declared_effects.is_empty() {
+            let undeclared: Vec<_> = body_effects.difference(&declared_effects).collect();
+            if !undeclared.is_empty() {
+                let err_span = arms.first().map(|a| a.span).unwrap_or(span);
+                let mut effects: Vec<_> = undeclared.into_iter().cloned().collect();
+                effects.sort();
+                if declared_effects.is_empty() {
+                    return Err(TypeError::at(
+                        err_span,
+                        format!(
+                            "handler '{}' uses effects {{{}}} but has no 'needs' declaration",
+                            name,
+                            effects.join(", ")
+                        ),
+                    ));
+                } else {
+                    return Err(TypeError::at(
+                        err_span,
+                        format!(
+                            "handler '{}' uses effects {{{}}} not declared in its 'needs' clause",
+                            name,
+                            effects.join(", ")
+                        ),
+                    ));
+                }
+            }
+        }
+
         let op_names = arms.iter().map(|a| a.op_name.clone()).collect();
         self.handlers.insert(
             name.into(),
@@ -593,6 +654,7 @@ impl Checker {
                 effects: effect_names.to_vec(),
                 ops: op_names,
                 has_return_clause: return_clause.is_some(),
+                needs: needs.to_vec(),
             },
         );
 

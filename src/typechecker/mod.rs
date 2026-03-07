@@ -256,7 +256,6 @@ pub(crate) struct EffectOpSig {
     pub return_type: Type,
 }
 
-// TODO: fields will be used for handler `needs` checking
 #[derive(Debug, Clone)]
 pub(crate) struct HandlerInfo {
     /// Which effects this handler handles
@@ -264,6 +263,8 @@ pub(crate) struct HandlerInfo {
     /// Arms: op_name -> (param_names, body) -- already type-checked at definition
     pub ops: Vec<std::string::String>,
     pub has_return_clause: bool,
+    /// Effects declared in the handler's `needs` clause
+    pub needs: Vec<std::string::String>,
 }
 
 #[derive(Debug, Clone)]
