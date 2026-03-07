@@ -265,6 +265,8 @@ pub(crate) struct HandlerInfo {
     pub has_return_clause: bool,
     /// Effects declared in the handler's `needs` clause
     pub needs: Vec<std::string::String>,
+    /// Return clause: (param_var_id, body_type). Used to compute the `with` expression type.
+    pub return_type: Option<(u32, Type)>,
 }
 
 #[derive(Debug, Clone)]

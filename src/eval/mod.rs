@@ -454,6 +454,22 @@ fn apply(func: Value, arg: Value) -> EvalResult {
             let key = format!("__impl_{}_{}_{}", trait_name, type_name, method_name);
             if let Some(impl_fn) = env.get(&key) {
                 apply(impl_fn, arg)
+            } else if trait_name == "Show" && method_name == "print" {
+                // print: call show dispatch then println the result
+                apply(
+                    Value::TraitMethod {
+                        trait_name: "Show".into(),
+                        method_name: "show".into(),
+                        env: env.clone(),
+                    },
+                    arg,
+                )
+                .then(|s| {
+                    if let Value::String(s) = s {
+                        println!("{}", s);
+                    }
+                    EvalResult::Ok(Value::Unit)
+                })
             } else if trait_name == "Show" && method_name == "show" {
                 // Built-in Show fallback for primitives and types without a custom impl.
                 EvalResult::Ok(Value::String(format!("{}", arg)))
@@ -556,8 +572,9 @@ pub fn eval_decl(decl: &Decl, env: &Env, loader: &ModuleLoader) -> EvalResult {
                         args: Vec::new(),
                     },
                 );
-                // Map constructor name -> type name for trait dispatch
-                env.set(
+                // Map constructor name -> type name for trait dispatch.
+                // Use set_root so TraitMethod lookups (which captured an ancestor env) can find it.
+                env.set_root(
                     format!("__ctor_type_{}", v.name),
                     Value::String(name.clone()),
                 );

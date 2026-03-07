@@ -625,13 +625,16 @@ impl Checker {
             self.env = saved_env;
         }
 
-        // Check the return clause body if present
-        if let Some(rc) = return_clause {
+        // Check the return clause body if present, capturing the param var and return type
+        let handler_return_type = if let Some(rc) = return_clause {
             let saved_env = self.env.clone();
             let saved_resume = self.resume_type.take();
-            // Bind the return value param (single param, fresh type)
+            let param_ty = self.fresh_var();
+            let param_var_id = match &param_ty {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             if let Some(param_name) = rc.params.first() {
-                let param_ty = self.fresh_var();
                 self.env.insert(
                     param_name.clone(),
                     Scheme {
@@ -641,10 +644,13 @@ impl Checker {
                     },
                 );
             }
-            self.infer_expr(&rc.body)?;
+            let ret_ty = self.infer_expr(&rc.body)?;
             self.resume_type = saved_resume;
             self.env = saved_env;
-        }
+            Some((param_var_id, ret_ty))
+        } else {
+            None
+        };
 
         // Check effect requirements against declared needs
         let body_effects = std::mem::replace(&mut self.current_effects, saved_effects);
@@ -687,6 +693,7 @@ impl Checker {
                 ops: op_names,
                 has_return_clause: return_clause.is_some(),
                 needs: needs.to_vec(),
+                return_type: handler_return_type,
             },
         );
 

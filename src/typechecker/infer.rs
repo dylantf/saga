@@ -574,7 +574,18 @@ impl Checker {
                         format!("undefined handler: {}", name),
                     ));
                 }
-                Ok(expr_ty)
+                if let Some((param_var_id, ret_ty)) = self
+                    .handlers
+                    .get(name)
+                    .and_then(|h| h.return_type.clone())
+                {
+                    // Unify the param var with the computation's result type so the
+                    // stored return type resolves correctly.
+                    self.unify_at(&Type::Var(param_var_id), &expr_ty, with_span)?;
+                    Ok(self.sub.apply(&ret_ty))
+                } else {
+                    Ok(expr_ty)
+                }
             }
             ast::Handler::Inline {
                 named,

@@ -1,0 +1,52 @@
+effect Validate {
+  fun invalid (err: String) -> Unit
+}
+
+fun require_non_empty (label: String) (s: String) -> Unit needs {Validate}
+require_non_empty label s =
+  if s == "" then invalid! $"{label} is required"
+  else ()
+
+fun require_min_age (min: Int) (age: Int) -> Unit needs {Validate}
+require_min_age min age =
+  if age < min then invalid! $"age must be at least {min}"
+  else ()
+
+record UserInput { name: String, age: Int }
+record ValidUser { name: String, age: Int }
+
+type Validation e a { Valid(a) | Invalid(e) }
+
+handler collecting for Validate {
+  invalid err -> { let (v, errs) = resume (); (v, err :: errs) }
+  return v -> (v, [])
+}
+
+fun validate_user (input: UserInput) -> Validation (List String) ValidUser
+validate_user input = {
+  let (v, errs) = {
+    require_non_empty "name" input.name
+    require_min_age 18 input.age
+    ValidUser { name: input.name, age: input.age }
+  } with collecting
+  
+  case errs {
+    [] -> Valid(v)
+    _  -> Invalid(errs)
+  }
+}
+
+show_errors errs = foldl (fun acc e -> acc <> "\n  - " <> e) "" errs
+
+fun show_result (r: Validation (List String) ValidUser) -> String
+show_result r = case r {
+  Valid(user)   -> $"Valid: {user.name}, age {user.age}"
+  Invalid(errs) -> $"Invalid: {show_errors errs}"
+}
+
+main () = {
+  validate_user UserInput { name: "Alice", age: 25 } |> show_result |> print
+  validate_user UserInput { name: "", age: 25 } |> show_result |> print
+  validate_user UserInput { name: "Bob", age: 15 } |> show_result |> print
+  validate_user UserInput { name: "", age: 15 } |> show_result |> print
+}
