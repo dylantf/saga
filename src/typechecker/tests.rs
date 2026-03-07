@@ -468,10 +468,34 @@ fn effect_propagation_handled_by_caller() {
 }
 
 #[test]
-fn lambda_effects_isolated() {
-    // Effects inside a lambda don't propagate to the enclosing function
-    check(
+fn lambda_effects_propagate_to_enclosing_function() {
+    // Effects inside a lambda propagate up to the enclosing function boundary
+    let result = check(
         "effect Fail {\n  fun fail (msg: String) -> a\n}\nfoo x = fun y -> fail! \"oops\"",
+    );
+    assert!(result.is_err());
+    let err = result.err().expect("expected error");
+    assert!(
+        err.message.contains("Fail"),
+        "expected Fail in error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn lambda_effects_covered_by_enclosing_needs() {
+    // Lambda effects are fine when the enclosing function declares them
+    check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun foo (x: Int) -> Int needs {Fail}\nfoo x = (fun y -> fail! \"oops\") x",
+    )
+    .unwrap();
+}
+
+#[test]
+fn lambda_effects_absorbed_by_hof_annotation() {
+    // HOF parameter annotated with `needs {Fail}` absorbs the effect from the lambda
+    check(
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun run (f: () -> Int needs {Fail}) -> Int\nrun f = f () with { fail msg -> 0 }\nfoo x = run (fun () -> fail! \"oops\")",
     )
     .unwrap();
 }

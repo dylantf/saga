@@ -319,8 +319,8 @@ pub enum TypeExpr {
     /// `Option a`, `Result a e`
     App(Box<TypeExpr>, Box<TypeExpr>),
 
-    /// `a -> b`
-    Arrow(Box<TypeExpr>, Box<TypeExpr>),
+    /// `a -> b` or `a -> b needs {Eff}`
+    Arrow(Box<TypeExpr>, Box<TypeExpr>, Vec<String>),
 }
 
 // --- Supporting types ---

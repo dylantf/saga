@@ -421,17 +421,64 @@ start_app () = {
 
 The program's entry point must handle everything - nothing escapes unhandled.
 
-### Effect polymorphism
+### Lambdas and effects
 
-Higher-order functions propagate effects from their callbacks using an effect
-variable:
+Lambdas (`fun x -> body`) are transparent to the effect system -- they have
+no `needs` clause of their own. Any effects used inside a lambda propagate
+up to the nearest named function boundary, which must handle or declare them:
 
 ```
-fun map (f: a -> b needs e) (xs: List a) -> List b needs e
+# Error: foo uses Fail but has no needs declaration
+foo x = fun y -> fail! "oops"
+
+# OK: outer function declares it
+fun foo (x: Int) -> Int needs {Fail}
+foo x = (fun y -> fail! "oops") x
+
+# OK: handled at the expression level
+foo x = (fun y -> fail! "oops") x with { fail msg -> 0 }
 ```
 
-If `f` is pure, `map` is pure. If `f` uses `Log`, `map` requires `Log`. The
-caller always sees the full picture.
+This keeps lambdas annotation-free. You never write `fun x -> body needs {Eff}`.
+
+### Effects through higher-order functions
+
+When you pass an effectful lambda to a function, the effects from the lambda
+propagate through to the enclosing `with` or `needs` boundary. For `map` and
+similar HOFs with no `needs` annotation on the callback parameter, the effects
+pass through transparently:
+
+```
+# Log propagates through map to the enclosing function
+fun process (xs: List String) -> List Unit needs {Log}
+process xs = map (fun x -> log! x) xs
+```
+
+For HOFs that internally handle the effect -- like `try` which absorbs `Fail`
+-- the function's parameter type must annotate `needs`. This tells the type
+checker that this function absorbs those effects from its callback, so they
+don't propagate further:
+
+```
+# `try` absorbs Fail: it declares needs {Fail} on the callback parameter
+fun try (computation: () -> a needs {Fail}) -> Result a String
+try computation = computation () with {
+  fail msg -> Err msg
+  return value -> Ok value
+}
+
+# Caller: Fail is absorbed by try, doesn't reach main
+main () = {
+  let result = try (fun () -> {
+    let x = safe_div! 10 0   # uses Fail
+    x * 2
+  })
+  ...
+}
+```
+
+The `needs {Fail}` on the parameter type is the declaration: "I will handle
+`Fail` for this callback." Without it, the effects pass through unchanged.
 
 ---
 
@@ -507,3 +554,4 @@ handlers are for.
 | Intercept success     | `return value -> Ok(value)`                        |
 | Qualify ambiguous ops | `Cache.get! key`                                   |
 | Declare effects on fn | `fun f () -> T needs {Log, Http}`                  |
+| HOF absorbs callback's effects | `fun run (f: () -> a needs {Fail}) -> a` |

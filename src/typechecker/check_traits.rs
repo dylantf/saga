@@ -25,6 +25,11 @@ impl Checker {
                 Box::new(self.substitute_trait_param(replacement, a)),
                 Box::new(self.substitute_trait_param(replacement, b)),
             ),
+            Type::EffArrow(a, b, effs) => Type::EffArrow(
+                Box::new(self.substitute_trait_param(replacement, a)),
+                Box::new(self.substitute_trait_param(replacement, b)),
+                effs.clone(),
+            ),
             Type::Con(name, args) => Type::Con(
                 name.clone(),
                 args.iter()

@@ -366,35 +366,106 @@ them against the declared `needs` clause.
   `Fail` propagates to your function's effect set.
 - **`with` subtraction**: `expr with handler` removes the handler's effects
   from the inner expression's set before merging back.
-- **Lambda isolation**: effects inside a lambda body don't propagate to the
-  enclosing function. The lambda's effects are deferred until it's called.
+- **Lambda propagation**: effects inside a lambda body propagate up to the
+  enclosing function boundary, same as any other expression. Lambdas are
+  transparent to the effect system -- they have no independent `needs`
+  declaration. See below for how HOFs absorb effects from lambdas.
+- **HOF effect absorption**: when a function takes a callback parameter
+  annotated with `needs`, passing an effectful lambda to that parameter
+  subtracts those effects from the caller's set (see `Type::EffArrow` below).
 - **Function boundary check**: after inferring a function body, if it uses
   effects not in the declared `needs`, the checker reports an error. If there's
   no `needs` declaration at all, any effect usage is an error.
 
-**Known limitation -- higher-order effect tracking:**
+**Lambda propagation in detail:**
 
-Effects on function parameters are not tracked through calls. If a function
-takes an effectful callback and calls it, the checker can't see the callback's
-effects:
+Lambdas (`fun x -> body`) do not isolate effects. Any effect call in the
+body propagates out to the enclosing named function, which must either handle
+it with `with` or declare it in its own `needs`.
 
 ```
-fun run_twice (f: () -> a needs {Fail}) -> a needs {Fail}
-run_twice f = f ()
+# Error: foo uses Fail but has no needs declaration
+foo x = fun y -> fail! "oops"
+
+# OK: the enclosing function declares needs {Fail}
+fun foo (x: Int) -> Int needs {Fail}
+foo x = (fun y -> fail! "oops") x
+
+# OK: lambda is inside a with that handles the effect
+foo x = (fun y -> fail! "oops") x with { fail msg -> 0 }
 ```
 
-Inside `run_twice`, `f ()` calls a local parameter. The checker doesn't know
-`f` carries `Fail` because that information is in the arrow type's `needs`
-annotation, which the checker doesn't inspect yet. The `needs {Fail}` on
-`run_twice` is correct but unverified.
+This design keeps lambdas annotation-free (no `fun x -> expr needs {Eff}`
+syntax). Effects belong to named function boundaries, which are the only
+places that can carry a `needs` clause.
 
-This works in practice because:
-- The common pattern (`try`, `run_with_state`) wraps the callback in a
-  `with` handler, so the effect is subtracted before reaching the boundary.
-- Direct effect calls (`fail!`, `log!`) and calls to named effectful
-  functions are fully tracked.
-- Fixing this properly requires effect annotations on arrow types in the
-  internal `Type` representation, which is a larger change.
+**HOF effect absorption (`Type::EffArrow`):**
+
+When a function takes a callback whose type annotation includes `needs`, the
+type checker stores that information in an `EffArrow` type node and uses it to
+subtract those effects from the caller's propagating set at the call site.
+
+```
+# `try` declares that its callback absorbs Fail
+fun try (computation: () -> a needs {Fail}) -> Result a String
+try computation = computation () with {
+  fail msg -> Err msg
+  return value -> Ok value
+}
+
+# Caller: lambda uses Fail, but try absorbs it -- no needs required on main
+main () = {
+  let result = try (fun () -> fail! "something went wrong")
+  ...
+}
+```
+
+Mechanically: when inferring `try (fun () -> ...)`, the checker:
+1. Infers the lambda body, adding `Fail` to `current_effects`
+2. Resolves `try`'s parameter type to `EffArrow(Unit, a, [Fail])`
+3. Subtracts `[Fail]` from `current_effects`
+
+The result: `Fail` never reaches `main`'s boundary. If `main` had no
+`needs {Fail}`, no error is reported -- because `try` absorbed it.
+
+**Implementation: `Type::EffArrow`:**
+
+The internal `Type` enum has two arrow variants:
+
+- `Type::Arrow(param, ret)` -- pure arrow, no effect annotation
+- `Type::EffArrow(param, ret, Vec<String>)` -- arrow with absorbed effects
+
+`EffArrow` is produced only by `convert_type_expr` when a `TypeExpr::Arrow`
+has a non-empty `needs` list (from a parsed annotation like
+`computation: () -> a needs {Fail}`). All other arrow constructions (lambda
+types, constructor types, trait method types) produce plain `Arrow`.
+
+Unification treats `Arrow` and `EffArrow` identically -- effect sets are not
+unified, only the type arguments. This keeps HM inference sound: a plain
+lambda `fun () -> ...` unifies cleanly with an `EffArrow` parameter.
+
+**Known remaining limitation -- `needs` on local function parameters:**
+
+If a named function takes an effectful callback but doesn't annotate `needs`
+on the parameter type, the checker can't see those effects:
+
+```
+# f's effects are invisible -- checker sees f () as a pure call
+fun run (f: () -> Int) -> Int
+run f = f ()
+```
+
+Callers passing an effectful lambda to `run` will have their effects
+propagate up through `run` and out to the top -- which may or may not be
+what they want. The fix is always to annotate the parameter with `needs`:
+
+```
+fun run (f: () -> Int needs {Fail}) -> Int
+```
+
+Full effect row polymorphism (effect variables like `needs e`) would allow
+HOFs to be transparent without manual annotation, but that requires row
+unification and is deferred to a later phase.
 
 ---
 
@@ -466,14 +537,13 @@ checker. Runtime dispatch uses mangled environment keys in the interpreter.
 
 - **`needs` on impl blocks**: not parsed yet. Different impls of the same trait
   may use different effects (e.g. a pure `Store` impl vs one using `Http`).
-  `needs` should go on `ImplDef`, mirroring handlers. Requires higher-order
-  effect tracking to work with polymorphic trait method calls.
+  `needs` should go on `ImplDef`, mirroring handlers.
 
-- **Higher-order effect tracking**: effects on arrow types are not tracked
-  through calls. If a function takes an effectful callback, the checker can't
-  see its effects. Fixing this requires effect annotations on arrow types in
-  the internal `Type` representation. This also blocks polymorphic trait method
-  dispatch knowing which effects an impl uses.
+- **Effect row polymorphism**: HOFs that are transparent to their callback's
+  effects (like `map`, `filter`) require effect variables (`needs e`) to be
+  fully tracked. The current `EffArrow` approach handles the absorbing-HOF
+  pattern (`try`, `run_with_state`) but not the transparent-HOF pattern.
+  Full row polymorphism is a larger change and is deferred.
 
 **Core traits for the stdlib (future):**
 

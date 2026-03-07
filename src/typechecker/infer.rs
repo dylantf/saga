@@ -60,6 +60,19 @@ impl Checker {
                     &Type::Arrow(Box::new(arg_ty), Box::new(ret_ty.clone())),
                     *span,
                 )?;
+                // If the function declares its argument absorbs specific effects
+                // (via EffArrow on the parameter type), subtract those from current_effects.
+                // This handles HOFs like `try (fun () -> fail! ...)` where `try` absorbs Fail.
+                let resolved_func = self.sub.apply(&func_ty);
+                let param_ty = match resolved_func {
+                    Type::Arrow(p, _) | Type::EffArrow(p, _, _) => Some(self.sub.apply(&p)),
+                    _ => None,
+                };
+                if let Some(Type::EffArrow(_, _, needs)) = param_ty {
+                    for eff in &needs {
+                        self.current_effects.remove(eff);
+                    }
+                }
                 Ok(ret_ty)
             }
 
@@ -127,16 +140,18 @@ impl Checker {
             Expr::Block { stmts, .. } => self.infer_block(stmts),
 
             Expr::Lambda { params, body, .. } => {
+                let saved_env = self.env.clone();
                 let mut param_types = Vec::new();
                 for pat in params {
                     let ty = self.fresh_var();
                     self.bind_pattern(pat, &ty)?;
                     param_types.push(ty);
                 }
-                // Lambda bodies are isolated: effects inside are deferred until call
-                let saved_effects = std::mem::take(&mut self.current_effects);
+                // Lambda body effects propagate up to the enclosing context.
+                // Effects are absorbed at function boundaries (needs declarations) or
+                // by `with` handlers, same as any other expression.
                 let body_ty = self.infer_expr(body)?;
-                self.current_effects = saved_effects;
+                self.env = saved_env;
                 // Build curried arrow: a -> b -> c -> ret
                 let mut result = body_ty;
                 for param_ty in param_types.into_iter().rev() {

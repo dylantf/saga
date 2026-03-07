@@ -773,7 +773,7 @@ fn type_expr_arrow() {
     let decls = parse("fun apply (f: a -> b) (x: a) -> b");
     match &decls[0] {
         Decl::FunAnnotation { params, .. } => {
-            assert!(matches!(&params[0].1, TypeExpr::Arrow(_, _)));
+            assert!(matches!(&params[0].1, TypeExpr::Arrow(_, _, _)));
         }
         _ => panic!("expected FunAnnotation"),
     }

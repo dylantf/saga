@@ -21,6 +21,10 @@ pub enum Type {
     Var(u32),
     /// Function type: a -> b
     Arrow(Box<Type>, Box<Type>),
+    /// Function type with effect annotation: a -> b needs {Eff}
+    /// Used for HOF parameter types that declare which effects they absorb.
+    /// Unification treats EffArrow the same as Arrow (effects are not unified).
+    EffArrow(Box<Type>, Box<Type>, Vec<String>),
     /// Named type constructor with args: Int = Con("Int", []), List a = Con("List", [a])
     Con(std::string::String, Vec<Type>),
 }
@@ -51,8 +55,8 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Var(id) => write!(f, "?{}", id),
-            Type::Arrow(a, b) => match a.as_ref() {
-                Type::Arrow(_, _) => write!(f, "({}) -> {}", a, b),
+            Type::Arrow(a, b) | Type::EffArrow(a, b, _) => match a.as_ref() {
+                Type::Arrow(_, _) | Type::EffArrow(_, _, _) => write!(f, "({}) -> {}", a, b),
                 _ => write!(f, "{} -> {}", a, b),
             },
             Type::Con(name, args) => {
@@ -94,6 +98,9 @@ impl Substitution {
                 }
             }
             Type::Arrow(a, b) => Type::Arrow(Box::new(self.apply(a)), Box::new(self.apply(b))),
+            Type::EffArrow(a, b, effs) => {
+                Type::EffArrow(Box::new(self.apply(a)), Box::new(self.apply(b)), effs.clone())
+            }
             Type::Con(name, args) => {
                 Type::Con(name.clone(), args.iter().map(|a| self.apply(a)).collect())
             }
@@ -131,7 +138,7 @@ impl Substitution {
                     false
                 }
             }
-            Type::Arrow(a, b) => self.occurs(id, a) || self.occurs(id, b),
+            Type::Arrow(a, b) | Type::EffArrow(a, b, _) => self.occurs(id, a) || self.occurs(id, b),
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
         }
     }
@@ -191,7 +198,7 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                 out.push(*id);
             }
         }
-        Type::Arrow(a, b) => {
+        Type::Arrow(a, b) | Type::EffArrow(a, b, _) => {
             free_vars_in_type(a, bound, out);
             free_vars_in_type(b, bound, out);
         }
@@ -569,7 +576,10 @@ impl Checker {
             (Type::Var(id), _) => self.sub.bind(*id, &b),
             (_, Type::Var(id)) => self.sub.bind(*id, &a),
 
-            (Type::Arrow(a1, a2), Type::Arrow(b1, b2)) => {
+            (Type::Arrow(a1, a2), Type::Arrow(b1, b2))
+            | (Type::Arrow(a1, a2), Type::EffArrow(b1, b2, _))
+            | (Type::EffArrow(a1, a2, _), Type::Arrow(b1, b2))
+            | (Type::EffArrow(a1, a2, _), Type::EffArrow(b1, b2, _)) => {
                 self.unify(a1, b1)?;
                 self.unify(a2, b2)
             }
@@ -623,6 +633,11 @@ impl Checker {
             Type::Arrow(a, b) => Type::Arrow(
                 Box::new(self.replace_vars(a, mapping)),
                 Box::new(self.replace_vars(b, mapping)),
+            ),
+            Type::EffArrow(a, b, effs) => Type::EffArrow(
+                Box::new(self.replace_vars(a, mapping)),
+                Box::new(self.replace_vars(b, mapping)),
+                effs.clone(),
             ),
             Type::Con(name, args) => Type::Con(
                 name.clone(),
@@ -679,10 +694,14 @@ impl Checker {
                     }
                 }
             }
-            crate::ast::TypeExpr::Arrow(a, b) => {
+            crate::ast::TypeExpr::Arrow(a, b, needs) => {
                 let a_ty = self.convert_type_expr(a, params);
                 let b_ty = self.convert_type_expr(b, params);
-                Type::Arrow(Box::new(a_ty), Box::new(b_ty))
+                if needs.is_empty() {
+                    Type::Arrow(Box::new(a_ty), Box::new(b_ty))
+                } else {
+                    Type::EffArrow(Box::new(a_ty), Box::new(b_ty), needs.clone())
+                }
             }
         }
     }
@@ -695,7 +714,7 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
                 out.push(*id);
             }
         }
-        Type::Arrow(a, b) => {
+        Type::Arrow(a, b) | Type::EffArrow(a, b, _) => {
             collect_free_vars(a, out);
             collect_free_vars(b, out);
         }

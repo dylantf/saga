@@ -561,24 +561,19 @@ impl Parser {
         if matches!(self.peek(), Token::Arrow) {
             self.advance();
             let right = self.parse_type_expr()?; // recurse = right-associative
-            let arrow = TypeExpr::Arrow(Box::new(left), Box::new(right));
-            // Consume optional `needs { Effect1, Module.Effect2 }` (ignored until type checker)
+            let mut needs = Vec::new();
             if matches!(self.peek(), Token::Needs) {
                 self.advance();
                 self.expect(Token::LBrace)?;
                 while !matches!(self.peek(), Token::RBrace) {
-                    self.advance(); // consume effect name (or module prefix)
-                    if matches!(self.peek(), Token::Dot) {
-                        self.advance(); // consume '.'
-                        self.advance(); // consume qualified name
-                    }
+                    needs.push(self.parse_needs_entry()?);
                     if matches!(self.peek(), Token::Comma) {
                         self.advance();
                     }
                 }
                 self.expect(Token::RBrace)?;
             }
-            Ok(arrow)
+            Ok(TypeExpr::Arrow(Box::new(left), Box::new(right), needs))
         } else {
             Ok(left)
         }

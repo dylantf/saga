@@ -237,7 +237,8 @@ impl Checker {
             let mut ann_current = ann_ty.clone();
             for param_ty in &param_types {
                 match ann_current {
-                    Type::Arrow(ann_param, ann_ret) => {
+                    Type::Arrow(ann_param, ann_ret)
+                    | Type::EffArrow(ann_param, ann_ret, _) => {
                         self.unify(param_ty, &ann_param)?;
                         ann_current = *ann_ret;
                     }
@@ -684,7 +685,7 @@ impl Checker {
                             ));
                         }
                     }
-                    Type::Arrow(_, _) => {
+                    Type::Arrow(_, _) | Type::EffArrow(_, _, _) => {
                         return Err(TypeError::at(
                             span,
                             format!("no impl of {} for function type", trait_name),
