@@ -2,7 +2,9 @@
 
 ---
 
-## 1. Basics (what already works, more or less)
+## 1. Basics
+
+Annotations are optional for private functions -- the type checker infers everything. They are required to export a function from a module (`pub` without an annotation is an error) and serve as documentation for anyone reading the code.
 
 ```
 # Comments with hash
@@ -404,7 +406,7 @@ helper x = x + 1
 
 # Importing
 import Math
-import Math exposing { abs, max }
+import Math (abs, max)
 import Math as M
 
 pub fun main () -> Unit
@@ -670,11 +672,11 @@ up after N failures - all in userspace, no language support needed.
    Handlers that use effects in their body also declare `needs`:
    `handler foo for Log needs {Console} { ... }`. Pure handlers omit it.
 
-8. **String interpolation** - `${expr}` inside double-quoted strings.
+8. **String interpolation** - `$"..."` prefix opts a string in to interpolation. Holes are `{expr}`.
 
    ```
-   greet name = print "Hello, ${name}!"
-   debug x y = print "x = ${show x}, y = ${show y}"
+   greet name = print $"Hello, {name}!"
+   debug x y = print $"x = {show x}, y = {show y}"
    ```
 
 9. **Lambdas** - use `fun`, no trailing lambda syntax.
@@ -686,11 +688,11 @@ up after N failures - all in userspace, no language support needed.
 
 10. **Backward pipes** - `<|` for lowering precedence, avoids parens.
 
-   ```
-   # These are equivalent:
-   print (show (add 1 2))
-   print <| show <| add 1 2
-   ```
+```
+# These are equivalent:
+print (show (add 1 2))
+print <| show <| add 1 2
+```
 
 11. **Effect propagation** - effects propagate virally through function
     signatures. If `fn3` needs `{Log}` and `fn2` calls `fn3` without
@@ -708,9 +710,10 @@ up after N failures - all in userspace, no language support needed.
     it as a type hole and warn about remaining `todo`s in release builds.
 
 13. **Negative literals as arguments** - require parentheses, same as Elm/Haskell.
-   `-` is always binary minus in application position; wrap negatives in parens.
-   ```
-   f (-5)    # fine
-   f -5      # parse error: binary minus with missing right operand
-   -x        # fine: unary negation in expression position
-   ```
+    `-` is always binary minus in application position; wrap negatives in parens.
+
+```
+f (-5)    # fine
+f -5      # parse error: binary minus with missing right operand
+-x        # fine: unary negation in expression position
+```

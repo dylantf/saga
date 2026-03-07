@@ -529,11 +529,18 @@ checker. Runtime dispatch uses mangled environment keys in the interpreter.
   Tuple2/Tuple3 types. Trait constraints on Tuple propagate to all elements.
   Tuple patterns work in let, case, and function args.
 
+**Done:**
+
+- **`needs` on handler bodies**: handler arms have their effects tracked and
+  checked against the declared `needs` clause, same as function bodies. Pure
+  handlers omit `needs`; impure handlers must declare all used effects.
+
 **Still needed:**
 
-- **`needs` on handler bodies**: parsed and stored in `HandlerDef.needs`, but
-  the typechecker ignores it. Handler arms should have their effects tracked
-  and checked against the declared `needs` clause, same as function bodies.
+- **`todo` and `panic` builtins**: not yet implemented. See section 6 for
+  design. Keywords, no `!`, return type `Never`. `todo` is a type hole
+  (typechecker accepts anywhere a value is expected). `panic` is an
+  immediate halt for logic errors.
 
 - **`needs` on impl blocks**: not parsed yet. Different impls of the same trait
   may use different effects (e.g. a pure `Store` impl vs one using `Http`).
@@ -689,7 +696,148 @@ trait system are fully shared -- only the codegen pass differs.
 
 ---
 
-## 10. Explicitly Out of Scope
+## 10. String Interpolation
+
+Syntax: `$"hello {expr}, you are {age}!"` -- the `$` prefix opts the string
+in to interpolation. Plain `"..."` strings are unchanged.
+
+**Escaping:**
+
+- `\{` produces a literal `{` (consistent with `\n`, `\t`, `\"`)
+- `}` never needs escaping -- it is only special inside holes
+- No `{{`/`}}` doubling syntax (C# style was rejected for inconsistency)
+
+**Holes:**
+
+- `{expr}` where `expr` is a full expression at the lowest precedence level
+- Pipe works inside holes: `$"count: {xs |> length}"`
+- Any `Show` instance is accepted; the typechecker enforces this naturally
+
+**Implementation -- parse-time desugaring:**
+
+No new AST node. `Token::InterpolatedString(Vec<InterpPart>)` carries
+pre-tokenized hole expressions from the lexer. The parser desugars inline:
+
+```
+$"hello {name}, age {age}!"
+  →  "hello " <> show(name) <> ", age " <> show(age) <> "!"
+```
+
+Each hole becomes `App(Var("show"), hole_expr)`. Literal segments become
+`Lit::String`. The whole thing folds left with `BinOp::Concat`. Empty
+literal parts are dropped.
+
+The typechecker and evaluator see ordinary `BinOp::Concat` and `App` nodes --
+no special casing required.
+
+**Lexer sub-tokenization:**
+
+When `read_interp_string` encounters `{`, it collects raw chars until the
+matching `}` (tracking brace depth for nested braces), then creates a fresh
+`Lexer` on that source to tokenize the hole expression. The resulting
+`Vec<Spanned>` is stored as `InterpPart::Hole`. The parser re-uses
+`Parser::new(hole_tokens).parse_expr(0)` to parse each hole.
+
+**String prefix system (planned):**
+
+The `$` prefix establishes a general string prefix system:
+
+| Syntax         | Meaning                          | Status   |
+| -------------- | -------------------------------- | -------- |
+| `"..."`        | Plain string, backslash escapes  | Done     |
+| `$"..."`       | Interpolated string              | Done     |
+| `r"..."`       | Raw string, no escape processing | Planned  |
+| `"""..."""`    | Multiline plain string           | Planned  |
+| `$"""..."""`   | Multiline interpolated string    | Planned  |
+
+`r"..."` and `$"..."` are mutually exclusive (raw strings disable `\{`,
+which is needed for escaping in interpolated strings).
+
+---
+
+## 11. Trait Dispatch and `set_root`
+
+**Problem:**
+
+`impl Show for T` wasn't being picked up at runtime for the builtin `show`
+function. The root cause: `TraitMethod` values capture their lookup env at
+registration time, but impl closures are registered in a different env frame.
+
+`show` is registered in `base_env` (in `register_builtins`). User code runs
+in `main_env = base_env.extend()`. `impl Show for User` stores the closure
+in `main_env`. When `show alice` dispatches, it calls `base_env.get(key)`,
+which walks up toward the root -- but `main_env` is a child of `base_env`,
+not an ancestor. The lookup fails.
+
+The same bug affects cross-module trait impls: a trait defined in module A
+(TraitMethod captures module_A_env) and implemented in module B (impl stored
+in module_B_env) would fail because the two envs are siblings, neither can
+see the other.
+
+**Fix: `Env::set_root`**
+
+`ImplDef` evaluation now calls `env.set_root(key, closure)` instead of
+`env.set(key, closure)`. `set_root` walks up the parent chain and stores
+the binding in the outermost (root) frame.
+
+This works because:
+1. All impls land in root -- globally visible regardless of registration site
+2. `TraitMethod.env.get(key)` walks up to root and finds them
+3. The invariant matches the language semantics: impls are globally scoped,
+   there is no such thing as a local `impl` block
+
+**`show` specifically:**
+
+`show` was changed from `Value::BuiltIn("show")` (which called
+`format!("{}", arg)` directly) to `Value::TraitMethod { trait_name: "Show" }`.
+This makes it go through the same dispatch path as user-defined trait methods.
+A fallback to `format!("{}", arg)` remains in the dispatch code for primitive
+types and types without an explicit `impl Show`.
+
+**Open question:**
+
+`set_root` is a blunt instrument -- any `ImplDef` mutates the root frame
+regardless of where it is evaluated. The cleaner fix would be to pass the
+current env to `apply` so trait dispatch always uses the most-derived env
+at the call site (Option A), or to use a separate `ImplRegistry` shared
+struct instead of the env chain (Option B). Both require threading a new
+parameter through `apply` and `eval_expr`. Deferred.
+
+---
+
+## 12. Qualified Record Creation
+
+Record types have no runtime constructor value (unlike ADT constructors).
+`Animal { name: "Rex" }` is parsed as `Expr::RecordCreate { name: "Animal" }`
+directly in the parser -- there is no `Animal` binding in the env to look up.
+
+This means `import Animals as A` followed by `A.Animal { ... }` would not
+work -- the `A.Animal` part would parse as a `QualifiedName`, and the `{`
+would be parsed as a block, not a record literal.
+
+**Fix:**
+
+In `parse_postfix`, after assembling `QualifiedName { module, name }`, if
+`name` starts with an uppercase letter and the next token is `{`, parse a
+record create immediately:
+
+```
+A.Animal { name: "Rex" } → RecordCreate { name: "Animal", fields: [...] }
+```
+
+The unqualified type name (`"Animal"`) is stored in the `RecordCreate` node,
+consistent with how qualified ADT constructors work:
+`A.Circle(5)` resolves to `Value::Constructor { name: "Circle", ... }`.
+
+This means two modules both exporting a record named `Animal` would produce
+values with the same type name -- impl dispatch would be ambiguous. Full
+namespacing (storing `"Animals.Animal"` in `Value::Record`) would fix this
+but requires also qualifying `ImplDef` target types at registration time and
+is deferred.
+
+---
+
+## 13. Explicitly Out of Scope
 
 - **Multishot continuations** - calling `resume` more than once. Not needed
   for practical effects (I/O, logging, state, errors, async). Could be added
