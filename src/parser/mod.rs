@@ -268,6 +268,21 @@ impl Parser {
             }
 
             let start = expr.span().start;
+            // Module access: `Math.abs` -> QualifiedName (bare Constructor LHS only)
+            if let Expr::Constructor { name: module, .. } = &expr {
+                let module = module.clone();
+                let name = self.expect_ident()?;
+                let end = self.tokens[self.pos - 1].span;
+                expr = Expr::QualifiedName {
+                    module,
+                    name,
+                    span: Span {
+                        start,
+                        end: end.end,
+                    },
+                };
+                continue;
+            }
             let field = self.expect_ident()?;
             let end = self.tokens[self.pos - 1].span;
             expr = Expr::FieldAccess {

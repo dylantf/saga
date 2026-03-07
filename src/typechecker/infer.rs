@@ -298,8 +298,7 @@ impl Checker {
                 span,
                 ..
             } => {
-                let op_sig = self
-                    .lookup_effect_op(name, qualifier.as_deref(), *span)?;
+                let op_sig = self.lookup_effect_op(name, qualifier.as_deref(), *span)?;
 
                 // Track which effect this op belongs to
                 if let Some(effect_name) = self.effect_for_op(name, qualifier.as_deref()) {
@@ -339,6 +338,23 @@ impl Checker {
                     .map(|e| self.infer_expr(e))
                     .collect::<Result<_, _>>()?;
                 Ok(Type::Con("Tuple".into(), tys))
+            }
+
+            Expr::QualifiedName { module, name, span } => {
+                let key = format!("{}.{}", module, name);
+                match self.env.get(&key).cloned() {
+                    Some(scheme) => {
+                        let (ty, constraints) = self.instantiate(&scheme);
+                        for (trait_name, trait_ty) in constraints {
+                            self.pending_constraints.push((trait_name, trait_ty, *span));
+                        }
+                        Ok(ty)
+                    }
+                    None => Err(TypeError {
+                        message: format!("unknown qualified name '{}.{}'", module, name),
+                        span: Some(*span),
+                    }),
+                }
             }
         }
     }
@@ -509,7 +525,14 @@ impl Checker {
                 span,
             } = decl
             {
-                self.register_impl(trait_name, target_type, type_params, where_clause, methods, *span)?;
+                self.register_impl(
+                    trait_name,
+                    target_type,
+                    type_params,
+                    where_clause,
+                    methods,
+                    *span,
+                )?;
             }
         }
 
@@ -648,8 +671,16 @@ impl Checker {
                 Ok(())
             }
 
+            Decl::Import {
+                module_path,
+                alias,
+                exposing,
+                span,
+                ..
+            } => self.typecheck_import(module_path, alias.as_deref(), exposing.as_deref(), *span),
+
             // Type annotations, type defs (already registered), effects, traits, impls,
-            // imports, modules -- skip for now
+            // module declarations -- skip
             _ => Ok(()),
         }
     }
@@ -978,11 +1009,11 @@ impl Checker {
         for arm in arms {
             let mut belongs_to_declared = false;
             for effect_name in effect_names {
-                if let Some(ops) = self.effects.get(effect_name) {
-                    if ops.iter().any(|o| o.name == arm.op_name) {
-                        belongs_to_declared = true;
-                        break;
-                    }
+                if let Some(ops) = self.effects.get(effect_name)
+                    && ops.iter().any(|o| o.name == arm.op_name)
+                {
+                    belongs_to_declared = true;
+                    break;
                 }
             }
             if !belongs_to_declared {
@@ -991,7 +1022,11 @@ impl Checker {
                     format!(
                         "handler arm '{}' is not an operation of {}",
                         arm.op_name,
-                        effect_names.iter().map(|e| format!("'{}'", e)).collect::<Vec<_>>().join(", ")
+                        effect_names
+                            .iter()
+                            .map(|e| format!("'{}'", e))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                 ));
             }
@@ -1217,10 +1252,10 @@ impl Checker {
                 .get(effect_name)
                 .ok_or_else(|| TypeError::at(span, format!("undefined effect: {}", effect_name)))?;
             let op = ops.iter().find(|o| o.name == op_name).ok_or_else(|| {
-                TypeError::at(span, format!(
-                    "effect '{}' has no operation '{}'",
-                    effect_name, op_name
-                ))
+                TypeError::at(
+                    span,
+                    format!("effect '{}' has no operation '{}'", effect_name, op_name),
+                )
             })?;
             Ok(op.clone())
         } else {
@@ -1228,15 +1263,20 @@ impl Checker {
             for ops in self.effects.values() {
                 if let Some(op) = ops.iter().find(|o| o.name == op_name) {
                     if found.is_some() {
-                        return Err(TypeError::at(span, format!(
-                            "ambiguous effect operation '{}': found in multiple effects",
-                            op_name
-                        )));
+                        return Err(TypeError::at(
+                            span,
+                            format!(
+                                "ambiguous effect operation '{}': found in multiple effects",
+                                op_name
+                            ),
+                        ));
                     }
                     found = Some(op.clone());
                 }
             }
-            found.ok_or_else(|| TypeError::at(span, format!("undefined effect operation: {}", op_name)))
+            found.ok_or_else(|| {
+                TypeError::at(span, format!("undefined effect operation: {}", op_name))
+            })
         }
     }
 
@@ -1300,29 +1340,29 @@ impl Checker {
                             }
                         }
                     }
-                // Still a type variable: check where clause bounds
-                Type::Var(id) => {
-                    let covered = resolved_bounds
-                        .get(id)
-                        .is_some_and(|b| b.contains(&trait_name));
-                    if !covered {
+                    // Still a type variable: check where clause bounds
+                    Type::Var(id) => {
+                        let covered = resolved_bounds
+                            .get(id)
+                            .is_some_and(|b| b.contains(&trait_name));
+                        if !covered {
+                            return Err(TypeError::at(
+                                span,
+                                format!(
+                                    "trait {} required but no impl or where clause bound for this type",
+                                    trait_name
+                                ),
+                            ));
+                        }
+                    }
+                    Type::Arrow(_, _) => {
                         return Err(TypeError::at(
                             span,
-                            format!(
-                                "trait {} required but no impl or where clause bound for this type",
-                                trait_name
-                            ),
+                            format!("no impl of {} for function type", trait_name),
                         ));
                     }
                 }
-                Type::Arrow(_, _) => {
-                    return Err(TypeError::at(
-                        span,
-                        format!("no impl of {} for function type", trait_name),
-                    ));
-                }
             }
-        }
         }
         Ok(())
     }
@@ -1569,8 +1609,172 @@ impl Checker {
             }
         }
 
-        self.trait_impls
-            .insert((trait_name.into(), target_type.into()), super::ImplInfo { param_constraints, span: Some(span) });
+        self.trait_impls.insert(
+            (trait_name.into(), target_type.into()),
+            super::ImplInfo {
+                param_constraints,
+                span: Some(span),
+            },
+        );
         Ok(())
     }
+
+    // --- Module import typechecking ---
+
+    fn typecheck_import(
+        &mut self,
+        module_path: &[String],
+        alias: Option<&str>,
+        exposing: Option<&[String]>,
+        span: crate::token::Span,
+    ) -> Result<(), TypeError> {
+        let module_name = module_path.join(".");
+        let prefix = alias.unwrap_or(&module_name).to_string();
+
+        let project_root = match &self.project_root.clone() {
+            None => return Ok(()), // script mode: skip typecheck of imports
+            Some(root) => root.clone(),
+        };
+
+        if self.tc_loading.contains(&module_name) {
+            return Err(TypeError::at(
+                span,
+                format!("circular import: {}", module_name),
+            ));
+        }
+
+        // Cache hit: inject cached bindings
+        if let Some(cached) = self.tc_loaded.get(&module_name).cloned() {
+            self.inject_module_types(&cached, &prefix, exposing, span)?;
+            return Ok(());
+        }
+
+        // Resolve file path
+        let rel: std::path::PathBuf = module_path.iter().collect();
+        let file_path = project_root.join(rel).with_extension("dy");
+
+        let source = std::fs::read_to_string(&file_path).map_err(|e| {
+            TypeError::at(span, format!("cannot read module '{}': {}", module_name, e))
+        })?;
+
+        let tokens = crate::lexer::Lexer::new(&source).lex().map_err(|e| {
+            TypeError::at(
+                span,
+                format!("lex error in module '{}': {}", module_name, e.message),
+            )
+        })?;
+        let program = crate::parser::Parser::new(tokens)
+            .parse_program()
+            .map_err(|e| {
+                TypeError::at(
+                    span,
+                    format!("parse error in module '{}': {}", module_name, e.message),
+                )
+            })?;
+
+        self.tc_loading.insert(module_name.clone());
+
+        // Run a fresh checker on prelude + module
+        let prelude_src = include_str!("../prelude.dy");
+        let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
+            .lex()
+            .expect("prelude lex error");
+        let prelude_program = crate::parser::Parser::new(prelude_tokens)
+            .parse_program()
+            .expect("prelude parse error");
+
+        let mut mod_checker = super::Checker::with_project_root(project_root);
+        // Share the module cache so transitive imports benefit from caching
+        mod_checker.tc_loaded = self.tc_loaded.clone();
+        mod_checker.check_program(&prelude_program).map_err(|e| {
+            TypeError::at(
+                span,
+                format!(
+                    "type error in prelude (for module '{}'): {}",
+                    module_name, e
+                ),
+            )
+        })?;
+        mod_checker.check_program(&program).map_err(|e| {
+            TypeError::at(
+                span,
+                format!("type error in module '{}': {}", module_name, e),
+            )
+        })?;
+
+        // Determine which names are public
+        let pub_names = public_names_for_tc(&program);
+
+        // Collect public type bindings
+        let mut public_bindings: Vec<(String, Scheme)> = Vec::new();
+        for name in &pub_names {
+            if let Some(scheme) = mod_checker.env.get(name) {
+                public_bindings.push((name.clone(), scheme.clone()));
+            }
+        }
+
+        self.tc_loading.remove(&module_name);
+        self.tc_loaded
+            .insert(module_name.clone(), public_bindings.clone());
+
+        self.inject_module_types(&public_bindings, &prefix, exposing, span)
+    }
+
+    fn inject_module_types(
+        &mut self,
+        bindings: &[(String, Scheme)],
+        prefix: &str,
+        exposing: Option<&[String]>,
+        span: crate::token::Span,
+    ) -> Result<(), TypeError> {
+        for (name, scheme) in bindings {
+            self.env
+                .insert(format!("{}.{}", prefix, name), scheme.clone());
+        }
+        if let Some(exposed) = exposing {
+            for name in exposed {
+                let qualified = format!("{}.{}", prefix, name);
+                match self.env.get(&qualified).cloned() {
+                    Some(scheme) => self.env.insert(name.clone(), scheme),
+                    None => {
+                        return Err(TypeError::at(
+                            span,
+                            format!("'{}' is not exported by module '{}'", name, prefix),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Names exported by a module for typechecking purposes.
+fn public_names_for_tc(program: &[crate::ast::Decl]) -> std::collections::HashSet<String> {
+    use crate::ast::Decl;
+    let mut names = std::collections::HashSet::new();
+    for decl in program {
+        match decl {
+            Decl::FunAnnotation {
+                public: true, name, ..
+            } => {
+                names.insert(name.clone());
+            }
+            Decl::TypeDef { variants, .. } => {
+                for v in variants {
+                    names.insert(v.name.clone());
+                }
+            }
+            Decl::HandlerDef { name, .. } => {
+                names.insert(name.clone());
+            }
+            Decl::TraitDef { methods, .. } => {
+                for m in methods {
+                    names.insert(m.name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    names
 }

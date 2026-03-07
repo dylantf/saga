@@ -127,6 +127,7 @@ impl Lexer {
             "where" => Token::Where,
             "import" => Token::Import,
             "module" => Token::Module,
+            "as" => Token::As,
             "trait" => Token::Trait,
             "impl" => Token::Impl,
             "return" => Token::Return,
@@ -258,7 +259,8 @@ impl Lexer {
                     let mut tok = self.read_identifier();
                     // ident! (no space) → EffectCall, but not ident!=
                     if let Token::Ident(ref name) = tok
-                        && self.peek() == Some('!') && self.peek_next() != Some('=')
+                        && self.peek() == Some('!')
+                        && self.peek_next() != Some('=')
                     {
                         let name = name.clone();
                         self.advance(); // consume '!'

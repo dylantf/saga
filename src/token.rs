@@ -27,6 +27,7 @@ pub enum Token {
     Where,
     Import,
     Module,
+    As,
     Trait,
     Impl,
     Return,
@@ -37,34 +38,34 @@ pub enum Token {
     EffectCall(String),
 
     // Operators
-    Plus,      // +
-    Minus,     // -
-    Star,      // *
-    Slash,     // /
-    Modulo,    // %
-    Eq,        // =
-    EqEq,      // ==
-    NotEq,     // !=
-    Lt,        // <
-    Gt,        // >
-    LtEq,      // <=
-    GtEq,      // >=
-    Arrow,     // ->
-    ArrowBack, // <-
-    Pipe,      // |>
-    PipeBack,  // <|
-    Concat,    // <>
-    And,       // &&
-    Or,        // ||
-    Dot,       // .
-    DotDot,    // ..
-    Backslash, // \
-    Bar,       // |
+    Plus,        // +
+    Minus,       // -
+    Star,        // *
+    Slash,       // /
+    Modulo,      // %
+    Eq,          // =
+    EqEq,        // ==
+    NotEq,       // !=
+    Lt,          // <
+    Gt,          // >
+    LtEq,        // <=
+    GtEq,        // >=
+    Arrow,       // ->
+    ArrowBack,   // <-
+    Pipe,        // |>
+    PipeBack,    // <|
+    Concat,      // <>
+    And,         // &&
+    Or,          // ||
+    Dot,         // .
+    DotDot,      // ..
+    Backslash,   // \
+    Bar,         // |
     DoubleColon, // ::
 
     // Delimiters
-    LParen, // (
-    RParen, // )
+    LParen,   // (
+    RParen,   // )
     LBrace,   // {
     RBrace,   // }
     LBracket, // [
@@ -89,7 +90,10 @@ pub struct Span {
 impl Span {
     /// Extend this span to cover up to the end of `other`.
     pub fn to(self, other: Span) -> Span {
-        Span { start: self.start, end: other.end }
+        Span {
+            start: self.start,
+            end: other.end,
+        }
     }
 }
 

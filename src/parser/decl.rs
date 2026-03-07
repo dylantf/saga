@@ -30,7 +30,18 @@ impl Parser {
             Token::Pub => {
                 let start = self.tokens[self.pos].span;
                 self.advance(); // consume 'pub'
-                self.parse_fun_annotation(true, start)
+                match self.peek() {
+                    Token::Fun => self.parse_fun_annotation(true, start),
+                    Token::Type => self.parse_type_def(),
+                    Token::Record => self.parse_record_def(),
+                    Token::Effect => self.parse_effect_def(),
+                    Token::Handler => self.parse_handler_def(),
+                    Token::Trait => self.parse_trait_def(),
+                    _ => Err(ParseError {
+                        message: format!("Expected declaration after 'pub', got {:?}", self.peek()),
+                        span: self.tokens[self.pos].span,
+                    }),
+                }
             }
             Token::Fun => {
                 let start = self.tokens[self.pos].span;
@@ -40,6 +51,8 @@ impl Parser {
             Token::Handler => self.parse_handler_def(),
             Token::Trait => self.parse_trait_def(),
             Token::Impl => self.parse_impl_def(),
+            Token::Module => self.parse_module_decl(),
+            Token::Import => self.parse_import_decl(),
             Token::Ident(_) => self.parse_fun_binding(),
             _ => Err(ParseError {
                 message: format!("Expected declaration, got {:?}", self.peek()),
@@ -577,5 +590,73 @@ impl Parser {
                 })
             }
         }
+    }
+
+    // --- Module declarations ---
+
+    // Parses: module Foo.Bar.Baz
+    fn parse_module_decl(&mut self) -> Result<Decl, ParseError> {
+        let start = self.tokens[self.pos].span;
+        self.advance(); // consume 'module'
+        let mut path = vec![self.expect_upper_ident()?];
+        while matches!(self.peek(), Token::Dot) {
+            self.advance(); // consume '.'
+            path.push(self.expect_upper_ident()?);
+        }
+        let end = self.tokens[self.pos - 1].span;
+        Ok(Decl::ModuleDecl {
+            path,
+            span: start.to(end),
+        })
+    }
+
+    // Parses:
+    //   import Math
+    //   import Math as M
+    //   import Math (abs, max)
+    //   import Math as M (abs, max)
+    //   import Foo.Bar
+    fn parse_import_decl(&mut self) -> Result<Decl, ParseError> {
+        let start = self.tokens[self.pos].span;
+        self.advance(); // consume 'import'
+
+        let mut module_path = vec![self.expect_upper_ident()?];
+        while matches!(self.peek(), Token::Dot) {
+            self.advance(); // consume '.'
+            module_path.push(self.expect_upper_ident()?);
+        }
+
+        // Optional: as Alias
+        let alias = if matches!(self.peek(), Token::As) {
+            self.advance(); // consume 'as'
+            Some(self.expect_upper_ident()?)
+        } else {
+            None
+        };
+
+        // Optional: (name1, name2, ...) — unqualified imports
+        let exposing = if matches!(self.peek(), Token::LParen) {
+            self.advance(); // consume '('
+            let mut names = Vec::new();
+            while !matches!(self.peek(), Token::RParen | Token::Eof) {
+                names.push(self.expect_ident()?);
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                }
+            }
+            let end = self.tokens[self.pos].span;
+            self.expect(Token::RParen)?;
+            Some((names, end))
+        } else {
+            None
+        };
+
+        let end = self.tokens[self.pos - 1].span;
+        Ok(Decl::Import {
+            module_path,
+            alias,
+            exposing: exposing.map(|(names, _)| names),
+            span: start.to(end),
+        })
     }
 }

@@ -27,11 +27,21 @@ impl Type {
     pub fn con(name: &str) -> Type {
         Type::Con(name.into(), vec![])
     }
-    pub fn int() -> Type { Type::con("Int") }
-    pub fn float() -> Type { Type::con("Float") }
-    pub fn string() -> Type { Type::con("String") }
-    pub fn bool() -> Type { Type::con("Bool") }
-    pub fn unit() -> Type { Type::con("Unit") }
+    pub fn int() -> Type {
+        Type::con("Int")
+    }
+    pub fn float() -> Type {
+        Type::con("Float")
+    }
+    pub fn string() -> Type {
+        Type::con("String")
+    }
+    pub fn bool() -> Type {
+        Type::con("Bool")
+    }
+    pub fn unit() -> Type {
+        Type::con("Unit")
+    }
 }
 
 impl std::fmt::Display for Type {
@@ -291,6 +301,12 @@ pub struct Checker {
     pub(crate) pending_constraints: Vec<(String, Type, Span)>,
     /// Where clause bounds: var_id -> set of trait names assumed satisfied
     pub(crate) where_bounds: HashMap<u32, HashSet<String>>,
+    /// Project root for resolving imports. None = script mode.
+    pub(crate) project_root: Option<std::path::PathBuf>,
+    /// Cache of already-typechecked modules: module name -> public type bindings.
+    pub(crate) tc_loaded: HashMap<String, Vec<(String, Scheme)>>,
+    /// Modules currently being typechecked (cycle detection).
+    pub(crate) tc_loading: HashSet<String>,
 }
 
 impl Checker {
@@ -310,8 +326,17 @@ impl Checker {
             trait_impls: HashMap::new(),
             pending_constraints: Vec::new(),
             where_bounds: HashMap::new(),
+            project_root: None,
+            tc_loaded: HashMap::new(),
+            tc_loading: HashSet::new(),
         };
         checker.register_builtins();
+        checker
+    }
+
+    pub fn with_project_root(root: std::path::PathBuf) -> Self {
+        let mut checker = Self::new();
+        checker.project_root = Some(root);
         checker
     }
 
@@ -332,24 +357,38 @@ impl Checker {
             },
         );
         for prim in &["Int", "Float", "String", "Bool", "Unit"] {
-            self.trait_impls
-                .insert(("Show".into(), prim.to_string()), ImplInfo { param_constraints: vec![], span: None });
+            self.trait_impls.insert(
+                ("Show".into(), prim.to_string()),
+                ImplInfo {
+                    param_constraints: vec![],
+                    span: None,
+                },
+            );
         }
         // Show for compound types requires Show on type params
         // List a: Show on param 0
         self.trait_impls.insert(
             ("Show".into(), "List".into()),
-            ImplInfo { param_constraints: vec![("Show".into(), 0)], span: None },
+            ImplInfo {
+                param_constraints: vec![("Show".into(), 0)],
+                span: None,
+            },
         );
         // Maybe a: Show on param 0
         self.trait_impls.insert(
             ("Show".into(), "Maybe".into()),
-            ImplInfo { param_constraints: vec![("Show".into(), 0)], span: None },
+            ImplInfo {
+                param_constraints: vec![("Show".into(), 0)],
+                span: None,
+            },
         );
         // Result a b: Show on params 0 and 1
         self.trait_impls.insert(
             ("Show".into(), "Result".into()),
-            ImplInfo { param_constraints: vec![("Show".into(), 0), ("Show".into(), 1)], span: None },
+            ImplInfo {
+                param_constraints: vec![("Show".into(), 0), ("Show".into(), 1)],
+                span: None,
+            },
         );
 
         // Built-in Num trait (arithmetic: +, -, *, /, %, unary -)
@@ -362,8 +401,13 @@ impl Checker {
             },
         );
         for prim in &["Int", "Float"] {
-            self.trait_impls
-                .insert(("Num".into(), prim.to_string()), ImplInfo { param_constraints: vec![], span: None });
+            self.trait_impls.insert(
+                ("Num".into(), prim.to_string()),
+                ImplInfo {
+                    param_constraints: vec![],
+                    span: None,
+                },
+            );
         }
 
         // Built-in Eq trait (==, !=)
@@ -376,8 +420,13 @@ impl Checker {
             },
         );
         for prim in &["Int", "Float", "String", "Bool", "Unit"] {
-            self.trait_impls
-                .insert(("Eq".into(), prim.to_string()), ImplInfo { param_constraints: vec![], span: None });
+            self.trait_impls.insert(
+                ("Eq".into(), prim.to_string()),
+                ImplInfo {
+                    param_constraints: vec![],
+                    span: None,
+                },
+            );
         }
 
         // Built-in Ord trait (<, >, <=, >=)
@@ -390,8 +439,13 @@ impl Checker {
             },
         );
         for prim in &["Int", "Float", "String"] {
-            self.trait_impls
-                .insert(("Ord".into(), prim.to_string()), ImplInfo { param_constraints: vec![], span: None });
+            self.trait_impls.insert(
+                ("Ord".into(), prim.to_string()),
+                ImplInfo {
+                    param_constraints: vec![],
+                    span: None,
+                },
+            );
         }
 
         // print : Show a => a -> Unit
@@ -480,11 +534,17 @@ impl Checker {
         // based on actual type args at constraint resolution time
         self.trait_impls.insert(
             ("Show".into(), "Tuple".into()),
-            ImplInfo { param_constraints: vec![], span: None }, // handled specially in check_pending_constraints
+            ImplInfo {
+                param_constraints: vec![],
+                span: None,
+            }, // handled specially in check_pending_constraints
         );
         self.trait_impls.insert(
             ("Eq".into(), "Tuple".into()),
-            ImplInfo { param_constraints: vec![], span: None }, // handled specially in check_pending_constraints
+            ImplInfo {
+                param_constraints: vec![],
+                span: None,
+            }, // handled specially in check_pending_constraints
         );
     }
 

@@ -210,6 +210,13 @@ pub enum Expr {
         elements: Vec<Expr>,
         span: Span,
     },
+
+    /// `Math.abs` - module-qualified name lookup
+    QualifiedName {
+        module: String,
+        name: String,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -231,7 +238,8 @@ impl Expr {
             | Expr::EffectCall { span, .. }
             | Expr::With { span, .. }
             | Expr::Resume { span, .. }
-            | Expr::Tuple { span, .. } => *span,
+            | Expr::Tuple { span, .. }
+            | Expr::QualifiedName { span, .. } => *span,
         }
     }
 }
