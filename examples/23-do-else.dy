@@ -1,0 +1,99 @@
+# do...else: sequential pattern binding with explicit success expression
+#
+# Each `Pat <- expr` line matches and binds, or short-circuits to the else block.
+# The last line (no `<-`) is the success return value.
+# All paths -- success and else arms -- must unify to the same type.
+
+type Result a e { Ok(a) | Err(e) }
+
+impl Show for Result a e where {a: Show, e: Show} {
+  show r = case r {
+    Ok(x)  -> $"Ok({x})"
+    Err(e) -> $"Err({e})"
+  }
+}
+
+# Simulated fallible operations
+fun find_user (id: Int) -> Result String String
+find_user id =
+  if id == 1 then Ok("alice")
+  else Err($"no user with id {id}")
+
+fun find_score (name: String) -> Result Int String
+find_score name =
+  if name == "alice" then Ok(95)
+  else Err($"no score for {name}")
+
+fun grade (score: Int) -> Result String String
+grade score =
+  if score >= 90 then Ok("A")
+  else if score >= 80 then Ok("B")
+  else if score >= 70 then Ok("C")
+  else Err($"failing score: {score}")
+
+# Chain three fallible operations.
+# Success expression is Ok(g) -- the whole thing returns Result String String.
+# All three Err bails unify to the same else arm.
+fun lookup_grade (id: Int) -> Result String String
+lookup_grade id =
+  do {
+    Ok(name)  <- find_user id
+    Ok(score) <- find_score name
+    Ok(g)     <- grade score
+    Ok(g)
+  } else {
+    Err(e) -> Err(e)
+  }
+
+# The success expression doesn't have to be Ok/Err.
+# Here the success path returns an Int and the else arm returns 0.
+fun score_or_zero (id: Int) -> Int
+score_or_zero id =
+  do {
+    Ok(name)  <- find_user id
+    Ok(score) <- find_score name
+    score
+  } else {
+    Err(_) -> 0
+  }
+
+# Mixed bail types: each binding bails with a different constructor.
+type Maybe a { Just(a) | Nothing }
+
+impl Show for Maybe a where {a: Show} {
+  show m = case m {
+    Just(x) -> $"Just({x})"
+    Nothing -> "Nothing"
+  }
+}
+
+fun active_users () -> Maybe (List String)
+active_users () = Just(["alice", "bob"])
+
+fun first (xs: List String) -> Maybe String
+first xs = case xs {
+  [] -> Nothing
+  h :: _ -> Just(h)
+}
+
+# Success: Ok(name). Mixed else arms: Nothing and Err both return Err.
+fun first_active_grade () -> Result String String
+first_active_grade () =
+  do {
+    Just(users) <- active_users ()
+    Just(name)  <- first users
+    Ok(score)   <- find_score name
+    Ok(g)       <- grade score
+    Ok(g)
+  } else {
+    Nothing -> Err("nothing found")
+    Err(e)  -> Err(e)
+  }
+
+main () = {
+  lookup_grade 1 |> print
+  lookup_grade 2 |> print
+  score_or_zero 1 |> print
+  score_or_zero 99 |> print
+  first_active_grade () |> print
+}

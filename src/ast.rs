@@ -223,6 +223,14 @@ pub enum Expr {
         name: String,
         span: Span,
     },
+
+    /// `do { Pat <- expr ... SuccessExpr } else { Pat -> expr ... }`
+    Do {
+        bindings: Vec<(Pat, Expr)>,
+        success: Box<Expr>,
+        else_arms: Vec<CaseArm>,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -245,7 +253,8 @@ impl Expr {
             | Expr::With { span, .. }
             | Expr::Resume { span, .. }
             | Expr::Tuple { span, .. }
-            | Expr::QualifiedName { span, .. } => *span,
+            | Expr::QualifiedName { span, .. }
+            | Expr::Do { span, .. } => *span,
         }
     }
 }
@@ -298,6 +307,19 @@ pub enum Pat {
         elements: Vec<Pat>,
         span: Span,
     },
+}
+
+impl Pat {
+    pub fn span(&self) -> Span {
+        match self {
+            Pat::Wildcard { span }
+            | Pat::Var { span, .. }
+            | Pat::Lit { span, .. }
+            | Pat::Constructor { span, .. }
+            | Pat::Record { span, .. }
+            | Pat::Tuple { span, .. } => *span,
+        }
+    }
 }
 
 // --- Types ---

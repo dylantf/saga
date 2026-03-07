@@ -36,6 +36,7 @@ pub enum Token {
     Resume,
     Needs,
     For,
+    Do,
     EffectCall(String),
 
     // Operators
@@ -62,6 +63,7 @@ pub enum Token {
     Backslash,   // \
     Bar,         // |
     DoubleColon, // ::
+    LeftArrow,   // <-
 
     // Delimiters
     LParen,   // (

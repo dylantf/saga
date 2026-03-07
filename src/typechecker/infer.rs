@@ -420,6 +420,45 @@ impl Checker {
                     }),
                 }
             }
+
+            Expr::Do {
+                bindings,
+                success,
+                else_arms,
+                ..
+            } => {
+                let result_ty = self.fresh_var();
+                let saved_env = self.env.clone();
+
+                // Type-check each binding in sequence; env accumulates bound vars
+                for (pat, expr) in bindings {
+                    let expr_ty = self.infer_expr(expr)?;
+                    self.bind_pattern(pat, &expr_ty)?;
+                }
+
+                // Success expression runs in do-block scope; its type is the
+                // success-path return type.
+                let success_ty = self.infer_expr(success)?;
+                self.unify_at(&result_ty, &success_ty, success.span())?;
+
+                // Restore env so else arms only see the outer scope
+                self.env = saved_env.clone();
+
+                // Type-check else arms: each gets a fresh scrutinee type; body
+                // types are unified with result_ty.
+                for arm in else_arms {
+                    let arm_saved = self.env.clone();
+                    let scrutinee_ty = self.fresh_var();
+                    self.bind_pattern(&arm.pattern, &scrutinee_ty)?;
+                    let body_ty = self.infer_expr(&arm.body)?;
+                    self.unify_at(&result_ty, &body_ty, arm.body.span())?;
+                    self.env = arm_saved;
+                }
+
+                // do-block bindings must not leak into the surrounding scope
+                self.env = saved_env;
+                Ok(result_ty)
+            }
         }
     }
 

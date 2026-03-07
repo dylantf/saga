@@ -60,7 +60,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 - [ ] Exhaustiveness checking for case expressions
 - [ ] Variable shadowing constraints -- currently silently overwrites; restrict to same type only (shadowing with a different type is a type error)
-- [ ] `do...else` block -- sequential pattern bindings with unified bail handling (each `Pat <- expr` extracts on match or short-circuits; else arms cover the union of bail constructors; last binding's extracted value is the return)
+- [x] `do...else` block -- sequential pattern bindings with explicit success expression (each `Pat <- expr` extracts on match or short-circuits to else; last line without `<-` is the success return value; else arms must unify with success type)
 - [ ] Higher-kinded types (`* -> *`, enables `Functor`, `Applicative`)
 - [ ] `Functor` / `Applicative` traits in stdlib
 

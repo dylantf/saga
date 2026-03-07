@@ -370,6 +370,45 @@ pub handler console for Log { ... }
 
 ---
 
+## do...else (Sequential Pattern Binding)
+
+```
+# Each line: Pat <- expr. If the pattern matches, bind vars and continue.
+# If it doesn't match, evaluate the corresponding else arm.
+# The last line (no <-) is the success return expression.
+
+do {
+  Ok(user)  <- get_user id
+  Ok(order) <- get_order user
+  Ok(order)                    # success return; type: Result Order E
+} else {
+  Err(e) -> Err(e)             # bail return; must unify with success type
+}
+
+# Mixed bail types (each binding can fail differently):
+do {
+  True      <- bool_fn ()
+  Some(str) <- maybe_fn True
+  Ok(n)     <- result_fn str
+  Ok(n)
+} else {
+  False    -> Err("false")
+  None     -> Err("none")
+  Err(msg) -> Err(msg)
+}
+
+# Success expression can be any value -- not required to be Ok/Err:
+do {
+  Ok(x) <- step1 ()
+  Ok(y) <- step2 x
+  x + y                        # success return type: Int
+} else {
+  Err(_) -> 0                  # else must also return Int
+}
+```
+
+---
+
 ## Builtins
 
 ```

@@ -97,6 +97,7 @@ impl Parser {
                 | Token::LBracket
                 | Token::EffectCall(_)
                 | Token::Resume
+                | Token::Do
         )
     }
 

@@ -134,6 +134,7 @@ impl Lexer {
             "resume" => Token::Resume,
             "needs" => Token::Needs,
             "for" => Token::For,
+            "do" => Token::Do,
             "mut" => Token::Ident("mut".into()),
             // Lex True/False as keywords even though they are treated as types
             "True" => Token::True,
@@ -413,6 +414,13 @@ impl Lexer {
                     self.advance();
                     self.advance();
                     let (spanned, tok) = self.emit(Token::NotEq, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
+                }
+                Some('<') if self.peek_next() == Some('-') => {
+                    self.advance();
+                    self.advance();
+                    let (spanned, tok) = self.emit(Token::LeftArrow, start);
                     tokens.push(spanned);
                     prev_token = Some(tok);
                 }

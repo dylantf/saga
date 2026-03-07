@@ -670,6 +670,75 @@ impl Parser {
                 })
             }
 
+            // do...else block: `do { Pat <- expr ... SuccessExpr } else { Pat -> expr ... }`
+            Token::Do => {
+                self.expect(Token::LBrace)?;
+                self.skip_terminators();
+
+                let mut bindings = Vec::new();
+                // Parse bindings (`Pat <- expr`) until we find the success expression
+                // (a line without `<-`). Distinguish by trying to parse a pattern and
+                // checking whether `<-` follows; backtrack if not.
+                let success = loop {
+                    if matches!(self.peek(), Token::RBrace | Token::Eof) {
+                        return Err(ParseError {
+                            message: "do block missing success expression before '}'".to_string(),
+                            span: self.tokens[self.pos].span,
+                        });
+                    }
+                    let saved_pos = self.pos;
+                    match self.parse_pattern() {
+                        Ok(pat) if matches!(self.peek(), Token::LeftArrow) => {
+                            self.advance(); // consume `<-`
+                            let expr = self.parse_expr(0)?;
+                            bindings.push((pat, expr));
+                            self.skip_terminators();
+                        }
+                        _ => {
+                            // Not a binding -- restore and parse as success expression
+                            self.pos = saved_pos;
+                            let success = self.parse_expr(0)?;
+                            self.skip_terminators();
+                            break success;
+                        }
+                    }
+                };
+                self.expect(Token::RBrace)?;
+
+                self.skip_terminators();
+                self.expect(Token::Else)?;
+                self.expect(Token::LBrace)?;
+                self.skip_terminators();
+
+                let mut else_arms = Vec::new();
+                while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                    let arm_start = self.tokens[self.pos].span;
+                    let pattern = self.parse_pattern()?;
+                    self.expect(Token::Arrow)?;
+                    let body = self.parse_expr(0)?;
+                    let end_span = body.span().end;
+                    else_arms.push(CaseArm {
+                        pattern,
+                        guard: None,
+                        body,
+                        span: Span {
+                            start: arm_start.start,
+                            end: end_span,
+                        },
+                    });
+                    self.skip_terminators();
+                }
+                let end = self.tokens[self.pos].span;
+                self.expect(Token::RBrace)?;
+
+                Ok(Expr::Do {
+                    bindings,
+                    success: Box::new(success),
+                    else_arms,
+                    span: span.to(end),
+                })
+            }
+
             tok => {
                 self.pos -= 1; // put back
                 Err(ParseError {

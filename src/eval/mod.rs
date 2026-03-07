@@ -206,6 +206,19 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> EvalResult {
                 None => EvalResult::error(format!("unknown qualified name '{}'", key)),
             }
         }
+
+        Expr::Do {
+            bindings,
+            success,
+            else_arms,
+            ..
+        } => {
+            let bindings = bindings.clone();
+            let success = success.clone();
+            let else_arms = else_arms.clone();
+            let env = env.clone();
+            eval_do_expr(&bindings, 0, &success, &else_arms, &env)
+        }
     }
 }
 
@@ -260,6 +273,40 @@ fn handle_effect(result: EvalResult, handler_val: &HandlerVal) -> EvalResult {
             }
         }
     }
+}
+
+// Helper: evaluate do...else bindings sequentially.
+// When all bindings succeed, evaluate and return the success expression.
+// On pattern mismatch, dispatch to else_arms like a case expression.
+fn eval_do_expr(
+    bindings: &[(Pat, Expr)],
+    index: usize,
+    success: &Expr,
+    else_arms: &[CaseArm],
+    env: &Env,
+) -> EvalResult {
+    if index >= bindings.len() {
+        return eval_expr(success, env);
+    }
+
+    let (pat, expr) = &bindings[index];
+    let pat = pat.clone();
+    let bindings = bindings.to_vec();
+    let success = success.clone();
+    let else_arms = else_arms.to_vec();
+    let env = env.clone();
+
+    eval_expr(expr, &env).then(move |val| {
+        if let Some(bound) = match_pattern(&pat, &val) {
+            for (name, v) in bound {
+                env.set(name, v);
+            }
+            eval_do_expr(&bindings, index + 1, &success, &else_arms, &env)
+        } else {
+            // Pattern mismatch: bail to else arms
+            eval_case_arms(&else_arms, &val, &env, 0)
+        }
+    })
 }
 
 // Helper: evaluate block statements sequentially, threading effects through continuations
