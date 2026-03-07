@@ -130,6 +130,17 @@ main () = print ()
     );
 }
 
+// --- Qualified constructors ---
+
+#[test]
+fn qualified_constructor() {
+    ok("
+import Shapes
+fun main () -> ()
+main () = print (Shapes.area (Shapes.Circle 3.0))
+");
+}
+
 // --- Caching: same module imported twice gives same bindings ---
 
 #[test]

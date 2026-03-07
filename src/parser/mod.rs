@@ -268,10 +268,17 @@ impl Parser {
             }
 
             let start = expr.span().start;
-            // Module access: `Math.abs` -> QualifiedName (bare Constructor LHS only)
+            // Module access: `Math.abs` or `Shapes.Circle` -> QualifiedName (bare Constructor LHS only)
             if let Expr::Constructor { name: module, .. } = &expr {
                 let module = module.clone();
-                let name = self.expect_ident()?;
+                let name = match self.peek().clone() {
+                    Token::Ident(n) => { self.advance(); n }
+                    Token::UpperIdent(n) => { self.advance(); n }
+                    tok => return Err(ParseError {
+                        message: format!("expected identifier after '.', got {:?}", tok),
+                        span: self.tokens[self.pos].span,
+                    }),
+                };
                 let end = self.tokens[self.pos - 1].span;
                 expr = Expr::QualifiedName {
                     module,

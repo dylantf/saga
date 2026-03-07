@@ -4,6 +4,18 @@ use crate::token::{Span, Token};
 use super::{ParseError, Parser};
 
 impl Parser {
+    // Parse a single effect name in a `needs` list: `Log` or `Logging.Log`
+    fn parse_needs_entry(&mut self) -> Result<String, ParseError> {
+        let name = self.expect_upper_ident()?;
+        if matches!(self.peek(), Token::Dot) {
+            self.advance(); // consume '.'
+            let qualifier = self.expect_upper_ident()?;
+            Ok(format!("{}.{}", name, qualifier))
+        } else {
+            Ok(name)
+        }
+    }
+
     // --- Declarations ---
 
     pub(super) fn parse_decl(&mut self) -> Result<Decl, ParseError> {
@@ -174,10 +186,10 @@ impl Parser {
         if matches!(self.peek(), Token::Needs) {
             self.advance(); // consume 'needs'
             self.expect(Token::LBrace)?;
-            effects.push(self.expect_upper_ident()?);
+            effects.push(self.parse_needs_entry()?);
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
-                effects.push(self.expect_upper_ident()?);
+                effects.push(self.parse_needs_entry()?);
             }
             self.expect(Token::RBrace)?;
         }
@@ -268,13 +280,13 @@ impl Parser {
         if matches!(self.peek(), Token::Needs) {
             self.advance(); // consume 'needs'
             self.expect(Token::LBrace)?;
-            needs.push(self.expect_upper_ident()?);
+            needs.push(self.parse_needs_entry()?);
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
                 if matches!(self.peek(), Token::RBrace) {
                     break; // trailing comma
                 }
-                needs.push(self.expect_upper_ident()?);
+                needs.push(self.parse_needs_entry()?);
             }
             self.expect(Token::RBrace)?;
         }
@@ -537,12 +549,16 @@ impl Parser {
             self.advance();
             let right = self.parse_type_expr()?; // recurse = right-associative
             let arrow = TypeExpr::Arrow(Box::new(left), Box::new(right));
-            // Consume optional `needs { Effect1, Effect2 }` (ignored until type checker)
+            // Consume optional `needs { Effect1, Module.Effect2 }` (ignored until type checker)
             if matches!(self.peek(), Token::Needs) {
                 self.advance();
                 self.expect(Token::LBrace)?;
                 while !matches!(self.peek(), Token::RBrace) {
-                    self.advance(); // consume effect name
+                    self.advance(); // consume effect name (or module prefix)
+                    if matches!(self.peek(), Token::Dot) {
+                        self.advance(); // consume '.'
+                        self.advance(); // consume qualified name
+                    }
                     if matches!(self.peek(), Token::Comma) {
                         self.advance();
                     }
