@@ -1,5 +1,3 @@
-# Pattern destructuring -- let, function args, and case all use the same patterns
-
 record Point {
   x: Int,
   y: Int,
@@ -10,42 +8,50 @@ type Shape {
   Rect(Float, Float)
 }
 
-# --- Function argument destructuring ---
+impl Show for Point {
+  show p = $"({p.x}, {p.y})"
+}
 
+impl Show for Shape {
+  show s = case s {
+    Circle(r) -> $"Circle({r})"
+    Rect(w, h) -> $"Rect({w}, {h})"
+  }
+}
+
+# Function argument destructuring 
 add_points (x1, y1) (x2, y2) = (x1 + x2, y1 + y2)
 
 area Circle(r) = r * r * 3.14
 area Rect(w, h) = w * h
 
-# --- Main ---
-
 main () = {
   # Let with tuples
   let (name, age) = ("Alice", 30)
-  name <> " is " <> show age |> print
+  print $"{name} is {age}"
 
   # Let with records
   let origin = Point { x: 0, y: 0 }
   let Point { x, y } = origin
-  "origin: " <> show x <> ", " <> show y |> print
+  print $"origin: ({x}, {y})"
 
   # Let with constructors
   let Circle(r) = Circle(5.0)
-  "radius: " <> show r |> print
+  print $"radius: {r}"
 
   # Let with list cons
   let h :: t = [1, 2, 3, 4, 5]
-  "head: " <> show h |> print
-  "tail: " <> show t |> print
+  print $"head: {h}"
+  print $"tail: {t}"
 
   # Nested destructuring
   let ((a, b), (c, d)) = ((1, 2), (3, 4))
-  "sum: " <> show (a + b + c + d) |> print
+  print $"sum: {a + b + c + d}"
 
-  # Function arg destructuring
-  let result = add_points (1, 2) (3, 4)
-  "added: " <> show result |> print
-
-  print <| "circle area: " <> (Circle 10.0 |> area |> show)
-  print <| "rect area: " <> (Rect 3.0 4.0 |> area |> show)
+  # Shape Show impl
+  let c = Circle 10.0
+  let rect = Rect 3.0 4.0
+  print $"{c} has area {area c}"
+  print $"{rect} has area {area rect}"
 }
+

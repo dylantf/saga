@@ -6,13 +6,19 @@
   "engines": {
     "vscode": "^1.75.0"
   },
-  "categories": ["Programming Languages"],
+  "categories": [
+    "Programming Languages"
+  ],
   "contributes": {
     "languages": [
       {
         "id": "dylang",
-        "aliases": ["dylang"],
-        "extensions": [".dy"],
+        "aliases": [
+          "dylang"
+        ],
+        "extensions": [
+          ".dy"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],

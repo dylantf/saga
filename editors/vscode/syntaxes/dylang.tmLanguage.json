@@ -4,6 +4,7 @@
   "scopeName": "source.dylang",
   "patterns": [
     { "include": "#comment" },
+    { "include": "#string-interp" },
     { "include": "#string" },
     { "include": "#number" },
     { "include": "#effect-call" },
@@ -36,10 +37,27 @@
         {
           "name": "constant.character.escape.dylang",
           "match": "\\\\[ntr\\\\\"']"
+        }
+      ]
+    },
+    "string-interp": {
+      "name": "string.quoted.double.interpolated.dylang",
+      "begin": "\\$\"",
+      "end": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.interpolated.begin.dylang" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.dylang" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.dylang",
+          "match": "\\\\[ntr\\\\\"'\\{]"
         },
         {
           "name": "meta.embedded.expression.dylang",
-          "begin": "\\$\\{",
+          "begin": "\\{",
           "end": "\\}",
           "beginCaptures": {
             "0": { "name": "punctuation.definition.interpolation.begin.dylang" }
@@ -75,11 +93,11 @@
         },
         {
           "name": "keyword.declaration.dylang",
-          "match": "\\b(let|mut|fun|pub|type|record|effect|handler|trait|impl|module|import|needs|where|resume)\\b"
+          "match": "\\b(let|fun|pub|type|record|effect|handler|trait|impl|module|import|needs|where|resume)\\b"
         },
         {
-          "name": "keyword.other.exposing.dylang",
-          "match": "\\b(exposing|as|for)\\b"
+          "name": "keyword.other.dylang",
+          "match": "\\b(as|for)\\b"
         }
       ]
     },
@@ -91,7 +109,7 @@
       "patterns": [
         {
           "name": "keyword.operator.arrow.dylang",
-          "match": "->|<-"
+          "match": "->"
         },
         {
           "name": "keyword.operator.pipe.dylang",
