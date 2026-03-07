@@ -473,11 +473,20 @@ impl Parser {
                         let let_start = self.tokens[self.pos].span;
                         self.advance(); // consume 'let'
                         let pattern = self.parse_pattern()?;
+                        let annotation = if matches!(self.peek(), Token::Colon)
+                            && matches!(pattern, Pat::Var { .. })
+                        {
+                            self.advance(); // consume ':'
+                            Some(self.parse_type_expr()?)
+                        } else {
+                            None
+                        };
                         self.expect(Token::Eq)?;
                         let value = self.parse_expr(0)?;
                         let stmt_span = let_start.to(value.span());
                         stmts.push(Stmt::Let {
                             pattern,
+                            annotation,
                             value,
                             span: stmt_span,
                         });

@@ -374,8 +374,17 @@ impl Checker {
         let mut last_ty = Type::unit();
         for stmt in stmts {
             match stmt {
-                Stmt::Let { pattern, value, .. } => {
+                Stmt::Let {
+                    pattern,
+                    annotation,
+                    value,
+                    span,
+                } => {
                     let ty = self.infer_expr(value)?;
+                    if let Some(ann) = annotation {
+                        let ann_ty = self.convert_type_expr(ann, &mut vec![]);
+                        self.unify_at(&ty, &ann_ty, *span)?;
+                    }
                     if let Pat::Var { name, .. } = pattern {
                         let scheme = self.generalize(&ty);
                         self.env.insert(name.clone(), scheme);

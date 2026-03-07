@@ -67,10 +67,17 @@ main () = {
   }
   print ("safe_div result: " <> show result)
 
+  # Let bindings with type annotations: guides inference and catches mismatches
+  let n: Int = 42
+  let greeting: String = "hello"
+  print (show n)
+  print greeting
+
   # --- Uncomment any line below to see a type error: ---
   # let bad = 1 + "hello"               # type mismatch: expected Int, got String
   # let bad = if True then 1 else "no"   # branch type mismatch
   # let bad = add 1 "two"               # expected Int, got String
   # let bad = Point { x: "bad", y: 2.0 } # field type mismatch
   # let bad = nope                       # undefined variable
+  # let bad: String = 42                 # annotation mismatch: expected String, got Int
 }

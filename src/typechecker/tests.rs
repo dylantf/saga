@@ -1302,3 +1302,38 @@ handler my_db for Db needs {Log} {
         err.message
     );
 }
+
+// --- Let binding type annotations ---
+
+#[test]
+fn let_annotation_correct() {
+    check("main () = { let x: Int = 5\n x }").unwrap();
+}
+
+#[test]
+fn let_annotation_mismatch() {
+    let result = check("main () = { let x: String = 5\n x }");
+    assert!(result.is_err());
+}
+
+#[test]
+fn let_annotation_guides_inference() {
+    // Annotation constrains the binding's type for subsequent use
+    check(
+        "fun add (x: Int) -> Int
+add x = x + 1
+main () = { let n: Int = 10\n add n }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn top_level_let_annotation_correct() {
+    check("let x: Int = 5\nmain () = x").unwrap();
+}
+
+#[test]
+fn top_level_let_annotation_mismatch() {
+    let result = check("let x: String = 5\nmain () = x");
+    assert!(result.is_err());
+}

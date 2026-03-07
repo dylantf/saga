@@ -174,8 +174,18 @@ impl Checker {
 
     pub(crate) fn check_decl(&mut self, decl: &Decl) -> Result<(), TypeError> {
         match decl {
-            Decl::Let { name, value, .. } => {
+            Decl::Let {
+                name,
+                annotation,
+                value,
+                span,
+                ..
+            } => {
                 let ty = self.infer_expr(value)?;
+                if let Some(ann) = annotation {
+                    let ann_ty = self.convert_type_expr(ann, &mut vec![]);
+                    self.unify_at(&ty, &ann_ty, *span)?;
+                }
                 let scheme = self.generalize(&ty);
                 self.env.insert(name.clone(), scheme);
                 Ok(())

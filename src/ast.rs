@@ -36,6 +36,7 @@ pub enum Decl {
 
     Let {
         name: String,
+        annotation: Option<TypeExpr>,
         value: Expr,
         span: Span,
     },
@@ -251,9 +252,10 @@ impl Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    /// `let x = expr` or `let (a, b) = expr`
+    /// `let x = expr`, `let x: Type = expr`, or `let (a, b) = expr`
     Let {
         pattern: Pat,
+        annotation: Option<TypeExpr>,
         value: Expr,
         span: Span,
     },

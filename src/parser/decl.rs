@@ -39,11 +39,18 @@ impl Parser {
                 let start = self.tokens[self.pos].span;
                 self.advance(); // consume 'let'
                 let name = self.expect_ident()?;
+                let annotation = if matches!(self.peek(), Token::Colon) {
+                    self.advance(); // consume ':'
+                    Some(self.parse_type_expr()?)
+                } else {
+                    None
+                };
                 self.expect(Token::Eq)?;
                 let value = self.parse_expr(0)?;
                 Ok(Decl::Let {
                     span: start.to(value.span()),
                     name,
+                    annotation,
                     value,
                 })
             }
