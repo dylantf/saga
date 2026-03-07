@@ -4,6 +4,8 @@ pub enum Token {
     Int(i64),
     Float(f64),
     String(String),
+    /// `$"hello {name}"` -- pre-tokenized interpolated string
+    InterpolatedString(Vec<InterpPart>),
 
     // Identifiers
     Ident(String),
@@ -93,6 +95,15 @@ impl Span {
             end: other.end,
         }
     }
+}
+
+/// A segment of an interpolated string.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterpPart {
+    /// Literal text between holes.
+    Literal(String),
+    /// `{expr}` -- pre-tokenized expression tokens (without surrounding braces).
+    Hole(Vec<Spanned>),
 }
 
 /// A token tagged with its location in source

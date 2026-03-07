@@ -188,6 +188,48 @@ main () = print (describe (Shapes.Circle 3.0))
 ");
 }
 
+// --- Cross-module traits ---
+
+#[test]
+fn cross_module_trait_impl() {
+    // Trait defined in Printable, impl in main -- dispatch must find it
+    ok("
+import Printable (Greet)
+record Dog { name: String }
+impl Greet for Dog {
+  greet d = \"Woof, I am \" <> d.name
+}
+fun main () -> ()
+main () = print (greet (Dog { name: \"Rex\" }))
+");
+}
+
+#[test]
+fn cross_module_show_impl() {
+    // impl Show for a type defined in Animals, used via show in main
+    ok("
+import Animals (Animal)
+fun main () -> ()
+main () = {
+  let a = Animal { name: \"Rex\", species: \"Dog\" }
+  print (show a)
+}
+");
+}
+
+#[test]
+fn cross_module_show_in_interpolation() {
+    // impl Show for Animal used implicitly inside string interpolation
+    ok("
+import Animals (Animal)
+fun main () -> ()
+main () = {
+  let a = Animal { name: \"Rex\", species: \"Dog\" }
+  print $\"Animal: {a}\"
+}
+");
+}
+
 // --- Error cases ---
 
 #[test]

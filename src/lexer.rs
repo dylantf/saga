@@ -1,4 +1,4 @@
-use crate::token::{Span, Spanned, Token};
+use crate::token::{InterpPart, Span, Spanned, Token};
 
 pub struct Lexer {
     source: Vec<char>,
@@ -191,6 +191,111 @@ impl Lexer {
         }
     }
 
+    // Read an interpolated string literal: $"hello {name}, age {age}"
+    // Called after consuming the opening `$"`.
+    fn read_interp_string(&mut self, start: usize) -> Result<Token, LexError> {
+        let mut parts: Vec<InterpPart> = Vec::new();
+        let mut literal = String::new();
+
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(LexError {
+                        message: "unterminated interpolated string".to_string(),
+                        pos: start,
+                    });
+                }
+                Some('"') => {
+                    self.advance();
+                    if !literal.is_empty() {
+                        parts.push(InterpPart::Literal(literal));
+                    }
+                    return Ok(Token::InterpolatedString(parts));
+                }
+                Some('\\') => {
+                    self.advance();
+                    match self.advance() {
+                        Some('n') => literal.push('\n'),
+                        Some('t') => literal.push('\t'),
+                        Some('\\') => literal.push('\\'),
+                        Some('"') => literal.push('"'),
+                        Some(ch) => literal.push(ch),
+                        None => {
+                            return Err(LexError {
+                                message: "unterminated escape sequence".to_string(),
+                                pos: start,
+                            });
+                        }
+                    }
+                }
+                // `{{` → literal `{`
+                Some('{') if self.peek_next() == Some('{') => {
+                    self.advance();
+                    self.advance();
+                    literal.push('{');
+                }
+                // `}}` → literal `}`
+                Some('}') if self.peek_next() == Some('}') => {
+                    self.advance();
+                    self.advance();
+                    literal.push('}');
+                }
+                // `{expr}` hole
+                Some('{') => {
+                    self.advance(); // consume `{`
+                    if !literal.is_empty() {
+                        parts.push(InterpPart::Literal(std::mem::take(&mut literal)));
+                    }
+                    // Collect raw chars until matching `}`, tracking brace depth
+                    let mut hole_src = String::new();
+                    let mut depth: usize = 1;
+                    loop {
+                        match self.peek() {
+                            None => {
+                                return Err(LexError {
+                                    message: "unterminated interpolation hole".to_string(),
+                                    pos: start,
+                                });
+                            }
+                            Some('{') => {
+                                depth += 1;
+                                hole_src.push('{');
+                                self.advance();
+                            }
+                            Some('}') => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    self.advance(); // consume closing `}`
+                                    break;
+                                }
+                                hole_src.push('}');
+                                self.advance();
+                            }
+                            Some(ch) => {
+                                hole_src.push(ch);
+                                self.advance();
+                            }
+                        }
+                    }
+                    let hole_tokens = Lexer::new(&hole_src).lex().map_err(|e| LexError {
+                        message: format!("in interpolation hole: {}", e.message),
+                        pos: start,
+                    })?;
+                    // Strip the trailing Eof
+                    let hole_tokens: Vec<Spanned> = hole_tokens
+                        .into_iter()
+                        .filter(|t| t.token != Token::Eof)
+                        .collect();
+                    parts.push(InterpPart::Hole(hole_tokens));
+                }
+                Some(ch) => {
+                    literal.push(ch);
+                    self.advance();
+                }
+            }
+        }
+    }
+
     // Should we emit a terminator token right now?
     // Only at nesting depth 0, and only after tokens that "end" an expression.
     fn should_emit_terminator(&self, prev: &Option<Token>) -> bool {
@@ -204,6 +309,7 @@ impl Lexer {
                 Token::Int(_)
                     | Token::Float(_)
                     | Token::String(_)
+                    | Token::InterpolatedString(_)
                     | Token::True
                     | Token::False
                     | Token::Ident(_)
@@ -245,6 +351,14 @@ impl Lexer {
                 }
                 Some('"') => {
                     let tok = self.read_string()?;
+                    let (spanned, tok) = self.emit(tok, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
+                }
+                Some('$') if self.peek_next() == Some('"') => {
+                    self.advance(); // consume `$`
+                    self.advance(); // consume `"`
+                    let tok = self.read_interp_string(start)?;
                     let (spanned, tok) = self.emit(tok, start);
                     tokens.push(spanned);
                     prev_token = Some(tok);

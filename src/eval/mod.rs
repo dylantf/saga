@@ -454,6 +454,9 @@ fn apply(func: Value, arg: Value) -> EvalResult {
             let key = format!("__impl_{}_{}_{}", trait_name, type_name, method_name);
             if let Some(impl_fn) = env.get(&key) {
                 apply(impl_fn, arg)
+            } else if trait_name == "Show" && method_name == "show" {
+                // Built-in Show fallback for primitives and types without a custom impl.
+                EvalResult::Ok(Value::String(format!("{}", arg)))
             } else {
                 EvalResult::error(format!("no impl of {} for type {}", trait_name, type_name))
             }
@@ -610,7 +613,9 @@ pub fn eval_decl(decl: &Decl, env: &Env, loader: &ModuleLoader) -> EvalResult {
                     body: body.clone(),
                     env: env.clone(),
                 };
-                env.set(key, Value::Closure(vec![arm]));
+                // Use set_root so TraitMethod lookups that captured an ancestor
+                // env (e.g. the built-in `show`) can find this impl.
+                env.set_root(key, Value::Closure(vec![arm]));
             }
             EvalResult::Ok(Value::Unit)
         }

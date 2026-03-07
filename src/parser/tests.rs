@@ -1536,3 +1536,57 @@ fn private_fun_annotation() {
         _ => panic!("expected FunAnnotation"),
     }
 }
+
+// --- String interpolation ---
+
+#[test]
+fn interp_empty() {
+    // $"" → ""
+    let expr = parse_expr(r#"$"""#);
+    assert!(matches!(expr, Expr::Lit { value: Lit::String(s), .. } if s.is_empty()));
+}
+
+#[test]
+fn interp_no_holes() {
+    // $"hello" → "hello"
+    let expr = parse_expr(r#"$"hello""#);
+    assert!(matches!(expr, Expr::Lit { value: Lit::String(s), .. } if s == "hello"));
+}
+
+#[test]
+fn interp_single_hole() {
+    // $"{x}" → show(x)
+    let expr = parse_expr(r#"$"{x}""#);
+    assert!(matches!(
+        expr,
+        Expr::App { func, arg, .. }
+        if matches!(func.as_ref(), Expr::Var { name, .. } if name == "show")
+        && matches!(arg.as_ref(), Expr::Var { name, .. } if name == "x")
+    ));
+}
+
+#[test]
+fn interp_literal_and_hole() {
+    // $"hello {name}" → "hello " <> show(name)
+    let expr = parse_expr(r#"$"hello {name}""#);
+    assert!(matches!(
+        expr,
+        Expr::BinOp { op: BinOp::Concat, left, right, .. }
+        if matches!(left.as_ref(), Expr::Lit { value: Lit::String(s), .. } if s == "hello ")
+        && matches!(right.as_ref(), Expr::App { func, .. }
+            if matches!(func.as_ref(), Expr::Var { name, .. } if name == "show"))
+    ));
+}
+
+#[test]
+fn interp_escaped_braces() {
+    // $"{{" → "{"
+    let expr = parse_expr(r#"$"{{""#);
+    assert!(matches!(expr, Expr::Lit { value: Lit::String(s), .. } if s == "{"));
+}
+
+#[test]
+fn interp_pipe_in_hole() {
+    // $"{xs |> show}" parses without error
+    parse_expr(r#"$"{xs |> show}""#);
+}

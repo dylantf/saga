@@ -88,6 +88,7 @@ impl Parser {
             Token::Int(_)
                 | Token::Float(_)
                 | Token::String(_)
+                | Token::InterpolatedString(_)
                 | Token::True
                 | Token::False
                 | Token::Ident(_)

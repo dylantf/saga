@@ -1,0 +1,10 @@
+module Animals
+
+pub record Animal {
+  name: String,
+  species: String,
+}
+
+pub impl Show for Animal {
+  show a = a.name <> " (" <> a.species <> ")"
+}

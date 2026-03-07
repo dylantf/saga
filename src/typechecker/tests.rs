@@ -1337,3 +1337,21 @@ fn top_level_let_annotation_mismatch() {
     let result = check("let x: String = 5\nmain () = x");
     assert!(result.is_err());
 }
+
+// --- String interpolation ---
+
+#[test]
+fn interp_infers_string() {
+    let ty = infer_expr_type(r#"$"hello {42}""#).unwrap();
+    assert_eq!(ty, Type::string());
+}
+
+#[test]
+fn interp_show_constraint_enforced() {
+    // A type without Show cannot appear in a hole
+    let result = check(
+        r#"type Foo { Foo }
+main () = $"val: {Foo}""#,
+    );
+    assert!(result.is_err());
+}

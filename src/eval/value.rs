@@ -204,6 +204,24 @@ impl Env {
     pub(crate) fn set(&self, name: String, value: Value) {
         self.0.borrow_mut().bindings.insert(name, value);
     }
+
+    /// Set a binding in the root (outermost) env frame.
+    /// Used for impl registrations so they're visible to TraitMethod lookups
+    /// that may have captured an ancestor env.
+    pub(crate) fn set_root(&self, name: String, value: Value) {
+        let inner = self.0.borrow();
+        match &inner.parent {
+            Some(parent) => {
+                let parent = parent.clone();
+                drop(inner);
+                parent.set_root(name, value);
+            }
+            None => {
+                drop(inner);
+                self.set(name, value);
+            }
+        }
+    }
 }
 
 // --- Eval result with continuations ---

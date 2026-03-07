@@ -1,0 +1,5 @@
+module Printable
+
+pub trait Greet a {
+  fun greet (x: a) -> String
+}

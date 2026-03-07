@@ -1,0 +1,28 @@
+# String interpolation with $"..."
+# Holes {} require Show on the interpolated value.
+
+record User {
+  name: String,
+  age: Int,
+}
+
+impl Show for User {
+  show user = user.name
+}
+
+main () = {
+  let alice = User { name: "Alice", age: 30 }
+  let bob = User { name: "Bob", age: 25 }
+
+  # Basic interpolation -- Show for User gives us the name
+  print $"Hello, {alice}!"
+  print $"Hello, {bob}!"
+
+  # Mixing record fields of different types in one string
+  print $"{alice} is {alice.age} years old."
+
+  # Expressions inside holes
+  let nums = [1, 2, 3, 4, 5]
+  print $"List has {length nums} elements."
+  print $"Sum: {foldl (fun acc x -> acc + x) 0 nums}"
+}

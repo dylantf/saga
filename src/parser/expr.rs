@@ -290,6 +290,53 @@ impl Parser {
                 value: Lit::String(s),
                 span,
             }),
+            Token::InterpolatedString(parts) => {
+                use crate::token::InterpPart;
+                // Desugar to a chain of `<>` concatenations.
+                // Each hole becomes `show(expr)`, each literal stays as a string.
+                // Adds a trailing Eof so sub-parsers can terminate cleanly.
+                let mut segments: Vec<Expr> = Vec::new();
+                for part in parts {
+                    match part {
+                        InterpPart::Literal(s) => {
+                            if !s.is_empty() {
+                                segments.push(Expr::Lit {
+                                    value: Lit::String(s),
+                                    span,
+                                });
+                            }
+                        }
+                        InterpPart::Hole(mut tokens) => {
+                            tokens.push(crate::token::Spanned {
+                                token: crate::token::Token::Eof,
+                                span,
+                            });
+                            let hole_expr = crate::parser::Parser::new(tokens)
+                                .parse_expr(0)
+                                .map_err(|e| e)?;
+                            segments.push(Expr::App {
+                                func: Box::new(Expr::Var {
+                                    name: "show".to_string(),
+                                    span,
+                                }),
+                                arg: Box::new(hole_expr),
+                                span,
+                            });
+                        }
+                    }
+                }
+                // Fold into a left-associative `<>` chain; empty string if no parts.
+                let init = segments.into_iter().reduce(|left, right| Expr::BinOp {
+                    op: BinOp::Concat,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    span,
+                });
+                Ok(init.unwrap_or(Expr::Lit {
+                    value: Lit::String(String::new()),
+                    span,
+                }))
+            }
             Token::Ident(i) => Ok(Expr::Var { name: i, span }),
             Token::UpperIdent(i) => {
                 if matches!(self.peek(), Token::LBrace) {

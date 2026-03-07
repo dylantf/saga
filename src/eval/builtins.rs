@@ -3,7 +3,14 @@ use crate::ast::Program;
 
 pub(super) fn register_builtins(env: &Env) {
     env.set("print".to_string(), Value::BuiltIn("print".to_string()));
-    env.set("show".to_string(), Value::BuiltIn("show".to_string()));
+    env.set(
+        "show".to_string(),
+        Value::TraitMethod {
+            trait_name: "Show".to_string(),
+            method_name: "show".to_string(),
+            env: env.clone(),
+        },
+    );
     env.set(
         "Nil".to_string(),
         Value::Constructor {
