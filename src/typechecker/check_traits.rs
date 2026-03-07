@@ -164,14 +164,14 @@ impl Checker {
             // Register where clause bounds on the fresh type vars so method bodies
             // can use trait methods on those vars (e.g. `show x` where `x: a` and `a: Show`).
             for bound in where_clause {
-                if let Some(idx) = type_params.iter().position(|p| p == &bound.type_var) {
-                    if let Some(Type::Var(var_id)) = param_vars.get(idx) {
-                        for trait_req in &bound.traits {
-                            self.where_bounds
-                                .entry(*var_id)
-                                .or_default()
-                                .insert(trait_req.clone());
-                        }
+                if let Some(idx) = type_params.iter().position(|p| p == &bound.type_var)
+                    && let Some(Type::Var(var_id)) = param_vars.get(idx)
+                {
+                    for trait_req in &bound.traits {
+                        self.where_bounds
+                            .entry(*var_id)
+                            .or_default()
+                            .insert(trait_req.clone());
                     }
                 }
             }

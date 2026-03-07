@@ -595,121 +595,109 @@ impl Checker {
 
     // --- Exhaustiveness checking ---
 
-    /// Check whether case arms exhaustively cover an ADT type, and detect
-    /// unreachable arms. Returns Err for non-exhaustive matches or redundant arms.
-    /// Silently succeeds if the scrutinee type is not a known ADT (e.g. Int, type variable).
+    /// Check whether case arms exhaustively cover a type using Maranget's
+    /// usefulness algorithm. Also detects unreachable/redundant arms.
     pub(crate) fn check_exhaustiveness(
         &self,
         arms: &[ast::CaseArm],
         scrutinee_ty: &Type,
         span: Span,
     ) -> Result<(), TypeError> {
+        use super::exhaustiveness::{self as exh, ExhaustivenessCtx, SPat};
+
         let resolved = self.sub.apply(scrutinee_ty);
 
-        // Extract the ADT name from the resolved type
+        // Skip exhaustiveness for unresolved type variables and arrow types
+        match &resolved {
+            Type::Con(_, _) => {}
+            _ => return Ok(()),
+        };
+
         let type_name = match &resolved {
-            Type::Con(name, _) => name,
-            _ => return Ok(()), // type variable or arrow -- skip
+            Type::Con(name, _) => name.clone(),
+            _ => unreachable!(),
         };
 
-        // Look up the constructors for this type
-        let all_variants = match self.adt_variants.get(type_name) {
-            Some(variants) => variants,
-            None => {
-                // For primitive types with infinite value sets (Int, Float, String),
-                // require a wildcard/variable fallback if any literal patterns are used.
-                if matches!(type_name.as_str(), "Int" | "Float" | "String") {
-                    let has_lit = arms.iter().any(|arm| matches!(&arm.pattern, Pat::Lit { .. }));
-                    if has_lit {
-                        let has_catchall = arms.iter().any(|arm| {
-                            arm.guard.is_none()
-                                && matches!(&arm.pattern, Pat::Wildcard { .. } | Pat::Var { .. })
-                        });
-                        if !has_catchall {
-                            return Err(TypeError::at(
-                                span,
-                                format!(
-                                    "non-exhaustive pattern match on {}: add a wildcard `_` or variable pattern",
-                                    type_name
-                                ),
-                            ));
-                        }
-                    }
+        // For primitive types with infinite value sets, keep the simple check:
+        // require a wildcard/variable fallback if any literal patterns are used.
+        if !self.adt_variants.contains_key(&type_name)
+            && matches!(type_name.as_str(), "Int" | "Float" | "String")
+        {
+            let has_lit = arms
+                .iter()
+                .any(|arm| matches!(&arm.pattern, Pat::Lit { .. }));
+            if has_lit {
+                let has_catchall = arms.iter().any(|arm| {
+                    arm.guard.is_none()
+                        && matches!(&arm.pattern, Pat::Wildcard { .. } | Pat::Var { .. })
+                });
+                if !has_catchall {
+                    return Err(TypeError::at(
+                        span,
+                        format!(
+                            "non-exhaustive pattern match on {}: add a wildcard `_` or variable pattern",
+                            type_name
+                        ),
+                    ));
                 }
-                return Ok(());
             }
-        };
-
-        // Walk arms in order, tracking coverage and detecting redundancy.
-        // A wildcard/var after all constructors are covered is redundant.
-        // A constructor that was already covered by a prior unguarded arm is redundant.
-        let mut covered: HashSet<&str> = HashSet::new();
-        let mut seen_catchall = false;
-
-        for arm in arms {
-            // Guarded arms don't establish coverage, so they can't make
-            // later arms redundant and can't themselves be redundant.
-            if arm.guard.is_some() {
-                continue;
-            }
-
-            match &arm.pattern {
-                Pat::Wildcard { .. } | Pat::Var { .. } => {
-                    if seen_catchall || covered.len() == all_variants.len() {
-                        return Err(TypeError::at(
-                            arm.pattern.span(),
-                            "unreachable pattern: all cases already covered",
-                        ));
-                    }
-                    seen_catchall = true;
-                }
-                Pat::Constructor { name, span, .. } => {
-                    if seen_catchall || covered.contains(name.as_str()) {
-                        return Err(TypeError::at(
-                            *span,
-                            format!("unreachable pattern: {} already covered", name),
-                        ));
-                    }
-                    covered.insert(name.as_str());
-                }
-                Pat::Lit {
-                    value: Lit::Bool(b),
-                    span,
-                } => {
-                    let ctor = if *b { "True" } else { "False" };
-                    if seen_catchall || covered.contains(ctor) {
-                        return Err(TypeError::at(
-                            *span,
-                            format!("unreachable pattern: {} already covered", ctor),
-                        ));
-                    }
-                    covered.insert(ctor);
-                }
-                _ => {}
-            }
-        }
-
-        if seen_catchall {
             return Ok(());
         }
 
-        let missing: Vec<&str> = all_variants
-            .iter()
-            .filter(|v| !covered.contains(v.as_str()))
-            .map(|v| v.as_str())
-            .collect();
-
-        if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(TypeError::at(
-                span,
-                format!(
-                    "non-exhaustive pattern match: missing {}",
-                    missing.join(", ")
-                ),
-            ))
+        // For non-ADT, non-primitive types (e.g. Unit, records), skip.
+        // Tuples are allowed through -- they're single-constructor types
+        // handled natively by the Maranget algorithm.
+        if !self.adt_variants.contains_key(&type_name) && type_name != "Tuple" {
+            return Ok(());
         }
+
+        let ctx = ExhaustivenessCtx {
+            adt_variants: &self.adt_variants,
+        };
+
+        // Build pattern matrix from arms (skip guarded arms for coverage,
+        // but include them for redundancy checking)
+        let mut matrix: Vec<Vec<SPat>> = Vec::new();
+
+        for arm in arms {
+            let spat = exh::simplify_pat(&arm.pattern);
+            let row = vec![spat.clone()];
+
+            // Redundancy check: is this arm useful w.r.t. prior unguarded arms?
+            if arm.guard.is_none() && !exh::useful(&ctx, &matrix, &row) {
+                let pat_str = exh::format_witness(&[spat]);
+                return Err(TypeError::at(
+                    arm.pattern.span(),
+                    format!("unreachable pattern: {} already covered", pat_str),
+                ));
+            }
+
+            // Only unguarded arms contribute to coverage
+            if arm.guard.is_none() {
+                matrix.push(row);
+            }
+        }
+
+        // Exhaustiveness check: is a wildcard useful against the full matrix?
+        let wildcard_row = vec![SPat::Wildcard];
+        if exh::useful(&ctx, &matrix, &wildcard_row) {
+            // Collect all uncovered witnesses for a complete error message
+            let witnesses = exh::find_all_witnesses(&ctx, &matrix, 1);
+            if !witnesses.is_empty() {
+                let formatted: Vec<String> =
+                    witnesses.iter().map(|w| exh::format_witness(w)).collect();
+                return Err(TypeError::at(
+                    span,
+                    format!(
+                        "non-exhaustive pattern match: missing {}",
+                        formatted.join(", ")
+                    ),
+                ));
+            }
+            return Err(TypeError::at(span, "non-exhaustive pattern match"));
+        }
+
+        Ok(())
     }
 
     /// Check do...else exhaustiveness: for each binding `pat <- expr`, find the
@@ -722,6 +710,8 @@ impl Checker {
         else_arms: &[ast::CaseArm],
         span: Span,
     ) -> Result<(), TypeError> {
+        use super::exhaustiveness::{self as exh, ExhaustivenessCtx, SPat};
+
         // Collect all bail constructors needed across all bindings
         let mut needed: HashSet<String> = HashSet::new();
 
@@ -752,7 +742,7 @@ impl Checker {
                 _ => None,
             };
 
-            for v in all_variants {
+            for (v, _arity) in all_variants {
                 if matched != Some(v.as_str()) {
                     needed.insert(v.clone());
                 }
@@ -763,45 +753,47 @@ impl Checker {
             return Ok(());
         }
 
-        // Check if any else arm is a wildcard/var (covers everything)
-        for arm in else_arms {
-            if arm.guard.is_some() {
-                continue;
-            }
-            match &arm.pattern {
-                Pat::Wildcard { .. } | Pat::Var { .. } => return Ok(()),
-                _ => {}
+        // Use Maranget to check else arm coverage
+        let ctx = ExhaustivenessCtx {
+            adt_variants: &self.adt_variants,
+        };
+
+        // Build a matrix from else arms (each is a single-column pattern)
+        let matrix: Vec<Vec<SPat>> = else_arms
+            .iter()
+            .filter(|arm| arm.guard.is_none())
+            .map(|arm| vec![exh::simplify_pat(&arm.pattern)])
+            .collect();
+
+        // Check that each needed bail constructor is covered
+        let mut missing_ctors = Vec::new();
+        for ctor_name in &needed {
+            let arity = self
+                .adt_variants
+                .values()
+                .flat_map(|v| v.iter())
+                .find(|(n, _)| n == ctor_name)
+                .map(|(_, a)| *a)
+                .unwrap_or(0);
+            let row = vec![SPat::Constructor(
+                ctor_name.clone(),
+                vec![SPat::Wildcard; arity],
+            )];
+            if exh::useful(&ctx, &matrix, &row) {
+                missing_ctors.push(ctor_name.as_str());
             }
         }
 
-        // Collect constructors covered by else arms
-        let covered: HashSet<&str> = else_arms
-            .iter()
-            .filter(|arm| arm.guard.is_none())
-            .filter_map(|arm| match &arm.pattern {
-                Pat::Constructor { name, .. } => Some(name.as_str()),
-                Pat::Lit {
-                    value: Lit::Bool(b),
-                    ..
-                } => Some(if *b { "True" } else { "False" }),
-                _ => None,
-            })
-            .collect();
-
-        let missing: Vec<&str> = needed
-            .iter()
-            .filter(|v| !covered.contains(v.as_str()))
-            .map(|v| v.as_str())
-            .collect();
-
-        if missing.is_empty() {
+        if missing_ctors.is_empty() {
             Ok(())
         } else {
-            let mut sorted = missing;
-            sorted.sort();
+            missing_ctors.sort();
             Err(TypeError::at(
                 span,
-                format!("non-exhaustive do...else: missing {}", sorted.join(", ")),
+                format!(
+                    "non-exhaustive do...else: missing {}",
+                    missing_ctors.join(", ")
+                ),
             ))
         }
     }

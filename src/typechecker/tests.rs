@@ -1747,3 +1747,169 @@ fn int_case_with_var_fallback() {
     )
     .unwrap();
 }
+
+// --- Nested pattern exhaustiveness (Maranget) ---
+
+#[test]
+fn nested_exhaustive_all_combinations() {
+    // All 4 combinations of (Bool, Bool) inside a constructor
+    check(
+        "type Pair { MkPair(Bool, Bool) }
+fun f (p: Pair) -> Int
+f p = case p {
+  MkPair(True, True) -> 1
+  MkPair(True, False) -> 2
+  MkPair(False, True) -> 3
+  MkPair(False, False) -> 4
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn nested_non_exhaustive_missing_combination() {
+    // Missing MkPair(False, False)
+    let result = check(
+        "type Pair { MkPair(Bool, Bool) }
+fun f (p: Pair) -> Int
+f p = case p {
+  MkPair(True, True) -> 1
+  MkPair(True, False) -> 2
+  MkPair(False, True) -> 3
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive"));
+    assert!(err.message.contains("MkPair"));
+    assert!(err.message.contains("False"));
+}
+
+#[test]
+fn nested_exhaustive_with_wildcard_in_subpattern() {
+    // Wildcard in second position covers both True and False
+    check(
+        "type Pair { MkPair(Bool, Bool) }
+fun f (p: Pair) -> Int
+f p = case p {
+  MkPair(True, _) -> 1
+  MkPair(False, _) -> 2
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn nested_exhaustive_with_top_level_wildcard() {
+    // A top-level wildcard covers everything
+    check(
+        "type Pair { MkPair(Bool, Bool) }
+fun f (p: Pair) -> Int
+f p = case p {
+  MkPair(True, True) -> 1
+  _ -> 0
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn nested_redundant_after_wildcards() {
+    // MkPair(True, True) is already covered by the two wildcard arms
+    let result = check(
+        "type Pair { MkPair(Bool, Bool) }
+fun f (p: Pair) -> Int
+f p = case p {
+  MkPair(True, _) -> 1
+  MkPair(False, _) -> 2
+  MkPair(True, True) -> 3
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("unreachable"));
+}
+
+#[test]
+fn nested_maybe_of_bool_exhaustive() {
+    // Maybe(Bool) fully covered
+    check(
+        "type Maybe a { Just(a) | Nothing }
+fun f (m: Maybe Bool) -> Int
+f m = case m {
+  Just(True) -> 1
+  Just(False) -> 2
+  Nothing -> 0
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn nested_maybe_of_bool_missing() {
+    // Missing Just(False)
+    let result = check(
+        "type Maybe a { Just(a) | Nothing }
+fun f (m: Maybe Bool) -> Int
+f m = case m {
+  Just(True) -> 1
+  Nothing -> 0
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive"));
+    assert!(err.message.contains("Just"));
+}
+
+#[test]
+fn nested_list_cons_exhaustive() {
+    // List with nested pattern on head
+    check(
+        "type Maybe a { Just(a) | Nothing }
+fun f (xs: List (Maybe Int)) -> Int
+f xs = case xs {
+  Just(_) :: _ -> 1
+  Nothing :: _ -> 2
+  [] -> 0
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn tuple_exhaustive_bool_pair() {
+    check(
+        "fun f (p: (Bool, Bool)) -> Int
+f p = case p {
+  (True, True) -> 1
+  (True, False) -> 2
+  (False, True) -> 3
+  (False, False) -> 4
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn tuple_non_exhaustive_missing() {
+    let result = check(
+        "fun f (p: (Bool, Bool)) -> Int
+f p = case p {
+  (True, True) -> 1
+  (True, False) -> 2
+  (False, True) -> 3
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive"));
+}
+
+#[test]
+fn tuple_exhaustive_with_wildcard() {
+    check(
+        "fun f (p: (Bool, Bool)) -> Int
+f p = case p {
+  (True, _) -> 1
+  (False, _) -> 2
+}",
+    )
+    .unwrap();
+}

@@ -64,7 +64,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
   - [x] Bool literal patterns recognized as True/False constructors
   - [x] Guarded arms conservatively treated as non-covering
   - [x] Do...else exhaustiveness (bail constructors across all bindings)
-  - [ ] Nested pattern exhaustiveness (Maranget's usefulness algorithm)
+  - [x] Nested pattern exhaustiveness (Maranget's usefulness algorithm)
   - [x] Redundant / unreachable arm detection
 - [x] `do...else` block -- sequential pattern bindings with explicit success expression (each `Pat <- expr` extracts on match or short-circuits to else; last line without `<-` is the success return value; else arms must unify with success type)
 - [ ] Higher-kinded types (`* -> *`, enables `Functor`, `Applicative`)

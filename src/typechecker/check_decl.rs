@@ -102,14 +102,13 @@ impl Checker {
                         // can use trait methods on those vars (e.g. `show x` where `x: a` and `a: Show`).
                         for bound in where_clause {
                             if let Some(idx) = type_params.iter().position(|p| p == &bound.type_var)
+                                && let Some(Type::Var(var_id)) = param_vars.get(idx)
                             {
-                                if let Some(Type::Var(var_id)) = param_vars.get(idx) {
-                                    for trait_req in &bound.traits {
-                                        this.where_bounds
-                                            .entry(*var_id)
-                                            .or_default()
-                                            .insert(trait_req.clone());
-                                    }
+                                for trait_req in &bound.traits {
+                                    this.where_bounds
+                                        .entry(*var_id)
+                                        .or_default()
+                                        .insert(trait_req.clone());
                                 }
                             }
                         }
@@ -719,7 +718,10 @@ impl Checker {
 
         self.adt_variants.insert(
             name.into(),
-            variants.iter().map(|v| v.name.clone()).collect(),
+            variants
+                .iter()
+                .map(|v| (v.name.clone(), v.fields.len()))
+                .collect(),
         );
 
         Ok(())
@@ -888,14 +890,10 @@ impl Checker {
             }
         }
 
-        let op_names = arms.iter().map(|a| a.op_name.clone()).collect();
         self.handlers.insert(
             name.into(),
             HandlerInfo {
                 effects: effect_names.to_vec(),
-                ops: op_names,
-                has_return_clause: return_clause.is_some(),
-                needs: needs.to_vec(),
                 return_type: handler_return_type,
             },
         );

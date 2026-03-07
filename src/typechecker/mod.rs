@@ -1,6 +1,7 @@
 mod check_decl;
 mod check_module;
 mod check_traits;
+pub(crate) mod exhaustiveness;
 mod infer;
 
 #[cfg(test)]
@@ -262,11 +263,6 @@ pub(crate) struct EffectOpSig {
 pub(crate) struct HandlerInfo {
     /// Which effects this handler handles
     pub effects: Vec<std::string::String>,
-    /// Arms: op_name -> (param_names, body) -- already type-checked at definition
-    pub ops: Vec<std::string::String>,
-    pub has_return_clause: bool,
-    /// Effects declared in the handler's `needs` clause
-    pub needs: Vec<std::string::String>,
     /// Return clause: (param_var_id, body_type). Used to compute the `with` expression type.
     pub return_type: Option<(u32, Type)>,
 }
@@ -326,8 +322,8 @@ pub struct Checker {
     pub(crate) tc_loaded: HashMap<String, Vec<(String, Scheme)>>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) tc_loading: HashSet<String>,
-    /// Reverse map: type name -> list of constructor names (for exhaustiveness checking)
-    pub(crate) adt_variants: HashMap<std::string::String, Vec<std::string::String>>,
+    /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
+    pub(crate) adt_variants: HashMap<std::string::String, Vec<(std::string::String, usize)>>,
 }
 
 impl Default for Checker {
@@ -590,9 +586,9 @@ impl Checker {
 
         // Built-in ADT variant maps (for exhaustiveness checking)
         self.adt_variants
-            .insert("List".into(), vec!["Nil".into(), "Cons".into()]);
+            .insert("List".into(), vec![("Nil".into(), 0), ("Cons".into(), 2)]);
         self.adt_variants
-            .insert("Bool".into(), vec!["True".into(), "False".into()]);
+            .insert("Bool".into(), vec![("True".into(), 0), ("False".into(), 0)]);
 
         // Show and Eq for Tuple (any arity -- all params must satisfy the trait)
         // We use "Tuple" as the type name; param_constraints are checked dynamically
