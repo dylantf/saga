@@ -56,9 +56,11 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `needs` on impl blocks (parsing + type checking)
 - [ ] `Semigroup` / `Monoid` in stdlib
 
-## Type System (Future)
+## Type System
 
 - [ ] Exhaustiveness checking for case expressions
+- [ ] Variable shadowing constraints -- currently silently overwrites; restrict to same type only (shadowing with a different type is a type error)
+- [ ] `do...else` block -- sequential pattern bindings with unified bail handling (each `Pat <- expr` extracts on match or short-circuits; else arms cover the union of bail constructors; last binding's extracted value is the return)
 - [ ] Higher-kinded types (`* -> *`, enables `Functor`, `Applicative`)
 - [ ] `Functor` / `Applicative` traits in stdlib
 

@@ -837,7 +837,230 @@ is deferred.
 
 ---
 
-## 13. Explicitly Out of Scope
+## 13. `do...else` Blocks
+
+Sequential pattern-binding with unified bail handling. Each binding either
+extracts a value (on match) or short-circuits the whole block (on mismatch).
+The else block handles all possible short-circuit values.
+
+### Syntax
+
+```
+do {
+  Pattern1 <- expr1
+  Pattern2 <- expr2
+  PatternN <- exprN
+} else {
+  BailPat1 -> result1
+  BailPat2 -> result2
+}
+```
+
+- Every line in the `do` block is a binding: `Pattern <- expr`.
+- The last binding's extracted value is the return value of the whole block
+  on the success path.
+- The `else` block is a set of pattern arms covering all possible bail values.
+- A variable pattern (`x <- expr`) always matches and never bails -- useful
+  as the last line when you need to transform before returning.
+
+### Semantics
+
+Each `Pattern <- expr` is evaluated in order:
+
+1. Evaluate `expr` to get a value `v`.
+2. Attempt to match `v` against `Pattern`.
+3. If match succeeds: bind the pattern variables, continue to next line.
+4. If match fails: short-circuit -- evaluate the else block with `v` as the
+   bail value. The matching else arm fires, and its result is the result of
+   the entire `do...else` expression.
+
+The else arms collectively cover the *union of all bail values* from all
+bindings. Since each binding contributes different constructors to the bail
+pool, the else block is a multi-source pattern match.
+
+### Type Checking
+
+**The bail pool:**
+
+For each binding `Pattern <- expr`:
+- Infer `expr` to get type `T` (e.g. `Result User e`)
+- Determine which constructors are consumed by `Pattern` (e.g. `Ok`)
+- The remaining constructors of `T` are added to the bail pool with their
+  payload types (e.g. `Err(e)` added as a bail entry)
+
+The bail pool is a list of `(constructor_name, payload_types, source_type)`
+entries accumulated across all bindings.
+
+**Checking else arms:**
+
+Each else arm `P -> body` is checked as follows:
+
+1. Bind pattern variables as fresh unification variables.
+2. Infer the arm body -- unification constrains those variables.
+3. Apply substitution: pattern variables now have (possibly solved) types.
+4. Find the bail pool entry whose constructor and payload types match the
+   resolved pattern.
+5. Verify the arm body type unifies with the block's overall return type.
+
+Step 3→4 is "deferred bail matching": inference runs first, then the resolved
+types are matched against the bail pool. This means annotations are not
+required in the common case -- the body provides enough information:
+
+```
+Err(a) -> a <> " failed"   -- infers a: String, matches Err(String) bail
+Err(a) -> a + 1            -- infers a: Int, matches Err(Int) bail
+```
+
+If the body doesn't constrain the variable (e.g. `Err(a) -> "fallback"`),
+the arm is treated as a wildcard covering all `Err(...)` entries.
+
+**Constructor unification:**
+
+Duplicate bail entries are unified before exhaustiveness checking:
+- Same constructor + same payload type from multiple bindings → single entry,
+  covered by one arm.
+- Same constructor + different payload types → separate entries requiring
+  separate arms (or a wildcard payload `Err(_)`).
+
+**Exhaustiveness:**
+
+After checking all else arms, every bail pool entry must be covered by at
+least one arm. Uncovered entries are a type error listing the missing
+constructors. A wildcard arm `_ -> ...` covers everything.
+
+**Return type:**
+
+The overall return type of the `do...else` expression is the unified type of:
+- The last binding's extracted value (success path)
+- All else arm bodies (bail paths)
+
+These must unify, or it is a type error.
+
+**No union types required:**
+
+The bail pool and multi-source exhaustiveness checking are a special typing
+rule scoped to the else block. No `Union(Vec<Type>)` variant is added to the
+`Type` enum. Union types as a general language feature remain out of scope.
+
+### Evaluator
+
+The `do...else` block is implemented as a first-class AST node rather than
+desugaring to nested `case` expressions. Desugaring would require duplicating
+the else arms at each binding site, which is ugly and loses the unified
+exhaustiveness context needed for good error messages.
+
+Evaluation loop:
+
+```rust
+Expr::Do { bindings, else_arms } => {
+    for (pattern, expr) in bindings {
+        let val = eval_expr(expr, env)?;
+        match try_match_pattern(&pattern, &val, env) {
+            Some(bindings) => {
+                for (name, v) in bindings { env.set(name, v); }
+                // last binding: fall through, val is the result
+            }
+            None => {
+                // bail: find matching else arm
+                for arm in else_arms {
+                    if let Some(b) = try_match_pattern(&arm.pattern, &val, env) {
+                        for (name, v) in b { env.set(name, v); }
+                        return eval_expr(&arm.body, env);
+                    }
+                }
+                // no else arm matched -- runtime error (type checker prevents this)
+                return EvalResult::Error("non-exhaustive do...else");
+            }
+        }
+    }
+    // all bindings succeeded: last extracted value is already in env
+    // (the last pattern's variables are bound; the "result" is the last val)
+}
+```
+
+Note: the last binding's extracted value is the success return. If the last
+pattern is `Ok(x)`, then `x` is the return value. The evaluator needs to
+track the last bound value specifically, or require the last pattern to bind
+a single variable.
+
+### New token: `<-`
+
+The `<-` token does not currently exist in the lexer. It must be added:
+- Lexer: emit `Token::LeftArrow` when `<` is followed immediately by `-`.
+  Be careful not to conflict with `<=` (less-than-or-equal): `<-` consumes
+  both characters, `<=` consumes both characters, `<` alone consumes one.
+- Parser: `<-` is only valid inside a `do` block. It is not a general
+  operator.
+
+### Examples
+
+**Homogeneous Result chain:**
+
+```
+do {
+  Ok(user)  <- get_user id
+  Ok(order) <- get_order user
+  Ok(result) <- process order
+} else {
+  Err(e) -> Err(e)   -- covers all three Err bails (unified, same type)
+}
+```
+
+**Mixed types:**
+
+```
+do {
+  True      <- bool_fn ()
+  Some(str) <- maybe_fn True
+  Ok(result) <- result_fn str
+} else {
+  False    -> Err("it was false")
+  None     -> Err("it was none")
+  Err(str) -> Err(str)
+}
+```
+
+**Variable binding as final line (transformation):**
+
+```
+do {
+  Ok(user)  <- get_user id
+  Ok(order) <- get_order user
+  summary   <- format_summary user order   -- always matches, no bail
+} else {
+  Err(e) -> Err(e)
+}
+-- returns: summary (a String or whatever format_summary returns)
+```
+
+**Shadowing across bindings (works via overwrite):**
+
+```
+do {
+  Ok(value) <- step1 ()
+  Ok(value) <- step2 value   -- shadows previous value, refers to step1's result
+  Ok(value) <- step3 value   -- shadows again, refers to step2's result
+  value
+} else {
+  Err(e) -> default
+}
+```
+
+### Implementation Order
+
+1. Add `Token::LeftArrow` to lexer.
+2. Add `Expr::Do { bindings: Vec<(Pat, Expr)>, else_arms: Vec<MatchArm> }` to AST.
+3. Parser: parse `do { Pat <- expr ... } else { arms }`.
+4. Evaluator: implement the evaluation loop above.
+5. Type checker: bail pool collection, deferred bail matching, exhaustiveness.
+
+The evaluator (step 4) can be implemented and tested before the type checker
+(step 5) -- run examples to verify correct short-circuit behavior, then add
+type safety.
+
+---
+
+## 14. Explicitly Out of Scope
 
 - **Multishot continuations** - calling `resume` more than once. Not needed
   for practical effects (I/O, logging, state, errors, async). Could be added
