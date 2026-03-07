@@ -522,6 +522,17 @@ impl Checker {
             self.env = saved_env;
         }
 
+        // Check exhaustiveness of function clause patterns (multi-column Maranget)
+        if clauses.len() > 1 || clauses.iter().any(|c| {
+            if let Decl::FunBinding { params, .. } = c {
+                params.iter().any(|p| !matches!(p, crate::ast::Pat::Var { .. } | crate::ast::Pat::Wildcard { .. }))
+            } else {
+                false
+            }
+        }) {
+            self.check_fun_exhaustiveness(name, clauses, &param_types)?;
+        }
+
         // Check effect requirements against declared needs
         let body_effects = std::mem::replace(&mut self.current_effects, saved_effects);
         let declared_effects = self.fun_effects.get(name).cloned().unwrap_or_default();
@@ -665,6 +676,91 @@ impl Checker {
         }
 
         self.env.insert(name.into(), scheme);
+        Ok(())
+    }
+
+    /// Check exhaustiveness of multi-clause function patterns using Maranget.
+    fn check_fun_exhaustiveness(
+        &self,
+        name: &str,
+        clauses: &[&Decl],
+        param_types: &[Type],
+    ) -> Result<(), TypeError> {
+        use super::exhaustiveness::{self as exh, ExhaustivenessCtx, SPat};
+
+        // Only check if at least one param resolves to a known ADT or Tuple
+        let resolved_types: Vec<_> = param_types.iter().map(|t| self.sub.apply(t)).collect();
+        let has_adt_param = resolved_types.iter().any(|t| match t {
+            Type::Con(name, _) => self.adt_variants.contains_key(name) || name == "Tuple",
+            _ => false,
+        });
+        if !has_adt_param {
+            return Ok(());
+        }
+
+        let ctx = ExhaustivenessCtx {
+            adt_variants: &self.adt_variants,
+        };
+
+        // Build pattern matrix: one row per clause, one column per param
+        let mut matrix: Vec<Vec<SPat>> = Vec::new();
+
+        for clause in clauses {
+            let Decl::FunBinding {
+                params, guard, span, ..
+            } = clause
+            else {
+                unreachable!()
+            };
+
+            let row: Vec<SPat> = params.iter().map(exh::simplify_pat).collect();
+
+            // Redundancy check
+            if guard.is_none() && !exh::useful(&ctx, &matrix, &row) {
+                return Err(TypeError::at(
+                    *span,
+                    format!(
+                        "unreachable clause for '{}': all cases already covered",
+                        name
+                    ),
+                ));
+            }
+
+            if guard.is_none() {
+                matrix.push(row);
+            }
+        }
+
+        // Exhaustiveness check
+        let wildcard_row: Vec<SPat> = (0..param_types.len())
+            .map(|_| SPat::Wildcard)
+            .collect();
+        if exh::useful(&ctx, &matrix, &wildcard_row) {
+            let witnesses = exh::find_all_witnesses(&ctx, &matrix, param_types.len());
+            let span = match clauses[0] {
+                Decl::FunBinding { span, .. } => *span,
+                _ => unreachable!(),
+            };
+            if !witnesses.is_empty() {
+                let formatted: Vec<String> = witnesses
+                    .iter()
+                    .map(|w| exh::format_witness(w))
+                    .collect();
+                return Err(TypeError::at(
+                    span,
+                    format!(
+                        "non-exhaustive clauses for '{}': missing {}",
+                        name,
+                        formatted.join(", ")
+                    ),
+                ));
+            }
+            return Err(TypeError::at(
+                span,
+                format!("non-exhaustive clauses for '{}'", name),
+            ));
+        }
+
         Ok(())
     }
 

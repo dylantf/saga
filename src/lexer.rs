@@ -183,7 +183,6 @@ impl Lexer {
                         }
                     }
                 }
-                // TODO: Handle ${...} interpolation
                 Some(ch) => {
                     s.push(ch);
                     self.advance();

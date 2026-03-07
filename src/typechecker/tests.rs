@@ -1913,3 +1913,82 @@ f p = case p {
     )
     .unwrap();
 }
+
+// --- Function head exhaustiveness ---
+
+#[test]
+fn fun_clauses_exhaustive_bool() {
+    check(
+        "fun f (x: Bool) -> Int
+f True = 1
+f False = 0",
+    )
+    .unwrap();
+}
+
+#[test]
+fn fun_clauses_non_exhaustive_bool() {
+    let result = check(
+        "fun f (x: Bool) -> Int
+f True = 1",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive"));
+    assert!(err.message.contains("False"));
+}
+
+#[test]
+fn fun_clauses_exhaustive_adt() {
+    check(
+        "type Maybe a { Just(a) | Nothing }
+fun f (m: Maybe Int) -> Int
+f (Just(x)) = x
+f Nothing = 0",
+    )
+    .unwrap();
+}
+
+#[test]
+fn fun_clauses_non_exhaustive_adt() {
+    let result = check(
+        "type Maybe a { Just(a) | Nothing }
+fun f (m: Maybe Int) -> Int
+f (Just(x)) = x",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive"));
+    assert!(err.message.contains("Nothing"));
+}
+
+#[test]
+fn fun_clauses_redundant() {
+    let result = check(
+        "fun f (x: Bool) -> Int
+f True = 1
+f False = 0
+f True = 2",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("unreachable"));
+}
+
+#[test]
+fn fun_clauses_with_wildcard_exhaustive() {
+    check(
+        "type Color { Red | Green | Blue }
+fun f (c: Color) -> Int
+f Red = 1
+f _ = 0",
+    )
+    .unwrap();
+}
+
+#[test]
+fn fun_clauses_single_var_param_skips_check() {
+    // Single clause with variable param should not trigger exhaustiveness
+    check(
+        "fun f (x: Int) -> Int
+f x = x + 1",
+    )
+    .unwrap();
+}

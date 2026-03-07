@@ -33,7 +33,6 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `needs` on functions (`fun f () -> T needs {Log, Http}`)
 - [x] `needs` on handlers (`handler stripe for Billing needs {Log} { ... }`)
 - [x] `needs` on impl blocks (different impls may use different effects)
-- [ ] Effect row polymorphism / effect variables (`needs e`) -- deferred, larger change
 
 ## Type Checker (HM)
 
@@ -54,7 +53,6 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Built-in traits: `Show`, `Num`, `Eq`, `Ord`
 - [x] Conditional impls (`impl Show for List a where {a: Show}`)
 - [x] `needs` on impl blocks (parsing + type checking)
-- [ ] `Semigroup` / `Monoid` in stdlib
 
 ## Type System
 
@@ -67,8 +65,6 @@ Checkbox = implemented and working. Unchecked = not yet done.
   - [x] Nested pattern exhaustiveness (Maranget's usefulness algorithm)
   - [x] Redundant / unreachable arm detection
 - [x] `do...else` block -- sequential pattern bindings with explicit success expression (each `Pat <- expr` extracts on match or short-circuits to else; last line without `<-` is the success return value; else arms must unify with success type)
-- [ ] Higher-kinded types (`* -> *`, enables `Functor`, `Applicative`)
-- [ ] `Functor` / `Applicative` traits in stdlib
 
 ## Module System
 
@@ -80,11 +76,27 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `project.toml` root marker, `Main.dy` entry point
 - [x] Typechecker: per-module checker, shared cache, qualified name injection
 
+## Pre-Backend Polish
+
+- [ ] `not` operator (boolean negation)
+- [ ] Negative number literals in patterns (`case x { -1 -> ... }`)
+- [ ] Conversion builtins (`to_string`, `to_int`, `to_float`)
+- [ ] String operations (`string_length`, `string_split`, `string_chars`, etc.)
+- [ ] Split prelude into stdlib modules (`List`, `Maybe`, `Result`)
+- [ ] More list functions (`zip`, `range`, `take`, `drop`, `any`, `all`)
+
 ## Backend
 
 - [ ] BEAM / Core Erlang codegen
 - [ ] JavaScript codegen (after BEAM is solid)
 - [ ] FFI (`foreign erlang "mod" "fun" as f in Effect`)
+
+## Maybe
+
+- [ ] Higher-kinded types (`* -> *`, enables `Functor`, `Applicative`)
+- [ ] `Functor` / `Applicative` traits in stdlib
+- [ ] `Semigroup` / `Monoid` in stdlib
+- [ ] Effect row polymorphism / effect variables (`needs e`)
 
 ## Out of Scope
 

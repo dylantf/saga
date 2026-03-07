@@ -1,3 +1,9 @@
+# --- Primitives ---
+
+fun not (x: Bool) -> Bool
+not True = False
+not False = True
+
 # --- Maybe ---
 
 type Maybe a {
