@@ -708,6 +708,8 @@ fn eval_builtin(name: &str, arg: Value) -> EvalResult {
             EvalResult::Ok(Value::Unit)
         }
         "show" => EvalResult::Ok(Value::String(format!("{}", arg))),
+        "panic" => EvalResult::error(format!("panic: {}", arg)),
+        "todo" => EvalResult::error(format!("not implemented: {}", arg)),
         _ => EvalResult::error(format!("Unknown builtin {}", name)),
     }
 }

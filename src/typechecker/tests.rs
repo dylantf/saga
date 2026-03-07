@@ -1434,3 +1434,185 @@ main () = $"val: {Foo}""#,
     );
     assert!(result.is_err());
 }
+
+// --- Exhaustiveness checking ---
+
+#[test]
+fn exhaustive_case_all_constructors() {
+    check(
+        "type Maybe a { Just(a) | Nothing }
+let x = case Just 42 {
+  Just(n) -> n
+  Nothing -> 0
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn exhaustive_case_wildcard() {
+    check(
+        "type Maybe a { Just(a) | Nothing }
+let x = case Just 42 {
+  Just(n) -> n
+  _ -> 0
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn exhaustive_case_var_pattern() {
+    check(
+        "type Maybe a { Just(a) | Nothing }
+let x = case Just 42 {
+  y -> 0
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn non_exhaustive_case_missing_constructor() {
+    let result = check(
+        "type Maybe a { Just(a) | Nothing }
+let x = case Just 42 {
+  Just(n) -> n
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(
+        err.message.contains("non-exhaustive"),
+        "expected non-exhaustive error, got: {}",
+        err.message
+    );
+    assert!(err.message.contains("Nothing"));
+}
+
+#[test]
+fn non_exhaustive_case_three_variants() {
+    let result = check(
+        "type Color { Red | Green | Blue }
+fun f (c: Color) -> Int
+f c = case c {
+  Red -> 1
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive"));
+    assert!(err.message.contains("Green"));
+    assert!(err.message.contains("Blue"));
+}
+
+#[test]
+fn exhaustive_case_bool_literals() {
+    check(
+        "let x = case True {
+  True -> 1
+  False -> 0
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn non_exhaustive_case_bool_missing_false() {
+    let result = check(
+        "let x = case True {
+  True -> 1
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive"));
+    assert!(err.message.contains("False"));
+}
+
+#[test]
+fn exhaustive_case_guard_with_wildcard_fallback() {
+    // Guarded arm doesn't count for exhaustiveness, but wildcard fallback covers all
+    check(
+        "type Maybe a { Just(a) | Nothing }
+let x = case Just 42 {
+  Just(n) if n > 0 -> n
+  _ -> 0
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn non_exhaustive_case_only_guarded_arm() {
+    // Guarded arm alone doesn't cover the constructor
+    let result = check(
+        "type Maybe a { Just(a) | Nothing }
+let x = case Just 42 {
+  Just(n) if n > 0 -> n
+  Nothing -> 0
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive"));
+    assert!(err.message.contains("Just"));
+}
+
+#[test]
+fn case_int_scrutinee_no_exhaustiveness_check() {
+    // Int is not an ADT -- no exhaustiveness check should apply
+    check(
+        "let x = case 42 {
+  0 -> \"zero\"
+  _ -> \"other\"
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn do_else_exhaustive() {
+    check(
+        "type Result a e { Ok(a) | Err(e) }
+fun get () -> Result Int String
+get () = Ok(42)
+let x = do {
+  Ok(n) <- get ()
+  n
+} else {
+  Err(_) -> 0
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn do_else_non_exhaustive() {
+    let result = check(
+        "type Shape { Circle | Rect | Point }
+fun get_shape () -> Shape
+get_shape () = Circle
+let x = do {
+  Circle <- get_shape ()
+  1
+} else {
+  Rect -> 2
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive do...else"));
+    assert!(err.message.contains("Point"));
+}
+
+#[test]
+fn do_else_wildcard_covers_all() {
+    check(
+        "type Result a e { Ok(a) | Err(e) }
+fun get () -> Result Int String
+get () = Ok(42)
+let x = do {
+  Ok(n) <- get ()
+  n
+} else {
+  _ -> 0
+}",
+    )
+    .unwrap();
+}

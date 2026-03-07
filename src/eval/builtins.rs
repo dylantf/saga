@@ -18,6 +18,8 @@ pub(super) fn register_builtins(env: &Env) {
             env: env.clone(),
         },
     );
+    env.set("panic".to_string(), Value::BuiltIn("panic".to_string()));
+    env.set("todo".to_string(), Value::BuiltIn("todo".to_string()));
     env.set(
         "Nil".to_string(),
         Value::Constructor {

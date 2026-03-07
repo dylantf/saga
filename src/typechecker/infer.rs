@@ -163,7 +163,7 @@ impl Checker {
             Expr::Case {
                 scrutinee,
                 arms,
-                span: _,
+                span,
             } => {
                 let scrut_ty = self.infer_expr(scrutinee)?;
                 let result_ty = self.fresh_var();
@@ -183,6 +183,8 @@ impl Checker {
 
                     self.env = saved_env;
                 }
+
+                self.check_exhaustiveness(arms, &scrut_ty, *span)?;
 
                 Ok(result_ty)
             }
@@ -425,15 +427,18 @@ impl Checker {
                 bindings,
                 success,
                 else_arms,
-                ..
+                span,
             } => {
                 let result_ty = self.fresh_var();
                 let saved_env = self.env.clone();
 
-                // Type-check each binding in sequence; env accumulates bound vars
+                // Type-check each binding in sequence; env accumulates bound vars.
+                // Also collect the inferred types for exhaustiveness checking later.
+                let mut binding_types: Vec<Type> = Vec::new();
                 for (pat, expr) in bindings {
                     let expr_ty = self.infer_expr(expr)?;
                     self.bind_pattern(pat, &expr_ty)?;
+                    binding_types.push(expr_ty);
                 }
 
                 // Success expression runs in do-block scope; its type is the
@@ -454,6 +459,10 @@ impl Checker {
                     self.unify_at(&result_ty, &body_ty, arm.body.span())?;
                     self.env = arm_saved;
                 }
+
+                // Exhaustiveness: collect bail constructors from all bindings
+                // and check that else arms cover them all.
+                self.check_do_exhaustiveness(bindings, &binding_types, else_arms, *span)?;
 
                 // do-block bindings must not leak into the surrounding scope
                 self.env = saved_env;
@@ -581,6 +590,173 @@ impl Checker {
                 }
                 Ok(())
             }
+        }
+    }
+
+    // --- Exhaustiveness checking ---
+
+    /// Check whether case arms exhaustively cover an ADT type.
+    /// Returns Err with missing constructors if non-exhaustive.
+    /// Silently succeeds if the scrutinee type is not a known ADT (e.g. Int, type variable).
+    pub(crate) fn check_exhaustiveness(
+        &self,
+        arms: &[ast::CaseArm],
+        scrutinee_ty: &Type,
+        span: Span,
+    ) -> Result<(), TypeError> {
+        let resolved = self.sub.apply(scrutinee_ty);
+
+        // Extract the ADT name from the resolved type
+        let type_name = match &resolved {
+            Type::Con(name, _) => name,
+            _ => return Ok(()), // type variable or arrow -- skip
+        };
+
+        // Look up the constructors for this type
+        let all_variants = match self.adt_variants.get(type_name) {
+            Some(variants) => variants,
+            None => return Ok(()), // not an ADT (e.g. Int, String, record) -- skip
+        };
+
+        // Check if any unguarded arm is a wildcard/variable (total match)
+        for arm in arms {
+            if arm.guard.is_some() {
+                continue;
+            }
+            match &arm.pattern {
+                Pat::Wildcard { .. } | Pat::Var { .. } => return Ok(()),
+                _ => {}
+            }
+        }
+
+        // Collect constructor names covered by unguarded arms
+        let covered: HashSet<&str> = arms
+            .iter()
+            .filter(|arm| arm.guard.is_none())
+            .filter_map(|arm| match &arm.pattern {
+                Pat::Constructor { name, .. } => Some(name.as_str()),
+                // Bool literal patterns cover True/False
+                Pat::Lit {
+                    value: Lit::Bool(b),
+                    ..
+                } => Some(if *b { "True" } else { "False" }),
+                _ => None,
+            })
+            .collect();
+
+        let missing: Vec<&str> = all_variants
+            .iter()
+            .filter(|v| !covered.contains(v.as_str()))
+            .map(|v| v.as_str())
+            .collect();
+
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(TypeError::at(
+                span,
+                format!(
+                    "non-exhaustive pattern match: missing {}",
+                    missing.join(", ")
+                ),
+            ))
+        }
+    }
+
+    /// Check do...else exhaustiveness: for each binding `pat <- expr`, find the
+    /// constructors of the expr type NOT matched by `pat` (the "bail" constructors),
+    /// and verify the else arms cover them all.
+    fn check_do_exhaustiveness(
+        &self,
+        bindings: &[(Pat, Expr)],
+        binding_types: &[Type],
+        else_arms: &[ast::CaseArm],
+        span: Span,
+    ) -> Result<(), TypeError> {
+        // Collect all bail constructors needed across all bindings
+        let mut needed: HashSet<String> = HashSet::new();
+
+        for ((pat, _), ty) in bindings.iter().zip(binding_types.iter()) {
+            let resolved = self.sub.apply(ty);
+            let type_name = match &resolved {
+                Type::Con(name, _) => name,
+                _ => continue,
+            };
+            let all_variants = match self.adt_variants.get(type_name) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            // If the binding pattern is a wildcard/var, it matches everything -- no bail
+            match pat {
+                Pat::Wildcard { .. } | Pat::Var { .. } => continue,
+                _ => {}
+            }
+
+            // Find which constructor the binding pattern matches
+            let matched = match pat {
+                Pat::Constructor { name, .. } => Some(name.as_str()),
+                Pat::Lit {
+                    value: Lit::Bool(b),
+                    ..
+                } => Some(if *b { "True" } else { "False" }),
+                _ => None,
+            };
+
+            for v in all_variants {
+                if matched != Some(v.as_str()) {
+                    needed.insert(v.clone());
+                }
+            }
+        }
+
+        if needed.is_empty() {
+            return Ok(());
+        }
+
+        // Check if any else arm is a wildcard/var (covers everything)
+        for arm in else_arms {
+            if arm.guard.is_some() {
+                continue;
+            }
+            match &arm.pattern {
+                Pat::Wildcard { .. } | Pat::Var { .. } => return Ok(()),
+                _ => {}
+            }
+        }
+
+        // Collect constructors covered by else arms
+        let covered: HashSet<&str> = else_arms
+            .iter()
+            .filter(|arm| arm.guard.is_none())
+            .filter_map(|arm| match &arm.pattern {
+                Pat::Constructor { name, .. } => Some(name.as_str()),
+                Pat::Lit {
+                    value: Lit::Bool(b),
+                    ..
+                } => Some(if *b { "True" } else { "False" }),
+                _ => None,
+            })
+            .collect();
+
+        let missing: Vec<&str> = needed
+            .iter()
+            .filter(|v| !covered.contains(v.as_str()))
+            .map(|v| v.as_str())
+            .collect();
+
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            let mut sorted = missing;
+            sorted.sort();
+            Err(TypeError::at(
+                span,
+                format!(
+                    "non-exhaustive do...else: missing {}",
+                    sorted.join(", ")
+                ),
+            ))
         }
     }
 

@@ -53,11 +53,13 @@ result_and_then f r = case r {
 fun head (xs: List a) -> a
 head xs = case xs {
   h :: _ -> h
+  Nil -> panic "head: empty list"
 }
 
 fun tail (xs: List a) -> List a
 tail xs = case xs {
   _ :: t -> t
+  Nil -> panic "tail: empty list"
 }
 
 fun length (xs: List a) -> Int

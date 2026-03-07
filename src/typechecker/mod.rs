@@ -324,6 +324,8 @@ pub struct Checker {
     pub(crate) tc_loaded: HashMap<String, Vec<(String, Scheme)>>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) tc_loading: HashSet<String>,
+    /// Reverse map: type name -> list of constructor names (for exhaustiveness checking)
+    pub(crate) adt_variants: HashMap<std::string::String, Vec<std::string::String>>,
 }
 
 impl Default for Checker {
@@ -353,6 +355,7 @@ impl Checker {
             project_root: None,
             tc_loaded: HashMap::new(),
             tc_loading: HashSet::new(),
+            adt_variants: HashMap::new(),
         };
         checker.register_builtins();
         checker
@@ -502,6 +505,36 @@ impl Checker {
             },
         );
 
+        // panic : String -> a (crashes at runtime, polymorphic return type)
+        let a = self.fresh_var();
+        let a_id = match &a {
+            Type::Var(id) => *id,
+            _ => unreachable!(),
+        };
+        self.env.insert(
+            "panic".into(),
+            Scheme {
+                forall: vec![a_id],
+                constraints: vec![],
+                ty: Type::Arrow(Box::new(Type::string()), Box::new(a)),
+            },
+        );
+
+        // todo : String -> a (type hole, crashes at runtime with "not implemented")
+        let a = self.fresh_var();
+        let a_id = match &a {
+            Type::Var(id) => *id,
+            _ => unreachable!(),
+        };
+        self.env.insert(
+            "todo".into(),
+            Scheme {
+                forall: vec![a_id],
+                constraints: vec![],
+                ty: Type::Arrow(Box::new(Type::string()), Box::new(a)),
+            },
+        );
+
         // List constructors
         let a = self.fresh_var();
         let a_id = match &a {
@@ -552,6 +585,12 @@ impl Checker {
                 ty: Type::bool(),
             },
         );
+
+        // Built-in ADT variant maps (for exhaustiveness checking)
+        self.adt_variants
+            .insert("List".into(), vec!["Nil".into(), "Cons".into()]);
+        self.adt_variants
+            .insert("Bool".into(), vec!["True".into(), "False".into()]);
 
         // Show and Eq for Tuple (any arity -- all params must satisfy the trait)
         // We use "Tuple" as the type name; param_constraints are checked dynamically

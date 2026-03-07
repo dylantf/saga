@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::ast::{self, Decl};
 
-use super::{Checker, EffectOpSig, HandlerInfo, Scheme, Type, TypeError};
+use super::{Checker, EffectOpSig, HandlerInfo, ImplInfo, Scheme, Type, TypeError};
 
 impl Checker {
     // --- Top-level declarations ---
@@ -52,15 +52,207 @@ impl Checker {
                 span,
             } = decl
             {
-                self.register_impl(
-                    trait_name,
-                    target_type,
-                    type_params,
-                    where_clause,
-                    needs,
-                    methods,
-                    *span,
-                )?;
+                {
+                    let this = &mut *self;
+                    let trait_name: &str = trait_name;
+                    let target_type: &str = target_type;
+                    let type_params: &[String] = type_params;
+                    let span = *span;
+                    // Check the trait exists
+                    let trait_info = this.traits.get(trait_name).cloned().ok_or_else(|| {
+                        TypeError::at(span, format!("impl for undefined trait: {}", trait_name))
+                    })?;
+
+                    // Check all required methods are provided
+                    let provided: Vec<&str> = methods.iter().map(|(n, _, _)| n.as_str()).collect();
+                    for (required_name, _, _) in &trait_info.methods {
+                        if !provided.contains(&required_name.as_str()) {
+                            return Err(TypeError::at(
+                                span,
+                                format!(
+                                    "impl {} for {} is missing method '{}'",
+                                    trait_name, target_type, required_name
+                                ),
+                            ));
+                        }
+                    }
+
+                    // Check for extra methods not in the trait
+                    for name in &provided {
+                        if !trait_info.methods.iter().any(|(n, _, _)| n == name) {
+                            return Err(TypeError::at(
+                                span,
+                                format!(
+                                    "impl {} for {} has method '{}' not defined in trait",
+                                    trait_name, target_type, name
+                                ),
+                            ));
+                        }
+                    }
+
+                    // Type-check each method body against the trait's expected signature.
+                    // Substitute the trait's type param with the concrete target type.
+                    // For parameterized impls (e.g. `impl Show for Box a`), use fresh vars for type params.
+                    let target = if type_params.is_empty() {
+                        Type::Con(target_type.into(), vec![])
+                    } else {
+                        let param_vars: Vec<Type> =
+                            type_params.iter().map(|_| this.fresh_var()).collect();
+                        // Register where clause bounds on the fresh type vars so method bodies
+                        // can use trait methods on those vars (e.g. `show x` where `x: a` and `a: Show`).
+                        for bound in where_clause {
+                            if let Some(idx) = type_params.iter().position(|p| p == &bound.type_var)
+                            {
+                                if let Some(Type::Var(var_id)) = param_vars.get(idx) {
+                                    for trait_req in &bound.traits {
+                                        this.where_bounds
+                                            .entry(*var_id)
+                                            .or_default()
+                                            .insert(trait_req.clone());
+                                    }
+                                }
+                            }
+                        }
+                        Type::Con(target_type.into(), param_vars)
+                    };
+
+                    let declared_effects: std::collections::HashSet<String> =
+                        needs.iter().cloned().collect();
+
+                    for (method_name, params, body) in methods {
+                        let trait_method = trait_info
+                            .methods
+                            .iter()
+                            .find(|(n, _, _)| n == method_name)
+                            .unwrap(); // already validated above
+
+                        let expected_params: Vec<Type> = trait_method
+                            .1
+                            .iter()
+                            .map(|t| this.substitute_trait_param(&target, t))
+                            .collect();
+                        let expected_return = this.substitute_trait_param(&target, &trait_method.2);
+
+                        let saved_env = this.env.clone();
+                        let saved_effects = std::mem::take(&mut this.current_effects);
+                        let saved_field_candidates = std::mem::take(&mut this.field_candidates);
+
+                        // Bind params with expected types
+                        for (i, pat) in params.iter().enumerate() {
+                            if i < expected_params.len() {
+                                this.bind_pattern(pat, &expected_params[i])?;
+                            }
+                        }
+
+                        // Infer body and check it matches the expected return type
+                        let body_ty = this.infer_expr(body)?;
+                        this.unify_at(&body_ty, &expected_return, body.span())
+                            .map_err(|e| {
+                                TypeError::at(
+                                    span,
+                                    format!(
+                                        "in impl {} for {}, method '{}': {}",
+                                        trait_name, target_type, method_name, e.message
+                                    ),
+                                )
+                            })?;
+
+                        // Check that body effects are covered by the impl's needs declaration
+                        let body_effects =
+                            std::mem::replace(&mut this.current_effects, saved_effects);
+                        if !body_effects.is_empty() || !declared_effects.is_empty() {
+                            let undeclared: Vec<_> =
+                                body_effects.difference(&declared_effects).collect();
+                            if !undeclared.is_empty() {
+                                let mut effects: Vec<_> = undeclared.into_iter().cloned().collect();
+                                effects.sort();
+                                if declared_effects.is_empty() {
+                                    return Err(TypeError::at(
+                                        body.span(),
+                                        format!(
+                                            "impl {} for {}, method '{}' uses effects {{{}}} but the impl has no 'needs' declaration",
+                                            trait_name,
+                                            target_type,
+                                            method_name,
+                                            effects.join(", ")
+                                        ),
+                                    ));
+                                } else {
+                                    return Err(TypeError::at(
+                                        body.span(),
+                                        format!(
+                                            "impl {} for {}, method '{}' uses effects {{{}}} not declared in 'needs'",
+                                            trait_name,
+                                            target_type,
+                                            method_name,
+                                            effects.join(", ")
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Register effects so callers of this method know what they propagate.
+                        // Union with any effects already registered (from other impls of the same method).
+                        if !declared_effects.is_empty() {
+                            this.fun_effects
+                                .entry(method_name.clone())
+                                .or_default()
+                                .extend(declared_effects.iter().cloned());
+                        }
+
+                        // Check for unresolved field access ambiguities at end of method body
+                        let body_field_candidates =
+                            std::mem::replace(&mut this.field_candidates, saved_field_candidates);
+                        for (var_id, (record_names, field_span)) in body_field_candidates {
+                            let resolved = this.sub.apply(&Type::Var(var_id));
+                            if matches!(resolved, Type::Var(_)) {
+                                let mut names = record_names.clone();
+                                names.sort();
+                                return Err(TypeError::at(
+                                    field_span,
+                                    format!(
+                                        "ambiguous field access: could be any of [{}] which all have this field; add a type annotation to disambiguate",
+                                        names.join(", ")
+                                    ),
+                                ));
+                            }
+                        }
+
+                        this.env = saved_env;
+                    }
+
+                    // Build param_constraints from where clause
+                    let mut param_constraints = Vec::new();
+                    for bound in where_clause {
+                        let param_idx = type_params.iter().position(|p| p == &bound.type_var);
+                        match param_idx {
+                            Some(idx) => {
+                                for trait_req in &bound.traits {
+                                    param_constraints.push((trait_req.clone(), idx));
+                                }
+                            }
+                            None => {
+                                return Err(TypeError::at(
+                                    span,
+                                    format!(
+                                        "where clause references unknown type variable '{}' (params: {:?})",
+                                        bound.type_var, type_params
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+
+                    this.trait_impls.insert(
+                        (trait_name.into(), target_type.into()),
+                        ImplInfo {
+                            param_constraints,
+                            span: Some(span),
+                        },
+                    );
+                    Ok(())
+                }?;
             }
         }
 
@@ -207,7 +399,14 @@ impl Checker {
                 span,
                 ..
             } => {
-                self.register_handler(name, effect_names, needs, arms, return_clause.as_deref(), *span)?;
+                self.register_handler(
+                    name,
+                    effect_names,
+                    needs,
+                    arms,
+                    return_clause.as_deref(),
+                    *span,
+                )?;
                 Ok(())
             }
 
@@ -251,8 +450,7 @@ impl Checker {
             let mut ann_current = ann_ty.clone();
             for param_ty in &param_types {
                 match ann_current {
-                    Type::Arrow(ann_param, ann_ret)
-                    | Type::EffArrow(ann_param, ann_ret, _) => {
+                    Type::Arrow(ann_param, ann_ret) | Type::EffArrow(ann_param, ann_ret, _) => {
                         self.unify(param_ty, &ann_param)?;
                         ann_current = *ann_ret;
                     }
@@ -364,7 +562,8 @@ impl Checker {
         // Check for unresolved ambiguous field accesses. Any var still in field_candidates
         // after the full body was checked is genuinely ambiguous -- the programmer needs
         // to add a type annotation to disambiguate.
-        let body_field_candidates = std::mem::replace(&mut self.field_candidates, saved_field_candidates);
+        let body_field_candidates =
+            std::mem::replace(&mut self.field_candidates, saved_field_candidates);
         for (var_id, (record_names, field_span)) in body_field_candidates {
             let resolved = self.sub.apply(&Type::Var(var_id));
             if matches!(resolved, Type::Var(_)) {
@@ -518,6 +717,11 @@ impl Checker {
             );
         }
 
+        self.adt_variants.insert(
+            name.into(),
+            variants.iter().map(|v| v.name.clone()).collect(),
+        );
+
         Ok(())
     }
 
@@ -654,8 +858,7 @@ impl Checker {
 
         // Check effect requirements against declared needs
         let body_effects = std::mem::replace(&mut self.current_effects, saved_effects);
-        let declared_effects: std::collections::HashSet<String> =
-            needs.iter().cloned().collect();
+        let declared_effects: std::collections::HashSet<String> = needs.iter().cloned().collect();
 
         if !body_effects.is_empty() || !declared_effects.is_empty() {
             let undeclared: Vec<_> = body_effects.difference(&declared_effects).collect();
