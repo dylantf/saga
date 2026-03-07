@@ -136,8 +136,10 @@
       "match": "\\b[A-Z][a-zA-Z0-9_']*\\b"
     },
     "function-def": {
-      "name": "entity.name.function.dylang",
-      "match": "\\b[a-z_][a-zA-Z0-9_']*(?=\\s+[a-z_]\\w*\\s*=)|\\b[a-z_][a-zA-Z0-9_']*(?=\\s+\\(\\)\\s*=)"
+      "match": "^\\s*([a-z_][a-zA-Z0-9_']*)(?=\\s+.*=)",
+      "captures": {
+        "1": { "name": "entity.name.function.dylang" }
+      }
     },
     "identifier": {
       "name": "variable.other.dylang",
