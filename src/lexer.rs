@@ -228,18 +228,6 @@ impl Lexer {
                         }
                     }
                 }
-                // `{{` → literal `{`
-                Some('{') if self.peek_next() == Some('{') => {
-                    self.advance();
-                    self.advance();
-                    literal.push('{');
-                }
-                // `}}` → literal `}`
-                Some('}') if self.peek_next() == Some('}') => {
-                    self.advance();
-                    self.advance();
-                    literal.push('}');
-                }
                 // `{expr}` hole
                 Some('{') => {
                     self.advance(); // consume `{`

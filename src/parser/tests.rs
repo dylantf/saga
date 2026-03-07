@@ -1580,8 +1580,8 @@ fn interp_literal_and_hole() {
 
 #[test]
 fn interp_escaped_braces() {
-    // $"{{" → "{"
-    let expr = parse_expr(r#"$"{{""#);
+    // $"\{" → "{"
+    let expr = parse_expr("$\"\\{\"");
     assert!(matches!(expr, Expr::Lit { value: Lit::String(s), .. } if s == "{"));
 }
 
