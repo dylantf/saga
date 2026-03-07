@@ -1589,8 +1589,8 @@ let x = case Just 42 {
 }
 
 #[test]
-fn case_int_scrutinee_no_exhaustiveness_check() {
-    // Int is not an ADT -- no exhaustiveness check should apply
+fn case_int_with_wildcard() {
+    // Int with literal patterns + wildcard is fine
     check(
         "let x = case 42 {
   0 -> \"zero\"
@@ -1717,6 +1717,32 @@ let x = case Just 42 {
   Just(n) if n > 0 -> n
   Just(n) -> 0
   Nothing -> 0
+}",
+    )
+    .unwrap();
+}
+
+// --- Primitive exhaustiveness (require wildcard) ---
+
+#[test]
+fn int_case_without_wildcard() {
+    let result = check(
+        "let x = case 42 {
+  0 -> \"zero\"
+  1 -> \"one\"
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive"));
+    assert!(err.message.contains("Int"));
+}
+
+#[test]
+fn int_case_with_var_fallback() {
+    check(
+        "let x = case 42 {
+  0 -> \"zero\"
+  n -> \"other\"
 }",
     )
     .unwrap();
