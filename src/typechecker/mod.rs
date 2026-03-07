@@ -1,3 +1,6 @@
+mod check_decl;
+mod check_module;
+mod check_traits;
 mod infer;
 
 #[cfg(test)]
@@ -307,6 +310,12 @@ pub struct Checker {
     pub(crate) tc_loaded: HashMap<String, Vec<(String, Scheme)>>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) tc_loading: HashSet<String>,
+}
+
+impl Default for Checker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Checker {
