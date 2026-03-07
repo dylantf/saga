@@ -172,6 +172,22 @@ main () = print (add 1 (double 2))
 ");
 }
 
+// --- Qualified constructor patterns ---
+
+#[test]
+fn qualified_constructor_pattern() {
+    ok("
+import Shapes
+fun describe (s: Shapes.Shape) -> String
+describe s = case s {
+  Shapes.Circle(r) -> \"circle\"
+  Shapes.Rect(w, h) -> \"rect\"
+}
+fun main () -> ()
+main () = print (describe (Shapes.Circle 3.0))
+");
+}
+
 // --- Error cases ---
 
 #[test]

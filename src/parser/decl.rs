@@ -4,13 +4,26 @@ use crate::token::{Span, Token};
 use super::{ParseError, Parser};
 
 impl Parser {
-    // Parse a single effect name in a `needs` list: `Log` or `Logging.Log`
+    // Parse `Name` or `Module.Name`, returning the full qualified string.
+    // Used where we want to preserve the qualification (e.g. needs lists).
     fn parse_needs_entry(&mut self) -> Result<String, ParseError> {
         let name = self.expect_upper_ident()?;
         if matches!(self.peek(), Token::Dot) {
             self.advance(); // consume '.'
             let qualifier = self.expect_upper_ident()?;
             Ok(format!("{}.{}", name, qualifier))
+        } else {
+            Ok(name)
+        }
+    }
+
+    // Parse `Name` or `Module.Name`, returning only the base name.
+    // Used where runtime/typechecker keys are bare names (traits, types, effects).
+    fn parse_upper_name(&mut self) -> Result<String, ParseError> {
+        let name = self.expect_upper_ident()?;
+        if matches!(self.peek(), Token::Dot) {
+            self.advance(); // consume '.'
+            Ok(self.expect_upper_ident()?) // discard module prefix, return base name
         } else {
             Ok(name)
         }
@@ -270,10 +283,10 @@ impl Parser {
         let name = self.expect_ident()?;
         self.expect(Token::For)?;
 
-        let mut effects = vec![self.expect_upper_ident()?];
+        let mut effects = vec![self.parse_upper_name()?];
         while matches!(self.peek(), Token::Comma) {
             self.advance();
-            effects.push(self.expect_upper_ident()?);
+            effects.push(self.parse_upper_name()?);
         }
 
         let mut needs = Vec::new();
@@ -369,11 +382,11 @@ impl Parser {
                 // `a: Show + Eq` we ignore the type var since it must be the trait's param
                 self.expect_ident()?;
                 self.expect(Token::Colon)?;
-                supertraits.push(self.expect_upper_ident()?);
+                supertraits.push(self.parse_upper_name()?);
 
                 while *self.peek() == Token::Plus {
                     self.advance();
-                    supertraits.push(self.expect_upper_ident()?);
+                    supertraits.push(self.parse_upper_name()?);
                 }
             }
 
@@ -447,10 +460,10 @@ impl Parser {
             }
             let type_var = self.expect_ident()?;
             self.expect(Token::Colon)?;
-            let mut traits = vec![self.expect_upper_ident()?];
+            let mut traits = vec![self.parse_upper_name()?];
             while *self.peek() == Token::Plus {
                 self.advance();
-                traits.push(self.expect_upper_ident()?);
+                traits.push(self.parse_upper_name()?);
             }
             bounds.push(crate::ast::TraitBound { type_var, traits });
         }
@@ -462,9 +475,9 @@ impl Parser {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume impl
 
-        let trait_name = self.expect_upper_ident()?;
+        let trait_name = self.parse_upper_name()?;
         self.expect(Token::For)?;
-        let target_type = self.expect_upper_ident()?;
+        let target_type = self.parse_upper_name()?;
 
         // Parse optional type params: `impl Show for Box a b`
         let mut type_params = Vec::new();
@@ -573,7 +586,16 @@ impl Parser {
 
     fn parse_type_atom(&mut self) -> Result<TypeExpr, ParseError> {
         match self.advance() {
-            Token::UpperIdent(s) => Ok(TypeExpr::Named(s)),
+            Token::UpperIdent(s) => {
+                // Support qualified type names: `Module.Type`
+                if matches!(self.peek(), Token::Dot) {
+                    self.advance(); // consume '.'
+                    let name = self.expect_upper_ident()?;
+                    Ok(TypeExpr::Named(format!("{}.{}", s, name)))
+                } else {
+                    Ok(TypeExpr::Named(s))
+                }
+            }
             Token::Ident(s) => Ok(TypeExpr::Var(s)),
             Token::LParen => {
                 // () is the Unit type

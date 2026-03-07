@@ -802,7 +802,9 @@ pub(crate) fn match_pattern(pattern: &Pat, value: &Value) -> Option<HashMap<Stri
                 args: vargs,
                 ..
             } => {
-                if pname != vname || pargs.len() != vargs.len() {
+                // Strip module prefix from pattern name: `Shapes.Circle` matches value `Circle`
+                let pbase = pname.rsplit('.').next().unwrap_or(pname);
+                if pbase != vname || pargs.len() != vargs.len() {
                     return None;
                 }
 
