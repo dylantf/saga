@@ -639,12 +639,20 @@ impl Parser {
             None
         };
 
-        // Optional: (name1, name2, ...) — unqualified imports
+        // Optional: (name1, Name2, ...) — unqualified imports (lowercase or uppercase)
         let exposing = if matches!(self.peek(), Token::LParen) {
             self.advance(); // consume '('
             let mut names = Vec::new();
             while !matches!(self.peek(), Token::RParen | Token::Eof) {
-                names.push(self.expect_ident()?);
+                let name = match self.peek().clone() {
+                    Token::Ident(n) => { self.advance(); n }
+                    Token::UpperIdent(n) => { self.advance(); n }
+                    tok => return Err(ParseError {
+                        message: format!("expected identifier in import list, got {:?}", tok),
+                        span: self.tokens[self.pos].span,
+                    }),
+                };
+                names.push(name);
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
                 }

@@ -1,9 +1,4 @@
-mod ast;
-mod eval;
-mod lexer;
-mod parser;
-mod token;
-mod typechecker;
+use dylang::{ast, eval, lexer, parser, typechecker};
 
 use std::env;
 use std::fs;

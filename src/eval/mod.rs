@@ -1,302 +1,17 @@
+pub(crate) mod builtins;
+pub(crate) mod module;
+pub(crate) mod value;
+
+pub use module::ModuleLoader;
+pub use value::{ClosureArm, EvalError, EvalResult, HandlerVal, Value};
+
 use crate::ast::*;
+use builtins::{parse_prelude, register_builtins};
+use module::load_module;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use std::rc::Rc;
-
-#[derive(Clone)]
-pub struct ClosureArm {
-    pub params: Vec<Pat>,
-    pub guard: Option<Expr>,
-    pub body: Expr,
-    pub env: Env, // starts as definition-time env, grows as each arg is applied
-}
-
-#[derive(Clone)]
-pub struct HandlerVal {
-    pub arms: Vec<crate::ast::HandlerArm>,
-    pub return_clause: Option<Box<crate::ast::HandlerArm>>,
-    pub env: Env,
-}
-
-impl fmt::Display for HandlerVal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<handler>")
-    }
-}
-
-#[derive(Clone)]
-pub enum Value {
-    Unit,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    String(String),
-
-    Closure(Vec<ClosureArm>),
-
-    // ADT value constructor
-    // E.g. Some(5) would be Constructor { name: "Some", arity: 1, args: [Int(5)]}
-    Constructor {
-        name: String,
-        arity: usize,
-        args: Vec<Value>,
-    },
-
-    Record {
-        name: String,
-        fields: HashMap<String, Value>,
-    },
-
-    EffectFn {
-        name: String,
-        qualifier: Option<String>,
-        arity: usize,
-        args: Vec<Value>,
-    },
-
-    Handler(HandlerVal),
-
-    BuiltIn(String),
-
-    /// Trait method that dispatches based on the argument's runtime type
-    TraitMethod {
-        trait_name: String,
-        method_name: String,
-        env: Env,
-    },
-
-    Continuation(Rc<RefCell<Option<Continuation>>>),
-
-    // Mutable reference cell (created by `let mut`)
-    Ref(Rc<RefCell<Value>>),
-}
-
-/// Extract a type name from a runtime value for trait dispatch.
-fn value_type_name(v: &Value) -> String {
-    match v {
-        Value::Int(_) => "Int".into(),
-        Value::Float(_) => "Float".into(),
-        Value::String(_) => "String".into(),
-        Value::Bool(_) => "Bool".into(),
-        Value::Unit => "Unit".into(),
-        Value::Record { name, .. } => name.clone(),
-        Value::Constructor { name, .. } => name.clone(),
-        _ => "<unknown>".into(),
-    }
-}
-
-fn is_list_value(v: &Value) -> bool {
-    match v {
-        Value::Constructor { name, args, .. } if name == "Nil" && args.is_empty() => true,
-        Value::Constructor { name, args, .. } if name == "Cons" && args.len() == 2 => {
-            is_list_value(&args[1])
-        }
-        _ => false,
-    }
-}
-
-fn fmt_list_elements(v: &Value, f: &mut fmt::Formatter<'_>, first: bool) -> fmt::Result {
-    match v {
-        Value::Constructor { name, args, .. } if name == "Nil" && args.is_empty() => Ok(()),
-        Value::Constructor { name, args, .. } if name == "Cons" && args.len() == 2 => {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", args[0])?;
-            fmt_list_elements(&args[1], f, false)
-        }
-        _ => Ok(()),
-    }
-}
-
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::Int(n) => write!(f, "{}", n),
-            Value::Float(v) => write!(f, "{}", v),
-            Value::String(s) => write!(f, "{}", s),
-            Value::Bool(b) => write!(f, "{}", b),
-            Value::Unit => write!(f, "()"),
-            Value::Closure { .. } => write!(f, "<function>"),
-            Value::BuiltIn(name) => write!(f, "<built-in: {}>", name),
-            Value::TraitMethod { method_name, .. } => write!(f, "<trait-method: {}>", method_name),
-            Value::Constructor { name, args, .. } => {
-                if name == "Tuple" {
-                    write!(f, "(")?;
-                    for (i, arg) in args.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{}", arg)?;
-                    }
-                    write!(f, ")")
-                } else if name == "Nil" && args.is_empty() {
-                    write!(f, "[]")
-                } else if name == "Cons" && args.len() == 2 && is_list_value(self) {
-                    write!(f, "[")?;
-                    fmt_list_elements(self, f, true)?;
-                    write!(f, "]")
-                } else if args.is_empty() {
-                    write!(f, "{}", name)
-                } else {
-                    write!(f, "{}(", name)?;
-                    for (i, arg) in args.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{}", arg)?;
-                    }
-                    write!(f, ")")
-                }
-            }
-            Value::Record { name, fields } => {
-                write!(f, "{} {{", name)?;
-                for (i, (k, v)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ",")?;
-                    }
-                    write!(f, " {}: {}", k, v)?;
-                }
-                write!(f, " }}")
-            }
-            Value::EffectFn { name, .. } => write!(f, "<effect-fn: {}>", name),
-            Value::Handler(h) => write!(f, "{}", h),
-            Value::Continuation(_) => write!(f, "<continuation>"),
-            Value::Ref(r) => write!(f, "{}", r.borrow()),
-        }
-    }
-}
-
-impl fmt::Debug for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-// --- Module loader ---
-
-#[derive(Clone)]
-pub struct ModuleLoader(Rc<RefCell<ModuleLoaderInner>>);
-
-struct ModuleLoaderInner {
-    /// Project root. None = script mode (imports not allowed).
-    project_root: Option<PathBuf>,
-    /// Builtins + prelude, evaluated once. Each module gets extend() of this.
-    base_env: Env,
-    /// Cache: module name -> exported bindings.
-    loaded: HashMap<String, HashMap<String, Value>>,
-    /// Modules currently being loaded (for cycle detection).
-    loading: HashSet<String>,
-}
-
-impl ModuleLoader {
-    pub fn script() -> Self {
-        ModuleLoader(Rc::new(RefCell::new(ModuleLoaderInner {
-            project_root: None,
-            base_env: Env::new(), // populated by eval_program after prelude runs
-            loaded: HashMap::new(),
-            loading: HashSet::new(),
-        })))
-    }
-
-    pub fn project(root: PathBuf) -> Self {
-        ModuleLoader(Rc::new(RefCell::new(ModuleLoaderInner {
-            project_root: Some(root),
-            base_env: Env::new(), // populated by eval_program after prelude runs
-            loaded: HashMap::new(),
-            loading: HashSet::new(),
-        })))
-    }
-}
-
-// --- Environment ---
-
-#[derive(Clone)]
-pub struct Env(Rc<RefCell<EnvInner>>);
-
-struct EnvInner {
-    bindings: HashMap<String, Value>,
-    parent: Option<Env>,
-}
-
-impl Env {
-    fn new() -> Self {
-        Env(Rc::new(RefCell::new(EnvInner {
-            bindings: HashMap::new(),
-            parent: None,
-        })))
-    }
-
-    fn extend(&self) -> Self {
-        Env(Rc::new(RefCell::new(EnvInner {
-            bindings: HashMap::new(),
-            parent: Some(self.clone()),
-        })))
-    }
-
-    fn get(&self, name: &str) -> Option<Value> {
-        let inner = self.0.borrow();
-        if let Some(val) = inner.bindings.get(name) {
-            Some(val.clone())
-        } else if let Some(parent) = &inner.parent {
-            parent.get(name)
-        } else {
-            None
-        }
-    }
-
-    fn set(&self, name: String, value: Value) {
-        self.0.borrow_mut().bindings.insert(name, value);
-    }
-}
-
-// --- Eval result with continuations ---
-
-#[derive(Debug)]
-pub struct EvalError {
-    pub message: String,
-}
-
-type Continuation = Box<dyn FnOnce(Value) -> EvalResult>;
-
-pub enum EvalResult {
-    Ok(Value),
-    Error(EvalError),
-    Effect {
-        name: String,
-        qualifier: Option<String>,
-        args: Vec<Value>,
-        continuation: Continuation,
-    },
-}
-
-impl EvalResult {
-    fn then(self, f: impl FnOnce(Value) -> EvalResult + 'static) -> EvalResult {
-        match self {
-            EvalResult::Ok(v) => f(v),
-            EvalResult::Error(e) => EvalResult::Error(e),
-            EvalResult::Effect {
-                name,
-                qualifier,
-                args,
-                continuation,
-            } => EvalResult::Effect {
-                name,
-                qualifier,
-                args,
-                continuation: Box::new(move |v| continuation(v).then(f)),
-            },
-        }
-    }
-
-    fn error(message: impl Into<String>) -> EvalResult {
-        EvalResult::Error(EvalError {
-            message: message.into(),
-        })
-    }
-}
+use value::{Continuation, Env};
 
 // --- Expressions ---
 
@@ -467,7 +182,7 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> EvalResult {
             eval_expr(&value, &env).then(move |val| match env.get("resume") {
                 Some(Value::Continuation(cont)) => match cont.borrow_mut().take() {
                     Some(k) => k(val),
-                    None => EvalResult::error("resume caleld more than once!"),
+                    None => EvalResult::error("resume called more than once!"),
                 },
                 _ => EvalResult::error("resume used outside of a handler"),
             })
@@ -669,7 +384,7 @@ fn eval_effect_args(func: Value, args: &[Expr], index: usize, env: &Env) -> Eval
     })
 }
 
-// --- Function application
+// --- Function application ---
 
 fn apply(func: Value, arg: Value) -> EvalResult {
     match func {
@@ -712,7 +427,6 @@ fn apply(func: Value, arg: Value) -> EvalResult {
                     if let Some(guard) = &arm.guard {
                         // Guards in apply can't use `then` with `continue`, so we
                         // only support pure (non-effectful) guard expressions here.
-                        // This matches the common case; effectful guards are unusual.
                         match eval_expr(guard, &local_env) {
                             EvalResult::Ok(Value::Bool(true)) => {}
                             EvalResult::Ok(Value::Bool(false)) => continue,
@@ -762,7 +476,7 @@ fn apply(func: Value, arg: Value) -> EvalResult {
             method_name,
             env,
         } => {
-            let raw_name = value_type_name(&arg);
+            let raw_name = value::value_type_name(&arg);
             // Constructors return their own name (e.g. "Some"), not the type name ("Option").
             // Look up __ctor_type_{name} entries stored during TypeDef eval to resolve.
             let type_name = env
@@ -961,7 +675,7 @@ pub fn eval_decl(decl: &Decl, env: &Env, loader: &ModuleLoader) -> EvalResult {
     }
 }
 
-// --- Builtin functions
+// --- Builtin functions ---
 
 fn eval_builtin(name: &str, arg: Value) -> EvalResult {
     match name {
@@ -974,7 +688,7 @@ fn eval_builtin(name: &str, arg: Value) -> EvalResult {
     }
 }
 
-// --- Binary operators
+// --- Binary operators ---
 
 fn eval_binop(op: &BinOp, left: Value, right: Value) -> EvalResult {
     match (op, &left, &right) {
@@ -1010,6 +724,14 @@ fn eval_binop(op: &BinOp, left: Value, right: Value) -> EvalResult {
         (BinOp::Mul, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Float(a * b)),
         (BinOp::Div, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Float(a / b)),
         (BinOp::Mod, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Float(a % b)),
+
+        // Float comparison
+        (BinOp::Eq, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Bool(a == b)),
+        (BinOp::NotEq, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Bool(a != b)),
+        (BinOp::Lt, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Bool(a < b)),
+        (BinOp::Gt, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Bool(a > b)),
+        (BinOp::LtEq, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Bool(a <= b)),
+        (BinOp::GtEq, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Bool(a >= b)),
 
         // String concatenation
         (BinOp::Concat, Value::String(a), Value::String(b)) => {
@@ -1051,7 +773,7 @@ fn eval_case_arms(arms: &[CaseArm], val: &Value, env: &Env, start: usize) -> Eva
     EvalResult::error(format!("No pattern matched for {}", val))
 }
 
-fn match_pattern(pattern: &Pat, value: &Value) -> Option<HashMap<String, Value>> {
+pub(crate) fn match_pattern(pattern: &Pat, value: &Value) -> Option<HashMap<String, Value>> {
     match pattern {
         Pat::Wildcard { .. } => Some(HashMap::new()),
 
@@ -1086,7 +808,6 @@ fn match_pattern(pattern: &Pat, value: &Value) -> Option<HashMap<String, Value>>
 
                 let mut all_bindings = HashMap::new();
                 for (pat, val) in pargs.iter().zip(vargs.iter()) {
-                    // TODO: checker should catch duplicate bindings (e.g. Pair(x, x))
                     let bindings = match_pattern(pat, val)?;
                     all_bindings.extend(bindings);
                 }
@@ -1135,7 +856,12 @@ fn match_pattern(pattern: &Pat, value: &Value) -> Option<HashMap<String, Value>>
 }
 
 // Helper to run eval_decl for a list of declarations
-fn eval_decls(decls: &[Decl], index: usize, env: &Env, loader: &ModuleLoader) -> EvalResult {
+pub(crate) fn eval_decls(
+    decls: &[Decl],
+    index: usize,
+    env: &Env,
+    loader: &ModuleLoader,
+) -> EvalResult {
     if index >= decls.len() {
         return EvalResult::Ok(Value::Unit);
     }
@@ -1144,250 +870,6 @@ fn eval_decls(decls: &[Decl], index: usize, env: &Env, loader: &ModuleLoader) ->
     let decls_vec: Vec<Decl> = decls.to_vec();
     eval_decl(&decls_vec[index], &env, &loader)
         .then(move |_| eval_decls(&decls_vec, index + 1, &env, &loader))
-}
-
-fn register_builtins(env: &Env) {
-    env.set("print".to_string(), Value::BuiltIn("print".to_string()));
-    env.set("show".to_string(), Value::BuiltIn("show".to_string()));
-    env.set(
-        "Nil".to_string(),
-        Value::Constructor {
-            name: "Nil".to_string(),
-            arity: 0,
-            args: vec![],
-        },
-    );
-    env.set(
-        "Cons".to_string(),
-        Value::Constructor {
-            name: "Cons".to_string(),
-            arity: 2,
-            args: vec![],
-        },
-    );
-}
-
-fn parse_prelude() -> Program {
-    let src = include_str!("prelude.dy");
-    let tokens = crate::lexer::Lexer::new(src)
-        .lex()
-        .expect("prelude lex error");
-    crate::parser::Parser::new(tokens)
-        .parse_program()
-        .expect("prelude parse error")
-}
-
-/// Collect the names exported by a module (public functions, type constructors,
-/// handlers, trait methods, impl dispatch keys).
-fn public_names(program: &[Decl]) -> HashSet<String> {
-    let mut names = HashSet::new();
-    for decl in program {
-        match decl {
-            Decl::FunAnnotation {
-                public: true, name, ..
-            } => {
-                names.insert(name.clone());
-            }
-            Decl::TypeDef {
-                public: true,
-                variants,
-                ..
-            } => {
-                for v in variants {
-                    names.insert(v.name.clone());
-                    names.insert(format!("__ctor_type_{}", v.name));
-                }
-            }
-            Decl::HandlerDef {
-                public: true,
-                name,
-                ..
-            } => {
-                names.insert(name.clone());
-            }
-            Decl::TraitDef {
-                public: true,
-                methods,
-                ..
-            } => {
-                for m in methods {
-                    names.insert(m.name.clone());
-                }
-            }
-            Decl::ImplDef {
-                trait_name,
-                target_type,
-                methods,
-                ..
-            } => {
-                for (method_name, ..) in methods {
-                    names.insert(format!(
-                        "__impl_{}_{}_{}",
-                        trait_name, target_type, method_name
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-    names
-}
-
-/// Verifies that the file on disk has the exact expected case for its name.
-/// Catches the macOS/Windows trap where `math.dy` is silently found for `Math.dy`.
-fn check_filename_case(file_path: &Path) -> Result<(), String> {
-    let dir = file_path.parent().unwrap_or(Path::new("."));
-    let expected = match file_path.file_name() {
-        Some(n) => n.to_string_lossy().into_owned(),
-        None => return Ok(()),
-    };
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let actual = entry.file_name().to_string_lossy().into_owned();
-            if actual.to_lowercase() == expected.to_lowercase() && actual != expected {
-                return Err(format!(
-                    "module file '{}' found but expected '{}' -- file name must match module name exactly",
-                    actual, expected
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Load, evaluate, and inject a module's public bindings into `env`.
-fn load_module(
-    module_path: &[String],
-    alias: Option<&str>,
-    exposing: Option<&[String]>,
-    env: &Env,
-    loader: &ModuleLoader,
-) -> EvalResult {
-    let module_name = module_path.join(".");
-    let prefix = alias.unwrap_or(&module_name);
-
-    let project_root = {
-        let inner = loader.0.borrow();
-        match &inner.project_root {
-            None => {
-                return EvalResult::error(
-                    "imports are not supported in script mode (run without a filename to use project mode)",
-                );
-            }
-            Some(root) => root.clone(),
-        }
-    };
-
-    // Cycle detection
-    if loader.0.borrow().loading.contains(&module_name) {
-        return EvalResult::error(format!("circular import detected: {}", module_name));
-    }
-
-    // Cache hit
-    let cached = loader.0.borrow().loaded.get(&module_name).cloned();
-    let public_bindings = if let Some(bindings) = cached {
-        bindings
-    } else {
-        // Resolve path: Foo.Bar -> <root>/Foo/Bar.dy
-        let rel: PathBuf = module_path.iter().collect();
-        let file_path = project_root.join(rel).with_extension("dy");
-
-        if let Err(e) = check_filename_case(&file_path) {
-            return EvalResult::error(e);
-        }
-
-        let source = match std::fs::read_to_string(&file_path) {
-            Ok(s) => s,
-            Err(e) => {
-                return EvalResult::error(format!(
-                    "cannot read module '{}' ({}): {}",
-                    module_name,
-                    file_path.display(),
-                    e
-                ));
-            }
-        };
-
-        let tokens = match crate::lexer::Lexer::new(&source).lex() {
-            Ok(t) => t,
-            Err(e) => {
-                return EvalResult::error(format!(
-                    "lex error in module '{}': {}",
-                    module_name, e.message
-                ));
-            }
-        };
-        let program = match crate::parser::Parser::new(tokens).parse_program() {
-            Ok(p) => p,
-            Err(e) => {
-                return EvalResult::error(format!(
-                    "parse error in module '{}': {}",
-                    module_name, e.message
-                ));
-            }
-        };
-
-        // Mark as loading
-        loader.0.borrow_mut().loading.insert(module_name.clone());
-
-        // Extend the cached base env (builtins + prelude already evaluated).
-        // This avoids re-parsing and re-evaluating the prelude for every module.
-        let mod_env = loader.0.borrow().base_env.extend();
-        match eval_decls(&program, 0, &mod_env, loader) {
-            EvalResult::Ok(_) => {}
-            EvalResult::Effect { name, .. } => {
-                loader.0.borrow_mut().loading.remove(&module_name);
-                return EvalResult::error(format!(
-                    "unhandled effect '{}' at module level in '{}'",
-                    name, module_name
-                ));
-            }
-            other => {
-                loader.0.borrow_mut().loading.remove(&module_name);
-                return other;
-            }
-        }
-
-        // Collect public bindings
-        let pub_names = public_names(&program);
-        let mut bindings = HashMap::new();
-        for name in &pub_names {
-            if let Some(val) = mod_env.get(name) {
-                bindings.insert(name.clone(), val);
-            }
-        }
-
-        loader.0.borrow_mut().loading.remove(&module_name);
-        loader
-            .0
-            .borrow_mut()
-            .loaded
-            .insert(module_name.clone(), bindings.clone());
-        bindings
-    };
-
-    // Inject qualified bindings: Math.abs, Math.max, ...
-    let prefix = prefix.to_string();
-    for (name, val) in &public_bindings {
-        env.set(format!("{}.{}", prefix, name), val.clone());
-    }
-
-    // Inject unqualified bindings from exposing list
-    if let Some(exposed) = exposing {
-        for name in exposed {
-            match public_bindings.get(name) {
-                Some(val) => env.set(name.clone(), val.clone()),
-                None => {
-                    return EvalResult::error(format!(
-                        "'{}' is not exported by module '{}'",
-                        name, module_name
-                    ));
-                }
-            }
-        }
-    }
-
-    EvalResult::Ok(Value::Unit)
 }
 
 pub fn eval_program(program: &Program, loader: &ModuleLoader) -> EvalResult {
