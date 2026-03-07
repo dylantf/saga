@@ -1188,16 +1188,28 @@ fn public_names(program: &[Decl]) -> HashSet<String> {
             } => {
                 names.insert(name.clone());
             }
-            Decl::TypeDef { variants, .. } => {
+            Decl::TypeDef {
+                public: true,
+                variants,
+                ..
+            } => {
                 for v in variants {
                     names.insert(v.name.clone());
                     names.insert(format!("__ctor_type_{}", v.name));
                 }
             }
-            Decl::HandlerDef { name, .. } => {
+            Decl::HandlerDef {
+                public: true,
+                name,
+                ..
+            } => {
                 names.insert(name.clone());
             }
-            Decl::TraitDef { methods, .. } => {
+            Decl::TraitDef {
+                public: true,
+                methods,
+                ..
+            } => {
                 for m in methods {
                     names.insert(m.name.clone());
                 }

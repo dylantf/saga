@@ -1396,3 +1396,143 @@ fn impl_def_simple() {
         _ => panic!("expected ImplDef, got {:?}", decls[0]),
     }
 }
+
+// --- Visibility (pub) ---
+
+#[test]
+fn pub_type_def() {
+    let decls = parse("pub type Shape { Circle(Float) }");
+    match &decls[0] {
+        Decl::TypeDef { public, name, .. } => {
+            assert!(public, "pub type should set public = true");
+            assert_eq!(name, "Shape");
+        }
+        _ => panic!("expected TypeDef"),
+    }
+}
+
+#[test]
+fn private_type_def() {
+    let decls = parse("type Shape { Circle(Float) }");
+    match &decls[0] {
+        Decl::TypeDef { public, .. } => {
+            assert!(!public, "bare type should set public = false");
+        }
+        _ => panic!("expected TypeDef"),
+    }
+}
+
+#[test]
+fn pub_record_def() {
+    let decls = parse("pub record User {\n  name: String\n}");
+    match &decls[0] {
+        Decl::RecordDef { public, name, .. } => {
+            assert!(public);
+            assert_eq!(name, "User");
+        }
+        _ => panic!("expected RecordDef"),
+    }
+}
+
+#[test]
+fn private_record_def() {
+    let decls = parse("record User {\n  name: String\n}");
+    match &decls[0] {
+        Decl::RecordDef { public, .. } => {
+            assert!(!public);
+        }
+        _ => panic!("expected RecordDef"),
+    }
+}
+
+#[test]
+fn pub_effect_def() {
+    let decls = parse("pub effect Log {\n  fun log (msg: String) -> Unit\n}");
+    match &decls[0] {
+        Decl::EffectDef { public, name, .. } => {
+            assert!(public);
+            assert_eq!(name, "Log");
+        }
+        _ => panic!("expected EffectDef"),
+    }
+}
+
+#[test]
+fn private_effect_def() {
+    let decls = parse("effect Log {\n  fun log (msg: String) -> Unit\n}");
+    match &decls[0] {
+        Decl::EffectDef { public, .. } => {
+            assert!(!public);
+        }
+        _ => panic!("expected EffectDef"),
+    }
+}
+
+#[test]
+fn pub_handler_def() {
+    let decls = parse("pub handler console_log for Log {\n  log msg -> resume ()\n}");
+    match &decls[0] {
+        Decl::HandlerDef { public, name, .. } => {
+            assert!(public);
+            assert_eq!(name, "console_log");
+        }
+        _ => panic!("expected HandlerDef"),
+    }
+}
+
+#[test]
+fn private_handler_def() {
+    let decls = parse("handler console_log for Log {\n  log msg -> resume ()\n}");
+    match &decls[0] {
+        Decl::HandlerDef { public, .. } => {
+            assert!(!public);
+        }
+        _ => panic!("expected HandlerDef"),
+    }
+}
+
+#[test]
+fn pub_trait_def() {
+    let decls = parse("pub trait Show a {\n  fun show (x: a) -> String\n}");
+    match &decls[0] {
+        Decl::TraitDef { public, name, .. } => {
+            assert!(public);
+            assert_eq!(name, "Show");
+        }
+        _ => panic!("expected TraitDef"),
+    }
+}
+
+#[test]
+fn private_trait_def() {
+    let decls = parse("trait Show a {\n  fun show (x: a) -> String\n}");
+    match &decls[0] {
+        Decl::TraitDef { public, .. } => {
+            assert!(!public);
+        }
+        _ => panic!("expected TraitDef"),
+    }
+}
+
+#[test]
+fn pub_fun_annotation() {
+    let decls = parse("pub fun add (a: Int) (b: Int) -> Int");
+    match &decls[0] {
+        Decl::FunAnnotation { public, name, .. } => {
+            assert!(public);
+            assert_eq!(name, "add");
+        }
+        _ => panic!("expected FunAnnotation"),
+    }
+}
+
+#[test]
+fn private_fun_annotation() {
+    let decls = parse("fun add (a: Int) (b: Int) -> Int");
+    match &decls[0] {
+        Decl::FunAnnotation { public, .. } => {
+            assert!(!public);
+        }
+        _ => panic!("expected FunAnnotation"),
+    }
+}

@@ -44,6 +44,7 @@ pub enum Decl {
 
     /// `type Option a { Some(a), None }`
     TypeDef {
+        public: bool,
         name: String,
         type_params: Vec<String>,
         variants: Vec<TypeConstructor>,
@@ -52,6 +53,7 @@ pub enum Decl {
 
     /// `record User { name: String, age: Int }`
     RecordDef {
+        public: bool,
         name: String,
         fields: Vec<(String, TypeExpr)>,
         span: Span,
@@ -59,6 +61,7 @@ pub enum Decl {
 
     /// `effect Console { fun print (msg: String) -> Unit }`
     EffectDef {
+        public: bool,
         name: String,
         operations: Vec<EffectOp>,
         span: Span,
@@ -66,6 +69,7 @@ pub enum Decl {
 
     /// `handler console_log for Log needs {Http} { ... }`
     HandlerDef {
+        public: bool,
         name: String,
         effects: Vec<String>,
         needs: Vec<String>,
@@ -77,6 +81,7 @@ pub enum Decl {
 
     /// `trait Show a { fun show (x: a) -> String }`
     TraitDef {
+        public: bool,
         name: String,
         type_param: String,
         supertraits: Vec<String>,

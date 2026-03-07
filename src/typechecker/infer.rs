@@ -1760,15 +1760,27 @@ fn public_names_for_tc(program: &[crate::ast::Decl]) -> std::collections::HashSe
             } => {
                 names.insert(name.clone());
             }
-            Decl::TypeDef { variants, .. } => {
+            Decl::TypeDef {
+                public: true,
+                variants,
+                ..
+            } => {
                 for v in variants {
                     names.insert(v.name.clone());
                 }
             }
-            Decl::HandlerDef { name, .. } => {
+            Decl::HandlerDef {
+                public: true,
+                name,
+                ..
+            } => {
                 names.insert(name.clone());
             }
-            Decl::TraitDef { methods, .. } => {
+            Decl::TraitDef {
+                public: true,
+                methods,
+                ..
+            } => {
                 for m in methods {
                     names.insert(m.name.clone());
                 }

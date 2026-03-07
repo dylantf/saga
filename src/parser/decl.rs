@@ -8,8 +8,8 @@ impl Parser {
 
     pub(super) fn parse_decl(&mut self) -> Result<Decl, ParseError> {
         match self.peek() {
-            Token::Type => self.parse_type_def(),
-            Token::Record => self.parse_record_def(),
+            Token::Type => self.parse_type_def(false),
+            Token::Record => self.parse_record_def(false),
             Token::Let => {
                 let start = self.tokens[self.pos].span;
                 self.advance(); // consume 'let'
@@ -32,11 +32,11 @@ impl Parser {
                 self.advance(); // consume 'pub'
                 match self.peek() {
                     Token::Fun => self.parse_fun_annotation(true, start),
-                    Token::Type => self.parse_type_def(),
-                    Token::Record => self.parse_record_def(),
-                    Token::Effect => self.parse_effect_def(),
-                    Token::Handler => self.parse_handler_def(),
-                    Token::Trait => self.parse_trait_def(),
+                    Token::Type => self.parse_type_def(true),
+                    Token::Record => self.parse_record_def(true),
+                    Token::Effect => self.parse_effect_def(true),
+                    Token::Handler => self.parse_handler_def(true),
+                    Token::Trait => self.parse_trait_def(true),
                     _ => Err(ParseError {
                         message: format!("Expected declaration after 'pub', got {:?}", self.peek()),
                         span: self.tokens[self.pos].span,
@@ -47,9 +47,9 @@ impl Parser {
                 let start = self.tokens[self.pos].span;
                 self.parse_fun_annotation(false, start)
             }
-            Token::Effect => self.parse_effect_def(),
-            Token::Handler => self.parse_handler_def(),
-            Token::Trait => self.parse_trait_def(),
+            Token::Effect => self.parse_effect_def(false),
+            Token::Handler => self.parse_handler_def(false),
+            Token::Trait => self.parse_trait_def(false),
             Token::Impl => self.parse_impl_def(),
             Token::Module => self.parse_module_decl(),
             Token::Import => self.parse_import_decl(),
@@ -62,7 +62,7 @@ impl Parser {
     }
 
     // Parses: record <Name> { <field>: <Type>, ... }
-    fn parse_record_def(&mut self) -> Result<Decl, ParseError> {
+    fn parse_record_def(&mut self, public: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'record'
         let name = self.expect_upper_ident()?;
@@ -85,13 +85,14 @@ impl Parser {
         self.expect(Token::RBrace)?;
 
         Ok(Decl::RecordDef {
+            public,
             name,
             fields,
             span: start.to(end),
         })
     }
 
-    fn parse_type_def(&mut self) -> Result<Decl, ParseError> {
+    fn parse_type_def(&mut self, public: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'type'
         let name = self.expect_upper_ident()?;
@@ -113,6 +114,7 @@ impl Parser {
         self.expect(Token::RBrace)?;
 
         Ok(Decl::TypeDef {
+            public,
             name,
             type_params,
             variants,
@@ -196,7 +198,7 @@ impl Parser {
     }
 
     // Parses: effect <Name> { fun <op> (<p>: <T>) ... -> <T> ... }
-    fn parse_effect_def(&mut self) -> Result<Decl, ParseError> {
+    fn parse_effect_def(&mut self, public: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'effect'
         let name = self.expect_upper_ident()?;
@@ -242,6 +244,7 @@ impl Parser {
         self.expect(Token::RBrace)?;
 
         Ok(Decl::EffectDef {
+            public,
             name,
             operations,
             span: start.to(end),
@@ -249,7 +252,7 @@ impl Parser {
     }
 
     // Parses: handler <name> for <Effect>, ... { <op> <params> -> <body> ... }
-    fn parse_handler_def(&mut self) -> Result<Decl, ParseError> {
+    fn parse_handler_def(&mut self, public: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'handler'
         let name = self.expect_ident()?;
@@ -322,6 +325,7 @@ impl Parser {
         self.expect(Token::RBrace)?;
 
         Ok(Decl::HandlerDef {
+            public,
             name,
             effects,
             needs,
@@ -331,7 +335,7 @@ impl Parser {
         })
     }
 
-    fn parse_trait_def(&mut self) -> Result<Decl, ParseError> {
+    fn parse_trait_def(&mut self, public: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'trait'
         let name = self.expect_upper_ident()?;
@@ -405,6 +409,7 @@ impl Parser {
         self.expect(Token::RBrace)?;
 
         Ok(Decl::TraitDef {
+            public,
             name,
             type_param,
             supertraits,
