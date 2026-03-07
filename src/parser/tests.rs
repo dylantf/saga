@@ -1397,6 +1397,22 @@ fn impl_def_simple() {
     }
 }
 
+#[test]
+fn impl_def_with_needs() {
+    let decls = parse("impl Store for Redis needs {Http, Fail} {\n  get key = http_get key\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::ImplDef { trait_name, target_type, needs, methods, .. } => {
+            assert_eq!(trait_name, "Store");
+            assert_eq!(target_type, "Redis");
+            assert_eq!(needs, &["Http", "Fail"]);
+            assert_eq!(methods.len(), 1);
+            assert_eq!(methods[0].0, "get");
+        }
+        _ => panic!("expected ImplDef, got {:?}", decls[0]),
+    }
+}
+
 // --- Visibility (pub) ---
 
 #[test]

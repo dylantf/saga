@@ -595,6 +595,85 @@ fn impl_correct() {
 }
 
 #[test]
+fn impl_pure_no_needs_ok() {
+    // Impl with no effects needs no 'needs' clause
+    check(
+        "record InMemory { store: String }
+trait Store a {
+  fun get (x: a) -> String
+}
+impl Store for InMemory {
+  get s = s.store
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn impl_uses_effect_without_needs_is_error() {
+    // Impl method uses an effect but the impl has no 'needs' declaration
+    let result = check(
+        "effect Fail { fun fail (msg: String) -> a }
+record Redis { url: String }
+trait Store a {
+  fun get (x: a) -> String
+}
+impl Store for Redis {
+  get s = fail! \"oops\"
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Fail"),
+        "expected Fail in error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn impl_uses_effect_with_correct_needs_ok() {
+    // Impl method uses an effect and declares it in 'needs'
+    check(
+        "effect Fail { fun fail (msg: String) -> a }
+record Redis { url: String }
+trait Store a {
+  fun get (x: a) -> String
+}
+impl Store for Redis needs {Fail} {
+  get s = fail! \"oops\"
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn impl_needs_missing_one_effect_is_error() {
+    // Impl method uses Fail and Log but only declares Fail in needs
+    let result = check(
+        "effect Fail { fun fail (msg: String) -> a }
+effect Log { fun log (msg: String) -> Unit }
+record Redis { url: String }
+trait Store a {
+  fun get (x: a) -> String
+}
+impl Store for Redis needs {Fail} {
+  get s = {
+    log! \"hello\"
+    fail! \"oops\"
+  }
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Log"),
+        "expected Log in error, got: {}",
+        err.message
+    );
+}
+
+#[test]
 fn impl_for_undefined_trait() {
     let result = check(
         "record User { name: String }\nimpl Bogus for User {\n  foo u = u.name\n}",

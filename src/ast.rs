@@ -89,11 +89,13 @@ pub enum Decl {
     },
 
     /// `impl Show for User { show user = ... }`
+    /// `impl Store for Redis needs {Http, Fail} { ... }`
     ImplDef {
         trait_name: String,
         target_type: String,
         type_params: Vec<String>,
         where_clause: Vec<TraitBound>,
+        needs: Vec<String>,
         methods: Vec<(String, Vec<Pat>, Expr)>,
         span: Span,
     },

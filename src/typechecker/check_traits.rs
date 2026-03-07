@@ -118,6 +118,7 @@ impl Checker {
         target_type: &str,
         type_params: &[String],
         where_clause: &[ast::TraitBound],
+        needs: &[String],
         methods: &[(String, Vec<ast::Pat>, ast::Expr)],
         span: Span,
     ) -> Result<(), TypeError> {
@@ -163,6 +164,9 @@ impl Checker {
             Type::Con(target_type.into(), param_vars)
         };
 
+        let declared_effects: std::collections::HashSet<String> =
+            needs.iter().cloned().collect();
+
         for (method_name, params, body) in methods {
             let trait_method = trait_info
                 .methods
@@ -178,6 +182,7 @@ impl Checker {
             let expected_return = self.substitute_trait_param(&target, &trait_method.2);
 
             let saved_env = self.env.clone();
+            let saved_effects = std::mem::take(&mut self.current_effects);
 
             // Bind params with expected types
             for (i, pat) in params.iter().enumerate() {
@@ -198,6 +203,44 @@ impl Checker {
                         ),
                     )
                 })?;
+
+            // Check that body effects are covered by the impl's needs declaration
+            let body_effects = std::mem::replace(&mut self.current_effects, saved_effects);
+            if !body_effects.is_empty() || !declared_effects.is_empty() {
+                let undeclared: Vec<_> = body_effects.difference(&declared_effects).collect();
+                if !undeclared.is_empty() {
+                    let mut effects: Vec<_> = undeclared.into_iter().cloned().collect();
+                    effects.sort();
+                    if declared_effects.is_empty() {
+                        return Err(TypeError::at(
+                            body.span(),
+                            format!(
+                                "impl {} for {}, method '{}' uses effects {{{}}} but the impl has no 'needs' declaration",
+                                trait_name, target_type, method_name,
+                                effects.join(", ")
+                            ),
+                        ));
+                    } else {
+                        return Err(TypeError::at(
+                            body.span(),
+                            format!(
+                                "impl {} for {}, method '{}' uses effects {{{}}} not declared in 'needs'",
+                                trait_name, target_type, method_name,
+                                effects.join(", ")
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            // Register effects so callers of this method know what they propagate.
+            // Union with any effects already registered (from other impls of the same method).
+            if !declared_effects.is_empty() {
+                self.fun_effects
+                    .entry(method_name.clone())
+                    .or_default()
+                    .extend(declared_effects.iter().cloned());
+            }
 
             self.env = saved_env;
         }

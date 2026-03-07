@@ -47,6 +47,7 @@ impl Checker {
                 target_type,
                 type_params,
                 where_clause,
+                needs,
                 methods,
                 span,
             } = decl
@@ -56,6 +57,7 @@ impl Checker {
                     target_type,
                     type_params,
                     where_clause,
+                    needs,
                     methods,
                     *span,
                 )?;

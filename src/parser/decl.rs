@@ -489,6 +489,21 @@ impl Parser {
 
         let where_clause = self.parse_where_clause()?;
 
+        let mut needs = Vec::new();
+        if matches!(self.peek(), Token::Needs) {
+            self.advance(); // consume 'needs'
+            self.expect(Token::LBrace)?;
+            needs.push(self.parse_needs_entry()?);
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                if matches!(self.peek(), Token::RBrace) {
+                    break; // trailing comma
+                }
+                needs.push(self.parse_needs_entry()?);
+            }
+            self.expect(Token::RBrace)?;
+        }
+
         self.expect(Token::LBrace)?;
         self.skip_terminators();
 
@@ -514,6 +529,7 @@ impl Parser {
             target_type,
             type_params,
             where_clause,
+            needs,
             methods,
             span: start.to(end),
         })

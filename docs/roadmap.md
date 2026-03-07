@@ -32,7 +32,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Abort without resume (structured exceptions)
 - [x] `needs` on functions (`fun f () -> T needs {Log, Http}`)
 - [x] `needs` on handlers (`handler stripe for Billing needs {Log} { ... }`)
-- [ ] `needs` on impl blocks (different impls may use different effects)
+- [x] `needs` on impl blocks (different impls may use different effects)
 - [ ] Effect row polymorphism / effect variables (`needs e`) -- deferred, larger change
 
 ## Type Checker (HM)
@@ -53,7 +53,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Runtime dispatch (`__impl_Trait_Type_method` mangled keys)
 - [x] Built-in traits: `Show`, `Num`, `Eq`, `Ord`
 - [x] Conditional impls (`impl Show for List a where {a: Show}`)
-- [ ] `needs` on impl blocks (parsing + type checking)
+- [x] `needs` on impl blocks (parsing + type checking)
 - [ ] `Semigroup` / `Monoid` in stdlib
 
 ## Type System (Future)
