@@ -280,8 +280,9 @@ impl Checker {
         // Snapshot pending constraints so we can partition new ones after body checking
         let constraints_before = self.pending_constraints.len();
 
-        // Save and clear effect tracking for this function body
+        // Save and clear effect tracking and field candidate tracking for this function body
         let saved_effects = std::mem::take(&mut self.current_effects);
+        let saved_field_candidates = std::mem::take(&mut self.field_candidates);
 
         for clause in clauses {
             let Decl::FunBinding {
@@ -357,6 +358,25 @@ impl Checker {
                         ),
                     ));
                 }
+            }
+        }
+
+        // Check for unresolved ambiguous field accesses. Any var still in field_candidates
+        // after the full body was checked is genuinely ambiguous -- the programmer needs
+        // to add a type annotation to disambiguate.
+        let body_field_candidates = std::mem::replace(&mut self.field_candidates, saved_field_candidates);
+        for (var_id, (record_names, field_span)) in body_field_candidates {
+            let resolved = self.sub.apply(&Type::Var(var_id));
+            if matches!(resolved, Type::Var(_)) {
+                let mut names = record_names.clone();
+                names.sort();
+                return Err(TypeError::at(
+                    field_span,
+                    format!(
+                        "ambiguous field access: could be any of [{}] which all have this field; add a type annotation to disambiguate",
+                        names.join(", ")
+                    ),
+                ));
             }
         }
 

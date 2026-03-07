@@ -245,10 +245,63 @@ impl Checker {
                                 *span,
                                 format!("no record has field '{}'", field),
                             )),
-                            _ => Err(TypeError::at(
-                                *span,
-                                format!("ambiguous field '{}': found in multiple records", field),
-                            )),
+                            _ => {
+                                // Multiple records have this field. Narrow by intersecting
+                                // with candidates already observed for this variable (from
+                                // previous field accesses on the same var).
+                                let id = match &resolved {
+                                    Type::Var(id) => *id,
+                                    _ => unreachable!(),
+                                };
+                                let narrowed: Vec<(String, Type)> =
+                                    match self.field_candidates.get(&id) {
+                                        Some((existing, _)) => candidates
+                                            .into_iter()
+                                            .filter(|(n, _)| existing.contains(n))
+                                            .collect(),
+                                        None => candidates,
+                                    };
+                                match narrowed.len() {
+                                    0 => Err(TypeError::at(
+                                        *span,
+                                        format!(
+                                            "no single record type has all accessed fields (including '{}')",
+                                            field
+                                        ),
+                                    )),
+                                    1 => {
+                                        let (rname, field_ty) =
+                                            narrowed.into_iter().next().unwrap();
+                                        self.unify(&resolved, &Type::Con(rname, vec![]))?;
+                                        self.field_candidates.remove(&id);
+                                        Ok(field_ty)
+                                    }
+                                    _ => {
+                                        // Still multiple candidates after narrowing. Return the
+                                        // field type if all agree so we can keep checking; the
+                                        // end-of-body check will error if the var stays ambiguous.
+                                        let names: Vec<String> =
+                                            narrowed.iter().map(|(n, _)| n.clone()).collect();
+                                        let first_ty = self.sub.apply(&narrowed[0].1);
+                                        let all_agree = narrowed
+                                            .iter()
+                                            .all(|(_, ty)| self.sub.apply(ty) == first_ty);
+                                        if all_agree {
+                                            self.field_candidates.insert(id, (names, *span));
+                                            Ok(first_ty)
+                                        } else {
+                                            Err(TypeError::at(
+                                                *span,
+                                                format!(
+                                                    "ambiguous field '{}': found in [{}] with different types; add a type annotation",
+                                                    field,
+                                                    names.join(", ")
+                                                ),
+                                            ))
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     _ => Err(TypeError::at(

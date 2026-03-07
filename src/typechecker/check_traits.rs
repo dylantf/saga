@@ -164,8 +164,7 @@ impl Checker {
             Type::Con(target_type.into(), param_vars)
         };
 
-        let declared_effects: std::collections::HashSet<String> =
-            needs.iter().cloned().collect();
+        let declared_effects: std::collections::HashSet<String> = needs.iter().cloned().collect();
 
         for (method_name, params, body) in methods {
             let trait_method = trait_info
@@ -183,6 +182,7 @@ impl Checker {
 
             let saved_env = self.env.clone();
             let saved_effects = std::mem::take(&mut self.current_effects);
+            let saved_field_candidates = std::mem::take(&mut self.field_candidates);
 
             // Bind params with expected types
             for (i, pat) in params.iter().enumerate() {
@@ -216,7 +216,9 @@ impl Checker {
                             body.span(),
                             format!(
                                 "impl {} for {}, method '{}' uses effects {{{}}} but the impl has no 'needs' declaration",
-                                trait_name, target_type, method_name,
+                                trait_name,
+                                target_type,
+                                method_name,
                                 effects.join(", ")
                             ),
                         ));
@@ -225,7 +227,9 @@ impl Checker {
                             body.span(),
                             format!(
                                 "impl {} for {}, method '{}' uses effects {{{}}} not declared in 'needs'",
-                                trait_name, target_type, method_name,
+                                trait_name,
+                                target_type,
+                                method_name,
                                 effects.join(", ")
                             ),
                         ));
@@ -240,6 +244,24 @@ impl Checker {
                     .entry(method_name.clone())
                     .or_default()
                     .extend(declared_effects.iter().cloned());
+            }
+
+            // Check for unresolved field access ambiguities at end of method body
+            let body_field_candidates =
+                std::mem::replace(&mut self.field_candidates, saved_field_candidates);
+            for (var_id, (record_names, field_span)) in body_field_candidates {
+                let resolved = self.sub.apply(&Type::Var(var_id));
+                if matches!(resolved, Type::Var(_)) {
+                    let mut names = record_names.clone();
+                    names.sort();
+                    return Err(TypeError::at(
+                        field_span,
+                        format!(
+                            "ambiguous field access: could be any of [{}] which all have this field; add a type annotation to disambiguate",
+                            names.join(", ")
+                        ),
+                    ));
+                }
             }
 
             self.env = saved_env;

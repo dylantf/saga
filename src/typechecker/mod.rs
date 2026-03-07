@@ -310,6 +310,10 @@ pub struct Checker {
     pub(crate) trait_impls: HashMap<(String, String), ImplInfo>,
     /// Pending trait constraints to check: (trait_name, type, span)
     pub(crate) pending_constraints: Vec<(String, Type, Span)>,
+    /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
+    /// Tracks which records are still candidates for an unresolved type variable based on
+    /// the intersection of all fields accessed on it. Checked at end of each function body.
+    pub(crate) field_candidates: HashMap<u32, (Vec<String>, Span)>,
     /// Where clause bounds: var_id -> set of trait names assumed satisfied
     pub(crate) where_bounds: HashMap<u32, HashSet<String>>,
     /// Project root for resolving imports. None = script mode.
@@ -342,6 +346,7 @@ impl Checker {
             traits: HashMap::new(),
             trait_impls: HashMap::new(),
             pending_constraints: Vec::new(),
+            field_candidates: HashMap::new(),
             where_bounds: HashMap::new(),
             project_root: None,
             tc_loaded: HashMap::new(),

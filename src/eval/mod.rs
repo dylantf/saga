@@ -693,6 +693,10 @@ fn eval_binop(op: &BinOp, left: Value, right: Value) -> EvalResult {
         (BinOp::LtEq, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Bool(a <= b)),
         (BinOp::GtEq, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Bool(a >= b)),
 
+        // String equality
+        (BinOp::Eq, Value::String(a), Value::String(b)) => EvalResult::Ok(Value::Bool(a == b)),
+        (BinOp::NotEq, Value::String(a), Value::String(b)) => EvalResult::Ok(Value::Bool(a != b)),
+
         // String concatenation
         (BinOp::Concat, Value::String(a), Value::String(b)) => {
             EvalResult::Ok(Value::String(format!("{}{}", a, b)))
