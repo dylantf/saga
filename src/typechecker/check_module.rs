@@ -155,9 +155,7 @@ pub(super) fn public_names_for_tc(
                 }
             }
             Decl::HandlerDef {
-                public: true,
-                name,
-                ..
+                public: true, name, ..
             } => {
                 names.insert(name.clone());
             }

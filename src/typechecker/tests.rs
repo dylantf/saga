@@ -121,7 +121,10 @@ fn type_mismatch_in_addition() {
 #[test]
 fn lambda_simple() {
     let ty = infer_expr_type("fun x -> x + 1").unwrap();
-    assert_eq!(ty, Type::Arrow(Box::new(Type::int()), Box::new(Type::int())));
+    assert_eq!(
+        ty,
+        Type::Arrow(Box::new(Type::int()), Box::new(Type::int()))
+    );
 }
 
 #[test]
@@ -171,9 +174,8 @@ fn case_binds_pattern_vars() {
 
 #[test]
 fn case_with_guard() {
-    let ty =
-        infer_expr_type("case 5 {\n  x if x > 0 -> \"positive\"\n  _ -> \"non-positive\"\n}")
-            .unwrap();
+    let ty = infer_expr_type("case 5 {\n  x if x > 0 -> \"positive\"\n  _ -> \"non-positive\"\n}")
+        .unwrap();
     assert_eq!(ty, Type::string());
 }
 
@@ -205,7 +207,10 @@ fn recursive_function() {
     let checker = check("factorial n = if n == 0 then 1 else n * factorial (n - 1)").unwrap();
     let scheme = checker.env.get("factorial").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
-    assert_eq!(ty, Type::Arrow(Box::new(Type::int()), Box::new(Type::int())));
+    assert_eq!(
+        ty,
+        Type::Arrow(Box::new(Type::int()), Box::new(Type::int()))
+    );
 }
 
 #[test]
@@ -213,7 +218,10 @@ fn multi_clause_with_guards() {
     let checker = check("abs n | n < 0 = 0 - n\nabs n = n").unwrap();
     let scheme = checker.env.get("abs").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
-    assert_eq!(ty, Type::Arrow(Box::new(Type::int()), Box::new(Type::int())));
+    assert_eq!(
+        ty,
+        Type::Arrow(Box::new(Type::int()), Box::new(Type::int()))
+    );
 }
 
 #[test]
@@ -221,7 +229,10 @@ fn multi_clause_literal_patterns() {
     let checker = check("fib 0 = 0\nfib 1 = 1\nfib n = fib (n - 1) + fib (n - 2)").unwrap();
     let scheme = checker.env.get("fib").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
-    assert_eq!(ty, Type::Arrow(Box::new(Type::int()), Box::new(Type::int())));
+    assert_eq!(
+        ty,
+        Type::Arrow(Box::new(Type::int()), Box::new(Type::int()))
+    );
 }
 
 #[test]
@@ -248,8 +259,7 @@ fn list_cons_expression() {
 
 #[test]
 fn record_create() {
-    let checker =
-        check("record Point { x: Int, y: Int }\nlet p = Point { x: 3, y: 4 }").unwrap();
+    let checker = check("record Point { x: Int, y: Int }\nlet p = Point { x: 3, y: 4 }").unwrap();
     let ty = checker.sub.apply(&checker.env.get("p").unwrap().ty);
     assert_eq!(ty, Type::Con("Point".into(), vec![]));
 }
@@ -326,12 +336,14 @@ fn record_pattern_with_alias() {
 
 #[test]
 fn annotation_correct() {
-    let checker = check(
-        "fun fib (n: Int) -> Int\nfib 0 = 0\nfib 1 = 1\nfib n = fib (n - 1) + fib (n - 2)",
-    )
-    .unwrap();
+    let checker =
+        check("fun fib (n: Int) -> Int\nfib 0 = 0\nfib 1 = 1\nfib n = fib (n - 1) + fib (n - 2)")
+            .unwrap();
     let ty = checker.sub.apply(&checker.env.get("fib").unwrap().ty);
-    assert_eq!(ty, Type::Arrow(Box::new(Type::int()), Box::new(Type::int())));
+    assert_eq!(
+        ty,
+        Type::Arrow(Box::new(Type::int()), Box::new(Type::int()))
+    );
 }
 
 #[test]
@@ -358,7 +370,10 @@ fn annotation_constrains_polymorphism() {
     // id without annotation is polymorphic; with annotation it's constrained to Int -> Int
     let checker = check("fun myid (x: Int) -> Int\nmyid x = x").unwrap();
     let ty = checker.sub.apply(&checker.env.get("myid").unwrap().ty);
-    assert_eq!(ty, Type::Arrow(Box::new(Type::int()), Box::new(Type::int())));
+    assert_eq!(
+        ty,
+        Type::Arrow(Box::new(Type::int()), Box::new(Type::int()))
+    );
 }
 
 #[test]
@@ -384,9 +399,7 @@ fn pipe_operator() {
 
 #[test]
 fn effect_call_without_needs_is_error() {
-    let result = check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfoo x = fail! \"oops\"",
-    );
+    let result = check("effect Fail {\n  fun fail (msg: String) -> a\n}\nfoo x = fail! \"oops\"");
     assert!(result.is_err());
     let err = result.err().expect("expected error");
     assert!(
@@ -470,9 +483,8 @@ fn effect_propagation_handled_by_caller() {
 #[test]
 fn lambda_effects_propagate_to_enclosing_function() {
     // Effects inside a lambda propagate up to the enclosing function boundary
-    let result = check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfoo x = fun y -> fail! \"oops\"",
-    );
+    let result =
+        check("effect Fail {\n  fun fail (msg: String) -> a\n}\nfoo x = fun y -> fail! \"oops\"");
     assert!(result.is_err());
     let err = result.err().expect("expected error");
     assert!(
@@ -563,7 +575,11 @@ fn impl_missing_method() {
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
-    assert!(err.message.contains("missing method"), "got: {}", err.message);
+    assert!(
+        err.message.contains("missing method"),
+        "got: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -573,7 +589,11 @@ fn impl_extra_method() {
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
-    assert!(err.message.contains("not defined in trait"), "got: {}", err.message);
+    assert!(
+        err.message.contains("not defined in trait"),
+        "got: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -583,7 +603,11 @@ fn impl_wrong_return_type() {
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
-    assert!(err.message.contains("type mismatch"), "got: {}", err.message);
+    assert!(
+        err.message.contains("type mismatch"),
+        "got: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -675,12 +699,14 @@ impl Store for Redis needs {Fail} {
 
 #[test]
 fn impl_for_undefined_trait() {
-    let result = check(
-        "record User { name: String }\nimpl Bogus for User {\n  foo u = u.name\n}",
-    );
+    let result = check("record User { name: String }\nimpl Bogus for User {\n  foo u = u.name\n}");
     assert!(result.is_err());
     let err = result.err().unwrap();
-    assert!(err.message.contains("undefined trait"), "got: {}", err.message);
+    assert!(
+        err.message.contains("undefined trait"),
+        "got: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -695,7 +721,11 @@ main () = describe (User { name: \"Alice\" })",
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
-    assert!(err.message.contains("no impl of Describe for User"), "got: {}", err.message);
+    assert!(
+        err.message.contains("no impl of Describe for User"),
+        "got: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -740,7 +770,8 @@ show_it x = describe x",
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(
-        err.message.contains("trait Describe required but not declared in where clause"),
+        err.message
+            .contains("trait Describe required but not declared in where clause"),
         "got: {}",
         err.message
     );
@@ -1133,11 +1164,13 @@ fn ord_comparison_on_bool_fails() {
 #[test]
 fn ord_constraint_propagates() {
     // Polymorphic function using < should infer Ord constraint
-    assert!(check(
-        "smaller a b = if a < b then a else b
+    assert!(
+        check(
+            "smaller a b = if a < b then a else b
 main () = smaller 1 2"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -1612,6 +1645,78 @@ let x = do {
   n
 } else {
   _ -> 0
+}",
+    )
+    .unwrap();
+}
+
+// --- Unreachable arm detection ---
+
+#[test]
+fn unreachable_duplicate_constructor() {
+    let result = check(
+        "type Maybe a { Just(a) | Nothing }
+let x = case Just 42 {
+  Just(n) -> n
+  Nothing -> 0
+  Just(m) -> m
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("unreachable"));
+    assert!(err.message.contains("Just"));
+}
+
+#[test]
+fn unreachable_after_wildcard() {
+    let result = check(
+        "type Maybe a { Just(a) | Nothing }
+let x = case Just 42 {
+  _ -> 0
+  Just(n) -> n
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("unreachable"));
+}
+
+#[test]
+fn unreachable_wildcard_after_all_covered() {
+    let result = check(
+        "type Maybe a { Just(a) | Nothing }
+let x = case Just 42 {
+  Just(n) -> n
+  Nothing -> 0
+  _ -> 99
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("unreachable"));
+}
+
+#[test]
+fn unreachable_bool_duplicate() {
+    let result = check(
+        "let x = case True {
+  True -> 1
+  False -> 0
+  True -> 2
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("unreachable"));
+    assert!(err.message.contains("True"));
+}
+
+#[test]
+fn guarded_arm_not_redundant() {
+    // A guarded arm followed by an unguarded arm for the same constructor is fine
+    check(
+        "type Maybe a { Just(a) | Nothing }
+let x = case Just 42 {
+  Just(n) if n > 0 -> n
+  Just(n) -> 0
+  Nothing -> 0
 }",
     )
     .unwrap();

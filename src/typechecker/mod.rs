@@ -98,9 +98,11 @@ impl Substitution {
                 }
             }
             Type::Arrow(a, b) => Type::Arrow(Box::new(self.apply(a)), Box::new(self.apply(b))),
-            Type::EffArrow(a, b, effs) => {
-                Type::EffArrow(Box::new(self.apply(a)), Box::new(self.apply(b)), effs.clone())
-            }
+            Type::EffArrow(a, b, effs) => Type::EffArrow(
+                Box::new(self.apply(a)),
+                Box::new(self.apply(b)),
+                effs.clone(),
+            ),
             Type::Con(name, args) => {
                 Type::Con(name.clone(), args.iter().map(|a| self.apply(a)).collect())
             }

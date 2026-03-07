@@ -595,8 +595,8 @@ impl Checker {
 
     // --- Exhaustiveness checking ---
 
-    /// Check whether case arms exhaustively cover an ADT type.
-    /// Returns Err with missing constructors if non-exhaustive.
+    /// Check whether case arms exhaustively cover an ADT type, and detect
+    /// unreachable arms. Returns Err for non-exhaustive matches or redundant arms.
     /// Silently succeeds if the scrutinee type is not a known ADT (e.g. Int, type variable).
     pub(crate) fn check_exhaustiveness(
         &self,
@@ -615,34 +615,83 @@ impl Checker {
         // Look up the constructors for this type
         let all_variants = match self.adt_variants.get(type_name) {
             Some(variants) => variants,
-            None => return Ok(()), // not an ADT (e.g. Int, String, record) -- skip
+            None => {
+                // For primitive types with infinite value sets (Int, Float, String),
+                // require a wildcard/variable fallback if any literal patterns are used.
+                if matches!(type_name.as_str(), "Int" | "Float" | "String") {
+                    let has_lit = arms.iter().any(|arm| matches!(&arm.pattern, Pat::Lit { .. }));
+                    if has_lit {
+                        let has_catchall = arms.iter().any(|arm| {
+                            arm.guard.is_none()
+                                && matches!(&arm.pattern, Pat::Wildcard { .. } | Pat::Var { .. })
+                        });
+                        if !has_catchall {
+                            return Err(TypeError::at(
+                                span,
+                                format!(
+                                    "non-exhaustive pattern match on {}: add a wildcard `_` or variable pattern",
+                                    type_name
+                                ),
+                            ));
+                        }
+                    }
+                }
+                return Ok(());
+            }
         };
 
-        // Check if any unguarded arm is a wildcard/variable (total match)
+        // Walk arms in order, tracking coverage and detecting redundancy.
+        // A wildcard/var after all constructors are covered is redundant.
+        // A constructor that was already covered by a prior unguarded arm is redundant.
+        let mut covered: HashSet<&str> = HashSet::new();
+        let mut seen_catchall = false;
+
         for arm in arms {
+            // Guarded arms don't establish coverage, so they can't make
+            // later arms redundant and can't themselves be redundant.
             if arm.guard.is_some() {
                 continue;
             }
+
             match &arm.pattern {
-                Pat::Wildcard { .. } | Pat::Var { .. } => return Ok(()),
+                Pat::Wildcard { .. } | Pat::Var { .. } => {
+                    if seen_catchall || covered.len() == all_variants.len() {
+                        return Err(TypeError::at(
+                            arm.pattern.span(),
+                            "unreachable pattern: all cases already covered",
+                        ));
+                    }
+                    seen_catchall = true;
+                }
+                Pat::Constructor { name, span, .. } => {
+                    if seen_catchall || covered.contains(name.as_str()) {
+                        return Err(TypeError::at(
+                            *span,
+                            format!("unreachable pattern: {} already covered", name),
+                        ));
+                    }
+                    covered.insert(name.as_str());
+                }
+                Pat::Lit {
+                    value: Lit::Bool(b),
+                    span,
+                } => {
+                    let ctor = if *b { "True" } else { "False" };
+                    if seen_catchall || covered.contains(ctor) {
+                        return Err(TypeError::at(
+                            *span,
+                            format!("unreachable pattern: {} already covered", ctor),
+                        ));
+                    }
+                    covered.insert(ctor);
+                }
                 _ => {}
             }
         }
 
-        // Collect constructor names covered by unguarded arms
-        let covered: HashSet<&str> = arms
-            .iter()
-            .filter(|arm| arm.guard.is_none())
-            .filter_map(|arm| match &arm.pattern {
-                Pat::Constructor { name, .. } => Some(name.as_str()),
-                // Bool literal patterns cover True/False
-                Pat::Lit {
-                    value: Lit::Bool(b),
-                    ..
-                } => Some(if *b { "True" } else { "False" }),
-                _ => None,
-            })
-            .collect();
+        if seen_catchall {
+            return Ok(());
+        }
 
         let missing: Vec<&str> = all_variants
             .iter()
@@ -752,10 +801,7 @@ impl Checker {
             sorted.sort();
             Err(TypeError::at(
                 span,
-                format!(
-                    "non-exhaustive do...else: missing {}",
-                    sorted.join(", ")
-                ),
+                format!("non-exhaustive do...else: missing {}", sorted.join(", ")),
             ))
         }
     }
@@ -789,10 +835,8 @@ impl Checker {
                         format!("undefined handler: {}", name),
                     ));
                 }
-                if let Some((param_var_id, ret_ty)) = self
-                    .handlers
-                    .get(name)
-                    .and_then(|h| h.return_type.clone())
+                if let Some((param_var_id, ret_ty)) =
+                    self.handlers.get(name).and_then(|h| h.return_type.clone())
                 {
                     // Unify the param var with the computation's result type so the
                     // stored return type resolves correctly.

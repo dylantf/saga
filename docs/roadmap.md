@@ -65,8 +65,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
   - [x] Guarded arms conservatively treated as non-covering
   - [x] Do...else exhaustiveness (bail constructors across all bindings)
   - [ ] Nested pattern exhaustiveness (Maranget's usefulness algorithm)
-  - [ ] Redundant / unreachable arm detection
-- [ ] Variable shadowing constraints -- currently silently overwrites; restrict to same type only (shadowing with a different type is a type error)
+  - [x] Redundant / unreachable arm detection
 - [x] `do...else` block -- sequential pattern bindings with explicit success expression (each `Pat <- expr` extracts on match or short-circuits to else; last line without `<-` is the success return value; else arms must unify with success type)
 - [ ] Higher-kinded types (`* -> *`, enables `Functor`, `Applicative`)
 - [ ] `Functor` / `Applicative` traits in stdlib
