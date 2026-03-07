@@ -434,7 +434,7 @@ impl Parser {
                 // Check for record update: { expr | field: val, ... }
                 // We don't start with `let`, so try parsing an expression,
                 // then check if the next token is `|`
-                if !matches!(self.peek(), Token::Let | Token::RBrace | Token::Mut) {
+                if !matches!(self.peek(), Token::Let | Token::RBrace) {
                     let save = self.pos;
                     let first_expr = self.parse_expr(0);
 
@@ -472,10 +472,6 @@ impl Parser {
                     if matches!(self.peek(), Token::Let) {
                         let let_start = self.tokens[self.pos].span;
                         self.advance(); // consume 'let'
-                        let mutable = matches!(self.peek(), Token::Mut);
-                        if mutable {
-                            self.advance(); // consume 'mut'
-                        }
                         let pattern = self.parse_pattern()?;
                         self.expect(Token::Eq)?;
                         let value = self.parse_expr(0)?;
@@ -483,33 +479,10 @@ impl Parser {
                         stmts.push(Stmt::Let {
                             pattern,
                             value,
-                            mutable,
                             span: stmt_span,
                         });
                     } else {
-                        // Parse expression, then check for `<-` assignment
-                        let expr = self.parse_expr(0)?;
-                        if matches!(self.peek(), Token::ArrowBack) {
-                            // name <- value (assignment to mutable binding)
-                            if let Expr::Var { name, .. } = &expr {
-                                let name = name.clone();
-                                self.advance(); // consume '<-'
-                                let value = self.parse_expr(0)?;
-                                let stmt_span = expr.span().to(value.span());
-                                stmts.push(Stmt::Assign {
-                                    name,
-                                    value,
-                                    span: stmt_span,
-                                });
-                            } else {
-                                return Err(ParseError {
-                                    message: "left side of <- must be a variable name".to_string(),
-                                    span: expr.span(),
-                                });
-                            }
-                        } else {
-                            stmts.push(Stmt::Expr(expr));
-                        }
+                        stmts.push(Stmt::Expr(self.parse_expr(0)?));
                     }
                     self.skip_terminators();
                 }

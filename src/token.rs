@@ -34,7 +34,6 @@ pub enum Token {
     Resume,
     Needs,
     For,
-    Mut,
     EffectCall(String),
 
     // Operators
@@ -51,7 +50,6 @@ pub enum Token {
     LtEq,        // <=
     GtEq,        // >=
     Arrow,       // ->
-    ArrowBack,   // <-
     Pipe,        // |>
     PipeBack,    // <|
     Concat,      // <>

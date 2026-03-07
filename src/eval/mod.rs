@@ -26,8 +26,6 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> EvalResult {
         },
 
         Expr::Var { name, .. } => match env.get(name) {
-            // Auto-deref: reading a `let mut` binding returns the inner value
-            Some(Value::Ref(r)) => EvalResult::Ok(r.borrow().clone()),
             Some(value) => EvalResult::Ok(value),
             None => EvalResult::error(format!("Undefined variable: {}", name)),
         },
@@ -273,47 +271,14 @@ fn eval_block_stmts(stmts: &[Stmt], index: usize, env: &Env) -> EvalResult {
     let is_last = index == stmts.len() - 1;
 
     match &stmts[index] {
-        Stmt::Let {
-            pattern,
-            value,
-            mutable,
-            ..
-        } => {
+        Stmt::Let { pattern, value, .. } => {
             let pattern = pattern.clone();
-            let mutable = *mutable;
             let stmts = stmts.to_vec();
             let env = env.clone();
             eval_expr(value, &env).then(move |val| {
-                if mutable {
-                    // Mutable only makes sense for simple variable patterns
-                    if let Pat::Var { name, .. } = &pattern {
-                        env.set(name.clone(), Value::Ref(Rc::new(RefCell::new(val))));
-                    }
-                } else if let Some(bindings) = match_pattern(&pattern, &val) {
+                if let Some(bindings) = match_pattern(&pattern, &val) {
                     for (name, val) in bindings {
                         env.set(name, val);
-                    }
-                }
-                eval_block_stmts(&stmts, index + 1, &env)
-            })
-        }
-        Stmt::Assign { name, value, .. } => {
-            let name = name.clone();
-            let stmts = stmts.to_vec();
-            let env = env.clone();
-            eval_expr(value, &env).then(move |val| {
-                match env.get(&name) {
-                    Some(Value::Ref(r)) => {
-                        *r.borrow_mut() = val;
-                    }
-                    Some(_) => {
-                        return EvalResult::error(format!(
-                            "Cannot assign to '{}': not a mutable binding",
-                            name
-                        ));
-                    }
-                    None => {
-                        return EvalResult::error(format!("Undefined variable: {}", name));
                     }
                 }
                 eval_block_stmts(&stmts, index + 1, &env)
@@ -544,21 +509,11 @@ pub fn eval_decl(decl: &Decl, env: &Env, loader: &ModuleLoader) -> EvalResult {
             EvalResult::Ok(Value::Unit)
         }
 
-        Decl::Let {
-            name,
-            value,
-            mutable,
-            ..
-        } => {
+        Decl::Let { name, value, .. } => {
             let name = name.clone();
-            let mutable = *mutable;
             let env = env.clone();
             eval_expr(value, &env).then(move |val| {
-                if mutable {
-                    env.set(name, Value::Ref(Rc::new(RefCell::new(val))));
-                } else {
-                    env.set(name, val);
-                }
+                env.set(name, val);
                 EvalResult::Ok(Value::Unit)
             })
         }

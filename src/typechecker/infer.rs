@@ -384,10 +384,6 @@ impl Checker {
                     }
                     last_ty = Type::unit();
                 }
-                Stmt::Assign { value, .. } => {
-                    self.infer_expr(value)?;
-                    last_ty = Type::unit();
-                }
                 Stmt::Expr(expr) => {
                     last_ty = self.infer_expr(expr)?;
                 }

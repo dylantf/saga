@@ -108,7 +108,6 @@ fn keyword_prefix_is_ident() {
 fn two_char_operators() {
     assert_eq!(toks("->"), vec![Arrow, Eof]);
     assert_eq!(toks("|>"), vec![Pipe, Eof]);
-    assert_eq!(toks("<-"), vec![ArrowBack, Eof]);
     assert_eq!(toks("<>"), vec![Concat, Eof]);
     assert_eq!(toks("<|"), vec![PipeBack, Eof]);
     assert_eq!(toks("=="), vec![EqEq, Eof]);

@@ -61,8 +61,6 @@ pub enum Value {
     },
 
     Continuation(Rc<RefCell<Option<Continuation>>>),
-
-    Ref(Rc<RefCell<Value>>),
 }
 
 pub(crate) fn value_type_name(v: &Value) -> String {
@@ -157,7 +155,6 @@ impl fmt::Display for Value {
             Value::EffectFn { name, .. } => write!(f, "<effect-fn: {}>", name),
             Value::Handler(h) => write!(f, "{}", h),
             Value::Continuation(_) => write!(f, "<continuation>"),
-            Value::Ref(r) => write!(f, "{}", r.borrow()),
         }
     }
 }

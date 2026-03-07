@@ -38,10 +38,6 @@ impl Parser {
             Token::Let => {
                 let start = self.tokens[self.pos].span;
                 self.advance(); // consume 'let'
-                let mutable = matches!(self.peek(), Token::Mut);
-                if mutable {
-                    self.advance(); // consume 'mut'
-                }
                 let name = self.expect_ident()?;
                 self.expect(Token::Eq)?;
                 let value = self.parse_expr(0)?;
@@ -49,7 +45,6 @@ impl Parser {
                     span: start.to(value.span()),
                     name,
                     value,
-                    mutable,
                 })
             }
             Token::Pub => {
