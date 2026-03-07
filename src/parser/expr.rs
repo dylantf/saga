@@ -165,13 +165,40 @@ impl Parser {
                     }),
                 };
                 let end = self.tokens[self.pos - 1].span;
+                let qspan = Span { start, end: end.end };
+
+                // Qualified record create: `A.Animal { field: val }`
+                // Uses unqualified type name, consistent with how `A.Circle(5)` → Constructor("Circle").
+                if name.chars().next().map_or(false, |c| c.is_uppercase())
+                    && matches!(self.peek(), Token::LBrace)
+                {
+                    self.advance(); // consume '{'
+                    self.skip_terminators();
+                    let mut fields = Vec::new();
+                    while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                        let field_name = self.expect_ident()?;
+                        self.expect(Token::Colon)?;
+                        let value = self.parse_expr(0)?;
+                        fields.push((field_name, value));
+                        if matches!(self.peek(), Token::Comma) {
+                            self.advance();
+                        }
+                        self.skip_terminators();
+                    }
+                    let end = self.tokens[self.pos].span;
+                    self.expect(Token::RBrace)?;
+                    expr = Expr::RecordCreate {
+                        name,
+                        fields,
+                        span: qspan.to(end),
+                    };
+                    continue;
+                }
+
                 expr = Expr::QualifiedName {
                     module,
                     name,
-                    span: Span {
-                        start,
-                        end: end.end,
-                    },
+                    span: qspan,
                 };
                 continue;
             }

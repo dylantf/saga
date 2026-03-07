@@ -192,9 +192,10 @@ main () = print (describe (Shapes.Circle 3.0))
 
 #[test]
 fn cross_module_trait_impl() {
-    // Trait defined in Printable, impl in main -- dispatch must find it
+    // Trait defined in Printable, impl defined locally -- dispatch must find it
+    // `greet` (the method) is what's exported, not the trait name `Greet`
     ok("
-import Printable (Greet)
+import Printable (greet)
 record Dog { name: String }
 impl Greet for Dog {
   greet d = \"Woof, I am \" <> d.name
@@ -206,9 +207,11 @@ main () = print (greet (Dog { name: \"Rex\" }))
 
 #[test]
 fn cross_module_show_impl() {
-    // impl Show for a type defined in Animals, used via show in main
+    // impl Show for Animal defined in Animals module, dispatched in main.
+    // Records have no runtime constructor value -- Animal{} is just syntax.
+    // Importing the module pulls in the mangled __impl_Show_Animal_show name.
     ok("
-import Animals (Animal)
+import Animals
 fun main () -> ()
 main () = {
   let a = Animal { name: \"Rex\", species: \"Dog\" }
@@ -221,11 +224,24 @@ main () = {
 fn cross_module_show_in_interpolation() {
     // impl Show for Animal used implicitly inside string interpolation
     ok("
-import Animals (Animal)
+import Animals
 fun main () -> ()
 main () = {
   let a = Animal { name: \"Rex\", species: \"Dog\" }
   print $\"Animal: {a}\"
+}
+");
+}
+
+#[test]
+fn qualified_record_create() {
+    // A.Animal { ... } should create an Animal record using the unqualified type name
+    ok("
+import Animals as A
+fun main () -> ()
+main () = {
+  let a = A.Animal { name: \"Rex\", species: \"Dog\" }
+  print (show a)
 }
 ");
 }
