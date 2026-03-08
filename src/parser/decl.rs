@@ -690,27 +690,21 @@ impl Parser {
             None
         };
 
-        // Optional: (name1, type Name2, ...) — unqualified imports
+        // Optional: (name1, Name2, ...) — unqualified imports
+        // Capital names are inferred as types and hoist their constructors automatically.
         let exposing = if matches!(self.peek(), Token::LParen) {
             self.advance(); // consume '('
             let mut items = Vec::new();
             while !matches!(self.peek(), Token::RParen | Token::Eof) {
-                let item = if matches!(self.peek(), Token::Type) {
-                    self.advance(); // consume 'type'
-                    let name = self.expect_upper_ident()?;
-                    crate::ast::ExposedItem::Type(name)
-                } else {
-                    let name = match self.peek().clone() {
-                        Token::Ident(n) => { self.advance(); n }
-                        Token::UpperIdent(n) => { self.advance(); n }
-                        tok => return Err(ParseError {
-                            message: format!("expected identifier in import list, got {:?}", tok),
-                            span: self.tokens[self.pos].span,
-                        }),
-                    };
-                    crate::ast::ExposedItem::Value(name)
+                let name = match self.peek().clone() {
+                    Token::Ident(n) => { self.advance(); n }
+                    Token::UpperIdent(n) => { self.advance(); n }
+                    tok => return Err(ParseError {
+                        message: format!("expected identifier in import list, got {:?}", tok),
+                        span: self.tokens[self.pos].span,
+                    }),
                 };
-                items.push(item);
+                items.push(name);
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
                 }

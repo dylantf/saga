@@ -170,35 +170,39 @@ impl Checker {
                 .insert(format!("{}.{}", prefix, name), scheme.clone());
         }
         if let Some(exposed) = exposing {
-            for item in exposed {
-                match item {
-                    crate::ast::ExposedItem::Value(name) => {
-                        let qualified = format!("{}.{}", prefix, name);
-                        match self.env.get(&qualified).cloned() {
-                            Some(scheme) => { self.env.insert(name.clone(), scheme); }
-                            None => {
-                                return Err(TypeError::at(
-                                    span,
-                                    format!("'{}' is not exported by module '{}'", name, prefix),
-                                ));
+            for name in exposed {
+                let is_type = name.chars().next().map_or(false, |c| c.is_uppercase());
+                if is_type {
+                    let mut found = binding_map.contains_key(name.as_str());
+                    // Hoist the type name itself if it's in bindings
+                    if let Some(&scheme) = binding_map.get(name.as_str()) {
+                        self.env.insert(name.clone(), scheme.clone());
+                    }
+                    // Hoist all constructors belonging to this type
+                    if let Some(ctors) = ctors_map.get(name) {
+                        for ctor in ctors {
+                            if let Some(&scheme) = binding_map.get(ctor.as_str()) {
+                                self.env.insert(ctor.clone(), scheme.clone());
+                                self.constructors.insert(ctor.clone(), scheme.clone());
+                                found = true;
                             }
                         }
                     }
-                    crate::ast::ExposedItem::Type(type_name) => {
-                        // Hoist the type name itself if it's in bindings
-                        if let Some(&scheme) = binding_map.get(type_name.as_str()) {
-                            self.env.insert(type_name.clone(), scheme.clone());
-                        }
-                        // Hoist all constructors belonging to this type
-                        if let Some(ctors) = ctors_map.get(type_name) {
-                            for ctor in ctors {
-                                if let Some(&scheme) = binding_map.get(ctor.as_str()) {
-                                    self.env.insert(ctor.clone(), scheme.clone());
-                                    // Also register in self.constructors so bare constructor
-                                    // expressions resolve correctly
-                                    self.constructors.insert(ctor.clone(), scheme.clone());
-                                }
-                            }
+                    if !found {
+                        return Err(TypeError::at(
+                            span,
+                            format!("'{}' is not exported by module '{}'", name, prefix),
+                        ));
+                    }
+                } else {
+                    let qualified = format!("{}.{}", prefix, name);
+                    match self.env.get(&qualified).cloned() {
+                        Some(scheme) => { self.env.insert(name.clone(), scheme); }
+                        None => {
+                            return Err(TypeError::at(
+                                span,
+                                format!("'{}' is not exported by module '{}'", name, prefix),
+                            ));
                         }
                     }
                 }

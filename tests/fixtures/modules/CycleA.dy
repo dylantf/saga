@@ -1,0 +1,5 @@
+module CycleA
+
+import CycleB
+
+pub val_a = 1

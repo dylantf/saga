@@ -11,14 +11,9 @@ pub struct Module {
 
 // --- Declarations ---
 
-/// An item in an import exposing list: `import Foo (bar, type Baz)`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ExposedItem {
-    /// A plain value/function: `import Foo (bar)`
-    Value(String),
-    /// A type and its constructors: `import Foo (type Bar)`
-    Type(String),
-}
+/// An item in an import exposing list: `import Foo (bar, Baz)`.
+/// Capital names are treated as types and hoist their constructors automatically.
+pub type ExposedItem = String;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decl {

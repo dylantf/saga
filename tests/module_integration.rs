@@ -288,6 +288,20 @@ main () = {
 // --- Error cases ---
 
 #[test]
+fn circular_import_gives_error() {
+    let msg = err("
+import CycleA
+fun main () -> ()
+main () = print ()
+");
+    assert!(
+        msg.contains("CycleA") || msg.contains("CycleB") || msg.contains("circular") || msg.contains("cycle"),
+        "expected circular import error, got: {}",
+        msg
+    );
+}
+
+#[test]
 fn missing_module_gives_error() {
     let msg = err("
 import DoesNotExist

@@ -267,40 +267,46 @@ pub(super) fn load_module(
         env.set(format!("{}.{}", prefix, name), val.clone());
     }
 
-    // Inject unqualified bindings from exposing list
+    // Inject unqualified bindings from exposing list.
+    // Capital names are inferred as types: hoist the type + its constructors.
+    // Lowercase names are plain values.
     if let Some(exposed) = exposing {
-        for item in exposed {
-            match item {
-                crate::ast::ExposedItem::Value(name) => {
-                    match public_bindings.get(name) {
-                        Some(val) => env.set(name.clone(), val.clone()),
-                        None => {
-                            return EvalResult::error(format!(
-                                "'{}' is not exported by module '{}'",
-                                name, module_name
-                            ));
-                        }
-                    }
+        for name in exposed {
+            let is_type = name.chars().next().map_or(false, |c| c.is_uppercase());
+            if is_type {
+                // Hoist the type name itself (if exported)
+                let mut found = public_bindings.get(name).is_some();
+                if let Some(val) = public_bindings.get(name) {
+                    env.set(name.clone(), val.clone());
                 }
-                crate::ast::ExposedItem::Type(type_name) => {
-                    // Hoist the type name itself (if exported)
-                    if let Some(val) = public_bindings.get(type_name) {
-                        env.set(type_name.clone(), val.clone());
-                    }
-                    // Hoist all constructors belonging to this type
-                    // by scanning __ctor_type_* entries in public_bindings
-                    let ctor_key = format!("__ctor_type_");
-                    for (k, v) in &public_bindings {
-                        if k.starts_with(&ctor_key) {
-                            if let Value::String(owner) = v {
-                                if owner == type_name {
-                                    let ctor_name = &k[ctor_key.len()..];
-                                    if let Some(ctor_val) = public_bindings.get(ctor_name) {
-                                        env.set(ctor_name.to_string(), ctor_val.clone());
-                                    }
+                // Hoist all constructors belonging to this type
+                for (k, v) in &public_bindings {
+                    if k.starts_with("__ctor_type_") {
+                        if let Value::String(owner) = v {
+                            if owner == name {
+                                let ctor_name = &k["__ctor_type_".len()..];
+                                if let Some(ctor_val) = public_bindings.get(ctor_name) {
+                                    env.set(ctor_name.to_string(), ctor_val.clone());
+                                    found = true;
                                 }
                             }
                         }
+                    }
+                }
+                if !found {
+                    return EvalResult::error(format!(
+                        "'{}' is not exported by module '{}'",
+                        name, module_name
+                    ));
+                }
+            } else {
+                match public_bindings.get(name) {
+                    Some(val) => env.set(name.clone(), val.clone()),
+                    None => {
+                        return EvalResult::error(format!(
+                            "'{}' is not exported by module '{}'",
+                            name, module_name
+                        ));
                     }
                 }
             }
