@@ -231,6 +231,13 @@ filter_pos n = case n {
     assert!(!out.contains("when"), "complex guard must not emit 'when'\n{out}");
 }
 
+// --- Builtins ---
+
+#[test]
+fn show_int_calls_io_lib() {
+    assert_contains("main () = show 42", "call 'io_lib':'format'");
+}
+
 // --- Short-circuit operators ---
 
 #[test]

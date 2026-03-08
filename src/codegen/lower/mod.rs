@@ -87,7 +87,7 @@ impl Lowerer {
             Expr::Lit { value, .. } => CExpr::Lit(lower_lit(value)),
 
             Expr::Var { name, .. } => match name.as_str() {
-                "print" => CExpr::Var("__builtin_print".to_string()),
+                "print" | "show" => CExpr::Var(format!("__builtin_{}", name)),
                 _ => {
                     // If referenced bare (not in application position), emit a FunRef
                     // so it can be passed as a value.
@@ -150,6 +150,28 @@ impl Lowerer {
                             vec![
                                 CExpr::Lit(CLit::Str("~s~n".to_string())),
                                 CExpr::Cons(Box::new(CExpr::Var(arg_var)), Box::new(CExpr::Nil)),
+                            ],
+                        )),
+                    );
+                }
+                // Special case: show builtin -> io_lib:format("~w", [x])
+                if let Expr::Var { name, .. } = func.as_ref()
+                    && name == "show"
+                {
+                    let arg_var = self.fresh();
+                    let arg_ce = self.lower_expr(arg);
+                    return CExpr::Let(
+                        arg_var.clone(),
+                        Box::new(arg_ce),
+                        Box::new(CExpr::Call(
+                            "io_lib".to_string(),
+                            "format".to_string(),
+                            vec![
+                                CExpr::Lit(CLit::Str("~w".to_string())),
+                                CExpr::Cons(
+                                    Box::new(CExpr::Var(arg_var)),
+                                    Box::new(CExpr::Nil),
+                                ),
                             ],
                         )),
                     );
