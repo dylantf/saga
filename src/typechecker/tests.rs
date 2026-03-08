@@ -1060,6 +1060,17 @@ fn num_arithmetic_on_float() {
 }
 
 #[test]
+fn mod_on_float_fails() {
+    let result = check("main () = 1.0 % 2.0");
+    assert!(result.is_err());
+}
+
+#[test]
+fn mod_on_int_works() {
+    assert!(check("main () = 7 % 3").is_ok());
+}
+
+#[test]
 fn num_arithmetic_on_string_fails() {
     let result = check("main () = \"a\" + \"b\"");
     assert!(result.is_err());

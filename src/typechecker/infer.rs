@@ -85,11 +85,16 @@ impl Checker {
                 let left_ty = self.infer_expr(left)?;
                 let right_ty = self.infer_expr(right)?;
                 match op {
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                         self.unify_at(&left_ty, &right_ty, *span)?;
                         self.pending_constraints
                             .push(("Num".into(), left_ty.clone(), *span));
                         Ok(left_ty)
+                    }
+                    BinOp::Mod => {
+                        self.unify_at(&left_ty, &Type::int(), *span)?;
+                        self.unify_at(&right_ty, &Type::int(), *span)?;
+                        Ok(Type::int())
                     }
                     BinOp::Eq | BinOp::NotEq => {
                         self.unify_at(&left_ty, &right_ty, *span)?;
