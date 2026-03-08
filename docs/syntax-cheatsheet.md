@@ -225,6 +225,47 @@ $"Show \{ literal brace"
 
 ---
 
+## Multiline Strings
+
+```
+# Triple-quoted strings allow literal newlines
+let sql = """
+    SELECT *
+    FROM users
+    WHERE age > 30
+    """
+# Result: "SELECT *\nFROM users\nWHERE age > 30"
+# Indentation is stripped based on the column of the closing """
+
+# Escape sequences work the same as regular strings
+let msg = """
+    hello\tworld
+    """
+
+# Multiline interpolated strings
+let report = $"""
+    Name: {user.name}
+    Age:  {user.age}
+    """
+```
+
+---
+
+## Raw Strings
+
+```
+# r prefix disables escape processing
+r"hello\nworld"       # literal backslash-n, not a newline
+
+# Raw multiline strings
+r"""
+    no \n escapes here either
+    backslashes are \ literal
+    """
+```
+
+---
+
 ## Effects
 
 ```

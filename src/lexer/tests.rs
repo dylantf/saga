@@ -324,3 +324,167 @@ fn spans_are_correct() {
     assert_eq!(tokens[0].span, Span { start: 0, end: 2 });
     assert_eq!(tokens[1].span, Span { start: 3, end: 5 });
 }
+
+// --- Raw strings ---
+
+#[test]
+fn raw_string_simple() {
+    assert_eq!(toks(r#"r"hello""#), vec![String("hello".into()), Eof]);
+}
+
+#[test]
+fn raw_string_no_escapes() {
+    // \n and \t should be literal backslash + letter, not escape sequences
+    assert_eq!(
+        toks(r#"r"hello\nworld\t""#),
+        vec![String("hello\\nworld\\t".into()), Eof]
+    );
+}
+
+#[test]
+fn raw_string_empty() {
+    assert_eq!(toks(r#"r"""#), vec![String("".into()), Eof]);
+}
+
+#[test]
+fn raw_string_unterminated() {
+    let result = Lexer::new(r#"r"oops"#).lex();
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().message, "unterminated raw string");
+}
+
+#[test]
+fn r_alone_is_ident() {
+    assert_eq!(toks("r"), vec![Ident("r".into()), Eof]);
+}
+
+#[test]
+fn r_space_quote_is_two_tokens() {
+    assert_eq!(
+        toks(r#"r "hello""#),
+        vec![Ident("r".into()), String("hello".into()), Eof]
+    );
+}
+
+// --- Multiline strings ---
+
+#[test]
+fn multiline_string_basic() {
+    let src = "\"\"\"\n    hello\n    world\n    \"\"\"";
+    assert_eq!(toks(src), vec![String("hello\nworld".into()), Eof]);
+}
+
+#[test]
+fn multiline_string_empty() {
+    assert_eq!(toks("\"\"\"\"\"\""), vec![String("".into()), Eof]);
+}
+
+#[test]
+fn multiline_string_single_line() {
+    assert_eq!(
+        toks("\"\"\"hello\"\"\""),
+        vec![String("hello".into()), Eof]
+    );
+}
+
+#[test]
+fn multiline_string_escapes() {
+    // \t inside multiline string should produce a tab character
+    let src = "\"\"\"\n    hello\\tworld\n    \"\"\"";
+    assert_eq!(
+        toks(src),
+        vec![String("hello\tworld".into()), Eof]
+    );
+}
+
+#[test]
+fn multiline_string_unterminated() {
+    let result = Lexer::new("\"\"\"oops").lex();
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().message, "unterminated multiline string");
+}
+
+#[test]
+fn multiline_string_preserves_relative_indent() {
+    // Content indented more than closing """ should keep the extra indent
+    let src = "\"\"\"\n        deep\n    shallow\n    \"\"\"";
+    assert_eq!(
+        toks(src),
+        vec![String("    deep\nshallow".into()), Eof]
+    );
+}
+
+#[test]
+fn multiline_string_blank_lines() {
+    let src = "\"\"\"\n    hello\n\n    world\n    \"\"\"";
+    assert_eq!(
+        toks(src),
+        vec![String("hello\n\nworld".into()), Eof]
+    );
+}
+
+#[test]
+fn multiline_string_no_terminator_for_inner_newlines() {
+    // Newlines inside the multiline string should not produce Terminator tokens
+    let src = "\"\"\"\n    hello\n    world\n    \"\"\"";
+    let tokens = toks(src);
+    assert!(!tokens.contains(&Terminator));
+}
+
+// --- Raw multiline strings ---
+
+#[test]
+fn raw_multiline_string_basic() {
+    let src = "r\"\"\"\n    hello\\nworld\n    \"\"\"";
+    // \n should be literal backslash-n, not a newline
+    assert_eq!(
+        toks(src),
+        vec![String("hello\\nworld".into()), Eof]
+    );
+}
+
+#[test]
+fn raw_multiline_string_empty() {
+    assert_eq!(toks("r\"\"\"\"\"\""), vec![String("".into()), Eof]);
+}
+
+#[test]
+fn raw_multiline_string_unterminated() {
+    let result = Lexer::new("r\"\"\"oops").lex();
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().message,
+        "unterminated raw multiline string"
+    );
+}
+
+// --- Multiline interpolated strings ---
+
+#[test]
+fn multiline_interp_basic() {
+    let src = "$\"\"\"\n    hello {name}\n    \"\"\"";
+    let tokens = toks(src);
+    // Should produce InterpolatedString with stripped indentation
+    assert!(matches!(&tokens[0], InterpolatedString(_)));
+    if let InterpolatedString(parts) = &tokens[0] {
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], InterpPart::Literal("hello ".into()));
+        // parts[1] is a Hole containing the `name` tokens
+        if let InterpPart::Hole(hole_tokens) = &parts[1] {
+            assert_eq!(hole_tokens.len(), 1);
+            assert_eq!(hole_tokens[0].token, Ident("name".into()));
+        } else {
+            panic!("expected Hole");
+        }
+    }
+}
+
+#[test]
+fn multiline_interp_unterminated() {
+    let result = Lexer::new("$\"\"\"oops {x}").lex();
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().message,
+        "unterminated multiline interpolated string"
+    );
+}

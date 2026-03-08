@@ -1,5 +1,116 @@
 use crate::token::{InterpPart, Span, Spanned, Token};
 
+/// Strip leading indentation from a multiline string based on the column of the closing `"""`.
+/// - The first element (empty string from newline after opening `"""`) is removed.
+/// - The last element (whitespace-only line containing closing `"""`) is removed.
+/// - `indent` leading spaces/tabs are stripped from each remaining line.
+fn strip_indentation(s: &str, indent: usize) -> String {
+    let mut lines: Vec<&str> = s.split('\n').collect();
+
+    // Remove leading empty line (newline immediately after opening """)
+    if lines.first() == Some(&"") {
+        lines.remove(0);
+    }
+
+    // Remove trailing whitespace-only line (the line with closing """)
+    if let Some(last) = lines.last()
+        && last.chars().all(|c| c == ' ' || c == '\t')
+    {
+        lines.pop();
+    }
+
+    // Strip `indent` leading whitespace chars from each line
+    lines
+        .iter()
+        .map(|line| {
+            let mut chars = line.chars();
+            for _ in 0..indent {
+                match chars.clone().next() {
+                    Some(' ') | Some('\t') => {
+                        chars.next();
+                    }
+                    _ => break,
+                }
+            }
+            chars.as_str()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Apply indentation stripping to interpolated string parts.
+/// Strips the leading empty line (after opening """), trailing whitespace-only line
+/// (before closing """), and `indent` leading spaces from each line within literals.
+fn strip_indentation_interp(parts: &mut Vec<InterpPart>, indent: usize) {
+    // Concatenate all literals (using a placeholder for holes) so we can identify
+    // line structure, then strip and redistribute.
+    // Simpler approach: process each literal's lines, stripping indent at line starts.
+
+    // First, remove leading newline from first literal (newline after opening """)
+    if let Some(InterpPart::Literal(s)) = parts.first_mut()
+        && s.starts_with('\n')
+    {
+        *s = s[1..].to_string();
+    }
+
+    // Remove trailing whitespace-only content from last literal (line with closing """)
+    if let Some(InterpPart::Literal(s)) = parts.last_mut() {
+        if let Some(last_nl) = s.rfind('\n') {
+            let after = &s[last_nl + 1..];
+            if after.chars().all(|c| c == ' ' || c == '\t') {
+                *s = s[..last_nl].to_string();
+            }
+        } else if s.chars().all(|c| c == ' ' || c == '\t') {
+            *s = String::new();
+        }
+    }
+
+    // Strip `indent` spaces after every newline within each literal
+    for part in parts.iter_mut() {
+        if let InterpPart::Literal(s) = part {
+            let mut result = String::new();
+            let mut lines = s.split('\n');
+            if let Some(first) = lines.next() {
+                // First line of each literal: only strip if it's the very first part
+                // We handle this by stripping from the first segment's first line below
+                result.push_str(first);
+            }
+            for line in lines {
+                result.push('\n');
+                // Strip indent spaces from start of line
+                let mut chars = line.chars();
+                for _ in 0..indent {
+                    match chars.clone().next() {
+                        Some(' ') | Some('\t') => {
+                            chars.next();
+                        }
+                        _ => break,
+                    }
+                }
+                result.push_str(chars.as_str());
+            }
+            *s = result;
+        }
+    }
+
+    // Strip indent from the very first literal's first line
+    if let Some(InterpPart::Literal(s)) = parts.first_mut() {
+        let mut chars = s.chars();
+        for _ in 0..indent {
+            match chars.clone().next() {
+                Some(' ') | Some('\t') => {
+                    chars.next();
+                }
+                _ => break,
+            }
+        }
+        *s = chars.collect();
+    }
+
+    // Remove empty literals
+    parts.retain(|p| !matches!(p, InterpPart::Literal(s) if s.is_empty()));
+}
+
 pub struct Lexer {
     source: Vec<char>,
     pos: usize,
@@ -31,6 +142,24 @@ impl Lexer {
 
     fn peek_next(&self) -> Option<char> {
         self.source.get(self.pos + 1).copied()
+    }
+
+    fn peek_ahead(&self, n: usize) -> Option<char> {
+        self.source.get(self.pos + n).copied()
+    }
+
+    /// Compute the 0-based column of `pos` by scanning back to the last newline.
+    fn column_of(&self, pos: usize) -> usize {
+        let mut col = 0;
+        let mut i = pos;
+        while i > 0 {
+            i -= 1;
+            if self.source[i] == '\n' {
+                return col;
+            }
+            col += 1;
+        }
+        col
     }
 
     fn advance(&mut self) -> Option<char> {
@@ -284,6 +413,196 @@ impl Lexer {
         }
     }
 
+    // Read a raw string: r"..." — no escape processing.
+    // Called after consuming `r`. Consumes the opening `"`.
+    fn read_raw_string(&mut self, start: usize) -> Result<Token, LexError> {
+        self.advance(); // consume opening "
+        let mut s = String::new();
+        loop {
+            match self.peek() {
+                None | Some('\n') => {
+                    return Err(LexError {
+                        message: "unterminated raw string".to_string(),
+                        pos: start,
+                    });
+                }
+                Some('"') => {
+                    self.advance();
+                    return Ok(Token::String(s));
+                }
+                Some(ch) => {
+                    s.push(ch);
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    // Read a raw multiline string: r"""...""" — no escape processing, with indentation stripping.
+    // Called after consuming `r"""`.
+    fn read_raw_multiline_string(&mut self, start: usize) -> Result<Token, LexError> {
+        let mut s = String::new();
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(LexError {
+                        message: "unterminated raw multiline string".to_string(),
+                        pos: start,
+                    });
+                }
+                Some('"') if self.peek_next() == Some('"') && self.peek_ahead(2) == Some('"') => {
+                    let close_col = self.column_of(self.pos);
+                    self.advance(); // "
+                    self.advance(); // "
+                    self.advance(); // "
+                    return Ok(Token::String(strip_indentation(&s, close_col)));
+                }
+                Some(ch) => {
+                    s.push(ch);
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    // Read a multiline string: """...""" — with escape processing and indentation stripping.
+    // Called after consuming the opening `"""`.
+    fn read_multiline_string(&mut self, start: usize) -> Result<Token, LexError> {
+        let mut s = String::new();
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(LexError {
+                        message: "unterminated multiline string".to_string(),
+                        pos: start,
+                    });
+                }
+                Some('"') if self.peek_next() == Some('"') && self.peek_ahead(2) == Some('"') => {
+                    let close_col = self.column_of(self.pos);
+                    self.advance(); // "
+                    self.advance(); // "
+                    self.advance(); // "
+                    return Ok(Token::String(strip_indentation(&s, close_col)));
+                }
+                Some('\\') => {
+                    self.advance();
+                    match self.advance() {
+                        Some('n') => s.push('\n'),
+                        Some('t') => s.push('\t'),
+                        Some('\\') => s.push('\\'),
+                        Some('"') => s.push('"'),
+                        Some(ch) => s.push(ch),
+                        None => {
+                            return Err(LexError {
+                                message: "unterminated escape sequence".to_string(),
+                                pos: start,
+                            });
+                        }
+                    }
+                }
+                Some(ch) => {
+                    s.push(ch);
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    // Read a multiline interpolated string: $"""..."""
+    // Called after consuming `$"""`.
+    fn read_multiline_interp_string(&mut self, start: usize) -> Result<Token, LexError> {
+        let mut parts: Vec<InterpPart> = Vec::new();
+        let mut literal = String::new();
+
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(LexError {
+                        message: "unterminated multiline interpolated string".to_string(),
+                        pos: start,
+                    });
+                }
+                Some('"') if self.peek_next() == Some('"') && self.peek_ahead(2) == Some('"') => {
+                    let close_col = self.column_of(self.pos);
+                    self.advance(); // "
+                    self.advance(); // "
+                    self.advance(); // "
+                    if !literal.is_empty() {
+                        parts.push(InterpPart::Literal(literal));
+                    }
+                    // Apply indentation stripping to literal parts
+                    strip_indentation_interp(&mut parts, close_col);
+                    return Ok(Token::InterpolatedString(parts));
+                }
+                Some('\\') => {
+                    self.advance();
+                    match self.advance() {
+                        Some('n') => literal.push('\n'),
+                        Some('t') => literal.push('\t'),
+                        Some('\\') => literal.push('\\'),
+                        Some('"') => literal.push('"'),
+                        Some(ch) => literal.push(ch),
+                        None => {
+                            return Err(LexError {
+                                message: "unterminated escape sequence".to_string(),
+                                pos: start,
+                            });
+                        }
+                    }
+                }
+                Some('{') => {
+                    self.advance();
+                    if !literal.is_empty() {
+                        parts.push(InterpPart::Literal(std::mem::take(&mut literal)));
+                    }
+                    let mut hole_src = String::new();
+                    let mut depth: usize = 1;
+                    loop {
+                        match self.peek() {
+                            None => {
+                                return Err(LexError {
+                                    message: "unterminated interpolation hole".to_string(),
+                                    pos: start,
+                                });
+                            }
+                            Some('{') => {
+                                depth += 1;
+                                hole_src.push('{');
+                                self.advance();
+                            }
+                            Some('}') => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    self.advance();
+                                    break;
+                                }
+                                hole_src.push('}');
+                                self.advance();
+                            }
+                            Some(ch) => {
+                                hole_src.push(ch);
+                                self.advance();
+                            }
+                        }
+                    }
+                    let hole_tokens = Lexer::new(&hole_src).lex().map_err(|e| LexError {
+                        message: format!("in interpolation hole: {}", e.message),
+                        pos: start,
+                    })?;
+                    let hole_tokens: Vec<Spanned> = hole_tokens
+                        .into_iter()
+                        .filter(|t| t.token != Token::Eof)
+                        .collect();
+                    parts.push(InterpPart::Hole(hole_tokens));
+                }
+                Some(ch) => {
+                    literal.push(ch);
+                    self.advance();
+                }
+            }
+        }
+    }
+
     // Should we emit a terminator token right now?
     // Only at nesting depth 0, and only after tokens that "end" an expression.
     fn should_emit_terminator(&self, prev: &Option<Token>) -> bool {
@@ -338,21 +657,54 @@ impl Lexer {
                     self.skip_comment();
                 }
                 Some('"') => {
-                    let tok = self.read_string()?;
+                    let tok = if self.peek_next() == Some('"') && self.peek_ahead(2) == Some('"') {
+                        self.advance(); // "
+                        self.advance(); // "
+                        self.advance(); // "
+                        self.read_multiline_string(start)?
+                    } else {
+                        self.read_string()?
+                    };
                     let (spanned, tok) = self.emit(tok, start);
                     tokens.push(spanned);
                     prev_token = Some(tok);
                 }
                 Some('$') if self.peek_next() == Some('"') => {
-                    self.advance(); // consume `$`
-                    self.advance(); // consume `"`
-                    let tok = self.read_interp_string(start)?;
+                    let tok = if self.peek_ahead(2) == Some('"') && self.peek_ahead(3) == Some('"')
+                    {
+                        self.advance(); // $
+                        self.advance(); // "
+                        self.advance(); // "
+                        self.advance(); // "
+                        self.read_multiline_interp_string(start)?
+                    } else {
+                        self.advance(); // $
+                        self.advance(); // "
+                        self.read_interp_string(start)?
+                    };
                     let (spanned, tok) = self.emit(tok, start);
                     tokens.push(spanned);
                     prev_token = Some(tok);
                 }
                 Some(ch) if ch.is_ascii_digit() => {
                     let tok = self.read_number();
+                    let (spanned, tok) = self.emit(tok, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
+                }
+                // r"..." raw string or r"""...""" raw multiline string
+                Some('r') if self.peek_next() == Some('"') => {
+                    let tok = if self.peek_ahead(2) == Some('"') && self.peek_ahead(3) == Some('"')
+                    {
+                        self.advance(); // r
+                        self.advance(); // "
+                        self.advance(); // "
+                        self.advance(); // "
+                        self.read_raw_multiline_string(start)?
+                    } else {
+                        self.advance(); // r
+                        self.read_raw_string(start)?
+                    };
                     let (spanned, tok) = self.emit(tok, start);
                     tokens.push(spanned);
                     prev_token = Some(tok);

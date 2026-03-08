@@ -1,0 +1,62 @@
+# String syntax showcase
+
+main () = {
+  # Regular strings
+  let greeting = "hello, world"
+  print greeting
+
+  # String interpolation
+  let name = "Dylan"
+  let age = 30
+  print $"Name: {name}, Age: {show age}"
+
+  # Multiline strings (indentation stripped based on closing """)
+  let poem = """
+    Roses are red,
+    Violets are blue,
+    Multiline strings are neat,
+    And so are you.
+    """
+  print poem
+
+  # Multiline with preserved relative indentation
+  let code = """
+    if x > 0 then
+      print "positive"
+    else
+      print "non-positive"
+    """
+  print code
+
+  # Escape sequences work in multiline strings
+  let with_tabs = """
+    col1\tcol2\tcol3
+    a\tb\tc
+    """
+  print with_tabs
+
+  # Raw strings (no escape processing)
+  let path = r"C:\Users\dylan\documents"
+  print path
+
+  # Raw multiline strings
+  let regex_notes = r"""
+    Common patterns:
+    \d+     one or more digits
+    \s*     zero or more whitespace
+    [a-z]+  one or more lowercase letters
+    """
+  print regex_notes
+
+  # Multiline interpolated strings
+  let x = 10
+  let y = 20
+  let report = $"""
+    Calculation Report
+    ==================
+    x = {show x}
+    y = {show y}
+    sum = {show (x + y)}
+    """
+  print report
+}
