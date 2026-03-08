@@ -473,6 +473,51 @@ fn pattern_negative_in_case() {
 }
 
 #[test]
+fn pattern_string_literal() {
+    let pat = parse_pattern("\"hello\"");
+    assert!(matches!(
+        pat,
+        Pat::Lit {
+            value: Lit::String(s),
+            ..
+        } if s == "hello"
+    ));
+}
+
+#[test]
+fn pattern_string_prefix() {
+    let pat = parse_pattern("\"hello \" <> rest");
+    match pat {
+        Pat::StringPrefix { prefix, rest, .. } => {
+            assert_eq!(prefix, "hello ");
+            assert!(matches!(*rest, Pat::Var { name, .. } if name == "rest"));
+        }
+        _ => panic!("expected StringPrefix, got {:?}", pat),
+    }
+}
+
+#[test]
+fn pattern_string_prefix_in_case() {
+    let expr = parse_expr(
+        "case msg { \"[ERROR]: \" <> detail -> detail; _ -> \"unknown\" }",
+    );
+    match expr {
+        Expr::Case { arms, .. } => {
+            assert_eq!(arms.len(), 2);
+            assert!(matches!(&arms[0].pattern, Pat::StringPrefix { prefix, .. } if prefix == "[ERROR]: "));
+        }
+        _ => panic!("expected Case"),
+    }
+}
+
+#[test]
+fn pattern_string_concat_requires_literal_on_left() {
+    let tokens = Lexer::new("x <> \"suffix\"").lex().unwrap();
+    let result = Parser::new(tokens).parse_pattern();
+    assert!(result.is_err());
+}
+
+#[test]
 fn pattern_bare_constructor() {
     let pat = parse_pattern("None");
     match pat {

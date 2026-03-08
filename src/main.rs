@@ -38,16 +38,18 @@ fn parse_and_typecheck(
     let tokens = match lexer::Lexer::new(source).lex() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("Lex error at byte {}: {}", e.pos, e.message);
+            let (line, col) = byte_offset_to_line_col(source, e.pos);
+            eprintln!("Lex error at {}:{}:{}: {}", source_path, line, col, e.message);
             std::process::exit(1);
         }
     };
     let program = match parser::Parser::new(tokens).parse_program() {
         Ok(p) => p,
         Err(e) => {
+            let (line, col) = byte_offset_to_line_col(source, e.span.start);
             eprintln!(
-                "Parse error at {}..{}: {}",
-                e.span.start, e.span.end, e.message
+                "Parse error at {}:{}:{}: {}",
+                source_path, line, col, e.message
             );
             std::process::exit(1);
         }

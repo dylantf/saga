@@ -1046,6 +1046,14 @@ pub(crate) fn match_pattern(pattern: &Pat, value: &Value) -> Option<HashMap<Stri
             }
             _ => None,
         },
+
+        Pat::StringPrefix { prefix, rest, .. } => match value {
+            Value::String(s) if s.starts_with(prefix.as_str()) => {
+                let remainder = Value::String(s[prefix.len()..].to_string());
+                match_pattern(rest, &remainder)
+            }
+            _ => None,
+        },
     }
 }
 

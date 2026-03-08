@@ -54,6 +54,16 @@ first_two xs = case xs {
   _ -> "fewer than two elements"
 }
 
+# String patterns:
+# Note: Wildcard always required for strings for exhaustiveness
+classify_log msg = case msg {
+  "[ERROR]: " <> detail -> "Error: " <> detail
+  "[WARN]: " <> detail -> "Warning: " <> detail
+  "[INFO]: " <> detail -> "Info: " <> detail
+  "hello" -> "greeting!"
+  _ -> "unknown: " <> msg
+}
+
 main () = {
   # Custom type patterns
   let c = Circle(5.0)
@@ -79,4 +89,10 @@ main () = {
 
   first_two [10, 20, 30] |> print
   first_two [5] |> print
+
+  # String patterns
+  classify_log "[ERROR]: disk full" |> print
+  classify_log "[WARN]: low memory" |> print
+  classify_log "hello" |> print
+  classify_log "something else" |> print
 }

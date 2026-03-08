@@ -298,6 +298,13 @@ pub enum Pat {
 
     /// `(a, b)`, `(x, y, z)`
     Tuple { elements: Vec<Pat>, span: Span },
+
+    /// `"prefix" <> rest` -- string prefix pattern
+    StringPrefix {
+        prefix: String,
+        rest: Box<Pat>,
+        span: Span,
+    },
 }
 
 impl Pat {
@@ -308,7 +315,8 @@ impl Pat {
             | Pat::Lit { span, .. }
             | Pat::Constructor { span, .. }
             | Pat::Record { span, .. }
-            | Pat::Tuple { span, .. } => *span,
+            | Pat::Tuple { span, .. }
+            | Pat::StringPrefix { span, .. } => *span,
         }
     }
 }

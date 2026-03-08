@@ -81,6 +81,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `not` operator (boolean negation)
 - [x] Negative number literals in patterns (`case x { -1 -> ... }`)
 - [x] Dict type
+- [ ] String-splitting desugaring for pattern matching on strings, e.g. "foo" <> rest
 - [ ] Split prelude into stdlib modules (`List`, `Maybe`, `Result`)
 - [ ] Char type?
 - [ ] Range syntax

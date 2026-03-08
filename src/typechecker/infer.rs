@@ -595,6 +595,11 @@ impl Checker {
                 }
                 Ok(())
             }
+
+            Pat::StringPrefix { rest, span, .. } => {
+                self.unify_at(ty, &Type::string(), *span)?;
+                self.bind_pattern(rest, &Type::string())
+            }
         }
     }
 

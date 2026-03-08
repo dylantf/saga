@@ -191,6 +191,13 @@ case user {
   User { name, age } -> name
   User { name: n } -> n   # field alias
 }
+
+# String patterns
+case msg {
+  "hello" -> "exact match"
+  "[ERROR]: " <> detail -> detail   # prefix split
+  _ -> "unknown"                    # required (strings are infinite)
+}
 ```
 
 ---

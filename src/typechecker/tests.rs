@@ -2105,3 +2105,27 @@ f d = Dict.member \"a\" d"
     )
     .is_ok());
 }
+
+#[test]
+fn string_literal_pattern() {
+    assert!(check(
+        "fun f (s: String) -> Int
+f s = case s {
+  \"hello\" -> 1
+  _ -> 0
+}"
+    )
+    .is_ok());
+}
+
+#[test]
+fn string_prefix_pattern() {
+    assert!(check(
+        "fun f (s: String) -> String
+f s = case s {
+  \"prefix\" <> rest -> rest
+  _ -> s
+}"
+    )
+    .is_ok());
+}

@@ -19,6 +19,32 @@ impl Parser {
             });
         }
 
+        // "prefix" <> rest  -> StringPrefix(prefix, rest)  (right-associative)
+        if matches!(self.peek(), Token::Concat) {
+            self.advance(); // consume <>
+            match pat {
+                Pat::Lit {
+                    value: Lit::String(prefix),
+                    ..
+                } => {
+                    let rest = self.parse_pattern()?;
+                    let end = self.tokens[self.pos - 1].span;
+                    return Ok(Pat::StringPrefix {
+                        prefix,
+                        rest: Box::new(rest),
+                        span: start.to(end),
+                    });
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "string concat pattern requires a string literal on the left"
+                            .to_string(),
+                        span: start,
+                    });
+                }
+            }
+        }
+
         Ok(pat)
     }
 
@@ -104,6 +130,10 @@ impl Parser {
                     })
                 }
             },
+            Token::String(s) => Ok(Pat::Lit {
+                value: Lit::String(s),
+                span,
+            }),
             Token::Int(n) => Ok(Pat::Lit {
                 value: Lit::Int(n),
                 span,

@@ -59,6 +59,11 @@ pub(crate) fn simplify_pat(pat: &Pat) -> SPat {
             // (record exhaustiveness would require field-level analysis)
             SPat::Wildcard
         }
+        Pat::StringPrefix { .. } => {
+            // String prefix patterns are non-covering (infinite string domain)
+            // Treat as wildcard so exhaustiveness requires a catch-all arm
+            SPat::Wildcard
+        }
     }
 }
 
