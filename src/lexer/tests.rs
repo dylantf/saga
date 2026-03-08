@@ -329,41 +329,28 @@ fn spans_are_correct() {
 
 #[test]
 fn raw_string_simple() {
-    assert_eq!(toks(r#"r"hello""#), vec![String("hello".into()), Eof]);
+    assert_eq!(toks(r#"@"hello""#), vec![String("hello".into()), Eof]);
 }
 
 #[test]
 fn raw_string_no_escapes() {
     // \n and \t should be literal backslash + letter, not escape sequences
     assert_eq!(
-        toks(r#"r"hello\nworld\t""#),
+        toks(r#"@"hello\nworld\t""#),
         vec![String("hello\\nworld\\t".into()), Eof]
     );
 }
 
 #[test]
 fn raw_string_empty() {
-    assert_eq!(toks(r#"r"""#), vec![String("".into()), Eof]);
+    assert_eq!(toks(r#"@"""#), vec![String("".into()), Eof]);
 }
 
 #[test]
 fn raw_string_unterminated() {
-    let result = Lexer::new(r#"r"oops"#).lex();
+    let result = Lexer::new(r#"@"oops"#).lex();
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().message, "unterminated raw string");
-}
-
-#[test]
-fn r_alone_is_ident() {
-    assert_eq!(toks("r"), vec![Ident("r".into()), Eof]);
-}
-
-#[test]
-fn r_space_quote_is_two_tokens() {
-    assert_eq!(
-        toks(r#"r "hello""#),
-        vec![Ident("r".into()), String("hello".into()), Eof]
-    );
 }
 
 // --- Multiline strings ---
@@ -435,7 +422,7 @@ fn multiline_string_no_terminator_for_inner_newlines() {
 
 #[test]
 fn raw_multiline_string_basic() {
-    let src = "r\"\"\"\n    hello\\nworld\n    \"\"\"";
+    let src = "@\"\"\"\n    hello\\nworld\n    \"\"\"";
     // \n should be literal backslash-n, not a newline
     assert_eq!(
         toks(src),
@@ -445,12 +432,12 @@ fn raw_multiline_string_basic() {
 
 #[test]
 fn raw_multiline_string_empty() {
-    assert_eq!(toks("r\"\"\"\"\"\""), vec![String("".into()), Eof]);
+    assert_eq!(toks("@\"\"\"\"\"\""), vec![String("".into()), Eof]);
 }
 
 #[test]
 fn raw_multiline_string_unterminated() {
-    let result = Lexer::new("r\"\"\"oops").lex();
+    let result = Lexer::new("@\"\"\"oops").lex();
     assert!(result.is_err());
     assert_eq!(
         result.unwrap_err().message,

@@ -413,8 +413,8 @@ impl Lexer {
         }
     }
 
-    // Read a raw string: r"..." — no escape processing.
-    // Called after consuming `r`. Consumes the opening `"`.
+    // Read a raw string: @"..." — no escape processing.
+    // Called after consuming `@`. Consumes the opening `"`.
     fn read_raw_string(&mut self, start: usize) -> Result<Token, LexError> {
         self.advance(); // consume opening "
         let mut s = String::new();
@@ -438,8 +438,8 @@ impl Lexer {
         }
     }
 
-    // Read a raw multiline string: r"""...""" — no escape processing, with indentation stripping.
-    // Called after consuming `r"""`.
+    // Read a raw multiline string: @"""...""" — no escape processing, with indentation stripping.
+    // Called after consuming `@"""`.
     fn read_raw_multiline_string(&mut self, start: usize) -> Result<Token, LexError> {
         let mut s = String::new();
         loop {
@@ -692,17 +692,17 @@ impl Lexer {
                     tokens.push(spanned);
                     prev_token = Some(tok);
                 }
-                // r"..." raw string or r"""...""" raw multiline string
-                Some('r') if self.peek_next() == Some('"') => {
+                // @"..." raw string or @"""...""" raw multiline string
+                Some('@') if self.peek_next() == Some('"') => {
                     let tok = if self.peek_ahead(2) == Some('"') && self.peek_ahead(3) == Some('"')
                     {
-                        self.advance(); // r
+                        self.advance(); // @
                         self.advance(); // "
                         self.advance(); // "
                         self.advance(); // "
                         self.read_raw_multiline_string(start)?
                     } else {
-                        self.advance(); // r
+                        self.advance(); // @
                         self.read_raw_string(start)?
                     };
                     let (spanned, tok) = self.emit(tok, start);

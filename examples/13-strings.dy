@@ -36,11 +36,11 @@ main () = {
   print with_tabs
 
   # Raw strings (no escape processing)
-  let path = r"C:\Users\dylan\documents"
+  let path = @"C:\Users\dylan\documents"
   print path
 
   # Raw multiline strings
-  let regex_notes = r"""
+  let regex_notes = @"""
     Common patterns:
     \d+     one or more digits
     \s*     zero or more whitespace

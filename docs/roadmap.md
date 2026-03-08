@@ -85,7 +85,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [ ] Split prelude into stdlib modules (`List`, `Maybe`, `Result`)
 - [ ] Number literal separators
 - [x] Multiline strings (`"""..."""`, `$"""..."""`)
-- [x] Raw strings (`r"..."`, `r"""..."""`)
+- [x] Raw strings (`@"..."`, `@"""..."""`)
 - [ ] Regular expressions
 - [ ] List comprehensions
 - [ ] Conversion builtins (`to_string`, `to_int`, `to_float`)

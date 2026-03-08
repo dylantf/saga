@@ -254,11 +254,11 @@ let report = $"""
 ## Raw Strings
 
 ```
-# r prefix disables escape processing
-r"hello\nworld"       # literal backslash-n, not a newline
+# @ prefix disables escape processing
+@"hello\nworld"       # literal backslash-n, not a newline
 
 # Raw multiline strings
-r"""
+@"""
     no \n escapes here either
     backslashes are \ literal
     """

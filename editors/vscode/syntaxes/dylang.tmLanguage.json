@@ -4,6 +4,7 @@
   "scopeName": "source.dylang",
   "patterns": [
     { "include": "#comment" },
+    { "include": "#string-raw" },
     { "include": "#string-interp" },
     { "include": "#string" },
     { "include": "#number" },
@@ -28,6 +29,17 @@
           "match": "#.*$"
         }
       ]
+    },
+    "string-raw": {
+      "name": "string.quoted.double.raw.dylang",
+      "begin": "@\"",
+      "end": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.raw.begin.dylang" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.dylang" }
+      }
     },
     "string": {
       "name": "string.quoted.double.dylang",

@@ -746,12 +746,14 @@ The `$` prefix establishes a general string prefix system:
 | -------------- | -------------------------------- | -------- |
 | `"..."`        | Plain string, backslash escapes  | Done     |
 | `$"..."`       | Interpolated string              | Done     |
-| `r"..."`       | Raw string, no escape processing | Planned  |
-| `"""..."""`    | Multiline plain string           | Planned  |
-| `$"""..."""`   | Multiline interpolated string    | Planned  |
+| `@"..."`       | Raw string, no escape processing | Done     |
+| `"""..."""`    | Multiline plain string           | Done     |
+| `@"""..."""`   | Raw multiline string             | Done     |
+| `$"""..."""`   | Multiline interpolated string    | Done     |
 
-`r"..."` and `$"..."` are mutually exclusive (raw strings disable `\{`,
-which is needed for escaping in interpolated strings).
+`@"..."` and `$"..."` are mutually exclusive (raw strings disable `\{`,
+which is needed for escaping in interpolated strings). The `r"..."` prefix
+is reserved for future regex literal support.
 
 ---
 
