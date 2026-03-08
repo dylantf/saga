@@ -80,9 +80,16 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 - [x] `not` operator (boolean negation)
 - [x] Negative number literals in patterns (`case x { -1 -> ... }`)
+- [x] Dict type
+- [ ] Split prelude into stdlib modules (`List`, `Maybe`, `Result`)
+- [ ] Char type?
+- [ ] Range syntax
+- [ ] Number literal separators
+- [ ] Multiline strings `""" """` ?
+- [ ] Raw strings (`r""` ?)
+- [ ] List comprehensions
 - [ ] Conversion builtins (`to_string`, `to_int`, `to_float`)
 - [ ] String operations (`string_length`, `string_split`, `string_chars`, etc.)
-- [ ] Split prelude into stdlib modules (`List`, `Maybe`, `Result`)
 - [ ] More list functions (`zip`, `range`, `take`, `drop`, `any`, `all`)
 
 ## Backend

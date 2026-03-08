@@ -608,6 +608,216 @@ impl Checker {
                 span: None,
             }, // handled specially in check_pending_constraints
         );
+
+        // --- Dict type ---
+
+        // Show for Dict k v: requires Show on both k and v
+        self.trait_impls.insert(
+            ("Show".into(), "Dict".into()),
+            ImplInfo {
+                param_constraints: vec![("Show".into(), 0), ("Show".into(), 1)],
+                span: None,
+            },
+        );
+        // Eq for Dict k v: requires Eq on both k and v
+        self.trait_impls.insert(
+            ("Eq".into(), "Dict".into()),
+            ImplInfo {
+                param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],
+                span: None,
+            },
+        );
+
+        // Dict.empty : forall k v. Dict k v
+        {
+            let k = self.fresh_var();
+            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let v = self.fresh_var();
+            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            self.env.insert(
+                "Dict.empty".into(),
+                Scheme {
+                    forall: vec![k_id, v_id],
+                    constraints: vec![],
+                    ty: Type::Con("Dict".into(), vec![k, v]),
+                },
+            );
+        }
+
+        // Dict.get : forall k v. Eq k => k -> Dict k v -> Maybe v
+        {
+            let k = self.fresh_var();
+            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let v = self.fresh_var();
+            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v.clone()]);
+            let maybe_v = Type::Con("Maybe".into(), vec![v]);
+            self.env.insert(
+                "Dict.get".into(),
+                Scheme {
+                    forall: vec![k_id, v_id],
+                    constraints: vec![("Eq".into(), k_id)],
+                    ty: Type::Arrow(
+                        Box::new(k),
+                        Box::new(Type::Arrow(Box::new(dict_kv), Box::new(maybe_v))),
+                    ),
+                },
+            );
+        }
+
+        // Dict.put : forall k v. Eq k => k -> v -> Dict k v -> Dict k v
+        {
+            let k = self.fresh_var();
+            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let v = self.fresh_var();
+            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v.clone()]);
+            self.env.insert(
+                "Dict.put".into(),
+                Scheme {
+                    forall: vec![k_id, v_id],
+                    constraints: vec![("Eq".into(), k_id)],
+                    ty: Type::Arrow(
+                        Box::new(k),
+                        Box::new(Type::Arrow(
+                            Box::new(v),
+                            Box::new(Type::Arrow(Box::new(dict_kv.clone()), Box::new(dict_kv))),
+                        )),
+                    ),
+                },
+            );
+        }
+
+        // Dict.remove : forall k v. Eq k => k -> Dict k v -> Dict k v
+        {
+            let k = self.fresh_var();
+            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let v = self.fresh_var();
+            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v.clone()]);
+            self.env.insert(
+                "Dict.remove".into(),
+                Scheme {
+                    forall: vec![k_id, v_id],
+                    constraints: vec![("Eq".into(), k_id)],
+                    ty: Type::Arrow(
+                        Box::new(k),
+                        Box::new(Type::Arrow(Box::new(dict_kv.clone()), Box::new(dict_kv))),
+                    ),
+                },
+            );
+        }
+
+        // Dict.keys : forall k v. Dict k v -> List k
+        {
+            let k = self.fresh_var();
+            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let v = self.fresh_var();
+            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v]);
+            let list_k = Type::Con("List".into(), vec![k]);
+            self.env.insert(
+                "Dict.keys".into(),
+                Scheme {
+                    forall: vec![k_id, v_id],
+                    constraints: vec![],
+                    ty: Type::Arrow(Box::new(dict_kv), Box::new(list_k)),
+                },
+            );
+        }
+
+        // Dict.values : forall k v. Dict k v -> List v
+        {
+            let k = self.fresh_var();
+            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let v = self.fresh_var();
+            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let dict_kv = Type::Con("Dict".into(), vec![k, v.clone()]);
+            let list_v = Type::Con("List".into(), vec![v]);
+            self.env.insert(
+                "Dict.values".into(),
+                Scheme {
+                    forall: vec![k_id, v_id],
+                    constraints: vec![],
+                    ty: Type::Arrow(Box::new(dict_kv), Box::new(list_v)),
+                },
+            );
+        }
+
+        // Dict.size : forall k v. Dict k v -> Int
+        {
+            let k = self.fresh_var();
+            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let v = self.fresh_var();
+            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let dict_kv = Type::Con("Dict".into(), vec![k, v]);
+            self.env.insert(
+                "Dict.size".into(),
+                Scheme {
+                    forall: vec![k_id, v_id],
+                    constraints: vec![],
+                    ty: Type::Arrow(Box::new(dict_kv), Box::new(Type::int())),
+                },
+            );
+        }
+
+        // Dict.from_list : forall k v. Eq k => List (k, v) -> Dict k v
+        {
+            let k = self.fresh_var();
+            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let v = self.fresh_var();
+            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let tuple_kv = Type::Con("Tuple".into(), vec![k.clone(), v.clone()]);
+            let list_kv = Type::Con("List".into(), vec![tuple_kv]);
+            let dict_kv = Type::Con("Dict".into(), vec![k, v]);
+            self.env.insert(
+                "Dict.from_list".into(),
+                Scheme {
+                    forall: vec![k_id, v_id],
+                    constraints: vec![("Eq".into(), k_id)],
+                    ty: Type::Arrow(Box::new(list_kv), Box::new(dict_kv)),
+                },
+            );
+        }
+
+        // Dict.to_list : forall k v. Dict k v -> List (k, v)
+        {
+            let k = self.fresh_var();
+            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let v = self.fresh_var();
+            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v.clone()]);
+            let tuple_kv = Type::Con("Tuple".into(), vec![k, v]);
+            let list_kv = Type::Con("List".into(), vec![tuple_kv]);
+            self.env.insert(
+                "Dict.to_list".into(),
+                Scheme {
+                    forall: vec![k_id, v_id],
+                    constraints: vec![],
+                    ty: Type::Arrow(Box::new(dict_kv), Box::new(list_kv)),
+                },
+            );
+        }
+
+        // Dict.member : forall k v. Eq k => k -> Dict k v -> Bool
+        {
+            let k = self.fresh_var();
+            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let v = self.fresh_var();
+            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v]);
+            self.env.insert(
+                "Dict.member".into(),
+                Scheme {
+                    forall: vec![k_id, v_id],
+                    constraints: vec![("Eq".into(), k_id)],
+                    ty: Type::Arrow(
+                        Box::new(k),
+                        Box::new(Type::Arrow(Box::new(dict_kv), Box::new(Type::bool()))),
+                    ),
+                },
+            );
+        }
     }
 
     // --- Unification ---

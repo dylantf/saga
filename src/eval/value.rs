@@ -52,7 +52,13 @@ pub enum Value {
 
     Handler(HandlerVal),
 
-    BuiltIn(String),
+    Dict(Vec<(Value, Value)>),
+
+    BuiltIn {
+        name: String,
+        arity: usize,
+        args: Vec<Value>,
+    },
 
     TraitMethod {
         trait_name: String,
@@ -72,7 +78,27 @@ pub(crate) fn value_type_name(v: &Value) -> String {
         Value::Unit => "Unit".into(),
         Value::Record { name, .. } => name.clone(),
         Value::Constructor { name, .. } => name.clone(),
+        Value::Dict(_) => "Dict".into(),
         _ => "<unknown>".into(),
+    }
+}
+
+pub(crate) fn value_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Int(a), Value::Int(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) => a == b,
+        (Value::String(a), Value::String(b)) => a == b,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Unit, Value::Unit) => true,
+        (
+            Value::Constructor {
+                name: n1, args: a1, ..
+            },
+            Value::Constructor {
+                name: n2, args: a2, ..
+            },
+        ) => n1 == n2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| value_eq(x, y)),
+        _ => false,
     }
 }
 
@@ -109,7 +135,17 @@ impl fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Unit => write!(f, "()"),
             Value::Closure { .. } => write!(f, "<function>"),
-            Value::BuiltIn(name) => write!(f, "<built-in: {}>", name),
+            Value::Dict(entries) => {
+                write!(f, "Dict.from_list [")?;
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "({}, {})", k, v)?;
+                }
+                write!(f, "]")
+            }
+            Value::BuiltIn { name, .. } => write!(f, "<built-in: {}>", name),
             Value::TraitMethod { method_name, .. } => {
                 write!(f, "<trait-method: {}>", method_name)
             }

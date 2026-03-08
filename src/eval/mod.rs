@@ -481,7 +481,18 @@ fn apply(func: Value, arg: Value) -> EvalResult {
             }
         }
 
-        Value::BuiltIn(name) => eval_builtin(&name, arg),
+        Value::BuiltIn {
+            name,
+            arity,
+            mut args,
+        } => {
+            args.push(arg);
+            if args.len() >= arity {
+                eval_builtin(&name, args)
+            } else {
+                EvalResult::Ok(Value::BuiltIn { name, arity, args })
+            }
+        }
 
         Value::TraitMethod {
             trait_name,
@@ -701,17 +712,169 @@ pub fn eval_decl(decl: &Decl, env: &Env, loader: &ModuleLoader) -> EvalResult {
 
 // --- Builtin functions ---
 
-fn eval_builtin(name: &str, arg: Value) -> EvalResult {
+fn eval_builtin(name: &str, args: Vec<Value>) -> EvalResult {
     match name {
         "print" => {
-            println!("{}", arg);
+            println!("{}", args[0]);
             EvalResult::Ok(Value::Unit)
         }
-        "show" => EvalResult::Ok(Value::String(format!("{}", arg))),
-        "panic" => EvalResult::error(format!("panic: {}", arg)),
-        "todo" => EvalResult::error(format!("not implemented: {}", arg)),
+        "show" => EvalResult::Ok(Value::String(format!("{}", args[0]))),
+        "panic" => EvalResult::error(format!("panic: {}", args[0])),
+        "todo" => EvalResult::error(format!("not implemented: {}", args[0])),
+
+        // --- Dict operations ---
+        "Dict.get" => {
+            let key = &args[0];
+            if let Value::Dict(entries) = &args[1] {
+                for (k, v) in entries {
+                    if value::value_eq(key, k) {
+                        return EvalResult::Ok(Value::Constructor {
+                            name: "Some".into(),
+                            arity: 1,
+                            args: vec![v.clone()],
+                        });
+                    }
+                }
+                EvalResult::Ok(Value::Constructor {
+                    name: "None".into(),
+                    arity: 0,
+                    args: vec![],
+                })
+            } else {
+                EvalResult::error("Dict.get: expected a Dict")
+            }
+        }
+        "Dict.put" => {
+            let key = args[0].clone();
+            let val = args[1].clone();
+            if let Value::Dict(entries) = &args[2] {
+                let mut new_entries: Vec<(Value, Value)> = entries
+                    .iter()
+                    .filter(|(k, _)| !value::value_eq(&key, k))
+                    .cloned()
+                    .collect();
+                new_entries.push((key, val));
+                EvalResult::Ok(Value::Dict(new_entries))
+            } else {
+                EvalResult::error("Dict.put: expected a Dict")
+            }
+        }
+        "Dict.remove" => {
+            let key = &args[0];
+            if let Value::Dict(entries) = &args[1] {
+                let new_entries: Vec<(Value, Value)> = entries
+                    .iter()
+                    .filter(|(k, _)| !value::value_eq(key, k))
+                    .cloned()
+                    .collect();
+                EvalResult::Ok(Value::Dict(new_entries))
+            } else {
+                EvalResult::error("Dict.remove: expected a Dict")
+            }
+        }
+        "Dict.keys" => {
+            if let Value::Dict(entries) = &args[0] {
+                let keys: Vec<Value> = entries.iter().map(|(k, _)| k.clone()).collect();
+                EvalResult::Ok(vec_to_list(keys))
+            } else {
+                EvalResult::error("Dict.keys: expected a Dict")
+            }
+        }
+        "Dict.values" => {
+            if let Value::Dict(entries) = &args[0] {
+                let vals: Vec<Value> = entries.iter().map(|(_, v)| v.clone()).collect();
+                EvalResult::Ok(vec_to_list(vals))
+            } else {
+                EvalResult::error("Dict.values: expected a Dict")
+            }
+        }
+        "Dict.size" => {
+            if let Value::Dict(entries) = &args[0] {
+                EvalResult::Ok(Value::Int(entries.len() as i64))
+            } else {
+                EvalResult::error("Dict.size: expected a Dict")
+            }
+        }
+        "Dict.from_list" => {
+            let mut entries: Vec<(Value, Value)> = Vec::new();
+            let mut cur = &args[0];
+            loop {
+                match cur {
+                    Value::Constructor { name, args, .. } if name == "Nil" => break,
+                    Value::Constructor { name, args, .. }
+                        if name == "Cons" && args.len() == 2 =>
+                    {
+                        if let Value::Constructor {
+                            name: tname,
+                            args: targs,
+                            ..
+                        } = &args[0]
+                        {
+                            if tname == "Tuple" && targs.len() == 2 {
+                                let key = targs[0].clone();
+                                // Remove existing entry with same key
+                                entries.retain(|(k, _)| !value::value_eq(&key, k));
+                                entries.push((key, targs[1].clone()));
+                            } else {
+                                return EvalResult::error(
+                                    "Dict.from_list: expected list of (k, v) tuples",
+                                );
+                            }
+                        } else {
+                            return EvalResult::error(
+                                "Dict.from_list: expected list of (k, v) tuples",
+                            );
+                        }
+                        cur = &args[1];
+                    }
+                    _ => return EvalResult::error("Dict.from_list: expected a List"),
+                }
+            }
+            EvalResult::Ok(Value::Dict(entries))
+        }
+        "Dict.to_list" => {
+            if let Value::Dict(entries) = &args[0] {
+                let tuples: Vec<Value> = entries
+                    .iter()
+                    .map(|(k, v)| Value::Constructor {
+                        name: "Tuple".into(),
+                        arity: 2,
+                        args: vec![k.clone(), v.clone()],
+                    })
+                    .collect();
+                EvalResult::Ok(vec_to_list(tuples))
+            } else {
+                EvalResult::error("Dict.to_list: expected a Dict")
+            }
+        }
+        "Dict.member" => {
+            let key = &args[0];
+            if let Value::Dict(entries) = &args[1] {
+                let found = entries.iter().any(|(k, _)| value::value_eq(key, k));
+                EvalResult::Ok(Value::Bool(found))
+            } else {
+                EvalResult::error("Dict.member: expected a Dict")
+            }
+        }
+
         _ => EvalResult::error(format!("Unknown builtin {}", name)),
     }
+}
+
+fn vec_to_list(items: Vec<Value>) -> Value {
+    let mut result = Value::Constructor {
+        name: "Nil".into(),
+        arity: 0,
+        args: vec![],
+    };
+    for item in items.into_iter().rev() {
+        result = Value::Constructor {
+            name: "Cons".into(),
+            arity: 2,
+            args: vec![item, result],
+        };
+    }
+    result
 }
 
 // --- Binary operators ---

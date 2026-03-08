@@ -410,6 +410,48 @@ do {
 
 ---
 
+## Dictionaries
+
+```
+# Built-in Dict k v type. Keys require Eq. All operations are immutable.
+
+# Empty dict
+let d = Dict.empty
+
+# Create from list of tuples
+let ages = Dict.from_list [("alice", 30), ("bob", 25)]
+
+# Lookup (returns Maybe v)
+Dict.get "alice" ages        # Some(30)
+Dict.get "unknown" ages      # None
+
+# Insert / update
+let ages2 = Dict.put "charlie" 35 ages
+
+# Remove
+let ages3 = Dict.remove "bob" ages
+
+# Membership
+Dict.member "alice" ages     # True
+
+# Size
+Dict.size ages               # 2
+
+# Keys and values (as Lists)
+Dict.keys ages               # ["alice", "bob"]
+Dict.values ages             # [30, 25]
+
+# Round-trip through list of tuples
+Dict.to_list ages            # [("alice", 30), ("bob", 25)]
+
+# Pipe-friendly
+Dict.empty
+  |> Dict.put "x" 1
+  |> Dict.put "y" 2
+```
+
+---
+
 ## Builtins
 
 ```
@@ -418,7 +460,7 @@ panic "unreachable"
 todo "implement this"
 
 # Built-in traits: Show, Eq, Ord, Num
-# Built-in types: Int, Float, String, Bool, Unit, Never
+# Built-in types: Int, Float, String, Bool, Unit, Never, Dict k v
 # Literals: 42, 3.14, "hello", True, False, ()
 # Unit value: ()
 ```
