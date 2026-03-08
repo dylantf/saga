@@ -11,6 +11,15 @@ pub struct Module {
 
 // --- Declarations ---
 
+/// An item in an import exposing list: `import Foo (bar, type Baz)`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExposedItem {
+    /// A plain value/function: `import Foo (bar)`
+    Value(String),
+    /// A type and its constructors: `import Foo (type Bar)`
+    Type(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decl {
     /// `pub fun add (a: Int) (b: Int) -> Int needs {Log} where {a: Show + Eq}`
@@ -104,7 +113,7 @@ pub enum Decl {
     Import {
         module_path: Vec<String>,
         alias: Option<String>,
-        exposing: Option<Vec<String>>,
+        exposing: Option<Vec<ExposedItem>>,
         span: Span,
     },
 

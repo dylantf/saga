@@ -2,31 +2,31 @@ main () = {
   let nums = [1, 2, 3, 4, 5]
   show nums |> print
 
-  let doubled = map (fun x -> x * 2) nums
+  let doubled = List.map (fun x -> x * 2) nums
   show doubled |> print
 
-  let evens = filter (fun x -> x % 2 == 0) nums
+  let evens = List.filter (fun x -> x % 2 == 0) nums
   show evens |> print
 
-  let total = foldl (fun acc x -> acc + x) 0 nums
+  let total = List.foldl (fun acc x -> acc + x) 0 nums
   show total |> print
 
-  let summed = foldr (fun x acc -> acc + x) 0 nums
+  let summed = List.foldr (fun x acc -> acc + x) 0 nums
   show summed |> print
 
-  let rev = reverse nums
+  let rev = List.reverse nums
   show rev |> print
 
-  let appended = append [1, 2] [3, 4]
+  let appended = List.append [1, 2] [3, 4]
   show appended |> print
 
-  let h = head nums
+  let h = List.head nums
   show h |> print
 
-  let t = tail nums
+  let t = List.tail nums
   show t |> print
 
-  let len = length nums
+  let len = List.length nums
   show len |> print
 
   let words = ["hello", "world"]

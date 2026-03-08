@@ -55,11 +55,11 @@ main () = {
 
   # Pipe results through transformations
   let d = try (fun () -> safe_div 42 6)
-    |> result_map (fun x -> x * 10)
+    |> Result.map (fun x -> x * 10)
   print ("piped ok: " <> show d)
 
   let e = try (fun () -> safe_div 42 0)
-    |> result_map (fun x -> x * 10)
-    |> result_map_err (fun msg -> "FAILED: " <> msg)
+    |> Result.map (fun x -> x * 10)
+    |> Result.map_err (fun msg -> "FAILED: " <> msg)
   print ("piped err: " <> show e)
 }

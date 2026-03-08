@@ -1,0 +1,24 @@
+module Maybe
+
+pub type Maybe a {
+  None
+  Some(a)
+}
+
+pub fun map (f: a -> b) (m: Maybe a) -> Maybe b
+map f m = case m {
+  None -> None
+  Some(x) -> Some(f x)
+}
+
+pub fun unwrap_or (default: a) (m: Maybe a) -> a
+unwrap_or default m = case m {
+  None -> default
+  Some(x) -> x
+}
+
+pub fun and_then (f: a -> Maybe b) (m: Maybe a) -> Maybe b
+and_then f m = case m {
+  None -> None
+  Some(x) -> f x
+}

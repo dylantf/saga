@@ -1084,6 +1084,7 @@ pub fn eval_program(program: &Program, loader: &ModuleLoader) -> EvalResult {
     eval_decls(&prelude, 0, &base_env, &loader).then(move |_| {
         // Cache base_env in the loader so imported modules extend it instead
         // of re-evaluating builtins + prelude from scratch.
+        // Set after prelude so user modules see builtins + prelude.
         loader.0.borrow_mut().base_env = base_env.clone();
 
         // Main program gets its own child frame so its bindings don't

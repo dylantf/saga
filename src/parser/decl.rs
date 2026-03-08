@@ -690,27 +690,34 @@ impl Parser {
             None
         };
 
-        // Optional: (name1, Name2, ...) — unqualified imports (lowercase or uppercase)
+        // Optional: (name1, type Name2, ...) — unqualified imports
         let exposing = if matches!(self.peek(), Token::LParen) {
             self.advance(); // consume '('
-            let mut names = Vec::new();
+            let mut items = Vec::new();
             while !matches!(self.peek(), Token::RParen | Token::Eof) {
-                let name = match self.peek().clone() {
-                    Token::Ident(n) => { self.advance(); n }
-                    Token::UpperIdent(n) => { self.advance(); n }
-                    tok => return Err(ParseError {
-                        message: format!("expected identifier in import list, got {:?}", tok),
-                        span: self.tokens[self.pos].span,
-                    }),
+                let item = if matches!(self.peek(), Token::Type) {
+                    self.advance(); // consume 'type'
+                    let name = self.expect_upper_ident()?;
+                    crate::ast::ExposedItem::Type(name)
+                } else {
+                    let name = match self.peek().clone() {
+                        Token::Ident(n) => { self.advance(); n }
+                        Token::UpperIdent(n) => { self.advance(); n }
+                        tok => return Err(ParseError {
+                            message: format!("expected identifier in import list, got {:?}", tok),
+                            span: self.tokens[self.pos].span,
+                        }),
+                    };
+                    crate::ast::ExposedItem::Value(name)
                 };
-                names.push(name);
+                items.push(item);
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
                 }
             }
             let end = self.tokens[self.pos].span;
             self.expect(Token::RParen)?;
-            Some((names, end))
+            Some((items, end))
         } else {
             None
         };
@@ -719,7 +726,7 @@ impl Parser {
         Ok(Decl::Import {
             module_path,
             alias,
-            exposing: exposing.map(|(names, _)| names),
+            exposing: exposing.map(|(items, _)| items),
             span: start.to(end),
         })
     }

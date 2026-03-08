@@ -321,6 +321,8 @@ pub struct Checker {
     pub(crate) project_root: Option<std::path::PathBuf>,
     /// Cache of already-typechecked modules: module name -> public type bindings.
     pub(crate) tc_loaded: HashMap<String, Vec<(String, Scheme)>>,
+    /// Cache of type->constructors maps for already-typechecked modules.
+    pub(crate) tc_type_ctors: HashMap<String, HashMap<String, Vec<String>>>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) tc_loading: HashSet<String>,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
@@ -353,6 +355,7 @@ impl Checker {
             where_bounds: HashMap::new(),
             project_root: None,
             tc_loaded: HashMap::new(),
+            tc_type_ctors: HashMap::new(),
             tc_loading: HashSet::new(),
             adt_variants: HashMap::new(),
         };

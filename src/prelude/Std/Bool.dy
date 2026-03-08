@@ -1,0 +1,5 @@
+module Bool
+
+pub fun not (x: Bool) -> Bool
+not True = False
+not False = True

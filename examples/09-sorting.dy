@@ -5,7 +5,7 @@ insert_sorted x xs = case xs {
   h :: t -> if x <= h then x :: xs else h :: insert_sorted x t
 }
 
-insertion_sort xs = foldl (fun sorted x -> insert_sorted x sorted) [] xs
+insertion_sort xs = List.foldl (fun sorted x -> insert_sorted x sorted) [] xs
 
 # --- Bubble sort ---
 
@@ -21,16 +21,16 @@ bubble_times n xs =
   if n == 0 then xs
   else bubble_times (n - 1) (bubble_pass xs)
 
-bubblesort xs = bubble_times (length xs) xs
+bubblesort xs = bubble_times (List.length xs) xs
 
 # --- Quicksort ---
 
 quicksort xs = case xs {
   [] -> []
   h :: t -> {
-    let smaller = filter (fun x -> x <= h) t
-    let larger = filter (fun x -> x > h) t
-    append (quicksort smaller) (h :: quicksort larger)
+    let smaller = List.filter (fun x -> x <= h) t
+    let larger = List.filter (fun x -> x > h) t
+    List.append (quicksort smaller) (h :: quicksort larger)
   }
 }
 

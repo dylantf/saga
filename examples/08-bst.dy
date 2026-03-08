@@ -22,11 +22,11 @@ contains t x = case t {
 # In-order traversal produces a sorted list
 to_list t = case t {
   Empty -> []
-  Node(l, v, r) -> append (to_list l) (v :: to_list r)
+  Node(l, v, r) -> List.append (to_list l) (v :: to_list r)
 }
 
 main () = {
-  let t = foldl insert Empty [5, 3, 7, 1, 4, 6, 8]
+  let t = List.foldl insert Empty [5, 3, 7, 1, 4, 6, 8]
 
   # In-order traversal should give sorted output
   show (to_list t) |> print

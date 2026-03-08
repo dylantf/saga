@@ -1,0 +1,7 @@
+import Std.Bool as Bool (not)
+import Std.Maybe as Maybe (type Maybe)
+import Std.Result as Result (type Result)
+import Std.List as List
+
+fst (x, _) = x
+snd (_, y) = y

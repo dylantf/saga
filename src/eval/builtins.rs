@@ -1,7 +1,7 @@
 use super::value::{Env, Value};
 use crate::ast::Program;
 
-pub(super) fn register_builtins(env: &Env) {
+pub(crate) fn register_builtins(env: &Env) {
     env.set(
         "print".to_string(),
         Value::TraitMethod {
@@ -76,7 +76,7 @@ pub(super) fn register_builtins(env: &Env) {
 }
 
 pub(super) fn parse_prelude() -> Program {
-    let src = include_str!("../prelude.dy");
+    let src = include_str!("../prelude/prelude.dy");
     let tokens = crate::lexer::Lexer::new(src)
         .lex()
         .expect("prelude lex error");

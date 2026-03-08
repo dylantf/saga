@@ -1,3 +1,6 @@
+# An example of how to get applicative chaining style validation
+# through a Validate effect with continuations holding an accumulator
+
 effect Validate {
   fun invalid (err: String) -> Unit
 }
@@ -22,6 +25,17 @@ handler collecting for Validate {
   return v -> (v, [])
 }
 
+impl Show for ValidUser {
+  show u = $"{u.name}, age {u.age}"
+}
+
+impl Show for Validation e a where {e: Show, a: Show} {
+  show v = case v {
+    Valid(x) -> $"Valid: {x}"
+    Invalid(e) -> $"Invalid: {e}"
+  }
+}
+
 fun validate_user (input: UserInput) -> Validation (List String) ValidUser
 validate_user input = {
   let (v, errs) = {
@@ -36,17 +50,9 @@ validate_user input = {
   }
 }
 
-show_errors errs = foldl (fun acc e -> acc <> "\n  - " <> e) "" errs
-
-fun show_result (r: Validation (List String) ValidUser) -> String
-show_result r = case r {
-  Valid(user)   -> $"Valid: {user.name}, age {user.age}"
-  Invalid(errs) -> $"Invalid: {show_errors errs}"
-}
-
 main () = {
-  validate_user UserInput { name: "Alice", age: 25 } |> show_result |> print
-  validate_user UserInput { name: "", age: 25 } |> show_result |> print
-  validate_user UserInput { name: "Bob", age: 15 } |> show_result |> print
-  validate_user UserInput { name: "", age: 15 } |> show_result |> print
+  validate_user UserInput { name: "Alice", age: 25 } |> print
+  validate_user UserInput { name: "", age: 25 } |> print
+  validate_user UserInput { name: "Bob", age: 15 } |> print
+  validate_user UserInput { name: "", age: 15 } |> print
 }

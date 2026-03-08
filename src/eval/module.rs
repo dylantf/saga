@@ -56,9 +56,11 @@ fn public_names(program: &[Decl]) -> HashSet<String> {
             }
             Decl::TypeDef {
                 public: true,
+                name,
                 variants,
                 ..
             } => {
+                names.insert(name.clone());
                 for v in variants {
                     names.insert(v.name.clone());
                     names.insert(format!("__ctor_type_{}", v.name));
@@ -118,26 +120,44 @@ fn check_filename_case(file_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Returns the embedded source for a builtin stdlib module, if it exists.
+fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
+    if module_path.len() == 2 && module_path[0] == "Std" {
+        match module_path[1].as_str() {
+            "Maybe"  => Some(include_str!("../prelude/Std/Maybe.dy")),
+            "Result" => Some(include_str!("../prelude/Std/Result.dy")),
+            "List"   => Some(include_str!("../prelude/Std/List.dy")),
+            "Bool"   => Some(include_str!("../prelude/Std/Bool.dy")),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
 /// Load, evaluate, and inject a module's public bindings into `env`.
 pub(super) fn load_module(
     module_path: &[String],
     alias: Option<&str>,
-    exposing: Option<&[String]>,
+    exposing: Option<&[crate::ast::ExposedItem]>,
     env: &Env,
     loader: &ModuleLoader,
 ) -> EvalResult {
     let module_name = module_path.join(".");
     let prefix = alias.unwrap_or(&module_name);
 
+    let is_builtin = builtin_module_source(module_path).is_some();
+
     let project_root = {
         let inner = loader.0.borrow();
         match &inner.project_root {
-            None => {
+            None if !is_builtin => {
                 return EvalResult::error(
                     "imports are not supported in script mode (run without a filename to use project mode)",
                 );
             }
-            Some(root) => root.clone(),
+            Some(root) => Some(root.clone()),
+            None => None,
         }
     };
 
@@ -151,23 +171,28 @@ pub(super) fn load_module(
     let public_bindings = if let Some(bindings) = cached {
         bindings
     } else {
-        // Resolve path: Foo.Bar -> <root>/Foo/Bar.dy
-        let rel: PathBuf = module_path.iter().collect();
-        let file_path = project_root.join(rel).with_extension("dy");
+        // Resolve source: builtin modules are embedded, others read from disk
+        let source = if let Some(src) = builtin_module_source(module_path) {
+            src.to_string()
+        } else {
+            let root = project_root.as_ref().unwrap();
+            let rel: PathBuf = module_path.iter().collect();
+            let file_path = root.join(rel).with_extension("dy");
 
-        if let Err(e) = check_filename_case(&file_path) {
-            return EvalResult::error(e);
-        }
+            if let Err(e) = check_filename_case(&file_path) {
+                return EvalResult::error(e);
+            }
 
-        let source = match std::fs::read_to_string(&file_path) {
-            Ok(s) => s,
-            Err(e) => {
-                return EvalResult::error(format!(
-                    "cannot read module '{}' ({}): {}",
-                    module_name,
-                    file_path.display(),
-                    e
-                ));
+            match std::fs::read_to_string(&file_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    return EvalResult::error(format!(
+                        "cannot read module '{}' ({}): {}",
+                        module_name,
+                        file_path.display(),
+                        e
+                    ));
+                }
             }
         };
 
@@ -193,8 +218,16 @@ pub(super) fn load_module(
         // Mark as loading
         loader.0.borrow_mut().loading.insert(module_name.clone());
 
-        // Extend the cached base env (builtins + prelude already evaluated).
-        let mod_env = loader.0.borrow().base_env.extend();
+        // Builtin Std modules get a fresh env with just builtins (they are
+        // the foundation and don't need the prelude). User modules extend
+        // loader.base_env which has builtins + prelude.
+        let mod_env = if is_builtin {
+            let env = Env::new();
+            super::register_builtins(&env);
+            env
+        } else {
+            loader.0.borrow().base_env.extend()
+        };
         match super::eval_decls(&program, 0, &mod_env, loader) {
             EvalResult::Ok(_) => {}
             EvalResult::Effect { name, .. } => {
@@ -236,14 +269,39 @@ pub(super) fn load_module(
 
     // Inject unqualified bindings from exposing list
     if let Some(exposed) = exposing {
-        for name in exposed {
-            match public_bindings.get(name) {
-                Some(val) => env.set(name.clone(), val.clone()),
-                None => {
-                    return EvalResult::error(format!(
-                        "'{}' is not exported by module '{}'",
-                        name, module_name
-                    ));
+        for item in exposed {
+            match item {
+                crate::ast::ExposedItem::Value(name) => {
+                    match public_bindings.get(name) {
+                        Some(val) => env.set(name.clone(), val.clone()),
+                        None => {
+                            return EvalResult::error(format!(
+                                "'{}' is not exported by module '{}'",
+                                name, module_name
+                            ));
+                        }
+                    }
+                }
+                crate::ast::ExposedItem::Type(type_name) => {
+                    // Hoist the type name itself (if exported)
+                    if let Some(val) = public_bindings.get(type_name) {
+                        env.set(type_name.clone(), val.clone());
+                    }
+                    // Hoist all constructors belonging to this type
+                    // by scanning __ctor_type_* entries in public_bindings
+                    let ctor_key = format!("__ctor_type_");
+                    for (k, v) in &public_bindings {
+                        if k.starts_with(&ctor_key) {
+                            if let Value::String(owner) = v {
+                                if owner == type_name {
+                                    let ctor_name = &k[ctor_key.len()..];
+                                    if let Some(ctor_val) = public_bindings.get(ctor_name) {
+                                        env.set(ctor_name.to_string(), ctor_val.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

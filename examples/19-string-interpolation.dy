@@ -23,6 +23,6 @@ main () = {
 
   # Expressions inside holes
   let nums = [1, 2, 3, 4, 5]
-  print $"List has {length nums} elements."
-  print $"Sum: {foldl (fun acc x -> acc + x) 0 nums}"
+  print $"List has {List.length nums} elements."
+  print $"Sum: {List.foldl (fun acc x -> acc + x) 0 nums}"
 }

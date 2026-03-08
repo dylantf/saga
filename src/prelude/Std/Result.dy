@@ -1,0 +1,30 @@
+module Result
+
+pub type Result a b {
+  Ok(a)
+  Err(b)
+}
+
+pub fun map (f: a -> c) (r: Result a b) -> Result c b
+map f r = case r {
+  Ok(x) -> Ok(f x)
+  Err(e) -> Err(e)
+}
+
+pub fun map_err (f: b -> c) (r: Result a b) -> Result a c
+map_err f r = case r {
+  Ok(x) -> Ok(x)
+  Err(e) -> Err(f e)
+}
+
+pub fun unwrap_or (default: a) (r: Result a b) -> a
+unwrap_or default r = case r {
+  Ok(x) -> x
+  Err(_) -> default
+}
+
+pub fun and_then (f: a -> Result c b) (r: Result a b) -> Result c b
+and_then f r = case r {
+  Ok(x) -> f x
+  Err(e) -> Err(e)
+}

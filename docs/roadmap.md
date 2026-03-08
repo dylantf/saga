@@ -82,7 +82,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Negative number literals in patterns (`case x { -1 -> ... }`)
 - [x] Dict type
 - [x] String-splitting desugaring for pattern matching on strings, e.g. "foo" <> rest
-- [ ] Split prelude into stdlib modules (`List`, `Maybe`, `Result`)
+- [x] Split prelude into stdlib modules (`List`, `Maybe`, `Result`)
 - [x] Number literal separators
 - [x] Multiline strings (`"""..."""`, `$"""..."""`)
 - [x] Raw strings (`@"..."`, `@"""..."""`)

@@ -1789,7 +1789,7 @@ fn list_comprehension_simple_generator() {
             // func should be `flat_map (fun x -> ...)`
             match *func {
                 Expr::App { func, arg, .. } => {
-                    assert!(matches!(*func, Expr::Var { name, .. } if name == "flat_map"));
+                    assert!(matches!(*func, Expr::QualifiedName { module, name, .. } if module == "List" && name == "flat_map"));
                     assert!(matches!(*arg, Expr::Lambda { .. }));
                 }
                 other => panic!("expected App(flat_map, lambda), got {:?}", other),
@@ -1831,7 +1831,7 @@ fn list_comprehension_nested_generators() {
             assert!(matches!(*arg, Expr::Var { name, .. } if name == "xs"));
             match *func {
                 Expr::App { func, arg: lambda, .. } => {
-                    assert!(matches!(*func, Expr::Var { name, .. } if name == "flat_map"));
+                    assert!(matches!(*func, Expr::QualifiedName { module, name, .. } if module == "List" && name == "flat_map"));
                     match *lambda {
                         Expr::Lambda { body, .. } => {
                             // body should be another flat_map call

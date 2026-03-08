@@ -246,6 +246,45 @@ main () = {
 ");
 }
 
+// --- Stdlib (Std.*) ---
+
+#[test]
+fn stdlib_maybe_qualified() {
+    ok("
+fun main () -> ()
+main () = {
+  let x = Maybe.map (fun n -> n + 1) (Some 41)
+  print (show x)
+}
+");
+}
+
+#[test]
+fn stdlib_constructors_unqualified() {
+    ok("
+fun main () -> ()
+main () = {
+  let x = Some 1
+  let y = None
+  let z = Ok 2
+  let w = Err \"oops\"
+  print (show x)
+}
+");
+}
+
+#[test]
+fn stdlib_list_qualified() {
+    ok("
+fun main () -> ()
+main () = {
+  let xs = [1, 2, 3]
+  let ys = List.map (fun x -> x * 2) xs
+  print (show ys)
+}
+");
+}
+
 // --- Error cases ---
 
 #[test]

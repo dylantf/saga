@@ -874,7 +874,8 @@ impl Parser {
                     body: Box::new(inner),
                     span,
                 };
-                let flat_map = Expr::Var {
+                let flat_map = Expr::QualifiedName {
+                    module: "List".to_string(),
                     name: "flat_map".to_string(),
                     span,
                 };
