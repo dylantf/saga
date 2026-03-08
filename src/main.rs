@@ -1,4 +1,4 @@
-use dylang::{ast, eval, lexer, parser, typechecker};
+use dylang::{ast, codegen, eval, lexer, parser, typechecker};
 
 use std::env;
 use std::fs;
@@ -128,6 +128,64 @@ fn cmd_run_project() {
     run_program(&program, &loader);
 }
 
+fn cmd_build(file: &str) {
+    let source = fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Error reading {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let mut checker = make_checker(None);
+    let program = parse_and_typecheck(&source, file, &mut checker);
+
+    // Derive module name from filename (e.g. "01-hello-world.dy" -> "hello_world")
+    let raw_stem = std::path::Path::new(file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("main");
+    // Sanitize: replace hyphens with underscores, strip leading digits/underscores
+    let sanitized: String = raw_stem.replace('-', "_");
+    let module_name = sanitized.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
+
+    let core_src = codegen::emit_module(module_name, &program);
+
+    let build_dir = std::path::Path::new(file)
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("_build");
+    fs::create_dir_all(&build_dir).unwrap_or_else(|e| {
+        eprintln!("Error creating _build dir: {}", e);
+        std::process::exit(1);
+    });
+
+    let core_path = build_dir.join(format!("{}.core", module_name));
+    fs::write(&core_path, &core_src).unwrap_or_else(|e| {
+        eprintln!("Error writing {}: {}", core_path.display(), e);
+        std::process::exit(1);
+    });
+
+    // Invoke erlc to compile to .beam, outputting into _build/
+    let status = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&build_dir)
+        .arg(&core_path)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to run erlc: {}", e);
+            std::process::exit(1);
+        });
+
+    if !status.success() {
+        eprintln!("erlc failed");
+        std::process::exit(1);
+    }
+
+    eprintln!("Built {}/{}.beam", build_dir.display(), module_name);
+    eprintln!(
+        "Run with: erl -noshell -pa {} -s {} main -s init stop",
+        build_dir.display(),
+        module_name
+    );
+}
+
 fn cmd_check(file: Option<&str>) {
     match file {
         Some(f) => {
@@ -181,10 +239,13 @@ fn main() {
             Some(file) => cmd_check(Some(file)),
             None => cmd_check(None),
         },
-        Some("build") => {
-            eprintln!("build: not yet implemented (backend pending)");
-            std::process::exit(1);
-        }
+        Some("build") => match args.get(2).map(|s| s.as_str()) {
+            Some(file) => cmd_build(file),
+            None => {
+                eprintln!("Usage: dylang build <file.dy>");
+                std::process::exit(1);
+            }
+        },
         _ => {
             print_usage();
             std::process::exit(1);

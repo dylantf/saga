@@ -1,1 +1,3 @@
 /target
+_build/
+erl_crash.dump

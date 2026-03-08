@@ -95,7 +95,53 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ## Backend
 
-- [ ] BEAM / Core Erlang codegen
+### Infrastructure
+- [x] Core Erlang IR (`CExpr`, `CPat`, `CLit`, `CModule`) + pretty-printer
+- [x] Lowering pass (dylang AST -> CErl IR)
+- [x] `erlc` invocation, `_build/` output directory
+- [x] `dylang build <file>` command
+
+### Expression lowering
+- [x] Literals (int, float, bool, string, unit)
+- [x] Variables
+- [x] Binary operators (arithmetic, comparison, concat)
+- [x] Short-circuit `&&` / `||`
+- [x] `if/else`
+- [x] Blocks and `let` bindings
+- [x] Lambdas
+- [x] `case` / pattern matching (constructors, tuples, literals, wildcards)
+- [x] Tuples
+- [x] List literals and cons (`[1, 2, 3]`, `h :: t`)
+- [x] ADT constructor expressions (`Some(x)`, `Circle(r)`)
+- [x] Records (create, field access, update)
+- [x] String interpolation (`$"..."`) -- desugared to `<>` chains by parser
+- [x] `do...else` blocks
+
+### Guards
+- [x] Simple guards (comparisons, arithmetic) emitted directly as Core Erlang `when` clauses
+- [x] Complex guards (user-defined function calls) desugared into arm body conditionals with fallthrough
+
+### Function calls
+- [ ] Calling other top-level functions in the same module
+- [ ] Multi-argument functions (currently only curried 1-at-a-time)
+- [ ] Mutual recursion (`letrec` in Core Erlang)
+- [ ] Tail call guarantee (verify `erlc` handles it from Core Erlang)
+
+### Module system
+- [ ] Multi-module builds (resolve imports, compile dependency order)
+- [ ] Qualified calls (`Math.abs x` -> `call 'math':'abs'(X)`)
+
+### Traits
+- [ ] Dictionary passing (trait impls as tuples of funs, passed as extra args)
+- [ ] Built-in trait dispatch (`Show`, `Eq`, `Ord`, `Num`)
+
+### Effects
+- [ ] Non-resumable handlers (`try/catch` in Core Erlang)
+- [ ] Resumable handlers (process-based: handler spawns a process)
+- [ ] Effect routing (find correct handler process for a given effect name)
+
+### Stdlib / prelude
+- [ ] Wire prelude functions to BEAM equivalents (`List`, `Maybe`, `Result`)
 - [ ] FFI (`foreign erlang "mod" "fun" as f in Effect`)
 
 ## Maybe

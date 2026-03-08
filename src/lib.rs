@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod codegen;
 pub mod eval;
 pub mod lexer;
 pub mod parser;
