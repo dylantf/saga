@@ -269,7 +269,8 @@ pub(crate) struct HandlerInfo {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TraitInfo {
-    // TODO: type_param will be used for kind checking
+    // TODO: type_param will be used for kind checking (maybe, if we implement it :P )
+    #[allow(dead_code)]
     pub type_param: String,
     pub supertraits: Vec<String>,
     /// Method signatures: name -> (param_types, return_type)

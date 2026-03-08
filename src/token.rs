@@ -53,6 +53,7 @@ pub enum Token {
     LtEq,        // <=
     GtEq,        // >=
     Arrow,       // ->
+    LeftArrow,   // <-
     Pipe,        // |>
     PipeBack,    // <|
     Concat,      // <>
@@ -63,7 +64,6 @@ pub enum Token {
     Backslash,   // \
     Bar,         // |
     DoubleColon, // ::
-    LeftArrow,   // <-
 
     // Delimiters
     LParen,   // (

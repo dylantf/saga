@@ -1,6 +1,6 @@
-use crate::ast::*;
-use crate::token::{Span, Token};
 use super::{ParseError, Parser};
+use crate::ast::*;
+use crate::token::Token;
 
 impl Parser {
     pub fn parse_pattern(&mut self) -> Result<Pat, ParseError> {

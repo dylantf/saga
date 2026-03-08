@@ -206,16 +206,10 @@ pub enum Expr {
     },
 
     /// `resume value`
-    Resume {
-        value: Box<Expr>,
-        span: Span,
-    },
+    Resume { value: Box<Expr>, span: Span },
 
     /// `(a, b)`, `(1, "hello", True)`
-    Tuple {
-        elements: Vec<Expr>,
-        span: Span,
-    },
+    Tuple { elements: Vec<Expr>, span: Span },
 
     /// `Math.abs` - module-qualified name lookup
     QualifiedName {
@@ -303,10 +297,7 @@ pub enum Pat {
     },
 
     /// `(a, b)`, `(x, y, z)`
-    Tuple {
-        elements: Vec<Pat>,
-        span: Span,
-    },
+    Tuple { elements: Vec<Pat>, span: Span },
 }
 
 impl Pat {

@@ -1,6 +1,6 @@
+use super::{ParseError, Parser};
 use crate::ast::*;
 use crate::token::{Span, Token};
-use super::{ParseError, Parser};
 
 impl Parser {
     /// Pratt parser: binary operators with precedence.
@@ -157,19 +157,30 @@ impl Parser {
             if let Expr::Constructor { name: module, .. } = &expr {
                 let module = module.clone();
                 let name = match self.peek().clone() {
-                    Token::Ident(n) => { self.advance(); n }
-                    Token::UpperIdent(n) => { self.advance(); n }
-                    tok => return Err(ParseError {
-                        message: format!("expected identifier after '.', got {:?}", tok),
-                        span: self.tokens[self.pos].span,
-                    }),
+                    Token::Ident(n) => {
+                        self.advance();
+                        n
+                    }
+                    Token::UpperIdent(n) => {
+                        self.advance();
+                        n
+                    }
+                    tok => {
+                        return Err(ParseError {
+                            message: format!("expected identifier after '.', got {:?}", tok),
+                            span: self.tokens[self.pos].span,
+                        });
+                    }
                 };
                 let end = self.tokens[self.pos - 1].span;
-                let qspan = Span { start, end: end.end };
+                let qspan = Span {
+                    start,
+                    end: end.end,
+                };
 
                 // Qualified record create: `A.Animal { field: val }`
                 // Uses unqualified type name, consistent with how `A.Circle(5)` → Constructor("Circle").
-                if name.chars().next().map_or(false, |c| c.is_uppercase())
+                if name.chars().next().is_some_and(|c| c.is_uppercase())
                     && matches!(self.peek(), Token::LBrace)
                 {
                     self.advance(); // consume '{'
@@ -338,9 +349,8 @@ impl Parser {
                                 token: crate::token::Token::Eof,
                                 span,
                             });
-                            let hole_expr = crate::parser::Parser::new(tokens)
-                                .parse_expr(0)
-                                .map_err(|e| e)?;
+
+                            let hole_expr = crate::parser::Parser::new(tokens).parse_expr(0)?;
                             segments.push(Expr::App {
                                 func: Box::new(Expr::Var {
                                     name: "show".to_string(),

@@ -112,6 +112,8 @@ impl Checker {
         Ok(())
     }
 
+    // Rust won't let us take an enum variant itself (Decl::ImplDef) so we just pass all its parameters
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn register_impl(
         &mut self,
         trait_name: &str,

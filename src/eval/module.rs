@@ -65,9 +65,7 @@ fn public_names(program: &[Decl]) -> HashSet<String> {
                 }
             }
             Decl::HandlerDef {
-                public: true,
-                name,
-                ..
+                public: true, name, ..
             } => {
                 names.insert(name.clone());
             }
