@@ -1,0 +1,25 @@
+# List comprehensions -- Haskell-style syntax
+
+main () = {
+  let xs = [1, 2, 3, 4, 5]
+
+  # Simple map: double each element
+  let doubled = [x * 2 | x <- xs]
+  print doubled
+
+  # Filter: keep only even numbers
+  let evens = [x | x <- xs, x % 2 == 0]
+  print evens
+
+  # Nested generators: cartesian product
+  let pairs = [x * 10 + y | x <- [1, 2, 3], y <- [4, 5]]
+  print pairs
+
+  # Guard with transform
+  let big_doubled = [x * 2 | x <- xs, x > 3]
+  print big_doubled
+
+  # Let binding in comprehension
+  let results = [y | x <- xs, let y = x + 10, y > 13]
+  print results
+}

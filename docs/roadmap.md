@@ -88,6 +88,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Raw strings (`@"..."`, `@"""..."""`)
 - [ ] Regular expressions
 - [ ] List comprehensions
+- [ ] Function composition
 - [ ] Conversion builtins (`to_string`, `to_int`, `to_float`)
 - [ ] String operations (`string_length`, `string_split`, `string_chars`, etc.)
 - [ ] More list functions (`zip`, `range`, `take`, `drop`, `any`, `all`)

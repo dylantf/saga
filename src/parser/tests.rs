@@ -1775,3 +1775,127 @@ fn interp_pipe_in_hole() {
     // $"{xs |> show}" parses without error
     parse_expr(r#"$"{xs |> show}""#);
 }
+
+// --- List comprehensions ---
+
+#[test]
+fn list_comprehension_simple_generator() {
+    // [x | x <- xs] ==> flat_map (fun x -> Cons(x, Nil)) xs
+    let expr = parse_expr("[x | x <- xs]");
+    match expr {
+        Expr::App { func, arg, .. } => {
+            // arg should be `xs`
+            assert!(matches!(*arg, Expr::Var { name, .. } if name == "xs"));
+            // func should be `flat_map (fun x -> ...)`
+            match *func {
+                Expr::App { func, arg, .. } => {
+                    assert!(matches!(*func, Expr::Var { name, .. } if name == "flat_map"));
+                    assert!(matches!(*arg, Expr::Lambda { .. }));
+                }
+                other => panic!("expected App(flat_map, lambda), got {:?}", other),
+            }
+        }
+        other => panic!("expected App, got {:?}", other),
+    }
+}
+
+#[test]
+fn list_comprehension_with_guard() {
+    // [x | x <- xs, x > 0] ==> flat_map (fun x -> if x > 0 then [x] else []) xs
+    let expr = parse_expr("[x | x <- xs, x > 0]");
+    match expr {
+        Expr::App { func, .. } => {
+            match *func {
+                Expr::App { arg: lambda, .. } => {
+                    match *lambda {
+                        Expr::Lambda { body, .. } => {
+                            // body should be an If expression (the guard)
+                            assert!(matches!(*body, Expr::If { .. }));
+                        }
+                        other => panic!("expected Lambda, got {:?}", other),
+                    }
+                }
+                other => panic!("expected App, got {:?}", other),
+            }
+        }
+        other => panic!("expected App, got {:?}", other),
+    }
+}
+
+#[test]
+fn list_comprehension_nested_generators() {
+    // [x + y | x <- xs, y <- ys] ==> flat_map (fun x -> flat_map (fun y -> [x+y]) ys) xs
+    let expr = parse_expr("[x + y | x <- xs, y <- ys]");
+    match expr {
+        Expr::App { func, arg, .. } => {
+            assert!(matches!(*arg, Expr::Var { name, .. } if name == "xs"));
+            match *func {
+                Expr::App { func, arg: lambda, .. } => {
+                    assert!(matches!(*func, Expr::Var { name, .. } if name == "flat_map"));
+                    match *lambda {
+                        Expr::Lambda { body, .. } => {
+                            // body should be another flat_map call
+                            assert!(matches!(*body, Expr::App { .. }));
+                        }
+                        other => panic!("expected Lambda, got {:?}", other),
+                    }
+                }
+                other => panic!("expected App, got {:?}", other),
+            }
+        }
+        other => panic!("expected App, got {:?}", other),
+    }
+}
+
+#[test]
+fn list_comprehension_with_let() {
+    // [y | x <- xs, let y = x + 1] ==> flat_map (fun x -> { let y = x + 1; [y] }) xs
+    let expr = parse_expr("[y | x <- xs, let y = x + 1]");
+    match expr {
+        Expr::App { func, .. } => {
+            match *func {
+                Expr::App { arg: lambda, .. } => {
+                    match *lambda {
+                        Expr::Lambda { body, .. } => {
+                            assert!(matches!(*body, Expr::Block { .. }));
+                        }
+                        other => panic!("expected Lambda, got {:?}", other),
+                    }
+                }
+                other => panic!("expected App, got {:?}", other),
+            }
+        }
+        other => panic!("expected App, got {:?}", other),
+    }
+}
+
+#[test]
+fn empty_list_still_works() {
+    let expr = parse_expr("[]");
+    assert!(matches!(expr, Expr::Constructor { name, .. } if name == "Nil"));
+}
+
+#[test]
+fn normal_list_still_works() {
+    // [1, 2] should still desugar to Cons(1, Cons(2, Nil))
+    let expr = parse_expr("[1, 2]");
+    match expr {
+        Expr::App { func, arg, .. } => {
+            // arg is Cons(2, Nil)
+            assert!(matches!(*arg, Expr::App { .. }));
+            match *func {
+                Expr::App { func, .. } => {
+                    assert!(matches!(*func, Expr::Constructor { name, .. } if name == "Cons"));
+                }
+                other => panic!("expected App(Cons, ...), got {:?}", other),
+            }
+        }
+        other => panic!("expected App, got {:?}", other),
+    }
+}
+
+#[test]
+fn list_comprehension_map_transform() {
+    // [x * 2 | x <- xs] parses without error
+    parse_expr("[x * 2 | x <- xs]");
+}

@@ -212,6 +212,21 @@ let h :: t = some_list
 
 ---
 
+## List Comprehensions
+
+```
+# Haskell-style: [expr | qualifiers]
+[x * 2 | x <- xs]                    # map
+[x | x <- xs, x > 0]                 # filter
+[x + y | x <- xs, y <- ys]           # nested generators (cartesian product)
+[x * 2 | x <- xs, x > 3]             # guard + transform
+[y | x <- xs, let y = x + 1, y > 3]  # let binding in comprehension
+```
+
+Desugars in the parser to `flat_map`, `if/else`, and `let` -- no special runtime support.
+
+---
+
 ## String Interpolation
 
 ```

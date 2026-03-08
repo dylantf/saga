@@ -459,13 +459,43 @@ impl Parser {
 
             // List literal: [e1, e2, e3]
             // Desugars to: Cons(e1, Cons(e2, Cons(e3, Nil)))
+            //
+            // List comprehension: [expr | qualifiers]
+            // Desugars using Haskell rules:
+            //   [e | p <- l, Q]  ==> flat_map (fun p -> [e | Q]) l
+            //   [e | guard, Q]   ==> if guard then [e | Q] else []
+            //   [e | let p = v, Q] ==> { let p = v; [e | Q] }
+            //   [e | ]           ==> [e]
             Token::LBracket => {
-                let mut elements = Vec::new();
-                while !matches!(self.peek(), Token::RBracket | Token::Eof) {
-                    elements.push(self.parse_expr(0)?);
-                    if matches!(self.peek(), Token::Comma) {
-                        self.advance();
+                // Empty list
+                if matches!(self.peek(), Token::RBracket) {
+                    let end = self.tokens[self.pos].span;
+                    self.advance();
+                    return Ok(Expr::Constructor {
+                        name: "Nil".to_string(),
+                        span: span.to(end),
+                    });
+                }
+
+                let first = self.parse_expr(0)?;
+
+                if matches!(self.peek(), Token::Bar) {
+                    // List comprehension: [expr | qualifiers]
+                    self.advance(); // consume |
+                    let qualifiers = self.parse_comprehension_qualifiers()?;
+                    let end = self.tokens[self.pos].span;
+                    self.expect(Token::RBracket)?;
+                    return Ok(self.desugar_comprehension(first, &qualifiers, span.to(end)));
+                }
+
+                // Normal list literal
+                let mut elements = vec![first];
+                while matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    if matches!(self.peek(), Token::RBracket) {
+                        break; // trailing comma
                     }
+                    elements.push(self.parse_expr(0)?);
                 }
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBracket)?;
@@ -758,4 +788,153 @@ impl Parser {
             }
         }
     }
+
+    // --- List comprehension helpers ---
+
+    /// Parse comma-separated comprehension qualifiers until `]`.
+    /// Each qualifier is a generator (`pat <- expr`), guard (`expr`),
+    /// or let binding (`let pat = expr`).
+    fn parse_comprehension_qualifiers(
+        &mut self,
+    ) -> Result<Vec<ComprehensionQualifier>, ParseError> {
+        let mut qualifiers = Vec::new();
+        loop {
+            if matches!(self.peek(), Token::RBracket | Token::Eof) {
+                break;
+            }
+
+            // Let binding: let pat = expr
+            if matches!(self.peek(), Token::Let) {
+                self.advance(); // consume let
+                let pat = self.parse_pattern()?;
+                self.expect(Token::Eq)?;
+                let value = self.parse_expr(0)?;
+                qualifiers.push(ComprehensionQualifier::Let(pat, value));
+            } else {
+                // Try generator (pat <- expr), fall back to guard (expr)
+                let saved_pos = self.pos;
+                match self.parse_pattern() {
+                    Ok(pat) if matches!(self.peek(), Token::LeftArrow) => {
+                        self.advance(); // consume <-
+                        let source = self.parse_expr(0)?;
+                        qualifiers.push(ComprehensionQualifier::Generator(pat, source));
+                    }
+                    _ => {
+                        self.pos = saved_pos;
+                        let guard = self.parse_expr(0)?;
+                        qualifiers.push(ComprehensionQualifier::Guard(guard));
+                    }
+                }
+            }
+
+            if matches!(self.peek(), Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        Ok(qualifiers)
+    }
+
+    /// Recursively desugar list comprehension qualifiers into nested
+    /// flat_map / if-then-else / let expressions.
+    fn desugar_comprehension(
+        &self,
+        body: Expr,
+        qualifiers: &[ComprehensionQualifier],
+        span: Span,
+    ) -> Expr {
+        if qualifiers.is_empty() {
+            // Base case: [e] ==> Cons(e, Nil)
+            return self.make_singleton_list(body, span);
+        }
+
+        match &qualifiers[0] {
+            ComprehensionQualifier::Generator(pat, source) => {
+                // [e | p <- l, Q] ==> flat_map (fun p -> [e | Q]) l
+                let inner = self.desugar_comprehension(body, &qualifiers[1..], span);
+                let lambda = Expr::Lambda {
+                    params: vec![pat.clone()],
+                    body: Box::new(inner),
+                    span,
+                };
+                let flat_map = Expr::Var {
+                    name: "flat_map".to_string(),
+                    span,
+                };
+                let app1 = Expr::App {
+                    func: Box::new(flat_map),
+                    arg: Box::new(lambda),
+                    span,
+                };
+                Expr::App {
+                    func: Box::new(app1),
+                    arg: Box::new(source.clone()),
+                    span,
+                }
+            }
+            ComprehensionQualifier::Guard(guard) => {
+                // [e | g, Q] ==> if g then [e | Q] else []
+                let then_branch = self.desugar_comprehension(body, &qualifiers[1..], span);
+                let else_branch = Expr::Constructor {
+                    name: "Nil".to_string(),
+                    span,
+                };
+                Expr::If {
+                    cond: Box::new(guard.clone()),
+                    then_branch: Box::new(then_branch),
+                    else_branch: Box::new(else_branch),
+                    span,
+                }
+            }
+            ComprehensionQualifier::Let(pat, value) => {
+                // [e | let p = v, Q] ==> { let p = v; [e | Q] }
+                let inner = self.desugar_comprehension(body, &qualifiers[1..], span);
+                Expr::Block {
+                    stmts: vec![
+                        Stmt::Let {
+                            pattern: pat.clone(),
+                            annotation: None,
+                            value: value.clone(),
+                            span,
+                        },
+                        Stmt::Expr(inner),
+                    ],
+                    span,
+                }
+            }
+        }
+    }
+
+    /// Build Cons(elem, Nil) -- a singleton list.
+    fn make_singleton_list(&self, elem: Expr, span: Span) -> Expr {
+        let nil = Expr::Constructor {
+            name: "Nil".to_string(),
+            span,
+        };
+        let cons = Expr::Constructor {
+            name: "Cons".to_string(),
+            span,
+        };
+        let app1 = Expr::App {
+            func: Box::new(cons),
+            arg: Box::new(elem),
+            span,
+        };
+        Expr::App {
+            func: Box::new(app1),
+            arg: Box::new(nil),
+            span,
+        }
+    }
+}
+
+/// A qualifier in a list comprehension.
+enum ComprehensionQualifier {
+    /// `pat <- expr` -- draw elements from a list
+    Generator(Pat, Expr),
+    /// `expr` -- boolean guard/filter
+    Guard(Expr),
+    /// `let pat = expr` -- local binding
+    Let(Pat, Expr),
 }

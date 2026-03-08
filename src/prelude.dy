@@ -106,3 +106,9 @@ append xs ys = case xs {
   Nil -> ys
   h :: t -> h :: append t ys
 }
+
+fun flat_map (f: a -> List b) (xs: List a) -> List b
+flat_map f xs = case xs {
+  Nil -> Nil
+  h :: t -> append (f h) (flat_map f t)
+}
