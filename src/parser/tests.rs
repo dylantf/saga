@@ -1899,3 +1899,61 @@ fn list_comprehension_map_transform() {
     // [x * 2 | x <- xs] parses without error
     parse_expr("[x * 2 | x <- xs]");
 }
+
+// --- Function composition ---
+
+#[test]
+fn compose_forward() {
+    // f >> g  →  fun _x -> g (f _x)
+    let expr = parse_expr("f >> g");
+    match expr {
+        Expr::Lambda { params, body, .. } => {
+            assert_eq!(params.len(), 1);
+            assert!(matches!(&params[0], Pat::Var { name, .. } if name == "_x"));
+            // body = g (f _x)
+            match *body {
+                Expr::App { func, arg, .. } => {
+                    assert!(matches!(*func, Expr::Var { name, .. } if name == "g"));
+                    match *arg {
+                        Expr::App { func, arg, .. } => {
+                            assert!(matches!(*func, Expr::Var { name, .. } if name == "f"));
+                            assert!(matches!(*arg, Expr::Var { name, .. } if name == "_x"));
+                        }
+                        other => panic!("expected App(f, _x), got {:?}", other),
+                    }
+                }
+                other => panic!("expected App(g, ...), got {:?}", other),
+            }
+        }
+        other => panic!("expected Lambda, got {:?}", other),
+    }
+}
+
+#[test]
+fn compose_backward() {
+    // f << g  →  fun _x -> f (g _x)
+    let expr = parse_expr("f << g");
+    match expr {
+        Expr::Lambda { body, .. } => {
+            match *body {
+                Expr::App { func, arg, .. } => {
+                    assert!(matches!(*func, Expr::Var { name, .. } if name == "f"));
+                    match *arg {
+                        Expr::App { func, .. } => {
+                            assert!(matches!(*func, Expr::Var { name, .. } if name == "g"));
+                        }
+                        other => panic!("expected App(g, _x), got {:?}", other),
+                    }
+                }
+                other => panic!("expected App(f, ...), got {:?}", other),
+            }
+        }
+        other => panic!("expected Lambda, got {:?}", other),
+    }
+}
+
+#[test]
+fn compose_chain() {
+    // f >> g >> h parses without error (left-associative)
+    parse_expr("f >> g >> h");
+}

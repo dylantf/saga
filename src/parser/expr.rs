@@ -22,9 +22,11 @@ impl Parser {
             }
 
             let (op, bp) = match self.peek() {
-                Token::Pipe => (None, 1),        // desugars to App(right, left)
-                Token::PipeBack => (None, 1),    // desugars to App(left, right)
-                Token::DoubleColon => (None, 1), // desugars to Cons(left, right), right-assoc
+                Token::Pipe => (None, 1),           // desugars to App(right, left)
+                Token::PipeBack => (None, 1),       // desugars to App(left, right)
+                Token::ComposeForward => (None, 1), // f >> g  →  fun x -> g (f x)
+                Token::ComposeBack => (None, 1),    // f << g  →  fun x -> f (g x)
+                Token::DoubleColon => (None, 1),    // desugars to Cons(left, right), right-assoc
                 Token::Or => (Some(BinOp::Or), 2),
                 Token::And => (Some(BinOp::And), 3),
                 Token::EqEq => (Some(BinOp::Eq), 4),
@@ -47,10 +49,16 @@ impl Parser {
             }
 
             // Remember operator kind before consuming
-            let is_backward_pipe = matches!(self.peek(), Token::PipeBack);
-            let is_cons = matches!(self.peek(), Token::DoubleColon);
+            let desugar = match self.peek() {
+                Token::PipeBack => Desugar::PipeBack,
+                Token::DoubleColon => Desugar::Cons,
+                Token::ComposeForward => Desugar::ComposeForward,
+                Token::ComposeBack => Desugar::ComposeBack,
+                _ => Desugar::None,
+            };
             self.advance(); // consume operator
             // :: is right-associative (recurse at same bp); everything else is left-associative
+            let is_cons = matches!(desugar, Desugar::Cons);
             let right = self.parse_expr(if is_cons { bp } else { bp + 1 })?;
 
             let span = left.span().to(right.span());
@@ -72,9 +80,17 @@ impl Parser {
                         span,
                     }
                 }
+                // f >> g  →  fun x -> g (f x)
+                None if matches!(desugar, Desugar::ComposeForward) => {
+                    self.desugar_compose(left, right, span)
+                }
+                // f << g  →  fun x -> f (g x)
+                None if matches!(desugar, Desugar::ComposeBack) => {
+                    self.desugar_compose(right, left, span)
+                }
                 // |> forward pipe: `x |> f` becomes `App(f, x)`
                 // <| backward pipe: `f <| x` becomes `App(f, x)`
-                None if is_backward_pipe => Expr::App {
+                None if matches!(desugar, Desugar::PipeBack) => Expr::App {
                     func: Box::new(left),
                     arg: Box::new(right),
                     span,
@@ -906,6 +922,34 @@ impl Parser {
         }
     }
 
+    /// Desugar `first >> second` into `fun _x -> second (first _x)`.
+    /// Both forward and backward compose call this with args in the right order.
+    fn desugar_compose(&self, first: Expr, second: Expr, span: Span) -> Expr {
+        let param = Pat::Var {
+            name: "_x".to_string(),
+            span,
+        };
+        let arg = Expr::Var {
+            name: "_x".to_string(),
+            span,
+        };
+        let inner = Expr::App {
+            func: Box::new(first),
+            arg: Box::new(arg),
+            span,
+        };
+        let body = Expr::App {
+            func: Box::new(second),
+            arg: Box::new(inner),
+            span,
+        };
+        Expr::Lambda {
+            params: vec![param],
+            body: Box::new(body),
+            span,
+        }
+    }
+
     /// Build Cons(elem, Nil) -- a singleton list.
     fn make_singleton_list(&self, elem: Expr, span: Span) -> Expr {
         let nil = Expr::Constructor {
@@ -927,6 +971,15 @@ impl Parser {
             span,
         }
     }
+}
+
+/// Tracks which desugared operator is being parsed.
+enum Desugar {
+    None,
+    PipeBack,
+    Cons,
+    ComposeForward,
+    ComposeBack,
 }
 
 /// A qualifier in a list comprehension.

@@ -744,6 +744,13 @@ impl Lexer {
                     tokens.push(spanned);
                     prev_token = Some(tok);
                 }
+                Some('<') if self.peek_next() == Some('<') => {
+                    self.advance();
+                    self.advance();
+                    let (spanned, tok) = self.emit(Token::ComposeBack, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
+                }
                 Some('<') if self.peek_next() == Some('>') => {
                     self.advance();
                     self.advance();
@@ -783,6 +790,13 @@ impl Lexer {
                     self.advance();
                     self.advance();
                     let (spanned, tok) = self.emit(Token::LtEq, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
+                }
+                Some('>') if self.peek_next() == Some('>') => {
+                    self.advance();
+                    self.advance();
+                    let (spanned, tok) = self.emit(Token::ComposeForward, start);
                     tokens.push(spanned);
                     prev_token = Some(tok);
                 }

@@ -54,6 +54,8 @@ add_five = add 5
 # String concat: <>
 # Pipe: |>
 # Backward-pipe: <| (desugars to opposite of pipe)
+# Compose: >>  (f >> g = fun x -> g (f x))
+# Backward-compose: <<  (f << g = fun x -> f (g x))
 # Cons: ::
 
 5 |> add 3 |> show |> print
@@ -61,6 +63,10 @@ add_five = add 5
 "hello" <> " " <> "world"
 
 1 :: 2 :: 3 :: []
+
+# Composition: point-free version of piping
+let process = parse >> validate >> save
+result |> process
 ```
 
 ---

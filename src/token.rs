@@ -54,9 +54,11 @@ pub enum Token {
     GtEq,        // >=
     Arrow,       // ->
     LeftArrow,   // <-
-    Pipe,        // |>
-    PipeBack,    // <|
-    Concat,      // <>
+    Pipe,           // |>
+    PipeBack,       // <|
+    Concat,         // <>
+    ComposeForward, // >>
+    ComposeBack,    // <<
     And,         // &&
     Or,          // ||
     Dot,         // .

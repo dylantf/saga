@@ -128,6 +128,10 @@
           "match": "\\|>|<\\|"
         },
         {
+          "name": "keyword.operator.compose.dylang",
+          "match": ">>|<<"
+        },
+        {
           "name": "keyword.operator.comparison.dylang",
           "match": "==|!=|<=|>="
         },
