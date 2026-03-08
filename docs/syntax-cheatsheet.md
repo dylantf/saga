@@ -47,7 +47,8 @@ add_five = add 5
 ## Operators & Syntax
 
 ```
-# Arithmetic: + - * / %
+# Arithmetic: + - * / % (% is Int-only)
+# Integer division truncates: 7 / 2 = 3
 # Comparison: == != < > <= >=
 # Logic: && ||
 # String concat: <>

@@ -749,7 +749,6 @@ fn eval_binop(op: &BinOp, left: Value, right: Value) -> EvalResult {
         (BinOp::Sub, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Float(a - b)),
         (BinOp::Mul, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Float(a * b)),
         (BinOp::Div, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Float(a / b)),
-        (BinOp::Mod, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Float(a % b)),
 
         // Float comparison
         (BinOp::Eq, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Bool(a == b)),

@@ -88,15 +88,14 @@ Checkbox = implemented and working. Unchecked = not yet done.
 ## Backend
 
 - [ ] BEAM / Core Erlang codegen
-- [ ] JavaScript codegen (after BEAM is solid)
 - [ ] FFI (`foreign erlang "mod" "fun" as f in Effect`)
 
 ## Maybe
 
-- [ ] Higher-kinded types (`* -> *`, enables `Functor`, `Applicative`)
-- [ ] `Functor` / `Applicative` traits in stdlib
-- [ ] `Semigroup` / `Monoid` in stdlib
-- [ ] Effect row polymorphism / effect variables (`needs e`)
+- Higher-kinded types (`* -> *`, enables `Functor`, `Applicative`)
+- `Functor` / `Applicative` traits in stdlib
+- `Semigroup` / `Monoid` in stdlib
+- Effect row polymorphism / effect variables (`needs e`)
 
 ## Out of Scope
 

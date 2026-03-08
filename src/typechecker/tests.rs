@@ -1071,6 +1071,21 @@ fn mod_on_int_works() {
 }
 
 #[test]
+fn div_int_returns_int() {
+    assert!(check("main () = 7 / 2").is_ok());
+}
+
+#[test]
+fn div_float_returns_float() {
+    assert!(check("main () = 7.0 / 2.0").is_ok());
+}
+
+#[test]
+fn div_mixed_int_float_fails() {
+    assert!(check("main () = 7 / 2.0").is_err());
+}
+
+#[test]
 fn num_arithmetic_on_string_fails() {
     let result = check("main () = \"a\" + \"b\"");
     assert!(result.is_err());

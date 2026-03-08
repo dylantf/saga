@@ -374,7 +374,9 @@ fn block_with_let() {
     match expr {
         Expr::Block { stmts, .. } => {
             assert_eq!(stmts.len(), 2);
-            assert!(matches!(&stmts[0], Stmt::Let { pattern: Pat::Var { name, .. }, .. } if name == "x"));
+            assert!(
+                matches!(&stmts[0], Stmt::Let { pattern: Pat::Var { name, .. }, .. } if name == "x")
+            );
             assert!(matches!(
                 &stmts[1],
                 Stmt::Expr(Expr::BinOp { op: BinOp::Add, .. })
@@ -442,8 +444,8 @@ fn pattern_lit_negative_int() {
 
 #[test]
 fn pattern_lit_float() {
-    let pat = parse_pattern("3.14");
-    assert!(matches!(pat, Pat::Lit { value: Lit::Float(f), .. } if f == 3.14));
+    let pat = parse_pattern("1.5");
+    assert!(matches!(pat, Pat::Lit { value: Lit::Float(f), .. } if f == 1.5));
 }
 
 #[test]
@@ -1104,7 +1106,9 @@ fn effect_def_single_op() {
     let decls = parse("effect Log {\n  fun log (level: String) (msg: String) -> Unit\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::EffectDef { name, operations, .. } => {
+        Decl::EffectDef {
+            name, operations, ..
+        } => {
             assert_eq!(name, "Log");
             assert_eq!(operations.len(), 1);
             assert_eq!(operations[0].name, "log");
@@ -1118,10 +1122,14 @@ fn effect_def_single_op() {
 
 #[test]
 fn effect_def_multiple_ops() {
-    let decls = parse("effect Http {\n  fun get (url: String) -> String\n  fun post (url: String) (body: String) -> String\n}");
+    let decls = parse(
+        "effect Http {\n  fun get (url: String) -> String\n  fun post (url: String) (body: String) -> String\n}",
+    );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::EffectDef { name, operations, .. } => {
+        Decl::EffectDef {
+            name, operations, ..
+        } => {
             assert_eq!(name, "Http");
             assert_eq!(operations.len(), 2);
             assert_eq!(operations[0].name, "get");
@@ -1139,7 +1147,13 @@ fn handler_def_simple() {
     let decls = parse("handler console_log for Log {\n  log level msg -> print! (level <> msg)\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::HandlerDef { name, effects, arms, return_clause, .. } => {
+        Decl::HandlerDef {
+            name,
+            effects,
+            arms,
+            return_clause,
+            ..
+        } => {
             assert_eq!(name, "console_log");
             assert_eq!(effects, &["Log"]);
             assert_eq!(arms.len(), 1);
@@ -1153,10 +1167,17 @@ fn handler_def_simple() {
 
 #[test]
 fn handler_def_with_return_clause() {
-    let decls = parse("handler to_result for Fail {\n  fail reason -> Err(reason)\n  return value -> Ok(value)\n}");
+    let decls = parse(
+        "handler to_result for Fail {\n  fail reason -> Err(reason)\n  return value -> Ok(value)\n}",
+    );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::HandlerDef { name, arms, return_clause, .. } => {
+        Decl::HandlerDef {
+            name,
+            arms,
+            return_clause,
+            ..
+        } => {
             assert_eq!(name, "to_result");
             assert_eq!(arms.len(), 1);
             assert_eq!(arms[0].op_name, "fail");
@@ -1170,7 +1191,9 @@ fn handler_def_with_return_clause() {
 
 #[test]
 fn handler_def_multi_effect() {
-    let decls = parse("handler dev_env for Log, Http {\n  log level msg -> resume ()\n  get url -> resume \"ok\"\n}");
+    let decls = parse(
+        "handler dev_env for Log, Http {\n  log level msg -> resume ()\n  get url -> resume \"ok\"\n}",
+    );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::HandlerDef { effects, arms, .. } => {
@@ -1183,10 +1206,18 @@ fn handler_def_multi_effect() {
 
 #[test]
 fn handler_def_with_needs() {
-    let decls = parse("handler stripe for Billing needs {Log, Http} {\n  charge account amount -> resume (fake_receipt ())\n}");
+    let decls = parse(
+        "handler stripe for Billing needs {Log, Http} {\n  charge account amount -> resume (fake_receipt ())\n}",
+    );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::HandlerDef { name, effects, needs, arms, .. } => {
+        Decl::HandlerDef {
+            name,
+            effects,
+            needs,
+            arms,
+            ..
+        } => {
             assert_eq!(name, "stripe");
             assert_eq!(effects, &["Billing"]);
             assert_eq!(needs, &["Log", "Http"]);
@@ -1199,7 +1230,8 @@ fn handler_def_with_needs() {
 
 #[test]
 fn handler_def_without_needs() {
-    let decls = parse("handler mock for Billing {\n  charge account amount -> resume (fake_receipt ())\n}");
+    let decls =
+        parse("handler mock for Billing {\n  charge account amount -> resume (fake_receipt ())\n}");
     match &decls[0] {
         Decl::HandlerDef { needs, .. } => {
             assert!(needs.is_empty());
@@ -1210,7 +1242,8 @@ fn handler_def_without_needs() {
 
 #[test]
 fn handler_def_needs_trailing_comma() {
-    let decls = parse("handler stripe for Billing needs {Log, Http,} {\n  charge a b -> resume ()\n}");
+    let decls =
+        parse("handler stripe for Billing needs {Log, Http,} {\n  charge a b -> resume ()\n}");
     match &decls[0] {
         Decl::HandlerDef { needs, .. } => {
             assert_eq!(needs, &["Log", "Http"]);
@@ -1227,13 +1260,17 @@ fn effect_call_simple() {
     match &expr {
         Expr::App { func, arg, .. } => {
             match func.as_ref() {
-                Expr::EffectCall { name, qualifier, .. } => {
+                Expr::EffectCall {
+                    name, qualifier, ..
+                } => {
                     assert_eq!(name, "log");
                     assert!(qualifier.is_none());
                 }
                 _ => panic!("expected EffectCall, got {:?}", func),
             }
-            assert!(matches!(arg.as_ref(), Expr::Lit { value: Lit::String(s), .. } if s == "hello"));
+            assert!(
+                matches!(arg.as_ref(), Expr::Lit { value: Lit::String(s), .. } if s == "hello")
+            );
         }
         _ => panic!("expected App(EffectCall, _), got {:?}", expr),
     }
@@ -1243,7 +1280,9 @@ fn effect_call_simple() {
 fn effect_call_no_args() {
     let expr = parse_expr("read_line!");
     match &expr {
-        Expr::EffectCall { name, qualifier, .. } => {
+        Expr::EffectCall {
+            name, qualifier, ..
+        } => {
             assert_eq!(name, "read_line");
             assert!(qualifier.is_none());
         }
@@ -1256,7 +1295,9 @@ fn effect_call_qualified() {
     let expr = parse_expr("Cache.get! \"key\"");
     match &expr {
         Expr::App { func, .. } => match func.as_ref() {
-            Expr::EffectCall { name, qualifier, .. } => {
+            Expr::EffectCall {
+                name, qualifier, ..
+            } => {
                 assert_eq!(name, "get");
                 assert_eq!(qualifier.as_deref(), Some("Cache"));
             }
@@ -1273,7 +1314,13 @@ fn resume_expr() {
     let expr = parse_expr("resume ()");
     match &expr {
         Expr::Resume { value, .. } => {
-            assert!(matches!(value.as_ref(), Expr::Lit { value: Lit::Unit, .. }));
+            assert!(matches!(
+                value.as_ref(),
+                Expr::Lit {
+                    value: Lit::Unit,
+                    ..
+                }
+            ));
         }
         _ => panic!("expected Resume, got {:?}", expr),
     }
@@ -1297,7 +1344,11 @@ fn with_named_handler() {
     // `with` has lowest precedence — wraps the entire expression
     let expr = parse_expr("run_server () with console_log");
     match &expr {
-        Expr::With { expr: inner, handler, .. } => {
+        Expr::With {
+            expr: inner,
+            handler,
+            ..
+        } => {
             assert!(matches!(inner.as_ref(), Expr::App { .. }));
             assert!(matches!(handler.as_ref(), Handler::Named(n) if n == "console_log"));
         }
@@ -1310,7 +1361,11 @@ fn with_inline_handler() {
     let expr = parse_expr("run_server () with {\n  log level msg -> print! msg\n}");
     match &expr {
         Expr::With { handler, .. } => match handler.as_ref() {
-            Handler::Inline { named, arms, return_clause } => {
+            Handler::Inline {
+                named,
+                arms,
+                return_clause,
+            } => {
                 assert!(named.is_empty());
                 assert_eq!(arms.len(), 1);
                 assert_eq!(arms[0].op_name, "log");
@@ -1376,7 +1431,11 @@ fn fun_annotation_needs_and_where() {
     let decls = parse("fun f (x: a) -> Unit needs {Log} where {a: Show}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::FunAnnotation { effects, where_clause, .. } => {
+        Decl::FunAnnotation {
+            effects,
+            where_clause,
+            ..
+        } => {
             assert_eq!(effects, &["Log"]);
             assert_eq!(where_clause.len(), 1);
             assert_eq!(where_clause[0].type_var, "a");
@@ -1392,7 +1451,13 @@ fn trait_def_simple() {
     let decls = parse("trait Show a {\n  fun show (x: a) -> String\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::TraitDef { name, type_param, supertraits, methods, .. } => {
+        Decl::TraitDef {
+            name,
+            type_param,
+            supertraits,
+            methods,
+            ..
+        } => {
             assert_eq!(name, "Show");
             assert_eq!(type_param, "a");
             assert!(supertraits.is_empty());
@@ -1409,7 +1474,13 @@ fn trait_def_with_supertraits() {
     let decls = parse("trait Ord a where {a: Eq} {\n  fun compare (x: a) (y: a) -> Ordering\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::TraitDef { name, type_param, supertraits, methods, .. } => {
+        Decl::TraitDef {
+            name,
+            type_param,
+            supertraits,
+            methods,
+            ..
+        } => {
             assert_eq!(name, "Ord");
             assert_eq!(type_param, "a");
             assert_eq!(supertraits, &["Eq"]);
@@ -1428,7 +1499,12 @@ fn impl_def_simple() {
     let decls = parse("impl Show for User {\n  show user = user.name\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::ImplDef { trait_name, target_type, methods, .. } => {
+        Decl::ImplDef {
+            trait_name,
+            target_type,
+            methods,
+            ..
+        } => {
             assert_eq!(trait_name, "Show");
             assert_eq!(target_type, "User");
             assert_eq!(methods.len(), 1);
@@ -1444,7 +1520,13 @@ fn impl_def_with_needs() {
     let decls = parse("impl Store for Redis needs {Http, Fail} {\n  get key = http_get key\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::ImplDef { trait_name, target_type, needs, methods, .. } => {
+        Decl::ImplDef {
+            trait_name,
+            target_type,
+            needs,
+            methods,
+            ..
+        } => {
             assert_eq!(trait_name, "Store");
             assert_eq!(target_type, "Redis");
             assert_eq!(needs, &["Http", "Fail"]);
