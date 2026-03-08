@@ -78,8 +78,8 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ## Pre-Backend Polish
 
-- [ ] `not` operator (boolean negation)
-- [ ] Negative number literals in patterns (`case x { -1 -> ... }`)
+- [x] `not` operator (boolean negation)
+- [x] Negative number literals in patterns (`case x { -1 -> ... }`)
 - [ ] Conversion builtins (`to_string`, `to_int`, `to_float`)
 - [ ] String operations (`string_length`, `string_split`, `string_chars`, etc.)
 - [ ] Split prelude into stdlib modules (`List`, `Maybe`, `Result`)

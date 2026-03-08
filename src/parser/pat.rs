@@ -87,8 +87,29 @@ impl Parser {
             }
             Token::Ident(s) if s.starts_with('_') => Ok(Pat::Wildcard { span }),
             Token::Ident(s) => Ok(Pat::Var { name: s, span }),
+            Token::Minus => match self.advance() {
+                Token::Int(n) => Ok(Pat::Lit {
+                    value: Lit::Int(-n),
+                    span: span.to(self.tokens[self.pos - 1].span),
+                }),
+                Token::Float(f) => Ok(Pat::Lit {
+                    value: Lit::Float(-f),
+                    span: span.to(self.tokens[self.pos - 1].span),
+                }),
+                tok => {
+                    self.pos -= 1;
+                    Err(ParseError {
+                        message: format!("expected number after '-' in pattern, got {:?}", tok),
+                        span: self.tokens[self.pos].span,
+                    })
+                }
+            },
             Token::Int(n) => Ok(Pat::Lit {
                 value: Lit::Int(n),
+                span,
+            }),
+            Token::Float(f) => Ok(Pat::Lit {
+                value: Lit::Float(f),
                 span,
             }),
             Token::True => Ok(Pat::Lit {

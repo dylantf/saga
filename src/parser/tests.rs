@@ -429,6 +429,48 @@ fn pattern_lit_bool() {
 }
 
 #[test]
+fn pattern_lit_negative_int() {
+    let pat = parse_pattern("-1");
+    assert!(matches!(
+        pat,
+        Pat::Lit {
+            value: Lit::Int(-1),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn pattern_lit_float() {
+    let pat = parse_pattern("3.14");
+    assert!(matches!(pat, Pat::Lit { value: Lit::Float(f), .. } if f == 3.14));
+}
+
+#[test]
+fn pattern_lit_negative_float() {
+    let pat = parse_pattern("-2.5");
+    assert!(matches!(pat, Pat::Lit { value: Lit::Float(f), .. } if f == -2.5));
+}
+
+#[test]
+fn pattern_negative_in_case() {
+    let expr = parse_expr("case x { -1 -> \"neg\"; 0 -> \"zero\"; _ -> \"other\" }");
+    match expr {
+        Expr::Case { arms, .. } => {
+            assert_eq!(arms.len(), 3);
+            assert!(matches!(
+                &arms[0].pattern,
+                Pat::Lit {
+                    value: Lit::Int(-1),
+                    ..
+                }
+            ));
+        }
+        _ => panic!("expected Case"),
+    }
+}
+
+#[test]
 fn pattern_bare_constructor() {
     let pat = parse_pattern("None");
     match pat {
