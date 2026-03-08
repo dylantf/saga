@@ -23,6 +23,34 @@ fn float() {
 }
 
 #[test]
+fn integer_with_separators() {
+    assert_eq!(toks("1_000_000"), vec![Int(1_000_000), Eof]);
+    assert_eq!(toks("1_0"), vec![Int(10), Eof]);
+}
+
+#[test]
+fn float_with_separators() {
+    assert_eq!(toks("1_000.000_1"), vec![Float(1_000.000_1), Eof]);
+}
+
+#[test]
+fn trailing_underscore_is_not_separator() {
+    // 42_ should lex as int 42 then ident _foo
+    assert_eq!(toks("42_foo"), vec![Int(42), Ident("_foo".into()), Eof]);
+}
+
+#[test]
+fn multiple_consecutive_underscores() {
+    assert_eq!(toks("1__0"), vec![Int(10), Eof]);
+    assert_eq!(toks("1___000"), vec![Int(1000), Eof]);
+}
+
+#[test]
+fn leading_underscore_is_ident() {
+    assert_eq!(toks("_100"), vec![Ident("_100".into()), Eof]);
+}
+
+#[test]
 fn integer_then_dot_ident() {
     // 3.foo should be int, dot, ident — not a float
     assert_eq!(toks("3.foo"), vec![Int(3), Dot, Ident("foo".into()), Eof]);
