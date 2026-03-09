@@ -202,9 +202,10 @@ impl Lowerer {
     }
 
     /// Apply the current return continuation (if set) to a final value.
-    /// Consumes the return_k so it's only applied once.
+    /// Clones the return_k so it can be applied in multiple branches
+    /// (e.g. both arms of an if/case inside a with block).
     fn apply_return_k(&mut self, val: CExpr) -> CExpr {
-        if let Some(k) = self.current_return_k.take() {
+        if let Some(k) = self.current_return_k.clone() {
             let v = self.fresh();
             CExpr::Let(
                 v.clone(),
@@ -264,8 +265,7 @@ impl Lowerer {
                     if value_has_nested {
                         let (k_param, value_expr) = match first {
                             Stmt::Let { pattern, value, .. } => {
-                                let var =
-                                    pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
+                                let var = pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
                                 (var, value)
                             }
                             Stmt::Expr(e) => (self.fresh(), e),
@@ -279,8 +279,7 @@ impl Lowerer {
                         // Normal (non-effect) statement
                         let (var, val_ce) = match first {
                             Stmt::Let { pattern, value, .. } => {
-                                let var =
-                                    pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
+                                let var = pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
                                 (var, self.lower_expr(value))
                             }
                             Stmt::Expr(e) => {
@@ -424,9 +423,7 @@ impl Lowerer {
                     Stmt::Expr(e) => {
                         collect_effect_call(e).map(|(name, qual, args)| (None, name, qual, args))
                     }
-                    Stmt::Let {
-                        pattern, value, ..
-                    } => collect_effect_call(value)
+                    Stmt::Let { pattern, value, .. } => collect_effect_call(value)
                         .map(|(name, qual, args)| (Some(pattern), name, qual, args)),
                 };
 
@@ -442,9 +439,7 @@ impl Lowerer {
                     self.lower_effect_call(op_name, qualifier, &args_owned, Some(inner_k))
                 } else {
                     let (pat_opt, value_expr) = match first {
-                        Stmt::Let {
-                            pattern, value, ..
-                        } => (Some(pattern), value),
+                        Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                         Stmt::Expr(e) => (None, e),
                     };
 

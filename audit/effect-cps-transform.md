@@ -6,7 +6,7 @@ The implementation uses a **selective CPS transform**: only block-level effect c
 
 ## Issues Found
 
-### 1. Critical: Effect calls inside `if`/`case` branches don't capture outer continuation
+### 1. (DONE) Critical: Effect calls inside `if`/`case` branches don't capture outer continuation
 
 When an abort-style effect (one where the handler doesn't call `resume`) fires inside an `if` or `case` branch, the codegen doesn't abort the outer computation. The handler returns a value that becomes the branch result, and execution continues with the next statement in the enclosing block.
 
@@ -90,7 +90,7 @@ At call sites:
 
 This increases every effectful function's arity by 1, but it's the only way to maintain the abort/success distinction across function call boundaries.
 
-### 3. Medium: `apply_return_k` uses `.take()` -- breaks branching
+### 3. (DONE) Medium: `apply_return_k` uses `.take()` -- breaks branching
 
 exprs.rs:204-215:
 

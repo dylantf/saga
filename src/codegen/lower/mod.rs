@@ -143,8 +143,7 @@ impl Lowerer {
                         }
                     }
                     if !param_effs.is_empty() {
-                        self.param_absorbed_effects
-                            .insert(name.clone(), param_effs);
+                        self.param_absorbed_effects.insert(name.clone(), param_effs);
                     }
                 }
                 _ => {}
@@ -213,11 +212,11 @@ impl Lowerer {
             if let Some(param_effs) = self.param_absorbed_effects.get(&name) {
                 let first_clause_params = clauses[0].0;
                 for (idx, effs) in param_effs {
-                    if let Some(pat) = first_clause_params.get(*idx) {
-                        if let Pat::Var { name: src_name, .. } = pat {
-                            self.current_effectful_vars
-                                .insert(src_name.clone(), effs.clone());
-                        }
+                    if let Some(pat) = first_clause_params.get(*idx)
+                        && let Pat::Var { name: src_name, .. } = pat
+                    {
+                        self.current_effectful_vars
+                            .insert(src_name.clone(), effs.clone());
                     }
                 }
             }
@@ -386,17 +385,16 @@ impl Lowerer {
                         // Saturated call: apply fun 'name'/N(arg1, ..., argN, handler1, ...)
                         let mut arg_vars: Vec<String> = Vec::new();
                         let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                        let callee_param_effs =
-                            self.param_absorbed_effects.get(func_name).cloned();
+                        let callee_param_effs = self.param_absorbed_effects.get(func_name).cloned();
                         for (i, arg) in non_unit_args.iter().enumerate() {
                             let v = self.fresh();
                             // If this arg position has absorbed effects, set context
                             // so lambdas at this position get handler params added.
                             let saved_ctx = self.lambda_effect_context.take();
-                            if let Some(ref pe) = callee_param_effs {
-                                if let Some(effs) = pe.get(&i) {
-                                    self.lambda_effect_context = Some(effs.clone());
-                                }
+                            if let Some(ref pe) = callee_param_effs
+                                && let Some(effs) = pe.get(&i)
+                            {
+                                self.lambda_effect_context = Some(effs.clone());
                             }
                             let ce = self.lower_expr(arg);
                             self.lambda_effect_context = saved_ctx;
@@ -428,48 +426,48 @@ impl Lowerer {
 
                 // Check for call to an effectful variable (HOF absorption).
                 // e.g. `computation ()` where computation absorbs Fail
-                if let Some((var_name, args)) = collect_fun_call(expr) {
-                    if let Some(absorbed) = self.current_effectful_vars.get(var_name).cloned() {
-                        let mut arg_vars: Vec<String> = Vec::new();
-                        let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                        // Filter out unit literal args
-                        let non_unit_args: Vec<&Expr> = args
-                            .into_iter()
-                            .filter(|a| {
-                                !matches!(
-                                    a,
-                                    Expr::Lit {
-                                        value: ast::Lit::Unit,
-                                        ..
-                                    }
-                                )
-                            })
-                            .collect();
-                        for arg in non_unit_args {
-                            let v = self.fresh();
-                            let ce = self.lower_expr(arg);
-                            arg_vars.push(v.clone());
-                            bindings.push((v, ce));
-                        }
-                        // Append handler params for absorbed effects
-                        for eff in &absorbed {
-                            if let Some(param) = self.current_handler_params.get(eff) {
-                                arg_vars.push(param.clone());
-                            } else {
-                                panic!(
-                                    "effectful variable '{}' needs effect '{}' but no handler param in scope",
-                                    var_name, eff
-                                );
-                            }
-                        }
-                        let call = CExpr::Apply(
-                            Box::new(CExpr::Var(core_var(var_name))),
-                            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-                        );
-                        return bindings.into_iter().rev().fold(call, |body, (var, val)| {
-                            CExpr::Let(var, Box::new(val), Box::new(body))
-                        });
+                if let Some((var_name, args)) = collect_fun_call(expr)
+                    && let Some(absorbed) = self.current_effectful_vars.get(var_name).cloned()
+                {
+                    let mut arg_vars: Vec<String> = Vec::new();
+                    let mut bindings: Vec<(String, CExpr)> = Vec::new();
+                    // Filter out unit literal args
+                    let non_unit_args: Vec<&Expr> = args
+                        .into_iter()
+                        .filter(|a| {
+                            !matches!(
+                                a,
+                                Expr::Lit {
+                                    value: ast::Lit::Unit,
+                                    ..
+                                }
+                            )
+                        })
+                        .collect();
+                    for arg in non_unit_args {
+                        let v = self.fresh();
+                        let ce = self.lower_expr(arg);
+                        arg_vars.push(v.clone());
+                        bindings.push((v, ce));
                     }
+                    // Append handler params for absorbed effects
+                    for eff in &absorbed {
+                        if let Some(param) = self.current_handler_params.get(eff) {
+                            arg_vars.push(param.clone());
+                        } else {
+                            panic!(
+                                "effectful variable '{}' needs effect '{}' but no handler param in scope",
+                                var_name, eff
+                            );
+                        }
+                    }
+                    let call = CExpr::Apply(
+                        Box::new(CExpr::Var(core_var(var_name))),
+                        arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+                    );
+                    return bindings.into_iter().rev().fold(call, |body, (var, val)| {
+                        CExpr::Let(var, Box::new(val), Box::new(body))
+                    });
                 }
 
                 let (func, arg) = match expr {
@@ -565,8 +563,7 @@ impl Lowerer {
                     for eff in &effects {
                         let handler_var = format!("_Handle{}", eff);
                         param_vars.push(handler_var.clone());
-                        self.current_handler_params
-                            .insert(eff.clone(), handler_var);
+                        self.current_handler_params.insert(eff.clone(), handler_var);
                     }
                 } else {
                     // Not in a HOF context, but check if the body uses effects
