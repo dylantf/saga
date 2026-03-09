@@ -125,8 +125,8 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Calling other top-level functions in the same module (saturated apply)
 - [x] Multi-argument functions (direct `apply 'name'/N`, no currying overhead)
 - [x] Multi-clause functions (`fib 0 = 0`, `fib 1 = 1`, `fib n = ...` -> single `case` body)
-- [ ] Mutual recursion (`letrec` in Core Erlang)
-- [ ] Tail call guarantee (verify `erlc` handles it from Core Erlang)
+- [x] Mutual recursion (top-level; `letrec` for local fns deferred)
+- [x] Tail call guarantee (recursive apply emitted in tail position; BEAM handles TCO natively)
 
 ### Module system
 - [ ] Multi-module builds (resolve imports, compile dependency order)
