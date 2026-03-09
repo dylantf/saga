@@ -332,6 +332,14 @@ impl Parser {
                 let op_name = self.expect_ident()?;
                 let mut params = Vec::new();
                 while !matches!(self.peek(), Token::Arrow | Token::Eof) {
+                    // Skip `()` unit params (zero-param effect ops)
+                    if matches!(self.peek(), Token::LParen)
+                        && matches!(self.peek_at(1), Token::RParen)
+                    {
+                        self.advance(); // consume '('
+                        self.advance(); // consume ')'
+                        continue;
+                    }
                     params.push(self.expect_ident()?);
                 }
                 self.expect(Token::Arrow)?;

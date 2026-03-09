@@ -900,7 +900,7 @@ compute () = {
 }
 
 main () = compute () with {
-  ask -> resume 42
+  ask () -> resume 42
 }
 "#;
     let out = emit_elaborated(src);
@@ -927,7 +927,7 @@ compute () = {
 }
 
 main () = compute () with {
-  ask -> resume 21
+  ask () -> resume 21
 }
 "#;
     let out = emit_elaborated(src);
@@ -949,7 +949,7 @@ decide () = {
 }
 
 main () = decide () with {
-  ask -> resume True
+  ask () -> resume True
 }
 "#;
     let out = emit_elaborated(src);
@@ -971,7 +971,7 @@ compute () = {
 }
 
 main () = compute () with {
-  ask -> resume 10
+  ask () -> resume 10
 }
 "#;
     let out = emit_elaborated(src);

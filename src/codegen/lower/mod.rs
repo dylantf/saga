@@ -102,9 +102,7 @@ impl Lowerer {
                         },
                     );
                 }
-                Decl::FunAnnotation {
-                    name, effects, ..
-                } => {
+                Decl::FunAnnotation { name, effects, .. } => {
                     if !effects.is_empty() {
                         let mut sorted = effects.clone();
                         sorted.sort();
@@ -297,7 +295,12 @@ impl Lowerer {
 
                 // Check for effect call: App(EffectCall { .. }, arg1, ...)
                 if let Some((op_name, qualifier, args)) = collect_effect_call(expr) {
-                    return self.lower_effect_call(op_name, qualifier, &args.into_iter().cloned().collect::<Vec<_>>(), None);
+                    return self.lower_effect_call(
+                        op_name,
+                        qualifier,
+                        &args.into_iter().cloned().collect::<Vec<_>>(),
+                        None,
+                    );
                 }
 
                 // Check for a saturated call to a known top-level function.
@@ -627,9 +630,7 @@ impl Lowerer {
             } => self.lower_effect_call(name, qualifier.as_deref(), args, None),
 
             // `expr with handler` -- attaches handler(s) to a computation
-            Expr::With {
-                expr, handler, ..
-            } => self.lower_with(expr, handler),
+            Expr::With { expr, handler, .. } => self.lower_with(expr, handler),
 
             // `resume value` -- inside a handler arm, calls the continuation K
             Expr::Resume { value, .. } => {
