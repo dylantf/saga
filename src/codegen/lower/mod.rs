@@ -49,22 +49,35 @@ impl Lowerer {
         // Group FunBindings by name, preserving declaration order, and simultaneously
         // populate top_level_funs. lower_params is called once per clause here.
         let mut clause_groups: Vec<(String, usize, Vec<Clause>)> = Vec::new();
+        let mut dict_constructors: Vec<(&str, &[String], &[Expr])> = Vec::new();
         for decl in program {
-            if let Decl::FunBinding {
-                name,
-                params,
-                guard,
-                body,
-                ..
-            } = decl
-            {
-                let arity = lower_params(params).len();
-                self.top_level_funs.entry(name.clone()).or_insert(arity);
-                if let Some(group) = clause_groups.iter_mut().find(|(n, _, _)| n == name) {
-                    group.2.push((params, guard, body));
-                } else {
-                    clause_groups.push((name.clone(), arity, vec![(params, guard, body)]));
+            match decl {
+                Decl::FunBinding {
+                    name,
+                    params,
+                    guard,
+                    body,
+                    ..
+                } => {
+                    let arity = lower_params(params).len();
+                    self.top_level_funs.entry(name.clone()).or_insert(arity);
+                    if let Some(group) = clause_groups.iter_mut().find(|(n, _, _)| n == name) {
+                        group.2.push((params, guard, body));
+                    } else {
+                        clause_groups.push((name.clone(), arity, vec![(params, guard, body)]));
+                    }
                 }
+                Decl::DictConstructor {
+                    name,
+                    dict_params,
+                    methods,
+                    ..
+                } => {
+                    self.top_level_funs
+                        .insert(name.clone(), dict_params.len());
+                    dict_constructors.push((name, dict_params, methods));
+                }
+                _ => {}
             }
         }
 
@@ -135,6 +148,21 @@ impl Lowerer {
                 name,
                 arity,
                 body: fun_body,
+            });
+        }
+
+        // Emit dictionary constructor functions
+        for (name, dict_params, methods) in dict_constructors {
+            let arity = dict_params.len();
+            let params: Vec<String> = dict_params.iter().map(|p| core_var(p)).collect();
+            let method_exprs: Vec<CExpr> =
+                methods.iter().map(|m| self.lower_expr(m)).collect();
+            let body = CExpr::Tuple(method_exprs);
+            exports.push((name.to_string(), arity));
+            fun_defs.push(CFunDef {
+                name: name.to_string(),
+                arity,
+                body: CExpr::Fun(params, Box::new(body)),
             });
         }
 
@@ -430,6 +458,49 @@ impl Lowerer {
                 else_arms,
                 ..
             } => self.lower_do(bindings, success, else_arms),
+
+            // --- Elaboration-only constructs ---
+
+            Expr::DictMethodAccess {
+                dict,
+                method_index,
+                ..
+            } => {
+                // Lower to: let D = <dict> in element(idx+1, D)
+                let dict_var = self.fresh();
+                let dict_ce = self.lower_expr(dict);
+                let extract_method = cerl_call(
+                    "erlang",
+                    "element",
+                    vec![
+                        CExpr::Lit(CLit::Int(*method_index as i64 + 1)),
+                        CExpr::Var(dict_var.clone()),
+                    ],
+                );
+                CExpr::Let(
+                    dict_var,
+                    Box::new(dict_ce),
+                    Box::new(extract_method),
+                )
+            }
+
+            Expr::DictRef { name, .. } => {
+                if let Some(&arity) = self.top_level_funs.get(name.as_str()) {
+                    if arity == 0 {
+                        // Nullary dict constructor: call it to get the dict tuple
+                        CExpr::Apply(
+                            Box::new(CExpr::FunRef(name.clone(), 0)),
+                            vec![],
+                        )
+                    } else {
+                        // Parameterized dict constructor: reference it
+                        CExpr::FunRef(name.clone(), arity)
+                    }
+                } else {
+                    // Dict param variable (passed as function argument)
+                    CExpr::Var(core_var(name))
+                }
+            }
 
             _ => CExpr::Lit(CLit::Atom(format!(
                 "todo_{:?}",

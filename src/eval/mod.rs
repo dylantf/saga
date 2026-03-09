@@ -219,6 +219,10 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> EvalResult {
             let env = env.clone();
             eval_do_expr(&bindings, 0, &success, &else_arms, &env)
         }
+
+        Expr::DictMethodAccess { .. } | Expr::DictRef { .. } => {
+            unreachable!("elaboration-only construct in interpreter")
+        }
     }
 }
 
@@ -707,6 +711,10 @@ pub fn eval_decl(decl: &Decl, env: &Env, loader: &ModuleLoader) -> EvalResult {
             env,
             loader,
         ),
+
+        Decl::DictConstructor { .. } => {
+            unreachable!("elaboration-only construct in interpreter")
+        }
     }
 }
 

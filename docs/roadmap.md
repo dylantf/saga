@@ -133,7 +133,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [ ] Qualified calls (`Math.abs x` -> `call 'math':'abs'(X)`)
 
 ### Traits
-- [ ] Dictionary passing (trait impls as tuples of funs, passed as extra args)
+- [x] Dictionary passing (trait impls as tuples of funs, passed as extra args; elaboration pass)
 - [ ] Built-in trait dispatch (`Show`, `Eq`, `Ord`, `Num`)
 - [ ] Replace `show`/`print` builtin special-cases with proper `Show` trait dispatch
 - [ ] Fix `show`/`print` as higher-order values (currently emit undefined `__builtin_*` var; need lambda wrapper)

@@ -1,4 +1,4 @@
-use dylang::{ast, codegen, eval, lexer, parser, typechecker};
+use dylang::{ast, codegen, elaborate, eval, lexer, parser, typechecker};
 
 use std::env;
 use std::fs;
@@ -145,7 +145,8 @@ fn cmd_build(file: &str) {
     let sanitized: String = raw_stem.replace('-', "_");
     let module_name = sanitized.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
 
-    let core_src = codegen::emit_module(module_name, &program);
+    let elaborated = elaborate::elaborate(&program, &checker);
+    let core_src = codegen::emit_module(module_name, &elaborated);
 
     let build_dir = std::path::Path::new(file)
         .parent()

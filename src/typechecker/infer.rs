@@ -473,6 +473,10 @@ impl Checker {
                 self.env = saved_env;
                 Ok(result_ty)
             }
+
+            Expr::DictMethodAccess { .. } | Expr::DictRef { .. } => {
+                unreachable!("elaboration-only construct in typechecker")
+            }
         }
     }
 

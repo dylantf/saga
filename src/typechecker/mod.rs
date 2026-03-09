@@ -268,7 +268,7 @@ pub(crate) struct HandlerInfo {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct TraitInfo {
+pub struct TraitInfo {
     // TODO: type_param will be used for kind checking (maybe, if we implement it :P )
     #[allow(dead_code)]
     pub type_param: String,
@@ -278,11 +278,22 @@ pub(crate) struct TraitInfo {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ImplInfo {
+pub struct ImplInfo {
     /// Constraints on type parameters: (trait_name, param_index)
     /// e.g. Show for List requires Show on param 0 (the element type)
     pub param_constraints: Vec<(String, usize)>,
     pub span: Option<Span>,
+}
+
+/// Evidence that a trait constraint was resolved during typechecking.
+/// Used by the elaboration pass to insert dictionary arguments.
+#[derive(Debug, Clone)]
+pub struct TraitEvidence {
+    pub span: Span,
+    pub trait_name: String,
+    /// The concrete type that satisfied the constraint.
+    /// None if resolved via a where-bound type variable (polymorphic passthrough).
+    pub resolved_type: Option<(String, Vec<Type>)>,
 }
 
 // --- Inference engine ---
@@ -327,6 +338,8 @@ pub struct Checker {
     pub(crate) tc_loading: HashSet<String>,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
     pub(crate) adt_variants: HashMap<std::string::String, Vec<(std::string::String, usize)>>,
+    /// Evidence collected during constraint solving for the elaboration pass.
+    pub evidence: Vec<TraitEvidence>,
 }
 
 impl Default for Checker {
@@ -358,6 +371,7 @@ impl Checker {
             tc_type_ctors: HashMap::new(),
             tc_loading: HashSet::new(),
             adt_variants: HashMap::new(),
+            evidence: Vec::new(),
         };
         checker.register_builtins();
         checker

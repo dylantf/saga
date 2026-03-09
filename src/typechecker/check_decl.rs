@@ -853,6 +853,12 @@ impl Checker {
                                 ));
                             }
                             Some(info) => {
+                                // Record evidence for the elaboration pass
+                                self.evidence.push(super::TraitEvidence {
+                                    span,
+                                    trait_name: trait_name.clone(),
+                                    resolved_type: Some((type_name.clone(), args.clone())),
+                                });
                                 // Push conditional constraints for type parameters
                                 if type_name == "Tuple" {
                                     // Tuples: propagate the trait to all elements
@@ -891,6 +897,12 @@ impl Checker {
                                 ),
                             ));
                         }
+                        // Record evidence for polymorphic passthrough
+                        self.evidence.push(super::TraitEvidence {
+                            span,
+                            trait_name: trait_name.clone(),
+                            resolved_type: None,
+                        });
                     }
                     Type::Arrow(_, _) | Type::EffArrow(_, _, _) => {
                         return Err(TypeError::at(

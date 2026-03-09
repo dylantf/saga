@@ -114,6 +114,18 @@ pub enum Decl {
 
     /// `module Foo.Bar`
     ModuleDecl { path: Vec<String>, span: Span },
+
+    // --- Elaboration-only (never produced by the parser) ---
+    /// Synthesized dictionary constructor function for a trait impl.
+    /// e.g. `__dict_Describe_User` returns a tuple of method functions.
+    DictConstructor {
+        name: String,
+        /// Parameters for sub-dictionaries (conditional impls like `Show for List a where {a: Show}`)
+        dict_params: Vec<String>,
+        /// Method implementations as lambda expressions, ordered by trait method declaration order
+        methods: Vec<Expr>,
+        span: Span,
+    },
 }
 
 // --- Expressions ---
@@ -229,6 +241,17 @@ pub enum Expr {
         else_arms: Vec<CaseArm>,
         span: Span,
     },
+
+    // --- Elaboration-only (never produced by the parser) ---
+    /// Extract a method from a dictionary tuple (does not apply it).
+    /// Lowered to `erlang:element(method_index+1, dict)`.
+    DictMethodAccess {
+        dict: Box<Expr>,
+        method_index: usize,
+        span: Span,
+    },
+    /// Reference to a dictionary value (a variable holding a dict, or a dict constructor name).
+    DictRef { name: String, span: Span },
 }
 
 impl Expr {
@@ -252,7 +275,9 @@ impl Expr {
             | Expr::Resume { span, .. }
             | Expr::Tuple { span, .. }
             | Expr::QualifiedName { span, .. }
-            | Expr::Do { span, .. } => *span,
+            | Expr::Do { span, .. }
+            | Expr::DictMethodAccess { span, .. }
+            | Expr::DictRef { span, .. } => *span,
         }
     }
 }
