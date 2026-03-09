@@ -116,8 +116,15 @@ pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Ve
                 current = func;
             }
             Expr::EffectCall {
-                name, qualifier, ..
+                name,
+                qualifier,
+                args: direct_args,
+                ..
             } => {
+                debug_assert!(
+                    direct_args.is_empty(),
+                    "EffectCall.args should be empty (args are wrapped via App nodes)"
+                );
                 args.reverse();
                 return Some((name.as_str(), qualifier.as_deref(), args));
             }

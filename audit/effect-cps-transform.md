@@ -121,7 +121,7 @@ The then-branch's `lower_block` terminal calls `apply_return_k`, consuming `curr
 
 mod.rs:765-776 always emits `apply _K(value)`. This works because handler functions always name their continuation param `_K` (exprs.rs:500). Nested handlers shadow correctly via lexical scoping. Not a bug, but using `fresh()` names would be more robust against refactoring surprises.
 
-### 5. Latent: `EffectCall.args` field ignored in codegen
+### 5. (DONE) Latent: `EffectCall.args` field ignored in codegen
 
 `collect_effect_call` at util.rs:109-127 only collects `App`-wrapped args, ignoring `EffectCall.args`. This is safe today because the parser always creates `EffectCall { args: vec![] }` and wraps args via `App`. But if any future pass populates `EffectCall.args` directly, this would silently drop arguments. Consider either:
 
