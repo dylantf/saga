@@ -2,12 +2,41 @@
 /// These are the implementations for specific expression forms, split out of
 /// mod.rs to keep file sizes manageable. Effects go in effects.rs, traits in
 /// traits.rs, etc.
-use crate::ast::{BinOp, CaseArm, Expr, Pat, Stmt};
+use crate::ast::{BinOp, CaseArm, Expr, Handler, HandlerArm, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::pats::lower_pat;
 use super::util::{binop_call, pat_binding_var};
 use super::Lowerer;
+
+/// Returns true if `expr` contains a `Resume` node anywhere in its tree.
+fn contains_resume(expr: &Expr) -> bool {
+    match expr {
+        Expr::Resume { .. } => true,
+        Expr::App { func, arg, .. } => contains_resume(func) || contains_resume(arg),
+        Expr::BinOp { left, right, .. } => contains_resume(left) || contains_resume(right),
+        Expr::UnaryMinus { expr, .. } => contains_resume(expr),
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => contains_resume(cond) || contains_resume(then_branch) || contains_resume(else_branch),
+        Expr::Block { stmts, .. } => stmts.iter().any(|s| match s {
+            Stmt::Expr(e) => contains_resume(e),
+            Stmt::Let { value, .. } => contains_resume(value),
+        }),
+        Expr::Lambda { body, .. } => contains_resume(body),
+        Expr::Case { scrutinee, arms, .. } => {
+            contains_resume(scrutinee) || arms.iter().any(|a| contains_resume(&a.body))
+        }
+        Expr::Tuple { elements, .. } => elements.iter().any(contains_resume),
+        Expr::With { expr, .. } => contains_resume(expr),
+        Expr::EffectCall { args, .. } => args.iter().any(contains_resume),
+        Expr::ForeignCall { args, .. } => args.iter().any(contains_resume),
+        _ => false,
+    }
+}
 
 /// Returns true if `expr` is a valid Core Erlang guard expression:
 /// comparisons, arithmetic, boolean ops, unary minus, and literals/variables.
@@ -278,6 +307,136 @@ impl Lowerer {
         }
 
         inner
+    }
+
+    /// Lower a `with` expression to Core Erlang try/catch.
+    pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
+        // Resolve all handler arms and return clause
+        let (all_arms, return_clause) = self.resolve_handler(handler);
+
+        // Check for resume usage (not supported yet)
+        for arm in &all_arms {
+            assert!(
+                !contains_resume(&arm.body),
+                "Resumable handlers are not yet supported in the compiled backend. \
+                 Handler arm '{}' uses `resume`.",
+                arm.op_name
+            );
+        }
+
+        // Lower the inner expression
+        let expr_ce = self.lower_expr(expr);
+
+        // Build success path (of clause)
+        let success_var = self.fresh();
+        let success_body = if let Some(ret) = &return_clause {
+            // return clause: bind the param name to success_var, lower the body
+            let param = if ret.params.is_empty() {
+                self.fresh()
+            } else {
+                super::util::core_var(&ret.params[0])
+            };
+            let body_ce = self.lower_expr(&ret.body);
+            CExpr::Let(param, Box::new(CExpr::Var(success_var.clone())), Box::new(body_ce))
+        } else {
+            CExpr::Var(success_var.clone())
+        };
+
+        // Build catch body: case on reason to match effect tags
+        let catch_class = self.fresh();
+        let catch_reason = self.fresh();
+        let catch_stack = self.fresh();
+
+        // Default arm: re-raise unhandled exceptions
+        let reraise = CExpr::Call(
+            "erlang".to_string(),
+            "raise".to_string(),
+            vec![
+                CExpr::Var(catch_class.clone()),
+                CExpr::Var(catch_reason.clone()),
+                CExpr::Var(catch_stack.clone()),
+            ],
+        );
+
+        // Build case arms for each handler arm
+        let mut case_arms: Vec<CArm> = Vec::new();
+        for arm in &all_arms {
+            // Pattern: {'__effect__', 'op_name', Param1, Param2, ...}
+            let mut pat_elems = vec![
+                CPat::Lit(CLit::Atom("__effect__".to_string())),
+                CPat::Lit(CLit::Atom(arm.op_name.clone())),
+            ];
+            for param in &arm.params {
+                pat_elems.push(CPat::Var(super::util::core_var(param)));
+            }
+
+            case_arms.push(CArm {
+                pat: CPat::Tuple(pat_elems),
+                guard: None,
+                body: self.lower_expr(&arm.body),
+            });
+        }
+
+        // Add default re-raise arm
+        case_arms.push(CArm {
+            pat: CPat::Wildcard,
+            guard: None,
+            body: reraise,
+        });
+
+        let catch_body = CExpr::Case(
+            Box::new(CExpr::Var(catch_reason.clone())),
+            case_arms,
+        );
+
+        CExpr::Try {
+            expr: Box::new(expr_ce),
+            success_var,
+            success_body: Box::new(success_body),
+            catch_class,
+            catch_reason,
+            catch_stacktrace: catch_stack,
+            catch_body: Box::new(catch_body),
+        }
+    }
+
+    /// Resolve a Handler into a flat list of arms and an optional return clause.
+    fn resolve_handler(&self, handler: &Handler) -> (Vec<HandlerArm>, Option<Box<HandlerArm>>) {
+        match handler {
+            Handler::Named(name) => {
+                let info = self
+                    .handler_defs
+                    .get(name)
+                    .unwrap_or_else(|| panic!("Unknown handler: {}", name));
+                (info.arms.clone(), info.return_clause.clone())
+            }
+            Handler::Inline {
+                named,
+                arms,
+                return_clause,
+            } => {
+                let mut all_arms = Vec::new();
+                let mut resolved_return = return_clause.clone();
+
+                // Merge arms from named handlers
+                for name in named {
+                    let info = self
+                        .handler_defs
+                        .get(name)
+                        .unwrap_or_else(|| panic!("Unknown handler: {}", name));
+                    all_arms.extend(info.arms.iter().cloned());
+                    // Use the first named handler's return clause if no inline one
+                    if resolved_return.is_none() {
+                        resolved_return = info.return_clause.clone();
+                    }
+                }
+
+                // Add inline arms after named handler arms
+                all_arms.extend(arms.iter().cloned());
+
+                (all_arms, resolved_return)
+            }
+        }
     }
 
     pub(super) fn lower_tuple_elems(&mut self, elems: &[Expr]) -> CExpr {

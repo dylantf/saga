@@ -28,6 +28,7 @@ fn print_usage() {
     eprintln!("  dylang check            Typecheck project without running");
     eprintln!("  dylang check <file.dy>  Typecheck a single file");
     eprintln!("  dylang build            Build project (not yet implemented)");
+    eprintln!("  dylang emit <file.dy>   Print generated Core Erlang to stdout");
 }
 
 fn parse_and_typecheck(
@@ -181,10 +182,30 @@ fn cmd_build(file: &str) {
 
     eprintln!("Built {}/{}.beam", build_dir.display(), module_name);
     eprintln!(
-        "Run with: erl -noshell -pa {} -s {} main -s init stop",
+        "Run with: erl -noshell -eval \"code:add_path(\\\"{}\\\"), {}:main(), init:stop().\"",
         build_dir.display(),
         module_name
     );
+}
+
+fn cmd_emit(file: &str) {
+    let source = fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Error reading {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let mut checker = make_checker(None);
+    let program = parse_and_typecheck(&source, file, &mut checker);
+
+    let raw_stem = std::path::Path::new(file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("main");
+    let sanitized: String = raw_stem.replace('-', "_");
+    let module_name = sanitized.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
+
+    let elaborated = elaborate::elaborate(&program, &checker);
+    let core_src = codegen::emit_module(module_name, &elaborated);
+    print!("{}", core_src);
 }
 
 fn cmd_check(file: Option<&str>) {
@@ -244,6 +265,13 @@ fn main() {
             Some(file) => cmd_build(file),
             None => {
                 eprintln!("Usage: dylang build <file.dy>");
+                std::process::exit(1);
+            }
+        },
+        Some("emit") => match args.get(2).map(|s| s.as_str()) {
+            Some(file) => cmd_emit(file),
+            None => {
+                eprintln!("Usage: dylang emit <file.dy>");
                 std::process::exit(1);
             }
         },

@@ -131,6 +131,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 ### Module system
 - [ ] Multi-module builds (resolve imports, compile dependency order)
 - [ ] Qualified calls (`Math.abs x` -> `call 'math':'abs'(X)`)
+- [ ] Module-qualified dict names (`__dict_Show_Graphics_Color` not `__dict_Show_Color`) to avoid collisions across modules
 
 ### Data structures
 - [ ] Dict lowering (dict literals -> Erlang maps, `Dict.*` -> `maps:*` BIFs)

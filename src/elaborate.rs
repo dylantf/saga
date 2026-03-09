@@ -389,6 +389,24 @@ impl Elaborator {
                         name, trait_name, span
                     );
                 }
+
+                // Dict-parameterized function used as a bare value (not directly applied).
+                // Partially apply the dict args so it can be passed as a first-class function.
+                // e.g. `let p = print` becomes `let p = print __dict_Show_String`
+                if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
+                    let mut result: Expr = expr.clone();
+                    for (trait_name, _type_var) in &dict_param_info {
+                        if let Some(dict_expr) = self.resolve_dict(&trait_name, *span) {
+                            result = Expr::App {
+                                func: Box::new(result),
+                                arg: Box::new(dict_expr),
+                                span: *span,
+                            };
+                        }
+                    }
+                    return result;
+                }
+
                 expr.clone()
             }
 
@@ -437,7 +455,9 @@ impl Elaborator {
                             span: func.span(),
                         };
                         for (trait_name, _type_var) in &dict_param_info {
-                            if let Some(dict_expr) = self.resolve_dict(trait_name, *span) {
+                            // Use the Var's span for evidence lookup (that's where
+                            // the typechecker recorded it), not the App's span.
+                            if let Some(dict_expr) = self.resolve_dict(trait_name, func.span()) {
                                 result = Expr::App {
                                     func: Box::new(result),
                                     arg: Box::new(dict_expr),
