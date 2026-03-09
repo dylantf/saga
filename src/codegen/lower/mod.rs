@@ -60,6 +60,10 @@ pub struct Lowerer {
     /// This places the return clause inside the CPS chain so handler aborts
     /// (which don't call K) naturally bypass the return clause.
     current_return_k: Option<CExpr>,
+    /// Return continuation to pass as `_ReturnK` to the next effectful call.
+    /// Set by `lower_with` when the inner expression is a direct function call,
+    /// consumed by the saturated call path.
+    pending_callee_return_k: Option<CExpr>,
 }
 
 impl Lowerer {
@@ -77,6 +81,7 @@ impl Lowerer {
             current_effectful_vars: HashMap::new(),
             lambda_effect_context: None,
             current_return_k: None,
+            pending_callee_return_k: None,
         }
     }
 
@@ -168,7 +173,7 @@ impl Lowerer {
                         .fun_effects
                         .get(name.as_str())
                         .map_or(0, |effs| effs.len());
-                    let arity = base_arity + effect_count;
+                    let arity = base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
                     self.top_level_funs.entry(name.clone()).or_insert(arity);
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _)| n == name) {
                         group.2.push((params, guard, body));
@@ -221,14 +226,32 @@ impl Lowerer {
                 }
             }
 
-            let base_arity = arity - handler_params.len();
+            let has_effects = !handler_params.is_empty();
+            let base_arity = arity - handler_params.len() - if has_effects { 1 } else { 0 };
+
+            // For effectful functions, set _ReturnK as current_return_k so
+            // lower_block applies it at terminal positions. Handler aborts
+            // bypass the function's normal return, so they skip _ReturnK.
+            let saved_return_k = self.current_return_k.take();
+            if has_effects {
+                self.current_return_k = Some(CExpr::Var("_ReturnK".to_string()));
+            }
 
             let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
                 // Single clause, no guard: emit directly without a case wrapper.
                 let (params, _, body) = clauses[0];
                 let mut params_ce = lower_params(params);
                 params_ce.extend(handler_params.iter().cloned());
+                if has_effects {
+                    params_ce.push("_ReturnK".to_string());
+                }
                 let body_ce = self.lower_expr(body);
+                // For non-block bodies, lower_block didn't run, so apply return_k
+                let body_ce = if has_effects && !matches!(body, Expr::Block { .. }) {
+                    self.apply_return_k(body_ce)
+                } else {
+                    body_ce
+                };
                 CExpr::Fun(params_ce, Box::new(body_ce))
             } else {
                 // Multi-clause or single clause with a guard: generate fresh arg vars
@@ -236,6 +259,9 @@ impl Lowerer {
                 let mut arg_vars: Vec<String> =
                     (0..base_arity).map(|i| format!("_Arg{}", i)).collect();
                 arg_vars.extend(handler_params.iter().cloned());
+                if has_effects {
+                    arg_vars.push("_ReturnK".to_string());
+                }
 
                 let arms: Vec<CArm> = clauses
                     .iter()
@@ -269,6 +295,11 @@ impl Lowerer {
                         };
                         let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
                         let body_ce = self.lower_expr(body);
+                        let body_ce = if has_effects && !matches!(body, Expr::Block { .. }) {
+                            self.apply_return_k(body_ce)
+                        } else {
+                            body_ce
+                        };
                         CArm {
                             pat,
                             guard: guard_ce,
@@ -294,6 +325,8 @@ impl Lowerer {
                 let case_ce = CExpr::Case(Box::new(scrut_ce), arms);
                 CExpr::Fun(arg_vars, Box::new(case_ce))
             };
+
+            self.current_return_k = saved_return_k;
 
             self.current_handler_params = saved_handler_params;
             self.current_effectful_vars = saved_effectful_vars;
@@ -379,8 +412,9 @@ impl Lowerer {
                         })
                         .collect();
 
+                    let return_k_count = if effect_count > 0 { 1 } else { 0 };
                     if let Some(arity) = total_arity
-                        && non_unit_args.len() + effect_count == arity
+                        && non_unit_args.len() + effect_count + return_k_count == arity
                     {
                         // Saturated call: apply fun 'name'/N(arg1, ..., argN, handler1, ...)
                         let mut arg_vars: Vec<String> = Vec::new();
@@ -413,6 +447,15 @@ impl Lowerer {
                                     );
                                 }
                             }
+                            // Pass _ReturnK: take from pending (set by `with`), or identity
+                            let return_k =
+                                self.pending_callee_return_k.take().unwrap_or_else(|| {
+                                    let p = self.fresh();
+                                    CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
+                                });
+                            let rk_var = self.fresh();
+                            bindings.push((rk_var.clone(), return_k));
+                            arg_vars.push(rk_var);
                         }
                         let call = CExpr::Apply(
                             Box::new(CExpr::FunRef(func_name.to_string(), arity)),
@@ -460,6 +503,16 @@ impl Lowerer {
                                 var_name, eff
                             );
                         }
+                    }
+                    // Pass _ReturnK: take from pending (set by `with`), or identity
+                    {
+                        let return_k = self.pending_callee_return_k.take().unwrap_or_else(|| {
+                            let p = self.fresh();
+                            CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
+                        });
+                        let rk_var = self.fresh();
+                        bindings.push((rk_var.clone(), return_k));
+                        arg_vars.push(rk_var);
                     }
                     let call = CExpr::Apply(
                         Box::new(CExpr::Var(core_var(var_name))),
@@ -559,18 +612,28 @@ impl Lowerer {
                 // If a lambda_effect_context is set (from being passed to an
                 // effectful HOF parameter), add handler params for those effects.
                 // This ensures both pure and effectful lambdas have the right arity.
+                let mut is_effectful_lambda = false;
                 if let Some(effects) = self.lambda_effect_context.take() {
                     for eff in &effects {
                         let handler_var = format!("_Handle{}", eff);
                         param_vars.push(handler_var.clone());
                         self.current_handler_params.insert(eff.clone(), handler_var);
                     }
+                    // Add _ReturnK parameter for effectful lambdas
+                    param_vars.push("_ReturnK".to_string());
+                    self.current_return_k = Some(CExpr::Var("_ReturnK".to_string()));
+                    is_effectful_lambda = true;
                 } else {
                     // Not in a HOF context, but check if the body uses effects
                     // directly (e.g. lambda defined in a block that already has
                     // handler params in scope -- those are captured, not parameterized).
                 }
                 let body_ce = self.lower_expr(body);
+                let body_ce = if is_effectful_lambda && !matches!(**body, Expr::Block { .. }) {
+                    self.apply_return_k(body_ce)
+                } else {
+                    body_ce
+                };
                 self.current_handler_params = saved_handler_params;
                 self.current_return_k = saved_return_k;
                 CExpr::Fun(param_vars, Box::new(body_ce))

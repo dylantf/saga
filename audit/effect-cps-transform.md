@@ -37,7 +37,7 @@ A-normalization does not help here: normalize.rs:175-189 normalizes branches wit
 
 The most targeted fix is **(b)**: when lowering an `if`/`case` whose branches contain effect calls, and there is an outer continuation context (more statements after this expression in the block), thread the outer K through the branches.
 
-### 2. Critical: Return clause wraps abort values for function-call inner expressions
+### 2. (DONE) Critical: Return clause wraps abort values for function-call inner expressions
 
 When the inner expression of `with` is a function call (not a block), the CPS chain lives inside the called function. `current_return_k` is never consumed by `lower_block`, so `apply_return_k` at exprs.rs:465 wraps the result unconditionally, including values returned by abort-style handlers.
 

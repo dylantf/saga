@@ -24,7 +24,8 @@ fn emit_elaborated(src: &str) -> String {
 /// Emit Core Erlang and compile it with erlc, asserting no compilation errors.
 fn assert_compiles(src: &str) {
     let out = emit_elaborated(src);
-    let dir = std::env::temp_dir().join("dylang_test");
+    // Use a unique temp dir per test to avoid races in parallel test execution
+    let dir = std::env::temp_dir().join(format!("dylang_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let core_path = dir.join("test.core");
     std::fs::write(&core_path, &out).unwrap();
@@ -398,8 +399,8 @@ fun do_work () -> Int needs {Log}
 do_work () = 42
 ";
     let out = emit_elaborated(src);
-    // do_work takes 0 user params + 1 handler param = arity 1
-    assert_contains(&out, "'do_work'/1");
+    // do_work takes 0 user params + 1 handler param + 1 _ReturnK = arity 2
+    assert_contains(&out, "'do_work'/2");
     assert_contains(&out, "_HandleLog");
 }
 
@@ -484,7 +485,7 @@ main () = do_work () with silent
     let out = emit_elaborated(src);
     // main should bind _HandleLog from the silent handler and call do_work
     assert_contains(&out, "_HandleLog");
-    assert_contains(&out, "apply 'do_work'/1");
+    assert_contains(&out, "apply 'do_work'/2");
 }
 
 #[test]
@@ -504,7 +505,7 @@ main () = risky () with {
     let out = emit_elaborated(src);
     // Should have an inline handler function bound to _HandleFail
     assert_contains(&out, "_HandleFail");
-    assert_contains(&out, "apply 'risky'/1");
+    assert_contains(&out, "apply 'risky'/2");
 }
 
 #[test]
@@ -601,8 +602,8 @@ main () = outer () with silent
     // outer should pass its _HandleLog to inner
     // inner/1 takes _HandleLog, outer/1 takes _HandleLog,
     // outer calls inner with its own _HandleLog
-    assert_contains(&out, "'inner'/1");
-    assert_contains(&out, "'outer'/1");
+    assert_contains(&out, "'inner'/2");
+    assert_contains(&out, "'outer'/2");
 }
 
 #[test]
@@ -660,7 +661,7 @@ main () = do_work () with silent
     let out = emit_elaborated(src);
     // do_work should have nested handler applies with continuations
     // wrapping the let bindings and final value
-    assert_contains(&out, "'do_work'/1");
+    assert_contains(&out, "'do_work'/2");
     assert_contains(&out, "apply _HandleLog('log'");
     // x = 10 + 20 should appear inside a continuation
     assert_contains(&out, "call 'erlang':'+'");
@@ -726,11 +727,10 @@ main () = outer () with silent
 "#;
     let out = emit_elaborated(src);
     // Both should take _HandleLog
-    assert_contains(&out, "'inner'/1");
-    assert_contains(&out, "'outer'/1");
-    // outer's body should call inner with _HandleLog passed through
-    // inner/1 called with the handler param
-    assert_contains(&out, "apply 'inner'/1(_HandleLog)");
+    assert_contains(&out, "'inner'/2");
+    assert_contains(&out, "'outer'/2");
+    // outer's body should call inner with _HandleLog and _ReturnK passed through
+    assert_contains(&out, "apply 'inner'/2(_HandleLog");
 }
 
 #[test]
@@ -767,8 +767,8 @@ main () = risky_work () with {
 }
 "#;
     let out = emit_elaborated(src);
-    // risky_work needs 2 handler params (Fail + Log, sorted alphabetically)
-    assert_contains(&out, "'risky_work'/2");
+    // risky_work needs 2 handler params + 1 _ReturnK (Fail + Log, sorted alphabetically)
+    assert_contains(&out, "'risky_work'/3");
     // Both handler params should be present
     assert_contains(&out, "_HandleFail");
     assert_contains(&out, "_HandleLog");
@@ -899,8 +899,8 @@ main () = safe_div 10 0 with {
 }
 "#;
     let out = emit_elaborated(src);
-    // safe_div takes 2 user params + 1 handler param = arity 3
-    assert_contains(&out, "'safe_div'/3");
+    // safe_div takes 2 user params + 1 handler param + 1 _ReturnK = arity 4
+    assert_contains(&out, "'safe_div'/4");
     assert_contains(&out, "_HandleFail");
 }
 

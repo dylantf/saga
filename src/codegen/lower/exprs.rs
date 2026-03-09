@@ -8,7 +8,8 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use super::Lowerer;
 use super::pats::lower_pat;
 use super::util::{
-    binop_call, collect_effect_call, core_var, has_nested_effect_call, pat_binding_var,
+    binop_call, collect_effect_call, collect_fun_call, core_var, has_nested_effect_call,
+    pat_binding_var,
 };
 
 /// Returns true if `expr` is a valid Core Erlang guard expression:
@@ -204,7 +205,7 @@ impl Lowerer {
     /// Apply the current return continuation (if set) to a final value.
     /// Clones the return_k so it can be applied in multiple branches
     /// (e.g. both arms of an if/case inside a with block).
-    fn apply_return_k(&mut self, val: CExpr) -> CExpr {
+    pub(super) fn apply_return_k(&mut self, val: CExpr) -> CExpr {
         if let Some(k) = self.current_return_k.clone() {
             let v = self.fresh();
             CExpr::Let(
@@ -643,26 +644,44 @@ impl Lowerer {
             handler_bindings.push((handler_var.clone(), handler_fun));
         }
 
-        // Build the return clause as a continuation (ReturnK) and place it
-        // inside the CPS chain. lower_block will apply it to the computation's
-        // final value. Handler aborts (which don't call K) naturally bypass it.
+        // Build the return clause lambda (if present).
         let saved_return_k = self.current_return_k.take();
-        if let Some(ret) = &return_clause {
+        let return_k_lambda = if let Some(ret) = &return_clause {
             let param = if ret.params.is_empty() {
                 self.fresh()
             } else {
                 core_var(&ret.params[0])
             };
             let ret_body = self.lower_expr(&ret.body);
-            self.current_return_k = Some(CExpr::Fun(vec![param], Box::new(ret_body)));
-        }
+            Some(CExpr::Fun(vec![param], Box::new(ret_body)))
+        } else {
+            None
+        };
 
-        // Lower the inner expression with the handler params and return_k in scope
-        let inner_ce = self.lower_expr(expr);
+        // Check if the inner expression is a direct effectful function call.
+        // If so, pass the return clause as _ReturnK parameter instead of
+        // wrapping externally. This prevents abort values from being wrapped.
+        let is_direct_effectful_call = collect_fun_call(expr)
+            .map(|(name, _)| {
+                self.fun_effects.contains_key(name)
+                    || self.current_effectful_vars.contains_key(name)
+            })
+            .unwrap_or(false);
 
-        // If return_k wasn't consumed (inner expr wasn't a block with CPS),
-        // fall back to applying it as a wrapper.
-        let result = self.apply_return_k(inner_ce);
+        let result = if is_direct_effectful_call {
+            // Pass return clause as _ReturnK to the callee via pending_callee_return_k
+            if let Some(rk) = return_k_lambda {
+                self.pending_callee_return_k = Some(rk);
+            }
+            self.lower_expr(expr)
+        } else {
+            // Block form or non-call: use current_return_k for terminal application
+            if let Some(rk) = return_k_lambda {
+                self.current_return_k = Some(rk);
+            }
+            let inner_ce = self.lower_expr(expr);
+            self.apply_return_k(inner_ce)
+        };
 
         self.current_handler_params = saved_handler_params;
         self.current_return_k = saved_return_k;
