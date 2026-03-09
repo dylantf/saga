@@ -117,7 +117,7 @@ The then-branch's `lower_block` terminal calls `apply_return_k`, consuming `curr
 
 **Fix:** Clone instead of take. Have `lower_with` clear `current_return_k` after lowering the inner expression (which it already does at line 468).
 
-### 4. Minor: `resume` hardcoded to `_K` variable name
+### 4. (DONE) Minor: `resume` hardcoded to `_K` variable name
 
 mod.rs:765-776 always emits `apply _K(value)`. This works because handler functions always name their continuation param `_K` (exprs.rs:500). Nested handlers shadow correctly via lexical scoping. Not a bug, but using `fresh()` names would be more robust against refactoring surprises.
 

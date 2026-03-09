@@ -64,6 +64,9 @@ pub struct Lowerer {
     /// Set by `lower_with` when the inner expression is a direct function call,
     /// consumed by the saturated call path.
     pending_callee_return_k: Option<CExpr>,
+    /// Variable name for the continuation parameter in the current handler function.
+    /// Set by `build_handler_fun`, read by `Expr::Resume`.
+    current_handler_k: Option<String>,
 }
 
 impl Lowerer {
@@ -82,6 +85,7 @@ impl Lowerer {
             lambda_effect_context: None,
             current_return_k: None,
             pending_callee_return_k: None,
+            current_handler_k: None,
         }
     }
 
@@ -823,13 +827,17 @@ impl Lowerer {
 
             // `resume value` -- inside a handler arm, calls the continuation K
             Expr::Resume { value, .. } => {
+                let k_name = self
+                    .current_handler_k
+                    .clone()
+                    .expect("resume used outside handler");
                 let v = self.fresh();
                 let ce = self.lower_expr(value);
                 CExpr::Let(
                     v.clone(),
                     Box::new(ce),
                     Box::new(CExpr::Apply(
-                        Box::new(CExpr::Var("_K".to_string())),
+                        Box::new(CExpr::Var(k_name)),
                         vec![CExpr::Var(v)],
                     )),
                 )

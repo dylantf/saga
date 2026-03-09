@@ -701,7 +701,7 @@ impl Lowerer {
     fn build_handler_fun(&mut self, arms: &[&HandlerArm]) -> CExpr {
         if arms.is_empty() {
             // Shouldn't happen, but degenerate case
-            let k_param = "_K".to_string();
+            let k_param = self.fresh();
             return CExpr::Fun(
                 vec!["_Op".to_string(), k_param.clone()],
                 Box::new(CExpr::Apply(
@@ -716,14 +716,15 @@ impl Lowerer {
 
         // Handler function params: Op, Param1, ..., ParamN, K
         let op_var = "_Op".to_string();
-        let k_var = "_K".to_string();
+        let k_var = self.fresh();
         let param_vars: Vec<String> = (0..max_params).map(|i| format!("_HArg{}", i)).collect();
 
         let mut fun_params = vec![op_var.clone()];
         fun_params.extend(param_vars.iter().cloned());
-        fun_params.push(k_var);
+        fun_params.push(k_var.clone());
 
         // Build case arms on the op atom
+        let prev_handler_k = self.current_handler_k.replace(k_var);
         let case_arms: Vec<CArm> = arms
             .iter()
             .map(|arm| {
@@ -745,6 +746,7 @@ impl Lowerer {
             })
             .collect();
 
+        self.current_handler_k = prev_handler_k;
         let case_expr = CExpr::Case(Box::new(CExpr::Var(op_var)), case_arms);
         CExpr::Fun(fun_params, Box::new(case_expr))
     }
