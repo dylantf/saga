@@ -21,6 +21,13 @@ fn emit_elaborated(src: &str) -> String {
     codegen::emit_module("test", &elaborated)
 }
 
+fn assert_contains(out: &str, needle: &str) {
+    assert!(
+        out.contains(needle),
+        "Expected to find:\n  {needle}\nIn output:\n{out}"
+    );
+}
+
 // --- Tail call position ---
 
 /// A tail-recursive function should have its recursive `apply` in tail position:
@@ -354,4 +361,417 @@ main () = print Red
         out.contains("'io':'format'"),
         "expected io:format in print\n{out}"
     );
+}
+
+// --- Effect system (CPS transform) ---
+
+#[test]
+fn effect_fun_gets_handler_param() {
+    // An effectful function should have an extra handler parameter in its arity
+    let src = "
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+fun do_work () -> Int needs {Log}
+do_work () = 42
+";
+    let out = emit_elaborated(src);
+    // do_work takes 0 user params + 1 handler param = arity 1
+    assert_contains(&out, "'do_work'/1");
+    assert_contains(&out, "_HandleLog");
+}
+
+#[test]
+fn effect_call_becomes_handler_apply() {
+    // `log! "hello"` should become `apply _HandleLog('log', "hello", K)`
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+fun do_work () -> Unit needs {Log}
+do_work () = log! "hello"
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "apply _HandleLog");
+    assert_contains(&out, "'log'");
+    assert_contains(&out, "\"hello\"");
+}
+
+#[test]
+fn effect_call_in_block_captures_continuation() {
+    // When an effect call is in a block, everything after it becomes the continuation
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+fun do_work () -> Int needs {Log}
+do_work () = {
+  log! "starting"
+  42
+}
+"#;
+    let out = emit_elaborated(src);
+    // Should have handler apply with a fun (continuation) as last arg
+    assert_contains(&out, "apply _HandleLog");
+    assert_contains(&out, "'log'");
+    // The continuation should contain 42
+    assert_contains(&out, "fun (");
+    assert_contains(&out, "42");
+}
+
+#[test]
+fn effect_call_let_binding_captures_value() {
+    // `let x = get! ()` should make x the continuation parameter
+    let src = "
+effect State {
+  fun get () -> Int
+}
+
+fun use_state () -> Int needs {State}
+use_state () = {
+  let x = get! ()
+  x + 1
+}
+";
+    let out = emit_elaborated(src);
+    assert_contains(&out, "apply _HandleState");
+    assert_contains(&out, "'get'");
+}
+
+#[test]
+fn with_named_handler_binds_handler() {
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+fun do_work () -> Int needs {Log}
+do_work () = {
+  log! "hello"
+  42
+}
+
+main () = do_work () with silent
+"#;
+    let out = emit_elaborated(src);
+    // main should bind _HandleLog from the silent handler and call do_work
+    assert_contains(&out, "_HandleLog");
+    assert_contains(&out, "apply 'do_work'/1");
+}
+
+#[test]
+fn with_inline_handler() {
+    let src = r#"
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+fun risky () -> Int needs {Fail}
+risky () = fail! "oops"
+
+main () = risky () with {
+  fail msg -> 0
+}
+"#;
+    let out = emit_elaborated(src);
+    // Should have an inline handler function bound to _HandleFail
+    assert_contains(&out, "_HandleFail");
+    assert_contains(&out, "apply 'risky'/1");
+}
+
+#[test]
+fn handler_resume_calls_k() {
+    // resume () in a handler should emit apply _K('unit')
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+fun do_work () -> Int needs {Log}
+do_work () = {
+  log! "hello"
+  42
+}
+
+main () = do_work () with silent
+"#;
+    let out = emit_elaborated(src);
+    // The handler function should call _K (resume)
+    assert_contains(&out, "apply _K(");
+}
+
+#[test]
+fn non_resumable_handler_no_k() {
+    // A handler that doesn't use resume should NOT call _K
+    let src = r#"
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+fun risky () -> Int needs {Fail}
+risky () = fail! "oops"
+
+main () = risky () with {
+  fail msg -> 0
+}
+"#;
+    let out = emit_elaborated(src);
+    // The inline handler body should just return 0, no _K call
+    // (the arm body is `0`, which doesn't reference _K)
+    assert_contains(&out, "_HandleFail");
+}
+
+#[test]
+fn with_return_clause() {
+    let src = r#"
+type Result a b { Ok(a) | Err(b) }
+
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+fun risky () -> Int needs {Fail}
+risky () = 42
+
+main () = risky () with {
+  fail msg -> Err msg
+  return value -> Ok value
+}
+"#;
+    let out = emit_elaborated(src);
+    // Should wrap the result in Ok
+    assert_contains(&out, "'Ok'");
+    assert_contains(&out, "'Err'");
+}
+
+#[test]
+fn effect_propagation_threads_handler() {
+    // When an effectful function calls another effectful function,
+    // the handler param should be threaded through
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+fun inner () -> Unit needs {Log}
+inner () = log! "from inner"
+
+fun outer () -> Unit needs {Log}
+outer () = inner ()
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+main () = outer () with silent
+"#;
+    let out = emit_elaborated(src);
+    // outer should pass its _HandleLog to inner
+    // inner/1 takes _HandleLog, outer/1 takes _HandleLog,
+    // outer calls inner with its own _HandleLog
+    assert_contains(&out, "'inner'/1");
+    assert_contains(&out, "'outer'/1");
+}
+
+#[test]
+fn multiple_effect_calls_chain_continuations() {
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+fun do_work () -> Int needs {Log}
+do_work () = {
+  log! "first"
+  log! "second"
+  42
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+main () = do_work () with silent
+"#;
+    let out = emit_elaborated(src);
+    // Should have two nested handler applies with continuations
+    // Count occurrences of apply _HandleLog
+    let count = out.matches("apply _HandleLog").count();
+    assert!(
+        count >= 2,
+        "expected at least 2 handler applies, got {count}\n{out}"
+    );
+}
+
+#[test]
+fn effect_cps_log_with_let_bindings() {
+    // Full CPS: log calls interleaved with let bindings and arithmetic
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+fun do_work () -> Int needs {Log}
+do_work () = {
+  log! "starting"
+  let x = 10 + 20
+  log! "done"
+  x
+}
+
+main () = do_work () with silent
+"#;
+    let out = emit_elaborated(src);
+    // do_work should have nested handler applies with continuations
+    // wrapping the let bindings and final value
+    assert_contains(&out, "'do_work'/1");
+    assert_contains(&out, "apply _HandleLog('log'");
+    // x = 10 + 20 should appear inside a continuation
+    assert_contains(&out, "call 'erlang':'+'");
+}
+
+#[test]
+fn effect_fail_non_resumable_with_return() {
+    // Fail handler doesn't call K; return clause wraps success path
+    let src = r#"
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+fun checked_double (x: Int) -> Int needs {Fail}
+checked_double x = if x > 100 then fail! "too big" else x * 2
+
+main () = {
+  let a = checked_double 10 with {
+    fail msg -> 0 - 1
+    return value -> value
+  }
+  let b = checked_double 200 with {
+    fail msg -> 0 - 1
+    return value -> value
+  }
+  a + b
+}
+"#;
+    let out = emit_elaborated(src);
+    // Should have two with-expression lowerings, each with _HandleFail
+    assert_contains(&out, "_HandleFail");
+    // The fail arm should not call _K
+    // The return clause should appear
+    assert_contains(&out, "'fail'");
+}
+
+#[test]
+fn effect_propagation_inner_outer() {
+    // outer calls inner, both need Log; handler param threads through
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+fun inner () -> Int needs {Log}
+inner () = {
+  log! "from inner"
+  42
+}
+
+fun outer () -> Int needs {Log}
+outer () = {
+  log! "from outer"
+  let x = inner ()
+  x + 1
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+main () = outer () with silent
+"#;
+    let out = emit_elaborated(src);
+    // Both should take _HandleLog
+    assert_contains(&out, "'inner'/1");
+    assert_contains(&out, "'outer'/1");
+    // outer's body should call inner with _HandleLog passed through
+    // inner/1 called with the handler param
+    assert_contains(&out, "apply 'inner'/1(_HandleLog)");
+}
+
+#[test]
+fn effect_multi_handler_stacking() {
+    // Function needs both Fail and Log; with provides both handlers
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+fun risky_work () -> Int needs {Fail, Log}
+risky_work () = {
+  log! "starting risky work"
+  let x = 10 * 5
+  if x > 100 then fail! "too big"
+  else {
+    log! "result ok"
+    x
+  }
+}
+
+main () = risky_work () with {
+  silent,
+  fail msg -> 0 - 1
+  return value -> value
+}
+"#;
+    let out = emit_elaborated(src);
+    // risky_work needs 2 handler params (Fail + Log, sorted alphabetically)
+    assert_contains(&out, "'risky_work'/2");
+    // Both handler params should be present
+    assert_contains(&out, "_HandleFail");
+    assert_contains(&out, "_HandleLog");
+}
+
+#[test]
+fn effect_multi_clause_function() {
+    // Effectful function with pattern-matched clauses
+    let src = r#"
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+fun safe_div (x: Int) (y: Int) -> Int needs {Fail}
+safe_div _ 0 = fail! "division by zero"
+safe_div x y = x * y
+
+main () = safe_div 10 0 with {
+  fail msg -> 0 - 1
+  return value -> value
+}
+"#;
+    let out = emit_elaborated(src);
+    // safe_div takes 2 user params + 1 handler param = arity 3
+    assert_contains(&out, "'safe_div'/3");
+    assert_contains(&out, "_HandleFail");
 }

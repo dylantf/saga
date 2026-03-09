@@ -143,10 +143,21 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Replace `show`/`print` builtin special-cases with proper `Show` trait dispatch
 - [x] Fix `show`/`print` as higher-order values (`show` is `DictMethodAccess`, `print` is a synthesized dict-parameterized function)
 
-### Effects
-- [ ] Non-resumable handlers (`try/catch` in Core Erlang)
-- [ ] Resumable handlers (process-based: handler spawns a process)
-- [ ] Effect routing (find correct handler process for a given effect name)
+### Effects (CPS transform)
+- [x] CPS plumbing (effect/handler metadata in lowerer, handler params on effectful functions)
+- [x] Effect calls in blocks (`log! "msg"` -> `apply Handler('log', "msg", K)`)
+- [x] Resumable handlers (`resume value` -> `apply _K(value)`)
+- [x] Non-resumable handlers (don't call `_K`, handler return value is result)
+- [x] Return clauses (`return value -> Ok value`)
+- [x] Named handlers (`handler silent for Log { ... }`)
+- [x] Inline handlers (`expr with { op args -> body }`)
+- [x] Handler stacking (multiple effects, one handler param per effect)
+- [x] Effect propagation (threading handler params through calls to effectful functions)
+- [x] Multishot continuations (calling `_K` multiple times; free on BEAM)
+- [ ] Elaborator: Show dict insertion inside handler arm bodies (`print` in handler crashes)
+- [ ] Handler `needs` clause (handler that itself uses effects)
+- [ ] Effect calls in non-block positions (nested in `if` conditions, binary ops, etc.)
+- [ ] HOF effect absorption (passing effectful closures through higher-order functions like `try`)
 
 ### Stdlib / prelude
 - [ ] Wire prelude functions to BEAM equivalents (`List`, `Maybe`, `Result`)
@@ -168,6 +179,5 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ## Out of Scope
 
-- Multishot continuations (single-shot is sufficient for practical effects)
 - Effect inference (explicit `needs` annotations required)
 - Effect tunneling (unhandled effects are errors)

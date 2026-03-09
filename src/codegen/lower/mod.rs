@@ -2,24 +2,49 @@ mod exprs;
 mod pats;
 mod util;
 
-use crate::ast::{self, Decl, Expr, Pat};
+use crate::ast::{self, Decl, Expr, HandlerArm, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use std::collections::HashMap;
 
 use pats::{lower_params, lower_pat};
 use util::{
-    cerl_call, collect_ctor_call, collect_fun_call, core_var, field_access_record_name, lower_lit,
+    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, core_var,
+    field_access_record_name, lower_lit,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
+
+/// Stored handler definition for CPS inlining at `with` sites.
+struct HandlerInfo {
+    effects: Vec<String>,
+    arms: Vec<HandlerArm>,
+    return_clause: Option<Box<HandlerArm>>,
+}
+
+/// Stored effect definition: maps op_name -> number of parameters.
+#[allow(dead_code)]
+struct EffectInfo {
+    /// op_name -> param count
+    ops: HashMap<String, usize>,
+}
 
 pub struct Lowerer {
     counter: usize,
     /// Maps record name -> ordered field names (from RecordDef declarations).
     record_fields: HashMap<String, Vec<String>>,
-    /// Maps top-level function name -> its exported arity (0 or 1).
+    /// Maps top-level function name -> its exported arity (including handler params).
     /// All multi-arg functions are curried to arity 1.
     top_level_funs: HashMap<String, usize>,
+    /// Maps effect name -> EffectInfo (op names and param counts).
+    effect_defs: HashMap<String, EffectInfo>,
+    /// Maps handler name -> handler arms + return clause.
+    handler_defs: HashMap<String, HandlerInfo>,
+    /// Maps function name -> list of effect names from `needs` (declaration order).
+    fun_effects: HashMap<String, Vec<String>>,
+    /// Maps op_name -> effect name (reverse lookup).
+    op_to_effect: HashMap<String, String>,
+    /// When lowering inside an effectful function, maps effect name -> handler param var name.
+    current_handler_params: HashMap<String, String>,
 }
 
 impl Lowerer {
@@ -28,6 +53,11 @@ impl Lowerer {
             counter: 0,
             record_fields: HashMap::new(),
             top_level_funs: HashMap::new(),
+            effect_defs: HashMap::new(),
+            handler_defs: HashMap::new(),
+            fun_effects: HashMap::new(),
+            op_to_effect: HashMap::new(),
+            current_handler_params: HashMap::new(),
         }
     }
 
@@ -38,16 +68,55 @@ impl Lowerer {
     }
 
     pub fn lower_module(&mut self, module_name: &str, program: &ast::Program) -> CModule {
-        // Collect record field orders so we can lower field access by position.
+        // Collect record field orders, effect definitions, handler definitions,
+        // and function effect requirements.
         for decl in program {
-            if let Decl::RecordDef { name, fields, .. } = decl {
-                let field_names = fields.iter().map(|(n, _)| n.clone()).collect();
-                self.record_fields.insert(name.clone(), field_names);
+            match decl {
+                Decl::RecordDef { name, fields, .. } => {
+                    let field_names = fields.iter().map(|(n, _)| n.clone()).collect();
+                    self.record_fields.insert(name.clone(), field_names);
+                }
+                Decl::EffectDef {
+                    name, operations, ..
+                } => {
+                    let mut ops = HashMap::new();
+                    for op in operations {
+                        ops.insert(op.name.clone(), op.params.len());
+                        self.op_to_effect.insert(op.name.clone(), name.clone());
+                    }
+                    self.effect_defs.insert(name.clone(), EffectInfo { ops });
+                }
+                Decl::HandlerDef {
+                    name,
+                    effects,
+                    arms,
+                    return_clause,
+                    ..
+                } => {
+                    self.handler_defs.insert(
+                        name.clone(),
+                        HandlerInfo {
+                            effects: effects.clone(),
+                            arms: arms.clone(),
+                            return_clause: return_clause.clone(),
+                        },
+                    );
+                }
+                Decl::FunAnnotation {
+                    name, effects, ..
+                } => {
+                    if !effects.is_empty() {
+                        let mut sorted = effects.clone();
+                        sorted.sort();
+                        self.fun_effects.insert(name.clone(), sorted);
+                    }
+                }
+                _ => {}
             }
         }
 
         // Group FunBindings by name, preserving declaration order, and simultaneously
-        // populate top_level_funs. lower_params is called once per clause here.
+        // populate top_level_funs. Handler params are added to the arity for effectful funs.
         let mut clause_groups: Vec<(String, usize, Vec<Clause>)> = Vec::new();
         let mut dict_constructors: Vec<(&str, &[String], &[Expr])> = Vec::new();
         for decl in program {
@@ -59,7 +128,12 @@ impl Lowerer {
                     body,
                     ..
                 } => {
-                    let arity = lower_params(params).len();
+                    let base_arity = lower_params(params).len();
+                    let effect_count = self
+                        .fun_effects
+                        .get(name.as_str())
+                        .map_or(0, |effs| effs.len());
+                    let arity = base_arity + effect_count;
                     self.top_level_funs.entry(name.clone()).or_insert(arity);
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _)| n == name) {
                         group.2.push((params, guard, body));
@@ -86,16 +160,33 @@ impl Lowerer {
         for (name, arity, clauses) in clause_groups {
             exports.push((name.clone(), arity));
 
+            // Set up handler param context for effectful functions
+            let effects = self.fun_effects.get(&name).cloned().unwrap_or_default();
+            let handler_params: Vec<String> = effects
+                .iter()
+                .map(|eff| format!("_Handle{}", eff))
+                .collect();
+            let saved_handler_params = std::mem::take(&mut self.current_handler_params);
+            for (eff, param) in effects.iter().zip(handler_params.iter()) {
+                self.current_handler_params
+                    .insert(eff.clone(), param.clone());
+            }
+
+            let base_arity = arity - handler_params.len();
+
             let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
                 // Single clause, no guard: emit directly without a case wrapper.
                 let (params, _, body) = clauses[0];
-                let params_ce = lower_params(params);
+                let mut params_ce = lower_params(params);
+                params_ce.extend(handler_params.iter().cloned());
                 let body_ce = self.lower_expr(body);
                 CExpr::Fun(params_ce, Box::new(body_ce))
             } else {
                 // Multi-clause or single clause with a guard: generate fresh arg vars
                 // and case-match on them using proper Core Erlang values syntax.
-                let arg_vars: Vec<String> = (0..arity).map(|i| format!("_Arg{}", i)).collect();
+                let mut arg_vars: Vec<String> =
+                    (0..base_arity).map(|i| format!("_Arg{}", i)).collect();
+                arg_vars.extend(handler_params.iter().cloned());
 
                 let arms: Vec<CArm> = clauses
                     .iter()
@@ -113,8 +204,12 @@ impl Lowerer {
                                 )
                             })
                             .collect();
-                        let pat = if arity == 1 {
+                        // Pattern only matches user params, not handler params
+                        let pat = if base_arity == 1 {
                             lower_pat(non_unit_pats[0], &self.record_fields)
+                        } else if base_arity == 0 {
+                            // No user params to match on -- use wildcard
+                            CPat::Wildcard
                         } else {
                             CPat::Values(
                                 non_unit_pats
@@ -133,15 +228,25 @@ impl Lowerer {
                     })
                     .collect();
 
-                // Scrutinee: bare variable for arity==1, Values expression otherwise.
-                let scrut_ce = if arity == 1 {
+                // Scrutinee: bare variable for base_arity==1, Values expression otherwise.
+                // For effectful arity-0 functions, case on a dummy atom.
+                let scrut_ce = if base_arity == 0 {
+                    CExpr::Lit(CLit::Atom("unit".to_string()))
+                } else if base_arity == 1 {
                     CExpr::Var(arg_vars[0].clone())
                 } else {
-                    CExpr::Values(arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect())
+                    CExpr::Values(
+                        arg_vars[..base_arity]
+                            .iter()
+                            .map(|v| CExpr::Var(v.clone()))
+                            .collect(),
+                    )
                 };
                 let case_ce = CExpr::Case(Box::new(scrut_ce), arms);
                 CExpr::Fun(arg_vars, Box::new(case_ce))
             };
+
+            self.current_handler_params = saved_handler_params;
 
             fun_defs.push(CFunDef {
                 name,
@@ -190,30 +295,68 @@ impl Lowerer {
                     return self.lower_ctor(ctor_name, args);
                 }
 
+                // Check for effect call: App(EffectCall { .. }, arg1, ...)
+                if let Some((op_name, qualifier, args)) = collect_effect_call(expr) {
+                    return self.lower_effect_call(op_name, qualifier, &args.into_iter().cloned().collect::<Vec<_>>(), None);
+                }
+
                 // Check for a saturated call to a known top-level function.
                 // e.g. `add 3 4` -> App(App(Var("add"), 3), 4)
-                // Peel the App chain; if the head is a known function with matching arity,
-                // emit a single multi-arg apply instead of nested one-arg applies.
-                if let Some((func_name, args)) = collect_fun_call(expr)
-                    && let Some(&arity) = self.top_level_funs.get(func_name)
-                    && args.len() == arity
-                {
-                    // Saturated call: apply fun 'name'/N(arg1, ..., argN)
-                    let mut arg_vars: Vec<String> = Vec::new();
-                    let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                    for arg in args {
-                        let v = self.fresh();
-                        let ce = self.lower_expr(arg);
-                        arg_vars.push(v.clone());
-                        bindings.push((v, ce));
+                // For effectful functions, the user provides N args but the function
+                // takes N+M where M is the number of handler params. We thread
+                // the caller's handler params through automatically.
+                if let Some((func_name, args)) = collect_fun_call(expr) {
+                    let callee_effects = self.fun_effects.get(func_name).cloned();
+                    let effect_count = callee_effects.as_ref().map_or(0, |e| e.len());
+                    let total_arity = self.top_level_funs.get(func_name).copied();
+
+                    // Filter out unit literal args (they don't count toward arity)
+                    let non_unit_args: Vec<&Expr> = args
+                        .into_iter()
+                        .filter(|a| {
+                            !matches!(
+                                a,
+                                Expr::Lit {
+                                    value: ast::Lit::Unit,
+                                    ..
+                                }
+                            )
+                        })
+                        .collect();
+
+                    if let Some(arity) = total_arity
+                        && non_unit_args.len() + effect_count == arity
+                    {
+                        // Saturated call: apply fun 'name'/N(arg1, ..., argN, handler1, ...)
+                        let mut arg_vars: Vec<String> = Vec::new();
+                        let mut bindings: Vec<(String, CExpr)> = Vec::new();
+                        for arg in non_unit_args {
+                            let v = self.fresh();
+                            let ce = self.lower_expr(arg);
+                            arg_vars.push(v.clone());
+                            bindings.push((v, ce));
+                        }
+                        // Append handler params for effectful callees
+                        if let Some(effs) = &callee_effects {
+                            for eff in effs {
+                                if let Some(param) = self.current_handler_params.get(eff) {
+                                    arg_vars.push(param.clone());
+                                } else {
+                                    panic!(
+                                        "function '{}' needs effect '{}' but no handler param in scope",
+                                        func_name, eff
+                                    );
+                                }
+                            }
+                        }
+                        let call = CExpr::Apply(
+                            Box::new(CExpr::FunRef(func_name.to_string(), arity)),
+                            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+                        );
+                        return bindings.into_iter().rev().fold(call, |body, (var, val)| {
+                            CExpr::Let(var, Box::new(val), Box::new(body))
+                        });
                     }
-                    let call = CExpr::Apply(
-                        Box::new(CExpr::FunRef(func_name.to_string(), arity)),
-                        arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-                    );
-                    return bindings.into_iter().rev().fold(call, |body, (var, val)| {
-                        CExpr::Let(var, Box::new(val), Box::new(body))
-                    });
                 }
 
                 let (func, arg) = match expr {
@@ -470,9 +613,44 @@ impl Lowerer {
                 }
             }
 
-            _ => CExpr::Lit(CLit::Atom(format!(
+            // --- Effect system (CPS transform) ---
+
+            // `log! "hello"` -- standalone effect call (not in a block).
+            // When an effect call appears as a bare expression (not in a block where
+            // we can capture the continuation), we call the handler with an identity
+            // continuation that just returns the value.
+            Expr::EffectCall {
+                name,
+                qualifier,
+                args,
+                ..
+            } => self.lower_effect_call(name, qualifier.as_deref(), args, None),
+
+            // `expr with handler` -- attaches handler(s) to a computation
+            Expr::With {
+                expr, handler, ..
+            } => self.lower_with(expr, handler),
+
+            // `resume value` -- inside a handler arm, calls the continuation K
+            Expr::Resume { value, .. } => {
+                let v = self.fresh();
+                let ce = self.lower_expr(value);
+                CExpr::Let(
+                    v.clone(),
+                    Box::new(ce),
+                    Box::new(CExpr::Apply(
+                        Box::new(CExpr::Var("_K".to_string())),
+                        vec![CExpr::Var(v)],
+                    )),
+                )
+            }
+
+            // StringInterpolation should be desugared before reaching the lowerer,
+            // but keep a fallback just in case.
+            #[allow(unreachable_patterns)]
+            other => CExpr::Lit(CLit::Atom(format!(
                 "todo_{:?}",
-                std::mem::discriminant(expr)
+                std::mem::discriminant(other)
             ))),
         }
     }
