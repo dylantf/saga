@@ -481,6 +481,41 @@ fn effect_propagation_handled_by_caller() {
 }
 
 #[test]
+fn handler_arm_body_effect_handled_by_sibling() {
+    // An inline handler arm body uses Log, which is handled by a sibling
+    // named handler in the same `with`. Should not require `needs` on caller.
+    check(
+        "effect Log {\n  fun log (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail (msg: String) -> a\n}\n\
+         handler silent for Log {\n  log msg -> resume ()\n}\n\
+         fun risky () -> Int needs {Fail, Log}\n\
+         risky () = fail! \"oops\"\n\
+         main () = risky () with {\n  silent,\n  fail msg -> {\n    log! (\"caught: \" <> msg)\n    0\n  }\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn handler_arm_body_unhandled_effect_propagates() {
+    // An inline handler arm body uses Log, but Log is NOT handled by the `with`.
+    // Should require `needs {Log}` on the enclosing function.
+    let result = check(
+        "effect Log {\n  fun log (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail (msg: String) -> a\n}\n\
+         fun risky () -> Int needs {Fail}\n\
+         risky () = fail! \"oops\"\n\
+         foo () = risky () with {\n  fail msg -> {\n    log! \"caught\"\n    0\n  }\n}",
+    );
+    assert!(result.is_err());
+    let err = result.err().expect("expected error");
+    assert!(
+        err.message.contains("Log"),
+        "expected Log propagation error, got: {}",
+        err.message
+    );
+}
+
+#[test]
 fn lambda_effects_propagate_to_enclosing_function() {
     // Effects inside a lambda propagate up to the enclosing function boundary
     let result =

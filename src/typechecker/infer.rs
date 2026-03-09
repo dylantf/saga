@@ -820,15 +820,15 @@ impl Checker {
         expr: &Expr,
         handler: &ast::Handler,
     ) -> Result<Type, TypeError> {
-        let saved_effects = std::mem::take(&mut self.current_effects);
-
-        let expr_ty = self.infer_expr(expr)?;
-
         let handled = self.handler_handled_effects(handler);
+
+        // Infer the inner expression, tracking its effects separately
+        let saved_effects = std::mem::take(&mut self.current_effects);
+        let expr_ty = self.infer_expr(expr)?;
+        // Subtract handled effects from the inner expression's effects
         for eff in &handled {
             self.current_effects.remove(eff);
         }
-
         let inner_effects = std::mem::replace(&mut self.current_effects, saved_effects);
         self.current_effects.extend(inner_effects);
 
@@ -865,6 +865,12 @@ impl Checker {
                         ));
                     }
                 }
+
+                // Infer arm bodies with effect tracking isolated, then subtract
+                // handled effects. This way, if an arm body uses an effect that
+                // is handled by a sibling handler in the same `with`, it doesn't
+                // propagate to the enclosing function.
+                let saved_effects_arms = std::mem::take(&mut self.current_effects);
 
                 for arm in arms {
                     let op_sig = self.lookup_effect_op(&arm.op_name, None, arm.span).ok();
@@ -923,8 +929,25 @@ impl Checker {
                     }
                     let ret_ty = self.infer_expr(&ret_arm.body)?;
                     self.env = saved_env;
+
+                    // Subtract handled effects from arm/return clause bodies
+                    for eff in &handled {
+                        self.current_effects.remove(eff);
+                    }
+                    let arm_effects =
+                        std::mem::replace(&mut self.current_effects, saved_effects_arms);
+                    self.current_effects.extend(arm_effects);
+
                     Ok(ret_ty)
                 } else {
+                    // Subtract handled effects from arm bodies
+                    for eff in &handled {
+                        self.current_effects.remove(eff);
+                    }
+                    let arm_effects =
+                        std::mem::replace(&mut self.current_effects, saved_effects_arms);
+                    self.current_effects.extend(arm_effects);
+
                     Ok(expr_ty)
                 }
             }
