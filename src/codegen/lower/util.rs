@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, Expr, Lit, Pat, TypeExpr};
+use crate::ast::{BinOp, Expr, Lit, Pat, Stmt, TypeExpr};
 use crate::codegen::cerl::{CExpr, CLit};
 use std::collections::BTreeSet;
 
@@ -134,6 +134,34 @@ pub(super) fn field_access_record_name(expr: &Expr) -> Option<&str> {
         return Some(name.as_str());
     }
     None
+}
+
+/// Check if an expression contains effect calls nested inside if/case/block
+/// branches. These aren't detected by `collect_effect_call` (which only finds
+/// direct effect calls at the expression root) and need special CPS handling
+/// so that abort-style handlers can skip the outer continuation.
+pub(super) fn has_nested_effect_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => branch_has_effect(then_branch) || branch_has_effect(else_branch),
+        Expr::Case { arms, .. } => arms.iter().any(|arm| branch_has_effect(&arm.body)),
+        Expr::Block { stmts, .. } => stmts.iter().any(|s| {
+            let value = match s {
+                Stmt::Expr(e) => e,
+                Stmt::Let { value, .. } => value,
+            };
+            branch_has_effect(value)
+        }),
+        _ => false,
+    }
+}
+
+/// Check if an expression is or contains an effect call (direct or nested).
+fn branch_has_effect(expr: &Expr) -> bool {
+    collect_effect_call(expr).is_some() || has_nested_effect_call(expr)
 }
 
 /// Recursively collect all effect names from `needs` clauses in a TypeExpr.

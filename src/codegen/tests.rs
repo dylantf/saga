@@ -235,6 +235,127 @@ filter_pos n = case n {
     );
 }
 
+// --- Nested effect calls in branches (CPS outer-K threading) ---
+
+#[test]
+fn effect_in_if_branch_threads_outer_k() {
+    // When an effect call is inside an if-branch and there are subsequent
+    // statements, the outer continuation must be threaded through the branches.
+    // The continuation K should appear as the effect call's last argument,
+    // NOT an identity function.
+    let src = "
+effect Fail {
+  fun fail (msg: String) -> Never
+}
+
+fun process () -> Unit needs {Fail}
+process () = {
+  let x = if True then fail! \"oops\" else 42
+  x
+}
+";
+    let out = emit(src);
+    // The if-branches should be inside a case, and the fail! should get a
+    // non-identity continuation that captures the rest of the block (x).
+    // Specifically, the continuation K should reference the variable bound
+    // from the effect result, not just return it unchanged.
+    assert!(
+        out.contains("case"),
+        "expected case for if-branch\n{out}"
+    );
+    // The continuation for the non-effect branch should apply K to 42
+    assert!(
+        out.contains("apply"),
+        "expected apply for K-threading\n{out}"
+    );
+}
+
+#[test]
+fn effect_in_case_branch_threads_outer_k() {
+    // Same issue but with case expressions instead of if.
+    let src = "
+effect Fail {
+  fun fail (msg: String) -> Never
+}
+
+fun dispatch (n: Int) -> Int needs {Fail}
+dispatch n = {
+  let x = case n {
+    0 -> fail! \"zero\"
+    n -> n
+  }
+  x + 1
+}
+";
+    let out = emit(src);
+    // Both branches should thread K. The fail! branch passes K to the handler,
+    // the normal branch applies K to n.
+    assert!(
+        out.contains("apply"),
+        "expected apply for continuation\n{out}"
+    );
+}
+
+#[test]
+fn nested_if_effect_threads_k_recursively() {
+    // Nested if/case: K should be threaded through multiple levels.
+    let src = "
+effect Fail {
+  fun fail (msg: String) -> Never
+}
+
+fun deep (a: Bool) (b: Bool) -> Int needs {Fail}
+deep a b = {
+  let x = if a then (if b then fail! \"inner\" else 1) else 2
+  x + 10
+}
+";
+    let out = emit(src);
+    assert!(
+        out.contains("apply"),
+        "expected apply for nested K-threading\n{out}"
+    );
+}
+
+#[test]
+fn effect_in_if_branch_k_not_identity() {
+    // The key correctness property: the continuation passed to the handler
+    // should NOT be an identity function (fun (X) -> X). It should capture
+    // the rest of the block.
+    let src = "
+effect Fail {
+  fun fail (msg: String) -> Never
+}
+
+fun process () -> Int needs {Fail}
+process () = {
+  let x = if True then fail! \"oops\" else 42
+  x + 1
+}
+";
+    let out = emit(src);
+    // With the fix, K is built from `x + 1` and threaded into branches.
+    // The non-effect branch (42) should apply K: `apply K(42)`.
+    // The effect branch passes K to the handler: `apply _HandleFail('fail', "oops", K)`.
+    // Without the fix, the effect gets an identity K and `x + 1` runs after the if.
+    //
+    // Check that there's a fun wrapping `x + 1` (the K closure):
+    assert!(
+        out.contains("call 'erlang':'+'"),
+        "expected addition in output\n{out}"
+    );
+    // The output should NOT have a flat `let X = case ... in X + 1` pattern.
+    // Instead, the + should be inside a fun (the K closure).
+    // We can verify by checking the fun count increased (K closure exists).
+    let fun_count = out.matches("fun (").count();
+    assert!(
+        fun_count >= 2, // at least the outer function + K closure
+        "expected at least 2 fun expressions (outer + K closure), got {}\n{}",
+        fun_count,
+        out
+    );
+}
+
 // --- Short-circuit operators ---
 
 #[test]

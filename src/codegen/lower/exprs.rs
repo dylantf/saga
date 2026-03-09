@@ -7,7 +7,9 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::Lowerer;
 use super::pats::lower_pat;
-use super::util::{binop_call, collect_effect_call, core_var, pat_binding_var};
+use super::util::{
+    binop_call, collect_effect_call, core_var, has_nested_effect_call, pat_binding_var,
+};
 
 /// Returns true if `expr` is a valid Core Erlang guard expression:
 /// comparisons, arithmetic, boolean ops, unary minus, and literals/variables.
@@ -251,19 +253,222 @@ impl Lowerer {
                     let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                     self.lower_effect_call(op_name, qualifier, &args_owned, Some(k))
                 } else {
-                    // Normal (non-effect) statement
-                    let (var, val_ce) = match first {
-                        Stmt::Let { pattern, value, .. } => {
-                            let var = pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
-                            (var, self.lower_expr(value))
-                        }
-                        Stmt::Expr(e) => {
-                            let var = self.fresh();
-                            (var, self.lower_expr(e))
-                        }
+                    // Check if value expression has effect calls nested in branches.
+                    // If so, build a continuation K from the remaining statements and
+                    // thread it through branches so abort-style handlers skip the rest.
+                    let value_has_nested = match first {
+                        Stmt::Expr(e) => has_nested_effect_call(e),
+                        Stmt::Let { value, .. } => has_nested_effect_call(value),
                     };
-                    let rest_ce = self.lower_block(rest);
-                    CExpr::Let(var, Box::new(val_ce), Box::new(rest_ce))
+
+                    if value_has_nested {
+                        let (k_param, value_expr) = match first {
+                            Stmt::Let { pattern, value, .. } => {
+                                let var =
+                                    pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
+                                (var, value)
+                            }
+                            Stmt::Expr(e) => (self.fresh(), e),
+                        };
+                        let rest_ce = self.lower_block(rest);
+                        let k = CExpr::Fun(vec![k_param], Box::new(rest_ce));
+                        let k_var = self.fresh();
+                        let body = self.lower_expr_with_k(value_expr, &k_var);
+                        CExpr::Let(k_var, Box::new(k), Box::new(body))
+                    } else {
+                        // Normal (non-effect) statement
+                        let (var, val_ce) = match first {
+                            Stmt::Let { pattern, value, .. } => {
+                                let var =
+                                    pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
+                                (var, self.lower_expr(value))
+                            }
+                            Stmt::Expr(e) => {
+                                let var = self.fresh();
+                                (var, self.lower_expr(e))
+                            }
+                        };
+                        let rest_ce = self.lower_block(rest);
+                        CExpr::Let(var, Box::new(val_ce), Box::new(rest_ce))
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Outer-K threading for nested effect calls in branches ---
+    //
+    // When an if/case/block has effect calls inside its branches and there is
+    // an outer continuation (more statements after it in the enclosing block),
+    // these methods thread K through the branches. Abort-style handlers that
+    // don't call K will skip the rest of the enclosing block, matching the
+    // interpreter's semantics.
+
+    /// Lower an expression with an outer continuation K threaded through branches.
+    fn lower_expr_with_k(&mut self, expr: &Expr, k_var: &str) -> CExpr {
+        match expr {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let cond_var = self.fresh();
+                let cond_ce = self.lower_expr(cond);
+                let then_ce = self.lower_branch_with_k(then_branch, k_var);
+                let else_ce = self.lower_branch_with_k(else_branch, k_var);
+                CExpr::Let(
+                    cond_var.clone(),
+                    Box::new(cond_ce),
+                    Box::new(CExpr::Case(
+                        Box::new(CExpr::Var(cond_var)),
+                        vec![
+                            CArm {
+                                pat: CPat::Lit(CLit::Atom("true".to_string())),
+                                guard: None,
+                                body: then_ce,
+                            },
+                            CArm {
+                                pat: CPat::Lit(CLit::Atom("false".to_string())),
+                                guard: None,
+                                body: else_ce,
+                            },
+                        ],
+                    )),
+                )
+            }
+            Expr::Case {
+                scrutinee, arms, ..
+            } => {
+                let scrut_var = self.fresh();
+                let scrut_ce = self.lower_expr(scrutinee);
+                let arms_ce: Vec<CArm> = arms
+                    .iter()
+                    .map(|arm| {
+                        let pat = lower_pat(&arm.pattern, &self.record_fields);
+                        let guard_ce = arm.guard.as_ref().map(|g| self.lower_expr(g));
+                        let body_ce = self.lower_branch_with_k(&arm.body, k_var);
+                        CArm {
+                            pat,
+                            guard: guard_ce,
+                            body: body_ce,
+                        }
+                    })
+                    .collect();
+                CExpr::Let(
+                    scrut_var.clone(),
+                    Box::new(scrut_ce),
+                    Box::new(CExpr::Case(Box::new(CExpr::Var(scrut_var)), arms_ce)),
+                )
+            }
+            Expr::Block { stmts, .. } => self.lower_block_with_k(stmts, k_var),
+            _ => {
+                // Not a branching expression: apply K to the result
+                let v = self.fresh();
+                let ce = self.lower_expr(expr);
+                CExpr::Let(
+                    v.clone(),
+                    Box::new(ce),
+                    Box::new(CExpr::Apply(
+                        Box::new(CExpr::Var(k_var.to_string())),
+                        vec![CExpr::Var(v)],
+                    )),
+                )
+            }
+        }
+    }
+
+    /// Lower a branch expression with an outer continuation K.
+    /// Dispatches based on whether the branch is a direct effect call,
+    /// contains nested effects, or is a plain expression.
+    fn lower_branch_with_k(&mut self, expr: &Expr, k_var: &str) -> CExpr {
+        if let Some((op_name, qualifier, args)) = collect_effect_call(expr) {
+            // Direct effect call: pass K as the continuation
+            let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
+            self.lower_effect_call(
+                op_name,
+                qualifier,
+                &args_owned,
+                Some(CExpr::Var(k_var.to_string())),
+            )
+        } else if has_nested_effect_call(expr) {
+            // Contains nested effects: recurse into branches
+            self.lower_expr_with_k(expr, k_var)
+        } else {
+            // No effects: apply K to the result
+            let v = self.fresh();
+            let ce = self.lower_expr(expr);
+            CExpr::Let(
+                v.clone(),
+                Box::new(ce),
+                Box::new(CExpr::Apply(
+                    Box::new(CExpr::Var(k_var.to_string())),
+                    vec![CExpr::Var(v)],
+                )),
+            )
+        }
+    }
+
+    /// Lower a block with an outer continuation K threaded to the terminal.
+    /// Like `lower_block` but applies K at terminal positions instead of return_k.
+    fn lower_block_with_k(&mut self, stmts: &[Stmt], k_var: &str) -> CExpr {
+        match stmts {
+            [] => CExpr::Apply(
+                Box::new(CExpr::Var(k_var.to_string())),
+                vec![CExpr::Tuple(vec![])],
+            ),
+            [Stmt::Expr(e)] => self.lower_branch_with_k(e, k_var),
+            [Stmt::Let { value, .. }] => self.lower_branch_with_k(value, k_var),
+            [first, rest @ ..] => {
+                let effect_info = match first {
+                    Stmt::Expr(e) => {
+                        collect_effect_call(e).map(|(name, qual, args)| (None, name, qual, args))
+                    }
+                    Stmt::Let {
+                        pattern, value, ..
+                    } => collect_effect_call(value)
+                        .map(|(name, qual, args)| (Some(pattern), name, qual, args)),
+                };
+
+                if let Some((pat, op_name, qualifier, args)) = effect_info {
+                    // Direct effect call at statement level: CPS with rest -> K-threaded
+                    let rest_ce = self.lower_block_with_k(rest, k_var);
+                    let k_param = match pat {
+                        Some(p) => pat_binding_var(p).unwrap_or_else(|| self.fresh()),
+                        None => self.fresh(),
+                    };
+                    let inner_k = CExpr::Fun(vec![k_param], Box::new(rest_ce));
+                    let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
+                    self.lower_effect_call(op_name, qualifier, &args_owned, Some(inner_k))
+                } else {
+                    let (pat_opt, value_expr) = match first {
+                        Stmt::Let {
+                            pattern, value, ..
+                        } => (Some(pattern), value),
+                        Stmt::Expr(e) => (None, e),
+                    };
+
+                    if has_nested_effect_call(value_expr) {
+                        // Value has nested effects: build inner K and thread through
+                        let k_param = match pat_opt {
+                            Some(p) => pat_binding_var(p).unwrap_or_else(|| self.fresh()),
+                            None => self.fresh(),
+                        };
+                        let rest_ce = self.lower_block_with_k(rest, k_var);
+                        let inner_k = CExpr::Fun(vec![k_param], Box::new(rest_ce));
+                        let inner_k_var = self.fresh();
+                        let body = self.lower_expr_with_k(value_expr, &inner_k_var);
+                        CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(body))
+                    } else {
+                        // Normal statement: evaluate, bind, then rest with K
+                        let var = match pat_opt {
+                            Some(p) => pat_binding_var(p).unwrap_or_else(|| self.fresh()),
+                            None => self.fresh(),
+                        };
+                        let val_ce = self.lower_expr(value_expr);
+                        let rest_ce = self.lower_block_with_k(rest, k_var);
+                        CExpr::Let(var, Box::new(val_ce), Box::new(rest_ce))
+                    }
                 }
             }
         }
