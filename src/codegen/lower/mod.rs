@@ -73,8 +73,7 @@ impl Lowerer {
                     methods,
                     ..
                 } => {
-                    self.top_level_funs
-                        .insert(name.clone(), dict_params.len());
+                    self.top_level_funs.insert(name.clone(), dict_params.len());
                     dict_constructors.push((name, dict_params, methods));
                 }
                 _ => {}
@@ -155,8 +154,7 @@ impl Lowerer {
         for (name, dict_params, methods) in dict_constructors {
             let arity = dict_params.len();
             let params: Vec<String> = dict_params.iter().map(|p| core_var(p)).collect();
-            let method_exprs: Vec<CExpr> =
-                methods.iter().map(|m| self.lower_expr(m)).collect();
+            let method_exprs: Vec<CExpr> = methods.iter().map(|m| self.lower_expr(m)).collect();
             let body = CExpr::Tuple(method_exprs);
             exports.push((name.to_string(), arity));
             fun_defs.push(CFunDef {
@@ -177,18 +175,15 @@ impl Lowerer {
         match expr {
             Expr::Lit { value, .. } => CExpr::Lit(lower_lit(value)),
 
-            Expr::Var { name, .. } => match name.as_str() {
-                "print" | "show" => CExpr::Var(format!("__builtin_{}", name)),
-                _ => {
-                    // If referenced bare (not in application position), emit a FunRef
-                    // so it can be passed as a value.
-                    if let Some(&arity) = self.top_level_funs.get(name.as_str()) {
-                        CExpr::FunRef(name.clone(), arity)
-                    } else {
-                        CExpr::Var(core_var(name))
-                    }
+            Expr::Var { name, .. } => {
+                // If referenced bare (not in application position), emit a FunRef
+                // so it can be passed as a value.
+                if let Some(&arity) = self.top_level_funs.get(name.as_str()) {
+                    CExpr::FunRef(name.clone(), arity)
+                } else {
+                    CExpr::Var(core_var(name))
                 }
-            },
+            }
 
             Expr::App { .. } => {
                 if let Some((ctor_name, args)) = collect_ctor_call(expr) {
@@ -225,44 +220,6 @@ impl Lowerer {
                     Expr::App { func, arg, .. } => (func, arg),
                     _ => unreachable!(),
                 };
-                // Special case: print builtin
-                if let Expr::Var { name, .. } = func.as_ref()
-                    && name == "print"
-                {
-                    let arg_var = self.fresh();
-                    let arg_ce = self.lower_expr(arg);
-                    return CExpr::Let(
-                        arg_var.clone(),
-                        Box::new(arg_ce),
-                        Box::new(CExpr::Call(
-                            "io".to_string(),
-                            "format".to_string(),
-                            vec![
-                                CExpr::Lit(CLit::Str("~s~n".to_string())),
-                                CExpr::Cons(Box::new(CExpr::Var(arg_var)), Box::new(CExpr::Nil)),
-                            ],
-                        )),
-                    );
-                }
-                // Special case: show builtin -> io_lib:format("~w", [x])
-                if let Expr::Var { name, .. } = func.as_ref()
-                    && name == "show"
-                {
-                    let arg_var = self.fresh();
-                    let arg_ce = self.lower_expr(arg);
-                    return CExpr::Let(
-                        arg_var.clone(),
-                        Box::new(arg_ce),
-                        Box::new(CExpr::Call(
-                            "io_lib".to_string(),
-                            "format".to_string(),
-                            vec![
-                                CExpr::Lit(CLit::Str("~w".to_string())),
-                                CExpr::Cons(Box::new(CExpr::Var(arg_var)), Box::new(CExpr::Nil)),
-                            ],
-                        )),
-                    );
-                }
                 // General curried application (partial application or unknown function)
                 let func_var = self.fresh();
                 let arg_var = self.fresh();
@@ -460,11 +417,8 @@ impl Lowerer {
             } => self.lower_do(bindings, success, else_arms),
 
             // --- Elaboration-only constructs ---
-
             Expr::DictMethodAccess {
-                dict,
-                method_index,
-                ..
+                dict, method_index, ..
             } => {
                 // Lower to: let D = <dict> in element(idx+1, D)
                 let dict_var = self.fresh();
@@ -477,21 +431,35 @@ impl Lowerer {
                         CExpr::Var(dict_var.clone()),
                     ],
                 );
-                CExpr::Let(
-                    dict_var,
-                    Box::new(dict_ce),
-                    Box::new(extract_method),
-                )
+                CExpr::Let(dict_var, Box::new(dict_ce), Box::new(extract_method))
+            }
+
+            Expr::ForeignCall {
+                module, func, args, ..
+            } => {
+                let mut vars = Vec::new();
+                let mut bindings = Vec::new();
+                for arg in args {
+                    let v = self.fresh();
+                    let ce = self.lower_expr(arg);
+                    vars.push(v.clone());
+                    bindings.push((v, ce));
+                }
+                let call = CExpr::Call(
+                    module.clone(),
+                    func.clone(),
+                    vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+                );
+                bindings.into_iter().rev().fold(call, |body, (var, val)| {
+                    CExpr::Let(var, Box::new(val), Box::new(body))
+                })
             }
 
             Expr::DictRef { name, .. } => {
                 if let Some(&arity) = self.top_level_funs.get(name.as_str()) {
                     if arity == 0 {
                         // Nullary dict constructor: call it to get the dict tuple
-                        CExpr::Apply(
-                            Box::new(CExpr::FunRef(name.clone(), 0)),
-                            vec![],
-                        )
+                        CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])
                     } else {
                         // Parameterized dict constructor: reference it
                         CExpr::FunRef(name.clone(), arity)

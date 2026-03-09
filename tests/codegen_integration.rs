@@ -148,3 +148,210 @@ main () = describe Red
         "expected element() call for dict method access\n{out}"
     );
 }
+
+// --- Built-in Show dispatch ---
+
+#[test]
+fn show_int_uses_dict_dispatch() {
+    let src = "main () = show 42";
+    let out = emit_elaborated(src);
+    // Should emit a dict constructor for Show/Int
+    assert!(
+        out.contains("'__dict_Show_Int'/0"),
+        "expected Show/Int dict constructor\n{out}"
+    );
+    // Should call erlang:integer_to_list for Int show
+    assert!(
+        out.contains("'erlang':'integer_to_list'"),
+        "expected integer_to_list call\n{out}"
+    );
+    // main should actually call the dict via element() dispatch
+    assert!(
+        out.contains("'erlang':'element'"),
+        "expected element() for dict method access\n{out}"
+    );
+}
+
+#[test]
+fn show_bool_uses_case() {
+    let src = "main () = show True";
+    let out = emit_elaborated(src);
+    assert!(
+        out.contains("'__dict_Show_Bool'/0"),
+        "expected Show/Bool dict constructor\n{out}"
+    );
+    // Bool show should produce "True"/"False" strings via case
+    assert!(
+        out.contains("\"True\""),
+        "expected \"True\" string in Show Bool\n{out}"
+    );
+}
+
+#[test]
+fn print_uses_show_dict() {
+    let src = "main () = print 42";
+    let out = emit_elaborated(src);
+    // print should be a function that takes a Show dict param
+    assert!(
+        out.contains("'print'/2"),
+        "expected print/2 (dict + value)\n{out}"
+    );
+    // print should call io:format
+    assert!(
+        out.contains("'io':'format'"),
+        "expected io:format call in print\n{out}"
+    );
+}
+
+#[test]
+fn show_string_is_identity() {
+    let src = "main () = show \"hello\"";
+    let out = emit_elaborated(src);
+    assert!(
+        out.contains("'__dict_Show_String'/0"),
+        "expected Show/String dict constructor\n{out}"
+    );
+}
+
+#[test]
+fn string_interpolation_uses_show_dict() {
+    let src = r#"main () = $"value is {42}""#;
+    let out = emit_elaborated(src);
+    // String interpolation desugars to show(x), which should use dict dispatch
+    assert!(
+        out.contains("'__dict_Show_Int'/0"),
+        "expected Show/Int dict for interpolation\n{out}"
+    );
+}
+
+#[test]
+fn show_tuple_inlines_per_element() {
+    let src = "main () = show (1, True)";
+    let out = emit_elaborated(src);
+    // Tuple show is inlined: no __dict_Show_Tuple, instead direct element extraction
+    assert!(
+        !out.contains("__dict_Show_Tuple"),
+        "should NOT have a Tuple dict constructor\n{out}"
+    );
+    // Should extract elements with erlang:element
+    assert!(
+        out.contains("'erlang':'element'"),
+        "expected erlang:element calls for tuple elements\n{out}"
+    );
+    // Should use Show dicts for the element types
+    assert!(
+        out.contains("'__dict_Show_Int'/0"),
+        "expected Show/Int dict for first element\n{out}"
+    );
+    assert!(
+        out.contains("'__dict_Show_Bool'/0"),
+        "expected Show/Bool dict for second element\n{out}"
+    );
+    // Should produce parens and comma separator
+    assert!(
+        out.contains("\"(\""),
+        "expected opening paren string\n{out}"
+    );
+    assert!(
+        out.contains("\", \""),
+        "expected comma separator string\n{out}"
+    );
+    assert!(
+        out.contains("\")\""),
+        "expected closing paren string\n{out}"
+    );
+    // The inline lambda should appear directly in main (fun (___tup) -> ...)
+    assert!(
+        out.contains("fun (___tup)"),
+        "main should contain inline tuple show lambda\n{out}"
+    );
+}
+
+#[test]
+fn show_triple_tuple_has_three_elements() {
+    let src = r#"main () = show (1, "hi", True)"#;
+    let out = emit_elaborated(src);
+    // Should reference Show dicts for all three element types
+    assert!(
+        out.contains("'__dict_Show_Int'/0"),
+        "expected Show/Int dict\n{out}"
+    );
+    assert!(
+        out.contains("'__dict_Show_String'/0"),
+        "expected Show/String dict\n{out}"
+    );
+    assert!(
+        out.contains("'__dict_Show_Bool'/0"),
+        "expected Show/Bool dict\n{out}"
+    );
+    // Should have the inline tuple lambda, not a Tuple dict
+    assert!(
+        out.contains("fun (___tup)"),
+        "expected inline tuple show lambda\n{out}"
+    );
+    assert!(
+        !out.contains("__dict_Show_Tuple"),
+        "should NOT have a Tuple dict constructor\n{out}"
+    );
+}
+
+#[test]
+fn show_user_defined_adt_uses_impl() {
+    let src = "
+type Color { Red | Green | Blue }
+
+impl Show for Color {
+  show c = case c {
+    Red -> \"Red\"
+    Green -> \"Green\"
+    Blue -> \"Blue\"
+  }
+}
+
+main () = show Red
+";
+    let out = emit_elaborated(src);
+    // Should emit the user's dict constructor
+    assert!(
+        out.contains("'__dict_Show_Color'/0"),
+        "expected Show/Color dict constructor\n{out}"
+    );
+    // main should dispatch show through the user's dict
+    assert!(
+        out.contains("'__dict_Show_Color'"),
+        "main should reference the user Show impl\n{out}"
+    );
+    // The user impl body should appear (case arms with color strings)
+    assert!(
+        out.contains("\"Red\""),
+        "expected \"Red\" string in Show impl body\n{out}"
+    );
+}
+
+#[test]
+fn print_user_defined_adt() {
+    let src = "
+type Color { Red | Green | Blue }
+
+impl Show for Color {
+  show c = case c {
+    Red -> \"Red\"
+    Green -> \"Green\"
+    Blue -> \"Blue\"
+  }
+}
+
+main () = print Red
+";
+    let out = emit_elaborated(src);
+    // print should receive the user's Show dict
+    assert!(
+        out.contains("'__dict_Show_Color'"),
+        "expected Show/Color dict passed to print\n{out}"
+    );
+    // print should call io:format
+    assert!(
+        out.contains("'io':'format'"),
+        "expected io:format in print\n{out}"
+    );
+}

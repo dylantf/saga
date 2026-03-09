@@ -220,7 +220,7 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> EvalResult {
             eval_do_expr(&bindings, 0, &success, &else_arms, &env)
         }
 
-        Expr::DictMethodAccess { .. } | Expr::DictRef { .. } => {
+        Expr::DictMethodAccess { .. } | Expr::DictRef { .. } | Expr::ForeignCall { .. } => {
             unreachable!("elaboration-only construct in interpreter")
         }
     }

@@ -252,6 +252,13 @@ pub enum Expr {
     },
     /// Reference to a dictionary value (a variable holding a dict, or a dict constructor name).
     DictRef { name: String, span: Span },
+    /// Call an Erlang BIF. Only produced by elaboration, never by the parser.
+    ForeignCall {
+        module: String,
+        func: String,
+        args: Vec<Expr>,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -277,7 +284,8 @@ impl Expr {
             | Expr::QualifiedName { span, .. }
             | Expr::Do { span, .. }
             | Expr::DictMethodAccess { span, .. }
-            | Expr::DictRef { span, .. } => *span,
+            | Expr::DictRef { span, .. }
+            | Expr::ForeignCall { span, .. } => *span,
         }
     }
 }

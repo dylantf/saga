@@ -474,7 +474,7 @@ impl Checker {
                 Ok(result_ty)
             }
 
-            Expr::DictMethodAccess { .. } | Expr::DictRef { .. } => {
+            Expr::DictMethodAccess { .. } | Expr::DictRef { .. } | Expr::ForeignCall { .. } => {
                 unreachable!("elaboration-only construct in typechecker")
             }
         }

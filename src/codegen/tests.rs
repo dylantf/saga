@@ -235,13 +235,6 @@ filter_pos n = case n {
     );
 }
 
-// --- Builtins ---
-
-#[test]
-fn show_int_calls_io_lib() {
-    assert_contains("main () = show 42", "call 'io_lib':'format'");
-}
-
 // --- Short-circuit operators ---
 
 #[test]

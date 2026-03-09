@@ -132,11 +132,15 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [ ] Multi-module builds (resolve imports, compile dependency order)
 - [ ] Qualified calls (`Math.abs x` -> `call 'math':'abs'(X)`)
 
+### Data structures
+- [ ] Dict lowering (dict literals -> Erlang maps, `Dict.*` -> `maps:*` BIFs)
+- [ ] List lowering (`List.*` -> `lists:*` BIFs)
+
 ### Traits
 - [x] Dictionary passing (trait impls as tuples of funs, passed as extra args; elaboration pass)
-- [ ] Built-in trait dispatch (`Show`, `Eq`, `Ord`, `Num`)
-- [ ] Replace `show`/`print` builtin special-cases with proper `Show` trait dispatch
-- [ ] Fix `show`/`print` as higher-order values (currently emit undefined `__builtin_*` var; need lambda wrapper)
+- [x] Built-in trait dispatch (`Show` via dict constructors; `Eq`/`Ord`/`Num` use direct BEAM BIFs)
+- [x] Replace `show`/`print` builtin special-cases with proper `Show` trait dispatch
+- [x] Fix `show`/`print` as higher-order values (`show` is `DictMethodAccess`, `print` is a synthesized dict-parameterized function)
 
 ### Effects
 - [ ] Non-resumable handlers (`try/catch` in Core Erlang)
