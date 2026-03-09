@@ -9,7 +9,30 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 
+use crate::ast::Expr;
 use crate::token::Span;
+
+/// Returns the span of the first effect call found in `expr`, if any.
+/// Used to reject effect calls inside guard expressions.
+pub(crate) fn find_effect_call(expr: &Expr) -> Option<Span> {
+    match expr {
+        Expr::EffectCall { span, .. } => Some(*span),
+        Expr::App { func, arg, .. } => find_effect_call(func).or_else(|| find_effect_call(arg)),
+        Expr::BinOp { left, right, .. } => {
+            find_effect_call(left).or_else(|| find_effect_call(right))
+        }
+        Expr::UnaryMinus { expr, .. } => find_effect_call(expr),
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => find_effect_call(cond)
+            .or_else(|| find_effect_call(then_branch))
+            .or_else(|| find_effect_call(else_branch)),
+        _ => None,
+    }
+}
 
 // --- Type representation ---
 

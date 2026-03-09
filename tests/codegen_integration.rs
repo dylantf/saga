@@ -1356,34 +1356,8 @@ main () = complex () with {
     assert_compiles(src);
 }
 
-#[test]
-fn effect_guard_desugared_to_body() {
-    // Effect call inside a case guard should be desugared into the arm body.
-    let src = r#"
-effect Check {
-  fun check (n: Int) -> Bool
-}
-
-handler always_true for Check {
-  check n -> resume True
-}
-
-fun filter (x: Int) -> Int needs {Check}
-filter x = case x {
-  n if check! n -> n
-  _ -> 0
-}
-
-main () = filter 5 with always_true
-"#;
-    let out = emit_elaborated(src);
-    // Every `when` should be followed by 'true' (complex guard desugaring).
-    assert!(
-        out.split("when").skip(1).all(|s| s.trim_start().starts_with("'true'")),
-        "effect guard must be desugared, not emitted as Core Erlang guard\n{out}"
-    );
-    assert_compiles(src);
-}
+// effect_guard_desugared_to_body removed: effect calls in guards are now
+// rejected by the type checker (see typechecker::tests::effect_call_in_case_guard_rejected)
 
 #[test]
 fn effect_result_ignored_three_in_a_row() {

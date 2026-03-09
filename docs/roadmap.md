@@ -41,7 +41,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Effects: EffectDef, EffectCall, HandlerDef, With, Resume, return clauses
 - [x] `needs` effect set tracking (direct calls, propagation, `with` subtraction, HOF absorption)
 - [x] `Type::EffArrow` for annotated callback parameters
-- [ ] Disallow effect invocations in guard expressions
+- [x] Disallow effect invocations in guard expressions
 
 ## Traits / Impls
 
@@ -171,7 +171,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Handler `needs` clause (handler that itself uses effects)
 - [x] Effect calls in non-block positions (nested in `if` conditions, binary ops, etc.)
 - [x] HOF effect absorption (passing effectful closures through higher-order functions like `try`)
-- [ ] Return clause bypass on handler abort (return clause wraps abort results incorrectly)
+- [x] Return clause bypass on handler abort (return clause wraps abort results incorrectly)
 
 ### Stdlib / prelude
 

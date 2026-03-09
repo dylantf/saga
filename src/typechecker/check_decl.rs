@@ -321,6 +321,12 @@ impl Checker {
             }
 
             if let Some(guard) = guard {
+                if let Some(span) = super::find_effect_call(guard) {
+                    return Err(TypeError::at(
+                        span,
+                        "Effect calls are not allowed in guard expressions".to_string(),
+                    ));
+                }
                 let guard_ty = self.infer_expr(guard)?;
                 self.unify_at(&guard_ty, &Type::bool(), guard.span())?;
             }

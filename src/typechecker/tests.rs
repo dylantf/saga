@@ -2164,3 +2164,57 @@ f s = case s {
     )
     .is_ok());
 }
+
+#[test]
+fn effect_call_in_case_guard_rejected() {
+    let result = check(
+        "effect Check {
+  fun check (n: Int) -> Bool
+}
+
+fun filter (x: Int) -> Int needs {Check}
+filter x = case x {
+  n if check! n -> n
+  _ -> 0
+}"
+    );
+    assert!(result.is_err());
+    let err = result.err().expect("expected type error");
+    assert!(
+        err.message.contains("not allowed in guard"),
+        "expected guard error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn effect_call_in_multi_clause_guard_rejected() {
+    let result = check(
+        "effect Check {
+  fun check (n: Int) -> Bool
+}
+
+fun filter (x: Int) -> Int needs {Check}
+filter x | check! x = x
+filter _ = 0"
+    );
+    assert!(result.is_err());
+    let err = result.err().expect("expected type error");
+    assert!(
+        err.message.contains("not allowed in guard"),
+        "expected guard error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn pure_guard_still_works() {
+    // Make sure we didn't break normal guards
+    assert!(check(
+        "clamp x = case x {
+  n if n < 0 -> 0
+  n -> n
+}"
+    )
+    .is_ok());
+}
