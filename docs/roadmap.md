@@ -41,6 +41,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Effects: EffectDef, EffectCall, HandlerDef, With, Resume, return clauses
 - [x] `needs` effect set tracking (direct calls, propagation, `with` subtraction, HOF absorption)
 - [x] `Type::EffArrow` for annotated callback parameters
+- [ ] Disallow effect invocations in guard expressions
 
 ## Traits / Impls
 

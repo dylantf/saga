@@ -373,3 +373,22 @@ fn or_short_circuits() {
     assert!(out.contains("case"), "expected case for ||\n{out}");
     assert!(out.contains("'true'"), "expected true short-circuit\n{out}");
 }
+
+// --- Non-trivial patterns in let-bindings ---
+
+#[test]
+fn tuple_destructure_in_block() {
+    // `let (a, b) = (1, 2)` in a block should destructure via case,
+    // not silently discard the pattern.
+    let src = "
+main () = {
+  let (a, b) = (1, 2)
+  a
+}
+";
+    let out = emit(src);
+    // The destructuring should produce a case on the tuple
+    assert!(out.contains("case"), "expected case for tuple destructure\n{out}");
+    // Variable A (lowered from `a`) should appear in the output
+    assert!(out.contains("A"), "expected bound variable A\n{out}");
+}

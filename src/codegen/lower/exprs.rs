@@ -218,6 +218,27 @@ impl Lowerer {
         }
     }
 
+    /// Bind a pattern to a single variable name, wrapping the body in a
+    /// destructuring `case` if the pattern is non-trivial (tuple, constructor, etc.).
+    /// Returns `(var_name, body)` where `var_name` is safe to use in a `Let` or `Fun` param.
+    fn destructure_pat(&mut self, pat: &Pat, body: CExpr) -> (String, CExpr) {
+        if let Some(var) = pat_binding_var(pat) {
+            (var, body)
+        } else {
+            let tmp = self.fresh();
+            let cpat = lower_pat(pat, &self.record_fields);
+            let wrapped = CExpr::Case(
+                Box::new(CExpr::Var(tmp.clone())),
+                vec![CArm {
+                    pat: cpat,
+                    guard: None,
+                    body,
+                }],
+            );
+            (tmp, wrapped)
+        }
+    }
+
     pub(super) fn lower_block(&mut self, stmts: &[Stmt]) -> CExpr {
         match stmts {
             [] => self.apply_return_k(CExpr::Tuple(vec![])), // unit
@@ -246,9 +267,9 @@ impl Lowerer {
 
                 if let Some((pat, op_name, qualifier, args)) = effect_info {
                     let rest_ce = self.lower_block(rest);
-                    let k_param = match pat {
-                        Some(p) => pat_binding_var(p).unwrap_or_else(|| self.fresh()),
-                        None => self.fresh(), // expression position: unused param
+                    let (k_param, rest_ce) = match pat {
+                        Some(p) => self.destructure_pat(p, rest_ce),
+                        None => (self.fresh(), rest_ce),
                     };
                     let k = CExpr::Fun(vec![k_param], Box::new(rest_ce));
                     // We need to own the args for lower_effect_call
@@ -264,31 +285,32 @@ impl Lowerer {
                     };
 
                     if value_has_nested {
-                        let (k_param, value_expr) = match first {
-                            Stmt::Let { pattern, value, .. } => {
-                                let var = pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
-                                (var, value)
-                            }
-                            Stmt::Expr(e) => (self.fresh(), e),
+                        let (pat_opt, value_expr) = match first {
+                            Stmt::Let { pattern, value, .. } => (Some(pattern), value),
+                            Stmt::Expr(e) => (None, e),
                         };
                         let rest_ce = self.lower_block(rest);
+                        let (k_param, rest_ce) = match pat_opt {
+                            Some(p) => self.destructure_pat(p, rest_ce),
+                            None => (self.fresh(), rest_ce),
+                        };
                         let k = CExpr::Fun(vec![k_param], Box::new(rest_ce));
                         let k_var = self.fresh();
                         let body = self.lower_expr_with_k(value_expr, &k_var);
                         CExpr::Let(k_var, Box::new(k), Box::new(body))
                     } else {
                         // Normal (non-effect) statement
-                        let (var, val_ce) = match first {
+                        let (pat_opt, val_ce) = match first {
                             Stmt::Let { pattern, value, .. } => {
-                                let var = pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
-                                (var, self.lower_expr(value))
+                                (Some(pattern), self.lower_expr(value))
                             }
-                            Stmt::Expr(e) => {
-                                let var = self.fresh();
-                                (var, self.lower_expr(e))
-                            }
+                            Stmt::Expr(e) => (None, self.lower_expr(e)),
                         };
                         let rest_ce = self.lower_block(rest);
+                        let (var, rest_ce) = match pat_opt {
+                            Some(p) => self.destructure_pat(p, rest_ce),
+                            None => (self.fresh(), rest_ce),
+                        };
                         CExpr::Let(var, Box::new(val_ce), Box::new(rest_ce))
                     }
                 }
@@ -431,9 +453,9 @@ impl Lowerer {
                 if let Some((pat, op_name, qualifier, args)) = effect_info {
                     // Direct effect call at statement level: CPS with rest -> K-threaded
                     let rest_ce = self.lower_block_with_k(rest, k_var);
-                    let k_param = match pat {
-                        Some(p) => pat_binding_var(p).unwrap_or_else(|| self.fresh()),
-                        None => self.fresh(),
+                    let (k_param, rest_ce) = match pat {
+                        Some(p) => self.destructure_pat(p, rest_ce),
+                        None => (self.fresh(), rest_ce),
                     };
                     let inner_k = CExpr::Fun(vec![k_param], Box::new(rest_ce));
                     let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
@@ -446,23 +468,23 @@ impl Lowerer {
 
                     if has_nested_effect_call(value_expr) {
                         // Value has nested effects: build inner K and thread through
-                        let k_param = match pat_opt {
-                            Some(p) => pat_binding_var(p).unwrap_or_else(|| self.fresh()),
-                            None => self.fresh(),
-                        };
                         let rest_ce = self.lower_block_with_k(rest, k_var);
+                        let (k_param, rest_ce) = match pat_opt {
+                            Some(p) => self.destructure_pat(p, rest_ce),
+                            None => (self.fresh(), rest_ce),
+                        };
                         let inner_k = CExpr::Fun(vec![k_param], Box::new(rest_ce));
                         let inner_k_var = self.fresh();
                         let body = self.lower_expr_with_k(value_expr, &inner_k_var);
                         CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(body))
                     } else {
                         // Normal statement: evaluate, bind, then rest with K
-                        let var = match pat_opt {
-                            Some(p) => pat_binding_var(p).unwrap_or_else(|| self.fresh()),
-                            None => self.fresh(),
-                        };
                         let val_ce = self.lower_expr(value_expr);
                         let rest_ce = self.lower_block_with_k(rest, k_var);
+                        let (var, rest_ce) = match pat_opt {
+                            Some(p) => self.destructure_pat(p, rest_ce),
+                            None => (self.fresh(), rest_ce),
+                        };
                         CExpr::Let(var, Box::new(val_ce), Box::new(rest_ce))
                     }
                 }

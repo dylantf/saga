@@ -128,7 +128,7 @@ mod.rs:765-776 always emits `apply _K(value)`. This works because handler functi
 - Asserting `EffectCall.args.is_empty()` in `collect_effect_call`
 - Or including `EffectCall.args` in the returned args
 
-### 6. Non-trivial patterns in CPS let-bindings
+### 6. (DONE) Non-trivial patterns in CPS let-bindings
 
 At exprs.rs:245-248, `pat_binding_var` only handles `Pat::Var`. If a user writes `let (a, b) = some_effect! ()`, the pattern is a tuple, `pat_binding_var` returns None, a fresh var is used, and the destructuring is lost. The continuation K receives the effect result but only binds it to a single variable.
 

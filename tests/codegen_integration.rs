@@ -23,9 +23,15 @@ fn emit_elaborated(src: &str) -> String {
 
 /// Emit Core Erlang and compile it with erlc, asserting no compilation errors.
 fn assert_compiles(src: &str) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
     let out = emit_elaborated(src);
-    // Use a unique temp dir per test to avoid races in parallel test execution
-    let dir = std::env::temp_dir().join(format!("dylang_test_{}", std::process::id()));
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "dylang_test_{}_{id}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let core_path = dir.join("test.core");
     std::fs::write(&core_path, &out).unwrap();
@@ -35,6 +41,8 @@ fn assert_compiles(src: &str) {
         .arg(&core_path)
         .output()
         .expect("failed to run erlc");
+    // Clean up temp files
+    let _ = std::fs::remove_dir_all(&dir);
     assert!(
         status.status.success(),
         "erlc failed to compile:\n{}\nstderr: {}",
@@ -1146,6 +1154,426 @@ main () = {
   let b = try_it (fun () -> fail! "boom")
   print "ok"
 }
+"#;
+    assert_compiles(src);
+}
+
+// --- Effect call coverage gap tests ---
+
+#[test]
+fn effect_in_tail_position() {
+    // Effect call as the last statement in a block.
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+fun greet () -> Unit needs {Log}
+greet () = {
+  log! "hello"
+}
+
+main () = greet () with silent
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn sequential_effects_interleaved_with_lets() {
+    // Multiple effect calls interleaved with non-effect let bindings.
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+fun work () -> Int needs {Log}
+work () = {
+  log! "start"
+  let x = 1
+  log! "middle"
+  let y = x + 1
+  log! "end"
+  y
+}
+
+main () = work () with silent
+"#;
+    let out = emit_elaborated(src);
+    // Should have multiple continuation funs for the chained effects
+    let fun_count = out.matches("fun (").count();
+    assert!(
+        fun_count >= 4,
+        "expected at least 4 fun expressions for K-chaining, got {}\n{}",
+        fun_count,
+        out
+    );
+    assert_compiles(src);
+}
+
+#[test]
+fn resume_with_non_unit_value() {
+    // Handler resumes with a computed value, not just ().
+    let src = r#"
+effect Ask {
+  fun ask () -> Int
+}
+
+handler answer_42 for Ask {
+  ask -> resume 42
+}
+
+fun use_ask () -> Int needs {Ask}
+use_ask () = {
+  let x = ask! ()
+  x + 1
+}
+
+main () = use_ask () with answer_42
+"#;
+    let out = emit_elaborated(src);
+    assert!(out.contains("42"), "expected 42 in handler resume\n{out}");
+    assert_compiles(src);
+}
+
+#[test]
+fn effect_in_record_constructor_arg() {
+    // Effect call as a record field value.
+    let src = r#"
+record Point { x: Int, y: Int }
+
+effect Ask {
+  fun ask () -> Int
+}
+
+handler answer_42 for Ask {
+  ask -> resume 42
+}
+
+fun make_point () -> Point needs {Ask}
+make_point () = {
+  let a = ask! ()
+  Point { x: a, y: 10 }
+}
+
+main () = make_point () with answer_42
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn effect_in_tuple_constructor_arg() {
+    // Effect call as a tuple element.
+    let src = r#"
+effect Ask {
+  fun ask () -> Int
+}
+
+handler answer_42 for Ask {
+  ask -> resume 42
+}
+
+fun make_pair () -> (Int, Int) needs {Ask}
+make_pair () = {
+  let a = ask! ()
+  (a, 10)
+}
+
+main () = make_pair () with answer_42
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn effect_in_adt_constructor_arg() {
+    // Effect call as ADT constructor argument.
+    let src = r#"
+type Maybe a { Some(a) | None }
+
+effect Ask {
+  fun ask () -> Int
+}
+
+handler answer_42 for Ask {
+  ask -> resume 42
+}
+
+fun maybe_ask () -> Maybe Int needs {Ask}
+maybe_ask () = {
+  let x = ask! ()
+  Some(x)
+}
+
+main () = maybe_ask () with answer_42
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn multiple_effects_three_handlers() {
+    // Function needing three effects, each with a separate handler.
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+effect Ask {
+  fun ask () -> Int
+}
+
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+handler answer_42 for Ask {
+  ask -> resume 42
+}
+
+fun complex () -> Int needs {Log, Ask, Fail}
+complex () = {
+  log! "start"
+  let x = ask! ()
+  if x > 100 then fail! "too big" else x
+}
+
+main () = complex () with {
+  silent,
+  answer_42,
+  fail msg -> 0
+}
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn effect_guard_desugared_to_body() {
+    // Effect call inside a case guard should be desugared into the arm body.
+    let src = r#"
+effect Check {
+  fun check (n: Int) -> Bool
+}
+
+handler always_true for Check {
+  check n -> resume True
+}
+
+fun filter (x: Int) -> Int needs {Check}
+filter x = case x {
+  n if check! n -> n
+  _ -> 0
+}
+
+main () = filter 5 with always_true
+"#;
+    let out = emit_elaborated(src);
+    // Every `when` should be followed by 'true' (complex guard desugaring).
+    assert!(
+        out.split("when").skip(1).all(|s| s.trim_start().starts_with("'true'")),
+        "effect guard must be desugared, not emitted as Core Erlang guard\n{out}"
+    );
+    assert_compiles(src);
+}
+
+#[test]
+fn effect_result_ignored_three_in_a_row() {
+    // Three consecutive effect calls whose return values are unused.
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+fun work () -> Int needs {Log}
+work () = {
+  log! "a"
+  log! "b"
+  log! "c"
+  42
+}
+
+main () = work () with silent
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn effect_returned_directly_no_block() {
+    // Effect call as the entire function body (no block).
+    let src = r#"
+effect Ask {
+  fun ask () -> Int
+}
+
+handler answer_42 for Ask {
+  ask -> resume 42
+}
+
+fun get_value () -> Int needs {Ask}
+get_value () = ask! ()
+
+main () = get_value () with answer_42
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn nested_effectful_function_calls() {
+    // Chain of effectful function calls: outer calls middle calls inner.
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+fun inner () -> Int needs {Log}
+inner () = {
+  log! "inner"
+  1
+}
+
+fun middle () -> Int needs {Log}
+middle () = {
+  let x = inner ()
+  log! "middle"
+  x + 1
+}
+
+fun outer () -> Int needs {Log}
+outer () = {
+  let y = middle ()
+  log! "outer"
+  y + 1
+}
+
+main () = outer () with silent
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn abort_skips_remaining_in_nested_calls() {
+    // Abort-style handler in inner function should skip continuation in outer.
+    let src = r#"
+type Result a e { Ok(a) | Err(e) }
+
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+fun inner () -> Int needs {Fail}
+inner () = {
+  fail! "boom"
+  999
+}
+
+fun outer () -> Int needs {Fail}
+outer () = {
+  let x = inner ()
+  x + 1
+}
+
+fun try_it (computation: () -> a needs {Fail}) -> Result a String
+try_it computation = computation () with {
+  fail msg -> Err(msg)
+  return value -> Ok(value)
+}
+
+main () = try_it (fun () -> outer ())
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn mixed_resume_and_abort_in_handler() {
+    // Handler where some ops resume and others abort.
+    let src = r#"
+effect IO {
+  fun read () -> Int
+  fun crash (msg: String) -> a
+}
+
+handler test_io for IO {
+  read -> resume 42
+  crash msg -> 0
+}
+
+fun process () -> Int needs {IO}
+process () = {
+  let x = read! ()
+  if x > 100 then crash! "too big" else x + 1
+}
+
+main () = process () with test_io
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn tuple_destructure_with_effect_result() {
+    // Tuple pattern destructuring where the RHS is an effect call.
+    let src = r#"
+effect Ask {
+  fun ask () -> (Int, Int)
+}
+
+handler answer for Ask {
+  ask -> resume (1, 2)
+}
+
+fun use_pair () -> Int needs {Ask}
+use_pair () = {
+  let (a, b) = ask! ()
+  a + b
+}
+
+main () = use_pair () with answer
+"#;
+    let out = emit_elaborated(src);
+    assert!(out.contains("case"), "expected case for tuple destructure\n{out}");
+    assert_compiles(src);
+}
+
+#[test]
+fn constructor_destructure_after_effect() {
+    // Constructor pattern match on effect result.
+    let src = r#"
+type Maybe a { Some(a) | None }
+
+effect Ask {
+  fun ask () -> Maybe Int
+}
+
+handler answer for Ask {
+  ask -> resume Some(42)
+}
+
+fun extract () -> Int needs {Ask}
+extract () = {
+  let result = ask! ()
+  case result {
+    Some(x) -> x
+    None -> 0
+  }
+}
+
+main () = extract () with answer
 "#;
     assert_compiles(src);
 }
