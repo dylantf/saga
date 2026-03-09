@@ -783,6 +783,84 @@ main () = do_work () with console_log
 }
 
 #[test]
+fn handler_needs_effect_from_sibling_handler() {
+    // A named handler for Fail that uses Log in its arm body.
+    // Both handlers provided in the same `with`.
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+handler logging_fail for Fail needs {Log} {
+  fail msg -> {
+    log! ("caught: " <> msg)
+    0
+  }
+}
+
+fun risky () -> Int needs {Fail, Log}
+risky () = {
+  log! "about to fail"
+  fail! "oops"
+}
+
+main () = risky () with { silent, logging_fail }
+"#;
+    let out = emit_elaborated(src);
+    // The Fail handler arm body contains log!, which should reference _HandleLog
+    assert_contains(&out, "_HandleLog");
+    assert_contains(&out, "_HandleFail");
+    // The fail arm body should apply _HandleLog for the log! call
+    assert_contains(&out, "apply _HandleLog('log'");
+}
+
+#[test]
+fn handler_needs_effect_from_outer_scope() {
+    // A named handler for Fail that needs Log.
+    // Log comes from the enclosing function's handler param.
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+handler logging_fail for Fail needs {Log} {
+  fail msg -> {
+    log! ("Failed: " <> msg)
+    0
+  }
+}
+
+handler silent for Log {
+  log msg -> resume ()
+}
+
+fun do_work () -> Int needs {Fail, Log}
+do_work () = {
+  log! "starting"
+  fail! "boom"
+}
+
+main () = do_work () with { silent, logging_fail }
+"#;
+    let out = emit_elaborated(src);
+    // logging_fail's arm body uses log!, should reference _HandleLog
+    assert_contains(&out, "apply _HandleLog('log'");
+    assert_contains(&out, "_HandleFail");
+}
+
+#[test]
 fn effect_multi_clause_function() {
     // Effectful function with pattern-matched clauses
     let src = r#"

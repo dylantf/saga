@@ -411,21 +411,27 @@ impl Lowerer {
             effect_arms.entry(eff).or_default().push(arm);
         }
 
-        // For each handled effect, build a handler function and bind it
+        // For each handled effect, build a handler function and bind it.
+        // Two passes: first set up all handler param names (so handler arm bodies
+        // that use effects from sibling handlers can find them via closure capture),
+        // then build the handler functions.
         let saved_handler_params = self.current_handler_params.clone();
-        let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
 
+        // Pass 1: register all handler param variables
+        let mut handler_vars: Vec<(String, String)> = Vec::new(); // (effect_name, var_name)
         for effect_name in &handled_effects {
             let handler_var = format!("_Handle{}", effect_name);
             self.current_handler_params
                 .insert(effect_name.clone(), handler_var.clone());
+            handler_vars.push((effect_name.clone(), handler_var));
+        }
 
+        // Pass 2: build handler functions (arm bodies can now reference any handler param)
+        let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
+        for (effect_name, handler_var) in &handler_vars {
             let arms = effect_arms.get(effect_name).cloned().unwrap_or_default();
-
-            // Build handler function: fun (Op, Arg1, ..., ArgN, K) -> case Op of ...
-            // For single-op effects (common case), we can simplify.
             let handler_fun = self.build_handler_fun(&arms);
-            handler_bindings.push((handler_var, handler_fun));
+            handler_bindings.push((handler_var.clone(), handler_fun));
         }
 
         // Lower the inner expression with the handler params in scope
