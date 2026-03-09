@@ -8,8 +8,8 @@ use std::collections::HashMap;
 
 use pats::{lower_params, lower_pat};
 use util::{
-    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, core_var,
-    field_access_record_name, lower_lit,
+    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_type_effects,
+    core_var, field_access_record_name, lower_lit,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -45,6 +45,16 @@ pub struct Lowerer {
     op_to_effect: HashMap<String, String>,
     /// When lowering inside an effectful function, maps effect name -> handler param var name.
     current_handler_params: HashMap<String, String>,
+    /// Maps function name -> (param_index -> absorbed effects) for EffArrow params.
+    /// e.g. for `fun try (computation: () -> a needs {Fail}) -> ...`,
+    /// stores `"try" -> {0 -> ["Fail"]}`.
+    param_absorbed_effects: HashMap<String, HashMap<usize, Vec<String>>>,
+    /// When lowering inside a function, maps local variable name -> effects it absorbs.
+    /// Set from `param_absorbed_effects` for the current function.
+    current_effectful_vars: HashMap<String, Vec<String>>,
+    /// Effects that the next lambda being lowered should accept as extra params.
+    /// Set by the call site that passes the lambda to an effectful parameter.
+    lambda_effect_context: Option<Vec<String>>,
 }
 
 impl Lowerer {
@@ -58,6 +68,9 @@ impl Lowerer {
             fun_effects: HashMap::new(),
             op_to_effect: HashMap::new(),
             current_handler_params: HashMap::new(),
+            param_absorbed_effects: HashMap::new(),
+            current_effectful_vars: HashMap::new(),
+            lambda_effect_context: None,
         }
     }
 
@@ -102,11 +115,30 @@ impl Lowerer {
                         },
                     );
                 }
-                Decl::FunAnnotation { name, effects, .. } => {
+                Decl::FunAnnotation {
+                    name,
+                    effects,
+                    params,
+                    ..
+                } => {
                     if !effects.is_empty() {
                         let mut sorted = effects.clone();
                         sorted.sort();
                         self.fun_effects.insert(name.clone(), sorted);
+                    }
+                    // Extract EffArrow info from parameter types
+                    let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
+                    for (i, (_param_name, type_expr)) in params.iter().enumerate() {
+                        let effs = collect_type_effects(type_expr);
+                        if !effs.is_empty() {
+                            let mut sorted: Vec<String> = effs.into_iter().collect();
+                            sorted.sort();
+                            param_effs.insert(i, sorted);
+                        }
+                    }
+                    if !param_effs.is_empty() {
+                        self.param_absorbed_effects
+                            .insert(name.clone(), param_effs);
                     }
                 }
                 _ => {}
@@ -168,6 +200,20 @@ impl Lowerer {
             for (eff, param) in effects.iter().zip(handler_params.iter()) {
                 self.current_handler_params
                     .insert(eff.clone(), param.clone());
+            }
+            // Set up effectful variable tracking for HOF absorption.
+            // Map param indices to param names from the first clause's patterns.
+            let saved_effectful_vars = std::mem::take(&mut self.current_effectful_vars);
+            if let Some(param_effs) = self.param_absorbed_effects.get(&name) {
+                let first_clause_params = clauses[0].0;
+                for (idx, effs) in param_effs {
+                    if let Some(pat) = first_clause_params.get(*idx) {
+                        if let Pat::Var { name: src_name, .. } = pat {
+                            self.current_effectful_vars
+                                .insert(src_name.clone(), effs.clone());
+                        }
+                    }
+                }
             }
 
             let base_arity = arity - handler_params.len();
@@ -245,6 +291,7 @@ impl Lowerer {
             };
 
             self.current_handler_params = saved_handler_params;
+            self.current_effectful_vars = saved_effectful_vars;
 
             fun_defs.push(CFunDef {
                 name,
@@ -333,9 +380,20 @@ impl Lowerer {
                         // Saturated call: apply fun 'name'/N(arg1, ..., argN, handler1, ...)
                         let mut arg_vars: Vec<String> = Vec::new();
                         let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                        for arg in non_unit_args {
+                        let callee_param_effs =
+                            self.param_absorbed_effects.get(func_name).cloned();
+                        for (i, arg) in non_unit_args.iter().enumerate() {
                             let v = self.fresh();
+                            // If this arg position has absorbed effects, set context
+                            // so lambdas at this position get handler params added.
+                            let saved_ctx = self.lambda_effect_context.take();
+                            if let Some(ref pe) = callee_param_effs {
+                                if let Some(effs) = pe.get(&i) {
+                                    self.lambda_effect_context = Some(effs.clone());
+                                }
+                            }
                             let ce = self.lower_expr(arg);
+                            self.lambda_effect_context = saved_ctx;
                             arg_vars.push(v.clone());
                             bindings.push((v, ce));
                         }
@@ -354,6 +412,52 @@ impl Lowerer {
                         }
                         let call = CExpr::Apply(
                             Box::new(CExpr::FunRef(func_name.to_string(), arity)),
+                            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+                        );
+                        return bindings.into_iter().rev().fold(call, |body, (var, val)| {
+                            CExpr::Let(var, Box::new(val), Box::new(body))
+                        });
+                    }
+                }
+
+                // Check for call to an effectful variable (HOF absorption).
+                // e.g. `computation ()` where computation absorbs Fail
+                if let Some((var_name, args)) = collect_fun_call(expr) {
+                    if let Some(absorbed) = self.current_effectful_vars.get(var_name).cloned() {
+                        let mut arg_vars: Vec<String> = Vec::new();
+                        let mut bindings: Vec<(String, CExpr)> = Vec::new();
+                        // Filter out unit literal args
+                        let non_unit_args: Vec<&Expr> = args
+                            .into_iter()
+                            .filter(|a| {
+                                !matches!(
+                                    a,
+                                    Expr::Lit {
+                                        value: ast::Lit::Unit,
+                                        ..
+                                    }
+                                )
+                            })
+                            .collect();
+                        for arg in non_unit_args {
+                            let v = self.fresh();
+                            let ce = self.lower_expr(arg);
+                            arg_vars.push(v.clone());
+                            bindings.push((v, ce));
+                        }
+                        // Append handler params for absorbed effects
+                        for eff in &absorbed {
+                            if let Some(param) = self.current_handler_params.get(eff) {
+                                arg_vars.push(param.clone());
+                            } else {
+                                panic!(
+                                    "effectful variable '{}' needs effect '{}' but no handler param in scope",
+                                    var_name, eff
+                                );
+                            }
+                        }
+                        let call = CExpr::Apply(
+                            Box::new(CExpr::Var(core_var(var_name))),
                             arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
                         );
                         return bindings.into_iter().rev().fold(call, |body, (var, val)| {
@@ -445,8 +549,25 @@ impl Lowerer {
             Expr::Block { stmts, .. } => self.lower_block(stmts),
 
             Expr::Lambda { params, body, .. } => {
-                let param_vars = lower_params(params);
+                let mut param_vars = lower_params(params);
+                let saved_handler_params = self.current_handler_params.clone();
+                // If a lambda_effect_context is set (from being passed to an
+                // effectful HOF parameter), add handler params for those effects.
+                // This ensures both pure and effectful lambdas have the right arity.
+                if let Some(effects) = self.lambda_effect_context.take() {
+                    for eff in &effects {
+                        let handler_var = format!("_Handle{}", eff);
+                        param_vars.push(handler_var.clone());
+                        self.current_handler_params
+                            .insert(eff.clone(), handler_var);
+                    }
+                } else {
+                    // Not in a HOF context, but check if the body uses effects
+                    // directly (e.g. lambda defined in a block that already has
+                    // handler params in scope -- those are captured, not parameterized).
+                }
                 let body_ce = self.lower_expr(body);
+                self.current_handler_params = saved_handler_params;
                 CExpr::Fun(param_vars, Box::new(body_ce))
             }
 

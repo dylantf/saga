@@ -21,6 +21,27 @@ fn emit_elaborated(src: &str) -> String {
     codegen::emit_module("test", &elaborated)
 }
 
+/// Emit Core Erlang and compile it with erlc, asserting no compilation errors.
+fn assert_compiles(src: &str) {
+    let out = emit_elaborated(src);
+    let dir = std::env::temp_dir().join("dylang_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let core_path = dir.join("test.core");
+    std::fs::write(&core_path, &out).unwrap();
+    let status = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        status.status.success(),
+        "erlc failed to compile:\n{}\nstderr: {}",
+        out,
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
 fn assert_contains(out: &str, needle: &str) {
     assert!(
         out.contains(needle),
@@ -981,4 +1002,102 @@ main () = compute () with {
         count >= 2,
         "expected at least 2 handler applies, got {count}\n{out}"
     );
+}
+
+#[test]
+fn effect_call_in_binop_compiles() {
+    let src = r#"
+effect Ask {
+  fun ask () -> Int
+}
+
+fun compute () -> Int needs {Ask}
+compute () = {
+  let x = 1 + ask! ()
+  x
+}
+
+main () = compute () with {
+  ask () -> resume 42
+}
+"#;
+    assert_compiles(src);
+}
+
+// --- HOF effect absorption ---
+
+#[test]
+fn hof_effect_absorption_try_pattern() {
+    // `try` takes an effectful callback and handles Fail internally.
+    // The lambda should get _HandleFail as an extra param,
+    // and `computation ()` inside try should pass it.
+    let src = r#"
+type Result a e { Ok(a) | Err(e) }
+
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+fun try_it (computation: () -> a needs {Fail}) -> Result a String
+try_it computation = computation () with {
+  fail msg -> Err(msg)
+  return value -> Ok(value)
+}
+
+main () = try_it (fun () -> fail! "oops")
+"#;
+    let out = emit_elaborated(src);
+    // The lambda should have _HandleFail as a parameter
+    assert_contains(&out, "_HandleFail");
+    // try_it's body should call computation with the handler param
+    assert_contains(&out, "apply Computation(");
+}
+
+#[test]
+fn hof_effect_absorption_lambda_with_block() {
+    // Lambda with a block body that uses effects
+    let src = r#"
+type Result a e { Ok(a) | Err(e) }
+
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+fun try_it (computation: () -> a needs {Fail}) -> Result a String
+try_it computation = computation () with {
+  fail msg -> Err(msg)
+  return value -> Ok(value)
+}
+
+main () = try_it (fun () -> {
+  let x = 10
+  if x > 100 then fail! "too big" else x
+})
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "_HandleFail");
+    assert_contains(&out, "apply Computation(");
+}
+
+#[test]
+fn hof_effect_absorption_compiles() {
+    // End-to-end: HOF effect absorption compiles to valid Core Erlang
+    let src = r#"
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+fun try_it (computation: () -> a needs {Fail}) -> String
+try_it computation = computation () with {
+  fail msg -> "err: " <> msg
+}
+
+main () = {
+  let a = try_it (fun () -> "hello")
+  print a
+  let b = try_it (fun () -> fail! "boom")
+  print b
+}
+"#;
+    assert_compiles(src);
 }

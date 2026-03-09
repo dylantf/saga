@@ -427,7 +427,10 @@ impl Lowerer {
         // Lower the inner expression with the handler params in scope
         let inner_ce = self.lower_expr(expr);
 
-        // Apply return clause wrapper if present
+        // Apply return clause wrapper if present.
+        // NOTE: This wraps unconditionally, which means handler aborts also
+        // pass through the return clause. A proper fix would integrate the
+        // return clause into the CPS continuation chain so aborts bypass it.
         let result = if let Some(ret) = &return_clause {
             let ret_var = self.fresh();
             let param = if ret.params.is_empty() {

@@ -1,5 +1,6 @@
-use crate::ast::{BinOp, Expr, Lit, Pat};
+use crate::ast::{BinOp, Expr, Lit, Pat, TypeExpr};
 use crate::codegen::cerl::{CExpr, CLit};
+use std::collections::BTreeSet;
 
 pub(super) fn lower_lit(lit: &Lit) -> CLit {
     match lit {
@@ -134,3 +135,22 @@ pub(super) fn field_access_record_name(expr: &Expr) -> Option<&str> {
     }
     None
 }
+
+/// Recursively collect all effect names from `needs` clauses in a TypeExpr.
+pub(super) fn collect_type_effects(ty: &TypeExpr) -> BTreeSet<String> {
+    match ty {
+        TypeExpr::Arrow(from, to, needs) => {
+            let mut effects: BTreeSet<String> = needs.iter().cloned().collect();
+            effects.extend(collect_type_effects(from));
+            effects.extend(collect_type_effects(to));
+            effects
+        }
+        TypeExpr::App(a, b) => {
+            let mut effects = collect_type_effects(a);
+            effects.extend(collect_type_effects(b));
+            effects
+        }
+        TypeExpr::Named(_) | TypeExpr::Var(_) => BTreeSet::new(),
+    }
+}
+

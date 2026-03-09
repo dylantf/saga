@@ -169,7 +169,8 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Elaborator: Show dict insertion inside handler arm bodies (`print` in handler crashes)
 - [x] Handler `needs` clause (handler that itself uses effects)
 - [x] Effect calls in non-block positions (nested in `if` conditions, binary ops, etc.)
-- [ ] HOF effect absorption (passing effectful closures through higher-order functions like `try`)
+- [x] HOF effect absorption (passing effectful closures through higher-order functions like `try`)
+- [ ] Return clause bypass on handler abort (return clause wraps abort results incorrectly)
 
 ### Stdlib / prelude
 
