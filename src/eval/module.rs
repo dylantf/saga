@@ -272,25 +272,22 @@ pub(super) fn load_module(
     // Lowercase names are plain values.
     if let Some(exposed) = exposing {
         for name in exposed {
-            let is_type = name.chars().next().map_or(false, |c| c.is_uppercase());
+            let is_type = name.starts_with(|c: char| c.is_uppercase());
             if is_type {
                 // Hoist the type name itself (if exported)
-                let mut found = public_bindings.get(name).is_some();
+                let mut found = public_bindings.contains_key(name);
                 if let Some(val) = public_bindings.get(name) {
                     env.set(name.clone(), val.clone());
                 }
                 // Hoist all constructors belonging to this type
                 for (k, v) in &public_bindings {
-                    if k.starts_with("__ctor_type_") {
-                        if let Value::String(owner) = v {
-                            if owner == name {
-                                let ctor_name = &k["__ctor_type_".len()..];
-                                if let Some(ctor_val) = public_bindings.get(ctor_name) {
-                                    env.set(ctor_name.to_string(), ctor_val.clone());
-                                    found = true;
-                                }
-                            }
-                        }
+                    if let Some(ctor_name) = k.strip_prefix("__ctor_type_")
+                        && let Value::String(owner) = v
+                        && owner == name
+                        && let Some(ctor_val) = public_bindings.get(ctor_name)
+                    {
+                        env.set(ctor_name.to_string(), ctor_val.clone());
+                        found = true;
                     }
                 }
                 if !found {

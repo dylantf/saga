@@ -226,9 +226,13 @@ filter_pos n = case n {
 }
 ";
     let out = emit(src);
-    // The complex guard must NOT appear as a `when` clause.
+    // The complex guard must NOT appear as a `when` clause -- only `when 'true'` is allowed.
     // Instead it becomes a nested case inside the arm body.
-    assert!(!out.contains("when"), "complex guard must not emit 'when'\n{out}");
+    // Verify: every `when` in the output is immediately followed by `'true'`.
+    assert!(
+        out.split("when").skip(1).all(|s| s.trim_start().starts_with("'true'")),
+        "complex guard must only emit `when 'true'`, not a function call\n{out}"
+    );
 }
 
 // --- Builtins ---

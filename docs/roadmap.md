@@ -122,8 +122,9 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Complex guards (user-defined function calls) desugared into arm body conditionals with fallthrough
 
 ### Function calls
-- [ ] Calling other top-level functions in the same module
-- [ ] Multi-argument functions (currently only curried 1-at-a-time)
+- [x] Calling other top-level functions in the same module (saturated apply)
+- [x] Multi-argument functions (direct `apply 'name'/N`, no currying overhead)
+- [x] Multi-clause functions (`fib 0 = 0`, `fib 1 = 1`, `fib n = ...` -> single `case` body)
 - [ ] Mutual recursion (`letrec` in Core Erlang)
 - [ ] Tail call guarantee (verify `erlc` handles it from Core Erlang)
 
@@ -134,6 +135,8 @@ Checkbox = implemented and working. Unchecked = not yet done.
 ### Traits
 - [ ] Dictionary passing (trait impls as tuples of funs, passed as extra args)
 - [ ] Built-in trait dispatch (`Show`, `Eq`, `Ord`, `Num`)
+- [ ] Replace `show`/`print` builtin special-cases with proper `Show` trait dispatch
+- [ ] Fix `show`/`print` as higher-order values (currently emit undefined `__builtin_*` var; need lambda wrapper)
 
 ### Effects
 - [ ] Non-resumable handlers (`try/catch` in Core Erlang)
@@ -143,6 +146,13 @@ Checkbox = implemented and working. Unchecked = not yet done.
 ### Stdlib / prelude
 - [ ] Wire prelude functions to BEAM equivalents (`List`, `Maybe`, `Result`)
 - [ ] FFI (`foreign erlang "mod" "fun" as f in Effect`)
+
+## Runtime Optimization
+
+- [ ] Expand `is_guard_safe` to allow Erlang guard BIFs (`is_integer`, `is_atom`, `is_list`, etc.) so they stay in `when` and enter the decision tree
+- [ ] Verify tail call optimization works end-to-end (emit a deep-recursive test, confirm no stack overflow on BEAM)
+- [ ] Benchmark trait dictionary passing overhead vs. Erlang direct dispatch
+- [ ] Profile generated Core Erlang for unnecessary intermediate `let` bindings (peephole cleanup pass)
 
 ## Maybe
 

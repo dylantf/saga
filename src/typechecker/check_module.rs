@@ -171,7 +171,7 @@ impl Checker {
         }
         if let Some(exposed) = exposing {
             for name in exposed {
-                let is_type = name.chars().next().map_or(false, |c| c.is_uppercase());
+                let is_type = name.starts_with(|c: char| c.is_uppercase());
                 if is_type {
                     let mut found = binding_map.contains_key(name.as_str());
                     // Hoist the type name itself if it's in bindings

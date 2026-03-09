@@ -36,6 +36,8 @@ pub enum CExpr {
     Nil,
     /// `fun 'name'/arity` -- reference to a module-local function by name
     FunRef(String, usize),
+    /// `<E1, E2, ...>` -- Core Erlang values expression (multi-value scrutinee)
+    Values(Vec<CExpr>),
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +57,8 @@ pub enum CPat {
     Nil,
     /// `Pat = Var` -- alias pattern
     Alias(String, Box<CPat>),
+    /// `<P1, P2, ...>` -- Core Erlang value pattern (multi-arg case arm)
+    Values(Vec<CPat>),
 }
 
 #[derive(Debug, Clone)]
@@ -177,10 +181,13 @@ impl Printer {
                 for arm in arms {
                     self.with_indent(2, |p| {
                         p.newline();
+                        p.push("<");
                         p.print_pat(&arm.pat);
-                        if let Some(guard) = &arm.guard {
-                            p.push(" when ");
-                            p.print_expr(guard);
+                        p.push(">");
+                        p.push(" when ");
+                        match &arm.guard {
+                            Some(guard) => p.print_expr(guard),
+                            None => p.push("'true'"),
                         }
                         p.push(" ->");
                         p.with_indent(2, |p| {
@@ -210,6 +217,12 @@ impl Printer {
             CExpr::Nil => self.push("[]"),
 
             CExpr::FunRef(name, arity) => self.push(&format!("'{}'/{}", name, arity)),
+
+            CExpr::Values(es) => {
+                self.push("<");
+                self.print_expr_list(es);
+                self.push(">");
+            }
         }
     }
 
@@ -257,6 +270,17 @@ impl Printer {
             CPat::Alias(var, pat) => {
                 self.print_pat(pat);
                 self.push(&format!(" = {}", var));
+            }
+            // CPat::Values holds the contents of a multi-value arm pattern.
+            // The surrounding <> are always emitted by the case arm printer,
+            // so print only the comma-separated inner patterns here.
+            CPat::Values(ps) => {
+                for (i, p) in ps.iter().enumerate() {
+                    if i > 0 {
+                        self.push(", ");
+                    }
+                    self.print_pat(p);
+                }
             }
         }
     }

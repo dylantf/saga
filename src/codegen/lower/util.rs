@@ -66,7 +66,7 @@ pub(super) fn pat_binding_var(pat: &Pat) -> Option<String> {
 
 /// Peel a chain of App nodes to find a named-function head (Var) and its arguments.
 /// Returns `Some((func_name, args))` if the head is a Var, `None` otherwise.
-pub(super) fn collect_fun_call<'a>(expr: &'a Expr) -> Option<(&'a str, Vec<&'a Expr>)> {
+pub(super) fn collect_fun_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
@@ -85,7 +85,7 @@ pub(super) fn collect_fun_call<'a>(expr: &'a Expr) -> Option<(&'a str, Vec<&'a E
 }
 
 /// Peel a chain of App nodes to find a Constructor head and its arguments.
-pub(super) fn collect_ctor_call<'a>(expr: &'a Expr) -> Option<(&'a str, Vec<&'a Expr>)> {
+pub(super) fn collect_ctor_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {

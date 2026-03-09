@@ -2,12 +2,16 @@ mod exprs;
 mod pats;
 mod util;
 
-use crate::ast::{self, Decl, Expr};
+use crate::ast::{self, Decl, Expr, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use std::collections::HashMap;
 
-use pats::lower_params;
-use util::{cerl_call, collect_ctor_call, collect_fun_call, core_var, field_access_record_name, lower_lit};
+use pats::{lower_params, lower_pat};
+use util::{
+    cerl_call, collect_ctor_call, collect_fun_call, core_var, field_access_record_name, lower_lit,
+};
+
+type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
 
 pub struct Lowerer {
     counter: usize,
@@ -42,37 +46,96 @@ impl Lowerer {
             }
         }
 
-        // Collect top-level function names and their true arities so the call
-        // site can emit a saturated apply instead of one-arg-at-a-time.
+        // Group FunBindings by name, preserving declaration order, and simultaneously
+        // populate top_level_funs. lower_params is called once per clause here.
+        let mut clause_groups: Vec<(String, usize, Vec<Clause>)> = Vec::new();
         for decl in program {
-            if let Decl::FunBinding { name, params, .. } = decl {
-                let params_ce = lower_params(params);
-                self.top_level_funs
-                    .entry(name.clone())
-                    .or_insert(params_ce.len());
+            if let Decl::FunBinding {
+                name,
+                params,
+                guard,
+                body,
+                ..
+            } = decl
+            {
+                let arity = lower_params(params).len();
+                self.top_level_funs.entry(name.clone()).or_insert(arity);
+                if let Some(group) = clause_groups.iter_mut().find(|(n, _, _)| n == name) {
+                    group.2.push((params, guard, body));
+                } else {
+                    clause_groups.push((name.clone(), arity, vec![(params, guard, body)]));
+                }
             }
         }
 
         let mut exports = Vec::new();
         let mut fun_defs = Vec::new();
 
-        for decl in program {
-            if let Decl::FunBinding {
-                name, params, body, ..
-            } = decl
-            {
+        for (name, arity, clauses) in clause_groups {
+            exports.push((name.clone(), arity));
+
+            let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
+                // Single clause, no guard: emit directly without a case wrapper.
+                let (params, _, body) = clauses[0];
                 let params_ce = lower_params(params);
-                let arity = params_ce.len();
-                if !exports.iter().any(|(n, _): &(String, usize)| n == name) {
-                    exports.push((name.clone(), arity));
-                }
                 let body_ce = self.lower_expr(body);
-                fun_defs.push(CFunDef {
-                    name: name.clone(),
-                    arity,
-                    body: CExpr::Fun(params_ce, Box::new(body_ce)),
-                });
-            }
+                CExpr::Fun(params_ce, Box::new(body_ce))
+            } else {
+                // Multi-clause or single clause with a guard: generate fresh arg vars
+                // and case-match on them using proper Core Erlang values syntax.
+                let arg_vars: Vec<String> = (0..arity).map(|i| format!("_Arg{}", i)).collect();
+
+                let arms: Vec<CArm> = clauses
+                    .iter()
+                    .map(|(params, guard, body)| {
+                        // Unit params were dropped in arity counting; filter here too.
+                        let non_unit_pats: Vec<&Pat> = params
+                            .iter()
+                            .filter(|p| {
+                                !matches!(
+                                    p,
+                                    Pat::Lit {
+                                        value: ast::Lit::Unit,
+                                        ..
+                                    }
+                                )
+                            })
+                            .collect();
+                        let pat = if arity == 1 {
+                            lower_pat(non_unit_pats[0], &self.record_fields)
+                        } else {
+                            CPat::Values(
+                                non_unit_pats
+                                    .iter()
+                                    .map(|p| lower_pat(p, &self.record_fields))
+                                    .collect(),
+                            )
+                        };
+                        let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
+                        let body_ce = self.lower_expr(body);
+                        CArm {
+                            pat,
+                            guard: guard_ce,
+                            body: body_ce,
+                        }
+                    })
+                    .collect();
+
+                // Scrutinee: bare variable for arity==1, Values expression otherwise.
+                let scrut_ce = if arity == 1 {
+                    CExpr::Var(arg_vars[0].clone())
+                } else {
+                    CExpr::Values(arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect())
+                };
+                let case_ce = CExpr::Case(Box::new(scrut_ce), arms);
+                CExpr::Fun(arg_vars, Box::new(case_ce))
+            };
+
+            fun_defs.push(CFunDef {
+                name,
+                arity,
+                body: fun_body,
+            });
         }
 
         CModule {
@@ -108,27 +171,26 @@ impl Lowerer {
                 // e.g. `add 3 4` -> App(App(Var("add"), 3), 4)
                 // Peel the App chain; if the head is a known function with matching arity,
                 // emit a single multi-arg apply instead of nested one-arg applies.
-                if let Some((func_name, args)) = collect_fun_call(expr) {
-                    if let Some(&arity) = self.top_level_funs.get(func_name) {
-                        if args.len() == arity {
-                            // Saturated call: apply fun 'name'/N(arg1, ..., argN)
-                            let mut arg_vars: Vec<String> = Vec::new();
-                            let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                            for arg in args {
-                                let v = self.fresh();
-                                let ce = self.lower_expr(arg);
-                                arg_vars.push(v.clone());
-                                bindings.push((v, ce));
-                            }
-                            let call = CExpr::Apply(
-                                Box::new(CExpr::FunRef(func_name.to_string(), arity)),
-                                arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-                            );
-                            return bindings.into_iter().rev().fold(call, |body, (var, val)| {
-                                CExpr::Let(var, Box::new(val), Box::new(body))
-                            });
-                        }
+                if let Some((func_name, args)) = collect_fun_call(expr)
+                    && let Some(&arity) = self.top_level_funs.get(func_name)
+                    && args.len() == arity
+                {
+                    // Saturated call: apply fun 'name'/N(arg1, ..., argN)
+                    let mut arg_vars: Vec<String> = Vec::new();
+                    let mut bindings: Vec<(String, CExpr)> = Vec::new();
+                    for arg in args {
+                        let v = self.fresh();
+                        let ce = self.lower_expr(arg);
+                        arg_vars.push(v.clone());
+                        bindings.push((v, ce));
                     }
+                    let call = CExpr::Apply(
+                        Box::new(CExpr::FunRef(func_name.to_string(), arity)),
+                        arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+                    );
+                    return bindings.into_iter().rev().fold(call, |body, (var, val)| {
+                        CExpr::Let(var, Box::new(val), Box::new(body))
+                    });
                 }
 
                 let (func, arg) = match expr {
@@ -168,10 +230,7 @@ impl Lowerer {
                             "format".to_string(),
                             vec![
                                 CExpr::Lit(CLit::Str("~w".to_string())),
-                                CExpr::Cons(
-                                    Box::new(CExpr::Var(arg_var)),
-                                    Box::new(CExpr::Nil),
-                                ),
+                                CExpr::Cons(Box::new(CExpr::Var(arg_var)), Box::new(CExpr::Nil)),
                             ],
                         )),
                     );
