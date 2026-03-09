@@ -2,23 +2,16 @@ mod exprs;
 mod pats;
 mod util;
 
-use crate::ast::{self, Decl, Expr, HandlerArm, Pat};
+use crate::ast::{self, Decl, Expr, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use std::collections::HashMap;
 
 use pats::{lower_params, lower_pat};
 use util::{
-    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, core_var,
-    field_access_record_name, lower_lit,
+    cerl_call, collect_ctor_call, collect_fun_call, core_var, field_access_record_name, lower_lit,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
-
-/// Stored handler definition for inlining at `with` sites.
-struct HandlerInfo {
-    arms: Vec<HandlerArm>,
-    return_clause: Option<Box<HandlerArm>>,
-}
 
 pub struct Lowerer {
     counter: usize,
@@ -27,8 +20,6 @@ pub struct Lowerer {
     /// Maps top-level function name -> its exported arity (0 or 1).
     /// All multi-arg functions are curried to arity 1.
     top_level_funs: HashMap<String, usize>,
-    /// Maps handler name -> handler arms + return clause (from HandlerDef declarations).
-    handler_defs: HashMap<String, HandlerInfo>,
 }
 
 impl Lowerer {
@@ -37,7 +28,6 @@ impl Lowerer {
             counter: 0,
             record_fields: HashMap::new(),
             top_level_funs: HashMap::new(),
-            handler_defs: HashMap::new(),
         }
     }
 
@@ -49,28 +39,10 @@ impl Lowerer {
 
     pub fn lower_module(&mut self, module_name: &str, program: &ast::Program) -> CModule {
         // Collect record field orders so we can lower field access by position.
-        // Also collect handler definitions for inlining at `with` sites.
         for decl in program {
-            match decl {
-                Decl::RecordDef { name, fields, .. } => {
-                    let field_names = fields.iter().map(|(n, _)| n.clone()).collect();
-                    self.record_fields.insert(name.clone(), field_names);
-                }
-                Decl::HandlerDef {
-                    name,
-                    arms,
-                    return_clause,
-                    ..
-                } => {
-                    self.handler_defs.insert(
-                        name.clone(),
-                        HandlerInfo {
-                            arms: arms.clone(),
-                            return_clause: return_clause.clone(),
-                        },
-                    );
-                }
-                _ => {}
+            if let Decl::RecordDef { name, fields, .. } = decl {
+                let field_names = fields.iter().map(|(n, _)| n.clone()).collect();
+                self.record_fields.insert(name.clone(), field_names);
             }
         }
 
@@ -216,33 +188,6 @@ impl Lowerer {
             Expr::App { .. } => {
                 if let Some((ctor_name, args)) = collect_ctor_call(expr) {
                     return self.lower_ctor(ctor_name, args);
-                }
-
-                // Check for saturated effect call: fail! "msg" -> App(EffectCall, "msg")
-                if let Some((op_name, qualifier, args)) = collect_effect_call(expr) {
-                    let full_name = match qualifier {
-                        Some(q) => format!("{}.{}", q, op_name),
-                        None => op_name.to_string(),
-                    };
-                    let mut tag_elems = vec![
-                        CExpr::Lit(CLit::Atom("__effect__".to_string())),
-                        CExpr::Lit(CLit::Atom(full_name)),
-                    ];
-                    let mut bindings = Vec::new();
-                    for arg in args {
-                        let v = self.fresh();
-                        let ce = self.lower_expr(arg);
-                        bindings.push((v.clone(), ce));
-                        tag_elems.push(CExpr::Var(v));
-                    }
-                    let throw = CExpr::Call(
-                        "erlang".to_string(),
-                        "throw".to_string(),
-                        vec![CExpr::Tuple(tag_elems)],
-                    );
-                    return bindings.into_iter().rev().fold(throw, |body, (var, val)| {
-                        CExpr::Let(var, Box::new(val), Box::new(body))
-                    });
                 }
 
                 // Check for a saturated call to a known top-level function.
@@ -523,39 +468,6 @@ impl Lowerer {
                     // Dict param variable (passed as function argument)
                     CExpr::Var(core_var(name))
                 }
-            }
-
-            Expr::With {
-                expr, handler, ..
-            } => self.lower_with(expr, handler),
-
-            Expr::EffectCall {
-                name, qualifier, args, ..
-            } => {
-                // Lower to: erlang:throw({'__effect__', OpName, Arg1, ...})
-                let op_name = match qualifier {
-                    Some(q) => format!("{}.{}", q, name),
-                    None => name.clone(),
-                };
-                let mut tag_elems = vec![
-                    CExpr::Lit(CLit::Atom("__effect__".to_string())),
-                    CExpr::Lit(CLit::Atom(op_name)),
-                ];
-                let mut bindings = Vec::new();
-                for arg in args {
-                    let v = self.fresh();
-                    let ce = self.lower_expr(arg);
-                    bindings.push((v.clone(), ce));
-                    tag_elems.push(CExpr::Var(v));
-                }
-                let throw = CExpr::Call(
-                    "erlang".to_string(),
-                    "throw".to_string(),
-                    vec![CExpr::Tuple(tag_elems)],
-                );
-                bindings.into_iter().rev().fold(throw, |body, (var, val)| {
-                    CExpr::Let(var, Box::new(val), Box::new(body))
-                })
             }
 
             _ => CExpr::Lit(CLit::Atom(format!(

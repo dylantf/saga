@@ -103,28 +103,6 @@ pub(super) fn collect_ctor_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
     }
 }
 
-/// Peel a chain of App nodes to find an EffectCall head and its collected arguments.
-/// Returns (op_name, qualifier, args) if the head is an EffectCall.
-pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, &Option<String>, Vec<&Expr>)> {
-    let mut args: Vec<&Expr> = Vec::new();
-    let mut current = expr;
-    loop {
-        match current {
-            Expr::App { func, arg, .. } => {
-                args.push(arg);
-                current = func;
-            }
-            Expr::EffectCall {
-                name, qualifier, ..
-            } => {
-                args.reverse();
-                return Some((name.as_str(), qualifier, args));
-            }
-            _ => return None,
-        }
-    }
-}
-
 /// Best-effort: return the record type name from an expression, for use when
 /// resolving field positions. Only works when the expression is a literal
 /// RecordCreate; otherwise the typechecker would need to be consulted.

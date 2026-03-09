@@ -38,16 +38,6 @@ pub enum CExpr {
     FunRef(String, usize),
     /// `<E1, E2, ...>` -- Core Erlang values expression (multi-value scrutinee)
     Values(Vec<CExpr>),
-    /// `try Expr of SuccessVar -> SuccessBody catch Class, Reason, Stack -> CatchBody`
-    Try {
-        expr: Box<CExpr>,
-        success_var: String,
-        success_body: Box<CExpr>,
-        catch_class: String,
-        catch_reason: String,
-        catch_stacktrace: String,
-        catch_body: Box<CExpr>,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -232,37 +222,6 @@ impl Printer {
                 self.push("<");
                 self.print_expr_list(es);
                 self.push(">");
-            }
-
-            CExpr::Try {
-                expr,
-                success_var,
-                success_body,
-                catch_class,
-                catch_reason,
-                catch_stacktrace,
-                catch_body,
-            } => {
-                self.push("try");
-                self.with_indent(2, |p| {
-                    p.newline();
-                    p.print_expr(expr);
-                });
-                self.newline();
-                self.push(&format!("of <{}> ->", success_var));
-                self.with_indent(2, |p| {
-                    p.newline();
-                    p.print_expr(success_body);
-                });
-                self.newline();
-                self.push(&format!(
-                    "catch <{},{},{}> ->",
-                    catch_class, catch_reason, catch_stacktrace
-                ));
-                self.with_indent(2, |p| {
-                    p.newline();
-                    p.print_expr(catch_body);
-                });
             }
         }
     }
