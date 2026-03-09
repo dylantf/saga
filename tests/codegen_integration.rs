@@ -754,6 +754,35 @@ main () = risky_work () with {
 }
 
 #[test]
+fn handler_arm_body_gets_show_dict() {
+    // print inside a named handler body should get the Show dict inserted
+    let src = r#"
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler console_log for Log {
+  log msg -> {
+    print msg
+    resume ()
+  }
+}
+
+fun do_work () -> Int needs {Log}
+do_work () = {
+  log! "hello"
+  42
+}
+
+main () = do_work () with console_log
+"#;
+    let out = emit_elaborated(src);
+    // The handler arm body should call print/2 with a Show dict
+    assert_contains(&out, "'print'/2");
+    assert_contains(&out, "__dict_Show_String");
+}
+
+#[test]
 fn effect_multi_clause_function() {
     // Effectful function with pattern-matched clauses
     let src = r#"

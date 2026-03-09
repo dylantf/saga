@@ -154,7 +154,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Handler stacking (multiple effects, one handler param per effect)
 - [x] Effect propagation (threading handler params through calls to effectful functions)
 - [x] Multishot continuations (calling `_K` multiple times; free on BEAM)
-- [ ] Elaborator: Show dict insertion inside handler arm bodies (`print` in handler crashes)
+- [x] Elaborator: Show dict insertion inside handler arm bodies (`print` in handler crashes)
 - [ ] Handler `needs` clause (handler that itself uses effects)
 - [ ] Effect calls in non-block positions (nested in `if` conditions, binary ops, etc.)
 - [ ] HOF effect absorption (passing effectful closures through higher-order functions like `try`)

@@ -21,7 +21,10 @@ record ValidUser { name: String, age: Int }
 type Validation e a { Valid(a) | Invalid(e) }
 
 handler collecting for Validate {
-  invalid err -> { let (v, errs) = resume (); (v, err :: errs) }
+  invalid err -> { 
+    let (v, errs) = resume ()
+    (v, err :: errs)
+  }
   return v -> (v, [])
 }
 

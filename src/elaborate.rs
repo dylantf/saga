@@ -249,6 +249,44 @@ impl Elaborator {
                     });
                 }
 
+                // Elaborate handler arm bodies (so print/show get dicts inserted)
+                Decl::HandlerDef {
+                    public,
+                    name,
+                    effects,
+                    needs,
+                    arms,
+                    return_clause,
+                    span,
+                } => {
+                    let elab_arms: Vec<HandlerArm> = arms
+                        .iter()
+                        .map(|arm| HandlerArm {
+                            op_name: arm.op_name.clone(),
+                            params: arm.params.clone(),
+                            body: Box::new(self.elaborate_expr(&arm.body)),
+                            span: arm.span,
+                        })
+                        .collect();
+                    let elab_return = return_clause.as_ref().map(|rc| {
+                        Box::new(HandlerArm {
+                            op_name: rc.op_name.clone(),
+                            params: rc.params.clone(),
+                            body: Box::new(self.elaborate_expr(&rc.body)),
+                            span: rc.span,
+                        })
+                    });
+                    output.push(Decl::HandlerDef {
+                        public: *public,
+                        name: name.clone(),
+                        effects: effects.clone(),
+                        needs: needs.clone(),
+                        arms: elab_arms,
+                        return_clause: elab_return,
+                        span: *span,
+                    });
+                }
+
                 // Pass through everything else
                 _ => output.push(decl.clone()),
             }
@@ -396,7 +434,7 @@ impl Elaborator {
                 if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
                     let mut result: Expr = expr.clone();
                     for (trait_name, _type_var) in &dict_param_info {
-                        if let Some(dict_expr) = self.resolve_dict(&trait_name, *span) {
+                        if let Some(dict_expr) = self.resolve_dict(trait_name, *span) {
                             result = Expr::App {
                                 func: Box::new(result),
                                 arg: Box::new(dict_expr),
