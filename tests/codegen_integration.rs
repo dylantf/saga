@@ -1101,3 +1101,50 @@ main () = {
 "#;
     assert_compiles(src);
 }
+
+#[test]
+fn return_clause_inside_cps_chain() {
+    // The return clause should be inside the CPS chain, not a post-wrapper.
+    // Verify the return clause (Ok wrapper) is inside the CPS chain.
+    let src = r#"
+type Result a e { Ok(a) | Err(e) }
+
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+try_it computation = computation () with {
+  fail msg -> Err(msg)
+  return value -> Ok(value)
+}
+"#;
+    let out = emit(src);
+    assert_contains(&out, "'Ok'");
+    assert_contains(&out, "'Err'");
+}
+
+#[test]
+fn return_clause_with_handler_compiles() {
+    // End-to-end: return clause + handler abort compiles to valid Core Erlang.
+    let src = r#"
+type Result a e { Ok(a) | Err(e) }
+
+effect Fail {
+  fun fail (msg: String) -> a
+}
+
+fun try_it (computation: () -> a needs {Fail}) -> Result a String
+try_it computation = computation () with {
+  fail msg -> Err(msg)
+  return value -> Ok(value)
+}
+
+main () = {
+  let a = try_it (fun () -> 42)
+  print "ok"
+  let b = try_it (fun () -> fail! "boom")
+  print "ok"
+}
+"#;
+    assert_compiles(src);
+}

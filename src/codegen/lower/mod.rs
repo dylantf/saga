@@ -55,6 +55,11 @@ pub struct Lowerer {
     /// Effects that the next lambda being lowered should accept as extra params.
     /// Set by the call site that passes the lambda to an effectful parameter.
     lambda_effect_context: Option<Vec<String>>,
+    /// Return continuation for the current `with` expression's return clause.
+    /// Set by `lower_with`, consumed by `lower_block` at its terminal cases.
+    /// This places the return clause inside the CPS chain so handler aborts
+    /// (which don't call K) naturally bypass the return clause.
+    current_return_k: Option<CExpr>,
 }
 
 impl Lowerer {
@@ -71,6 +76,7 @@ impl Lowerer {
             param_absorbed_effects: HashMap::new(),
             current_effectful_vars: HashMap::new(),
             lambda_effect_context: None,
+            current_return_k: None,
         }
     }
 
@@ -551,6 +557,7 @@ impl Lowerer {
             Expr::Lambda { params, body, .. } => {
                 let mut param_vars = lower_params(params);
                 let saved_handler_params = self.current_handler_params.clone();
+                let saved_return_k = self.current_return_k.take();
                 // If a lambda_effect_context is set (from being passed to an
                 // effectful HOF parameter), add handler params for those effects.
                 // This ensures both pure and effectful lambdas have the right arity.
@@ -568,6 +575,7 @@ impl Lowerer {
                 }
                 let body_ce = self.lower_expr(body);
                 self.current_handler_params = saved_handler_params;
+                self.current_return_k = saved_return_k;
                 CExpr::Fun(param_vars, Box::new(body_ce))
             }
 

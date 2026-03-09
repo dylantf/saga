@@ -199,14 +199,33 @@ impl Lowerer {
         )
     }
 
+    /// Apply the current return continuation (if set) to a final value.
+    /// Consumes the return_k so it's only applied once.
+    fn apply_return_k(&mut self, val: CExpr) -> CExpr {
+        if let Some(k) = self.current_return_k.take() {
+            let v = self.fresh();
+            CExpr::Let(
+                v.clone(),
+                Box::new(val),
+                Box::new(CExpr::Apply(Box::new(k), vec![CExpr::Var(v)])),
+            )
+        } else {
+            val
+        }
+    }
+
     pub(super) fn lower_block(&mut self, stmts: &[Stmt]) -> CExpr {
         match stmts {
-            [] => CExpr::Tuple(vec![]), // unit
-            [Stmt::Expr(e)] => self.lower_expr(e),
+            [] => self.apply_return_k(CExpr::Tuple(vec![])), // unit
+            [Stmt::Expr(e)] => {
+                let val = self.lower_expr(e);
+                self.apply_return_k(val)
+            }
             [Stmt::Let { pattern, value, .. }] => {
                 let var = pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
                 let val_ce = self.lower_expr(value);
-                CExpr::Let(var.clone(), Box::new(val_ce), Box::new(CExpr::Var(var)))
+                let body = self.apply_return_k(CExpr::Var(var.clone()));
+                CExpr::Let(var, Box::new(val_ce), Box::new(body))
             }
             [first, rest @ ..] => {
                 // Check if the first statement contains an effect call -- if so, CPS transform:
@@ -424,32 +443,29 @@ impl Lowerer {
             handler_bindings.push((handler_var.clone(), handler_fun));
         }
 
-        // Lower the inner expression with the handler params in scope
-        let inner_ce = self.lower_expr(expr);
-
-        // Apply return clause wrapper if present.
-        // NOTE: This wraps unconditionally, which means handler aborts also
-        // pass through the return clause. A proper fix would integrate the
-        // return clause into the CPS continuation chain so aborts bypass it.
-        let result = if let Some(ret) = &return_clause {
-            let ret_var = self.fresh();
+        // Build the return clause as a continuation (ReturnK) and place it
+        // inside the CPS chain. lower_block will apply it to the computation's
+        // final value. Handler aborts (which don't call K) naturally bypass it.
+        let saved_return_k = self.current_return_k.take();
+        if let Some(ret) = &return_clause {
             let param = if ret.params.is_empty() {
                 self.fresh()
             } else {
                 core_var(&ret.params[0])
             };
             let ret_body = self.lower_expr(&ret.body);
-            let ret_fn = CExpr::Fun(vec![param], Box::new(ret_body));
-            CExpr::Let(
-                ret_var.clone(),
-                Box::new(inner_ce),
-                Box::new(CExpr::Apply(Box::new(ret_fn), vec![CExpr::Var(ret_var)])),
-            )
-        } else {
-            inner_ce
-        };
+            self.current_return_k = Some(CExpr::Fun(vec![param], Box::new(ret_body)));
+        }
+
+        // Lower the inner expression with the handler params and return_k in scope
+        let inner_ce = self.lower_expr(expr);
+
+        // If return_k wasn't consumed (inner expr wasn't a block with CPS),
+        // fall back to applying it as a wrapper.
+        let result = self.apply_return_k(inner_ce);
 
         self.current_handler_params = saved_handler_params;
+        self.current_return_k = saved_return_k;
 
         // Wrap with handler bindings
         handler_bindings
