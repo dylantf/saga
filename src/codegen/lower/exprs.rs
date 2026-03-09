@@ -5,9 +5,9 @@
 use crate::ast::{BinOp, CaseArm, Expr, Handler, HandlerArm, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
+use super::Lowerer;
 use super::pats::lower_pat;
 use super::util::{binop_call, collect_effect_call, core_var, pat_binding_var};
-use super::Lowerer;
 
 /// Returns true if `expr` is a valid Core Erlang guard expression:
 /// comparisons, arithmetic, boolean ops, unary minus, and literals/variables.
@@ -217,11 +217,8 @@ impl Lowerer {
                     Stmt::Expr(e) => {
                         collect_effect_call(e).map(|(name, qual, args)| (None, name, qual, args))
                     }
-                    Stmt::Let {
-                        pattern, value, ..
-                    } => collect_effect_call(value).map(|(name, qual, args)| {
-                        (Some(pattern), name, qual, args)
-                    }),
+                    Stmt::Let { pattern, value, .. } => collect_effect_call(value)
+                        .map(|(name, qual, args)| (Some(pattern), name, qual, args)),
                 };
 
                 if let Some((pat, op_name, qualifier, args)) = effect_info {
@@ -238,8 +235,7 @@ impl Lowerer {
                     // Normal (non-effect) statement
                     let (var, val_ce) = match first {
                         Stmt::Let { pattern, value, .. } => {
-                            let var =
-                                pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
+                            let var = pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
                             (var, self.lower_expr(value))
                         }
                         Stmt::Expr(e) => {
@@ -296,10 +292,7 @@ impl Lowerer {
                     CArm {
                         pat: CPat::Var(fail_var.clone()),
                         guard: None,
-                        body: CExpr::Case(
-                            Box::new(CExpr::Var(fail_var)),
-                            else_arms_ce.clone(),
-                        ),
+                        body: CExpr::Case(Box::new(CExpr::Var(fail_var)), else_arms_ce.clone()),
                     },
                 ],
             );
@@ -382,12 +375,9 @@ impl Lowerer {
         let apply = CExpr::Apply(Box::new(CExpr::Var(handler_var)), call_args);
 
         // Wrap with let-bindings for args
-        bindings
-            .into_iter()
-            .rev()
-            .fold(apply, |body, (var, val)| {
-                CExpr::Let(var, Box::new(val), Box::new(body))
-            })
+        bindings.into_iter().rev().fold(apply, |body, (var, val)| {
+            CExpr::Let(var, Box::new(val), Box::new(body))
+        })
     }
 
     /// Lower a `with` expression: `expr with handler`.
@@ -450,10 +440,7 @@ impl Lowerer {
             CExpr::Let(
                 ret_var.clone(),
                 Box::new(inner_ce),
-                Box::new(CExpr::Apply(
-                    Box::new(ret_fn),
-                    vec![CExpr::Var(ret_var)],
-                )),
+                Box::new(CExpr::Apply(Box::new(ret_fn), vec![CExpr::Var(ret_var)])),
             )
         } else {
             inner_ce
@@ -492,9 +479,7 @@ impl Lowerer {
         // Handler function params: Op, Param1, ..., ParamN, K
         let op_var = "_Op".to_string();
         let k_var = "_K".to_string();
-        let param_vars: Vec<String> = (0..max_params)
-            .map(|i| format!("_HArg{}", i))
-            .collect();
+        let param_vars: Vec<String> = (0..max_params).map(|i| format!("_HArg{}", i)).collect();
 
         let mut fun_params = vec![op_var.clone()];
         fun_params.extend(param_vars.iter().cloned());
@@ -569,10 +554,10 @@ impl Lowerer {
 
                 // Determine effects from inline arms
                 for arm in arms {
-                    if let Some(eff) = self.op_to_effect.get(&arm.op_name) {
-                        if !handled_effects.contains(eff) {
-                            handled_effects.push(eff.clone());
-                        }
+                    if let Some(eff) = self.op_to_effect.get(&arm.op_name)
+                        && !handled_effects.contains(eff)
+                    {
+                        handled_effects.push(eff.clone());
                     }
                 }
 

@@ -93,15 +93,21 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [ ] String operations (`string_length`, `string_split`, `string_chars`, etc.)
 - [ ] More list functions (`zip`, `range`, `take`, `drop`, `any`, `all`)
 
+## Syntax
+
+- [ ] Unify () and Unit annotations. Currently they are mixed, probably just use () everywhere.
+
 ## Backend
 
 ### Infrastructure
+
 - [x] Core Erlang IR (`CExpr`, `CPat`, `CLit`, `CModule`) + pretty-printer
 - [x] Lowering pass (dylang AST -> CErl IR)
 - [x] `erlc` invocation, `_build/` output directory
 - [x] `dylang build <file>` command
 
 ### Expression lowering
+
 - [x] Literals (int, float, bool, string, unit)
 - [x] Variables
 - [x] Binary operators (arithmetic, comparison, concat)
@@ -118,10 +124,12 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `do...else` blocks
 
 ### Guards
+
 - [x] Simple guards (comparisons, arithmetic) emitted directly as Core Erlang `when` clauses
 - [x] Complex guards (user-defined function calls) desugared into arm body conditionals with fallthrough
 
 ### Function calls
+
 - [x] Calling other top-level functions in the same module (saturated apply)
 - [x] Multi-argument functions (direct `apply 'name'/N`, no currying overhead)
 - [x] Multi-clause functions (`fib 0 = 0`, `fib 1 = 1`, `fib n = ...` -> single `case` body)
@@ -129,21 +137,25 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Tail call guarantee (recursive apply emitted in tail position; BEAM handles TCO natively)
 
 ### Module system
+
 - [ ] Multi-module builds (resolve imports, compile dependency order)
 - [ ] Qualified calls (`Math.abs x` -> `call 'math':'abs'(X)`)
 - [ ] Module-qualified dict names (`__dict_Show_Graphics_Color` not `__dict_Show_Color`) to avoid collisions across modules
 
 ### Data structures
+
 - [ ] Dict lowering (dict literals -> Erlang maps, `Dict.*` -> `maps:*` BIFs)
 - [ ] List lowering (`List.*` -> `lists:*` BIFs)
 
 ### Traits
+
 - [x] Dictionary passing (trait impls as tuples of funs, passed as extra args; elaboration pass)
 - [x] Built-in trait dispatch (`Show` via dict constructors; `Eq`/`Ord`/`Num` use direct BEAM BIFs)
 - [x] Replace `show`/`print` builtin special-cases with proper `Show` trait dispatch
 - [x] Fix `show`/`print` as higher-order values (`show` is `DictMethodAccess`, `print` is a synthesized dict-parameterized function)
 
 ### Effects (CPS transform)
+
 - [x] CPS plumbing (effect/handler metadata in lowerer, handler params on effectful functions)
 - [x] Effect calls in blocks (`log! "msg"` -> `apply Handler('log', "msg", K)`)
 - [x] Resumable handlers (`resume value` -> `apply _K(value)`)
@@ -156,10 +168,11 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Multishot continuations (calling `_K` multiple times; free on BEAM)
 - [x] Elaborator: Show dict insertion inside handler arm bodies (`print` in handler crashes)
 - [x] Handler `needs` clause (handler that itself uses effects)
-- [ ] Effect calls in non-block positions (nested in `if` conditions, binary ops, etc.)
+- [x] Effect calls in non-block positions (nested in `if` conditions, binary ops, etc.)
 - [ ] HOF effect absorption (passing effectful closures through higher-order functions like `try`)
 
 ### Stdlib / prelude
+
 - [ ] Wire prelude functions to BEAM equivalents (`List`, `Maybe`, `Result`)
 - [ ] FFI (`foreign erlang "mod" "fun" as f in Effect`)
 

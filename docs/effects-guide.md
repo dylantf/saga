@@ -62,6 +62,23 @@ Calling a function that _internally_ uses effects is a normal call - its
 signature (`needs {Log}`) tells you it has effects, but the call site is just
 `run_server ()`.
 
+Effect calls can appear anywhere an expression is expected, not just as
+standalone statements in a block. For example:
+
+```
+let x = 1 + ask! ()
+let result = transform (get! "key")
+if check! () then a else b
+```
+
+When multiple effect calls appear in the same expression, they are evaluated
+left-to-right:
+
+```
+# ask! is called twice: first for the left operand, then for the right
+let sum = ask! () + ask! ()
+```
+
 ---
 
 ## Handling Effects

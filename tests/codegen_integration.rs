@@ -882,3 +882,103 @@ main () = safe_div 10 0 with {
     assert_contains(&out, "'safe_div'/3");
     assert_contains(&out, "_HandleFail");
 }
+
+// --- Effect calls in non-block positions ---
+
+#[test]
+fn effect_call_in_binop() {
+    // Effect call nested in a binary operation should be lifted to a let binding
+    let src = r#"
+effect Ask {
+  fun ask () -> Int
+}
+
+fun compute () -> Int needs {Ask}
+compute () = {
+  let x = 1 + ask! ()
+  x
+}
+
+main () = compute () with {
+  ask -> resume 42
+}
+"#;
+    let out = emit_elaborated(src);
+    // The ask! should be CPS-transformed with a continuation that does the addition
+    assert_contains(&out, "apply _HandleAsk('ask'");
+    // The addition should still happen
+    assert_contains(&out, "call 'erlang':'+'");
+}
+
+#[test]
+fn effect_call_in_function_arg() {
+    // Effect call as an argument to a function call
+    let src = r#"
+effect Ask {
+  fun ask () -> Int
+}
+
+double x = x * 2
+
+fun compute () -> Int needs {Ask}
+compute () = {
+  let x = double (ask! ())
+  x
+}
+
+main () = compute () with {
+  ask -> resume 21
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "apply _HandleAsk('ask'");
+    assert_contains(&out, "'double'");
+}
+
+#[test]
+fn effect_call_in_if_condition() {
+    // Effect call in an if condition
+    let src = r#"
+effect Ask {
+  fun ask () -> Bool
+}
+
+fun decide () -> Int needs {Ask}
+decide () = {
+  if ask! () then 1 else 0
+}
+
+main () = decide () with {
+  ask -> resume True
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "apply _HandleAsk('ask'");
+}
+
+#[test]
+fn multiple_effect_calls_in_binop() {
+    // Two effect calls in the same binary expression
+    let src = r#"
+effect Ask {
+  fun ask () -> Int
+}
+
+fun compute () -> Int needs {Ask}
+compute () = {
+  let x = ask! () + ask! ()
+  x
+}
+
+main () = compute () with {
+  ask -> resume 10
+}
+"#;
+    let out = emit_elaborated(src);
+    // Should have two separate handler applies for the two ask! calls
+    let count = out.matches("apply _HandleAsk('ask'").count();
+    assert!(
+        count >= 2,
+        "expected at least 2 handler applies, got {count}\n{out}"
+    );
+}
