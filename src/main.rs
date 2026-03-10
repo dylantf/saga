@@ -185,7 +185,7 @@ fn cmd_build(file: &str) {
 
     eprintln!("Built {}/{}.beam", build_dir.display(), module_name);
     eprintln!(
-        "Run with: erl -noshell -pa {} -s {} main -s erlang exit",
+        "Run with: erl -noshell -pa {} -s {} main -s init stop",
         build_dir.display(),
         module_name
     );
