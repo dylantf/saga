@@ -102,6 +102,7 @@ pub fn print_module(m: &CModule) -> String {
 struct Printer {
     buf: String,
     indent: usize,
+    wildcard_counter: usize,
 }
 
 impl Printer {
@@ -109,6 +110,7 @@ impl Printer {
         Printer {
             buf: String::new(),
             indent: 0,
+            wildcard_counter: 0,
         }
     }
 
@@ -247,7 +249,11 @@ impl Printer {
     fn print_pat(&mut self, pat: &CPat) {
         match pat {
             CPat::Var(v) => self.push(v),
-            CPat::Wildcard => self.push("_"),
+            CPat::Wildcard => {
+                let n = self.wildcard_counter;
+                self.wildcard_counter += 1;
+                self.push(&format!("_W{n}"));
+            }
             CPat::Lit(lit) => self.print_lit(lit),
             CPat::Tuple(elems) => {
                 self.push("{");

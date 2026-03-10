@@ -29,10 +29,17 @@ pub(super) fn lower_pat(pat: &Pat, record_fields: &HashMap<String, Vec<String>>)
         Pat::Tuple { elements, .. } => {
             CPat::Tuple(elements.iter().map(|p| lower_pat(p, record_fields)).collect())
         }
-        Pat::Constructor { name, args, .. } => {
-            let mut elems = vec![CPat::Lit(CLit::Atom(name.clone()))];
-            elems.extend(args.iter().map(|p| lower_pat(p, record_fields)));
-            CPat::Tuple(elems)
+        Pat::Constructor { name, args, .. } => match name.as_str() {
+            "Cons" if args.len() == 2 => CPat::Cons(
+                Box::new(lower_pat(&args[0], record_fields)),
+                Box::new(lower_pat(&args[1], record_fields)),
+            ),
+            "Nil" if args.is_empty() => CPat::Nil,
+            _ => {
+                let mut elems = vec![CPat::Lit(CLit::Atom(name.clone()))];
+                elems.extend(args.iter().map(|p| lower_pat(p, record_fields)));
+                CPat::Tuple(elems)
+            }
         }
         Pat::Record { name, fields, .. } => {
             // Records are tagged tuples in declared field order.
@@ -60,6 +67,16 @@ pub(super) fn lower_pat(pat: &Pat, record_fields: &HashMap<String, Vec<String>>)
             }
             CPat::Tuple(elems)
         }
-        Pat::StringPrefix { .. } => CPat::Wildcard, // TODO
+        Pat::StringPrefix {
+            prefix, rest, ..
+        } => {
+            // "abc" <> rest  =>  [97 | [98 | [99 | Rest]]]
+            // Expand the prefix string into a cons chain of character codes,
+            // with the rest pattern as the tail.
+            let tail = lower_pat(rest, record_fields);
+            prefix.chars().rev().fold(tail, |acc, ch| {
+                CPat::Cons(Box::new(CPat::Lit(CLit::Int(ch as i64))), Box::new(acc))
+            })
+        }
     }
 }

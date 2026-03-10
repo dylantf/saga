@@ -40,7 +40,10 @@ fn parse_and_typecheck(
         Ok(t) => t,
         Err(e) => {
             let (line, col) = byte_offset_to_line_col(source, e.pos);
-            eprintln!("Lex error at {}:{}:{}: {}", source_path, line, col, e.message);
+            eprintln!(
+                "Lex error at {}:{}:{}: {}",
+                source_path, line, col, e.message
+            );
             std::process::exit(1);
         }
     };
@@ -182,7 +185,7 @@ fn cmd_build(file: &str) {
 
     eprintln!("Built {}/{}.beam", build_dir.display(), module_name);
     eprintln!(
-        "Run with: erl -noshell -eval \"code:add_path(\\\"{}\\\"), {}:main(), init:stop().\"",
+        "Run with: erl -noshell -pa {} -s {} main -s erlang exit",
         build_dir.display(),
         module_name
     );
