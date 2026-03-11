@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::ast::{self, Decl};
 
-use super::{Checker, EffectOpSig, HandlerInfo, Scheme, Type, TypeError};
+use super::{Checker, EffectDefInfo, EffectOpSig, HandlerInfo, Scheme, Type, TypeError};
 
 impl Checker {
     // --- Top-level declarations ---
@@ -23,9 +23,12 @@ impl Checker {
                     self.register_record_def(name, fields)?;
                 }
                 Decl::EffectDef {
-                    name, operations, ..
+                    name,
+                    type_params,
+                    operations,
+                    ..
                 } => {
-                    self.register_effect_def(name, operations)?;
+                    self.register_effect_def(name, type_params, operations)?;
                 }
                 Decl::TraitDef {
                     name,
@@ -90,8 +93,10 @@ impl Checker {
                 }
                 annotations.insert(name.clone(), fun_ty);
                 if !effects.is_empty() {
-                    self.fun_effects
-                        .insert(name.clone(), effects.iter().cloned().collect());
+                    self.fun_effects.insert(
+                        name.clone(),
+                        effects.iter().map(|e| e.name.clone()).collect(),
+                    );
                 }
 
                 // Process where clause into (trait_name, var_id) constraints
@@ -288,6 +293,7 @@ impl Checker {
 
         // Save and clear effect tracking and field candidate tracking for this function body
         let saved_effects = std::mem::take(&mut self.current_effects);
+        let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
         let saved_field_candidates = std::mem::take(&mut self.field_candidates);
 
         for clause in clauses {
@@ -338,18 +344,26 @@ impl Checker {
         }
 
         // Check exhaustiveness of function clause patterns (multi-column Maranget)
-        if clauses.len() > 1 || clauses.iter().any(|c| {
-            if let Decl::FunBinding { params, .. } = c {
-                params.iter().any(|p| !matches!(p, crate::ast::Pat::Var { .. } | crate::ast::Pat::Wildcard { .. }))
-            } else {
-                false
-            }
-        }) {
+        if clauses.len() > 1
+            || clauses.iter().any(|c| {
+                if let Decl::FunBinding { params, .. } = c {
+                    params.iter().any(|p| {
+                        !matches!(
+                            p,
+                            crate::ast::Pat::Var { .. } | crate::ast::Pat::Wildcard { .. }
+                        )
+                    })
+                } else {
+                    false
+                }
+            })
+        {
             self.check_fun_exhaustiveness(name, clauses, &param_types)?;
         }
 
         // Check effect requirements against declared needs
         let body_effects = std::mem::replace(&mut self.current_effects, saved_effects);
+        self.effect_type_param_cache = saved_effect_cache;
         let declared_effects = self.fun_effects.get(name).cloned().unwrap_or_default();
 
         if !body_effects.is_empty() || !declared_effects.is_empty() {
@@ -522,7 +536,10 @@ impl Checker {
 
         for clause in clauses {
             let Decl::FunBinding {
-                params, guard, span, ..
+                params,
+                guard,
+                span,
+                ..
             } = clause
             else {
                 unreachable!()
@@ -547,9 +564,7 @@ impl Checker {
         }
 
         // Exhaustiveness check
-        let wildcard_row: Vec<SPat> = (0..param_types.len())
-            .map(|_| SPat::Wildcard)
-            .collect();
+        let wildcard_row: Vec<SPat> = (0..param_types.len()).map(|_| SPat::Wildcard).collect();
         if exh::useful(&ctx, &matrix, &wildcard_row) {
             let witnesses = exh::find_all_witnesses(&ctx, &matrix, param_types.len());
             let span = match clauses[0] {
@@ -557,10 +572,8 @@ impl Checker {
                 _ => unreachable!(),
             };
             if !witnesses.is_empty() {
-                let formatted: Vec<String> = witnesses
-                    .iter()
-                    .map(|w| exh::format_witness(w))
-                    .collect();
+                let formatted: Vec<String> =
+                    witnesses.iter().map(|w| exh::format_witness(w)).collect();
                 return Err(TypeError::at(
                     span,
                     format!(
@@ -655,11 +668,28 @@ impl Checker {
     pub(crate) fn register_effect_def(
         &mut self,
         name: &str,
+        effect_type_params: &[String],
         operations: &[ast::EffectOp],
     ) -> Result<(), TypeError> {
+        // Create fresh vars for the effect's type params, shared across all operations.
+        // E.g. for `effect State s { get () -> s; put (val: s) -> Unit }`,
+        // a single var ID for `s` is used by both `get` and `put`.
+        let mut shared_params: Vec<(String, u32)> = vec![];
+        let mut type_param_ids = Vec::new();
+        for tp in effect_type_params {
+            let var = self.fresh_var();
+            let id = match &var {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
+            shared_params.push((tp.clone(), id));
+            type_param_ids.push(id);
+        }
+
         let mut ops = Vec::new();
         for op in operations {
-            let mut params_list: Vec<(String, u32)> = vec![];
+            // Start with the shared effect type params, then add op-local type vars
+            let mut params_list = shared_params.clone();
             let param_types: Vec<Type> = op
                 .params
                 .iter()
@@ -672,30 +702,66 @@ impl Checker {
                 return_type,
             });
         }
-        self.effects.insert(name.into(), ops);
+        self.effects.insert(
+            name.into(),
+            EffectDefInfo {
+                type_params: type_param_ids,
+                ops,
+            },
+        );
         Ok(())
     }
 
     pub(crate) fn register_handler(
         &mut self,
         name: &str,
-        effect_names: &[String],
-        needs: &[String],
+        effect_names: &[ast::EffectRef],
+        needs: &[ast::EffectRef],
         arms: &[ast::HandlerArm],
         return_clause: Option<&ast::HandlerArm>,
         span: crate::token::Span,
     ) -> Result<(), TypeError> {
         // Save and clear effect tracking for this handler body
         let saved_effects = std::mem::take(&mut self.current_effects);
+        let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
+
+        // Build type param bindings from handler's effect refs.
+        // E.g. `handler counter for State Int` with effect State s:
+        //   creates mapping {s_var_id -> Int}
+        let mut handler_type_mapping: std::collections::HashMap<u32, Type> =
+            std::collections::HashMap::new();
+        for effect_ref in effect_names {
+            if let Some(info) = self.effects.get(&effect_ref.name) {
+                let info = info.clone();
+                for (i, &param_id) in info.type_params.iter().enumerate() {
+                    if let Some(type_arg_expr) = effect_ref.type_args.get(i) {
+                        let concrete_ty = self.convert_type_expr(type_arg_expr, &mut vec![]);
+                        handler_type_mapping.insert(param_id, concrete_ty);
+                    }
+                }
+            }
+        }
 
         // Validate that each arm's operation belongs to the handler's declared effects
         for arm in arms {
             let mut belongs_to_declared = false;
-            for effect_name in effect_names {
-                if let Some(ops) = self.effects.get(effect_name)
-                    && ops.iter().any(|o| o.name == arm.op_name)
+            let mut matched_op: Option<EffectOpSig> = None;
+            for effect_ref in effect_names {
+                if let Some(info) = self.effects.get(&effect_ref.name)
+                    && let Some(op) = info.ops.iter().find(|o| o.name == arm.op_name)
                 {
                     belongs_to_declared = true;
+                    // Apply handler type bindings to specialize the op signature
+                    let specialized = EffectOpSig {
+                        name: op.name.clone(),
+                        params: op
+                            .params
+                            .iter()
+                            .map(|t| self.replace_vars(t, &handler_type_mapping))
+                            .collect(),
+                        return_type: self.replace_vars(&op.return_type, &handler_type_mapping),
+                    };
+                    matched_op = Some(specialized);
                     break;
                 }
             }
@@ -707,14 +773,14 @@ impl Checker {
                         arm.op_name,
                         effect_names
                             .iter()
-                            .map(|e| format!("'{}'", e))
+                            .map(|e| format!("'{}'", e.name))
                             .collect::<Vec<_>>()
                             .join(", ")
                     ),
                 ));
             }
 
-            let op_sig = self.lookup_effect_op(&arm.op_name, None, arm.span)?;
+            let op_sig = matched_op.unwrap();
 
             // Bind op params and set resume context, then check body
             let saved_env = self.env.clone();
@@ -771,7 +837,9 @@ impl Checker {
 
         // Check effect requirements against declared needs
         let body_effects = std::mem::replace(&mut self.current_effects, saved_effects);
-        let declared_effects: std::collections::HashSet<String> = needs.iter().cloned().collect();
+        self.effect_type_param_cache = saved_effect_cache;
+        let declared_effects: std::collections::HashSet<String> =
+            needs.iter().map(|e| e.name.clone()).collect();
 
         if !body_effects.is_empty() || !declared_effects.is_empty() {
             let undeclared: Vec<_> = body_effects.difference(&declared_effects).collect();
@@ -804,7 +872,7 @@ impl Checker {
         self.handlers.insert(
             name.into(),
             HandlerInfo {
-                effects: effect_names.to_vec(),
+                effects: effect_names.iter().map(|e| e.name.clone()).collect(),
                 return_type: handler_return_type,
             },
         );

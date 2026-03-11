@@ -138,7 +138,7 @@ impl<'a> Lowerer<'a> {
                     self.handler_defs.insert(
                         name.clone(),
                         HandlerInfo {
-                            effects: effects.clone(),
+                            effects: effects.iter().map(|e| e.name.clone()).collect(),
                             arms: arms.clone(),
                             return_clause: return_clause.clone(),
                         },
@@ -155,7 +155,8 @@ impl<'a> Lowerer<'a> {
                         self.pub_names.insert(name.clone());
                     }
                     if !effects.is_empty() {
-                        let mut sorted = effects.clone();
+                        let mut sorted: Vec<String> =
+                            effects.iter().map(|e| e.name.clone()).collect();
                         sorted.sort();
                         self.fun_effects.insert(name.clone(), sorted);
                     }
@@ -199,8 +200,7 @@ impl<'a> Lowerer<'a> {
 
                     // Register imported functions with qualified keys
                     for (name, scheme) in &info.exports {
-                        let (base_arity, effects) =
-                            util::arity_and_effects_from_type(&scheme.ty);
+                        let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
                         let effect_count = effects.len();
                         let expanded_arity =
                             base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
@@ -226,12 +226,9 @@ impl<'a> Lowerer<'a> {
                                     let expanded_arity = base_arity
                                         + effect_count
                                         + if effect_count > 0 { 1 } else { 0 };
-                                    self.top_level_funs
-                                        .insert(name.clone(), expanded_arity);
-                                    self.imported_names.insert(
-                                        name.clone(),
-                                        (erlang_name.clone(), name.clone()),
-                                    );
+                                    self.top_level_funs.insert(name.clone(), expanded_arity);
+                                    self.imported_names
+                                        .insert(name.clone(), (erlang_name.clone(), name.clone()));
                                     if !effects.is_empty() {
                                         self.fun_effects.insert(name.clone(), effects);
                                     }
@@ -241,12 +238,11 @@ impl<'a> Lowerer<'a> {
                     }
 
                     // Register imported effect definitions
-                    for (eff_name, ops) in &info.effect_defs {
+                    for (eff_name, ops, _type_param_count) in &info.effect_defs {
                         let mut ops_map = HashMap::new();
                         for (op_name, param_count) in ops {
                             ops_map.insert(op_name.clone(), *param_count);
-                            self.op_to_effect
-                                .insert(op_name.clone(), eff_name.clone());
+                            self.op_to_effect.insert(op_name.clone(), eff_name.clone());
                         }
                         self.effect_defs
                             .insert(eff_name.clone(), EffectInfo { ops: ops_map });
@@ -1077,11 +1073,8 @@ impl<'a> Lowerer<'a> {
             arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
         );
 
-        bindings
-            .into_iter()
-            .rev()
-            .fold(call, |body, (var, val)| {
-                CExpr::Let(var, Box::new(val), Box::new(body))
-            })
+        bindings.into_iter().rev().fold(call, |body, (var, val)| {
+            CExpr::Let(var, Box::new(val), Box::new(body))
+        })
     }
 }

@@ -120,7 +120,7 @@ impl Checker {
         target_type: &str,
         type_params: &[String],
         where_clause: &[ast::TraitBound],
-        needs: &[String],
+        needs: &[ast::EffectRef],
         methods: &[(String, Vec<ast::Pat>, ast::Expr)],
         span: Span,
     ) -> Result<(), TypeError> {
@@ -180,7 +180,8 @@ impl Checker {
             Type::Con(target_type.into(), param_vars)
         };
 
-        let declared_effects: std::collections::HashSet<String> = needs.iter().cloned().collect();
+        let declared_effects: std::collections::HashSet<String> =
+            needs.iter().map(|e| e.name.clone()).collect();
 
         for (method_name, params, body) in methods {
             let trait_method = trait_info
@@ -198,6 +199,7 @@ impl Checker {
 
             let saved_env = self.env.clone();
             let saved_effects = std::mem::take(&mut self.current_effects);
+            let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
             let saved_field_candidates = std::mem::take(&mut self.field_candidates);
 
             // Bind params with expected types
@@ -222,6 +224,7 @@ impl Checker {
 
             // Check that body effects are covered by the impl's needs declaration
             let body_effects = std::mem::replace(&mut self.current_effects, saved_effects);
+            self.effect_type_param_cache = saved_effect_cache;
             if !body_effects.is_empty() || !declared_effects.is_empty() {
                 let undeclared: Vec<_> = body_effects.difference(&declared_effects).collect();
                 if !undeclared.is_empty() {

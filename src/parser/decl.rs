@@ -6,15 +6,20 @@ use super::{ParseError, Parser};
 impl Parser {
     // Parse `Name` or `Module.Name`, returning the full qualified string.
     // Used where we want to preserve the qualification (e.g. needs lists).
-    fn parse_needs_entry(&mut self) -> Result<String, ParseError> {
+    fn parse_effect_ref(&mut self) -> Result<EffectRef, ParseError> {
         let name = self.expect_upper_ident()?;
-        if matches!(self.peek(), Token::Dot) {
+        let name = if matches!(self.peek(), Token::Dot) {
             self.advance(); // consume '.'
             let qualifier = self.expect_upper_ident()?;
-            Ok(format!("{}.{}", name, qualifier))
+            format!("{}.{}", name, qualifier)
         } else {
-            Ok(name)
+            name
+        };
+        let mut type_args = Vec::new();
+        while self.can_start_type_atom() {
+            type_args.push(self.parse_type_atom()?);
         }
+        Ok(EffectRef { name, type_args })
     }
 
     // Parse `Name` or `Module.Name`, returning only the base name.
@@ -201,10 +206,10 @@ impl Parser {
         if matches!(self.peek(), Token::Needs) {
             self.advance(); // consume 'needs'
             self.expect(Token::LBrace)?;
-            effects.push(self.parse_needs_entry()?);
+            effects.push(self.parse_effect_ref()?);
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
-                effects.push(self.parse_needs_entry()?);
+                effects.push(self.parse_effect_ref()?);
             }
             self.expect(Token::RBrace)?;
         }
@@ -229,6 +234,10 @@ impl Parser {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'effect'
         let name = self.expect_upper_ident()?;
+        let mut type_params = Vec::new();
+        while matches!(self.peek(), Token::Ident(_)) {
+            type_params.push(self.expect_ident()?);
+        }
         self.expect(Token::LBrace)?;
         self.skip_terminators();
 
@@ -273,6 +282,7 @@ impl Parser {
         Ok(Decl::EffectDef {
             public,
             name,
+            type_params,
             operations,
             span: start.to(end),
         })
@@ -285,23 +295,23 @@ impl Parser {
         let name = self.expect_ident()?;
         self.expect(Token::For)?;
 
-        let mut effects = vec![self.parse_upper_name()?];
+        let mut effects = vec![self.parse_effect_ref()?];
         while matches!(self.peek(), Token::Comma) {
             self.advance();
-            effects.push(self.parse_upper_name()?);
+            effects.push(self.parse_effect_ref()?);
         }
 
         let mut needs = Vec::new();
         if matches!(self.peek(), Token::Needs) {
             self.advance(); // consume 'needs'
             self.expect(Token::LBrace)?;
-            needs.push(self.parse_needs_entry()?);
+            needs.push(self.parse_effect_ref()?);
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
                 if matches!(self.peek(), Token::RBrace) {
                     break; // trailing comma
                 }
-                needs.push(self.parse_needs_entry()?);
+                needs.push(self.parse_effect_ref()?);
             }
             self.expect(Token::RBrace)?;
         }
@@ -501,13 +511,13 @@ impl Parser {
         if matches!(self.peek(), Token::Needs) {
             self.advance(); // consume 'needs'
             self.expect(Token::LBrace)?;
-            needs.push(self.parse_needs_entry()?);
+            needs.push(self.parse_effect_ref()?);
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
                 if matches!(self.peek(), Token::RBrace) {
                     break; // trailing comma
                 }
-                needs.push(self.parse_needs_entry()?);
+                needs.push(self.parse_effect_ref()?);
             }
             self.expect(Token::RBrace)?;
         }
@@ -592,7 +602,7 @@ impl Parser {
                 self.advance();
                 self.expect(Token::LBrace)?;
                 while !matches!(self.peek(), Token::RBrace) {
-                    needs.push(self.parse_needs_entry()?);
+                    needs.push(self.parse_effect_ref()?);
                     if matches!(self.peek(), Token::Comma) {
                         self.advance();
                     }
@@ -705,12 +715,20 @@ impl Parser {
             let mut items = Vec::new();
             while !matches!(self.peek(), Token::RParen | Token::Eof) {
                 let name = match self.peek().clone() {
-                    Token::Ident(n) => { self.advance(); n }
-                    Token::UpperIdent(n) => { self.advance(); n }
-                    tok => return Err(ParseError {
-                        message: format!("expected identifier in import list, got {:?}", tok),
-                        span: self.tokens[self.pos].span,
-                    }),
+                    Token::Ident(n) => {
+                        self.advance();
+                        n
+                    }
+                    Token::UpperIdent(n) => {
+                        self.advance();
+                        n
+                    }
+                    tok => {
+                        return Err(ParseError {
+                            message: format!("expected identifier in import list, got {:?}", tok),
+                            span: self.tokens[self.pos].span,
+                        });
+                    }
                 };
                 items.push(name);
                 if matches!(self.peek(), Token::Comma) {

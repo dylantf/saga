@@ -1,0 +1,49 @@
+# Generic effects: State s with get/put
+#
+# The same State effect can be used at different types
+# by declaring handlers that specialize the type parameter.
+
+effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+# Handler that manages an Int counter, starting at 0
+handler int_state for State Int {
+  get () -> resume 0
+  put val -> resume ()
+}
+
+# Handler that manages a String accumulator
+handler string_state for State String {
+  get () -> resume ""
+  put val -> resume ()
+}
+
+# Use State as an Int counter
+fun count_up () -> Int needs {State}
+count_up () = {
+  let x = get! ()
+  put! (x + 1)
+  let y = get! ()
+  put! (y + 1)
+  get! ()
+}
+
+# Use State as a String accumulator
+fun build_greeting (name: String) -> String needs {State}
+build_greeting name = {
+  let s = get! ()
+  put! (s <> "Hello, ")
+  let s2 = get! ()
+  put! (s2 <> name <> "!")
+  get! ()
+}
+
+main () = {
+  let n = count_up () with int_state
+  print n
+
+  let greeting = build_greeting "world" with string_state
+  print greeting
+}

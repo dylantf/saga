@@ -190,8 +190,8 @@ pub struct Scheme {
 pub struct ModuleCodegenInfo {
     /// Public type bindings: name -> scheme (same data as tc_loaded).
     pub exports: Vec<(String, Scheme)>,
-    /// Public effect definitions: effect name -> vec of (op_name, param_count).
-    pub effect_defs: Vec<(String, Vec<(String, usize)>)>,
+    /// Public effect definitions: effect name -> (ops as (op_name, param_count), type_param_count).
+    pub effect_defs: Vec<(String, Vec<(String, usize)>, usize)>,
     /// Public record definitions: record name -> ordered field names.
     pub record_fields: Vec<(String, Vec<String>)>,
     /// Public handler names.
@@ -299,6 +299,13 @@ pub(crate) struct EffectOpSig {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct EffectDefInfo {
+    /// Fresh var IDs for the effect's type parameters (empty for non-parameterized effects)
+    pub type_params: Vec<u32>,
+    pub ops: Vec<EffectOpSig>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct HandlerInfo {
     /// Which effects this handler handles
     pub effects: Vec<std::string::String>,
@@ -345,14 +352,17 @@ pub struct Checker {
     pub(crate) constructors: HashMap<std::string::String, Scheme>,
     /// Record definitions: record name -> vec of (field_name, field_type)
     pub(crate) records: HashMap<std::string::String, Vec<(std::string::String, Type)>>,
-    /// Effect definitions: effect name -> vec of (op_name, param_types, return_type)
-    pub(crate) effects: HashMap<std::string::String, Vec<EffectOpSig>>,
+    /// Effect definitions: effect name -> definition info (type params + operations)
+    pub(crate) effects: HashMap<std::string::String, EffectDefInfo>,
     /// Named handler definitions: handler name -> info
     pub(crate) handlers: HashMap<std::string::String, HandlerInfo>,
     /// Context for resume typing: when inside a handler arm, the return type of the op being handled
     pub(crate) resume_type: Option<Type>,
     /// Effects used in the current function body (accumulated during inference)
     pub(crate) current_effects: HashSet<String>,
+    /// Per-scope cache of instantiated effect type params: effect name -> mapping from original var IDs to fresh vars.
+    /// Ensures all ops from the same effect share type params within a function scope.
+    pub(crate) effect_type_param_cache: HashMap<String, HashMap<u32, Type>>,
     /// Known effect requirements for named functions: name -> set of effect names
     pub(crate) fun_effects: HashMap<String, HashSet<String>>,
     /// Trait definitions: trait name -> info
@@ -403,6 +413,7 @@ impl Checker {
             handlers: HashMap::new(),
             resume_type: None,
             current_effects: HashSet::new(),
+            effect_type_param_cache: HashMap::new(),
             fun_effects: HashMap::new(),
             traits: HashMap::new(),
             trait_impls: HashMap::new(),
@@ -693,9 +704,15 @@ impl Checker {
         // Dict.empty : forall k v. Dict k v
         {
             let k = self.fresh_var();
-            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let k_id = match &k {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let v = self.fresh_var();
-            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let v_id = match &v {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             self.env.insert(
                 "Dict.empty".into(),
                 Scheme {
@@ -709,9 +726,15 @@ impl Checker {
         // Dict.get : forall k v. Eq k => k -> Dict k v -> Maybe v
         {
             let k = self.fresh_var();
-            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let k_id = match &k {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let v = self.fresh_var();
-            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let v_id = match &v {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v.clone()]);
             let maybe_v = Type::Con("Maybe".into(), vec![v]);
             self.env.insert(
@@ -730,9 +753,15 @@ impl Checker {
         // Dict.put : forall k v. Eq k => k -> v -> Dict k v -> Dict k v
         {
             let k = self.fresh_var();
-            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let k_id = match &k {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let v = self.fresh_var();
-            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let v_id = match &v {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v.clone()]);
             self.env.insert(
                 "Dict.put".into(),
@@ -753,9 +782,15 @@ impl Checker {
         // Dict.remove : forall k v. Eq k => k -> Dict k v -> Dict k v
         {
             let k = self.fresh_var();
-            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let k_id = match &k {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let v = self.fresh_var();
-            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let v_id = match &v {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v.clone()]);
             self.env.insert(
                 "Dict.remove".into(),
@@ -773,9 +808,15 @@ impl Checker {
         // Dict.keys : forall k v. Dict k v -> List k
         {
             let k = self.fresh_var();
-            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let k_id = match &k {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let v = self.fresh_var();
-            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let v_id = match &v {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v]);
             let list_k = Type::Con("List".into(), vec![k]);
             self.env.insert(
@@ -791,9 +832,15 @@ impl Checker {
         // Dict.values : forall k v. Dict k v -> List v
         {
             let k = self.fresh_var();
-            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let k_id = match &k {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let v = self.fresh_var();
-            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let v_id = match &v {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let dict_kv = Type::Con("Dict".into(), vec![k, v.clone()]);
             let list_v = Type::Con("List".into(), vec![v]);
             self.env.insert(
@@ -809,9 +856,15 @@ impl Checker {
         // Dict.size : forall k v. Dict k v -> Int
         {
             let k = self.fresh_var();
-            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let k_id = match &k {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let v = self.fresh_var();
-            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let v_id = match &v {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let dict_kv = Type::Con("Dict".into(), vec![k, v]);
             self.env.insert(
                 "Dict.size".into(),
@@ -826,9 +879,15 @@ impl Checker {
         // Dict.from_list : forall k v. Eq k => List (k, v) -> Dict k v
         {
             let k = self.fresh_var();
-            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let k_id = match &k {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let v = self.fresh_var();
-            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let v_id = match &v {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let tuple_kv = Type::Con("Tuple".into(), vec![k.clone(), v.clone()]);
             let list_kv = Type::Con("List".into(), vec![tuple_kv]);
             let dict_kv = Type::Con("Dict".into(), vec![k, v]);
@@ -845,9 +904,15 @@ impl Checker {
         // Dict.to_list : forall k v. Dict k v -> List (k, v)
         {
             let k = self.fresh_var();
-            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let k_id = match &k {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let v = self.fresh_var();
-            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let v_id = match &v {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v.clone()]);
             let tuple_kv = Type::Con("Tuple".into(), vec![k, v]);
             let list_kv = Type::Con("List".into(), vec![tuple_kv]);
@@ -864,9 +929,15 @@ impl Checker {
         // Dict.member : forall k v. Eq k => k -> Dict k v -> Bool
         {
             let k = self.fresh_var();
-            let k_id = match &k { Type::Var(id) => *id, _ => unreachable!() };
+            let k_id = match &k {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let v = self.fresh_var();
-            let v_id = match &v { Type::Var(id) => *id, _ => unreachable!() };
+            let v_id = match &v {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
             let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v]);
             self.env.insert(
                 "Dict.member".into(),
@@ -945,7 +1016,7 @@ impl Checker {
         (ty, constraints)
     }
 
-    fn replace_vars(&self, ty: &Type, mapping: &HashMap<u32, Type>) -> Type {
+    pub(crate) fn replace_vars(&self, ty: &Type, mapping: &HashMap<u32, Type>) -> Type {
         match ty {
             Type::Var(id) => mapping.get(id).cloned().unwrap_or_else(|| ty.clone()),
             Type::Arrow(a, b) => Type::Arrow(
@@ -968,9 +1039,25 @@ impl Checker {
     pub(crate) fn generalize(&self, ty: &Type) -> Scheme {
         let resolved = self.sub.apply(ty);
         let env_vars = self.env.free_vars(&self.sub);
+        // Collect effect type param vars that must not be generalized --
+        // these are shared across ops of the same effect within a function scope.
+        let effect_vars: HashSet<u32> = self
+            .effect_type_param_cache
+            .values()
+            .flat_map(|mapping| {
+                mapping.values().filter_map(|ty| {
+                    let resolved = self.sub.apply(ty);
+                    if let Type::Var(id) = resolved {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
         let mut forall = Vec::new();
         collect_free_vars(&resolved, &mut forall);
-        forall.retain(|v| !env_vars.contains(v));
+        forall.retain(|v| !env_vars.contains(v) && !effect_vars.contains(v));
         Scheme {
             forall,
             constraints: vec![],
@@ -1018,7 +1105,8 @@ impl Checker {
                 if needs.is_empty() {
                     Type::Arrow(Box::new(a_ty), Box::new(b_ty))
                 } else {
-                    Type::EffArrow(Box::new(a_ty), Box::new(b_ty), needs.clone())
+                    let effect_names: Vec<String> = needs.iter().map(|e| e.name.clone()).collect();
+                    Type::EffArrow(Box::new(a_ty), Box::new(b_ty), effect_names)
                 }
             }
         }

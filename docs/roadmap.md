@@ -155,6 +155,11 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Replace `show`/`print` builtin special-cases with proper `Show` trait dispatch
 - [x] Fix `show`/`print` as higher-order values (`show` is `DictMethodAccess`, `print` is a synthesized dict-parameterized function)
 
+### Codegen bugs
+
+- [ ] Integer division: `/` on `Int` emits `erlang:'/'` (float division) instead of `erlang:'div'`
+- [ ] Polymorphic type class dicts used as bare function refs without applying dict arguments (e.g. `'__dict_Show_Result'/2` not called with sub-dicts)
+
 ### Effects (CPS transform)
 
 - [x] CPS plumbing (effect/handler metadata in lowerer, handler params on effectful functions)
@@ -187,9 +192,9 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ## Upcoming
 
-- [ ] Generic effects (`effect State s { fun get () -> s; fun put (val: s) -> Unit }`)
-  - Parser: type params on effect declarations (mirror trait syntax)
-  - Type checker: link type vars across operations within a handler, unify `needs {State Int}` etc.
+- [x] Generic effects (`effect State s { fun get () -> s; fun put (val: s) -> Unit }`)
+  - Parser: type params on effect declarations, `EffectRef` with type_args in needs/handler clauses
+  - Type checker: shared type vars across operations, fresh instantiation on lookup, handler specialization
   - Handlers: `handler counter for State Int { ... }` binds the type param
   - Enables prelude-provided `State s`, `MVector` backed by BEAM arrays
 - [ ] Local function definitions (`let f x = ...` inside a block, with recursion + closure capture)

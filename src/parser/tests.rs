@@ -2,6 +2,11 @@ use super::*;
 use crate::ast::Handler;
 use crate::lexer::Lexer;
 
+/// Extract effect names from a slice of EffectRef for test assertions
+fn effect_names(refs: &[crate::ast::EffectRef]) -> Vec<&str> {
+    refs.iter().map(|e| e.name.as_str()).collect()
+}
+
 fn parse(source: &str) -> Program {
     let tokens = Lexer::new(source).lex().unwrap();
     Parser::new(tokens).parse_program().unwrap()
@@ -707,7 +712,7 @@ fn fun_annotation_public_with_effects() {
             public, effects, ..
         } => {
             assert!(public);
-            assert_eq!(effects, &vec!["Console".to_string()]);
+            assert_eq!(effect_names(effects), vec!["Console"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
     }
@@ -728,7 +733,7 @@ fn fun_annotation_unit_param() {
             assert_eq!(params.len(), 1);
             assert_eq!(params[0].0, "_");
             assert_eq!(params[0].1, TypeExpr::Named("Unit".into()));
-            assert_eq!(effects, &vec!["Log".to_string()]);
+            assert_eq!(effect_names(effects), vec!["Log"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
     }
@@ -1200,7 +1205,7 @@ fn handler_def_simple() {
             ..
         } => {
             assert_eq!(name, "console_log");
-            assert_eq!(effects, &["Log"]);
+            assert_eq!(effect_names(effects), vec!["Log"]);
             assert_eq!(arms.len(), 1);
             assert_eq!(arms[0].op_name, "log");
             assert_eq!(arms[0].params, vec!["level", "msg"]);
@@ -1242,7 +1247,7 @@ fn handler_def_multi_effect() {
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::HandlerDef { effects, arms, .. } => {
-            assert_eq!(effects, &["Log", "Http"]);
+            assert_eq!(effect_names(effects), vec!["Log", "Http"]);
             assert_eq!(arms.len(), 2);
         }
         _ => panic!("expected HandlerDef, got {:?}", decls[0]),
@@ -1264,8 +1269,8 @@ fn handler_def_with_needs() {
             ..
         } => {
             assert_eq!(name, "stripe");
-            assert_eq!(effects, &["Billing"]);
-            assert_eq!(needs, &["Log", "Http"]);
+            assert_eq!(effect_names(effects), vec!["Billing"]);
+            assert_eq!(effect_names(needs), vec!["Log", "Http"]);
             assert_eq!(arms.len(), 1);
             assert_eq!(arms[0].op_name, "charge");
         }
@@ -1291,7 +1296,7 @@ fn handler_def_needs_trailing_comma() {
         parse("handler stripe for Billing needs {Log, Http,} {\n  charge a b -> resume ()\n}");
     match &decls[0] {
         Decl::HandlerDef { needs, .. } => {
-            assert_eq!(needs, &["Log", "Http"]);
+            assert_eq!(effect_names(needs), vec!["Log", "Http"]);
         }
         _ => panic!("expected HandlerDef"),
     }
@@ -1481,7 +1486,7 @@ fn fun_annotation_needs_and_where() {
             where_clause,
             ..
         } => {
-            assert_eq!(effects, &["Log"]);
+            assert_eq!(effect_names(effects), vec!["Log"]);
             assert_eq!(where_clause.len(), 1);
             assert_eq!(where_clause[0].type_var, "a");
         }
@@ -1574,7 +1579,7 @@ fn impl_def_with_needs() {
         } => {
             assert_eq!(trait_name, "Store");
             assert_eq!(target_type, "Redis");
-            assert_eq!(needs, &["Http", "Fail"]);
+            assert_eq!(effect_names(needs), vec!["Http", "Fail"]);
             assert_eq!(methods.len(), 1);
             assert_eq!(methods[0].0, "get");
         }
@@ -1956,4 +1961,74 @@ fn compose_backward() {
 fn compose_chain() {
     // f >> g >> h parses without error (left-associative)
     parse_expr("f >> g >> h");
+}
+
+// --- Generic effects ---
+
+#[test]
+fn effect_def_with_type_params() {
+    let decls = parse("effect State s {\n  fun get () -> s\n  fun put (val: s) -> Unit\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::EffectDef {
+            name, type_params, operations, ..
+        } => {
+            assert_eq!(name, "State");
+            assert_eq!(type_params, &["s"]);
+            assert_eq!(operations.len(), 2);
+            assert_eq!(operations[0].name, "get");
+            assert_eq!(operations[1].name, "put");
+        }
+        _ => panic!("expected EffectDef"),
+    }
+}
+
+#[test]
+fn handler_for_parameterized_effect() {
+    let decls = parse("handler counter for State Int {\n  get () -> resume 0\n  put val -> resume ()\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::HandlerDef {
+            name, effects, arms, ..
+        } => {
+            assert_eq!(name, "counter");
+            assert_eq!(effects.len(), 1);
+            assert_eq!(effects[0].name, "State");
+            assert_eq!(effects[0].type_args.len(), 1);
+            assert_eq!(effects[0].type_args[0], TypeExpr::Named("Int".into()));
+            assert_eq!(arms.len(), 2);
+        }
+        _ => panic!("expected HandlerDef"),
+    }
+}
+
+#[test]
+fn fun_annotation_needs_parameterized_effect() {
+    let decls = parse("fun foo () -> Int needs {State Int}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::FunAnnotation { effects, .. } => {
+            assert_eq!(effects.len(), 1);
+            assert_eq!(effects[0].name, "State");
+            assert_eq!(effects[0].type_args.len(), 1);
+            assert_eq!(effects[0].type_args[0], TypeExpr::Named("Int".into()));
+        }
+        _ => panic!("expected FunAnnotation"),
+    }
+}
+
+#[test]
+fn needs_mixed_parameterized_and_plain() {
+    let decls = parse("fun foo () -> Int needs {State Int, Log}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::FunAnnotation { effects, .. } => {
+            assert_eq!(effects.len(), 2);
+            assert_eq!(effects[0].name, "State");
+            assert_eq!(effects[0].type_args.len(), 1);
+            assert_eq!(effects[1].name, "Log");
+            assert_eq!(effects[1].type_args.len(), 0);
+        }
+        _ => panic!("expected FunAnnotation"),
+    }
 }

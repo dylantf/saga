@@ -830,12 +830,14 @@ impl Checker {
 
         // Infer the inner expression, tracking its effects separately
         let saved_effects = std::mem::take(&mut self.current_effects);
+        let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
         let expr_ty = self.infer_expr(expr)?;
         // Subtract handled effects from the inner expression's effects
         for eff in &handled {
             self.current_effects.remove(eff);
         }
         let inner_effects = std::mem::replace(&mut self.current_effects, saved_effects);
+        self.effect_type_param_cache = saved_effect_cache;
         self.current_effects.extend(inner_effects);
 
         let with_span = expr.span();
@@ -967,8 +969,8 @@ impl Checker {
         {
             return Some(effect_name.to_string());
         }
-        for (effect_name, ops) in &self.effects {
-            if ops.iter().any(|o| o.name == op_name) {
+        for (effect_name, info) in &self.effects {
+            if info.ops.iter().any(|o| o.name == op_name) {
                 return Some(effect_name.clone());
             }
         }
@@ -1000,7 +1002,42 @@ impl Checker {
         handled
     }
 
+    /// Instantiate an effect op signature, reusing cached type param vars for the same effect
+    /// within the current function scope. This ensures `get` and `put` from `State s` share `s`.
+    fn instantiate_effect_op(
+        &mut self,
+        effect_name: &str,
+        op: &EffectOpSig,
+        type_params: &[u32],
+    ) -> EffectOpSig {
+        if type_params.is_empty() {
+            return op.clone();
+        }
+        // Reuse cached mapping or create fresh vars
+        let mapping = if let Some(cached) = self.effect_type_param_cache.get(effect_name) {
+            cached.clone()
+        } else {
+            let mapping: std::collections::HashMap<u32, Type> = type_params
+                .iter()
+                .map(|&old_id| (old_id, self.fresh_var()))
+                .collect();
+            self.effect_type_param_cache
+                .insert(effect_name.to_string(), mapping.clone());
+            mapping
+        };
+        EffectOpSig {
+            name: op.name.clone(),
+            params: op
+                .params
+                .iter()
+                .map(|t| self.replace_vars(t, &mapping))
+                .collect(),
+            return_type: self.replace_vars(&op.return_type, &mapping),
+        }
+    }
+
     /// Look up an effect operation by name, optionally qualified (e.g. `Cache.get`).
+    /// Returns the op signature with fresh type vars for the effect's type params.
     pub(crate) fn lookup_effect_op(
         &mut self,
         op_name: &str,
@@ -1008,21 +1045,22 @@ impl Checker {
         span: Span,
     ) -> Result<EffectOpSig, TypeError> {
         if let Some(effect_name) = qualifier {
-            let ops = self
+            let info = self
                 .effects
                 .get(effect_name)
-                .ok_or_else(|| TypeError::at(span, format!("undefined effect: {}", effect_name)))?;
-            let op = ops.iter().find(|o| o.name == op_name).ok_or_else(|| {
+                .ok_or_else(|| TypeError::at(span, format!("undefined effect: {}", effect_name)))?
+                .clone();
+            let op = info.ops.iter().find(|o| o.name == op_name).ok_or_else(|| {
                 TypeError::at(
                     span,
                     format!("effect '{}' has no operation '{}'", effect_name, op_name),
                 )
             })?;
-            Ok(op.clone())
+            Ok(self.instantiate_effect_op(effect_name, op, &info.type_params))
         } else {
-            let mut found: Option<EffectOpSig> = None;
-            for ops in self.effects.values() {
-                if let Some(op) = ops.iter().find(|o| o.name == op_name) {
+            let mut found: Option<(String, EffectOpSig, Vec<u32>)> = None;
+            for (eff_name, info) in &self.effects {
+                if let Some(op) = info.ops.iter().find(|o| o.name == op_name) {
                     if found.is_some() {
                         return Err(TypeError::at(
                             span,
@@ -1032,12 +1070,13 @@ impl Checker {
                             ),
                         ));
                     }
-                    found = Some(op.clone());
+                    found = Some((eff_name.clone(), op.clone(), info.type_params.clone()));
                 }
             }
-            found.ok_or_else(|| {
+            let (eff_name, op, type_params) = found.ok_or_else(|| {
                 TypeError::at(span, format!("undefined effect operation: {}", op_name))
-            })
+            })?;
+            Ok(self.instantiate_effect_op(&eff_name, &op, &type_params))
         }
     }
 }

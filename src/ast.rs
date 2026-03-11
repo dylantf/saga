@@ -2,6 +2,14 @@ use crate::token::Span;
 
 pub type Program = Vec<Decl>;
 
+/// A reference to an effect, optionally with type arguments.
+/// e.g. `Log` (no args), `State Int`, `State (MVector a)`
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectRef {
+    pub name: String,
+    pub type_args: Vec<TypeExpr>,
+}
+
 // --- Top-level ---
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,7 +31,7 @@ pub enum Decl {
         name: String,
         params: Vec<(String, TypeExpr)>,
         return_type: TypeExpr,
-        effects: Vec<String>,
+        effects: Vec<EffectRef>,
         /// `where {a: Show + Eq, b: Ord}` - trait bounds on type variables
         where_clause: Vec<TraitBound>,
         span: Span,
@@ -63,19 +71,22 @@ pub enum Decl {
     },
 
     /// `effect Console { fun print (msg: String) -> Unit }`
+    /// `effect State s { fun get () -> s; fun put (val: s) -> Unit }`
     EffectDef {
         public: bool,
         name: String,
+        type_params: Vec<String>,
         operations: Vec<EffectOp>,
         span: Span,
     },
 
     /// `handler console_log for Log needs {Http} { ... }`
+    /// `handler counter for State Int { ... }`
     HandlerDef {
         public: bool,
         name: String,
-        effects: Vec<String>,
-        needs: Vec<String>,
+        effects: Vec<EffectRef>,
+        needs: Vec<EffectRef>,
         arms: Vec<HandlerArm>,
         /// `return value -> Ok(value)` clause
         return_clause: Option<Box<HandlerArm>>,
@@ -99,7 +110,7 @@ pub enum Decl {
         target_type: String,
         type_params: Vec<String>,
         where_clause: Vec<TraitBound>,
-        needs: Vec<String>,
+        needs: Vec<EffectRef>,
         methods: Vec<(String, Vec<Pat>, Expr)>,
         span: Span,
     },
@@ -371,8 +382,8 @@ pub enum TypeExpr {
     /// `Option a`, `Result a e`
     App(Box<TypeExpr>, Box<TypeExpr>),
 
-    /// `a -> b` or `a -> b needs {Eff}`
-    Arrow(Box<TypeExpr>, Box<TypeExpr>, Vec<String>),
+    /// `a -> b` or `a -> b needs {Eff}` or `a -> b needs {State Int}`
+    Arrow(Box<TypeExpr>, Box<TypeExpr>, Vec<EffectRef>),
 }
 
 // --- Supporting types ---

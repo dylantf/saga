@@ -5,10 +5,10 @@ use crate::token::Span;
 fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
     if module_path.len() == 2 && module_path[0] == "Std" {
         match module_path[1].as_str() {
-            "Maybe"  => Some(include_str!("../prelude/Std/Maybe.dy")),
+            "Maybe" => Some(include_str!("../prelude/Std/Maybe.dy")),
             "Result" => Some(include_str!("../prelude/Std/Result.dy")),
-            "List"   => Some(include_str!("../prelude/Std/List.dy")),
-            "Bool"   => Some(include_str!("../prelude/Std/Bool.dy")),
+            "List" => Some(include_str!("../prelude/Std/List.dy")),
+            "Bool" => Some(include_str!("../prelude/Std/Bool.dy")),
             _ => None,
         }
     } else {
@@ -17,11 +17,19 @@ fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
 }
 
 /// Maps type names to their constructor names, for `type T` hoist support.
-fn type_constructors(program: &[crate::ast::Decl]) -> std::collections::HashMap<String, Vec<String>> {
+fn type_constructors(
+    program: &[crate::ast::Decl],
+) -> std::collections::HashMap<String, Vec<String>> {
     use crate::ast::Decl;
     let mut map = std::collections::HashMap::new();
     for decl in program {
-        if let Decl::TypeDef { public: true, name, variants, .. } = decl {
+        if let Decl::TypeDef {
+            public: true,
+            name,
+            variants,
+            ..
+        } = decl
+        {
             let ctors: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
             map.insert(name.clone(), ctors);
         }
@@ -59,9 +67,24 @@ impl Checker {
 
         // Cache hit: inject cached bindings
         if let Some(cached) = self.tc_loaded.get(&module_name).cloned() {
-            let cached_ctors = self.tc_type_ctors.get(&module_name).cloned().unwrap_or_default();
-            let cached_records = self.tc_record_defs.get(&module_name).cloned().unwrap_or_default();
-            self.inject_module_types(&cached, &cached_ctors, &cached_records, &prefix, exposing, span)?;
+            let cached_ctors = self
+                .tc_type_ctors
+                .get(&module_name)
+                .cloned()
+                .unwrap_or_default();
+            let cached_records = self
+                .tc_record_defs
+                .get(&module_name)
+                .cloned()
+                .unwrap_or_default();
+            self.inject_module_types(
+                &cached,
+                &cached_ctors,
+                &cached_records,
+                &prefix,
+                exposing,
+                span,
+            )?;
             return Ok(());
         }
 
@@ -152,14 +175,11 @@ impl Checker {
             std::collections::HashMap::new();
         for decl in &program {
             if let crate::ast::Decl::RecordDef {
-                public: true,
-                name,
-                ..
+                public: true, name, ..
             } = decl
+                && let Some(fields) = mod_checker.records.get(name.as_str())
             {
-                if let Some(fields) = mod_checker.records.get(name.as_str()) {
-                    pub_records.insert(name.clone(), fields.clone());
-                }
+                pub_records.insert(name.clone(), fields.clone());
             }
         }
 
@@ -245,12 +265,12 @@ impl Checker {
                         }
                     }
                     // If the exposed name is a constructor (not a type), also add to constructors
-                    if ctor_to_type.contains_key(name.as_str()) {
-                        if let Some(&scheme) = binding_map.get(name.as_str()) {
-                            self.env.insert(name.clone(), scheme.clone());
-                            self.constructors.insert(name.clone(), scheme.clone());
-                            found = true;
-                        }
+                    if ctor_to_type.contains_key(name.as_str())
+                        && let Some(&scheme) = binding_map.get(name.as_str())
+                    {
+                        self.env.insert(name.clone(), scheme.clone());
+                        self.constructors.insert(name.clone(), scheme.clone());
+                        found = true;
                     }
                     if !found {
                         return Err(TypeError::at(
@@ -261,7 +281,9 @@ impl Checker {
                 } else {
                     let qualified = format!("{}.{}", prefix, name);
                     match self.env.get(&qualified).cloned() {
-                        Some(scheme) => { self.env.insert(name.clone(), scheme); }
+                        Some(scheme) => {
+                            self.env.insert(name.clone(), scheme);
+                        }
                         None => {
                             return Err(TypeError::at(
                                 span,
@@ -291,6 +313,7 @@ fn collect_codegen_info(
             Decl::EffectDef {
                 public: true,
                 name,
+                type_params,
                 operations,
                 ..
             } => {
@@ -298,7 +321,7 @@ fn collect_codegen_info(
                     .iter()
                     .map(|op| (op.name.clone(), op.params.len()))
                     .collect();
-                effect_defs.push((name.clone(), ops));
+                effect_defs.push((name.clone(), ops, type_params.len()));
             }
             Decl::RecordDef {
                 public: true,
@@ -310,9 +333,7 @@ fn collect_codegen_info(
                 record_fields.push((name.clone(), field_names));
             }
             Decl::HandlerDef {
-                public: true,
-                name,
-                ..
+                public: true, name, ..
             } => {
                 handler_defs.push(name.clone());
             }

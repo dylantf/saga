@@ -2218,3 +2218,367 @@ fn pure_guard_still_works() {
     )
     .is_ok());
 }
+
+// --- Generic effects ---
+
+#[test]
+fn generic_effect_basic() {
+    // effect State s with get/put, handler for State Int, function using it
+    assert!(check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+handler counter for State Int {
+  get () -> resume 0
+  put val -> resume ()
+}
+
+fun use_state () -> Unit needs {State}
+use_state () = {
+  let x = get! ()
+  put! (x + 1)
+}"
+    )
+    .is_ok());
+}
+
+#[test]
+fn generic_effect_type_shared_across_ops() {
+    // get returns s, put takes s -- they must agree
+    // Here the handler says State Int, so get returns Int and put takes Int
+    assert!(check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+handler string_state for State String {
+  get () -> resume \"hello\"
+  put val -> resume ()
+}
+
+fun use_string_state () -> Unit needs {State}
+use_string_state () = {
+  let s = get! ()
+  put! (s <> \" world\")
+}"
+    )
+    .is_ok());
+}
+
+#[test]
+fn non_parameterized_effects_still_work() {
+    // Existing non-parameterized effects should work exactly as before
+    assert!(check(
+        "effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler console for Log {
+  log msg -> resume ()
+}
+
+fun work () -> Unit needs {Log}
+work () = log! \"hello\""
+    )
+    .is_ok());
+}
+
+#[test]
+fn generic_effect_handler_type_mismatch() {
+    // Handler declares State Int but resumes with a String -- should fail
+    let result = check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+handler bad for State Int {
+  get () -> resume \"not an int\"
+  put val -> resume ()
+}",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn generic_effect_get_infers_type() {
+    // get! returns s, and adding 1 to it constrains s to Int
+    assert!(check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+fun inc () -> Unit needs {State}
+inc () = {
+  let x = get! ()
+  put! (x + 1)
+}"
+    )
+    .is_ok());
+}
+
+#[test]
+fn generic_effect_put_get_type_mismatch() {
+    // get returns s, put takes s -- using get as Int then putting a String should fail
+    let result = check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+fun bad () -> Unit needs {State}
+bad () = {
+  let x = get! ()
+  let _ = x + 1
+  put! \"hello\"
+}",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn generic_effect_multiple_type_params() {
+    // Effect with two type params
+    assert!(check(
+        "effect Store k v {
+  fun read (key: k) -> v
+  fun write (key: k) (val: v) -> Unit
+}
+
+handler dict_store for Store String Int {
+  read key -> resume 0
+  write key val -> resume ()
+}"
+    )
+    .is_ok());
+}
+
+#[test]
+fn generic_effect_with_existing_effects() {
+    // Generic and non-generic effects together
+    assert!(check(
+        "effect Log {
+  fun log (msg: String) -> Unit
+}
+
+effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+fun work () -> Unit needs {Log, State}
+work () = {
+  log! \"starting\"
+  let x = get! ()
+  put! (x + 1)
+  log! \"done\"
+}"
+    )
+    .is_ok());
+}
+
+#[test]
+fn generic_effect_independent_across_functions() {
+    // Two functions can use the same generic effect at different types
+    assert!(check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+fun use_int () -> Unit needs {State}
+use_int () = {
+  let x = get! ()
+  put! (x + 1)
+}
+
+fun use_string () -> Unit needs {State}
+use_string () = {
+  let s = get! ()
+  put! (s <> \"!\")
+}"
+    )
+    .is_ok());
+}
+
+#[test]
+fn generic_effect_put_then_get() {
+    // Inference works when put constrains the type first, then get uses it
+    assert!(check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+fun put_then_get () -> Int needs {State}
+put_then_get () = {
+  put! 42
+  get! ()
+}"
+    )
+    .is_ok());
+}
+
+#[test]
+fn generic_effect_put_then_get_mismatch() {
+    // put constrains s to Int, but return type is String -- should fail
+    let result = check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+fun bad () -> String needs {State}
+bad () = {
+  put! 42
+  get! ()
+}",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn generic_effect_complex_type_param() {
+    // Type param can be a complex type like List Int
+    assert!(check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+type List a { Nil | Cons(a, List a) }
+
+handler list_state for State (List Int) {
+  get () -> resume Nil
+  put val -> resume ()
+}"
+    )
+    .is_ok());
+}
+
+#[test]
+fn generic_effect_handler_return_clause() {
+    // Return clause should work with the specialized type
+    assert!(check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+type Result a { Ok(a) | Err(String) }
+
+handler safe_state for State Int {
+  get () -> resume 0
+  put val -> resume ()
+  return value -> Ok(value)
+}"
+    )
+    .is_ok());
+}
+
+#[test]
+fn generic_effect_op_with_function_param() {
+    // Effect op that takes a function over the type param
+    assert!(check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+  fun modify (f: s -> s) -> Unit
+}
+
+handler counter for State Int {
+  get () -> resume 0
+  put val -> resume ()
+  modify f -> resume ()
+}
+
+fun use_modify () -> Unit needs {State}
+use_modify () = {
+  put! 10
+  modify! (fun x -> x + x)
+}",
+    )
+    .is_ok());
+}
+
+#[test]
+fn generic_effect_op_with_function_param_mismatch() {
+    // modify takes (s -> s) but lambda has wrong type
+    let result = check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+  fun modify (f: s -> s) -> Unit
+}
+
+fun bad () -> Unit needs {State}
+bad () = {
+  put! 42
+  modify! (fun x -> \"not an int\")
+}",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn generic_effect_multi_param_partial_mismatch() {
+    // Store k v: read constrains v to Int, write uses String for v -- should fail
+    let result = check(
+        "effect Store k v {
+  fun read (key: k) -> v
+  fun write (key: k) (val: v) -> Unit
+}
+
+fun bad () -> Unit needs {Store}
+bad () = {
+  let x = read! \"key\"
+  let _ = x + 1
+  write! \"key\" \"not an int\"
+}",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn generic_effect_with_scopes_independent() {
+    // Effect type params should be independent across with scopes
+    assert!(check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+handler int_state for State Int {
+  get () -> resume 0
+  put val -> resume ()
+}
+
+handler string_state for State String {
+  get () -> resume \"\"
+  put val -> resume ()
+}
+
+fun use_int () -> Unit needs {State}
+use_int () = {
+  let x = get! ()
+  put! (x + 1)
+}
+
+fun use_string () -> Unit needs {State}
+use_string () = {
+  let s = get! ()
+  put! (s <> \"!\")
+}
+
+fun main () -> Unit
+main () = {
+  use_int () with int_state
+  use_string () with string_state
+}"
+    )
+    .is_ok());
+}

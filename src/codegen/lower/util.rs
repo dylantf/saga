@@ -88,7 +88,7 @@ pub(super) fn collect_fun_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
 
 /// Like `collect_fun_call`, but for qualified names (`Module.func arg1 arg2`).
 /// Returns `Some((module, func_name, args))` if the head is a QualifiedName.
-pub(super) fn collect_qualified_call<'a>(expr: &'a Expr) -> Option<(&'a str, &'a str, Vec<&'a Expr>)> {
+pub(super) fn collect_qualified_call(expr: &Expr) -> Option<(&str, &str, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
@@ -196,7 +196,7 @@ fn branch_has_effect(expr: &Expr) -> bool {
 pub(super) fn collect_type_effects(ty: &TypeExpr) -> BTreeSet<String> {
     match ty {
         TypeExpr::Arrow(from, to, needs) => {
-            let mut effects: BTreeSet<String> = needs.iter().cloned().collect();
+            let mut effects: BTreeSet<String> = needs.iter().map(|e| e.name.clone()).collect();
             effects.extend(collect_type_effects(from));
             effects.extend(collect_type_effects(to));
             effects
@@ -244,4 +244,3 @@ pub(super) fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
     }
     (arity, effects.into_iter().collect())
 }
-
