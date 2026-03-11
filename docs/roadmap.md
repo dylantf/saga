@@ -42,6 +42,10 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `needs` effect set tracking (direct calls, propagation, `with` subtraction, HOF absorption)
 - [x] `Type::EffArrow` for annotated callback parameters
 - [x] Disallow effect invocations in guard expressions
+- [x] Prelude substitution leak: module checkers started at `next_var: 0`, causing var ID
+  collisions with the parent checker. Imported scheme types resolved through the parent's
+  substitution, creating phantom dependencies that blocked generalization of polymorphic
+  functions like `run_state`. Fixed by starting module checkers at the parent's `next_var`.
 
 ## Traits / Impls
 

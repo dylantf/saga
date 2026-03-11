@@ -1,0 +1,50 @@
+# State effect quicksort (simplified)
+#
+# Demonstrates generic effects with State s.
+# Uses List as the state type since MVector is not yet implemented.
+# This version uses top-level helpers since local function defs aren't supported yet.
+
+effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+# A simple counter using State Int
+fun count_up (n: Int) -> Int needs {State Int}
+count_up n =
+  if n == 0 then get! ()
+  else {
+    let x = get! ()
+    put! (x + 1)
+    count_up (n - 1)
+  }
+
+# Accumulate strings using State String
+fun greet (name: String) -> String needs {State String}
+greet name = {
+  let acc = get! ()
+  put! (acc <> "Hello, " <> name <> "! ")
+  get! ()
+}
+
+# Stateless handlers (each get returns the initial value)
+# Real state-threading handlers need recursive continuation passing,
+# which is future work.
+
+handler counter for State Int {
+  get () -> resume 0
+  put val -> resume ()
+}
+
+handler string_acc for State String {
+  get () -> resume ""
+  put val -> resume ()
+}
+
+main () = {
+  let n = count_up 5 with counter
+  print n
+
+  let msg = greet "world" with string_acc
+  print msg
+}

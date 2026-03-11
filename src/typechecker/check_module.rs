@@ -121,6 +121,9 @@ impl Checker {
             Some(root) => super::Checker::with_project_root(root),
             None => super::Checker::new(),
         };
+        // Start the module checker's var IDs after the parent's current counter
+        // to avoid var ID collisions when module schemes are injected into the parent.
+        mod_checker.next_var = self.next_var;
         // Share the module cache so transitive imports benefit from caching
         mod_checker.tc_loaded = self.tc_loaded.clone();
         mod_checker.tc_type_ctors = self.tc_type_ctors.clone();
@@ -181,6 +184,11 @@ impl Checker {
             {
                 pub_records.insert(name.clone(), fields.clone());
             }
+        }
+
+        // Advance the parent's var counter past the module's to keep IDs disjoint.
+        if mod_checker.next_var > self.next_var {
+            self.next_var = mod_checker.next_var;
         }
 
         self.tc_loading.remove(&module_name);

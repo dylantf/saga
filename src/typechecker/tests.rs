@@ -2633,3 +2633,70 @@ bad () = {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn generic_effect_needs_type_var_from_annotation() {
+    // needs {State a} where a is a type var from the function signature
+    // should link the effect's type param to the function's type param
+    let result = check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+fun transform (f: a -> a) -> a needs {State a}
+transform f = {
+  let x = get! ()
+  let y = f x
+  put! y
+  y
+}",
+    );
+    if let Err(e) = &result {
+        eprintln!("ERROR: {:?}", e);
+    }
+    assert!(result.is_ok());
+}
+
+#[test]
+fn generic_effect_needs_type_var_mismatch() {
+    // needs {State a} but body treats a as both Int (s+1) and String (put! "hello")
+    let result = check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+fun bad (x: a) -> Int needs {State a}
+bad x = {
+  let s = get! ()
+  put! \"hello\"
+  s + 1
+}",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn generic_effect_effarrow_polymorphic_hof() {
+    // A polymorphic HOF that takes an effectful callback and returns a type var
+    // should be callable at different types (regression: EffArrow + return type var
+    // caused generalization failure when prelude is loaded)
+    assert!(check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+fun run_state (init: s) (f: () -> a needs {State s}) -> (a, s)
+run_state init f = (f (), init)
+
+fun use_it () -> Int
+use_it () = {
+  let (a, _) = run_state 0 (fun () -> get! ())
+  let (b, _) = run_state \"\" (fun () -> get! ())
+  a
+}",
+    )
+    .is_ok());
+}

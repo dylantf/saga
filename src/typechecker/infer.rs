@@ -146,6 +146,7 @@ impl Checker {
 
             Expr::Lambda { params, body, .. } => {
                 let saved_env = self.env.clone();
+                let saved_effect_cache = self.effect_type_param_cache.clone();
                 let mut param_types = Vec::new();
                 for pat in params {
                     let ty = self.fresh_var();
@@ -157,6 +158,7 @@ impl Checker {
                 // by `with` handlers, same as any other expression.
                 let body_ty = self.infer_expr(body)?;
                 self.env = saved_env;
+                self.effect_type_param_cache = saved_effect_cache;
                 // Build curried arrow: a -> b -> c -> ret
                 let mut result = body_ty;
                 for param_ty in param_types.into_iter().rev() {
