@@ -97,6 +97,22 @@ impl Checker {
                         name.clone(),
                         effects.iter().map(|e| e.name.clone()).collect(),
                     );
+                    // Store effect type arg constraints for pre-populating the cache
+                    let mut constraints = Vec::new();
+                    for eff in effects {
+                        if !eff.type_args.is_empty() {
+                            let concrete_types: Vec<Type> = eff
+                                .type_args
+                                .iter()
+                                .map(|ta| self.convert_type_expr(ta, &mut params_list))
+                                .collect();
+                            constraints.push((eff.name.clone(), concrete_types));
+                        }
+                    }
+                    if !constraints.is_empty() {
+                        self.fun_effect_type_constraints
+                            .insert(name.clone(), constraints);
+                    }
                 }
 
                 // Process where clause into (trait_name, var_id) constraints
@@ -295,6 +311,22 @@ impl Checker {
         let saved_effects = std::mem::take(&mut self.current_effects);
         let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
         let saved_field_candidates = std::mem::take(&mut self.field_candidates);
+
+        // Pre-populate effect type param cache from annotation constraints (e.g. needs {State Int})
+        if let Some(constraints) = self.fun_effect_type_constraints.get(name).cloned() {
+            for (effect_name, concrete_types) in &constraints {
+                if let Some(info) = self.effects.get(effect_name).cloned() {
+                    let mapping: std::collections::HashMap<u32, Type> = info
+                        .type_params
+                        .iter()
+                        .zip(concrete_types.iter())
+                        .map(|(&param_id, ty)| (param_id, ty.clone()))
+                        .collect();
+                    self.effect_type_param_cache
+                        .insert(effect_name.clone(), mapping);
+                }
+            }
+        }
 
         for clause in clauses {
             let Decl::FunBinding {

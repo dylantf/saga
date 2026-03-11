@@ -365,6 +365,8 @@ pub struct Checker {
     pub(crate) effect_type_param_cache: HashMap<String, HashMap<u32, Type>>,
     /// Known effect requirements for named functions: name -> set of effect names
     pub(crate) fun_effects: HashMap<String, HashSet<String>>,
+    /// Annotation-provided effect type constraints: fn name -> [(effect_name, [concrete types])]
+    pub(crate) fun_effect_type_constraints: HashMap<String, Vec<(String, Vec<Type>)>>,
     /// Trait definitions: trait name -> info
     pub(crate) traits: HashMap<String, TraitInfo>,
     /// Impl registry: (trait_name, target_type) -> impl info
@@ -415,6 +417,7 @@ impl Checker {
             current_effects: HashSet::new(),
             effect_type_param_cache: HashMap::new(),
             fun_effects: HashMap::new(),
+            fun_effect_type_constraints: HashMap::new(),
             traits: HashMap::new(),
             trait_impls: HashMap::new(),
             pending_constraints: Vec::new(),

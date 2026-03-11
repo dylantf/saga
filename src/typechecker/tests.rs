@@ -2582,3 +2582,54 @@ main () = {
     )
     .is_ok());
 }
+
+#[test]
+fn generic_effect_needs_type_arg_constrains_body() {
+    // needs {State Int} should constrain s=Int, so put! "hello" should fail
+    let result = check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+fun bad () -> Unit needs {State Int}
+bad () = put! \"hello\"",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn generic_effect_needs_type_arg_allows_matching_usage() {
+    // needs {State Int} with consistent Int usage should pass
+    assert!(check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+fun good () -> Unit needs {State Int}
+good () = {
+  let x = get! ()
+  put! (x + 1)
+}"
+    )
+    .is_ok());
+}
+
+#[test]
+fn generic_effect_needs_type_arg_get_returns_correct_type() {
+    // needs {State String} means get! returns String, so adding 1 should fail
+    let result = check(
+        "effect State s {
+  fun get () -> s
+  fun put (val: s) -> Unit
+}
+
+fun bad () -> Int needs {State String}
+bad () = {
+  let x = get! ()
+  x + 1
+}",
+    );
+    assert!(result.is_err());
+}
