@@ -1,0 +1,60 @@
+# In-place quicksort without mutation
+#
+# Assumes the prelude provides:
+#
+#   effect State s {
+#     fun get () -> s
+#     fun put (val: s) -> Unit
+#   }
+#
+#   fun run_state (initial: s) (f: () -> a needs {State s}) -> (a, s)
+#
+# MVector a is an opaque type -- inert without State.
+# Its operations all require State (MVector a):
+#
+#   MVector.from_list : List a -> MVector a
+#   MVector.to_list   : MVector a -> List a needs {State (MVector a)}
+#   MVector.read      : MVector a -> Int -> a needs {State (MVector a)}
+#   MVector.swap      : MVector a -> Int -> Int -> Unit needs {State (MVector a)}
+#   MVector.length    : MVector a -> Int
+
+fun partition (v: MVector Int) (lo: Int) (hi: Int) -> Int needs {State (MVector Int)}
+partition v lo hi = {
+  let pivot = MVector.read! v hi
+  let loop i j =
+    if j >= hi then { MVector.swap! v i hi; i }
+    else if MVector.read! v j < pivot then {
+      MVector.swap! v i j
+      loop (i + 1) (j + 1)
+    } else loop i (j + 1)
+  loop lo lo
+}
+
+fun quicksort (v: MVector Int) (lo: Int) (hi: Int) -> Unit needs {State (MVector Int)}
+quicksort v lo hi =
+  if lo >= hi then ()
+  else {
+    let pivot_idx = partition v lo hi
+    quicksort v lo (pivot_idx - 1)
+    quicksort (pivot_idx + 1) hi
+  }
+
+fun sort (xs: List Int) -> List Int
+sort xs = {
+  let v = MVector.from_list xs
+  let (result, _) = run_state v (fun () -> {
+    quicksort v 0 (MVector.length v - 1)
+    MVector.to_list v
+  })
+  result
+}
+
+main () = {
+  let xs = [3, 6, 1, 8, 2, 9, 4, 7, 5]
+  print ("input:  " <> show xs)
+  print ("sorted: " <> show (sort xs))
+
+  let ys = [42, 17, 99, 3, 55, 1]
+  print ("input:  " <> show ys)
+  print ("sorted: " <> show (sort ys))
+}

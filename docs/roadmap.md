@@ -185,6 +185,15 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [ ] Benchmark trait dictionary passing overhead vs. Erlang direct dispatch
 - [ ] Profile generated Core Erlang for unnecessary intermediate `let` bindings (peephole cleanup pass)
 
+## Upcoming
+
+- [ ] Generic effects (`effect State s { fun get () -> s; fun put (val: s) -> Unit }`)
+  - Parser: type params on effect declarations (mirror trait syntax)
+  - Type checker: link type vars across operations within a handler, unify `needs {State Int}` etc.
+  - Handlers: `handler counter for State Int { ... }` binds the type param
+  - Enables prelude-provided `State s`, `MVector` backed by BEAM arrays
+- [ ] Local function definitions (`let f x = ...` inside a block, with recursion + closure capture)
+
 ## Maybe
 
 - Higher-kinded types (`* -> *`, enables `Functor`, `Applicative`)
