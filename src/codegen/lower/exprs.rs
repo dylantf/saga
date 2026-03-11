@@ -25,7 +25,7 @@ fn is_guard_safe(expr: &Expr) -> bool {
     }
 }
 
-impl Lowerer {
+impl<'a> Lowerer<'a> {
     /// Lower a list of case arms, handling complex guards by desugaring them
     /// into conditional expressions inside the arm body.
     ///

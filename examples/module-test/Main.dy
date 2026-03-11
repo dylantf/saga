@@ -1,0 +1,10 @@
+module Main
+
+import MathLib (add, double)
+
+pub fun main () -> Unit
+main () = {
+  print (add 10 20)
+  print (double 7)
+  print (MathLib.add 100 200)
+}

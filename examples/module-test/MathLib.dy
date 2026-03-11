@@ -1,0 +1,7 @@
+module MathLib
+
+pub fun add (a: Int) (b: Int) -> Int
+add a b = a + b
+
+pub fun double (x: Int) -> Int
+double x = add x x

@@ -4,12 +4,13 @@ mod util;
 
 use crate::ast::{self, Decl, Expr, HandlerArm, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
+use crate::typechecker::ModuleCodegenInfo;
 use std::collections::HashMap;
 
 use pats::{lower_params, lower_pat};
 use util::{
-    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_type_effects,
-    core_var, field_access_record_name, lower_lit,
+    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_qualified_call,
+    collect_type_effects, core_var, field_access_record_name, lower_lit,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -28,8 +29,17 @@ struct EffectInfo {
     ops: HashMap<String, usize>,
 }
 
-pub struct Lowerer {
+pub struct Lowerer<'a> {
     counter: usize,
+    /// Codegen info for imported modules (from typechecker cache).
+    codegen_info: &'a HashMap<String, ModuleCodegenInfo>,
+    /// Maps module alias/name used in source -> Erlang module atom name.
+    module_aliases: HashMap<String, String>,
+    /// Maps unqualified imported name -> (erlang_module, original_name).
+    /// For exposed imports like `import Math (add)`, `add` maps to `("math", "add")`.
+    imported_names: HashMap<String, (String, String)>,
+    /// Names declared as `pub` in the current module (for export filtering).
+    pub_names: std::collections::HashSet<String>,
     /// Maps record name -> ordered field names (from RecordDef declarations).
     record_fields: HashMap<String, Vec<String>>,
     /// Maps top-level function name -> its exported arity (including handler params).
@@ -69,10 +79,14 @@ pub struct Lowerer {
     current_handler_k: Option<String>,
 }
 
-impl Lowerer {
-    pub fn new() -> Self {
+impl<'a> Lowerer<'a> {
+    pub fn new(codegen_info: &'a HashMap<String, ModuleCodegenInfo>) -> Self {
         Lowerer {
             counter: 0,
+            codegen_info,
+            module_aliases: HashMap::new(),
+            imported_names: HashMap::new(),
+            pub_names: std::collections::HashSet::new(),
             record_fields: HashMap::new(),
             top_level_funs: HashMap::new(),
             effect_defs: HashMap::new(),
@@ -131,11 +145,15 @@ impl Lowerer {
                     );
                 }
                 Decl::FunAnnotation {
+                    public,
                     name,
                     effects,
                     params,
                     ..
                 } => {
+                    if *public {
+                        self.pub_names.insert(name.clone());
+                    }
                     if !effects.is_empty() {
                         let mut sorted = effects.clone();
                         sorted.sort();
@@ -156,6 +174,88 @@ impl Lowerer {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Pre-populate lookup tables from imported modules' codegen info.
+        for decl in program {
+            if let Decl::Import {
+                module_path,
+                alias,
+                exposing,
+                ..
+            } = decl
+            {
+                let module_name = module_path.join(".");
+                let prefix = alias.as_deref().unwrap_or(&module_name).to_string();
+                let erlang_name = util::module_name_to_erlang(module_path);
+                self.module_aliases
+                    .insert(prefix.clone(), erlang_name.clone());
+
+                if let Some(info) = self.codegen_info.get(&module_name) {
+                    // Build a set of exported names for checking exposing list
+                    let exported_names: std::collections::HashSet<&str> =
+                        info.exports.iter().map(|(n, _)| n.as_str()).collect();
+
+                    // Register imported functions with qualified keys
+                    for (name, scheme) in &info.exports {
+                        let (base_arity, effects) =
+                            util::arity_and_effects_from_type(&scheme.ty);
+                        let effect_count = effects.len();
+                        let expanded_arity =
+                            base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
+                        let qualified = format!("{}.{}", prefix, name);
+                        self.top_level_funs
+                            .insert(qualified.clone(), expanded_arity);
+                        if !effects.is_empty() {
+                            self.fun_effects.insert(qualified, effects);
+                        }
+                    }
+
+                    // Register exposed (unqualified) names
+                    if let Some(exposed) = exposing {
+                        for name in exposed {
+                            if exported_names.contains(name.as_str()) {
+                                // Find the scheme to get arity/effects
+                                if let Some((_, scheme)) =
+                                    info.exports.iter().find(|(n, _)| n == name)
+                                {
+                                    let (base_arity, effects) =
+                                        util::arity_and_effects_from_type(&scheme.ty);
+                                    let effect_count = effects.len();
+                                    let expanded_arity = base_arity
+                                        + effect_count
+                                        + if effect_count > 0 { 1 } else { 0 };
+                                    self.top_level_funs
+                                        .insert(name.clone(), expanded_arity);
+                                    self.imported_names.insert(
+                                        name.clone(),
+                                        (erlang_name.clone(), name.clone()),
+                                    );
+                                    if !effects.is_empty() {
+                                        self.fun_effects.insert(name.clone(), effects);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Register imported effect definitions
+                    for (eff_name, ops) in &info.effect_defs {
+                        let mut ops_map = HashMap::new();
+                        for (op_name, param_count) in ops {
+                            ops_map.insert(op_name.clone(), *param_count);
+                            self.op_to_effect
+                                .insert(op_name.clone(), eff_name.clone());
+                        }
+                        self.effect_defs
+                            .insert(eff_name.clone(), EffectInfo { ops: ops_map });
+                    }
+                    // Register imported record field orders
+                    for (rec_name, fields) in &info.record_fields {
+                        self.record_fields.insert(rec_name.clone(), fields.clone());
+                    }
+                }
             }
         }
 
@@ -201,8 +301,13 @@ impl Lowerer {
         let mut exports = Vec::new();
         let mut fun_defs = Vec::new();
 
+        // If there's no module declaration, it's a single-file script -- export everything.
+        let is_module = program.iter().any(|d| matches!(d, Decl::ModuleDecl { .. }));
+
         for (name, arity, clauses) in clause_groups {
-            exports.push((name.clone(), arity));
+            if !is_module || self.pub_names.contains(&name) {
+                exports.push((name.clone(), arity));
+            }
 
             // Set up handler param context for effectful functions
             let effects = self.fun_effects.get(&name).cloned().unwrap_or_default();
@@ -368,9 +473,24 @@ impl Lowerer {
             Expr::Lit { value, .. } => CExpr::Lit(lower_lit(value)),
 
             Expr::Var { name, .. } => {
-                // If referenced bare (not in application position), emit a FunRef
-                // so it can be passed as a value.
-                if let Some(&arity) = self.top_level_funs.get(name.as_str()) {
+                // If it's an imported name used bare, emit an external fun ref.
+                if let Some((erl_mod, erl_name)) = self.imported_names.get(name.as_str()) {
+                    if let Some(&arity) = self.top_level_funs.get(name.as_str()) {
+                        CExpr::Call(
+                            "erlang".to_string(),
+                            "make_fun".to_string(),
+                            vec![
+                                CExpr::Lit(CLit::Atom(erl_mod.clone())),
+                                CExpr::Lit(CLit::Atom(erl_name.clone())),
+                                CExpr::Lit(CLit::Int(arity as i64)),
+                            ],
+                        )
+                    } else {
+                        CExpr::Var(core_var(name))
+                    }
+                } else if let Some(&arity) = self.top_level_funs.get(name.as_str()) {
+                    // If referenced bare (not in application position), emit a FunRef
+                    // so it can be passed as a value.
                     CExpr::FunRef(name.clone(), arity)
                 } else {
                     CExpr::Var(core_var(name))
@@ -390,6 +510,12 @@ impl Lowerer {
                         &args.into_iter().cloned().collect::<Vec<_>>(),
                         None,
                     );
+                }
+
+                // Check for a qualified call: App(QualifiedName { module, name }, arg1, ...)
+                // e.g. `Math.abs x` -> call 'math':'abs'(X)
+                if let Some((module, func_name, args)) = collect_qualified_call(expr) {
+                    return self.lower_qualified_call(module, func_name, &args);
                 }
 
                 // Check for a saturated call to a known top-level function.
@@ -461,10 +587,17 @@ impl Lowerer {
                             bindings.push((rk_var.clone(), return_k));
                             arg_vars.push(rk_var);
                         }
-                        let call = CExpr::Apply(
-                            Box::new(CExpr::FunRef(func_name.to_string(), arity)),
-                            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-                        );
+                        let call_args: Vec<CExpr> =
+                            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
+                        let call =
+                            if let Some((erl_mod, erl_name)) = self.imported_names.get(func_name) {
+                                CExpr::Call(erl_mod.clone(), erl_name.clone(), call_args)
+                            } else {
+                                CExpr::Apply(
+                                    Box::new(CExpr::FunRef(func_name.to_string(), arity)),
+                                    call_args,
+                                )
+                            };
                         return bindings.into_iter().rev().fold(call, |body, (var, val)| {
                             CExpr::Let(var, Box::new(val), Box::new(body))
                         });
@@ -658,7 +791,31 @@ impl Lowerer {
 
             Expr::Tuple { elements, .. } => self.lower_tuple_elems(elements),
 
-            Expr::QualifiedName { name, .. } => CExpr::Var(core_var(name)),
+            Expr::QualifiedName { module, name, .. } => {
+                // When used as a bare reference (not in application position),
+                // emit a FunRef if it's a known imported function, otherwise a Var.
+                let qualified = format!("{}.{}", module, name);
+                if let Some(&arity) = self.top_level_funs.get(&qualified) {
+                    let erlang_module = self
+                        .module_aliases
+                        .get(module.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| module.to_lowercase());
+                    // In Core Erlang, referencing an external function as a value
+                    // is done with: fun 'module':'name'/arity
+                    CExpr::Call(
+                        "erlang".to_string(),
+                        "make_fun".to_string(),
+                        vec![
+                            CExpr::Lit(CLit::Atom(erlang_module)),
+                            CExpr::Lit(CLit::Atom(name.clone())),
+                            CExpr::Lit(CLit::Int(arity as i64)),
+                        ],
+                    )
+                } else {
+                    CExpr::Var(core_var(name))
+                }
+            }
 
             Expr::RecordCreate { name, fields, .. } => {
                 let order = self.record_fields.get(name).cloned().unwrap_or_default();
@@ -852,10 +1009,79 @@ impl Lowerer {
             ))),
         }
     }
-}
 
-impl Default for Lowerer {
-    fn default() -> Self {
-        Self::new()
+    /// Lower a qualified function call like `Math.abs x` to `call 'math':'abs'(X)`.
+    /// For effectful imported functions, handler params and _ReturnK are threaded.
+    fn lower_qualified_call(&mut self, module: &str, func_name: &str, args: &[&Expr]) -> CExpr {
+        let erlang_module = self
+            .module_aliases
+            .get(module)
+            .cloned()
+            .unwrap_or_else(|| module.to_lowercase());
+
+        let qualified = format!("{}.{}", module, func_name);
+        let callee_effects = self.fun_effects.get(&qualified).cloned();
+        let effect_count = callee_effects.as_ref().map_or(0, |e| e.len());
+
+        // Filter out unit literal args
+        let non_unit_args: Vec<&&Expr> = args
+            .iter()
+            .filter(|a| {
+                !matches!(
+                    a,
+                    Expr::Lit {
+                        value: ast::Lit::Unit,
+                        ..
+                    }
+                )
+            })
+            .collect();
+
+        let mut arg_vars: Vec<String> = Vec::new();
+        let mut bindings: Vec<(String, CExpr)> = Vec::new();
+
+        for arg in &non_unit_args {
+            let v = self.fresh();
+            let ce = self.lower_expr(arg);
+            arg_vars.push(v.clone());
+            bindings.push((v, ce));
+        }
+
+        // Append handler params for effectful callees
+        if let Some(effs) = &callee_effects {
+            for eff in effs {
+                if let Some(param) = self.current_handler_params.get(eff) {
+                    arg_vars.push(param.clone());
+                } else {
+                    panic!(
+                        "qualified call '{}.{}' needs effect '{}' but no handler param in scope",
+                        module, func_name, eff
+                    );
+                }
+            }
+            // Pass _ReturnK
+            let return_k = self.pending_callee_return_k.take().unwrap_or_else(|| {
+                let p = self.fresh();
+                CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
+            });
+            let rk_var = self.fresh();
+            bindings.push((rk_var.clone(), return_k));
+            arg_vars.push(rk_var);
+        }
+
+        let _ = effect_count; // used implicitly through callee_effects
+
+        let call = CExpr::Call(
+            erlang_module,
+            func_name.to_string(),
+            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+        );
+
+        bindings
+            .into_iter()
+            .rev()
+            .fold(call, |body, (var, val)| {
+                CExpr::Let(var, Box::new(val), Box::new(body))
+            })
     }
 }

@@ -1,4 +1,4 @@
-use super::{Checker, Scheme, TypeError};
+use super::{Checker, ModuleCodegenInfo, Scheme, TypeError};
 use crate::token::Span;
 
 /// Returns the embedded source for a builtin stdlib module, if it exists.
@@ -60,7 +60,8 @@ impl Checker {
         // Cache hit: inject cached bindings
         if let Some(cached) = self.tc_loaded.get(&module_name).cloned() {
             let cached_ctors = self.tc_type_ctors.get(&module_name).cloned().unwrap_or_default();
-            self.inject_module_types(&cached, &cached_ctors, &prefix, exposing, span)?;
+            let cached_records = self.tc_record_defs.get(&module_name).cloned().unwrap_or_default();
+            self.inject_module_types(&cached, &cached_ctors, &cached_records, &prefix, exposing, span)?;
             return Ok(());
         }
 
@@ -100,6 +101,8 @@ impl Checker {
         // Share the module cache so transitive imports benefit from caching
         mod_checker.tc_loaded = self.tc_loaded.clone();
         mod_checker.tc_type_ctors = self.tc_type_ctors.clone();
+        mod_checker.tc_codegen_info = self.tc_codegen_info.clone();
+        mod_checker.tc_record_defs = self.tc_record_defs.clone();
 
         // Run a fresh checker on prelude + module.
         // Builtin Std modules skip the prelude to avoid circular imports
@@ -144,19 +147,50 @@ impl Checker {
             }
         }
 
+        // Collect public record definitions from the module checker
+        let mut pub_records: std::collections::HashMap<String, Vec<(String, super::Type)>> =
+            std::collections::HashMap::new();
+        for decl in &program {
+            if let crate::ast::Decl::RecordDef {
+                public: true,
+                name,
+                ..
+            } = decl
+            {
+                if let Some(fields) = mod_checker.records.get(name.as_str()) {
+                    pub_records.insert(name.clone(), fields.clone());
+                }
+            }
+        }
+
         self.tc_loading.remove(&module_name);
         self.tc_loaded
             .insert(module_name.clone(), public_bindings.clone());
         self.tc_type_ctors
             .insert(module_name.clone(), ctors_map.clone());
+        self.tc_record_defs
+            .insert(module_name.clone(), pub_records.clone());
 
-        self.inject_module_types(&public_bindings, &ctors_map, &prefix, exposing, span)
+        // Build codegen info from the module's public declarations
+        let codegen_info = collect_codegen_info(&program, &public_bindings);
+        self.tc_codegen_info
+            .insert(module_name.clone(), codegen_info);
+
+        self.inject_module_types(
+            &public_bindings,
+            &ctors_map,
+            &pub_records,
+            &prefix,
+            exposing,
+            span,
+        )
     }
 
     fn inject_module_types(
         &mut self,
         bindings: &[(String, Scheme)],
         ctors_map: &std::collections::HashMap<String, Vec<String>>,
+        record_defs: &std::collections::HashMap<String, Vec<(String, super::Type)>>,
         prefix: &str,
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
@@ -165,10 +199,27 @@ impl Checker {
         let binding_map: std::collections::HashMap<&str, &Scheme> =
             bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
 
+        // Build reverse map: constructor name -> type name (for exposing constructors by name)
+        let mut ctor_to_type: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for (type_name, ctors) in ctors_map {
+            for ctor in ctors {
+                ctor_to_type.insert(ctor.as_str(), type_name.as_str());
+            }
+        }
+
         for (name, scheme) in bindings {
             self.env
                 .insert(format!("{}.{}", prefix, name), scheme.clone());
         }
+
+        // Always inject record definitions for qualified access
+        for (rec_name, fields) in record_defs {
+            self.records
+                .entry(rec_name.clone())
+                .or_insert_with(|| fields.clone());
+        }
+
         if let Some(exposed) = exposing {
             for name in exposed {
                 let is_type = name.starts_with(|c: char| c.is_uppercase());
@@ -178,6 +229,11 @@ impl Checker {
                     if let Some(&scheme) = binding_map.get(name.as_str()) {
                         self.env.insert(name.clone(), scheme.clone());
                     }
+                    // If it's a record type, register its fields
+                    if let Some(fields) = record_defs.get(name.as_str()) {
+                        self.records.insert(name.clone(), fields.clone());
+                        found = true;
+                    }
                     // Hoist all constructors belonging to this type
                     if let Some(ctors) = ctors_map.get(name) {
                         for ctor in ctors {
@@ -186,6 +242,14 @@ impl Checker {
                                 self.constructors.insert(ctor.clone(), scheme.clone());
                                 found = true;
                             }
+                        }
+                    }
+                    // If the exposed name is a constructor (not a type), also add to constructors
+                    if ctor_to_type.contains_key(name.as_str()) {
+                        if let Some(&scheme) = binding_map.get(name.as_str()) {
+                            self.env.insert(name.clone(), scheme.clone());
+                            self.constructors.insert(name.clone(), scheme.clone());
+                            found = true;
                         }
                     }
                     if !found {
@@ -212,6 +276,58 @@ impl Checker {
     }
 }
 
+/// Collect codegen-relevant info from a module's public declarations.
+fn collect_codegen_info(
+    program: &[crate::ast::Decl],
+    public_bindings: &[(String, Scheme)],
+) -> ModuleCodegenInfo {
+    use crate::ast::Decl;
+    let mut effect_defs = Vec::new();
+    let mut record_fields = Vec::new();
+    let mut handler_defs = Vec::new();
+
+    for decl in program {
+        match decl {
+            Decl::EffectDef {
+                public: true,
+                name,
+                operations,
+                ..
+            } => {
+                let ops: Vec<(String, usize)> = operations
+                    .iter()
+                    .map(|op| (op.name.clone(), op.params.len()))
+                    .collect();
+                effect_defs.push((name.clone(), ops));
+            }
+            Decl::RecordDef {
+                public: true,
+                name,
+                fields,
+                ..
+            } => {
+                let field_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                record_fields.push((name.clone(), field_names));
+            }
+            Decl::HandlerDef {
+                public: true,
+                name,
+                ..
+            } => {
+                handler_defs.push(name.clone());
+            }
+            _ => {}
+        }
+    }
+
+    ModuleCodegenInfo {
+        exports: public_bindings.to_vec(),
+        effect_defs,
+        record_fields,
+        handler_defs,
+    }
+}
+
 /// Names exported by a module for typechecking purposes.
 pub(super) fn public_names_for_tc(
     program: &[crate::ast::Decl],
@@ -235,6 +351,11 @@ pub(super) fn public_names_for_tc(
                 for v in variants {
                     names.insert(v.name.clone());
                 }
+            }
+            Decl::RecordDef {
+                public: true, name, ..
+            } => {
+                names.insert(name.clone());
             }
             Decl::HandlerDef {
                 public: true, name, ..

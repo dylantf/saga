@@ -27,7 +27,7 @@ fn print_usage() {
     eprintln!("  dylang run <file.dy>    Run a single file (no module resolution)");
     eprintln!("  dylang check            Typecheck project without running");
     eprintln!("  dylang check <file.dy>  Typecheck a single file");
-    eprintln!("  dylang build            Build project (not yet implemented)");
+    eprintln!("  dylang build            Build project (requires project.toml, compiles all modules)");
     eprintln!("  dylang emit <file.dy>   Print generated Core Erlang to stdout");
 }
 
@@ -130,6 +130,108 @@ fn cmd_run_project() {
     let program = parse_and_typecheck(&source, "Main.dy", &mut checker);
     let loader = eval::ModuleLoader::project(project_root);
     run_program(&program, &loader);
+}
+
+fn cmd_build_project() {
+    let project_root = find_project_root().unwrap_or_else(|| {
+        eprintln!("No project.toml found. Run with a filename to build a single file.");
+        std::process::exit(1);
+    });
+
+    let main_path = project_root.join("Main.dy");
+    let main_source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
+        eprintln!("Error reading Main.dy: {}", e);
+        std::process::exit(1);
+    });
+
+    // Typecheck Main.dy (transitively typechecks all imports, populating caches)
+    let mut checker = make_checker(Some(project_root.clone()));
+    let main_program = parse_and_typecheck(&main_source, "Main.dy", &mut checker);
+
+    let build_dir = project_root.join("_build");
+    fs::create_dir_all(&build_dir).unwrap_or_else(|e| {
+        eprintln!("Error creating _build dir: {}", e);
+        std::process::exit(1);
+    });
+
+    // Compile each imported module (skip builtins)
+    let module_names: Vec<String> = checker
+        .tc_codegen_info
+        .keys()
+        .filter(|name| !name.starts_with("Std."))
+        .cloned()
+        .collect();
+
+    for module_name in &module_names {
+        let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
+        let rel: PathBuf = module_path.iter().collect();
+        let file_path = project_root.join(rel).with_extension("dy");
+        let source = fs::read_to_string(&file_path).unwrap_or_else(|e| {
+            eprintln!("Error reading {}: {}", file_path.display(), e);
+            std::process::exit(1);
+        });
+
+        // Re-parse and re-typecheck the module (typechecker caches make this fast)
+        let mut mod_checker = make_checker(Some(project_root.clone()));
+        let mod_program = parse_and_typecheck(&source, module_name, &mut mod_checker);
+
+        let elaborated = elaborate::elaborate(&mod_program, &mod_checker);
+        let erlang_name = module_name.to_lowercase().replace('.', "_");
+        let core_src = codegen::emit_module_with_imports(
+            &erlang_name,
+            &elaborated,
+            &checker.tc_codegen_info,
+        );
+
+        let core_path = build_dir.join(format!("{}.core", erlang_name));
+        fs::write(&core_path, &core_src).unwrap_or_else(|e| {
+            eprintln!("Error writing {}: {}", core_path.display(), e);
+            std::process::exit(1);
+        });
+        eprintln!("Emitted {}", core_path.display());
+    }
+
+    // Compile Main module
+    let elaborated = elaborate::elaborate(&main_program, &checker);
+    let core_src = codegen::emit_module_with_imports("main", &elaborated, &checker.tc_codegen_info);
+
+    let core_path = build_dir.join("main.core");
+    fs::write(&core_path, &core_src).unwrap_or_else(|e| {
+        eprintln!("Error writing {}: {}", core_path.display(), e);
+        std::process::exit(1);
+    });
+    eprintln!("Emitted {}", core_path.display());
+
+    // Compile all .core files with erlc
+    let core_files: Vec<_> = fs::read_dir(&build_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "core"))
+        .map(|e| e.path())
+        .collect();
+
+    for core_file in &core_files {
+        let status = std::process::Command::new("erlc")
+            .arg("-o")
+            .arg(&build_dir)
+            .arg(core_file)
+            .status()
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to run erlc: {}", e);
+                std::process::exit(1);
+            });
+
+        if !status.success() {
+            eprintln!("erlc failed on {}", core_file.display());
+            std::process::exit(1);
+        }
+    }
+
+    eprintln!("Built {} module(s) in {}", core_files.len(), build_dir.display());
+    eprintln!(
+        "Run with: erl -noshell -pa {} -s main main -s init stop",
+        build_dir.display()
+    );
 }
 
 fn cmd_build(file: &str) {
@@ -266,10 +368,7 @@ fn main() {
         },
         Some("build") => match args.get(2).map(|s| s.as_str()) {
             Some(file) => cmd_build(file),
-            None => {
-                eprintln!("Usage: dylang build <file.dy>");
-                std::process::exit(1);
-            }
+            None => cmd_build_project(),
         },
         Some("emit") => match args.get(2).map(|s| s.as_str()) {
             Some(file) => cmd_emit(file),

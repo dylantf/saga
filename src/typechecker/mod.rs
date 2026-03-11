@@ -182,6 +182,22 @@ pub struct Scheme {
     pub ty: Type,
 }
 
+// --- Module codegen info ---
+
+/// Information about a module's exports needed by the lowerer/codegen.
+/// Populated during typechecking alongside `tc_loaded`.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleCodegenInfo {
+    /// Public type bindings: name -> scheme (same data as tc_loaded).
+    pub exports: Vec<(String, Scheme)>,
+    /// Public effect definitions: effect name -> vec of (op_name, param_count).
+    pub effect_defs: Vec<(String, Vec<(String, usize)>)>,
+    /// Public record definitions: record name -> ordered field names.
+    pub record_fields: Vec<(String, Vec<String>)>,
+    /// Public handler names.
+    pub handler_defs: Vec<String>,
+}
+
 // --- Type environment ---
 
 /// Maps variable names to their type schemes.
@@ -357,6 +373,10 @@ pub struct Checker {
     pub(crate) tc_loaded: HashMap<String, Vec<(String, Scheme)>>,
     /// Cache of type->constructors maps for already-typechecked modules.
     pub(crate) tc_type_ctors: HashMap<String, HashMap<String, Vec<String>>>,
+    /// Cache of codegen-relevant info for each typechecked module.
+    pub tc_codegen_info: HashMap<String, ModuleCodegenInfo>,
+    /// Cache of record definitions from typechecked modules: module name -> record name -> field types.
+    pub(crate) tc_record_defs: HashMap<String, HashMap<String, Vec<(String, Type)>>>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) tc_loading: HashSet<String>,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
@@ -392,6 +412,8 @@ impl Checker {
             project_root: None,
             tc_loaded: HashMap::new(),
             tc_type_ctors: HashMap::new(),
+            tc_codegen_info: HashMap::new(),
+            tc_record_defs: HashMap::new(),
             tc_loading: HashSet::new(),
             adt_variants: HashMap::new(),
             evidence: Vec::new(),

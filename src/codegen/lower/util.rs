@@ -1,5 +1,6 @@
 use crate::ast::{BinOp, Expr, Lit, Pat, Stmt, TypeExpr};
 use crate::codegen::cerl::{CExpr, CLit};
+use crate::typechecker::Type;
 use std::collections::BTreeSet;
 
 pub(super) fn lower_lit(lit: &Lit) -> CLit {
@@ -79,6 +80,26 @@ pub(super) fn collect_fun_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
             Expr::Var { name, .. } => {
                 args.reverse();
                 return Some((name.as_str(), args));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Like `collect_fun_call`, but for qualified names (`Module.func arg1 arg2`).
+/// Returns `Some((module, func_name, args))` if the head is a QualifiedName.
+pub(super) fn collect_qualified_call<'a>(expr: &'a Expr) -> Option<(&'a str, &'a str, Vec<&'a Expr>)> {
+    let mut args: Vec<&Expr> = Vec::new();
+    let mut current = expr;
+    loop {
+        match current {
+            Expr::App { func, arg, .. } => {
+                args.push(arg);
+                current = func;
+            }
+            Expr::QualifiedName { module, name, .. } => {
+                args.reverse();
+                return Some((module.as_str(), name.as_str(), args));
             }
             _ => return None,
         }
@@ -187,5 +208,40 @@ pub(super) fn collect_type_effects(ty: &TypeExpr) -> BTreeSet<String> {
         }
         TypeExpr::Named(_) | TypeExpr::Var(_) => BTreeSet::new(),
     }
+}
+
+/// Convert a module path like `["Foo", "Bar", "Baz"]` to an Erlang module atom
+/// name like `"foo_bar_baz"`.
+pub(super) fn module_name_to_erlang(path: &[String]) -> String {
+    path.iter()
+        .map(|s| s.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+/// Derive base arity and effect names from a typechecker `Type`.
+/// Returns `(base_param_count, sorted_effect_names)`.
+/// The expanded arity (for codegen) is: base + effects.len() + if effects is non-empty { 1 } else { 0 }.
+pub(super) fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
+    let mut arity = 0;
+    let mut effects = BTreeSet::new();
+    let mut current = ty;
+    loop {
+        match current {
+            Type::Arrow(_, ret) => {
+                arity += 1;
+                current = ret;
+            }
+            Type::EffArrow(_, ret, effs) => {
+                arity += 1;
+                for eff in effs {
+                    effects.insert(eff.clone());
+                }
+                current = ret;
+            }
+            _ => break,
+        }
+    }
+    (arity, effects.into_iter().collect())
 }
 
