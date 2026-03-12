@@ -152,7 +152,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Constructor atom mangling (prefix with module name to avoid cross-module collisions)
 - [x] Cross-module trait impl injection (importing a module imports its pub trait impls)
 - [x] Module-qualified dict names (`__dict_Show_Graphics_Color` not `__dict_Show_Color`)
-- [ ] Entry point handler setup (wrapper for effectful `Main.main`)
+- [x] Entry point validation (`main` cannot have `needs`, effects handled via `with`)
 
 ### Data structures
 

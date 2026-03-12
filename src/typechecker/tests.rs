@@ -2700,3 +2700,22 @@ use_it () = {
     )
     .is_ok());
 }
+
+#[test]
+fn main_cannot_have_effects() {
+    let result = check(
+        "effect Log {
+  fun log (msg: String) -> Unit
+}
+
+fun main () -> Unit needs {Log}
+main () = log! \"hello\"",
+    );
+    assert!(result.is_err());
+    let err = result.err().expect("expected error");
+    assert!(
+        err.message.contains("cannot use `needs`"),
+        "expected error about main + needs, got: {}",
+        err.message
+    );
+}

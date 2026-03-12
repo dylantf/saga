@@ -189,6 +189,30 @@ impl Checker {
             }
         }
 
+        // Validate that `main` does not declare effects (it's the top of the call stack,
+        // there is no caller above to provide handlers)
+        if let Some(effects) = self.fun_effects.get("main") {
+            if !effects.is_empty() {
+                // Find the span from the annotation
+                let span = program.iter().find_map(|d| {
+                    if let Decl::FunAnnotation { name, span, .. } = d
+                        && name == "main"
+                    {
+                        Some(*span)
+                    } else {
+                        None
+                    }
+                });
+                return Err(TypeError::at(
+                    span.unwrap_or(crate::token::Span { start: 0, end: 0 }),
+                    format!(
+                        "`main` cannot use `needs` -- it is the entry point and there is no caller to provide handlers for {{{}}}. Handle effects inside `main` using `with` instead.",
+                        effects.iter().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                ));
+            }
+        }
+
         // Check all accumulated trait constraints now that types are resolved
         self.check_pending_constraints()?;
 

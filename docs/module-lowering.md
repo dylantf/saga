@@ -121,11 +121,15 @@ modules' `ModuleCodegenInfo.type_constructors`, and all Std.* modules in
 
 ---
 
-## Entry point
+## Entry point (done)
 
-`Main.main` is the boot function. The main module's `main` function must be
-exported as `main/0` (or with the appropriate effect-expanded arity) so the
-Erlang runtime can call it.
+`Main.main` is the boot function, exported as `main/0` so the Erlang runtime
+can call it via `erl -s main main`.
+
+`main` cannot declare `needs` -- it is the top of the call stack with no caller
+above to provide handlers. The typechecker enforces this. Effects are handled
+inside `main` using `with` expressions. This is consistent with the evaluator,
+which also does not install default handlers.
 
 ---
 
@@ -178,7 +182,4 @@ Done:
 7. Multi-file emission (one `.core` per module, `cmd_build_project` driver)
 8. Tag/constructor atom qualification (module-prefixed atoms)
 9. Cross-module trait impl injection + module-qualified dict names
-
-Remaining:
-
-- Entry point handler setup (wrapper for effectful `Main.main`)
+10. Entry point validation (`main` cannot have `needs`)
