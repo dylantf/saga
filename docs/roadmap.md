@@ -43,9 +43,9 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `Type::EffArrow` for annotated callback parameters
 - [x] Disallow effect invocations in guard expressions
 - [x] Prelude substitution leak: module checkers started at `next_var: 0`, causing var ID
-  collisions with the parent checker. Imported scheme types resolved through the parent's
-  substitution, creating phantom dependencies that blocked generalization of polymorphic
-  functions like `run_state`. Fixed by starting module checkers at the parent's `next_var`.
+      collisions with the parent checker. Imported scheme types resolved through the parent's
+      substitution, creating phantom dependencies that blocked generalization of polymorphic
+      functions like `run_state`. Fixed by starting module checkers at the parent's `next_var`.
 
 ## Traits / Impls
 
@@ -161,7 +161,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ### Codegen bugs
 
-- [ ] Integer division: `/` on `Int` emits `erlang:'/'` (float division) instead of `erlang:'div'`
+- [x] Integer division: `/` on `Int` emits `erlang:'/'` (float division) instead of `erlang:'div'`
 - [ ] Polymorphic type class dicts used as bare function refs without applying dict arguments (e.g. `'__dict_Show_Result'/2` not called with sub-dicts)
 
 ### Effects (CPS transform)

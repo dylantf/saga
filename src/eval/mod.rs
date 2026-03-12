@@ -902,8 +902,8 @@ fn eval_binop(op: &BinOp, left: Value, right: Value) -> EvalResult {
         (BinOp::Add, Value::Int(a), Value::Int(b)) => EvalResult::Ok(Value::Int(a + b)),
         (BinOp::Sub, Value::Int(a), Value::Int(b)) => EvalResult::Ok(Value::Int(a - b)),
         (BinOp::Mul, Value::Int(a), Value::Int(b)) => EvalResult::Ok(Value::Int(a * b)),
-        (BinOp::Div, Value::Int(_), Value::Int(0)) => EvalResult::error("division by zero"),
-        (BinOp::Div, Value::Int(a), Value::Int(b)) => EvalResult::Ok(Value::Int(a / b)),
+        (BinOp::FloatDiv | BinOp::IntDiv, Value::Int(_), Value::Int(0)) => EvalResult::error("division by zero"),
+        (BinOp::FloatDiv | BinOp::IntDiv, Value::Int(a), Value::Int(b)) => EvalResult::Ok(Value::Int(a / b)),
         (BinOp::Mod, Value::Int(_), Value::Int(0)) => EvalResult::error("modulo by zero"),
         (BinOp::Mod, Value::Int(a), Value::Int(b)) => EvalResult::Ok(Value::Int(a % b)),
 
@@ -919,7 +919,7 @@ fn eval_binop(op: &BinOp, left: Value, right: Value) -> EvalResult {
         (BinOp::Add, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Float(a + b)),
         (BinOp::Sub, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Float(a - b)),
         (BinOp::Mul, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Float(a * b)),
-        (BinOp::Div, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Float(a / b)),
+        (BinOp::FloatDiv | BinOp::IntDiv, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Float(a / b)),
 
         // Float comparison
         (BinOp::Eq, Value::Float(a), Value::Float(b)) => EvalResult::Ok(Value::Bool(a == b)),

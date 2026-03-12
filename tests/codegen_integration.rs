@@ -1551,3 +1551,19 @@ main () = extract () with answer
 "#;
     assert_compiles(src);
 }
+
+// --- Integer vs float division ---
+
+#[test]
+fn int_division_emits_erlang_div() {
+    let src = "main () = 10 / 3";
+    let out = emit_elaborated(src);
+    assert_contains(&out, "call 'erlang':'div'");
+}
+
+#[test]
+fn float_division_emits_erlang_slash() {
+    let src = "main () = 10.0 / 3.0";
+    let out = emit_elaborated(src);
+    assert_contains(&out, "call 'erlang':'/'");
+}

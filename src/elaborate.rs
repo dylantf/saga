@@ -532,12 +532,30 @@ impl Elaborator {
                 left,
                 right,
                 span,
-            } => Expr::BinOp {
-                op: op.clone(),
-                left: Box::new(self.elaborate_expr(left)),
-                right: Box::new(self.elaborate_expr(right)),
-                span: *span,
-            },
+            } => {
+                // Rewrite Div to IntDiv when the Num constraint resolved to Int
+                let elaborated_op = if *op == BinOp::FloatDiv {
+                    let is_int = self
+                        .evidence_by_span
+                        .get(span)
+                        .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Num"))
+                        .and_then(|ev| ev.resolved_type.as_ref())
+                        .is_some_and(|(name, _)| name == "Int");
+                    if is_int {
+                        BinOp::IntDiv
+                    } else {
+                        BinOp::FloatDiv
+                    }
+                } else {
+                    op.clone()
+                };
+                Expr::BinOp {
+                    op: elaborated_op,
+                    left: Box::new(self.elaborate_expr(left)),
+                    right: Box::new(self.elaborate_expr(right)),
+                    span: *span,
+                }
+            }
 
             Expr::UnaryMinus { expr: e, span } => Expr::UnaryMinus {
                 expr: Box::new(self.elaborate_expr(e)),

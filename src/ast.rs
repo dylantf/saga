@@ -399,20 +399,21 @@ pub enum Lit {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinOp {
-    Add,    // +
-    Sub,    // -
-    Mul,    // *
-    Div,    // /
-    Mod,    // %
-    Eq,     // ==
-    NotEq,  // !=
-    Lt,     // <
-    Gt,     // >
-    LtEq,   // <=
-    GtEq,   // >=
-    And,    // &&
-    Or,     // ||
-    Concat, // <>
+    Add,      // +
+    Sub,      // -
+    Mul,      // *
+    FloatDiv, // / (float division)
+    IntDiv,   // / on Int (truncating integer division, emitted by elaboration)
+    Mod,      // %
+    Eq,       // ==
+    NotEq,    // !=
+    Lt,       // <
+    Gt,       // >
+    LtEq,     // <=
+    GtEq,     // >=
+    And,      // &&
+    Or,       // ||
+    Concat,   // <>
 }
 
 /// A constructor in a type definition, e.g. Some(a) or None

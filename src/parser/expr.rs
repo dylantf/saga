@@ -39,7 +39,7 @@ impl Parser {
                 Token::Plus => (Some(BinOp::Add), 6),
                 Token::Minus => (Some(BinOp::Sub), 6),
                 Token::Star => (Some(BinOp::Mul), 7),
-                Token::Slash => (Some(BinOp::Div), 7),
+                Token::Slash => (Some(BinOp::FloatDiv), 7),
                 Token::Modulo => (Some(BinOp::Mod), 7),
                 _ => break,
             };
