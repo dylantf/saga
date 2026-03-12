@@ -215,6 +215,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - `Functor` / `Applicative` traits in stdlib
 - `Semigroup` / `Monoid` in stdlib
 - Effect row polymorphism / effect variables (`needs e`)
+- `Dynamic` type for consuming untyped Erlang data (JSON parsers, ETS, message passing)
 
 ## Out of Scope
 

@@ -90,18 +90,33 @@ main () = id 42
 // --- ADT constructors ---
 
 #[test]
-fn adt_zero_arg_is_atom() {
-    // `None` with no args -> bare atom 'None'
-    assert_contains("main () = None", "'None'");
+fn none_is_undefined_atom() {
+    // `None` -> 'undefined' (BEAM convention)
+    assert_contains("main () = None", "'undefined'");
 }
 
 #[test]
-fn adt_one_arg_is_tagged_tuple() {
-    // `Some(42)` -> {'Some', 42}
+fn some_is_bare_value() {
+    // `Some(42)` -> 42 (bare value, no tuple wrapping)
     let out = emit("main () = Some(42)");
-    assert!(out.contains("'Some'"), "missing tag\n{out}");
     assert!(out.contains("42"), "missing value\n{out}");
-    assert!(out.contains("{"), "missing tuple\n{out}");
+    assert!(!out.contains("'Some'"), "should not have Some tag\n{out}");
+}
+
+#[test]
+fn ok_uses_lowercase_atom() {
+    // `Ok(1)` -> {ok, 1}
+    let out = emit("main () = Ok(1)");
+    assert!(out.contains("'ok'"), "missing ok atom\n{out}");
+    assert!(!out.contains("'Ok'"), "should not have uppercase Ok\n{out}");
+}
+
+#[test]
+fn err_uses_error_atom() {
+    // `Err(1)` -> {error, 1}
+    let out = emit("main () = Err(1)");
+    assert!(out.contains("'error'"), "missing error atom\n{out}");
+    assert!(!out.contains("'Err'"), "should not have uppercase Err\n{out}");
 }
 
 // --- Lists ---
@@ -143,7 +158,9 @@ main () = case True {
 }
 
 #[test]
-fn case_constructor_patterns() {
+fn case_maybe_patterns() {
+    // Some(v) lowers to bare variable, None to 'undefined'.
+    // None arm must come before Some arm (specific before wildcard).
     let src = "
 unwrap opt = case opt {
   Some(v) -> v
@@ -151,8 +168,13 @@ unwrap opt = case opt {
 }
 ";
     let out = emit(src);
-    assert!(out.contains("'Some'"), "missing Some pattern\n{out}");
-    assert!(out.contains("'None'"), "missing None pattern\n{out}");
+    assert!(out.contains("'undefined'"), "missing undefined pattern for None\n{out}");
+    // Some(v) becomes a bare variable pattern
+    assert!(!out.contains("'Some'"), "should not have Some tag\n{out}");
+    // undefined arm should come before the variable arm
+    let undef_pos = out.find("'undefined'").unwrap();
+    let v_pos = out.rfind("V").unwrap();
+    assert!(undef_pos < v_pos, "undefined arm should come before variable arm\n{out}");
 }
 
 // --- Records ---
@@ -457,8 +479,7 @@ fn int_parse() {
     let src = r#"main () = Int.parse "42""#;
     let out = emit(src);
     assert!(out.contains("call 'string':'to_integer'"), "expected string:to_integer\n{out}");
-    assert!(out.contains("Some"), "expected Some constructor\n{out}");
-    assert!(out.contains("None"), "expected None constructor\n{out}");
+    assert!(out.contains("'undefined'"), "expected undefined for None\n{out}");
 }
 
 #[test]
@@ -466,8 +487,7 @@ fn float_parse() {
     let src = r#"main () = Float.parse "2.5""#;
     let out = emit(src);
     assert!(out.contains("call 'string':'to_float'"), "expected string:to_float\n{out}");
-    assert!(out.contains("Some"), "expected Some constructor\n{out}");
-    assert!(out.contains("None"), "expected None constructor\n{out}");
+    assert!(out.contains("'undefined'"), "expected undefined for None\n{out}");
 }
 
 // --- Dict builtins ---
@@ -493,8 +513,8 @@ main () = {
 "#;
     let out = emit(src);
     assert!(out.contains("call 'maps':'find'"), "expected maps:find\n{out}");
-    assert!(out.contains("Some"), "expected Some constructor\n{out}");
-    assert!(out.contains("None"), "expected None constructor\n{out}");
+    assert!(out.contains("'ok'"), "expected ok atom for Some\n{out}");
+    assert!(out.contains("'undefined'"), "expected undefined for None\n{out}");
 }
 
 #[test]

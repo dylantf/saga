@@ -608,9 +608,9 @@ main () = risky () with {
 }
 "#;
     let out = emit_elaborated(src);
-    // Should wrap the result in Ok (mangled with module prefix)
-    assert_contains(&out, "'_script_Ok'");
-    assert_contains(&out, "'_script_Err'");
+    // Ok/Err use BEAM convention atoms (lowercase)
+    assert_contains(&out, "'ok'");
+    assert_contains(&out, "'error'");
 }
 
 #[test]
@@ -1155,8 +1155,9 @@ try_it computation = computation () with {
 }
 "#;
     let out = emit(src);
-    assert_contains(&out, "'_script_Ok'");
-    assert_contains(&out, "'_script_Err'");
+    // Ok/Err use BEAM convention atoms (lowercase)
+    assert_contains(&out, "'ok'");
+    assert_contains(&out, "'error'");
 }
 
 #[test]

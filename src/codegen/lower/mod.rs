@@ -745,6 +745,7 @@ impl<'a> Lowerer<'a> {
                 if name == "Nil" {
                     CExpr::Nil
                 } else {
+                    // mangle_ctor_atom handles Ok->"ok", Err->"error", None->"undefined"
                     let atom = util::mangle_ctor_atom(name, &self.constructor_modules);
                     CExpr::Lit(CLit::Atom(atom))
                 }
@@ -1189,9 +1190,6 @@ impl<'a> Lowerer<'a> {
         func_name: &str,
         args: &[&Expr],
     ) -> Option<CExpr> {
-        let some_atom = util::mangle_ctor_atom("Some", &self.constructor_modules);
-        let none_atom = util::mangle_ctor_atom("None", &self.constructor_modules);
-
         match (module, func_name) {
             // Int.to_float x  ->  call 'erlang':'float'(X)
             ("Int", "to_float") => {
@@ -1249,8 +1247,8 @@ impl<'a> Lowerer<'a> {
             }
 
             // Int.parse s  ->  case string:to_integer(S) of
-            //   {N, []} -> {Some, N}    (fully consumed)
-            //   _       -> {None}
+            //   {N, []} -> N            (Some = bare value)
+            //   _       -> 'undefined'  (None)
             ("Int", "parse") => {
                 let arg = self.lower_expr(args[0]);
                 let v = self.fresh();
@@ -1263,15 +1261,12 @@ impl<'a> Lowerer<'a> {
                         CArm {
                             pat: CPat::Tuple(vec![CPat::Var(n.clone()), CPat::Nil]),
                             guard: None,
-                            body: CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(some_atom)),
-                                CExpr::Var(n),
-                            ]),
+                            body: CExpr::Var(n),
                         },
                         CArm {
                             pat: CPat::Wildcard,
                             guard: None,
-                            body: CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(none_atom))]),
+                            body: CExpr::Lit(CLit::Atom("undefined".to_string())),
                         },
                     ],
                 );
@@ -1283,8 +1278,8 @@ impl<'a> Lowerer<'a> {
             }
 
             // Float.parse s  ->  case string:to_float(S) of
-            //   {F, []} -> {Some, F}
-            //   _       -> {None}
+            //   {F, []} -> F            (Some = bare value)
+            //   _       -> 'undefined'  (None)
             ("Float", "parse") => {
                 let arg = self.lower_expr(args[0]);
                 let v = self.fresh();
@@ -1297,15 +1292,12 @@ impl<'a> Lowerer<'a> {
                         CArm {
                             pat: CPat::Tuple(vec![CPat::Var(f.clone()), CPat::Nil]),
                             guard: None,
-                            body: CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(some_atom)),
-                                CExpr::Var(f),
-                            ]),
+                            body: CExpr::Var(f),
                         },
                         CArm {
                             pat: CPat::Wildcard,
                             guard: None,
-                            body: CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(none_atom))]),
+                            body: CExpr::Lit(CLit::Atom("undefined".to_string())),
                         },
                     ],
                 );
@@ -1335,10 +1327,10 @@ impl<'a> Lowerer<'a> {
             // Dict.get key dict -> case maps:find(Key, Dict) of
             //   {ok, V} -> {Some, V}
             //   error   -> {None}
+            // Dict.get key dict -> case maps:find(Key, Dict) of
+            //   {ok, V} -> V            (Some = bare value)
+            //   error   -> 'undefined'  (None)
             "get" => {
-                let some_atom = util::mangle_ctor_atom("Some", &self.constructor_modules);
-                let none_atom = util::mangle_ctor_atom("None", &self.constructor_modules);
-
                 let key_expr = self.lower_expr(args[0]);
                 let dict_expr = self.lower_expr(args[1]);
                 let k = self.fresh();
@@ -1359,15 +1351,12 @@ impl<'a> Lowerer<'a> {
                                 CPat::Var(v.clone()),
                             ]),
                             guard: None,
-                            body: CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(some_atom)),
-                                CExpr::Var(v),
-                            ]),
+                            body: CExpr::Var(v),
                         },
                         CArm {
                             pat: CPat::Lit(CLit::Atom("error".to_string())),
                             guard: None,
-                            body: CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(none_atom))]),
+                            body: CExpr::Lit(CLit::Atom("undefined".to_string())),
                         },
                     ],
                 );

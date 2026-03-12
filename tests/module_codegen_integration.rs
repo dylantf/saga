@@ -640,8 +640,11 @@ main () = case Some(42) {
     typecheck_source(main_src, &mut checker);
     let out = emit_project_module(main_src, "main", &checker);
 
-    assert_contains(&out, "'std_maybe_Some'");
-    assert_contains(&out, "'std_maybe_None'");
+    // Some(v) compiles to bare value, None compiles to 'undefined' (BEAM convention)
+    assert_contains(&out, "'undefined'");
+    // Some(42) should compile to just 42 (bare value, no tag tuple)
+    assert!(!out.contains("'std_maybe_Some'"), "Some should not produce a tagged tuple");
+    assert!(!out.contains("'std_maybe_None'"), "None should use 'undefined' not a tagged tuple");
 }
 
 #[test]

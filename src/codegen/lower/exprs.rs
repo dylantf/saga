@@ -35,6 +35,14 @@ impl<'a> Lowerer<'a> {
     /// into:
     ///   `Pat -> if complex_guard then body else case scrut_var of <remaining arms>`
     pub(super) fn lower_case_arms(&mut self, scrut_var: &str, arms: &[CaseArm]) -> Vec<CArm> {
+        // Reorder arms so that Some(v) patterns (which lower to bare variables)
+        // come after more specific patterns like None (which lowers to 'undefined').
+        // Without this, Some(v) would match everything before None gets a chance.
+        let reordered = Self::reorder_maybe_arms(arms);
+        self.lower_case_arms_inner(scrut_var, &reordered)
+    }
+
+    fn lower_case_arms_inner(&mut self, scrut_var: &str, arms: &[&CaseArm]) -> Vec<CArm> {
         let mut result = Vec::new();
 
         for (i, arm) in arms.iter().enumerate() {
@@ -68,7 +76,7 @@ impl<'a> Lowerer<'a> {
                     } else {
                         CExpr::Case(
                             Box::new(CExpr::Var(scrut_var.to_string())),
-                            self.lower_case_arms(scrut_var, remaining),
+                            self.lower_case_arms_inner(scrut_var, remaining),
                         )
                     };
 
@@ -103,9 +111,34 @@ impl<'a> Lowerer<'a> {
         result
     }
 
+    /// Reorder case arms so that `Some(v)` patterns (which compile to bare
+    /// variables) come after `None` patterns (which compile to `'undefined'`).
+    /// This prevents the wildcard-like Some arm from shadowing None.
+    fn reorder_maybe_arms(arms: &[CaseArm]) -> Vec<&CaseArm> {
+        let is_some_pat = |arm: &&CaseArm| matches!(&arm.pattern, Pat::Constructor { name, args, .. } if name == "Some" && args.len() == 1);
+        let has_some = arms.iter().any(|a| is_some_pat(&&a));
+        if !has_some {
+            return arms.iter().collect();
+        }
+        // Put non-Some arms first, then Some arms
+        let mut reordered: Vec<&CaseArm> = Vec::new();
+        let mut some_arms: Vec<&CaseArm> = Vec::new();
+        for arm in arms {
+            if is_some_pat(&&arm) {
+                some_arms.push(arm);
+            } else {
+                reordered.push(arm);
+            }
+        }
+        reordered.extend(some_arms);
+        reordered
+    }
+
     /// Lower a saturated constructor call to the appropriate Core Erlang form.
     pub(super) fn lower_ctor(&mut self, name: &str, args: Vec<&Expr>) -> CExpr {
         match name {
+            // Some(v) -> bare value (no tuple wrapping)
+            "Some" if args.len() == 1 => self.lower_expr(args[0]),
             "Nil" => CExpr::Nil,
             "Cons" if args.len() == 2 => {
                 let head_var = self.fresh();
@@ -365,7 +398,8 @@ impl<'a> Lowerer<'a> {
             } => {
                 let scrut_var = self.fresh();
                 let scrut_ce = self.lower_expr(scrutinee);
-                let arms_ce: Vec<CArm> = arms
+                let reordered = Self::reorder_maybe_arms(arms);
+                let arms_ce: Vec<CArm> = reordered
                     .iter()
                     .map(|arm| {
                         let pat = lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules);
