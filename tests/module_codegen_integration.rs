@@ -385,3 +385,113 @@ main () = area (Circle 5.0) + area (Rect 3.0 4.0)
     typecheck_source(main_src, &mut checker);
     let _out = emit_project_module(main_src, "main", &checker);
 }
+
+// ---- Cross-module effectful calls ----
+
+#[test]
+fn cross_module_effectful_qualified_call() {
+    // Logger.greet needs {Log}, so the call should thread _HandleLog + _ReturnK
+    let main_src = "
+module Main
+import Logger
+
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler console_log for Log {
+  log msg -> print msg
+}
+
+pub fun main () -> String
+main () = Logger.greet \"world\" with console_log
+";
+    let mut checker = make_project_checker();
+    typecheck_source(main_src, &mut checker);
+    let out = emit_project_module(main_src, "main", &checker);
+
+    // Should emit inter-module call with handler params
+    assert_contains(&out, "call 'logger':'greet'");
+    // The call should have 3 args: name, _HandleLog, _ReturnK
+    // (not just 1 arg like a pure function)
+}
+
+#[test]
+fn cross_module_effectful_exposed_call() {
+    // Same as above but with exposed import
+    let main_src = "
+module Main
+import Logger (greet)
+
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler console_log for Log {
+  log msg -> print msg
+}
+
+pub fun main () -> String
+main () = greet \"world\" with console_log
+";
+    let mut checker = make_project_checker();
+    typecheck_source(main_src, &mut checker);
+    let out = emit_project_module(main_src, "main", &checker);
+
+    // Exposed effectful call should still be inter-module
+    assert_contains(&out, "call 'logger':'greet'");
+}
+
+#[test]
+fn cross_module_effectful_export_arity() {
+    // Logger.greet should be exported with expanded arity (1 + 1 handler + 1 ReturnK = 3)
+    let logger_src = std::fs::read_to_string(fixtures_root().join("Logger.dy")).unwrap();
+    let mut checker = make_project_checker();
+    typecheck_source(&logger_src, &mut checker);
+    let out = emit_project_module(&logger_src, "logger", &checker);
+
+    // greet should be exported with arity 3 (name, _HandleLog, _ReturnK)
+    assert_contains(&out, "'greet'/3");
+}
+
+#[test]
+fn cross_module_effectful_compiles_with_erlc() {
+    let logger_src = std::fs::read_to_string(fixtures_root().join("Logger.dy")).unwrap();
+    let main_src = "
+module Main
+import Logger
+
+effect Log {
+  fun log (msg: String) -> Unit
+}
+
+handler console_log for Log {
+  log msg -> print msg
+}
+
+pub fun main () -> String
+main () = Logger.greet \"world\" with console_log
+";
+    let mut checker = make_project_checker();
+    typecheck_source(main_src, &mut checker);
+
+    let logger_core = emit_project_module(&logger_src, "logger", &checker);
+    let main_core = emit_project_module(main_src, "main", &checker);
+
+    // Both should compile with erlc
+    let dir = assert_erlc_compiles(&logger_core, "logger");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let output = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
