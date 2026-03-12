@@ -3,11 +3,11 @@ use super::emit_module;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 
-/// Parse `src` and emit Core Erlang for a module named "test".
+/// Parse `src` and emit Core Erlang for a single-file script module.
 fn emit(src: &str) -> String {
     let tokens = Lexer::new(src).lex().expect("lex error");
     let program = Parser::new(tokens).parse_program().expect("parse error");
-    emit_module("test", &program)
+    emit_module("_script", &program)
 }
 
 /// Assert that `emit(src)` contains `needle` as a substring.
@@ -164,7 +164,7 @@ record Point { x: Int, y: Int }
 main () = Point { x: 1, y: 2 }
 ";
     let out = emit(src);
-    assert!(out.contains("'test_Point'"), "missing tag\n{out}");
+    assert!(out.contains("'_script_Point'"), "missing tag\n{out}");
     assert!(out.contains("1"), "missing x\n{out}");
     assert!(out.contains("2"), "missing y\n{out}");
 }

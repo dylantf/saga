@@ -242,14 +242,7 @@ fn cmd_build(file: &str) {
     let mut checker = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
 
-    // Derive module name from filename (e.g. "01-hello-world.dy" -> "hello_world")
-    let raw_stem = std::path::Path::new(file)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("main");
-    // Sanitize: replace hyphens with underscores, strip leading digits/underscores
-    let sanitized: String = raw_stem.replace('-', "_");
-    let module_name = sanitized.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
+    let module_name = "_script";
 
     let elaborated = elaborate::elaborate(&program, &checker);
     let core_src = codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info);
@@ -301,12 +294,7 @@ fn cmd_emit(file: &str) {
     let mut checker = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
 
-    let raw_stem = std::path::Path::new(file)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("main");
-    let sanitized: String = raw_stem.replace('-', "_");
-    let module_name = sanitized.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
+    let module_name = "_script";
 
     let elaborated = elaborate::elaborate(&program, &checker);
     let core_src = codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info);

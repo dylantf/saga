@@ -5,7 +5,7 @@ fn emit(src: &str) -> String {
     let program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
-    codegen::emit_module("test", &program)
+    codegen::emit_module("_script", &program)
 }
 
 /// Parse, typecheck, elaborate, then emit Core Erlang.
@@ -18,7 +18,7 @@ fn emit_elaborated(src: &str) -> String {
     let mut checker = typechecker::Checker::new();
     checker.check_program(&program).expect("typecheck error");
     let elaborated = elaborate::elaborate(&program, &checker);
-    codegen::emit_module("test", &elaborated)
+    codegen::emit_module("_script", &elaborated)
 }
 
 /// Emit Core Erlang and compile it with erlc, asserting no compilation errors.
@@ -33,7 +33,7 @@ fn assert_compiles(src: &str) {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let core_path = dir.join("test.core");
+    let core_path = dir.join("_script.core");
     std::fs::write(&core_path, &out).unwrap();
     let status = std::process::Command::new("erlc")
         .arg("-o")
@@ -609,8 +609,8 @@ main () = risky () with {
 "#;
     let out = emit_elaborated(src);
     // Should wrap the result in Ok (mangled with module prefix)
-    assert_contains(&out, "'test_Ok'");
-    assert_contains(&out, "'test_Err'");
+    assert_contains(&out, "'_script_Ok'");
+    assert_contains(&out, "'_script_Err'");
 }
 
 #[test]
@@ -1155,8 +1155,8 @@ try_it computation = computation () with {
 }
 "#;
     let out = emit(src);
-    assert_contains(&out, "'test_Ok'");
-    assert_contains(&out, "'test_Err'");
+    assert_contains(&out, "'_script_Ok'");
+    assert_contains(&out, "'_script_Err'");
 }
 
 #[test]
