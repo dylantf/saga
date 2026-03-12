@@ -104,6 +104,9 @@ impl Elaborator {
                 }
                 Decl::FunAnnotation {
                     name, where_clause, ..
+                }
+                | Decl::ExternalFun {
+                    name, where_clause, ..
                 } => {
                     if !where_clause.is_empty() {
                         let mut dict_params = Vec::new();

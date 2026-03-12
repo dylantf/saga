@@ -140,6 +140,64 @@ impl Checker {
             }
         }
 
+        // Register external functions: build type from annotation and insert into env directly
+        // (no FunBinding will follow for these)
+        for decl in program {
+            if let Decl::ExternalFun {
+                name,
+                params,
+                return_type,
+                effects,
+                where_clause,
+                span,
+                ..
+            } = decl
+            {
+                let mut params_list: Vec<(String, u32)> = vec![];
+                let mut fun_ty = self.convert_type_expr(return_type, &mut params_list);
+                for (_, texpr) in params.iter().rev() {
+                    let param_ty = self.convert_type_expr(texpr, &mut params_list);
+                    fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
+                }
+
+                if !effects.is_empty() {
+                    return Err(TypeError::at(
+                        *span,
+                        format!(
+                            "external function '{}' cannot declare effects with `needs` -- wrap it in a local function instead",
+                            name
+                        ),
+                    ));
+                }
+
+                // Build scheme constraints from where clause
+                let mut scheme_constraints = Vec::new();
+                if !where_clause.is_empty() {
+                    for bound in where_clause {
+                        if let Some((_, var_id)) =
+                            params_list.iter().find(|(n, _)| *n == bound.type_var)
+                        {
+                            for trait_name in &bound.traits {
+                                scheme_constraints.push((trait_name.clone(), *var_id));
+                            }
+                        } else {
+                            return Err(TypeError::at(
+                                *span,
+                                format!(
+                                    "where clause references unknown type variable '{}'",
+                                    bound.type_var
+                                ),
+                            ));
+                        }
+                    }
+                }
+
+                let mut scheme = self.generalize(&fun_ty);
+                scheme.constraints = scheme_constraints;
+                self.env.insert(name.clone(), scheme);
+            }
+        }
+
         // Second pass: pre-bind all function names with fresh vars (enables mutual recursion)
         let mut fun_vars: HashMap<std::string::String, Type> = HashMap::new();
         for decl in program {
@@ -191,8 +249,9 @@ impl Checker {
 
         // Validate that `main` does not declare effects (it's the top of the call stack,
         // there is no caller above to provide handlers)
-        if let Some(effects) = self.fun_effects.get("main") {
-            if !effects.is_empty() {
+        if let Some(effects) = self.fun_effects.get("main")
+            && !effects.is_empty()
+        {
                 // Find the span from the annotation
                 let span = program.iter().find_map(|d| {
                     if let Decl::FunAnnotation { name, span, .. } = d
@@ -210,7 +269,6 @@ impl Checker {
                         effects.iter().cloned().collect::<Vec<_>>().join(", ")
                     ),
                 ));
-            }
         }
 
         // Check all accumulated trait constraints now that types are resolved

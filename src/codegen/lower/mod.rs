@@ -81,6 +81,9 @@ pub struct Lowerer<'a> {
     /// e.g. "Circle" -> "shapes", "Some" -> "std_maybe".
     /// Constructors not in this map are prelude builtins and are not mangled.
     constructor_modules: HashMap<String, String>,
+    /// Maps external function name -> (erlang_module, erlang_func, arity).
+    /// Populated from `Decl::ExternalFun` declarations.
+    external_funs: HashMap<String, (String, String, usize)>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -105,6 +108,7 @@ impl<'a> Lowerer<'a> {
             pending_callee_return_k: None,
             constructor_modules: HashMap::new(),
             current_handler_k: None,
+            external_funs: HashMap::new(),
         }
     }
 
@@ -200,6 +204,36 @@ impl<'a> Lowerer<'a> {
                     if !param_effs.is_empty() {
                         self.param_absorbed_effects.insert(name.clone(), param_effs);
                     }
+                }
+                Decl::ExternalFun {
+                    public,
+                    name,
+                    module: erl_module,
+                    func: erl_func,
+                    params,
+                    effects,
+                    ..
+                } => {
+                    if *public {
+                        self.pub_names.insert(name.clone());
+                    }
+                    let real_arity = params.len();
+                    self.external_funs.insert(
+                        name.clone(),
+                        (erl_module.clone(), erl_func.clone(), real_arity),
+                    );
+                    // Register effects if declared
+                    if !effects.is_empty() {
+                        let mut sorted: Vec<String> =
+                            effects.iter().map(|e| e.name.clone()).collect();
+                        sorted.sort();
+                        self.fun_effects.insert(name.clone(), sorted);
+                    }
+                    // Register as a top-level function with the appropriate arity
+                    let effect_count = effects.len();
+                    let expanded_arity =
+                        real_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
+                    self.top_level_funs.insert(name.clone(), expanded_arity);
                 }
                 _ => {}
             }
@@ -355,6 +389,34 @@ impl<'a> Lowerer<'a> {
 
         // If there's no module declaration, it's a single-file script -- export everything.
         let is_module = program.iter().any(|d| matches!(d, Decl::ModuleDecl { .. }));
+
+        // Generate wrapper functions for external declarations so cross-module
+        // imports can call them by the local name.
+        for decl in program {
+            if let Decl::ExternalFun {
+                public,
+                name,
+                module: erl_module,
+                func: erl_func,
+                params,
+                ..
+            } = decl
+            {
+                let arity = params.len();
+                let arg_vars: Vec<String> = (0..arity).map(|i| format!("_Ext{}", i)).collect();
+                let call_args: Vec<CExpr> =
+                    arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
+                let call = CExpr::Call(erl_module.clone(), erl_func.clone(), call_args);
+                fun_defs.push(CFunDef {
+                    name: name.clone(),
+                    arity,
+                    body: CExpr::Fun(arg_vars, Box::new(call)),
+                });
+                if *public || !is_module {
+                    exports.push((name.clone(), arity));
+                }
+            }
+        }
 
         for (name, arity, clauses) in clause_groups {
             if !is_module || self.pub_names.contains(&name) {
@@ -647,15 +709,21 @@ impl<'a> Lowerer<'a> {
                         }
                         let call_args: Vec<CExpr> =
                             arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-                        let call =
-                            if let Some((erl_mod, erl_name)) = self.imported_names.get(func_name) {
-                                CExpr::Call(erl_mod.clone(), erl_name.clone(), call_args)
-                            } else {
-                                CExpr::Apply(
-                                    Box::new(CExpr::FunRef(func_name.to_string(), arity)),
-                                    call_args,
-                                )
-                            };
+                        let call = if let Some((erl_mod, erl_func, _)) =
+                            self.external_funs.get(func_name)
+                        {
+                            // External function: direct call to the foreign module
+                            CExpr::Call(erl_mod.clone(), erl_func.clone(), call_args)
+                        } else if let Some((erl_mod, erl_name)) =
+                            self.imported_names.get(func_name)
+                        {
+                            CExpr::Call(erl_mod.clone(), erl_name.clone(), call_args)
+                        } else {
+                            CExpr::Apply(
+                                Box::new(CExpr::FunRef(func_name.to_string(), arity)),
+                                call_args,
+                            )
+                        };
                         return bindings.into_iter().rev().fold(call, |body, (var, val)| {
                             CExpr::Let(var, Box::new(val), Box::new(body))
                         });

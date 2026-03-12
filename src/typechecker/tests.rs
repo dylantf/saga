@@ -2719,3 +2719,19 @@ main () = log! \"hello\"",
         err.message
     );
 }
+
+#[test]
+fn external_fun_cannot_have_effects() {
+    let result = check(
+        r#"
+        @external("erlang", "file", "read_file")
+        fun read_file (path: String) -> String needs {IO}
+        "#,
+    );
+    let err = result.err().expect("expected error");
+    assert!(
+        err.message.contains("external function") && err.message.contains("cannot declare effects"),
+        "expected error about external + needs, got: {}",
+        err.message
+    );
+}

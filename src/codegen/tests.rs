@@ -625,3 +625,57 @@ fn list_flat_map() {
         "call 'lists':'flatmap'",
     );
 }
+
+// --- @external ---
+
+#[test]
+fn external_fun_generates_wrapper() {
+    let src = r#"
+@external("erlang", "lists", "reverse")
+fun reverse (list: List a) -> List a
+main () = 42
+"#;
+    let out = emit(src);
+    // Should generate a wrapper function that calls lists:reverse
+    assert!(
+        out.contains("call 'lists':'reverse'"),
+        "Expected call to lists:reverse in:\n{out}"
+    );
+    // Wrapper should be exported
+    assert!(
+        out.contains("'reverse'/1"),
+        "Expected reverse/1 export in:\n{out}"
+    );
+}
+
+#[test]
+fn external_fun_direct_call() {
+    let src = r#"
+@external("erlang", "lists", "reverse")
+fun reverse (list: List a) -> List a
+
+fun main () -> List Int
+main () = reverse [1, 2, 3]
+"#;
+    let out = emit(src);
+    assert!(
+        out.contains("call 'lists':'reverse'"),
+        "Expected direct call to lists:reverse in:\n{out}"
+    );
+}
+
+#[test]
+fn external_fun_multi_param() {
+    let src = r#"
+@external("erlang", "maps", "get")
+fun get (key: a) (map: Dict a b) -> b
+
+fun main () -> Int
+main () = get "x" Dict.empty
+"#;
+    let out = emit(src);
+    assert!(
+        out.contains("call 'maps':'get'"),
+        "Expected call to maps:get in:\n{out}"
+    );
+}

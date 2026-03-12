@@ -713,6 +713,13 @@ impl Lexer {
                     tokens.push(spanned);
                     prev_token = Some(tok);
                 }
+                // Bare @ (not followed by ") — annotation marker
+                Some('@') => {
+                    self.advance();
+                    let (spanned, tok) = self.emit(Token::At, start);
+                    tokens.push(spanned);
+                    prev_token = Some(tok);
+                }
                 Some(ch) if ch.is_alphabetic() || ch == '_' => {
                     let mut tok = self.read_identifier();
                     // ident! (no space) → EffectCall, but not ident!=

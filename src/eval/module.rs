@@ -80,6 +80,11 @@ fn public_names(program: &[Decl]) -> HashSet<String> {
                     names.insert(m.name.clone());
                 }
             }
+            Decl::ExternalFun {
+                public: true, name, ..
+            } => {
+                names.insert(name.clone());
+            }
             Decl::ImplDef {
                 trait_name,
                 target_type,

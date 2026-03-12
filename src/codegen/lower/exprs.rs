@@ -116,7 +116,7 @@ impl<'a> Lowerer<'a> {
     /// This prevents the wildcard-like Some arm from shadowing None.
     fn reorder_maybe_arms(arms: &[CaseArm]) -> Vec<&CaseArm> {
         let is_some_pat = |arm: &&CaseArm| matches!(&arm.pattern, Pat::Constructor { name, args, .. } if name == "Some" && args.len() == 1);
-        let has_some = arms.iter().any(|a| is_some_pat(&&a));
+        let has_some = arms.iter().any(|a| is_some_pat(&a));
         if !has_some {
             return arms.iter().collect();
         }
@@ -124,7 +124,7 @@ impl<'a> Lowerer<'a> {
         let mut reordered: Vec<&CaseArm> = Vec::new();
         let mut some_arms: Vec<&CaseArm> = Vec::new();
         for arm in arms {
-            if is_some_pat(&&arm) {
+            if is_some_pat(&arm) {
                 some_arms.push(arm);
             } else {
                 reordered.push(arm);

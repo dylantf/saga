@@ -464,6 +464,11 @@ pub(super) fn public_names_for_tc(
             } => {
                 names.insert(name.clone());
             }
+            Decl::ExternalFun {
+                public: true, name, ..
+            } => {
+                names.insert(name.clone());
+            }
             Decl::TraitDef {
                 public: true,
                 methods,

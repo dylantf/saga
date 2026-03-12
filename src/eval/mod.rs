@@ -715,6 +715,11 @@ pub fn eval_decl(decl: &Decl, env: &Env, loader: &ModuleLoader) -> EvalResult {
         Decl::DictConstructor { .. } => {
             unreachable!("elaboration-only construct in interpreter")
         }
+
+        // External functions are not supported in the interpreter
+        Decl::ExternalFun { name, .. } => {
+            EvalResult::error(format!("external function '{}' cannot be evaluated in the interpreter", name))
+        }
     }
 }
 
