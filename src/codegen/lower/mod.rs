@@ -238,14 +238,14 @@ impl<'a> Lowerer<'a> {
                     }
 
                     // Register imported effect definitions
-                    for (eff_name, ops, _type_param_count) in &info.effect_defs {
+                    for eff_def in &info.effect_defs {
                         let mut ops_map = HashMap::new();
-                        for (op_name, param_count) in ops {
-                            ops_map.insert(op_name.clone(), *param_count);
-                            self.op_to_effect.insert(op_name.clone(), eff_name.clone());
+                        for op in &eff_def.ops {
+                            ops_map.insert(op.name.clone(), op.param_count);
+                            self.op_to_effect.insert(op.name.clone(), eff_def.name.clone());
                         }
                         self.effect_defs
-                            .insert(eff_name.clone(), EffectInfo { ops: ops_map });
+                            .insert(eff_def.name.clone(), EffectInfo { ops: ops_map });
                     }
                     // Register imported record field orders
                     for (rec_name, fields) in &info.record_fields {

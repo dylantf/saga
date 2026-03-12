@@ -184,14 +184,29 @@ pub struct Scheme {
 
 // --- Module codegen info ---
 
+/// An effect operation definition for codegen: operation name and parameter count.
+#[derive(Debug, Clone)]
+pub struct EffectOpDef {
+    pub name: String,
+    pub param_count: usize,
+}
+
+/// An effect definition for codegen: effect name, its operations, and type parameter count.
+#[derive(Debug, Clone)]
+pub struct EffectDef {
+    pub name: String,
+    pub ops: Vec<EffectOpDef>,
+    pub type_param_count: usize,
+}
+
 /// Information about a module's exports needed by the lowerer/codegen.
 /// Populated during typechecking alongside `tc_loaded`.
 #[derive(Debug, Clone, Default)]
 pub struct ModuleCodegenInfo {
     /// Public type bindings: name -> scheme (same data as tc_loaded).
     pub exports: Vec<(String, Scheme)>,
-    /// Public effect definitions: effect name -> (ops as (op_name, param_count), type_param_count).
-    pub effect_defs: Vec<(String, Vec<(String, usize)>, usize)>,
+    /// Public effect definitions.
+    pub effect_defs: Vec<EffectDef>,
     /// Public record definitions: record name -> ordered field names.
     pub record_fields: Vec<(String, Vec<String>)>,
     /// Public handler names.

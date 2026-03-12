@@ -1,4 +1,4 @@
-use super::{Checker, ModuleCodegenInfo, Scheme, TypeError};
+use super::{Checker, EffectDef, EffectOpDef, ModuleCodegenInfo, Scheme, TypeError};
 use crate::token::Span;
 
 /// Returns the embedded source for a builtin stdlib module, if it exists.
@@ -325,11 +325,18 @@ fn collect_codegen_info(
                 operations,
                 ..
             } => {
-                let ops: Vec<(String, usize)> = operations
+                let ops = operations
                     .iter()
-                    .map(|op| (op.name.clone(), op.params.len()))
+                    .map(|op| EffectOpDef {
+                        name: op.name.clone(),
+                        param_count: op.params.len(),
+                    })
                     .collect();
-                effect_defs.push((name.clone(), ops, type_params.len()));
+                effect_defs.push(EffectDef {
+                    name: name.clone(),
+                    ops,
+                    type_param_count: type_params.len(),
+                });
             }
             Decl::RecordDef {
                 public: true,
