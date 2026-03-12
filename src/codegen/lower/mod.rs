@@ -114,6 +114,17 @@ impl<'a> Lowerer<'a> {
         format!("_Cor{}", n)
     }
 
+    /// Find a record name whose field list contains all the given update field names.
+    fn find_record_by_fields(&self, field_names: &[String]) -> Option<&str> {
+        self.record_fields.iter().find_map(|(rname, fields)| {
+            if field_names.iter().all(|f| fields.contains(f)) {
+                Some(rname.as_str())
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn lower_module(&mut self, module_name: &str, program: &ast::Program) -> CModule {
         // Collect record field orders, effect definitions, handler definitions,
         // and function effect requirements.
@@ -899,7 +910,10 @@ impl<'a> Lowerer<'a> {
             Expr::RecordUpdate { record, fields, .. } => {
                 let rec_var = self.fresh();
                 let rec_ce = self.lower_expr(record);
-                let record_name = field_access_record_name(record);
+                let update_field_names: Vec<String> =
+                    fields.iter().map(|(n, _)| n.clone()).collect();
+                let record_name = field_access_record_name(record)
+                    .or_else(|| self.find_record_by_fields(&update_field_names));
                 let order = record_name
                     .and_then(|rname| self.record_fields.get(rname))
                     .cloned()
