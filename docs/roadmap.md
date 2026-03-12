@@ -162,7 +162,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 ### Codegen bugs
 
 - [x] Integer division: `/` on `Int` emits `erlang:'/'` (float division) instead of `erlang:'div'`
-- [ ] Polymorphic type class dicts used as bare function refs without applying dict arguments (e.g. `'__dict_Show_Result'/2` not called with sub-dicts)
+- [x] Polymorphic type class dicts used as bare function refs without applying dict arguments (e.g. `'__dict_Show_Result'/2` not called with sub-dicts)
 
 ### Effects (CPS transform)
 

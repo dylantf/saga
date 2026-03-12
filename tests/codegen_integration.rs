@@ -393,6 +393,33 @@ main () = print Red
     );
 }
 
+// --- Polymorphic trait dict sub-dictionaries ---
+
+#[test]
+fn show_parameterized_type_applies_sub_dicts() {
+    let src = r#"
+type Box a { Wrap(a) }
+
+impl Show for Box a where {a: Show} {
+  show b = case b {
+    Wrap(v) -> "Wrap(" <> show v <> ")"
+  }
+}
+
+main () = show (Wrap 42)
+"#;
+    let out = emit_elaborated(src);
+    // The dict constructor should be applied with a sub-dict, not used as a bare ref.
+    assert!(
+        out.contains("'__dict_Show_Box'"),
+        "expected Show/Box dict constructor\n{out}"
+    );
+    assert!(
+        out.contains("'__dict_Show_Int'"),
+        "expected Show/Int sub-dict applied to Box dict\n{out}"
+    );
+}
+
 // --- Effect system (CPS transform) ---
 
 #[test]

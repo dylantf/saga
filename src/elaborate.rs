@@ -763,15 +763,26 @@ impl Elaborator {
         for ev in evidence_list {
             if ev.trait_name == trait_name {
                 return match &ev.resolved_type {
-                    Some((type_name, _args)) => {
+                    Some((type_name, args)) => {
                         // Concrete type: reference the dict constructor
                         let dict_name = self
                             .dict_names
-                            .get(&(trait_name.to_string(), type_name.clone()));
-                        dict_name.map(|name| Expr::DictRef {
-                            name: name.clone(),
+                            .get(&(trait_name.to_string(), type_name.clone()))?;
+                        let mut dict_expr: Expr = Expr::DictRef {
+                            name: dict_name.clone(),
                             span,
-                        })
+                        };
+                        // Apply sub-dictionaries for each type argument
+                        for arg_ty in args {
+                            if let Some(sub_dict) = self.dict_for_type(trait_name, arg_ty, span) {
+                                dict_expr = Expr::App {
+                                    func: Box::new(dict_expr),
+                                    arg: Box::new(sub_dict),
+                                    span,
+                                };
+                            }
+                        }
+                        Some(dict_expr)
                     }
                     None => {
                         // Polymorphic: use the dict param from current function
@@ -794,7 +805,7 @@ impl Elaborator {
     /// Build the show function expression for a concrete type.
     /// Returns an expression that, when applied to a value of that type, produces a string.
     fn show_fn_for_type(&self, ty: &Type, span: Span) -> Option<Expr> {
-        let dict = self.dict_for_type(ty, span)?;
+        let dict = self.dict_for_type("Show", ty, span)?;
         Some(Expr::DictMethodAccess {
             dict: Box::new(dict),
             method_index: 0,
@@ -803,16 +814,16 @@ impl Elaborator {
     }
 
     /// Build the dict expression for a concrete type (the dict itself, not the method).
-    fn dict_for_type(&self, ty: &Type, span: Span) -> Option<Expr> {
+    fn dict_for_type(&self, trait_name: &str, ty: &Type, span: Span) -> Option<Expr> {
         match ty {
             Type::Con(name, args) => {
-                let dict_name = self.dict_names.get(&("Show".into(), name.clone()))?;
+                let dict_name = self.dict_names.get(&(trait_name.into(), name.clone()))?;
                 let mut dict_expr: Expr = Expr::DictRef {
                     name: dict_name.clone(),
                     span,
                 };
                 for arg_ty in args {
-                    let sub_dict = self.dict_for_type(arg_ty, span)?;
+                    let sub_dict = self.dict_for_type(trait_name, arg_ty, span)?;
                     dict_expr = Expr::App {
                         func: Box::new(dict_expr),
                         arg: Box::new(sub_dict),
