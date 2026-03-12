@@ -156,7 +156,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 ### Data structures
 
 - [x] Dict lowering (`Dict.empty` -> `maps:new()`, `Dict.*` -> `maps:*` BIFs, `Eq` via `=:=`)
-- [ ] List lowering (`List.*` -> `lists:*` BIFs)
+- [x] List lowering (`List.*` -> `lists:*`/`erlang:*` BIFs, `foldl` arg-swap wrapper)
 
 ### Traits
 

@@ -534,3 +534,74 @@ fn dict_member() {
     let src = r#"main () = Dict.member "a" Dict.empty"#;
     assert_contains(src, "call 'maps':'is_key'");
 }
+
+// --- List builtins ---
+
+#[test]
+fn list_head() {
+    assert_contains("main () = List.head [1, 2]", "call 'erlang':'hd'");
+}
+
+#[test]
+fn list_tail() {
+    assert_contains("main () = List.tail [1, 2]", "call 'erlang':'tl'");
+}
+
+#[test]
+fn list_length() {
+    assert_contains("main () = List.length [1, 2]", "call 'erlang':'length'");
+}
+
+#[test]
+fn list_map() {
+    assert_contains(
+        "main () = List.map (fun x -> x + 1) [1, 2]",
+        "call 'lists':'map'",
+    );
+}
+
+#[test]
+fn list_filter() {
+    assert_contains(
+        "main () = List.filter (fun x -> x > 0) [1, 2]",
+        "call 'lists':'filter'",
+    );
+}
+
+#[test]
+fn list_foldl() {
+    let src = "main () = List.foldl (fun acc x -> acc + x) 0 [1, 2, 3]";
+    let out = emit(src);
+    assert!(out.contains("call 'lists':'foldl'"), "expected lists:foldl\n{out}");
+    // Should have a wrapper fun for arg swap
+    assert!(out.contains("fun ("), "expected wrapper lambda\n{out}");
+}
+
+#[test]
+fn list_foldr() {
+    assert_contains(
+        "main () = List.foldr (fun x acc -> x + acc) 0 [1, 2, 3]",
+        "call 'lists':'foldr'",
+    );
+}
+
+#[test]
+fn list_reverse() {
+    assert_contains("main () = List.reverse [1, 2]", "call 'lists':'reverse'");
+}
+
+#[test]
+fn list_append() {
+    assert_contains(
+        "main () = List.append [1] [2]",
+        "call 'lists':'append'",
+    );
+}
+
+#[test]
+fn list_flat_map() {
+    assert_contains(
+        "main () = List.flat_map (fun x -> [x, x]) [1, 2]",
+        "call 'lists':'flatmap'",
+    );
+}

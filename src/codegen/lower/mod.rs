@@ -1107,6 +1107,11 @@ impl<'a> Lowerer<'a> {
             return ce;
         }
 
+        // List builtins
+        if let Some(ce) = self.lower_builtin_list(module, func_name, args) {
+            return ce;
+        }
+
         let erlang_module = self
             .module_aliases
             .get(module)
@@ -1379,36 +1384,122 @@ impl<'a> Lowerer<'a> {
             }
 
             // Dict.put key value dict -> maps:put(Key, Value, Dict)
-            "put" => Some(self.lower_simple_dict_call("put", args)),
+            "put" => Some(self.lower_bif_call("maps","put", args)),
 
             // Dict.remove key dict -> maps:remove(Key, Dict)
-            "remove" => Some(self.lower_simple_dict_call("remove", args)),
+            "remove" => Some(self.lower_bif_call("maps","remove", args)),
 
             // Dict.keys dict -> maps:keys(Dict)
-            "keys" => Some(self.lower_simple_dict_call("keys", args)),
+            "keys" => Some(self.lower_bif_call("maps","keys", args)),
 
             // Dict.values dict -> maps:values(Dict)
-            "values" => Some(self.lower_simple_dict_call("values", args)),
+            "values" => Some(self.lower_bif_call("maps","values", args)),
 
             // Dict.size dict -> maps:size(Dict)
-            "size" => Some(self.lower_simple_dict_call("size", args)),
+            "size" => Some(self.lower_bif_call("maps","size", args)),
 
             // Dict.from_list list -> maps:from_list(List)
-            "from_list" => Some(self.lower_simple_dict_call("from_list", args)),
+            "from_list" => Some(self.lower_bif_call("maps","from_list", args)),
 
             // Dict.to_list dict -> maps:to_list(Dict)
-            "to_list" => Some(self.lower_simple_dict_call("to_list", args)),
+            "to_list" => Some(self.lower_bif_call("maps","to_list", args)),
 
             // Dict.member key dict -> maps:is_key(Key, Dict)
-            "member" => Some(self.lower_simple_dict_call("is_key", args)),
+            "member" => Some(self.lower_bif_call("maps","is_key", args)),
 
             _ => None,
         }
     }
 
-    /// Helper: lower a Dict builtin that maps directly to a `maps:*` BIF
-    /// with no result wrapping needed.
-    fn lower_simple_dict_call(&mut self, bif_name: &str, args: &[&Expr]) -> CExpr {
+    /// Lower List.* calls to Erlang `lists` / `erlang` BIF calls.
+    fn lower_builtin_list(
+        &mut self,
+        module: &str,
+        func_name: &str,
+        args: &[&Expr],
+    ) -> Option<CExpr> {
+        if module != "List" {
+            return None;
+        }
+
+        match (func_name, args.len()) {
+            // List.head xs -> erlang:hd(Xs)
+            ("head", 1) => Some(self.lower_bif_call("erlang", "hd", args)),
+
+            // List.tail xs -> erlang:tl(Xs)
+            ("tail", 1) => Some(self.lower_bif_call("erlang", "tl", args)),
+
+            // List.length xs -> erlang:length(Xs)
+            ("length", 1) => Some(self.lower_bif_call("erlang", "length", args)),
+
+            // List.map f xs -> lists:map(F, Xs)
+            ("map", 2) => Some(self.lower_bif_call("lists", "map", args)),
+
+            // List.filter pred xs -> lists:filter(Pred, Xs)
+            ("filter", 2) => Some(self.lower_bif_call("lists", "filter", args)),
+
+            // List.foldl f acc xs -> lists:foldl(Wrapper, Acc, Xs)
+            // Language: f(acc, elem), Erlang: f(elem, acc) -- need arg swap
+            ("foldl", 3) => {
+                let f_expr = self.lower_expr(args[0]);
+                let acc_expr = self.lower_expr(args[1]);
+                let xs_expr = self.lower_expr(args[2]);
+                let f_var = self.fresh();
+                let acc_var = self.fresh();
+                let xs_var = self.fresh();
+                let elem = self.fresh();
+                let acc_in = self.fresh();
+
+                // fun(Elem, AccIn) -> apply F(AccIn, Elem)
+                let wrapper = CExpr::Fun(
+                    vec![elem.clone(), acc_in.clone()],
+                    Box::new(CExpr::Apply(
+                        Box::new(CExpr::Var(f_var.clone())),
+                        vec![CExpr::Var(acc_in), CExpr::Var(elem)],
+                    )),
+                );
+                let w_var = self.fresh();
+
+                let call = cerl_call("lists", "foldl", vec![
+                    CExpr::Var(w_var.clone()),
+                    CExpr::Var(acc_var.clone()),
+                    CExpr::Var(xs_var.clone()),
+                ]);
+
+                Some(CExpr::Let(
+                    f_var,
+                    Box::new(f_expr),
+                    Box::new(CExpr::Let(
+                        acc_var,
+                        Box::new(acc_expr),
+                        Box::new(CExpr::Let(
+                            xs_var,
+                            Box::new(xs_expr),
+                            Box::new(CExpr::Let(w_var, Box::new(wrapper), Box::new(call))),
+                        )),
+                    )),
+                ))
+            }
+
+            // List.foldr f acc xs -> lists:foldr(F, Acc, Xs)
+            // Both use f(elem, acc) -- direct match
+            ("foldr", 3) => Some(self.lower_bif_call("lists", "foldr", args)),
+
+            // List.reverse xs -> lists:reverse(Xs)
+            ("reverse", 1) => Some(self.lower_bif_call("lists", "reverse", args)),
+
+            // List.append xs ys -> lists:append(Xs, Ys)
+            ("append", 2) => Some(self.lower_bif_call("lists", "append", args)),
+
+            // List.flat_map f xs -> lists:flatmap(F, Xs)
+            ("flat_map", 2) => Some(self.lower_bif_call("lists", "flatmap", args)),
+
+            _ => None,
+        }
+    }
+
+    /// Helper: lower args and emit a BIF call with no result wrapping.
+    fn lower_bif_call(&mut self, erl_module: &str, bif_name: &str, args: &[&Expr]) -> CExpr {
         let mut arg_vars = Vec::new();
         let mut bindings = Vec::new();
 
@@ -1420,7 +1511,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let call = cerl_call(
-            "maps",
+            erl_module,
             bif_name,
             arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
         );
