@@ -310,7 +310,7 @@ main () = {
 
     // Should compile without errors about unknown record fields
     // The record creates a tagged tuple with fields in correct order
-    assert_contains(&out, "'Animal'");
+    assert_contains(&out, "'animals_Animal'");
 }
 
 // ---- Multiple imports from different modules ----
@@ -480,6 +480,131 @@ main () = Logger.greet \"world\" with console_log
 
     // Both should compile with erlc
     let dir = assert_erlc_compiles(&logger_core, "logger");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let output = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ---- Constructor atom mangling ----
+
+#[test]
+fn local_adt_constructors_mangled_with_module_name() {
+    let shapes_src = std::fs::read_to_string(fixtures_root().join("Shapes.dy")).unwrap();
+    let mut checker = make_project_checker();
+    typecheck_source(&shapes_src, &mut checker);
+    let out = emit_project_module(&shapes_src, "shapes", &checker);
+
+    // Constructors should be prefixed with module name
+    assert_contains(&out, "'shapes_Circle'");
+    assert_contains(&out, "'shapes_Rect'");
+    // Unmangled names should not appear as constructor atoms
+    assert!(!out.contains("{'Circle'"), "unmangled Circle found\n{out}");
+    assert!(!out.contains("{'Rect'"), "unmangled Rect found\n{out}");
+}
+
+#[test]
+fn imported_constructors_mangled_with_source_module() {
+    let main_src = "
+module Main
+import Shapes (Circle, Rect, area)
+pub fun main () -> Float
+main () = area (Circle 5.0) + area (Rect 3.0 4.0)
+";
+    let mut checker = make_project_checker();
+    typecheck_source(main_src, &mut checker);
+    let out = emit_project_module(main_src, "main", &checker);
+
+    // Imported constructors should use the source module's prefix
+    assert_contains(&out, "'shapes_Circle'");
+    assert_contains(&out, "'shapes_Rect'");
+}
+
+#[test]
+fn record_constructors_mangled() {
+    // Test that record constructors get mangled when used in expressions
+    let main_src = "
+module Main
+import Animals (Animal)
+pub fun main () -> String
+main () = {
+  let a = Animal { name: \"Rex\", species: \"Dog\" }
+  a.name
+}
+";
+    let mut checker = make_project_checker();
+    typecheck_source(main_src, &mut checker);
+    let out = emit_project_module(main_src, "main", &checker);
+
+    // Record constructor should be mangled with source module prefix
+    assert_contains(&out, "'animals_Animal'");
+}
+
+#[test]
+fn prelude_constructors_mangled_with_std_prefix() {
+    let main_src = "
+module Main
+pub fun main () -> Int
+main () = case Some(42) {
+  Some(x) -> x
+  None -> 0
+}
+";
+    let mut checker = make_project_checker();
+    typecheck_source(main_src, &mut checker);
+    let out = emit_project_module(main_src, "main", &checker);
+
+    assert_contains(&out, "'std_maybe_Some'");
+    assert_contains(&out, "'std_maybe_None'");
+}
+
+#[test]
+fn cross_module_constructor_consistency() {
+    // Constructor atoms must match between the defining module and the importing module
+    let shapes_src = std::fs::read_to_string(fixtures_root().join("Shapes.dy")).unwrap();
+    let main_src = "
+module Main
+import Shapes (Circle, area)
+pub fun main () -> Float
+main () = area (Circle 5.0)
+";
+    let mut checker = make_project_checker();
+    typecheck_source(main_src, &mut checker);
+
+    let shapes_out = emit_project_module(&shapes_src, "shapes", &checker);
+    let main_out = emit_project_module(main_src, "main", &checker);
+
+    // Both modules should use the same mangled atom
+    assert_contains(&shapes_out, "'shapes_Circle'");
+    assert_contains(&main_out, "'shapes_Circle'");
+}
+
+#[test]
+fn mangled_constructors_compile_with_erlc() {
+    let shapes_src = std::fs::read_to_string(fixtures_root().join("Shapes.dy")).unwrap();
+    let main_src = "
+module Main
+import Shapes (Circle, Rect, area)
+pub fun main () -> Float
+main () = area (Circle 5.0) + area (Rect 3.0 4.0)
+";
+    let mut checker = make_project_checker();
+    typecheck_source(main_src, &mut checker);
+
+    let shapes_core = emit_project_module(&shapes_src, "shapes", &checker);
+    let main_core = emit_project_module(main_src, "main", &checker);
+
+    let dir = assert_erlc_compiles(&shapes_core, "shapes");
     let main_core_path = dir.join("main.core");
     std::fs::write(&main_core_path, &main_core).unwrap();
     let output = std::process::Command::new("erlc")

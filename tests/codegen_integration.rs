@@ -608,9 +608,9 @@ main () = risky () with {
 }
 "#;
     let out = emit_elaborated(src);
-    // Should wrap the result in Ok
-    assert_contains(&out, "'Ok'");
-    assert_contains(&out, "'Err'");
+    // Should wrap the result in Ok (mangled with module prefix)
+    assert_contains(&out, "'test_Ok'");
+    assert_contains(&out, "'test_Err'");
 }
 
 #[test]
@@ -1155,8 +1155,8 @@ try_it computation = computation () with {
 }
 "#;
     let out = emit(src);
-    assert_contains(&out, "'Ok'");
-    assert_contains(&out, "'Err'");
+    assert_contains(&out, "'test_Ok'");
+    assert_contains(&out, "'test_Err'");
 }
 
 #[test]

@@ -9,7 +9,7 @@ use super::Lowerer;
 use super::pats::lower_pat;
 use super::util::{
     binop_call, collect_effect_call, collect_fun_call, core_var, has_nested_effect_call,
-    pat_binding_var,
+    mangle_ctor_atom, pat_binding_var,
 };
 
 /// Returns true if `expr` is a valid Core Erlang guard expression:
@@ -38,7 +38,7 @@ impl<'a> Lowerer<'a> {
         let mut result = Vec::new();
 
         for (i, arm) in arms.iter().enumerate() {
-            let pat = lower_pat(&arm.pattern, &self.record_fields);
+            let pat = lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules);
 
             match &arm.guard {
                 None => {
@@ -135,7 +135,8 @@ impl<'a> Lowerer<'a> {
                     vars.push(var.clone());
                     bindings.push((var, val));
                 }
-                let mut elems = vec![CExpr::Lit(CLit::Atom(name.to_string()))];
+                let atom = mangle_ctor_atom(name, &self.constructor_modules);
+                let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
                 elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
                 let tuple = CExpr::Tuple(elems);
                 bindings.into_iter().rev().fold(tuple, |body, (var, val)| {
@@ -226,7 +227,7 @@ impl<'a> Lowerer<'a> {
             (var, body)
         } else {
             let tmp = self.fresh();
-            let cpat = lower_pat(pat, &self.record_fields);
+            let cpat = lower_pat(pat, &self.record_fields, &self.constructor_modules);
             let wrapped = CExpr::Case(
                 Box::new(CExpr::Var(tmp.clone())),
                 vec![CArm {
@@ -367,7 +368,7 @@ impl<'a> Lowerer<'a> {
                 let arms_ce: Vec<CArm> = arms
                     .iter()
                     .map(|arm| {
-                        let pat = lower_pat(&arm.pattern, &self.record_fields);
+                        let pat = lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules);
                         let guard_ce = arm.guard.as_ref().map(|g| self.lower_expr(g));
                         let body_ce = self.lower_branch_with_k(&arm.body, k_var);
                         CArm {
@@ -509,7 +510,7 @@ impl<'a> Lowerer<'a> {
         let else_arms_ce: Vec<CArm> = else_arms
             .iter()
             .map(|arm| CArm {
-                pat: lower_pat(&arm.pattern, &self.record_fields),
+                pat: lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules),
                 guard: arm.guard.as_ref().map(|g| self.lower_expr(g)),
                 body: self.lower_expr(&arm.body),
             })
@@ -527,7 +528,7 @@ impl<'a> Lowerer<'a> {
                 Box::new(CExpr::Var(scrut_var.clone())),
                 vec![
                     CArm {
-                        pat: lower_pat(pat, &self.record_fields),
+                        pat: lower_pat(pat, &self.record_fields, &self.constructor_modules),
                         guard: None,
                         body: inner,
                     },

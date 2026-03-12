@@ -91,8 +91,8 @@ main () = {
   first_two [5] |> print
 
   # String patterns
-  classify_log "[ERROR]: disk full" |> print
-  classify_log "[WARN]: low memory" |> print
+  classify_log "[INFO]: this is some helpful info :)" |> print
+  classify_log "[WARN]: test warning" |> print
   classify_log "hello" |> print
   classify_log "something else" |> print
 }

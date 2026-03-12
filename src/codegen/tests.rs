@@ -164,7 +164,7 @@ record Point { x: Int, y: Int }
 main () = Point { x: 1, y: 2 }
 ";
     let out = emit(src);
-    assert!(out.contains("'Point'"), "missing tag\n{out}");
+    assert!(out.contains("'test_Point'"), "missing tag\n{out}");
     assert!(out.contains("1"), "missing x\n{out}");
     assert!(out.contains("2"), "missing y\n{out}");
 }

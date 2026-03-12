@@ -77,6 +77,10 @@ pub struct Lowerer<'a> {
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
+    /// Maps constructor name -> erlang module name for atom mangling.
+    /// e.g. "Circle" -> "shapes", "Some" -> "std_maybe".
+    /// Constructors not in this map are prelude builtins and are not mangled.
+    constructor_modules: HashMap<String, String>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -99,6 +103,7 @@ impl<'a> Lowerer<'a> {
             lambda_effect_context: None,
             current_return_k: None,
             pending_callee_return_k: None,
+            constructor_modules: HashMap::new(),
             current_handler_k: None,
         }
     }
@@ -117,6 +122,17 @@ impl<'a> Lowerer<'a> {
                 Decl::RecordDef { name, fields, .. } => {
                     let field_names = fields.iter().map(|(n, _)| n.clone()).collect();
                     self.record_fields.insert(name.clone(), field_names);
+                    // Register record as a constructor for atom mangling
+                    self.constructor_modules
+                        .insert(name.clone(), module_name.to_string());
+                }
+                Decl::TypeDef { name, variants, .. } => {
+                    // Register all constructors for atom mangling
+                    for variant in variants {
+                        self.constructor_modules
+                            .insert(variant.name.clone(), module_name.to_string());
+                    }
+                    let _ = name; // type name not needed here
                 }
                 Decl::EffectDef {
                     name, operations, ..
@@ -175,6 +191,21 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Register prelude (Std.*) constructors so they're mangled consistently
+        // even when not explicitly imported by user code.
+        for (mod_name, info) in self.codegen_info {
+            if mod_name.starts_with("Std.") {
+                let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
+                let erlang_name = util::module_name_to_erlang(&mod_path);
+                for (_type_name, ctors) in &info.type_constructors {
+                    for ctor in ctors {
+                        self.constructor_modules
+                            .insert(ctor.clone(), erlang_name.clone());
+                    }
+                }
             }
         }
 
@@ -250,6 +281,13 @@ impl<'a> Lowerer<'a> {
                     // Register imported record field orders
                     for (rec_name, fields) in &info.record_fields {
                         self.record_fields.insert(rec_name.clone(), fields.clone());
+                    }
+                    // Register imported constructors for atom mangling
+                    for (_type_name, ctors) in &info.type_constructors {
+                        for ctor in ctors {
+                            self.constructor_modules
+                                .insert(ctor.clone(), erlang_name.clone());
+                        }
                     }
                 }
             }
@@ -386,7 +424,7 @@ impl<'a> Lowerer<'a> {
                             .collect();
                         // Pattern only matches user params, not handler params
                         let pat = if base_arity == 1 {
-                            lower_pat(non_unit_pats[0], &self.record_fields)
+                            lower_pat(non_unit_pats[0], &self.record_fields, &self.constructor_modules)
                         } else if base_arity == 0 {
                             // No user params to match on -- use wildcard
                             CPat::Wildcard
@@ -394,7 +432,7 @@ impl<'a> Lowerer<'a> {
                             CPat::Values(
                                 non_unit_pats
                                     .iter()
-                                    .map(|p| lower_pat(p, &self.record_fields))
+                                    .map(|p| lower_pat(p, &self.record_fields, &self.constructor_modules))
                                     .collect(),
                             )
                         };
@@ -683,7 +721,8 @@ impl<'a> Lowerer<'a> {
                 if name == "Nil" {
                     CExpr::Nil
                 } else {
-                    CExpr::Lit(CLit::Atom(name.clone()))
+                    let atom = util::mangle_ctor_atom(name, &self.constructor_modules);
+                    CExpr::Lit(CLit::Atom(atom))
                 }
             }
 
@@ -828,7 +867,8 @@ impl<'a> Lowerer<'a> {
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
-                let mut elems = vec![CExpr::Lit(CLit::Atom(name.clone()))];
+                let atom = util::mangle_ctor_atom(name, &self.constructor_modules);
+                let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
                 elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
                 let tuple = CExpr::Tuple(elems);
                 bindings.into_iter().rev().fold(tuple, |body, (var, val)| {

@@ -211,6 +211,8 @@ pub struct ModuleCodegenInfo {
     pub record_fields: Vec<(String, Vec<String>)>,
     /// Public handler names.
     pub handler_defs: Vec<String>,
+    /// Public type constructors: type name -> [constructor names].
+    pub type_constructors: Vec<(String, Vec<String>)>,
 }
 
 // --- Type environment ---

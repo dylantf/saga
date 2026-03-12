@@ -23,15 +23,23 @@ fn type_constructors(
     use crate::ast::Decl;
     let mut map = std::collections::HashMap::new();
     for decl in program {
-        if let Decl::TypeDef {
-            public: true,
-            name,
-            variants,
-            ..
-        } = decl
-        {
-            let ctors: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-            map.insert(name.clone(), ctors);
+        match decl {
+            Decl::TypeDef {
+                public: true,
+                name,
+                variants,
+                ..
+            } => {
+                let ctors: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                map.insert(name.clone(), ctors);
+            }
+            Decl::RecordDef {
+                public: true, name, ..
+            } => {
+                // Records use their name as the constructor atom
+                map.insert(name.clone(), vec![name.clone()]);
+            }
+            _ => {}
         }
     }
     map
@@ -356,11 +364,14 @@ fn collect_codegen_info(
         }
     }
 
+    let type_ctors = type_constructors(program);
+
     ModuleCodegenInfo {
         exports: public_bindings.to_vec(),
         effect_defs,
         record_fields,
         handler_defs,
+        type_constructors: type_ctors.into_iter().collect(),
     }
 }
 

@@ -96,12 +96,28 @@ contains the `Http` effect in its type.
 
 ---
 
-## Tag/constructor atom qualification
+## Tag/constructor atom qualification (done)
 
-Record constructor tag atoms and ADT constructor atoms must be prefixed with
-the module name to avoid collisions. `Point` defined in module `Geo` becomes
-`'geo_point'` as a tag atom. Same for ADT constructors: `Circle` in `Shapes`
-becomes `'shapes_circle'`.
+All constructor atoms are prefixed with `module_Name` (module name from
+`module_name_to_erlang`, underscore, original constructor name with case
+preserved). Examples:
+
+- `Circle` in `Shapes` -> `'shapes_Circle'`
+- `Some` from `Std.Maybe` -> `'std_maybe_Some'`
+- `Animal` record in `Animals` -> `'animals_Animal'`
+
+Builtins that map to BEAM primitives are not mangled:
+- `True`/`False` -> `'true'`/`'false'` (Erlang atoms, via `lower_lit`)
+- `Cons`/`Nil` -> native Erlang list syntax
+
+Prelude constructors (Std.Maybe, Std.Result) are registered in the lowerer
+for all modules, so single-file and multi-module modes produce identical atoms.
+
+The `constructor_modules` map on `Lowerer` tracks constructor -> erlang module
+name. Populated from: current module's TypeDef/RecordDef declarations, imported
+modules' `ModuleCodegenInfo.type_constructors`, and all Std.* modules in
+`codegen_info`. Used in `mangle_ctor_atom()` (util.rs) which is called from
+`lower_ctor`, `Pat::Constructor`, `Pat::Record`, and `RecordCreate`.
 
 ---
 
@@ -122,13 +138,21 @@ files.
 
 ---
 
-## Implementation order
+## Implementation status
 
-1. Module name mapping utility
+Done:
+
+1. Module name mapping utility (`module_name_to_erlang`)
 2. Export filtering (pub only) in `CModule` emission
 3. Derive codegen info from `tc_loaded` Schemes (populate lowerer tables)
 4. Qualified calls for pure functions (`QualifiedName` -> `CExpr::Call`)
-5. Tag/constructor atom qualification
-6. Qualified calls for effectful functions (handler threading)
-7. Multi-file emission (one `.core` per module, driver loop)
-8. Entry point (`Main.main` as boot function)
+5. Exposed imports (`import Math (add)` -> inter-module `CExpr::Call`)
+6. Qualified calls for effectful functions (handler + `_ReturnK` threading)
+7. Multi-file emission (one `.core` per module, `cmd_build_project` driver)
+8. Tag/constructor atom qualification (module-prefixed atoms)
+
+Remaining:
+
+- Cross-module trait impl injection (import a module's trait dicts)
+- Module-qualified dict names (`__dict_Show_shapes_Circle`)
+- Entry point handler setup (wrapper for effectful `Main.main`)

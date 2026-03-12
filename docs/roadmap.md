@@ -144,9 +144,15 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ### Module system
 
-- [ ] Multi-module builds (resolve imports, compile dependency order)
-- [ ] Qualified calls (`Math.abs x` -> `call 'math':'abs'(X)`)
-- [ ] Module-qualified dict names (`__dict_Show_Graphics_Color` not `__dict_Show_Color`) to avoid collisions across modules
+- [x] Multi-module builds (resolve imports, compile dependency order)
+- [x] Qualified calls (`Math.abs x` -> `call 'math':'abs'(X)`)
+- [x] Exposed imports (`import Math (add)` -> `call 'math':'add'(...)`)
+- [x] `pub` export filtering (only pub functions exported in module mode)
+- [x] Cross-module effectful calls (handler params + `_ReturnK` threaded across module boundaries)
+- [x] Constructor atom mangling (prefix with module name to avoid cross-module collisions)
+- [ ] Cross-module trait impl injection (importing a module imports its pub trait impls)
+- [ ] Module-qualified dict names (`__dict_Show_Graphics_Color` not `__dict_Show_Color`)
+- [ ] Entry point handler setup (wrapper for effectful `Main.main`)
 
 ### Data structures
 

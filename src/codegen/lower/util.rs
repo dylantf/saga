@@ -1,7 +1,19 @@
 use crate::ast::{BinOp, Expr, Lit, Pat, Stmt, TypeExpr};
 use crate::codegen::cerl::{CExpr, CLit};
 use crate::typechecker::Type;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+
+/// Mangle a constructor atom with its module prefix.
+/// If the constructor is in `constructor_modules`, returns `"module_Name"`.
+/// Otherwise returns the name unchanged (prelude builtins like True/False
+/// are handled as literals, not constructors).
+pub(super) fn mangle_ctor_atom(name: &str, constructor_modules: &HashMap<String, String>) -> String {
+    if let Some(module) = constructor_modules.get(name) {
+        format!("{}_{}", module, name)
+    } else {
+        name.to_string()
+    }
+}
 
 pub(super) fn lower_lit(lit: &Lit) -> CLit {
     match lit {

@@ -252,7 +252,7 @@ fn cmd_build(file: &str) {
     let module_name = sanitized.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
 
     let elaborated = elaborate::elaborate(&program, &checker);
-    let core_src = codegen::emit_module(module_name, &elaborated);
+    let core_src = codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info);
 
     let build_dir = std::path::Path::new(file)
         .parent()
@@ -309,7 +309,7 @@ fn cmd_emit(file: &str) {
     let module_name = sanitized.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
 
     let elaborated = elaborate::elaborate(&program, &checker);
-    let core_src = codegen::emit_module(module_name, &elaborated);
+    let core_src = codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info);
     print!("{}", core_src);
 }
 
