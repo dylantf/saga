@@ -851,6 +851,11 @@ impl<'a> Lowerer<'a> {
             Expr::Tuple { elements, .. } => self.lower_tuple_elems(elements),
 
             Expr::QualifiedName { module, name, .. } => {
+                // Dict.empty is a value, not a function -- emit maps:new()
+                if module == "Dict" && name == "empty" {
+                    return cerl_call("maps", "new", vec![]);
+                }
+
                 // When used as a bare reference (not in application position),
                 // emit a FunRef if it's a known imported function, otherwise a Var.
                 let qualified = format!("{}.{}", module, name);
@@ -1097,6 +1102,11 @@ impl<'a> Lowerer<'a> {
             return ce;
         }
 
+        // Dict builtins
+        if let Some(ce) = self.lower_builtin_dict(module, func_name, args) {
+            return ce;
+        }
+
         let erlang_module = self
             .module_aliases
             .get(module)
@@ -1303,5 +1313,120 @@ impl<'a> Lowerer<'a> {
 
             _ => None,
         }
+    }
+
+    /// Lower Dict.* builtins to Erlang `maps` module BIF calls.
+    fn lower_builtin_dict(
+        &mut self,
+        module: &str,
+        func_name: &str,
+        args: &[&Expr],
+    ) -> Option<CExpr> {
+        if module != "Dict" {
+            return None;
+        }
+
+        match func_name {
+            // Dict.get key dict -> case maps:find(Key, Dict) of
+            //   {ok, V} -> {Some, V}
+            //   error   -> {None}
+            "get" => {
+                let some_atom = util::mangle_ctor_atom("Some", &self.constructor_modules);
+                let none_atom = util::mangle_ctor_atom("None", &self.constructor_modules);
+
+                let key_expr = self.lower_expr(args[0]);
+                let dict_expr = self.lower_expr(args[1]);
+                let k = self.fresh();
+                let d = self.fresh();
+                let result = self.fresh();
+                let v = self.fresh();
+
+                let call = cerl_call("maps", "find", vec![
+                    CExpr::Var(k.clone()),
+                    CExpr::Var(d.clone()),
+                ]);
+                let case = CExpr::Case(
+                    Box::new(CExpr::Var(result.clone())),
+                    vec![
+                        CArm {
+                            pat: CPat::Tuple(vec![
+                                CPat::Lit(CLit::Atom("ok".to_string())),
+                                CPat::Var(v.clone()),
+                            ]),
+                            guard: None,
+                            body: CExpr::Tuple(vec![
+                                CExpr::Lit(CLit::Atom(some_atom)),
+                                CExpr::Var(v),
+                            ]),
+                        },
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("error".to_string())),
+                            guard: None,
+                            body: CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(none_atom))]),
+                        },
+                    ],
+                );
+
+                Some(CExpr::Let(
+                    k,
+                    Box::new(key_expr),
+                    Box::new(CExpr::Let(
+                        d,
+                        Box::new(dict_expr),
+                        Box::new(CExpr::Let(result, Box::new(call), Box::new(case))),
+                    )),
+                ))
+            }
+
+            // Dict.put key value dict -> maps:put(Key, Value, Dict)
+            "put" => Some(self.lower_simple_dict_call("put", args)),
+
+            // Dict.remove key dict -> maps:remove(Key, Dict)
+            "remove" => Some(self.lower_simple_dict_call("remove", args)),
+
+            // Dict.keys dict -> maps:keys(Dict)
+            "keys" => Some(self.lower_simple_dict_call("keys", args)),
+
+            // Dict.values dict -> maps:values(Dict)
+            "values" => Some(self.lower_simple_dict_call("values", args)),
+
+            // Dict.size dict -> maps:size(Dict)
+            "size" => Some(self.lower_simple_dict_call("size", args)),
+
+            // Dict.from_list list -> maps:from_list(List)
+            "from_list" => Some(self.lower_simple_dict_call("from_list", args)),
+
+            // Dict.to_list dict -> maps:to_list(Dict)
+            "to_list" => Some(self.lower_simple_dict_call("to_list", args)),
+
+            // Dict.member key dict -> maps:is_key(Key, Dict)
+            "member" => Some(self.lower_simple_dict_call("is_key", args)),
+
+            _ => None,
+        }
+    }
+
+    /// Helper: lower a Dict builtin that maps directly to a `maps:*` BIF
+    /// with no result wrapping needed.
+    fn lower_simple_dict_call(&mut self, bif_name: &str, args: &[&Expr]) -> CExpr {
+        let mut arg_vars = Vec::new();
+        let mut bindings = Vec::new();
+
+        for arg in args {
+            let v = self.fresh();
+            let ce = self.lower_expr(arg);
+            arg_vars.push(v.clone());
+            bindings.push((v, ce));
+        }
+
+        let call = cerl_call(
+            "maps",
+            bif_name,
+            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+        );
+
+        bindings.into_iter().rev().fold(call, |body, (var, val)| {
+            CExpr::Let(var, Box::new(val), Box::new(body))
+        })
     }
 }

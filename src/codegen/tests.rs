@@ -469,3 +469,68 @@ fn float_parse() {
     assert!(out.contains("Some"), "expected Some constructor\n{out}");
     assert!(out.contains("None"), "expected None constructor\n{out}");
 }
+
+// --- Dict builtins ---
+
+#[test]
+fn dict_empty() {
+    assert_contains("main () = Dict.empty", "call 'maps':'new'");
+}
+
+#[test]
+fn dict_put() {
+    let src = r#"main () = Dict.put "a" 1 Dict.empty"#;
+    assert_contains(src, "call 'maps':'put'");
+}
+
+#[test]
+fn dict_get() {
+    let src = r#"
+main () = {
+  let d = Dict.put "a" 1 Dict.empty
+  Dict.get "a" d
+}
+"#;
+    let out = emit(src);
+    assert!(out.contains("call 'maps':'find'"), "expected maps:find\n{out}");
+    assert!(out.contains("Some"), "expected Some constructor\n{out}");
+    assert!(out.contains("None"), "expected None constructor\n{out}");
+}
+
+#[test]
+fn dict_remove() {
+    let src = r#"main () = Dict.remove "a" Dict.empty"#;
+    assert_contains(src, "call 'maps':'remove'");
+}
+
+#[test]
+fn dict_keys() {
+    assert_contains("main () = Dict.keys Dict.empty", "call 'maps':'keys'");
+}
+
+#[test]
+fn dict_values() {
+    assert_contains("main () = Dict.values Dict.empty", "call 'maps':'values'");
+}
+
+#[test]
+fn dict_size() {
+    assert_contains("main () = Dict.size Dict.empty", "call 'maps':'size'");
+}
+
+#[test]
+fn dict_from_list() {
+    let src = r#"main () = Dict.from_list [("a", 1)]"#;
+    assert_contains(src, "call 'maps':'from_list'");
+}
+
+#[test]
+fn dict_to_list() {
+    assert_contains("main () = Dict.to_list Dict.empty", "call 'maps':'to_list'");
+}
+
+#[test]
+fn dict_member() {
+    let src = r#"main () = Dict.member "a" Dict.empty"#;
+    assert_contains(src, "call 'maps':'is_key'");
+}
