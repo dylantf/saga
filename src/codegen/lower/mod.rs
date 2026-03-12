@@ -284,7 +284,8 @@ impl<'a> Lowerer<'a> {
                         let mut ops_map = HashMap::new();
                         for op in &eff_def.ops {
                             ops_map.insert(op.name.clone(), op.param_count);
-                            self.op_to_effect.insert(op.name.clone(), eff_def.name.clone());
+                            self.op_to_effect
+                                .insert(op.name.clone(), eff_def.name.clone());
                         }
                         self.effect_defs
                             .insert(eff_def.name.clone(), EffectInfo { ops: ops_map });
@@ -299,6 +300,12 @@ impl<'a> Lowerer<'a> {
                             self.constructor_modules
                                 .insert(ctor.clone(), erlang_name.clone());
                         }
+                    }
+                    // Register imported trait impl dicts for cross-module calls
+                    for (_trait_name, _target_type, dict_name, arity) in &info.trait_impl_dicts {
+                        self.top_level_funs.insert(dict_name.clone(), *arity);
+                        self.imported_names
+                            .insert(dict_name.clone(), (erlang_name.clone(), dict_name.clone()));
                     }
                 }
             }
@@ -435,7 +442,11 @@ impl<'a> Lowerer<'a> {
                             .collect();
                         // Pattern only matches user params, not handler params
                         let pat = if base_arity == 1 {
-                            lower_pat(non_unit_pats[0], &self.record_fields, &self.constructor_modules)
+                            lower_pat(
+                                non_unit_pats[0],
+                                &self.record_fields,
+                                &self.constructor_modules,
+                            )
                         } else if base_arity == 0 {
                             // No user params to match on -- use wildcard
                             CPat::Wildcard
@@ -443,7 +454,9 @@ impl<'a> Lowerer<'a> {
                             CPat::Values(
                                 non_unit_pats
                                     .iter()
-                                    .map(|p| lower_pat(p, &self.record_fields, &self.constructor_modules))
+                                    .map(|p| {
+                                        lower_pat(p, &self.record_fields, &self.constructor_modules)
+                                    })
                                     .collect(),
                             )
                         };
@@ -1002,7 +1015,23 @@ impl<'a> Lowerer<'a> {
             }
 
             Expr::DictRef { name, .. } => {
-                if let Some(&arity) = self.top_level_funs.get(name.as_str()) {
+                if let Some((erl_mod, erl_name)) = self.imported_names.get(name.as_str()) {
+                    // Cross-module dict constructor
+                    let arity = self.top_level_funs.get(name.as_str()).copied().unwrap_or(0);
+                    if arity == 0 {
+                        CExpr::Call(erl_mod.clone(), erl_name.clone(), vec![])
+                    } else {
+                        CExpr::Call(
+                            "erlang".to_string(),
+                            "make_fun".to_string(),
+                            vec![
+                                CExpr::Lit(CLit::Atom(erl_mod.clone())),
+                                CExpr::Lit(CLit::Atom(erl_name.clone())),
+                                CExpr::Lit(CLit::Int(arity as i64)),
+                            ],
+                        )
+                    }
+                } else if let Some(&arity) = self.top_level_funs.get(name.as_str()) {
                     if arity == 0 {
                         // Nullary dict constructor: call it to get the dict tuple
                         CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])

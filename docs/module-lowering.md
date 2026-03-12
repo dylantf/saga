@@ -138,6 +138,33 @@ files.
 
 ---
 
+## Cross-module trait dicts (done)
+
+When module B defines `impl Show for Animal`, importing B makes its trait impl
+available to the importing module. Three layers cooperate:
+
+1. **Typechecker**: `tc_trait_impls` cache stores per-module trait impls.
+   `typecheck_import` propagates them into the parent checker's `trait_impls`
+   so constraint resolution finds `Show for Animal`.
+
+2. **Elaborator**: `elaborate_module()` accepts a module name. Dict names are
+   module-qualified: `__dict_Show_animals_Animal` (not `__dict_Show_Animal`).
+   Imported modules' dict names are pre-populated from
+   `ModuleCodegenInfo.trait_impl_dicts`.
+
+3. **Lowerer**: Imported dicts are registered in `top_level_funs` and
+   `imported_names`. `DictRef` lowering checks `imported_names` first and
+   emits a cross-module `CExpr::Call`:
+
+```erlang
+call 'animals':'__dict_Show_animals_Animal'()
+```
+
+Built-in Show dicts (`__dict_Show_Int`, etc.) are synthesized locally in every
+module and remain unqualified.
+
+---
+
 ## Implementation status
 
 Done:
@@ -150,9 +177,8 @@ Done:
 6. Qualified calls for effectful functions (handler + `_ReturnK` threading)
 7. Multi-file emission (one `.core` per module, `cmd_build_project` driver)
 8. Tag/constructor atom qualification (module-prefixed atoms)
+9. Cross-module trait impl injection + module-qualified dict names
 
 Remaining:
 
-- Cross-module trait impl injection (import a module's trait dicts)
-- Module-qualified dict names (`__dict_Show_shapes_Circle`)
 - Entry point handler setup (wrapper for effectful `Main.main`)

@@ -16,7 +16,12 @@ use crate::typechecker::{Checker, TraitEvidence, TraitInfo, Type};
 /// Elaborate a program using typechecker results.
 /// Returns a new program with dictionary passing made explicit.
 pub fn elaborate(program: &Program, checker: &Checker) -> Program {
-    let mut elab = Elaborator::new(checker);
+    elaborate_module(program, checker, "")
+}
+
+/// Elaborate with a module name for module-qualified dict names.
+pub fn elaborate_module(program: &Program, checker: &Checker, module_name: &str) -> Program {
+    let mut elab = Elaborator::new(checker, module_name);
     elab.elaborate_program(program)
 }
 
@@ -35,10 +40,12 @@ struct Elaborator {
     current_fun: Option<String>,
     /// Current function's dict param names: trait_name -> param_name
     current_dict_params: HashMap<String, String>,
+    /// Erlang module name for this module (e.g. "animals"), used for dict name qualification
+    erlang_module: String,
 }
 
 impl Elaborator {
-    fn new(checker: &Checker) -> Self {
+    fn new(checker: &Checker, module_name: &str) -> Self {
         // Build evidence lookup by span
         let mut evidence_by_span: HashMap<Span, Vec<TraitEvidence>> = HashMap::new();
         for ev in &checker.evidence {
@@ -48,14 +55,34 @@ impl Elaborator {
                 .push(ev.clone());
         }
 
+        // Erlang module name: "Foo.Bar" -> "foo_bar", "" -> ""
+        let erlang_module = if module_name.is_empty() {
+            String::new()
+        } else {
+            module_name
+                .split('.')
+                .map(|s| s.to_lowercase())
+                .collect::<Vec<_>>()
+                .join("_")
+        };
+
+        // Pre-populate dict_names from imported modules' codegen info
+        let mut dict_names = HashMap::new();
+        for info in checker.tc_codegen_info.values() {
+            for (trait_name, target_type, dict_name, _arity) in &info.trait_impl_dicts {
+                dict_names.insert((trait_name.clone(), target_type.clone()), dict_name.clone());
+            }
+        }
+
         Elaborator {
             trait_methods: HashMap::new(),
             fun_dict_params: HashMap::new(),
-            dict_names: HashMap::new(),
+            dict_names,
             traits: checker.traits.clone(),
             evidence_by_span,
             current_fun: None,
             current_dict_params: HashMap::new(),
+            erlang_module,
         }
     }
 
@@ -93,7 +120,14 @@ impl Elaborator {
                     target_type,
                     ..
                 } => {
-                    let dict_name = format!("__dict_{}_{}", trait_name, target_type);
+                    let dict_name = if self.erlang_module.is_empty() {
+                        format!("__dict_{}_{}", trait_name, target_type)
+                    } else {
+                        format!(
+                            "__dict_{}_{}_{}",
+                            trait_name, self.erlang_module, target_type
+                        )
+                    };
                     self.dict_names
                         .insert((trait_name.clone(), target_type.clone()), dict_name);
                 }

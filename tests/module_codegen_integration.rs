@@ -16,7 +16,15 @@ fn emit_project_module(
     let program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
-    let elaborated = elaborate::elaborate(&program, checker);
+    // Extract original module name (e.g. "Animals") from ModuleDecl for elaboration
+    let original_module_name = program.iter().find_map(|d| {
+        if let dylang::ast::Decl::ModuleDecl { path, .. } = d {
+            Some(path.join("."))
+        } else {
+            None
+        }
+    }).unwrap_or_default();
+    let elaborated = elaborate::elaborate_module(&program, checker, &original_module_name);
     codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info)
 }
 
@@ -493,6 +501,74 @@ main () = Logger.greet \"world\" with console_log
         output.status.success(),
         "erlc failed on main:\n{main_core}\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ---- Cross-module trait dicts ----
+
+#[test]
+fn cross_module_trait_dict_show_animal() {
+    // Animals.dy defines `impl Show for Animal`.
+    // Importing Animals should make the Show dict available for Animal.
+    let main_src = "
+module Main
+import Animals (Animal)
+pub fun main () -> String
+main () = show (Animal { name: \"Rex\", species: \"Dog\" })
+";
+    let mut checker = make_project_checker();
+    typecheck_source(main_src, &mut checker);
+    let out = emit_project_module(main_src, "main", &checker);
+
+    // The dict should be referenced as a cross-module call to animals module
+    assert_contains(&out, "call 'animals':'__dict_Show_animals_Animal'");
+}
+
+#[test]
+fn cross_module_trait_dict_compiles_with_erlc() {
+    let animals_src = std::fs::read_to_string(fixtures_root().join("Animals.dy")).unwrap();
+    let main_src = "
+module Main
+import Animals (Animal)
+pub fun main () -> String
+main () = show (Animal { name: \"Rex\", species: \"Dog\" })
+";
+    let mut checker = make_project_checker();
+    typecheck_source(main_src, &mut checker);
+
+    let animals_core = emit_project_module(&animals_src, "animals", &checker);
+    let main_core = emit_project_module(main_src, "main", &checker);
+
+    let dir = assert_erlc_compiles(&animals_core, "animals");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let output = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn local_dict_names_are_module_qualified() {
+    // When Animals.dy defines impl Show for Animal, the dict should be
+    // named __dict_Show_animals_Animal (not __dict_Show_Animal)
+    let animals_src = std::fs::read_to_string(fixtures_root().join("Animals.dy")).unwrap();
+    let mut checker = make_project_checker();
+    typecheck_source(&animals_src, &mut checker);
+    let out = emit_project_module(&animals_src, "animals", &checker);
+
+    assert_contains(&out, "'__dict_Show_animals_Animal'");
+    assert!(
+        !out.contains("'__dict_Show_Animal'"),
+        "dict name should be module-qualified\n{out}"
     );
 }
 

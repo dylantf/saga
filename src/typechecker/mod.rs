@@ -213,6 +213,9 @@ pub struct ModuleCodegenInfo {
     pub handler_defs: Vec<String>,
     /// Public type constructors: type name -> [constructor names].
     pub type_constructors: Vec<(String, Vec<String>)>,
+    /// Trait impl dicts: (trait_name, target_type, dict_name, arity).
+    /// The dict_name is module-qualified (e.g. `__dict_Show_animals_Animal`).
+    pub trait_impl_dicts: Vec<(String, String, String, usize)>,
 }
 
 // --- Type environment ---
@@ -406,6 +409,8 @@ pub struct Checker {
     pub tc_codegen_info: HashMap<String, ModuleCodegenInfo>,
     /// Cache of record definitions from typechecked modules: module name -> record name -> field types.
     pub(crate) tc_record_defs: HashMap<String, HashMap<String, Vec<(String, Type)>>>,
+    /// Cache of trait impls from typechecked modules: module name -> (trait, type) -> impl info.
+    pub(crate) tc_trait_impls: HashMap<String, HashMap<(String, String), ImplInfo>>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) tc_loading: HashSet<String>,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
@@ -445,6 +450,7 @@ impl Checker {
             tc_type_ctors: HashMap::new(),
             tc_codegen_info: HashMap::new(),
             tc_record_defs: HashMap::new(),
+            tc_trait_impls: HashMap::new(),
             tc_loading: HashSet::new(),
             adt_variants: HashMap::new(),
             evidence: Vec::new(),

@@ -85,6 +85,14 @@ impl Checker {
                 .get(&module_name)
                 .cloned()
                 .unwrap_or_default();
+            // Inject cached trait impls
+            if let Some(cached_impls) = self.tc_trait_impls.get(&module_name).cloned() {
+                for (key, info) in &cached_impls {
+                    self.trait_impls
+                        .entry(key.clone())
+                        .or_insert_with(|| info.clone());
+                }
+            }
             self.inject_module_types(
                 &cached,
                 &cached_ctors,
@@ -137,6 +145,7 @@ impl Checker {
         mod_checker.tc_type_ctors = self.tc_type_ctors.clone();
         mod_checker.tc_codegen_info = self.tc_codegen_info.clone();
         mod_checker.tc_record_defs = self.tc_record_defs.clone();
+        mod_checker.tc_trait_impls = self.tc_trait_impls.clone();
 
         // Run a fresh checker on prelude + module.
         // Builtin Std modules skip the prelude to avoid circular imports
@@ -194,6 +203,23 @@ impl Checker {
             }
         }
 
+        // Collect the module's own trait impls (from ImplDef declarations in the source).
+        let mut module_trait_impls: std::collections::HashMap<(String, String), super::ImplInfo> =
+            std::collections::HashMap::new();
+        for decl in &program {
+            if let crate::ast::Decl::ImplDef {
+                trait_name,
+                target_type,
+                ..
+            } = decl
+            {
+                let key = (trait_name.clone(), target_type.clone());
+                if let Some(info) = mod_checker.trait_impls.get(&key) {
+                    module_trait_impls.insert(key, info.clone());
+                }
+            }
+        }
+
         // Advance the parent's var counter past the module's to keep IDs disjoint.
         if mod_checker.next_var > self.next_var {
             self.next_var = mod_checker.next_var;
@@ -206,11 +232,20 @@ impl Checker {
             .insert(module_name.clone(), ctors_map.clone());
         self.tc_record_defs
             .insert(module_name.clone(), pub_records.clone());
+        self.tc_trait_impls
+            .insert(module_name.clone(), module_trait_impls.clone());
 
         // Build codegen info from the module's public declarations
-        let codegen_info = collect_codegen_info(&program, &public_bindings);
+        let codegen_info = collect_codegen_info(&module_name, &program, &public_bindings);
         self.tc_codegen_info
             .insert(module_name.clone(), codegen_info);
+
+        // Inject the module's trait impls into the parent checker
+        for (key, info) in &module_trait_impls {
+            self.trait_impls
+                .entry(key.clone())
+                .or_insert_with(|| info.clone());
+        }
 
         self.inject_module_types(
             &public_bindings,
@@ -316,6 +351,7 @@ impl Checker {
 
 /// Collect codegen-relevant info from a module's public declarations.
 fn collect_codegen_info(
+    module_name: &str,
     program: &[crate::ast::Decl],
     public_bindings: &[(String, Scheme)],
 ) -> ModuleCodegenInfo {
@@ -323,6 +359,14 @@ fn collect_codegen_info(
     let mut effect_defs = Vec::new();
     let mut record_fields = Vec::new();
     let mut handler_defs = Vec::new();
+    let mut trait_impl_dicts = Vec::new();
+
+    // Erlang module name: "Foo.Bar" -> "foo_bar"
+    let erlang_module = module_name
+        .split('.')
+        .map(|s| s.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("_");
 
     for decl in program {
         match decl {
@@ -360,6 +404,16 @@ fn collect_codegen_info(
             } => {
                 handler_defs.push(name.clone());
             }
+            Decl::ImplDef {
+                trait_name,
+                target_type,
+                where_clause,
+                ..
+            } => {
+                let dict_name = format!("__dict_{}_{}_{}", trait_name, erlang_module, target_type);
+                let arity = where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
+                trait_impl_dicts.push((trait_name.clone(), target_type.clone(), dict_name, arity));
+            }
             _ => {}
         }
     }
@@ -372,6 +426,7 @@ fn collect_codegen_info(
         record_fields,
         handler_defs,
         type_constructors: type_ctors.into_iter().collect(),
+        trait_impl_dicts,
     }
 }
 

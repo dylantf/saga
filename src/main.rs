@@ -175,7 +175,7 @@ fn cmd_build_project() {
         let mut mod_checker = make_checker(Some(project_root.clone()));
         let mod_program = parse_and_typecheck(&source, module_name, &mut mod_checker);
 
-        let elaborated = elaborate::elaborate(&mod_program, &mod_checker);
+        let elaborated = elaborate::elaborate_module(&mod_program, &mod_checker, module_name);
         let erlang_name = module_name.to_lowercase().replace('.', "_");
         let core_src = codegen::emit_module_with_imports(
             &erlang_name,
@@ -192,7 +192,7 @@ fn cmd_build_project() {
     }
 
     // Compile Main module
-    let elaborated = elaborate::elaborate(&main_program, &checker);
+    let elaborated = elaborate::elaborate_module(&main_program, &checker, "Main");
     let core_src = codegen::emit_module_with_imports("main", &elaborated, &checker.tc_codegen_info);
 
     let core_path = build_dir.join("main.core");
