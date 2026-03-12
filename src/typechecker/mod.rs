@@ -977,6 +977,56 @@ impl Checker {
                 },
             );
         }
+
+        // --- Conversion builtins ---
+
+        // Int.parse : String -> Maybe Int
+        self.env.insert(
+            "Int.parse".into(),
+            Scheme {
+                forall: vec![],
+                constraints: vec![],
+                ty: Type::Arrow(
+                    Box::new(Type::string()),
+                    Box::new(Type::Con("Maybe".into(), vec![Type::int()])),
+                ),
+            },
+        );
+
+        // Int.to_float : Int -> Float
+        self.env.insert(
+            "Int.to_float".into(),
+            Scheme {
+                forall: vec![],
+                constraints: vec![],
+                ty: Type::Arrow(Box::new(Type::int()), Box::new(Type::float())),
+            },
+        );
+
+        // Float.parse : String -> Maybe Float
+        self.env.insert(
+            "Float.parse".into(),
+            Scheme {
+                forall: vec![],
+                constraints: vec![],
+                ty: Type::Arrow(
+                    Box::new(Type::string()),
+                    Box::new(Type::Con("Maybe".into(), vec![Type::float()])),
+                ),
+            },
+        );
+
+        // Float.trunc, Float.round, Float.floor, Float.ceil : Float -> Int
+        for name in ["Float.trunc", "Float.round", "Float.floor", "Float.ceil"] {
+            self.env.insert(
+                name.into(),
+                Scheme {
+                    forall: vec![],
+                    constraints: vec![],
+                    ty: Type::Arrow(Box::new(Type::float()), Box::new(Type::int())),
+                },
+            );
+        }
     }
 
     // --- Unification ---

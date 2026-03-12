@@ -1092,6 +1092,11 @@ impl<'a> Lowerer<'a> {
     /// Lower a qualified function call like `Math.abs x` to `call 'math':'abs'(X)`.
     /// For effectful imported functions, handler params and _ReturnK are threaded.
     fn lower_qualified_call(&mut self, module: &str, func_name: &str, args: &[&Expr]) -> CExpr {
+        // Builtin conversion functions
+        if let Some(ce) = self.lower_builtin_conversion(module, func_name, args) {
+            return ce;
+        }
+
         let erlang_module = self
             .module_aliases
             .get(module)
@@ -1159,5 +1164,144 @@ impl<'a> Lowerer<'a> {
         bindings.into_iter().rev().fold(call, |body, (var, val)| {
             CExpr::Let(var, Box::new(val), Box::new(body))
         })
+    }
+
+    /// Lower builtin conversion functions (Int.parse, Float.trunc, etc.)
+    /// to direct Erlang BIF calls. Returns None if not a builtin.
+    fn lower_builtin_conversion(
+        &mut self,
+        module: &str,
+        func_name: &str,
+        args: &[&Expr],
+    ) -> Option<CExpr> {
+        let some_atom = util::mangle_ctor_atom("Some", &self.constructor_modules);
+        let none_atom = util::mangle_ctor_atom("None", &self.constructor_modules);
+
+        match (module, func_name) {
+            // Int.to_float x  ->  call 'erlang':'float'(X)
+            ("Int", "to_float") => {
+                let arg = self.lower_expr(args[0]);
+                let v = self.fresh();
+                Some(CExpr::Let(
+                    v.clone(),
+                    Box::new(arg),
+                    Box::new(cerl_call("erlang", "float", vec![CExpr::Var(v)])),
+                ))
+            }
+
+            // Float.trunc x  ->  call 'erlang':'trunc'(X)
+            ("Float", "trunc") => {
+                let arg = self.lower_expr(args[0]);
+                let v = self.fresh();
+                Some(CExpr::Let(
+                    v.clone(),
+                    Box::new(arg),
+                    Box::new(cerl_call("erlang", "trunc", vec![CExpr::Var(v)])),
+                ))
+            }
+
+            // Float.round x  ->  call 'erlang':'round'(X)
+            ("Float", "round") => {
+                let arg = self.lower_expr(args[0]);
+                let v = self.fresh();
+                Some(CExpr::Let(
+                    v.clone(),
+                    Box::new(arg),
+                    Box::new(cerl_call("erlang", "round", vec![CExpr::Var(v)])),
+                ))
+            }
+
+            // Float.floor x  ->  call 'erlang':'floor'(X)
+            ("Float", "floor") => {
+                let arg = self.lower_expr(args[0]);
+                let v = self.fresh();
+                Some(CExpr::Let(
+                    v.clone(),
+                    Box::new(arg),
+                    Box::new(cerl_call("erlang", "floor", vec![CExpr::Var(v)])),
+                ))
+            }
+
+            // Float.ceil x  ->  call 'erlang':'ceil'(X)
+            ("Float", "ceil") => {
+                let arg = self.lower_expr(args[0]);
+                let v = self.fresh();
+                Some(CExpr::Let(
+                    v.clone(),
+                    Box::new(arg),
+                    Box::new(cerl_call("erlang", "ceil", vec![CExpr::Var(v)])),
+                ))
+            }
+
+            // Int.parse s  ->  case string:to_integer(S) of
+            //   {N, []} -> {Some, N}    (fully consumed)
+            //   _       -> {None}
+            ("Int", "parse") => {
+                let arg = self.lower_expr(args[0]);
+                let v = self.fresh();
+                let n = self.fresh();
+                let result = self.fresh();
+                let call = cerl_call("string", "to_integer", vec![CExpr::Var(v.clone())]);
+                let case = CExpr::Case(
+                    Box::new(CExpr::Var(result.clone())),
+                    vec![
+                        CArm {
+                            pat: CPat::Tuple(vec![CPat::Var(n.clone()), CPat::Nil]),
+                            guard: None,
+                            body: CExpr::Tuple(vec![
+                                CExpr::Lit(CLit::Atom(some_atom)),
+                                CExpr::Var(n),
+                            ]),
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(none_atom))]),
+                        },
+                    ],
+                );
+                Some(CExpr::Let(
+                    v,
+                    Box::new(arg),
+                    Box::new(CExpr::Let(result, Box::new(call), Box::new(case))),
+                ))
+            }
+
+            // Float.parse s  ->  case string:to_float(S) of
+            //   {F, []} -> {Some, F}
+            //   _       -> {None}
+            ("Float", "parse") => {
+                let arg = self.lower_expr(args[0]);
+                let v = self.fresh();
+                let f = self.fresh();
+                let result = self.fresh();
+                let call = cerl_call("string", "to_float", vec![CExpr::Var(v.clone())]);
+                let case = CExpr::Case(
+                    Box::new(CExpr::Var(result.clone())),
+                    vec![
+                        CArm {
+                            pat: CPat::Tuple(vec![CPat::Var(f.clone()), CPat::Nil]),
+                            guard: None,
+                            body: CExpr::Tuple(vec![
+                                CExpr::Lit(CLit::Atom(some_atom)),
+                                CExpr::Var(f),
+                            ]),
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(none_atom))]),
+                        },
+                    ],
+                );
+                Some(CExpr::Let(
+                    v,
+                    Box::new(arg),
+                    Box::new(CExpr::Let(result, Box::new(call), Box::new(case))),
+                ))
+            }
+
+            _ => None,
+        }
     }
 }

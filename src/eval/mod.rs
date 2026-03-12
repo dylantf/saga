@@ -865,6 +865,79 @@ fn eval_builtin(name: &str, args: Vec<Value>) -> EvalResult {
             }
         }
 
+        // --- Conversion operations ---
+        "Int.parse" => {
+            if let Value::String(s) = &args[0] {
+                match s.parse::<i64>() {
+                    Ok(n) => EvalResult::Ok(Value::Constructor {
+                        name: "Some".into(),
+                        arity: 1,
+                        args: vec![Value::Int(n)],
+                    }),
+                    Err(_) => EvalResult::Ok(Value::Constructor {
+                        name: "None".into(),
+                        arity: 0,
+                        args: vec![],
+                    }),
+                }
+            } else {
+                EvalResult::error("Int.parse: expected a String")
+            }
+        }
+        "Int.to_float" => {
+            if let Value::Int(n) = &args[0] {
+                EvalResult::Ok(Value::Float(*n as f64))
+            } else {
+                EvalResult::error("Int.to_float: expected an Int")
+            }
+        }
+        "Float.parse" => {
+            if let Value::String(s) = &args[0] {
+                match s.parse::<f64>() {
+                    Ok(f) => EvalResult::Ok(Value::Constructor {
+                        name: "Some".into(),
+                        arity: 1,
+                        args: vec![Value::Float(f)],
+                    }),
+                    Err(_) => EvalResult::Ok(Value::Constructor {
+                        name: "None".into(),
+                        arity: 0,
+                        args: vec![],
+                    }),
+                }
+            } else {
+                EvalResult::error("Float.parse: expected a String")
+            }
+        }
+        "Float.trunc" => {
+            if let Value::Float(f) = &args[0] {
+                EvalResult::Ok(Value::Int(f.trunc() as i64))
+            } else {
+                EvalResult::error("Float.trunc: expected a Float")
+            }
+        }
+        "Float.round" => {
+            if let Value::Float(f) = &args[0] {
+                EvalResult::Ok(Value::Int(f.round() as i64))
+            } else {
+                EvalResult::error("Float.round: expected a Float")
+            }
+        }
+        "Float.floor" => {
+            if let Value::Float(f) = &args[0] {
+                EvalResult::Ok(Value::Int(f.floor() as i64))
+            } else {
+                EvalResult::error("Float.floor: expected a Float")
+            }
+        }
+        "Float.ceil" => {
+            if let Value::Float(f) = &args[0] {
+                EvalResult::Ok(Value::Int(f.ceil() as i64))
+            } else {
+                EvalResult::error("Float.ceil: expected a Float")
+            }
+        }
+
         _ => EvalResult::error(format!("Unknown builtin {}", name)),
     }
 }

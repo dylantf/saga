@@ -409,3 +409,63 @@ main () = {
     // Variable A (lowered from `a`) should appear in the output
     assert!(out.contains("A"), "expected bound variable A\n{out}");
 }
+
+// --- Conversion builtins ---
+
+#[test]
+fn int_to_float() {
+    assert_contains(
+        "main () = Int.to_float 5",
+        "call 'erlang':'float'",
+    );
+}
+
+#[test]
+fn float_trunc() {
+    assert_contains(
+        "main () = Float.trunc 3.7",
+        "call 'erlang':'trunc'",
+    );
+}
+
+#[test]
+fn float_round() {
+    assert_contains(
+        "main () = Float.round 3.5",
+        "call 'erlang':'round'",
+    );
+}
+
+#[test]
+fn float_floor() {
+    assert_contains(
+        "main () = Float.floor 3.9",
+        "call 'erlang':'floor'",
+    );
+}
+
+#[test]
+fn float_ceil() {
+    assert_contains(
+        "main () = Float.ceil 3.1",
+        "call 'erlang':'ceil'",
+    );
+}
+
+#[test]
+fn int_parse() {
+    let src = r#"main () = Int.parse "42""#;
+    let out = emit(src);
+    assert!(out.contains("call 'string':'to_integer'"), "expected string:to_integer\n{out}");
+    assert!(out.contains("Some"), "expected Some constructor\n{out}");
+    assert!(out.contains("None"), "expected None constructor\n{out}");
+}
+
+#[test]
+fn float_parse() {
+    let src = r#"main () = Float.parse "2.5""#;
+    let out = emit(src);
+    assert!(out.contains("call 'string':'to_float'"), "expected string:to_float\n{out}");
+    assert!(out.contains("Some"), "expected Some constructor\n{out}");
+    assert!(out.contains("None"), "expected None constructor\n{out}");
+}

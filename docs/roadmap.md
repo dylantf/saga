@@ -95,13 +95,12 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [ ] Regular expressions
 - [x] List comprehensions
 - [x] Function composition
-- [ ] Conversion builtins (`to_string`, `to_int`, `to_float`)
+- [x] Conversion builtins (`Int.parse`, `Int.to_float`, `Float.parse`, `Float.trunc`, `Float.round`, `Float.floor`, `Float.ceil`)
 - [ ] String operations (`string_length`, `string_split`, `string_chars`, etc.)
 - [ ] More list functions (`zip`, `range`, `take`, `drop`, `any`, `all`)
 
 ## Syntax
 
-- [ ] Unify () and Unit annotations. Currently they are mixed, probably just use () everywhere.
 
 ## Backend
 

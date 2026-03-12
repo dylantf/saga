@@ -57,6 +57,26 @@ pub(crate) fn register_builtins(env: &Env) {
         );
     }
 
+    // Conversion builtins
+    for (name, arity) in [
+        ("Int.parse", 1),
+        ("Int.to_float", 1),
+        ("Float.parse", 1),
+        ("Float.trunc", 1),
+        ("Float.round", 1),
+        ("Float.floor", 1),
+        ("Float.ceil", 1),
+    ] {
+        env.set(
+            name.to_string(),
+            Value::BuiltIn {
+                name: name.to_string(),
+                arity,
+                args: vec![],
+            },
+        );
+    }
+
     env.set(
         "Nil".to_string(),
         Value::Constructor {
