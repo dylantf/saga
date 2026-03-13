@@ -4,7 +4,7 @@
 - [x] 16-traits -- integer_to_list called on a string. Show dict dispatch is picking the wrong impl for a record field.
 - [ ] 18-destructuring -- unbound variable 'X1'. Tuple destructuring in function params not lowering correctly.
 - [x] 19-string-interpolation -- element(2, "Alice") -- Show impl for a record is treating a string as a tuple. Fixed: interpolation hole tokens were re-lexed with spans starting at 0, so holes starting with the same identifier got identical spans and shared evidence. Now offset hole token spans by their source position.
-- [ ] 20-validation-show -- if_clause error, likely same pattern match exhaustiveness issue as 08.
+- [x] 20-validation-show -- if_clause error, likely same pattern match exhaustiveness issue as 08. Fixed: two issues -- (1) `with` handler return clause was applied twice for block expressions (once internally by lower_block, once externally by lower_with), (2) polymorphic dict params for same trait (e.g. `where {e: Show, a: Show}`) collided because current_dict_params was keyed by trait name only. Added type_var_name to TraitEvidence so the elaborator picks the correct dict param.
 - [ ] 21-do-else -- key_exists error in erlc. Duplicate \_\_dict_Show_Maybe export, likely from the prelude dedup issue we noted.
 - [x] 22-dictionaries -- if_clause in Show for Bool. Fixed: True/False now lower to bare atoms `true`/`false` matching Erlang convention. (Remaining badarg error on dict iteration is a separate issue.)
 - [ ] 26-run-state -- unbound variable 'Fst'. The fst prelude function isn't being lowered.

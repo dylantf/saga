@@ -122,6 +122,8 @@ impl Checker {
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
                         {
+                            self.where_bound_var_names
+                                .insert(*var_id, bound.type_var.clone());
                             for trait_name in &bound.traits {
                                 constraints.push((trait_name.clone(), *var_id));
                             }
@@ -1010,12 +1012,18 @@ impl Checker {
         // Build resolved where bounds (substitution may have chained var IDs)
         let mut resolved_bounds: std::collections::HashMap<u32, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
+        // Also resolve var names through substitution
+        let mut resolved_var_names: std::collections::HashMap<u32, String> =
+            std::collections::HashMap::new();
         for (&var_id, traits) in &self.where_bounds {
             if let Type::Var(resolved_id) = self.sub.apply(&Type::Var(var_id)) {
                 resolved_bounds
                     .entry(resolved_id)
                     .or_default()
                     .extend(traits.iter().cloned());
+                if let Some(name) = self.where_bound_var_names.get(&var_id) {
+                    resolved_var_names.insert(resolved_id, name.clone());
+                }
             }
         }
 
@@ -1046,6 +1054,7 @@ impl Checker {
                                     span,
                                     trait_name: trait_name.clone(),
                                     resolved_type: Some((type_name.clone(), args.clone())),
+                                    type_var_name: None,
                                 });
                                 // Push conditional constraints for type parameters
                                 if type_name == "Tuple" {
@@ -1086,10 +1095,12 @@ impl Checker {
                             ));
                         }
                         // Record evidence for polymorphic passthrough
+                        let var_name = resolved_var_names.get(id).cloned();
                         self.evidence.push(super::TraitEvidence {
                             span,
                             trait_name: trait_name.clone(),
                             resolved_type: None,
+                            type_var_name: var_name,
                         });
                     }
                     Type::Arrow(_, _) | Type::EffArrow(_, _, _) => {

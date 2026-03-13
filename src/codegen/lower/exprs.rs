@@ -836,7 +836,13 @@ impl<'a> Lowerer<'a> {
                 self.current_return_k = Some(rk);
             }
             let inner_ce = self.lower_expr(expr);
-            self.apply_return_k(inner_ce)
+            // Block expressions apply current_return_k internally (at the terminal
+            // statement), so don't apply it again here to avoid double-wrapping.
+            if matches!(expr, Expr::Block { .. }) {
+                inner_ce
+            } else {
+                self.apply_return_k(inner_ce)
+            }
         };
 
         self.current_handler_params = saved_handler_params;

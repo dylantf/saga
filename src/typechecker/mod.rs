@@ -365,6 +365,10 @@ pub struct TraitEvidence {
     /// The concrete type that satisfied the constraint.
     /// None if resolved via a where-bound type variable (polymorphic passthrough).
     pub resolved_type: Option<(String, Vec<Type>)>,
+    /// For polymorphic evidence, the name of the type variable that was bounded.
+    /// Used to select the correct dict param when multiple where-clause bounds
+    /// exist for the same trait (e.g. `where {e: Show, a: Show}`).
+    pub type_var_name: Option<String>,
 }
 
 // --- Inference engine ---
@@ -404,6 +408,8 @@ pub struct Checker {
     pub(crate) field_candidates: HashMap<u32, (Vec<String>, Span)>,
     /// Where clause bounds: var_id -> set of trait names assumed satisfied
     pub(crate) where_bounds: HashMap<u32, HashSet<String>>,
+    /// Reverse map from type var ID to original type parameter name (for polymorphic evidence)
+    pub(crate) where_bound_var_names: HashMap<u32, String>,
     /// Project root for resolving imports. None = script mode.
     pub(crate) project_root: Option<std::path::PathBuf>,
     /// Cache of already-typechecked modules: module name -> public type bindings.
@@ -450,6 +456,7 @@ impl Checker {
             pending_constraints: Vec::new(),
             field_candidates: HashMap::new(),
             where_bounds: HashMap::new(),
+            where_bound_var_names: HashMap::new(),
             project_root: None,
             tc_loaded: HashMap::new(),
             tc_type_ctors: HashMap::new(),

@@ -840,13 +840,25 @@ impl Elaborator {
                             Some(dict_expr)
                         }
                         None => {
-                            // Polymorphic: use the dict param from current function
-                            self.current_dict_params
-                                .get(trait_name)
-                                .map(|name| Expr::Var {
-                                    name: name.clone(),
+                            // Polymorphic: use the dict param from current function.
+                            // If evidence has a type_var_name, use it to build the
+                            // specific dict param name (handles multiple where-clause
+                            // bounds for the same trait, e.g. `where {e: Show, a: Show}`).
+                            if let Some(ref var_name) = ev.type_var_name {
+                                let param_name =
+                                    format!("__dict_{}_{}", trait_name, var_name);
+                                Some(Expr::Var {
+                                    name: param_name,
                                     span,
                                 })
+                            } else {
+                                self.current_dict_params
+                                    .get(trait_name)
+                                    .map(|name| Expr::Var {
+                                        name: name.clone(),
+                                        span,
+                                    })
+                            }
                         }
                     };
                 }

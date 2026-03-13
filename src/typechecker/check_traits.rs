@@ -169,6 +169,8 @@ impl Checker {
                 if let Some(idx) = type_params.iter().position(|p| p == &bound.type_var)
                     && let Some(Type::Var(var_id)) = param_vars.get(idx)
                 {
+                    self.where_bound_var_names
+                        .insert(*var_id, bound.type_var.clone());
                     for trait_req in &bound.traits {
                         self.where_bounds
                             .entry(*var_id)
