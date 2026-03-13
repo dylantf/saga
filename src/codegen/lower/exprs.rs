@@ -277,6 +277,18 @@ impl<'a> Lowerer<'a> {
         match stmts {
             [] => self.apply_return_k(CExpr::Tuple(vec![])), // unit
             [Stmt::Expr(e)] => {
+                // Terminal effect call: pass _ReturnK as K directly for abort semantics
+                if self.current_return_k.is_some() {
+                    if let Some((op_name, qualifier, args)) = collect_effect_call(e) {
+                        let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
+                        return self.lower_effect_call(
+                            op_name,
+                            qualifier,
+                            &args_owned,
+                            self.current_return_k.clone(),
+                        );
+                    }
+                }
                 let val = self.lower_expr(e);
                 self.apply_return_k(val)
             }
@@ -287,6 +299,47 @@ impl<'a> Lowerer<'a> {
                 CExpr::Let(var, Box::new(val_ce), Box::new(body))
             }
             [first, rest @ ..] => {
+                // Check if the value is a `with` expression. If so, capture the rest
+                // of the block as _ReturnK so abort-style handlers skip subsequent stmts.
+                let with_info = match first {
+                    Stmt::Let {
+                        pattern,
+                        value: Expr::With { .. },
+                        ..
+                    } => Some((Some(pattern), match first {
+                        Stmt::Let { value, .. } => value,
+                        _ => unreachable!(),
+                    })),
+                    Stmt::Expr(e @ Expr::With { .. }) => Some((None, e)),
+                    _ => None,
+                };
+                if let Some((pat_opt, with_expr)) = with_info {
+                    let rest_ce = self.lower_block(rest);
+                    let (k_param, rest_ce) = match pat_opt {
+                        Some(p) => self.destructure_pat(p, rest_ce),
+                        None => (self.fresh(), rest_ce),
+                    };
+                    let rest_k = CExpr::Fun(vec![k_param], Box::new(rest_ce));
+                    let saved = self.pending_callee_return_k.take();
+                    self.pending_callee_return_k = Some(rest_k);
+                    let result = self.lower_expr(with_expr);
+                    if let Some(unused_k) = self.pending_callee_return_k.take() {
+                        // Non-direct path: pending wasn't consumed, apply rest manually
+                        self.pending_callee_return_k = saved;
+                        let v = self.fresh();
+                        return CExpr::Let(
+                            v.clone(),
+                            Box::new(result),
+                            Box::new(CExpr::Apply(
+                                Box::new(unused_k),
+                                vec![CExpr::Var(v)],
+                            )),
+                        );
+                    }
+                    self.pending_callee_return_k = saved;
+                    return result;
+                }
+
                 // Check if the first statement contains an effect call -- if so, CPS transform:
                 // everything in `rest` becomes the continuation closure K.
                 // Effect calls may be bare (EffectCall) or wrapped in App nodes

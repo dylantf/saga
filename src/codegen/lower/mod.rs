@@ -469,12 +469,24 @@ impl<'a> Lowerer<'a> {
                 if has_effects {
                     params_ce.push("_ReturnK".to_string());
                 }
-                let body_ce = self.lower_expr(body);
-                // For non-block bodies, lower_block didn't run, so apply return_k
+                // For non-block bodies, lower_block didn't run, so apply return_k.
+                // Special case: if the body is a terminal effect call, pass _ReturnK
+                // directly as K so abort-style handlers skip the rest (proper CPS).
                 let body_ce = if has_effects && !matches!(body, Expr::Block { .. }) {
-                    self.apply_return_k(body_ce)
+                    if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
+                        let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
+                        self.lower_effect_call(
+                            op_name,
+                            qualifier,
+                            &args_owned,
+                            self.current_return_k.clone(),
+                        )
+                    } else {
+                        let body_ce = self.lower_expr(body);
+                        self.apply_return_k(body_ce)
+                    }
                 } else {
-                    body_ce
+                    self.lower_expr(body)
                 };
                 CExpr::Fun(params_ce, Box::new(body_ce))
             } else {
@@ -524,11 +536,22 @@ impl<'a> Lowerer<'a> {
                             )
                         };
                         let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
-                        let body_ce = self.lower_expr(body);
                         let body_ce = if has_effects && !matches!(body, Expr::Block { .. }) {
-                            self.apply_return_k(body_ce)
+                            if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
+                                let args_owned: Vec<Expr> =
+                                    args.into_iter().cloned().collect();
+                                self.lower_effect_call(
+                                    op_name,
+                                    qualifier,
+                                    &args_owned,
+                                    self.current_return_k.clone(),
+                                )
+                            } else {
+                                let body_ce = self.lower_expr(body);
+                                self.apply_return_k(body_ce)
+                            }
                         } else {
-                            body_ce
+                            self.lower_expr(body)
                         };
                         CArm {
                             pat,
