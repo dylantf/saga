@@ -244,6 +244,10 @@ impl TypeEnv {
         self.bindings.remove(name);
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Scheme)> {
+        self.bindings.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
     /// Free type variables in the environment (used for generalization).
     fn free_vars(&self, sub: &Substitution) -> Vec<u32> {
         let mut vars = Vec::new();

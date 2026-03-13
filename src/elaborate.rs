@@ -46,6 +46,20 @@ struct Elaborator {
 
 impl Elaborator {
     fn new(checker: &Checker, module_name: &str) -> Self {
+        // Build inferred dict params from checker's env (for functions without
+        // explicit where clauses that still have inferred trait constraints).
+        let mut inferred_dict_params: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for (name, scheme) in checker.env.iter() {
+            if !scheme.constraints.is_empty() {
+                let dict_params: Vec<(String, String)> = scheme
+                    .constraints
+                    .iter()
+                    .map(|(trait_name, var_id)| (trait_name.clone(), format!("v{}", var_id)))
+                    .collect();
+                inferred_dict_params.insert(name.to_string(), dict_params);
+            }
+        }
+
         // Build evidence lookup by span
         let mut evidence_by_span: HashMap<Span, Vec<TraitEvidence>> = HashMap::new();
         for ev in &checker.evidence {
@@ -76,7 +90,7 @@ impl Elaborator {
 
         Elaborator {
             trait_methods: HashMap::new(),
-            fun_dict_params: HashMap::new(),
+            fun_dict_params: inferred_dict_params,
             dict_names,
             traits: checker.traits.clone(),
             evidence_by_span,
@@ -147,9 +161,11 @@ impl Elaborator {
             }
         }
 
-        // Register `print` as a dict-parameterized function (Show a => a -> Unit)
+        // Register `print` and `show` as dict-parameterized functions (Show a => ...)
         self.fun_dict_params
             .insert("print".into(), vec![("Show".into(), "a".into())]);
+        self.fun_dict_params
+            .insert("show".into(), vec![("Show".into(), "a".into())]);
 
         // Register built-in Show dicts
         for type_name in [
@@ -796,42 +812,55 @@ impl Elaborator {
     /// Returns a DictRef expression or None if no evidence found.
     fn resolve_dict(&self, trait_name: &str, span: Span) -> Option<Expr> {
         // Check if we have evidence for this span
-        let evidence_list = self.evidence_by_span.get(&span)?;
-        for ev in evidence_list {
-            if ev.trait_name == trait_name {
-                return match &ev.resolved_type {
-                    Some((type_name, args)) => {
-                        // Concrete type: reference the dict constructor
-                        let dict_name = self
-                            .dict_names
-                            .get(&(trait_name.to_string(), type_name.clone()))?;
-                        let mut dict_expr: Expr = Expr::DictRef {
-                            name: dict_name.clone(),
-                            span,
-                        };
-                        // Apply sub-dictionaries for each type argument
-                        for arg_ty in args {
-                            if let Some(sub_dict) = self.dict_for_type(trait_name, arg_ty, span) {
-                                dict_expr = Expr::App {
-                                    func: Box::new(dict_expr),
-                                    arg: Box::new(sub_dict),
-                                    span,
-                                };
-                            }
-                        }
-                        Some(dict_expr)
-                    }
-                    None => {
-                        // Polymorphic: use the dict param from current function
-                        self.current_dict_params
-                            .get(trait_name)
-                            .map(|name| Expr::Var {
-                                name: name.clone(),
+        if let Some(evidence_list) = self.evidence_by_span.get(&span) {
+            for ev in evidence_list {
+                if ev.trait_name == trait_name {
+                    return match &ev.resolved_type {
+                        Some((type_name, args)) => {
+                            // Concrete type: reference the dict constructor
+                            let dict_name = self
+                                .dict_names
+                                .get(&(trait_name.to_string(), type_name.clone()))?;
+                            let mut dict_expr: Expr = Expr::DictRef {
+                                name: dict_name.clone(),
                                 span,
-                            })
-                    }
-                };
+                            };
+                            // Apply sub-dictionaries for each type argument
+                            for arg_ty in args {
+                                if let Some(sub_dict) =
+                                    self.dict_for_type(trait_name, arg_ty, span)
+                                {
+                                    dict_expr = Expr::App {
+                                        func: Box::new(dict_expr),
+                                        arg: Box::new(sub_dict),
+                                        span,
+                                    };
+                                }
+                            }
+                            Some(dict_expr)
+                        }
+                        None => {
+                            // Polymorphic: use the dict param from current function
+                            self.current_dict_params
+                                .get(trait_name)
+                                .map(|name| Expr::Var {
+                                    name: name.clone(),
+                                    span,
+                                })
+                        }
+                    };
+                }
             }
+        }
+
+        // No evidence at this span -- fall back to current function's dict param
+        // (handles inferred constraints where the typechecker absorbed the constraint
+        // into the function's scheme rather than recording span-level evidence).
+        if let Some(name) = self.current_dict_params.get(trait_name) {
+            return Some(Expr::Var {
+                name: name.clone(),
+                span,
+            });
         }
 
         // No matching evidence for this trait. Might be a built-in trait

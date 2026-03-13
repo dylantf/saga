@@ -640,16 +640,17 @@ impl<'a> Lowerer<'a> {
                 }
 
                 // Lower `panic msg` / `todo msg` to erlang:error(msg)
-                if let Some((func_name, args)) = collect_fun_call(expr) {
-                    if (func_name == "panic" || func_name == "todo") && args.len() == 1 {
-                        let arg = self.lower_expr(args[0]);
-                        let v = self.fresh();
-                        return CExpr::Let(
-                            v.clone(),
-                            Box::new(arg),
-                            Box::new(cerl_call("erlang", "error", vec![CExpr::Var(v)])),
-                        );
-                    }
+                if let Some((func_name, args)) = collect_fun_call(expr)
+                    && (func_name == "panic" || func_name == "todo")
+                    && args.len() == 1
+                {
+                    let arg = self.lower_expr(args[0]);
+                    let v = self.fresh();
+                    return CExpr::Let(
+                        v.clone(),
+                        Box::new(arg),
+                        Box::new(cerl_call("erlang", "error", vec![CExpr::Var(v)])),
+                    );
                 }
 
                 // Check for a saturated call to a known top-level function.
@@ -831,15 +832,17 @@ impl<'a> Lowerer<'a> {
                 })
             }
 
-            Expr::Constructor { name, .. } => {
-                if name == "Nil" {
-                    CExpr::Nil
-                } else {
-                    // mangle_ctor_atom handles Ok->"ok", Err->"error", None->"undefined"
+            Expr::Constructor { name, .. } => match name.as_str() {
+                "Nil" => CExpr::Nil,
+                // Booleans are bare atoms to match Erlang's native true/false
+                "True" => CExpr::Lit(CLit::Atom("true".to_string())),
+                "False" => CExpr::Lit(CLit::Atom("false".to_string())),
+                _ => {
                     let atom = util::mangle_ctor_atom(name, &self.constructor_modules);
-                    CExpr::Lit(CLit::Atom(atom))
+                    // Wrap in a 1-tuple to match pattern representation and avoid atom collisions
+                    CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(atom))])
                 }
-            }
+            },
 
             Expr::BinOp {
                 op, left, right, ..
@@ -1266,5 +1269,4 @@ impl<'a> Lowerer<'a> {
             CExpr::Let(var, Box::new(val), Box::new(body))
         })
     }
-
 }

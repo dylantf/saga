@@ -11,11 +11,13 @@ use std::collections::{BTreeSet, HashMap};
 /// Module types: Circle -> "shapes_Circle"
 /// Prelude builtins: True -> "True", False -> "False"
 pub(super) fn mangle_ctor_atom(name: &str, constructor_modules: &HashMap<String, String>) -> String {
-    // BEAM convention overrides for Result and Maybe
+    // BEAM convention overrides for Result, Maybe, and Bool
     match name {
         "Ok" => return "ok".to_string(),
         "Err" => return "error".to_string(),
         "None" => return "undefined".to_string(),
+        "True" => return "true".to_string(),
+        "False" => return "false".to_string(),
         // Some is handled structurally (bare value, no tag) -- not here
         _ => {}
     }

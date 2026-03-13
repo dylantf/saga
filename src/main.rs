@@ -307,11 +307,13 @@ fn cmd_build(file: &str) {
 
     let module_name = "_script";
 
-    let elaborated = elaborate::elaborate(&program, &checker);
-    let mut lowerer_input = prelude_imports(&prelude);
-    lowerer_input.extend(elaborated);
+    // Prepend prelude imports before elaboration so the elaborator
+    // sees them (same as project mode processes imports).
+    let mut full_program = prelude_imports(&prelude);
+    full_program.extend(program);
+    let elaborated = elaborate::elaborate(&full_program, &checker);
     let core_src =
-        codegen::emit_module_with_imports(module_name, &lowerer_input, &checker.tc_codegen_info);
+        codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info);
 
     let build_dir = std::path::Path::new(file)
         .parent()
@@ -378,11 +380,13 @@ fn cmd_emit(file: &str) {
 
     let module_name = "_script";
 
-    let elaborated = elaborate::elaborate(&program, &checker);
-    let mut lowerer_input = prelude_imports(&prelude);
-    lowerer_input.extend(elaborated);
+    // Prepend prelude imports before elaboration so the elaborator
+    // sees them (same as project mode processes imports).
+    let mut full_program = prelude_imports(&prelude);
+    full_program.extend(program);
+    let elaborated = elaborate::elaborate(&full_program, &checker);
     let core_src =
-        codegen::emit_module_with_imports(module_name, &lowerer_input, &checker.tc_codegen_info);
+        codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info);
     print!("{}", core_src);
 }
 
