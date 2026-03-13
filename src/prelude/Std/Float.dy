@@ -1,0 +1,13 @@
+module Float
+
+pub @external("erlang", "erlang", "trunc")
+fun trunc (x: Float) -> Int
+
+pub @external("erlang", "erlang", "round")
+fun round (x: Float) -> Int
+
+pub @external("erlang", "erlang", "floor")
+fun floor (x: Float) -> Int
+
+pub @external("erlang", "erlang", "ceil")
+fun ceil (x: Float) -> Int

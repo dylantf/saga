@@ -2061,85 +2061,9 @@ fn dict_empty_typechecks() {
     assert!(check("main () = Dict.empty").is_ok());
 }
 
-#[test]
-fn dict_put_get() {
-    assert!(check("main () = Dict.get \"a\" (Dict.put \"a\" 1 Dict.empty)").is_ok());
-}
-
-#[test]
-fn dict_size_returns_int() {
-    assert!(check(
-        "fun f (d: Dict String Int) -> Int
-f d = Dict.size d"
-    )
-    .is_ok());
-}
-
-#[test]
-fn dict_keys_returns_list() {
-    assert!(check(
-        "fun f (d: Dict String Int) -> List String
-f d = Dict.keys d"
-    )
-    .is_ok());
-}
-
-#[test]
-fn dict_values_returns_list() {
-    assert!(check(
-        "fun f (d: Dict String Int) -> List Int
-f d = Dict.values d"
-    )
-    .is_ok());
-}
-
-#[test]
-fn dict_eq_constraint_propagates() {
-    // Using Dict.put in a polymorphic function should require Eq on the key
-    let result = check(
-        "fun insert (k: a) (v: b) (d: Dict a b) -> Dict a b
-insert k v d = Dict.put k v d",
-    );
-    assert!(result.is_err(), "should require Eq constraint on key type");
-}
-
-#[test]
-fn dict_eq_constraint_satisfied_by_where() {
-    assert!(check(
-        "fun insert (k: a) (v: b) (d: Dict a b) -> Dict a b where {a: Eq}
-insert k v d = Dict.put k v d"
-    )
-    .is_ok());
-}
-
-#[test]
-fn dict_function_key_fails() {
-    let result = check("main () = Dict.put (fun x -> x) 1 Dict.empty");
-    assert!(result.is_err(), "function type should not satisfy Eq");
-}
-
-#[test]
-fn dict_from_list() {
-    assert!(check("main () = Dict.from_list [(\"a\", 1), (\"b\", 2)]").is_ok());
-}
-
-#[test]
-fn dict_to_list() {
-    assert!(check(
-        "fun f (d: Dict String Int) -> List (String, Int)
-f d = Dict.to_list d"
-    )
-    .is_ok());
-}
-
-#[test]
-fn dict_member() {
-    assert!(check(
-        "fun f (d: Dict String Int) -> Bool
-f d = Dict.member \"a\" d"
-    )
-    .is_ok());
-}
+// Dict.put, Dict.keys, Dict.values, Dict.size, Dict.from_list, Dict.to_list,
+// Dict.member are now defined in Std/Dict.dy via @external declarations.
+// Their type checking is covered by module integration tests.
 
 #[test]
 fn string_literal_pattern() {

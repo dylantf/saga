@@ -274,8 +274,9 @@ main () = {
 }
 
 #[test]
-fn stdlib_list_qualified() {
-    ok("
+fn stdlib_list_external_panics_in_interpreter() {
+    // List.map is now @external -- can't run in the interpreter
+    let result = err("
 fun main () -> ()
 main () = {
   let xs = [1, 2, 3]
@@ -283,6 +284,7 @@ main () = {
   print (show ys)
 }
 ");
+    assert!(result.contains("external function"), "expected external function error, got: {}", result);
 }
 
 // --- Error cases ---

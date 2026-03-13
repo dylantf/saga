@@ -1,0 +1,4 @@
+module Int
+
+pub @external("erlang", "erlang", "float")
+fun to_float (n: Int) -> Float
