@@ -369,6 +369,12 @@ impl Parser {
                             }
                         }
                         InterpPart::Hole(mut tokens) => {
+                            // Use the first token's span so each hole gets a unique span
+                            // for evidence resolution (avoids dict collisions).
+                            let hole_span = tokens
+                                .first()
+                                .map(|t| t.span)
+                                .unwrap_or(span);
                             tokens.push(crate::token::Spanned {
                                 token: crate::token::Token::Eof,
                                 span,
@@ -378,10 +384,10 @@ impl Parser {
                             segments.push(Expr::App {
                                 func: Box::new(Expr::Var {
                                     name: "show".to_string(),
-                                    span,
+                                    span: hole_span,
                                 }),
                                 arg: Box::new(hole_expr),
-                                span,
+                                span: hole_span,
                             });
                         }
                     }

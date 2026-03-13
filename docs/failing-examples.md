@@ -3,7 +3,7 @@
 - [x] 11-fail-effect, 14-fail-to-result -- effect handler results flowing into print with wrong types (passing an atom ok to integer_to_list). Fixed: two-part CPS fix -- (1) terminal effect calls in function bodies now pass \_ReturnK as K directly to the handler instead of identity+wrap, (2) `with` expressions in blocks capture the rest of the block as the \_ReturnK continuation so abort-style handlers skip subsequent statements.
 - [x] 16-traits -- integer_to_list called on a string. Show dict dispatch is picking the wrong impl for a record field.
 - [ ] 18-destructuring -- unbound variable 'X1'. Tuple destructuring in function params not lowering correctly.
-- [ ] 19-string-interpolation -- element(2, "Alice") -- Show impl for a record is treating a string as a tuple.
+- [x] 19-string-interpolation -- element(2, "Alice") -- Show impl for a record is treating a string as a tuple. Fixed: interpolation hole tokens were re-lexed with spans starting at 0, so holes starting with the same identifier got identical spans and shared evidence. Now offset hole token spans by their source position.
 - [ ] 20-validation-show -- if_clause error, likely same pattern match exhaustiveness issue as 08.
 - [ ] 21-do-else -- key_exists error in erlc. Duplicate \_\_dict_Show_Maybe export, likely from the prelude dedup issue we noted.
 - [x] 22-dictionaries -- if_clause in Show for Bool. Fixed: True/False now lower to bare atoms `true`/`false` matching Erlang convention. (Remaining badarg error on dict iteration is a separate issue.)

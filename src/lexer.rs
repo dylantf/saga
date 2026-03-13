@@ -364,6 +364,7 @@ impl Lexer {
                 // `{expr}` hole
                 Some('{') => {
                     self.advance(); // consume `{`
+                    let hole_start = self.pos; // position of first char inside hole
                     if !literal.is_empty() {
                         parts.push(InterpPart::Literal(std::mem::take(&mut literal)));
                     }
@@ -402,10 +403,17 @@ impl Lexer {
                         message: format!("in interpolation hole: {}", e.message),
                         pos: start,
                     })?;
-                    // Strip the trailing Eof
+                    // Strip the trailing Eof and offset spans to original source positions
                     let hole_tokens: Vec<Spanned> = hole_tokens
                         .into_iter()
                         .filter(|t| t.token != Token::Eof)
+                        .map(|t| Spanned {
+                            token: t.token,
+                            span: Span {
+                                start: t.span.start + hole_start,
+                                end: t.span.end + hole_start,
+                            },
+                        })
                         .collect();
                     parts.push(InterpPart::Hole(hole_tokens));
                 }
@@ -556,6 +564,7 @@ impl Lexer {
                 }
                 Some('{') => {
                     self.advance();
+                    let hole_start = self.pos;
                     if !literal.is_empty() {
                         parts.push(InterpPart::Literal(std::mem::take(&mut literal)));
                     }
@@ -596,6 +605,13 @@ impl Lexer {
                     let hole_tokens: Vec<Spanned> = hole_tokens
                         .into_iter()
                         .filter(|t| t.token != Token::Eof)
+                        .map(|t| Spanned {
+                            token: t.token,
+                            span: Span {
+                                start: t.span.start + hole_start,
+                                end: t.span.end + hole_start,
+                            },
+                        })
                         .collect();
                     parts.push(InterpPart::Hole(hole_tokens));
                 }
