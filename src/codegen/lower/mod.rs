@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use pats::{lower_params, lower_pat};
 use util::{
     cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_qualified_call,
-    collect_type_effects, core_var, field_access_record_name, lower_lit,
+    collect_type_effects, core_var, field_access_record_name, has_nested_effect_call, lower_lit,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -117,6 +117,17 @@ impl<'a> Lowerer<'a> {
         let n = self.counter;
         self.counter += 1;
         format!("_Cor{}", n)
+    }
+
+    /// Find a record name that contains the given field.
+    fn find_record_by_field(&self, field: &str) -> Option<&str> {
+        self.record_fields.iter().find_map(|(rname, fields)| {
+            if fields.iter().any(|f| f == field) {
+                Some(rname.as_str())
+            } else {
+                None
+            }
+        })
     }
 
     /// Find a record name whose field list contains all the given update field names.
@@ -481,9 +492,31 @@ impl<'a> Lowerer<'a> {
                             &args_owned,
                             self.current_return_k.clone(),
                         )
+                    } else if has_nested_effect_call(body) {
+                        // Nested effect calls in branches (e.g. if/case with fail!):
+                        // thread _ReturnK through branches so abort skips the wrap.
+                        let k_var = self.fresh();
+                        let k_ce = self.current_return_k.clone().unwrap();
+                        let body_ce = self.lower_expr_with_k(body, &k_var);
+                        CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
                     } else {
-                        let body_ce = self.lower_expr(body);
-                        self.apply_return_k(body_ce)
+                        // Check for effectful function call: pass _ReturnK directly
+                        let is_eff_call = collect_fun_call(body)
+                            .map(|(name, _)| {
+                                self.fun_effects.contains_key(name)
+                                    || self.current_effectful_vars.contains_key(name)
+                            })
+                            .unwrap_or(false);
+                        if is_eff_call {
+                            let saved = self.pending_callee_return_k.take();
+                            self.pending_callee_return_k = self.current_return_k.clone();
+                            let result = self.lower_expr(body);
+                            self.pending_callee_return_k = saved;
+                            result
+                        } else {
+                            let body_ce = self.lower_expr(body);
+                            self.apply_return_k(body_ce)
+                        }
                     }
                 } else {
                     self.lower_expr(body)
@@ -546,6 +579,11 @@ impl<'a> Lowerer<'a> {
                                     &args_owned,
                                     self.current_return_k.clone(),
                                 )
+                            } else if has_nested_effect_call(body) {
+                                let k_var = self.fresh();
+                                let k_ce = self.current_return_k.clone().unwrap();
+                                let body_ce = self.lower_expr_with_k(body, &k_var);
+                                CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
                             } else {
                                 let body_ce = self.lower_expr(body);
                                 self.apply_return_k(body_ce)
@@ -941,11 +979,41 @@ impl<'a> Lowerer<'a> {
                     // directly (e.g. lambda defined in a block that already has
                     // handler params in scope -- those are captured, not parameterized).
                 }
-                let body_ce = self.lower_expr(body);
                 let body_ce = if is_effectful_lambda && !matches!(**body, Expr::Block { .. }) {
-                    self.apply_return_k(body_ce)
+                    if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
+                        let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
+                        self.lower_effect_call(
+                            op_name,
+                            qualifier,
+                            &args_owned,
+                            self.current_return_k.clone(),
+                        )
+                    } else if has_nested_effect_call(body) {
+                        let k_var = self.fresh();
+                        let k_ce = self.current_return_k.clone().unwrap();
+                        let body_ce = self.lower_expr_with_k(body, &k_var);
+                        CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
+                    } else {
+                        // Check for effectful function call: pass _ReturnK directly
+                        let is_eff_call = collect_fun_call(body)
+                            .map(|(name, _)| {
+                                self.fun_effects.contains_key(name)
+                                    || self.current_effectful_vars.contains_key(name)
+                            })
+                            .unwrap_or(false);
+                        if is_eff_call {
+                            let saved = self.pending_callee_return_k.take();
+                            self.pending_callee_return_k = self.current_return_k.clone();
+                            let result = self.lower_expr(body);
+                            self.pending_callee_return_k = saved;
+                            result
+                        } else {
+                            let body_ce = self.lower_expr(body);
+                            self.apply_return_k(body_ce)
+                        }
+                    }
                 } else {
-                    body_ce
+                    self.lower_expr(body)
                 };
                 self.current_handler_params = saved_handler_params;
                 self.current_return_k = saved_return_k;
@@ -1023,7 +1091,8 @@ impl<'a> Lowerer<'a> {
             }
 
             Expr::FieldAccess { expr, field, .. } => {
-                let record_name = field_access_record_name(expr);
+                let record_name = field_access_record_name(expr)
+                    .or_else(|| self.find_record_by_field(field));
                 let idx = record_name
                     .and_then(|rname| self.record_fields.get(rname))
                     .and_then(|fields| fields.iter().position(|f| f == field))

@@ -1,7 +1,7 @@
 - [x] 03-booleans, 15-typechecking-errors, 17-tuples -- unresolved trait method 'show' panic in the elaborator. Fixed: registered `show` as dict-parameterized in elaborator like `print`.
 - [x] 08-bst -- if_clause error in insert. Fixed: nullary constructors in expressions now emit 1-tuples to match pattern representation. (Remaining Show Bool failure is tracked in item 22.)
-- [x] 11-fail-effect, 14-fail-to-result -- effect handler results flowing into print with wrong types (passing an atom ok to integer_to_list). Fixed: two-part CPS fix -- (1) terminal effect calls in function bodies now pass _ReturnK as K directly to the handler instead of identity+wrap, (2) `with` expressions in blocks capture the rest of the block as the _ReturnK continuation so abort-style handlers skip subsequent statements.
-- [ ] 16-traits -- integer_to_list called on a string. Show dict dispatch is picking the wrong impl for a record field.
+- [x] 11-fail-effect, 14-fail-to-result -- effect handler results flowing into print with wrong types (passing an atom ok to integer_to_list). Fixed: two-part CPS fix -- (1) terminal effect calls in function bodies now pass \_ReturnK as K directly to the handler instead of identity+wrap, (2) `with` expressions in blocks capture the rest of the block as the \_ReturnK continuation so abort-style handlers skip subsequent statements.
+- [x] 16-traits -- integer_to_list called on a string. Show dict dispatch is picking the wrong impl for a record field.
 - [ ] 18-destructuring -- unbound variable 'X1'. Tuple destructuring in function params not lowering correctly.
 - [ ] 19-string-interpolation -- element(2, "Alice") -- Show impl for a record is treating a string as a tuple.
 - [ ] 20-validation-show -- if_clause error, likely same pattern match exhaustiveness issue as 08.
