@@ -1,0 +1,10 @@
+- [ ] 03-booleans, 15-typechecking-errors, 17-tuples -- unresolved trait method 'show' panic in the elaborator. Likely these use show as a bare value (not via print) and the elaborator doesn't handle it.
+- [ ] 08-bst -- if_clause error in insert. Probably a pattern match or if/else not compiling exhaustively to Core Erlang.
+- [ ] 11-fail-effect, 14-fail-to-result -- effect handler results flowing into print with wrong types (passing an atom ok to integer_to_list). The effect CPS transform is returning the wrong value shape.
+- [ ] 16-traits -- integer_to_list called on a string. Show dict dispatch is picking the wrong impl for a record field.
+- [ ] 18-destructuring -- unbound variable 'X1'. Tuple destructuring in function params not lowering correctly.
+- [ ] 19-string-interpolation -- element(2, "Alice") -- Show impl for a record is treating a string as a tuple.
+- [ ] 20-validation-show -- if_clause error, likely same pattern match exhaustiveness issue as 08.
+- [ ] 21-do-else -- key_exists error in erlc. Duplicate \_\_dict_Show_Maybe export, likely from the prelude dedup issue we noted.
+- [ ] 22-dictionaries -- if_clause in Show for Bool. Bool values aren't being represented as the atoms the Show dict expects.
+- [ ] 26-run-state -- unbound variable 'Fst'. The fst prelude function isn't being lowered.
