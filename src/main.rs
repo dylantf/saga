@@ -27,7 +27,9 @@ fn print_usage() {
     eprintln!("  dylang run <file.dy>    Run a single file (no module resolution)");
     eprintln!("  dylang check            Typecheck project without running");
     eprintln!("  dylang check <file.dy>  Typecheck a single file");
-    eprintln!("  dylang build            Build project (requires project.toml, compiles all modules)");
+    eprintln!(
+        "  dylang build            Build project (requires project.toml, compiles all modules)"
+    );
     eprintln!("  dylang emit <file.dy>   Print generated Core Erlang to stdout");
 }
 
@@ -70,7 +72,7 @@ fn parse_and_typecheck(
     program
 }
 
-fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
+fn make_checker(project_root: Option<PathBuf>) -> (typechecker::Checker, ast::Program) {
     let mut checker = match project_root {
         Some(root) => typechecker::Checker::with_project_root(root),
         None => typechecker::Checker::new(),
@@ -86,7 +88,64 @@ fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
         eprintln!("Prelude type error: {}", e);
         std::process::exit(1);
     }
-    checker
+    (checker, prelude_program)
+}
+
+/// Extract just the import declarations from the prelude program.
+/// Used in script mode to give the lowerer visibility into prelude imports.
+fn prelude_imports(prelude: &ast::Program) -> ast::Program {
+    prelude
+        .iter()
+        .filter(|d| matches!(d, ast::Decl::Import { .. }))
+        .cloned()
+        .collect()
+}
+
+/// Compile all Std.* modules referenced in codegen_info into the build directory.
+/// These are embedded in the binary, so we parse, elaborate, lower, and emit them.
+fn compile_std_modules(checker: &typechecker::Checker, build_dir: &std::path::Path) {
+    let std_modules: Vec<String> = checker
+        .tc_codegen_info
+        .keys()
+        .filter(|name| name.starts_with("Std."))
+        .cloned()
+        .collect();
+
+    for module_name in &std_modules {
+        let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
+        let source = typechecker::builtin_module_source(&module_path)
+            .expect("Std module missing from embedded sources");
+
+        let tokens = lexer::Lexer::new(source).lex().unwrap_or_else(|e| {
+            eprintln!("Std module {} lex error: {:?}", module_name, e);
+            std::process::exit(1);
+        });
+        let program = parser::Parser::new(tokens)
+            .parse_program()
+            .unwrap_or_else(|e| {
+                eprintln!("Std module {} parse error: {:?}", module_name, e);
+                std::process::exit(1);
+            });
+
+        // Std modules are self-contained (only use @external FFI), so we can
+        // typecheck with a fresh checker and elaborate directly.
+        let mut mod_checker = typechecker::Checker::new();
+        if let Err(e) = mod_checker.check_program(&program) {
+            eprintln!("Std module {} type error: {}", module_name, e);
+            std::process::exit(1);
+        }
+
+        let elaborated = elaborate::elaborate_module(&program, &mod_checker, module_name);
+        let erlang_name = module_name.to_lowercase().replace('.', "_");
+        let core_src =
+            codegen::emit_module_with_imports(&erlang_name, &elaborated, &checker.tc_codegen_info);
+
+        let core_path = build_dir.join(format!("{}.core", erlang_name));
+        fs::write(&core_path, &core_src).unwrap_or_else(|e| {
+            eprintln!("Error writing {}: {}", core_path.display(), e);
+            std::process::exit(1);
+        });
+    }
 }
 
 fn run_program(program: &ast::Program, loader: &eval::ModuleLoader) {
@@ -108,7 +167,7 @@ fn cmd_run_script(file: &str) {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let mut checker = make_checker(None);
+    let (mut checker, _prelude) = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
     let loader = eval::ModuleLoader::script();
     run_program(&program, &loader);
@@ -126,7 +185,7 @@ fn cmd_run_project() {
         std::process::exit(1);
     });
 
-    let mut checker = make_checker(Some(project_root.clone()));
+    let (mut checker, _prelude) = make_checker(Some(project_root.clone()));
     let program = parse_and_typecheck(&source, "Main.dy", &mut checker);
     let loader = eval::ModuleLoader::project(project_root);
     run_program(&program, &loader);
@@ -145,7 +204,7 @@ fn cmd_build_project() {
     });
 
     // Typecheck Main.dy (transitively typechecks all imports, populating caches)
-    let mut checker = make_checker(Some(project_root.clone()));
+    let (mut checker, _prelude) = make_checker(Some(project_root.clone()));
     let main_program = parse_and_typecheck(&main_source, "Main.dy", &mut checker);
 
     let build_dir = project_root.join("_build");
@@ -154,7 +213,10 @@ fn cmd_build_project() {
         std::process::exit(1);
     });
 
-    // Compile each imported module (skip builtins)
+    // Compile Std library modules
+    compile_std_modules(&checker, &build_dir);
+
+    // Compile each imported user module
     let module_names: Vec<String> = checker
         .tc_codegen_info
         .keys()
@@ -172,16 +234,13 @@ fn cmd_build_project() {
         });
 
         // Re-parse and re-typecheck the module (typechecker caches make this fast)
-        let mut mod_checker = make_checker(Some(project_root.clone()));
+        let (mut mod_checker, _prelude) = make_checker(Some(project_root.clone()));
         let mod_program = parse_and_typecheck(&source, module_name, &mut mod_checker);
 
         let elaborated = elaborate::elaborate_module(&mod_program, &mod_checker, module_name);
         let erlang_name = module_name.to_lowercase().replace('.', "_");
-        let core_src = codegen::emit_module_with_imports(
-            &erlang_name,
-            &elaborated,
-            &checker.tc_codegen_info,
-        );
+        let core_src =
+            codegen::emit_module_with_imports(&erlang_name, &elaborated, &checker.tc_codegen_info);
 
         let core_path = build_dir.join(format!("{}.core", erlang_name));
         fs::write(&core_path, &core_src).unwrap_or_else(|e| {
@@ -227,7 +286,11 @@ fn cmd_build_project() {
         }
     }
 
-    eprintln!("Built {} module(s) in {}", core_files.len(), build_dir.display());
+    eprintln!(
+        "Built {} module(s) in {}",
+        core_files.len(),
+        build_dir.display()
+    );
     eprintln!(
         "Run with: erl -noshell -pa {} -s main main -s init stop",
         build_dir.display()
@@ -239,13 +302,16 @@ fn cmd_build(file: &str) {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let mut checker = make_checker(None);
+    let (mut checker, prelude) = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
 
     let module_name = "_script";
 
     let elaborated = elaborate::elaborate(&program, &checker);
-    let core_src = codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info);
+    let mut lowerer_input = prelude_imports(&prelude);
+    lowerer_input.extend(elaborated);
+    let core_src =
+        codegen::emit_module_with_imports(module_name, &lowerer_input, &checker.tc_codegen_info);
 
     let build_dir = std::path::Path::new(file)
         .parent()
@@ -262,23 +328,39 @@ fn cmd_build(file: &str) {
         std::process::exit(1);
     });
 
-    // Invoke erlc to compile to .beam, outputting into _build/
-    let status = std::process::Command::new("erlc")
-        .arg("-o")
-        .arg(&build_dir)
-        .arg(&core_path)
-        .status()
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to run erlc: {}", e);
-            std::process::exit(1);
-        });
+    // Compile Std library modules into the build directory
+    compile_std_modules(&checker, &build_dir);
 
-    if !status.success() {
-        eprintln!("erlc failed");
-        std::process::exit(1);
+    // Invoke erlc on all .core files
+    let core_files: Vec<_> = fs::read_dir(&build_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "core"))
+        .map(|e| e.path())
+        .collect();
+
+    for core_file in &core_files {
+        let status = std::process::Command::new("erlc")
+            .arg("-o")
+            .arg(&build_dir)
+            .arg(core_file)
+            .status()
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to run erlc: {}", e);
+                std::process::exit(1);
+            });
+
+        if !status.success() {
+            eprintln!("erlc failed on {}", core_file.display());
+            std::process::exit(1);
+        }
     }
 
-    eprintln!("Built {}/{}.beam", build_dir.display(), module_name);
+    eprintln!(
+        "Built {} module(s) in {}",
+        core_files.len(),
+        build_dir.display()
+    );
     eprintln!(
         "Run with: erl -noshell -pa {} -s {} main -s init stop",
         build_dir.display(),
@@ -291,13 +373,16 @@ fn cmd_emit(file: &str) {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let mut checker = make_checker(None);
+    let (mut checker, prelude) = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
 
     let module_name = "_script";
 
     let elaborated = elaborate::elaborate(&program, &checker);
-    let core_src = codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info);
+    let mut lowerer_input = prelude_imports(&prelude);
+    lowerer_input.extend(elaborated);
+    let core_src =
+        codegen::emit_module_with_imports(module_name, &lowerer_input, &checker.tc_codegen_info);
     print!("{}", core_src);
 }
 
@@ -308,7 +393,7 @@ fn cmd_check(file: Option<&str>) {
                 eprintln!("Error reading {}: {}", f, e);
                 std::process::exit(1);
             });
-            let mut checker = make_checker(None);
+            let (mut checker, _prelude) = make_checker(None);
             parse_and_typecheck(&source, f, &mut checker);
             eprintln!("OK");
         }
@@ -322,7 +407,7 @@ fn cmd_check(file: Option<&str>) {
                 eprintln!("Error reading Main.dy: {}", e);
                 std::process::exit(1);
             });
-            let mut checker = make_checker(Some(project_root));
+            let (mut checker, _prelude) = make_checker(Some(project_root));
             parse_and_typecheck(&source, "Main.dy", &mut checker);
             eprintln!("OK");
         }

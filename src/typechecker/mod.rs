@@ -1,5 +1,6 @@
 mod check_decl;
 mod check_module;
+pub use check_module::builtin_module_source;
 mod check_traits;
 pub(crate) mod exhaustiveness;
 mod infer;
@@ -803,7 +804,6 @@ impl Checker {
                 ),
             },
         );
-
     }
 
     // --- Unification ---

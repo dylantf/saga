@@ -639,6 +639,19 @@ impl<'a> Lowerer<'a> {
                     return self.lower_qualified_call(module, func_name, &args);
                 }
 
+                // Lower `panic msg` / `todo msg` to erlang:error(msg)
+                if let Some((func_name, args)) = collect_fun_call(expr) {
+                    if (func_name == "panic" || func_name == "todo") && args.len() == 1 {
+                        let arg = self.lower_expr(args[0]);
+                        let v = self.fresh();
+                        return CExpr::Let(
+                            v.clone(),
+                            Box::new(arg),
+                            Box::new(cerl_call("erlang", "error", vec![CExpr::Var(v)])),
+                        );
+                    }
+                }
+
                 // Check for a saturated call to a known top-level function.
                 // e.g. `add 3 4` -> App(App(Var("add"), 3), 4)
                 // For effectful functions, the user provides N args but the function
@@ -786,27 +799,36 @@ impl<'a> Lowerer<'a> {
                     });
                 }
 
-                let (func, arg) = match expr {
-                    Expr::App { func, arg, .. } => (func, arg),
-                    _ => unreachable!(),
-                };
-                // General curried application (partial application or unknown function)
+                // Collect the full App chain and emit a single multi-arg Apply.
+                // e.g. `f acc h` = App(App(f, acc), h) -> apply F(Acc, H)
+                let mut callee = expr;
+                let mut args_rev = Vec::new();
+                while let Expr::App { func, arg, .. } = callee {
+                    args_rev.push(arg.as_ref());
+                    callee = func.as_ref();
+                }
+                args_rev.reverse();
+
+                let mut bindings = Vec::new();
                 let func_var = self.fresh();
-                let arg_var = self.fresh();
-                let func_ce = self.lower_expr(func);
-                let arg_ce = self.lower_expr(arg);
-                CExpr::Let(
-                    func_var.clone(),
-                    Box::new(func_ce),
-                    Box::new(CExpr::Let(
-                        arg_var.clone(),
-                        Box::new(arg_ce),
-                        Box::new(CExpr::Apply(
-                            Box::new(CExpr::Var(func_var)),
-                            vec![CExpr::Var(arg_var)],
-                        )),
-                    )),
-                )
+                let func_ce = self.lower_expr(callee);
+                bindings.push((func_var.clone(), func_ce));
+
+                let mut arg_vars = Vec::new();
+                for arg in &args_rev {
+                    let v = self.fresh();
+                    let ce = self.lower_expr(arg);
+                    bindings.push((v.clone(), ce));
+                    arg_vars.push(v);
+                }
+
+                let call = CExpr::Apply(
+                    Box::new(CExpr::Var(func_var)),
+                    arg_vars.into_iter().map(CExpr::Var).collect(),
+                );
+                bindings.into_iter().rev().fold(call, |body, (var, val)| {
+                    CExpr::Let(var, Box::new(val), Box::new(body))
+                })
             }
 
             Expr::Constructor { name, .. } => {

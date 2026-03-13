@@ -2,7 +2,7 @@ use super::{Checker, EffectDef, EffectOpDef, ModuleCodegenInfo, Scheme, TypeErro
 use crate::token::Span;
 
 /// Returns the embedded source for a builtin stdlib module, if it exists.
-fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
+pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
     if module_path.len() == 2 && module_path[0] == "Std" {
         match module_path[1].as_str() {
             "Maybe" => Some(include_str!("../prelude/Std/Maybe.dy")),
