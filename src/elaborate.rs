@@ -7,7 +7,7 @@
 //! - Add dictionary parameters to functions with where clauses
 //! - Insert dictionary arguments at call sites
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::token::Span;
@@ -176,6 +176,19 @@ impl Elaborator {
                 .entry(key)
                 .or_insert_with(|| format!("__dict_Show_{}", type_name));
         }
+
+        // Collect user-defined Show impls so we can skip emitting builtins for them
+        let user_show_impls: HashSet<&str> = program
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::ImplDef {
+                    trait_name,
+                    target_type,
+                    ..
+                } if trait_name == "Show" => Some(target_type.as_str()),
+                _ => None,
+            })
+            .collect();
 
         // Pass 2: Emit new program with dict constructors and elaborated functions
         let mut output = Vec::new();
@@ -439,6 +452,10 @@ impl Elaborator {
             ("Dict", vec!["__dict_Show_a".into(), "__dict_Show_b".into()]),
         ];
         for (type_name, dict_params) in builtin_show_types {
+            // Skip builtin dict if user already defined an impl for this type
+            if user_show_impls.contains(type_name) {
+                continue;
+            }
             if let Some(methods) = self.builtin_show_methods(type_name) {
                 output.push(Decl::DictConstructor {
                     name: format!("__dict_Show_{}", type_name),
