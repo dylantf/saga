@@ -48,6 +48,24 @@ impl Parser {
         Ok(pat)
     }
 
+    /// Check if the next token can start a pattern argument for a constructor.
+    /// Used for space-separated constructor args: `Just x`, `Foo a b`.
+    fn can_start_pattern_arg(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::Ident(_)
+                | Token::UpperIdent(_)
+                | Token::Int(_)
+                | Token::Float(_)
+                | Token::String(_)
+                | Token::True
+                | Token::False
+                | Token::LParen
+                | Token::LBracket
+                | Token::Minus
+        )
+    }
+
     fn parse_pattern_atom(&mut self) -> Result<Pat, ParseError> {
         let span = self.tokens[self.pos].span;
 
@@ -103,11 +121,21 @@ impl Parser {
                         span: span.to(end),
                     })
                 } else {
-                    // Bare constructor: None, or qualified: Shapes.None
+                    // Constructor with optional space-separated args: Just x, Foo a b
+                    // Greedily consume pattern atoms until a delimiter is reached.
+                    let mut args = Vec::new();
+                    while self.can_start_pattern_arg() {
+                        args.push(self.parse_pattern_atom()?);
+                    }
+                    let end = if args.is_empty() {
+                        span
+                    } else {
+                        self.tokens[self.pos - 1].span
+                    };
                     Ok(Pat::Constructor {
                         name,
-                        args: vec![],
-                        span,
+                        args,
+                        span: span.to(end),
                     })
                 }
             }

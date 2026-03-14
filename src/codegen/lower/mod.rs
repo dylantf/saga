@@ -79,7 +79,7 @@ pub struct Lowerer<'a> {
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
     /// Maps constructor name -> erlang module name for atom mangling.
-    /// e.g. "Circle" -> "shapes", "Some" -> "std_maybe".
+    /// e.g. "Circle" -> "shapes", "Just" -> "std_maybe".
     /// Constructors not in this map are prelude builtins and are not mangled.
     constructor_modules: HashMap<String, String>,
     /// Maps external function name -> (erlang_module, erlang_func, arity).

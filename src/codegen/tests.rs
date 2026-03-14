@@ -91,16 +91,16 @@ main () = id 42
 
 #[test]
 fn none_is_undefined_atom() {
-    // `None` -> 'undefined' (BEAM convention)
-    assert_contains("main () = None", "'undefined'");
+    // `Nothing` -> 'undefined' (BEAM convention)
+    assert_contains("main () = Nothing", "'undefined'");
 }
 
 #[test]
 fn some_is_bare_value() {
-    // `Some(42)` -> 42 (bare value, no tuple wrapping)
-    let out = emit("main () = Some(42)");
+    // `Just(42)` -> 42 (bare value, no tuple wrapping)
+    let out = emit("main () = Just(42)");
     assert!(out.contains("42"), "missing value\n{out}");
-    assert!(!out.contains("'Some'"), "should not have Some tag\n{out}");
+    assert!(!out.contains("'Just'"), "should not have Just tag\n{out}");
 }
 
 #[test]
@@ -162,21 +162,21 @@ main () = case True {
 
 #[test]
 fn case_maybe_patterns() {
-    // Some(v) lowers to bare variable, None to 'undefined'.
-    // None arm must come before Some arm (specific before wildcard).
+    // Just(v) lowers to bare variable, Nothing to 'undefined'.
+    // Nothing arm must come before Just arm (specific before wildcard).
     let src = "
 unwrap opt = case opt {
-  Some(v) -> v
-  None -> 0
+  Just(v) -> v
+  Nothing -> 0
 }
 ";
     let out = emit(src);
     assert!(
         out.contains("'undefined'"),
-        "missing undefined pattern for None\n{out}"
+        "missing undefined pattern for Nothing\n{out}"
     );
-    // Some(v) becomes a bare variable pattern
-    assert!(!out.contains("'Some'"), "should not have Some tag\n{out}");
+    // Just(v) becomes a bare variable pattern
+    assert!(!out.contains("'Just'"), "should not have Just tag\n{out}");
     // undefined arm should come before the variable arm
     let undef_pos = out.find("'undefined'").unwrap();
     let v_pos = out.rfind("V").unwrap();
@@ -571,8 +571,8 @@ fn external_fun_returning_maybe() {
 fun getenv (name: String) -> Maybe String
 
 main () = case getenv "HOME" {
-  Some(dir) -> dir
-  None -> "/tmp"
+  Just(dir) -> dir
+  Nothing -> "/tmp"
 }
 "#;
     let out = emit(src);
@@ -583,8 +583,8 @@ main () = case getenv "HOME" {
     );
     // No tuple wrapping around the result
     assert!(
-        !out.contains("'Some'"),
-        "Should not have Some tag in:\n{out}"
+        !out.contains("'Just'"),
+        "Should not have Just tag in:\n{out}"
     );
     // Pattern match should use 'undefined' for None
     assert!(

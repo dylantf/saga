@@ -78,8 +78,8 @@ fn variable() {
 
 #[test]
 fn constructor() {
-    let expr = parse_expr("Some");
-    assert!(matches!(expr, Expr::Constructor { name, .. } if name == "Some"));
+    let expr = parse_expr("Just");
+    assert!(matches!(expr, Expr::Constructor { name, .. } if name == "Just"));
 }
 
 // --- Binary operators ---
@@ -524,10 +524,10 @@ fn pattern_string_concat_requires_literal_on_left() {
 
 #[test]
 fn pattern_bare_constructor() {
-    let pat = parse_pattern("None");
+    let pat = parse_pattern("Nothing");
     match pat {
         Pat::Constructor { name, args, .. } => {
-            assert_eq!(name, "None");
+            assert_eq!(name, "Nothing");
             assert!(args.is_empty());
         }
         _ => panic!("expected Constructor, got {:?}", pat),
@@ -536,10 +536,10 @@ fn pattern_bare_constructor() {
 
 #[test]
 fn pattern_constructor_with_args() {
-    let pat = parse_pattern("Some(x)");
+    let pat = parse_pattern("Just(x)");
     match pat {
         Pat::Constructor { name, args, .. } => {
-            assert_eq!(name, "Some");
+            assert_eq!(name, "Just");
             assert_eq!(args.len(), 1);
             assert!(matches!(&args[0], Pat::Var { name, .. } if name == "x"));
         }
@@ -561,12 +561,104 @@ fn pattern_constructor_multiple_args() {
 
 #[test]
 fn pattern_nested_constructor() {
-    let pat = parse_pattern("Some(Cons(a, b))");
+    let pat = parse_pattern("Just(Cons(a, b))");
     match pat {
         Pat::Constructor { name, args, .. } => {
-            assert_eq!(name, "Some");
+            assert_eq!(name, "Just");
             assert_eq!(args.len(), 1);
             assert!(matches!(&args[0], Pat::Constructor { name, .. } if name == "Cons"));
+        }
+        _ => panic!("expected Constructor, got {:?}", pat),
+    }
+}
+
+#[test]
+fn pattern_constructor_space_separated() {
+    let pat = parse_pattern("Just x");
+    match pat {
+        Pat::Constructor { name, args, .. } => {
+            assert_eq!(name, "Just");
+            assert_eq!(args.len(), 1);
+            assert!(matches!(&args[0], Pat::Var { name, .. } if name == "x"));
+        }
+        _ => panic!("expected Constructor, got {:?}", pat),
+    }
+}
+
+#[test]
+fn pattern_constructor_space_separated_multi_arg() {
+    let pat = parse_pattern("Pair a b");
+    match pat {
+        Pat::Constructor { name, args, .. } => {
+            assert_eq!(name, "Pair");
+            assert_eq!(args.len(), 2);
+            assert!(matches!(&args[0], Pat::Var { name, .. } if name == "a"));
+            assert!(matches!(&args[1], Pat::Var { name, .. } if name == "b"));
+        }
+        _ => panic!("expected Constructor, got {:?}", pat),
+    }
+}
+
+#[test]
+fn pattern_constructor_space_separated_nested() {
+    let pat = parse_pattern("Foo Bar");
+    match pat {
+        Pat::Constructor { name, args, .. } => {
+            assert_eq!(name, "Foo");
+            assert_eq!(args.len(), 1);
+            assert!(matches!(&args[0], Pat::Constructor { name, args, .. } if name == "Bar" && args.is_empty()));
+        }
+        _ => panic!("expected Constructor, got {:?}", pat),
+    }
+}
+
+#[test]
+fn pattern_constructor_with_paren_args() {
+    // Foo(1, 2) and Foo (1, 2) both parse as Foo with two args (paren syntax)
+    let pat = parse_pattern("Foo (1, 2)");
+    match pat {
+        Pat::Constructor { name, args, .. } => {
+            assert_eq!(name, "Foo");
+            assert_eq!(args.len(), 2);
+        }
+        _ => panic!("expected Constructor, got {:?}", pat),
+    }
+}
+
+#[test]
+fn pattern_constructor_space_separated_with_grouped_tuple() {
+    // To pass a tuple as a single arg, use nested parens or a binding
+    let pat = parse_pattern("Foo ((1, 2))");
+    match pat {
+        Pat::Constructor { name, args, .. } => {
+            assert_eq!(name, "Foo");
+            assert_eq!(args.len(), 1);
+            assert!(matches!(&args[0], Pat::Tuple { elements, .. } if elements.len() == 2));
+        }
+        _ => panic!("expected Constructor, got {:?}", pat),
+    }
+}
+
+#[test]
+fn pattern_constructor_space_separated_with_literal() {
+    let pat = parse_pattern("Just 42");
+    match pat {
+        Pat::Constructor { name, args, .. } => {
+            assert_eq!(name, "Just");
+            assert_eq!(args.len(), 1);
+            assert!(matches!(&args[0], Pat::Lit { value: Lit::Int(42), .. }));
+        }
+        _ => panic!("expected Constructor, got {:?}", pat),
+    }
+}
+
+#[test]
+fn pattern_bare_constructor_still_works() {
+    let pat = parse_pattern("Nothing");
+    match pat {
+        Pat::Constructor { name, args, .. } => {
+            assert_eq!(name, "Nothing");
+            assert!(args.is_empty());
         }
         _ => panic!("expected Constructor, got {:?}", pat),
     }
@@ -777,7 +869,7 @@ fn fun_binding_with_guard() {
 
 #[test]
 fn type_def_simple() {
-    let decls = parse("type Option a {\n  Some(a)\n  None\n}");
+    let decls = parse("type Option a {\n  Just(a)\n  Nothing\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::TypeDef {
@@ -789,9 +881,9 @@ fn type_def_simple() {
             assert_eq!(name, "Option");
             assert_eq!(type_params, &vec!["a".to_string()]);
             assert_eq!(variants.len(), 2);
-            assert_eq!(variants[0].name, "Some");
+            assert_eq!(variants[0].name, "Just");
             assert_eq!(variants[0].fields.len(), 1);
-            assert_eq!(variants[1].name, "None");
+            assert_eq!(variants[1].name, "Nothing");
             assert!(variants[1].fields.is_empty());
         }
         _ => panic!("expected TypeDef, got {:?}", decls[0]),
@@ -802,13 +894,13 @@ fn type_def_simple() {
 
 #[test]
 fn case_simple() {
-    let expr = parse_expr("case x {\n  Some(v) -> v\n  None -> 0\n}");
+    let expr = parse_expr("case x {\n  Just(v) -> v\n  Nothing -> 0\n}");
     match expr {
         Expr::Case { arms, .. } => {
             assert_eq!(arms.len(), 2);
             assert!(arms[0].guard.is_none());
-            assert!(matches!(&arms[0].pattern, Pat::Constructor { name, .. } if name == "Some"));
-            assert!(matches!(&arms[1].pattern, Pat::Constructor { name, .. } if name == "None"));
+            assert!(matches!(&arms[0].pattern, Pat::Constructor { name, .. } if name == "Just"));
+            assert!(matches!(&arms[1].pattern, Pat::Constructor { name, .. } if name == "Nothing"));
         }
         _ => panic!("expected Case, got {:?}", expr),
     }
@@ -962,8 +1054,8 @@ fn record_create_multiline() {
 
 #[test]
 fn bare_constructor_without_braces() {
-    let expr = parse_expr("None");
-    assert!(matches!(expr, Expr::Constructor { name, .. } if name == "None"));
+    let expr = parse_expr("Nothing");
+    assert!(matches!(expr, Expr::Constructor { name, .. } if name == "Nothing"));
 }
 
 // --- Record update ---

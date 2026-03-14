@@ -1561,22 +1561,22 @@ main () = use_pair () with answer
 fn constructor_destructure_after_effect() {
     // Constructor pattern match on effect result.
     let src = r#"
-type Maybe a { Some(a) | None }
+type Maybe a { Just(a) | Nothing }
 
 effect Ask {
   fun ask () -> Maybe Int
 }
 
 handler answer for Ask {
-  ask -> resume Some(42)
+  ask -> resume Just(42)
 }
 
 fun extract () -> Int needs {Ask}
 extract () = {
   let result = ask! ()
   case result {
-    Some(x) -> x
-    None -> 0
+    Just(x) -> x
+    Nothing -> 0
   }
 }
 

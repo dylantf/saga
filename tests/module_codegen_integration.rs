@@ -631,20 +631,20 @@ fn prelude_constructors_mangled_with_std_prefix() {
     let main_src = "
 module Main
 pub fun main () -> Int
-main () = case Some(42) {
-  Some(x) -> x
-  None -> 0
+main () = case Just(42) {
+  Just(x) -> x
+  Nothing -> 0
 }
 ";
     let mut checker = make_project_checker();
     typecheck_source(main_src, &mut checker);
     let out = emit_project_module(main_src, "main", &checker);
 
-    // Some(v) compiles to bare value, None compiles to 'undefined' (BEAM convention)
+    // Just(v) compiles to bare value, Nothing compiles to 'undefined' (BEAM convention)
     assert_contains(&out, "'undefined'");
-    // Some(42) should compile to just 42 (bare value, no tag tuple)
-    assert!(!out.contains("'std_maybe_Some'"), "Some should not produce a tagged tuple");
-    assert!(!out.contains("'std_maybe_None'"), "None should use 'undefined' not a tagged tuple");
+    // Just(42) should compile to just 42 (bare value, no tag tuple)
+    assert!(!out.contains("'std_maybe_Just'"), "Just should not produce a tagged tuple");
+    assert!(!out.contains("'std_maybe_Nothing'"), "Nothing should use 'undefined' not a tagged tuple");
 }
 
 #[test]

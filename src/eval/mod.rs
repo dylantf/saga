@@ -786,14 +786,14 @@ fn eval_builtin(name: &str, args: Vec<Value>) -> EvalResult {
                 for (k, v) in entries {
                     if value::value_eq(key, k) {
                         return EvalResult::Ok(Value::Constructor {
-                            name: "Some".into(),
+                            name: "Just".into(),
                             arity: 1,
                             args: vec![v.clone()],
                         });
                     }
                 }
                 EvalResult::Ok(Value::Constructor {
-                    name: "None".into(),
+                    name: "Nothing".into(),
                     arity: 0,
                     args: vec![],
                 })
@@ -919,12 +919,12 @@ fn eval_builtin(name: &str, args: Vec<Value>) -> EvalResult {
             if let Value::String(s) = &args[0] {
                 match s.parse::<i64>() {
                     Ok(n) => EvalResult::Ok(Value::Constructor {
-                        name: "Some".into(),
+                        name: "Just".into(),
                         arity: 1,
                         args: vec![Value::Int(n)],
                     }),
                     Err(_) => EvalResult::Ok(Value::Constructor {
-                        name: "None".into(),
+                        name: "Nothing".into(),
                         arity: 0,
                         args: vec![],
                     }),
@@ -944,12 +944,12 @@ fn eval_builtin(name: &str, args: Vec<Value>) -> EvalResult {
             if let Value::String(s) = &args[0] {
                 match s.parse::<f64>() {
                     Ok(f) => EvalResult::Ok(Value::Constructor {
-                        name: "Some".into(),
+                        name: "Just".into(),
                         arity: 1,
                         args: vec![Value::Float(f)],
                     }),
                     Err(_) => EvalResult::Ok(Value::Constructor {
-                        name: "None".into(),
+                        name: "Nothing".into(),
                         arity: 0,
                         args: vec![],
                     }),

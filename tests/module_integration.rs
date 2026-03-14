@@ -253,7 +253,7 @@ fn stdlib_maybe_qualified() {
     ok("
 fun main () -> ()
 main () = {
-  let x = Maybe.map (fun n -> n + 1) (Some 41)
+  let x = Maybe.map (fun n -> n + 1) (Just 41)
   print (show x)
 }
 ");
@@ -264,8 +264,8 @@ fn stdlib_constructors_unqualified() {
     ok("
 fun main () -> ()
 main () = {
-  let x = Some 1
-  let y = None
+  let x = Just 1
+  let y = Nothing
   let z = Ok 2
   let w = Err \"oops\"
   print (show x)

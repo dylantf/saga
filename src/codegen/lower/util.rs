@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 /// overrides for Result/Maybe and module-prefix mangling for user types.
 ///
 /// Result: Ok -> "ok", Err -> "error"
-/// Maybe:  None -> "undefined" (Some is special-cased structurally, not here)
+/// Maybe:  Nothing -> "undefined" (Just is special-cased structurally, not here)
 /// Module types: Circle -> "shapes_Circle"
 /// Prelude builtins: True -> "True", False -> "False"
 pub(super) fn mangle_ctor_atom(name: &str, constructor_modules: &HashMap<String, String>) -> String {
@@ -15,10 +15,10 @@ pub(super) fn mangle_ctor_atom(name: &str, constructor_modules: &HashMap<String,
     match name {
         "Ok" => return "ok".to_string(),
         "Err" => return "error".to_string(),
-        "None" => return "undefined".to_string(),
+        "Nothing" => return "undefined".to_string(),
         "True" => return "true".to_string(),
         "False" => return "false".to_string(),
-        // Some is handled structurally (bare value, no tag) -- not here
+        // Just is handled structurally (bare value, no tag) -- not here
         _ => {}
     }
     if let Some(module) = constructor_modules.get(name) {
