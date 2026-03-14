@@ -48,15 +48,23 @@ impl Elaborator {
     fn new(checker: &Checker, module_name: &str) -> Self {
         // Build inferred dict params from checker's env (for functions without
         // explicit where clauses that still have inferred trait constraints).
+        // Traits that use operator dispatch, not dictionary dispatch.
+        // These should not generate dict params.
+        let operator_traits: std::collections::HashSet<&str> =
+            ["Num", "Eq", "Ord"].into_iter().collect();
+
         let mut inferred_dict_params: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (name, scheme) in checker.env.iter() {
             if !scheme.constraints.is_empty() {
                 let dict_params: Vec<(String, String)> = scheme
                     .constraints
                     .iter()
+                    .filter(|(trait_name, _)| !operator_traits.contains(trait_name.as_str()))
                     .map(|(trait_name, var_id)| (trait_name.clone(), format!("v{}", var_id)))
                     .collect();
-                inferred_dict_params.insert(name.to_string(), dict_params);
+                if !dict_params.is_empty() {
+                    inferred_dict_params.insert(name.to_string(), dict_params);
+                }
             }
         }
 
@@ -773,6 +781,15 @@ impl Elaborator {
     /// Build the dict expression for a concrete type (the dict itself, not the method).
     fn dict_for_type(&self, trait_name: &str, ty: &Type, span: Span) -> Option<Expr> {
         match ty {
+            Type::Con(name, args) if name == "Tuple" && trait_name == "Show" => {
+                // Tuples don't have a dict constructor; build an inline dict
+                // containing the show lambda: {fun t -> "(" ++ ... ++ ")"}
+                let show_lambda = self.build_tuple_show_lambda(args, span)?;
+                Some(Expr::Tuple {
+                    elements: vec![show_lambda],
+                    span,
+                })
+            }
             Type::Con(name, args) => {
                 let dict_name = self.dict_names.get(&(trait_name.into(), name.clone()))?;
                 let mut dict_expr: Expr = Expr::DictRef {
@@ -811,7 +828,11 @@ impl Elaborator {
                     .is_some_and(|(name, _)| name == "Tuple")
         })?;
         let (_type_name, type_args) = tuple_ev.resolved_type.as_ref()?;
+        self.build_tuple_show_lambda(type_args, span)
+    }
 
+    /// Build a show lambda for a tuple with the given element types.
+    fn build_tuple_show_lambda(&self, type_args: &[Type], span: Span) -> Option<Expr> {
         let s = span;
         let t_var = Expr::Var {
             name: "__tup".into(),
