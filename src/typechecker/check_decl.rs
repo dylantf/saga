@@ -113,34 +113,8 @@ impl Checker {
             }
         }
 
-        // Register impls (after traits, imports, and externals so we can validate against them)
-        for decl in program {
-            if let Decl::ImplDef {
-                trait_name,
-                target_type,
-                type_params,
-                where_clause,
-                needs,
-                methods,
-                span,
-            } = decl
-            {
-                self.register_impl(
-                    trait_name,
-                    target_type,
-                    type_params,
-                    where_clause,
-                    needs,
-                    methods,
-                    *span,
-                )?;
-            }
-        }
-
-        // Check supertrait requirements (after all impls are registered so order doesn't matter)
-        self.check_supertrait_impls()?;
-
         // Collect function annotations: name -> declared type, effects, and where constraints
+        // Done before impls so annotated helpers are available in impl bodies.
         let mut annotations: HashMap<std::string::String, Type> = HashMap::new();
         let mut annotation_constraints: HashMap<std::string::String, Vec<(String, u32)>> =
             HashMap::new();
@@ -161,7 +135,7 @@ impl Checker {
                     let param_ty = self.convert_type_expr(texpr, &mut params_list);
                     fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
                 }
-                annotations.insert(name.clone(), fun_ty);
+                annotations.insert(name.clone(), fun_ty.clone());
                 if !effects.is_empty() {
                     self.fun_effects.insert(
                         name.clone(),
@@ -209,27 +183,42 @@ impl Checker {
                     }
                     annotation_constraints.insert(name.clone(), constraints);
                 }
-            }
-        }
 
-        // Register body-less annotations (e.g. `fun print ... where {a: Show}`)
-        // directly into env, since no FunBinding will follow to trigger check_fun_clauses.
-        let has_binding: std::collections::HashSet<&str> = program
-            .iter()
-            .filter_map(|d| match d {
-                Decl::FunBinding { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect();
-        for (name, ty) in &annotations {
-            if !has_binding.contains(name.as_str()) {
-                let mut scheme = self.generalize(ty);
-                if let Some(constraints) = annotation_constraints.get(name) {
-                    scheme.constraints = constraints.clone();
+                // Pre-register annotated functions so they're available in impl bodies
+                let mut scheme = self.generalize(&fun_ty);
+                if let Some(c) = annotation_constraints.get(name) {
+                    scheme.constraints = c.clone();
                 }
                 self.env.insert(name.clone(), scheme);
             }
         }
+
+        // Register impls (after traits, imports, externals, and annotations)
+        for decl in program {
+            if let Decl::ImplDef {
+                trait_name,
+                target_type,
+                type_params,
+                where_clause,
+                needs,
+                methods,
+                span,
+            } = decl
+            {
+                self.register_impl(
+                    trait_name,
+                    target_type,
+                    type_params,
+                    where_clause,
+                    needs,
+                    methods,
+                    *span,
+                )?;
+            }
+        }
+
+        // Check supertrait requirements (after all impls are registered so order doesn't matter)
+        self.check_supertrait_impls()?;
 
         // Second pass: pre-bind all function names with fresh vars (enables mutual recursion)
         let mut fun_vars: HashMap<std::string::String, Type> = HashMap::new();
