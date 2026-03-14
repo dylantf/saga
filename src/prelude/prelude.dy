@@ -1,7 +1,3 @@
-trait Show a {
-  fun show (x: a) -> String
-}
-
 import Std.Bool as Bool (not)
 import Std.Maybe as Maybe (Maybe)
 import Std.Result as Result (Result)
@@ -9,9 +5,11 @@ import Std.List as List
 import Std.Dict as Dict
 import Std.Int as Int
 import Std.Float as Float
+import Std.Tuple (fst, snd)
 
-fst (x, _) = x
-snd (_, y) = y
+trait Show a {
+  fun show (x: a) -> String
+}
 
 impl Show for String {
   show x = x

@@ -699,3 +699,23 @@ main () = area (Circle 5.0) + area (Rect 3.0 4.0)
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ---- Prelude functions (fst, snd) in project mode ----
+
+#[test]
+fn prelude_fst_snd_compile_in_project_mode() {
+    let main_src = "
+module Main
+pub fun main () -> Int
+main () = {
+  let pair = (10, 20)
+  let x = fst pair
+  let y = snd pair
+  x + y
+}
+";
+    let mut checker = make_project_checker();
+    typecheck_source(main_src, &mut checker);
+    let out = emit_project_module(main_src, "main", &checker);
+    assert_erlc_compiles(&out, "main");
+}

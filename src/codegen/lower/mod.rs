@@ -265,6 +265,21 @@ impl<'a> Lowerer<'a> {
                     .or_insert_with(|| (erlang_name.clone(), dict_name.clone()));
             }
             if mod_name.starts_with("Std.") {
+                // Register Std exports so prelude-imported functions (e.g. fst, snd)
+                // resolve to cross-module calls without an explicit import in user code.
+                for (name, scheme) in &info.exports {
+                    let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
+                    let effect_count = effects.len();
+                    let expanded_arity =
+                        base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
+                    self.top_level_funs.entry(name.clone()).or_insert(expanded_arity);
+                    self.imported_names
+                        .entry(name.clone())
+                        .or_insert_with(|| (erlang_name.clone(), name.clone()));
+                    if !effects.is_empty() {
+                        self.fun_effects.entry(name.clone()).or_insert(effects);
+                    }
+                }
                 for (_type_name, ctors) in &info.type_constructors {
                     for ctor in ctors {
                         self.constructor_modules

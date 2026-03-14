@@ -126,21 +126,9 @@ fn check_filename_case(file_path: &Path) -> Result<(), String> {
 }
 
 /// Returns the embedded source for a builtin stdlib module, if it exists.
+/// Delegates to the canonical copy in the typechecker to avoid duplication.
 fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
-    if module_path.len() == 2 && module_path[0] == "Std" {
-        match module_path[1].as_str() {
-            "Maybe"  => Some(include_str!("../prelude/Std/Maybe.dy")),
-            "Result" => Some(include_str!("../prelude/Std/Result.dy")),
-            "List"   => Some(include_str!("../prelude/Std/List.dy")),
-            "Bool"   => Some(include_str!("../prelude/Std/Bool.dy")),
-            "Dict"   => Some(include_str!("../prelude/Std/Dict.dy")),
-            "Int"    => Some(include_str!("../prelude/Std/Int.dy")),
-            "Float"  => Some(include_str!("../prelude/Std/Float.dy")),
-            _ => None,
-        }
-    } else {
-        None
-    }
+    crate::typechecker::builtin_module_source(module_path)
 }
 
 /// Load, evaluate, and inject a module's public bindings into `env`.

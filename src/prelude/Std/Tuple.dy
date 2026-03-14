@@ -1,0 +1,7 @@
+module Tuple
+
+pub fun fst (t: (a, b)) -> a
+fst (x, _) = x
+
+pub fun snd (t: (a, b)) -> b
+snd (_, y) = y

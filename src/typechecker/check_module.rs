@@ -12,6 +12,7 @@ pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
             "Dict" => Some(include_str!("../prelude/Std/Dict.dy")),
             "Int" => Some(include_str!("../prelude/Std/Int.dy")),
             "Float" => Some(include_str!("../prelude/Std/Float.dy")),
+            "Tuple" => Some(include_str!("../prelude/Std/Tuple.dy")),
             _ => None,
         }
     } else {
@@ -160,7 +161,8 @@ impl Checker {
             })?;
 
         // Cache the parsed program so the build step can skip re-parsing
-        self.tc_programs.insert(module_name.clone(), program.clone());
+        self.tc_programs
+            .insert(module_name.clone(), program.clone());
 
         self.tc_loading.insert(module_name.clone());
 
