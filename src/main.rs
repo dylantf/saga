@@ -317,16 +317,12 @@ fn cmd_build(file: &str) {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let (mut checker, prelude) = make_checker(None);
+    let (mut checker, _prelude) = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
 
     let module_name = "_script";
 
-    // Prepend full prelude (imports + functions like fst/snd) before
-    // elaboration so they're available in the compiled output.
-    let mut full_program = prelude;
-    full_program.extend(program);
-    let elaborated = elaborate::elaborate(&full_program, &checker);
+    let elaborated = elaborate::elaborate(&program, &checker);
     let core_src =
         codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info);
 
@@ -390,16 +386,12 @@ fn cmd_emit(file: &str) {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let (mut checker, prelude) = make_checker(None);
+    let (mut checker, _prelude) = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
 
     let module_name = "_script";
 
-    // Prepend full prelude (imports + functions like fst/snd) before
-    // elaboration so they're available in the compiled output.
-    let mut full_program = prelude;
-    full_program.extend(program);
-    let elaborated = elaborate::elaborate(&full_program, &checker);
+    let elaborated = elaborate::elaborate(&program, &checker);
     let core_src =
         codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info);
     print!("{}", core_src);

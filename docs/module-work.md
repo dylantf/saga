@@ -12,7 +12,7 @@
 
   In check_module.rs:67, when project_root is None and the import isn't a builtin Std module, typecheck_import returns Ok(()) silently. If someone writes import MyLib in a script, they get no error. It just silently doesn't import anything. Their code will then fail later with a confusing "unknown variable" error instead of "imports not supported in script mode".
 
-- [ ] 4. Script-mode build (cmd_build) prepends the full prelude AST
+- [x] 4. Script-mode build (cmd_build) prepends the full prelude AST
 
   In main.rs:302-304, script mode concatenates the entire prelude AST with the user program before elaboration. This means the emitted .core file contains all prelude functions, even unused ones. In project mode each module is self-contained and imports are inter-module calls. This asymmetry means script-mode .core files are bloated and don't match how project-mode works.
 

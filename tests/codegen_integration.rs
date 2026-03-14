@@ -29,12 +29,10 @@ fn emit_elaborated(src: &str) -> String {
     let program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
-    let (mut checker, prelude_program) = bootstrap();
+    let (mut checker, _prelude_program) = bootstrap();
     checker.check_program(&program).expect("typecheck error");
-    let mut full_program = prelude_program;
-    full_program.extend(program);
-    let elaborated = elaborate::elaborate(&full_program, &checker);
-    codegen::emit_module("_script", &elaborated)
+    let elaborated = elaborate::elaborate(&program, &checker);
+    codegen::emit_module_with_imports("_script", &elaborated, &checker.tc_codegen_info)
 }
 
 /// Emit Core Erlang and compile it with erlc, asserting no compilation errors.
@@ -252,7 +250,7 @@ fn show_string_is_identity() {
     let src = "main () = show \"hello\"";
     let out = emit_elaborated(src);
     assert!(
-        out.contains("'__dict_Show_String'/0"),
+        out.contains("__dict_Show_std_string_String"),
         "expected Show/String dict constructor\n{out}"
     );
 }
@@ -321,7 +319,7 @@ fn show_triple_tuple_has_three_elements() {
         "expected Show/Int dict\n{out}"
     );
     assert!(
-        out.contains("__dict_Show_String"),
+        out.contains("__dict_Show_std_string_String"),
         "expected Show/String dict\n{out}"
     );
     assert!(
@@ -843,7 +841,7 @@ main () = do_work () with console_log
     let out = emit_elaborated(src);
     // The handler arm body should call io:format (print is lowered inline)
     assert_contains(&out, "'io':'format'");
-    assert_contains(&out, "__dict_Show_String");
+    assert_contains(&out, "__dict_Show_std_string_String");
 }
 
 #[test]

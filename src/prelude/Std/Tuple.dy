@@ -5,3 +5,7 @@ fst (x, _) = x
 
 pub fun snd (t: (a, b)) -> b
 snd (_, y) = y
+
+impl Show for Unit {
+  show _ = "()"
+}

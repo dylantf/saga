@@ -1,0 +1,5 @@
+module String
+
+impl Show for String {
+  show x = x
+}
