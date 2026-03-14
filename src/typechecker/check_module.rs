@@ -64,7 +64,15 @@ impl Checker {
         let is_builtin = builtin_module_source(module_path).is_some();
 
         let project_root = match &self.project_root.clone() {
-            None if !is_builtin => return Ok(()), // script mode: skip non-builtin imports
+            None if !is_builtin => {
+                return Err(TypeError::at(
+                    span,
+                    format!(
+                        "cannot import '{}': user module imports require a project (create a project.toml)",
+                        module_name
+                    ),
+                ));
+            }
             Some(root) => Some(root.clone()),
             None => None,
         };

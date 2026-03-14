@@ -2743,3 +2743,20 @@ impl Display for Wrapper {
     )
     .unwrap();
 }
+
+#[test]
+fn script_mode_allows_std_imports() {
+    check("import Std.List\nlet xs = List.map (fun x -> x + 1) [1, 2, 3]").unwrap();
+}
+
+#[test]
+fn script_mode_rejects_user_imports() {
+    match check("import MyLib") {
+        Err(err) => assert!(
+            err.to_string().contains("project"),
+            "expected project.toml hint, got: {}",
+            err
+        ),
+        Ok(_) => panic!("should reject user import in script mode"),
+    }
+}
