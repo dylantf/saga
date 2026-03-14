@@ -22,6 +22,7 @@ pub enum Token {
     Else,
     Fun,
     Pub,
+    Opaque,
     Record,
     Effect,
     Handler,

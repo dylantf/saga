@@ -31,12 +31,18 @@ fn type_constructors(
         match decl {
             Decl::TypeDef {
                 public: true,
+                opaque,
                 name,
                 variants,
                 ..
             } => {
-                let ctors: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-                map.insert(name.clone(), ctors);
+                if *opaque {
+                    // Opaque types export the type name but no constructors
+                    map.insert(name.clone(), vec![]);
+                } else {
+                    let ctors: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                    map.insert(name.clone(), ctors);
+                }
             }
             Decl::RecordDef {
                 public: true, name, ..
@@ -451,7 +457,9 @@ impl Checker {
                         found = true;
                     }
                     // Hoist all constructors belonging to this type
+                    // (for opaque types, ctors is empty but the type name is still valid)
                     if let Some(ctors) = ctors_map.get(name) {
+                        found = true;
                         for ctor in ctors {
                             if let Some(&scheme) = binding_map.get(ctor.as_str()) {
                                 self.env.insert(ctor.clone(), scheme.clone());
@@ -590,13 +598,16 @@ pub(super) fn public_names_for_tc(
             }
             Decl::TypeDef {
                 public: true,
+                opaque,
                 name,
                 variants,
                 ..
             } => {
                 names.insert(name.clone());
-                for v in variants {
-                    names.insert(v.name.clone());
+                if !opaque {
+                    for v in variants {
+                        names.insert(v.name.clone());
+                    }
                 }
             }
             Decl::RecordDef {

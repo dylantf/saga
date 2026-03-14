@@ -38,7 +38,11 @@ impl Parser {
 
     pub(super) fn parse_decl(&mut self) -> Result<Decl, ParseError> {
         match self.peek() {
-            Token::Type => self.parse_type_def(false),
+            Token::Type => self.parse_type_def(false, false),
+            Token::Opaque => {
+                self.advance(); // consume 'opaque'
+                self.parse_type_def(true, true)
+            }
             Token::Record => self.parse_record_def(false),
             Token::Let => {
                 let start = self.tokens[self.pos].span;
@@ -69,7 +73,11 @@ impl Parser {
                 match self.peek() {
                     Token::Fun => self.parse_fun_annotation(true, start),
                     Token::At => self.parse_external_fun(true, start),
-                    Token::Type => self.parse_type_def(true),
+                    Token::Type => self.parse_type_def(true, false),
+                    Token::Opaque => {
+                        self.advance(); // consume 'opaque'
+                        self.parse_type_def(true, true)
+                    }
                     Token::Record => self.parse_record_def(true),
                     Token::Effect => self.parse_effect_def(true),
                     Token::Handler => self.parse_handler_def(true),
@@ -129,7 +137,7 @@ impl Parser {
         })
     }
 
-    fn parse_type_def(&mut self, public: bool) -> Result<Decl, ParseError> {
+    fn parse_type_def(&mut self, public: bool, opaque: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'type'
         let name = self.expect_upper_ident()?;
@@ -152,6 +160,7 @@ impl Parser {
 
         Ok(Decl::TypeDef {
             public,
+            opaque,
             name,
             type_params,
             variants,

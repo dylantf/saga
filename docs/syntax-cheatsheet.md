@@ -115,6 +115,9 @@ type Maybe a {
 
 # Pipe separator (optional, newlines also work)
 type Color { Red | Green | Blue }
+
+# Opaque types (opaque keyword implies `pub`)
+opaque type Foo { Bar | Baz }
 ```
 
 ---

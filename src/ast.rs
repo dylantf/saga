@@ -56,6 +56,7 @@ pub enum Decl {
     /// `type Option a { Some(a), None }`
     TypeDef {
         public: bool,
+        opaque: bool,
         name: String,
         type_params: Vec<String>,
         variants: Vec<TypeConstructor>,

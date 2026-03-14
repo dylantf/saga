@@ -253,6 +253,7 @@ impl Lexer {
             "else" => Token::Else,
             "fun" => Token::Fun,
             "pub" => Token::Pub,
+            "opaque" => Token::Opaque,
             "record" => Token::Record,
             "effect" => Token::Effect,
             "handler" => Token::Handler,

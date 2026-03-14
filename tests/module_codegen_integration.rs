@@ -719,3 +719,114 @@ main () = {
     let out = emit_project_module(main_src, "main", &checker);
     assert_erlc_compiles(&out, "main");
 }
+
+// ---- Opaque types ----
+
+#[test]
+fn opaque_type_exports_name_but_not_constructors() {
+    let lib_src = "
+module OpaqueLib
+opaque type Token { Secret(String) }
+pub fun make_token (s: String) -> Token
+make_token s = Secret s
+";
+    let main_src = "
+module Main
+import OpaqueLib (Token, make_token)
+pub fun main () -> Token
+main () = make_token \"abc\"
+";
+    let mut checker = make_project_checker();
+    let lib_path = fixtures_root().join("OpaqueLib.dy");
+    std::fs::write(&lib_path, lib_src).unwrap();
+    typecheck_source(main_src, &mut checker);
+    let _out = emit_project_module(main_src, "main", &checker);
+    let _ = std::fs::remove_file(&lib_path);
+}
+
+#[test]
+fn opaque_type_constructor_rejected_by_importer() {
+    let lib_src = "
+module OpaqueLib2
+opaque type Token { Secret(String) }
+pub fun make_token (s: String) -> Token
+make_token s = Secret s
+";
+    let main_src = "
+module Main
+import OpaqueLib2 (Token, Secret)
+pub fun main () -> Token
+main () = Secret \"abc\"
+";
+    let mut checker = make_project_checker();
+    let lib_path = fixtures_root().join("OpaqueLib2.dy");
+    std::fs::write(&lib_path, lib_src).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        typecheck_source(main_src, &mut checker);
+    }));
+    let _ = std::fs::remove_file(&lib_path);
+    assert!(result.is_err(), "importing opaque constructor should fail");
+}
+
+#[test]
+fn opaque_type_compiles_and_runs_on_beam() {
+    let lib_src = "
+module OpaqueLib3
+opaque type Token { Secret(String) }
+pub fun make_token (s: String) -> Token
+make_token s = Secret s
+
+pub fun reveal (t: Token) -> String
+reveal t = case t { Secret(s) -> s }
+";
+    let main_src = "
+module Main
+import OpaqueLib3 (Token, make_token, reveal)
+pub fun main () -> String
+main () = reveal (make_token \"hello\")
+";
+    let mut checker = make_project_checker();
+    let lib_path = fixtures_root().join("OpaqueLib3.dy");
+    std::fs::write(&lib_path, lib_src).unwrap();
+    typecheck_source(main_src, &mut checker);
+
+    let lib_core = emit_project_module(lib_src, "opaquelib3", &checker);
+    let main_core = emit_project_module(main_src, "main", &checker);
+    let _ = std::fs::remove_file(&lib_path);
+
+    let dir = assert_erlc_compiles(&lib_core, "opaquelib3");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let output = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        output.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Actually run it on the BEAM
+    let run_output = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("io:format(\"~s~n\", [main:main()]), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run_output.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run_output.stdout);
+    assert!(
+        stdout.contains("hello"),
+        "expected 'hello' in output, got: {stdout}"
+    );
+}
