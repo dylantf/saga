@@ -708,7 +708,7 @@ impl Parser {
                     let arm_start = self.tokens[self.pos].span;
                     let pattern = self.parse_pattern()?;
 
-                    let guard = if matches!(self.peek(), Token::If) {
+                    let guard = if matches!(self.peek(), Token::Bar) {
                         self.advance();
                         Some(self.parse_expr(0)?)
                     } else {

@@ -165,10 +165,10 @@ case shape {
   Point -> 0.0
 }
 
-# Guards
+# Guards (| in both case arms and function definitions)
 case n {
-  n if n < 0 -> 0
-  n if n > 100 -> 100
+  n | n < 0 -> 0
+  n | n > 100 -> 100
   n -> n
 }
 

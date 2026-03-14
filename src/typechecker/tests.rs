@@ -183,7 +183,7 @@ fn case_binds_pattern_vars() {
 
 #[test]
 fn case_with_guard() {
-    let ty = infer_expr_type("case 5 {\n  x if x > 0 -> \"positive\"\n  _ -> \"non-positive\"\n}")
+    let ty = infer_expr_type("case 5 {\n  x | x > 0 -> \"positive\"\n  _ -> \"non-positive\"\n}")
         .unwrap();
     assert_eq!(ty, Type::string());
 }
@@ -1636,7 +1636,7 @@ fn exhaustive_case_guard_with_wildcard_fallback() {
     check(
         "type Maybe a { Just(a) | Nothing }
 let x = case Just 42 {
-  Just(n) if n > 0 -> n
+  Just(n) | n > 0 -> n
   _ -> 0
 }",
     )
@@ -1649,7 +1649,7 @@ fn non_exhaustive_case_only_guarded_arm() {
     let result = check(
         "type Maybe a { Just(a) | Nothing }
 let x = case Just 42 {
-  Just(n) if n > 0 -> n
+  Just(n) | n > 0 -> n
   Nothing -> 0
 }",
     );
@@ -1784,7 +1784,7 @@ fn guarded_arm_not_redundant() {
     check(
         "type Maybe a { Just(a) | Nothing }
 let x = case Just 42 {
-  Just(n) if n > 0 -> n
+  Just(n) | n > 0 -> n
   Just(n) -> 0
   Nothing -> 0
 }",
@@ -2111,7 +2111,7 @@ fn effect_call_in_case_guard_rejected() {
 
 fun filter (x: Int) -> Int needs {Check}
 filter x = case x {
-  n if check! n -> n
+  n | check! n -> n
   _ -> 0
 }",
     );
@@ -2150,7 +2150,7 @@ fn pure_guard_still_works() {
     assert!(
         check(
             "clamp x = case x {
-  n if n < 0 -> 0
+  n | n < 0 -> 0
   n -> n
 }"
         )

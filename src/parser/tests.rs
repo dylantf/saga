@@ -908,7 +908,7 @@ fn case_simple() {
 
 #[test]
 fn case_with_guard() {
-    let expr = parse_expr("case x {\n  n if n > 0 -> n\n  _ -> 0\n}");
+    let expr = parse_expr("case x {\n  n | n > 0 -> n\n  _ -> 0\n}");
     match expr {
         Expr::Case { arms, .. } => {
             assert_eq!(arms.len(), 2);

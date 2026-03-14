@@ -95,12 +95,12 @@ eval expr = case expr {
   Mul(a, b) -> eval a * eval b
 }
 
-# Guards in case arms use `if`
+# Guards use `|` in both case arms and function definitions
 # Any pure function (no effects) can be used in guards
 pub fun clamp (n: Int) -> Int
 clamp n = case n {
-  n if n < 0 -> 0
-  n if n > 100 -> 100
+  n | n < 0 -> 0
+  n | n > 100 -> 100
   n -> n
 }
 
@@ -109,7 +109,7 @@ is_valid s = String.length s > 0 && String.length s < 100
 
 pub fun describe (s: String) -> String
 describe s = case s {
-  s if is_valid s -> "valid: " <> s
+  s | is_valid s -> "valid: " <> s
   _ -> "invalid"
 }
 
