@@ -447,7 +447,7 @@ pub enum BinOp {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeConstructor {
     pub name: String,
-    pub fields: Vec<TypeExpr>, // empty = bare variant like None
+    pub fields: Vec<(Option<String>, TypeExpr)>, // (optional label, type)
     pub span: Span,
 }
 

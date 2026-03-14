@@ -761,7 +761,7 @@ impl Checker {
             } else {
                 // Build: field1 -> field2 -> ... -> ResultType
                 let mut ty = result_type.clone();
-                for field in variant.fields.iter().rev() {
+                for (_, field) in variant.fields.iter().rev() {
                     let field_ty = self.convert_type_expr(field, &mut param_vars);
                     ty = Type::Arrow(Box::new(field_ty), Box::new(ty));
                 }

@@ -176,10 +176,10 @@ impl Parser {
 
         if matches!(self.peek(), Token::LParen) {
             self.advance();
-            fields.push(self.parse_type_expr()?);
+            fields.push(self.parse_labeled_type_field()?);
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
-                fields.push(self.parse_type_expr()?);
+                fields.push(self.parse_labeled_type_field()?);
             }
             self.expect(Token::RParen)?;
         }
@@ -190,6 +190,25 @@ impl Parser {
             fields,
             span: start.to(end),
         })
+    }
+
+    /// Parse an optional label followed by a type expression: `radius: Float` or just `Float`.
+    fn parse_labeled_type_field(&mut self) -> Result<(Option<String>, TypeExpr), ParseError> {
+        // Try label: if we see `ident :`, it's a labeled field
+        if let Token::Ident(name) = self.peek() {
+            let name = name.clone();
+            let save = self.pos;
+            self.advance();
+            if matches!(self.peek(), Token::Colon) {
+                self.advance(); // consume ':'
+                let ty = self.parse_type_expr()?;
+                return Ok((Some(name), ty));
+            }
+            // Not a label, backtrack
+            self.pos = save;
+        }
+        let ty = self.parse_type_expr()?;
+        Ok((None, ty))
     }
 
     // Parses: [pub] fun <name> (<p>: <Type>) ... -> <ReturnType> [needs {Effect, ...}]
