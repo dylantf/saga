@@ -28,13 +28,19 @@ pub @external("erlang", "string", "slice")
 fun slice (s: String) (start: Int) (len: Int) -> String
 
 pub fun find (s: String) (sub: String) -> Maybe String
+# builtin
 
 pub fun strip_prefix (s: String) (prefix: String) -> Maybe String
+# builtin
 
 pub fun contains (s: String) (sub: String) -> Bool
+# builtin
 
 pub fun starts_with (s: String) (prefix: String) -> Bool
+# builtin
 
 pub fun ends_with (s: String) (suffix: String) -> Bool
+# builtin
 
 pub fun split (s: String) (sep: String) -> List String
+# builtin

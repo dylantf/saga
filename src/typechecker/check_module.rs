@@ -13,6 +13,7 @@ pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
             "Int" => Some(include_str!("../prelude/Std/Int.dy")),
             "Float" => Some(include_str!("../prelude/Std/Float.dy")),
             "String" => Some(include_str!("../prelude/Std/String.dy")),
+            "Regex" => Some(include_str!("../prelude/Std/Regex.dy")),
             "Tuple" => Some(include_str!("../prelude/Std/Tuple.dy")),
             _ => None,
         }

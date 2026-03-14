@@ -376,6 +376,263 @@ impl Lowerer<'_> {
         }
     }
 
+    /// Lower Regex builtins that call re:run/re:replace with fixed option args.
+    pub(super) fn lower_builtin_regex(
+        &mut self,
+        module: &str,
+        func_name: &str,
+        args: &[&crate::ast::Expr],
+    ) -> Option<CExpr> {
+        if module != "Regex" {
+            return None;
+        }
+
+        match func_name {
+            // Regex.match pattern s -> case re:run(S, Pat) of {match,_} -> true; nomatch -> false end
+            "match" => {
+                let pat = self.lower_expr(args[0]);
+                let s = self.lower_expr(args[1]);
+                let pv = self.fresh();
+                let sv = self.fresh();
+                let result = self.fresh();
+                let call = cerl_call(
+                    "re",
+                    "run",
+                    vec![CExpr::Var(sv.clone()), CExpr::Var(pv.clone())],
+                );
+                let case = CExpr::Case(
+                    Box::new(CExpr::Var(result.clone())),
+                    vec![
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("nomatch".to_string())),
+                            guard: None,
+                            body: CExpr::Lit(CLit::Atom("false".to_string())),
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: CExpr::Lit(CLit::Atom("true".to_string())),
+                        },
+                    ],
+                );
+                Some(CExpr::Let(
+                    pv,
+                    Box::new(pat),
+                    Box::new(CExpr::Let(
+                        sv,
+                        Box::new(s),
+                        Box::new(CExpr::Let(result, Box::new(call), Box::new(case))),
+                    )),
+                ))
+            }
+
+            // Regex.find pattern s -> case re:run(S, Pat, [{capture,first,binary}]) of
+            //   {match,[V]} -> V; nomatch -> undefined end
+            "find" => {
+                let pat = self.lower_expr(args[0]);
+                let s = self.lower_expr(args[1]);
+                let pv = self.fresh();
+                let sv = self.fresh();
+                let result = self.fresh();
+                let v = self.fresh();
+                let opts = CExpr::Cons(
+                    Box::new(CExpr::Tuple(vec![
+                        CExpr::Lit(CLit::Atom("capture".to_string())),
+                        CExpr::Lit(CLit::Atom("first".to_string())),
+                        CExpr::Lit(CLit::Atom("list".to_string())),
+                    ])),
+                    Box::new(CExpr::Nil),
+                );
+                let call = cerl_call(
+                    "re",
+                    "run",
+                    vec![CExpr::Var(sv.clone()), CExpr::Var(pv.clone()), opts],
+                );
+                let case = CExpr::Case(
+                    Box::new(CExpr::Var(result.clone())),
+                    vec![
+                        CArm {
+                            pat: CPat::Tuple(vec![
+                                CPat::Lit(CLit::Atom("match".to_string())),
+                                CPat::Cons(Box::new(CPat::Var(v.clone())), Box::new(CPat::Nil)),
+                            ]),
+                            guard: None,
+                            body: CExpr::Var(v),
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: CExpr::Lit(CLit::Atom("undefined".to_string())),
+                        },
+                    ],
+                );
+                Some(CExpr::Let(
+                    pv,
+                    Box::new(pat),
+                    Box::new(CExpr::Let(
+                        sv,
+                        Box::new(s),
+                        Box::new(CExpr::Let(result, Box::new(call), Box::new(case))),
+                    )),
+                ))
+            }
+
+            // Regex.find_all pattern s -> case re:run(S, Pat, [global, {capture,first,binary}]) of
+            //   {match, Matches} -> lists:map(fun([X]) -> X end, Matches); nomatch -> [] end
+            "find_all" => {
+                let pat = self.lower_expr(args[0]);
+                let s = self.lower_expr(args[1]);
+                let pv = self.fresh();
+                let sv = self.fresh();
+                let result = self.fresh();
+                let matches = self.fresh();
+                let x = self.fresh();
+                let opts = CExpr::Cons(
+                    Box::new(CExpr::Lit(CLit::Atom("global".to_string()))),
+                    Box::new(CExpr::Cons(
+                        Box::new(CExpr::Tuple(vec![
+                            CExpr::Lit(CLit::Atom("capture".to_string())),
+                            CExpr::Lit(CLit::Atom("first".to_string())),
+                            CExpr::Lit(CLit::Atom("list".to_string())),
+                        ])),
+                        Box::new(CExpr::Nil),
+                    )),
+                );
+                let call = cerl_call(
+                    "re",
+                    "run",
+                    vec![CExpr::Var(sv.clone()), CExpr::Var(pv.clone()), opts],
+                );
+                // fun([X]) -> X -- unwrap each [Match] to Match
+                let unwrap_fn = CExpr::Fun(
+                    vec![x.clone()],
+                    Box::new(CExpr::Case(
+                        Box::new(CExpr::Var(x.clone())),
+                        vec![CArm {
+                            pat: CPat::Cons(Box::new(CPat::Var(x.clone())), Box::new(CPat::Nil)),
+                            guard: None,
+                            body: CExpr::Var(x.clone()),
+                        }],
+                    )),
+                );
+                let unwrap_var = self.fresh();
+                let map_call = cerl_call(
+                    "lists",
+                    "map",
+                    vec![CExpr::Var(unwrap_var.clone()), CExpr::Var(matches.clone())],
+                );
+                let case = CExpr::Case(
+                    Box::new(CExpr::Var(result.clone())),
+                    vec![
+                        CArm {
+                            pat: CPat::Tuple(vec![
+                                CPat::Lit(CLit::Atom("match".to_string())),
+                                CPat::Var(matches.clone()),
+                            ]),
+                            guard: None,
+                            body: CExpr::Let(
+                                unwrap_var,
+                                Box::new(unwrap_fn),
+                                Box::new(map_call),
+                            ),
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: CExpr::Nil,
+                        },
+                    ],
+                );
+                Some(CExpr::Let(
+                    pv,
+                    Box::new(pat),
+                    Box::new(CExpr::Let(
+                        sv,
+                        Box::new(s),
+                        Box::new(CExpr::Let(result, Box::new(call), Box::new(case))),
+                    )),
+                ))
+            }
+
+            // Regex.replace pattern s replacement -> re:replace(S, Pat, Rep, [{return,list}])
+            "replace" => {
+                let pat = self.lower_expr(args[0]);
+                let s = self.lower_expr(args[1]);
+                let rep = self.lower_expr(args[2]);
+                let pv = self.fresh();
+                let sv = self.fresh();
+                let rv = self.fresh();
+                let opts = CExpr::Cons(
+                    Box::new(CExpr::Tuple(vec![
+                        CExpr::Lit(CLit::Atom("return".to_string())),
+                        CExpr::Lit(CLit::Atom("list".to_string())),
+                    ])),
+                    Box::new(CExpr::Nil),
+                );
+                let call = cerl_call(
+                    "re",
+                    "replace",
+                    vec![
+                        CExpr::Var(sv.clone()),
+                        CExpr::Var(pv.clone()),
+                        CExpr::Var(rv.clone()),
+                        opts,
+                    ],
+                );
+                Some(CExpr::Let(
+                    pv,
+                    Box::new(pat),
+                    Box::new(CExpr::Let(
+                        sv,
+                        Box::new(s),
+                        Box::new(CExpr::Let(rv, Box::new(rep), Box::new(call))),
+                    )),
+                ))
+            }
+
+            // Regex.replace_all pattern s replacement -> re:replace(S, Pat, Rep, [global, {return,list}])
+            "replace_all" => {
+                let pat = self.lower_expr(args[0]);
+                let s = self.lower_expr(args[1]);
+                let rep = self.lower_expr(args[2]);
+                let pv = self.fresh();
+                let sv = self.fresh();
+                let rv = self.fresh();
+                let opts = CExpr::Cons(
+                    Box::new(CExpr::Lit(CLit::Atom("global".to_string()))),
+                    Box::new(CExpr::Cons(
+                        Box::new(CExpr::Tuple(vec![
+                            CExpr::Lit(CLit::Atom("return".to_string())),
+                            CExpr::Lit(CLit::Atom("list".to_string())),
+                        ])),
+                        Box::new(CExpr::Nil),
+                    )),
+                );
+                let call = cerl_call(
+                    "re",
+                    "replace",
+                    vec![
+                        CExpr::Var(sv.clone()),
+                        CExpr::Var(pv.clone()),
+                        CExpr::Var(rv.clone()),
+                        opts,
+                    ],
+                );
+                Some(CExpr::Let(
+                    pv,
+                    Box::new(pat),
+                    Box::new(CExpr::Let(
+                        sv,
+                        Box::new(s),
+                        Box::new(CExpr::Let(rv, Box::new(rep), Box::new(call))),
+                    )),
+                ))
+            }
+
+            _ => None,
+        }
+    }
+
     /// Lower `print(dict, x)` to `let S = apply show(X) in io:format("~s~n", [S])`.
     /// After elaboration, `print x` becomes `print(__dict_Show_a, x)`.
     pub(super) fn lower_builtin_print(&mut self, args: &[&crate::ast::Expr]) -> Option<CExpr> {

@@ -1430,6 +1430,11 @@ impl<'a> Lowerer<'a> {
             return ce;
         }
 
+        // Regex builtins
+        if let Some(ce) = self.lower_builtin_regex(module, func_name, args) {
+            return ce;
+        }
+
         let erlang_module = self
             .module_aliases
             .get(module)
