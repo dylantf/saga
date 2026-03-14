@@ -1,7 +1,7 @@
 use dylang::{codegen, elaborate, lexer, parser, typechecker};
 
-/// Load the prelude into a checker and return both.
-fn bootstrap() -> (typechecker::Checker, Vec<dylang::ast::Decl>) {
+/// Load the prelude into a checker.
+fn bootstrap() -> typechecker::Checker {
     let prelude_src = include_str!("../src/prelude/prelude.dy");
     let prelude_tokens = lexer::Lexer::new(prelude_src).lex().expect("prelude lex error");
     let prelude_program = parser::Parser::new(prelude_tokens)
@@ -11,7 +11,7 @@ fn bootstrap() -> (typechecker::Checker, Vec<dylang::ast::Decl>) {
     checker
         .check_program(&prelude_program)
         .expect("prelude typecheck error");
-    (checker, prelude_program)
+    checker
 }
 
 fn emit(src: &str) -> String {
@@ -29,7 +29,7 @@ fn emit_elaborated(src: &str) -> String {
     let program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
-    let (mut checker, _prelude_program) = bootstrap();
+    let mut checker = bootstrap();
     checker.check_program(&program).expect("typecheck error");
     let elaborated = elaborate::elaborate(&program, &checker);
     codegen::emit_module_with_imports("_script", &elaborated, &checker.tc_codegen_info)

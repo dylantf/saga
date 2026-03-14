@@ -72,7 +72,7 @@ fn parse_and_typecheck(
     program
 }
 
-fn make_checker(project_root: Option<PathBuf>) -> (typechecker::Checker, ast::Program) {
+fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
     let mut checker = match project_root {
         Some(root) => typechecker::Checker::with_project_root(root),
         None => typechecker::Checker::new(),
@@ -90,7 +90,7 @@ fn make_checker(project_root: Option<PathBuf>) -> (typechecker::Checker, ast::Pr
     }
     // Cache the prelude snapshot eagerly so seeded_module_checker can use it
     checker.tc_prelude_snapshot = Some(Box::new(checker.clone()));
-    (checker, prelude_program)
+    checker
 }
 
 /// Compile all Std.* modules referenced in codegen_info into the build directory.
@@ -164,7 +164,7 @@ fn cmd_run_script(file: &str) {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let (mut checker, _prelude) = make_checker(None);
+    let mut checker = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
     let loader = eval::ModuleLoader::script();
     run_program(&program, &loader);
@@ -182,7 +182,7 @@ fn cmd_run_project() {
         std::process::exit(1);
     });
 
-    let (mut checker, _prelude) = make_checker(Some(project_root.clone()));
+    let mut checker = make_checker(Some(project_root.clone()));
     let program = parse_and_typecheck(&source, "Main.dy", &mut checker);
     let loader = eval::ModuleLoader::project(project_root);
     run_program(&program, &loader);
@@ -201,7 +201,7 @@ fn cmd_build_project() {
     });
 
     // Typecheck Main.dy (transitively typechecks all imports, populating caches)
-    let (mut checker, _prelude) = make_checker(Some(project_root.clone()));
+    let mut checker = make_checker(Some(project_root.clone()));
     let main_program = parse_and_typecheck(&main_source, "Main.dy", &mut checker);
 
     let build_dir = project_root.join("_build");
@@ -317,7 +317,7 @@ fn cmd_build(file: &str) {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let (mut checker, _prelude) = make_checker(None);
+    let mut checker = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
 
     let module_name = "_script";
@@ -386,7 +386,7 @@ fn cmd_emit(file: &str) {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let (mut checker, _prelude) = make_checker(None);
+    let mut checker = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
 
     let module_name = "_script";
@@ -404,7 +404,7 @@ fn cmd_check(file: Option<&str>) {
                 eprintln!("Error reading {}: {}", f, e);
                 std::process::exit(1);
             });
-            let (mut checker, _prelude) = make_checker(None);
+            let mut checker = make_checker(None);
             parse_and_typecheck(&source, f, &mut checker);
             eprintln!("OK");
         }
@@ -418,7 +418,7 @@ fn cmd_check(file: Option<&str>) {
                 eprintln!("Error reading Main.dy: {}", e);
                 std::process::exit(1);
             });
-            let (mut checker, _prelude) = make_checker(Some(project_root));
+            let mut checker = make_checker(Some(project_root));
             parse_and_typecheck(&source, "Main.dy", &mut checker);
             eprintln!("OK");
         }
