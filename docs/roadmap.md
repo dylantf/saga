@@ -58,7 +58,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Built-in traits: `Show`, `Num`, `Eq`, `Ord`
 - [x] Conditional impls (`impl Show for List a where {a: Show}`)
 - [x] `needs` on impl blocks (parsing + type checking)
-- [ ] `deriving` syntax to auto-generate trait impls from ADT structure (e.g. `type Color { Red | Green } deriving {Show, Eq}`)
+- [x] `deriving` syntax to auto-generate trait impls from ADT structure (e.g. `type Color { Red | Green } deriving (Show)`)
 
 ## Type System
 
@@ -187,6 +187,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Effect calls in non-block positions (nested in `if` conditions, binary ops, etc.)
 - [x] HOF effect absorption (passing effectful closures through higher-order functions like `try`)
 - [x] Return clause bypass on handler abort (return clause wraps abort results incorrectly)
+- [ ] Actor effect (see messaging.md)
 
 ### Stdlib / prelude
 
