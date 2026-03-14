@@ -45,12 +45,10 @@ build_msg () = {
 }
 
 main () = {
-  run_state 0 (fun () -> count_up 5)
-  |> fst
-  |> print
+  let (value, _) = run_state 0 (fun () -> count_up 5)
+  print value
 
-  run_state "" (fun () -> build_msg ())
-  |> fst
-  |> print
+  let (msg, _) = run_state "" (fun () -> build_msg ())
+  print msg
 }
 

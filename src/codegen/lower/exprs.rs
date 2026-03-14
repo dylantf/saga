@@ -547,8 +547,22 @@ impl<'a> Lowerer<'a> {
                 &args_owned,
                 Some(CExpr::Var(k_var.to_string())),
             )
-        } else if has_nested_effect_call(expr) {
-            // Contains nested effects: recurse into branches
+        } else if collect_fun_call(expr)
+            .map(|(name, _)| {
+                self.fun_effects.contains_key(name)
+                    || self.current_effectful_vars.contains_key(name)
+            })
+            .unwrap_or(false)
+        {
+            // Call to an effectful function: pass K as _ReturnK
+            let saved = self.pending_callee_return_k.take();
+            self.pending_callee_return_k = Some(CExpr::Var(k_var.to_string()));
+            let ce = self.lower_expr(expr);
+            self.pending_callee_return_k = saved;
+            ce
+        } else if has_nested_effect_call(expr) || matches!(expr, Expr::Block { .. }) {
+            // Contains nested effects or is a block (which may have effectful
+            // function calls not detected by has_nested_effect_call): recurse
             self.lower_expr_with_k(expr, k_var)
         } else {
             // No effects: apply K to the result
@@ -599,6 +613,29 @@ impl<'a> Lowerer<'a> {
                         Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                         Stmt::Expr(e) => (None, e),
                     };
+
+                    // Check for call to an effectful function. Capture the
+                    // rest of the block as _ReturnK so CPS chains correctly
+                    // (e.g. state-threading handlers need real continuations).
+                    let is_effectful_call = collect_fun_call(value_expr)
+                        .map(|(name, _)| {
+                            self.fun_effects.contains_key(name)
+                                || self.current_effectful_vars.contains_key(name)
+                        })
+                        .unwrap_or(false);
+                    if is_effectful_call {
+                        let rest_ce = self.lower_block_with_k(rest, k_var);
+                        let (k_param, rest_ce) = match pat_opt {
+                            Some(p) => self.destructure_pat(p, rest_ce),
+                            None => (self.fresh(), rest_ce),
+                        };
+                        let rest_k = CExpr::Fun(vec![k_param], Box::new(rest_ce));
+                        let saved = self.pending_callee_return_k.take();
+                        self.pending_callee_return_k = Some(rest_k);
+                        let result = self.lower_expr(value_expr);
+                        self.pending_callee_return_k = saved;
+                        return result;
+                    }
 
                     if has_nested_effect_call(value_expr) {
                         // Value has nested effects: build inner K and thread through
@@ -825,11 +862,18 @@ impl<'a> Lowerer<'a> {
             .unwrap_or(false);
 
         let result = if is_direct_effectful_call {
-            // Pass return clause as _ReturnK to the callee via pending_callee_return_k
+            // Pass return clause as _ReturnK to the callee via pending_callee_return_k.
+            // Save any outer pending (e.g. rest-of-block continuation from
+            // `let x = f() with { ... }; use x`) so it survives -- lower_expr
+            // will consume the handler's return clause, and the block needs its
+            // original rest_k back to wrap the CPS result.
+            let saved_outer = self.pending_callee_return_k.take();
             if let Some(rk) = return_k_lambda {
                 self.pending_callee_return_k = Some(rk);
             }
-            self.lower_expr(expr)
+            let ce = self.lower_expr(expr);
+            self.pending_callee_return_k = saved_outer;
+            ce
         } else {
             // Block form or non-call: use current_return_k for terminal application
             if let Some(rk) = return_k_lambda {

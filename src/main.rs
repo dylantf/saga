@@ -307,9 +307,9 @@ fn cmd_build(file: &str) {
 
     let module_name = "_script";
 
-    // Prepend prelude imports before elaboration so the elaborator
-    // sees them (same as project mode processes imports).
-    let mut full_program = prelude_imports(&prelude);
+    // Prepend full prelude (imports + functions like fst/snd) before
+    // elaboration so they're available in the compiled output.
+    let mut full_program = prelude;
     full_program.extend(program);
     let elaborated = elaborate::elaborate(&full_program, &checker);
     let core_src =
@@ -380,9 +380,9 @@ fn cmd_emit(file: &str) {
 
     let module_name = "_script";
 
-    // Prepend prelude imports before elaboration so the elaborator
-    // sees them (same as project mode processes imports).
-    let mut full_program = prelude_imports(&prelude);
+    // Prepend full prelude (imports + functions like fst/snd) before
+    // elaboration so they're available in the compiled output.
+    let mut full_program = prelude;
     full_program.extend(program);
     let elaborated = elaborate::elaborate(&full_program, &checker);
     let core_src =
