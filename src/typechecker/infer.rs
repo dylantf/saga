@@ -513,13 +513,12 @@ impl Checker {
                     last_ty = Type::unit();
                     i += 1;
                 }
-                Stmt::LetFun {
-                    name, span, ..
-                } => {
+                Stmt::LetFun { name, span, .. } => {
                     // Group consecutive LetFun clauses with the same name
                     let fun_name = name.clone();
                     let fun_span = *span;
-                    let mut clauses: Vec<(&[Pat], &Option<Box<Expr>>, &Expr)> = Vec::new();
+                    type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
+                    let mut clauses: Vec<Clause> = Vec::new();
                     while i < stmts.len() {
                         if let Stmt::LetFun {
                             name: n,

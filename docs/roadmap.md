@@ -96,7 +96,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] List comprehensions
 - [x] Function composition
 - [x] Conversion builtins (`Int.parse`, `Int.to_float`, `Float.parse`, `Float.trunc`, `Float.round`, `Float.floor`, `Float.ceil`)
-- [ ] String operations (`string_length`, `string_split`, `string_chars`, etc.)
+- [x] String operations (`string_length`, `string_split`, `string_chars`, etc.)
 - [ ] More list functions (`zip`, `range`, `take`, `drop`, `any`, `all`)
 
 ## Syntax
@@ -210,7 +210,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
   - Type checker: shared type vars across operations, fresh instantiation on lookup, handler specialization
   - Handlers: `handler counter for State Int { ... }` binds the type param
   - Enables prelude-provided `State s`, `MVector` backed by BEAM arrays
-- [ ] Local function definitions (`let f x = ...` inside a block, with recursion + closure capture)
+- [x] Local function definitions (`let f x = ...` inside a block, with recursion + closure capture)
 
 ## Maybe
 
@@ -220,6 +220,11 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - Effect row polymorphism / effect variables (`needs e`)
 - `Dynamic` type for consuming untyped Erlang data (JSON parsers, ETS, message passing)
 - Cache cloning in typecheck_import: At check_module.rs:204-209, six HashMap caches are .clone()d into every module checker. For deep import trees this is a lot of allocation. The caches are read-heavy and append-only during module checking. Using Rc<RefCell<...>> or passing references would avoid the cloning, but this makes the borrow checker harder to work with. Can be revisited if performance becomes a concern (and after profiling to see if the cloning is the issue).
+
+## Tooling
+
+- [ ] REPL (interactive expression evaluation, type display, effect handling)
+- [ ] Dependency management (`project.toml` dependencies, package registry, version resolution)
 
 ## Out of Scope
 

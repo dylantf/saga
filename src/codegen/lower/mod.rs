@@ -259,7 +259,9 @@ impl<'a> Lowerer<'a> {
             let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
             let erlang_name = util::module_name_to_erlang(&mod_path);
             for (_trait_name, _target_type, dict_name, arity) in &info.trait_impl_dicts {
-                self.top_level_funs.entry(dict_name.clone()).or_insert(*arity);
+                self.top_level_funs
+                    .entry(dict_name.clone())
+                    .or_insert(*arity);
                 self.imported_names
                     .entry(dict_name.clone())
                     .or_insert_with(|| (erlang_name.clone(), dict_name.clone()));
@@ -280,14 +282,20 @@ impl<'a> Lowerer<'a> {
                     let expanded_arity =
                         base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
                     // Register both unqualified and qualified (alias.name) forms
-                    self.top_level_funs.entry(name.clone()).or_insert(expanded_arity);
+                    self.top_level_funs
+                        .entry(name.clone())
+                        .or_insert(expanded_arity);
                     let qualified = format!("{}.{}", mod_path.last().unwrap(), name);
-                    self.top_level_funs.entry(qualified.clone()).or_insert(expanded_arity);
+                    self.top_level_funs
+                        .entry(qualified.clone())
+                        .or_insert(expanded_arity);
                     self.imported_names
                         .entry(name.clone())
                         .or_insert_with(|| (erlang_name.clone(), name.clone()));
                     if !effects.is_empty() {
-                        self.fun_effects.entry(name.clone()).or_insert(effects.clone());
+                        self.fun_effects
+                            .entry(name.clone())
+                            .or_insert(effects.clone());
                         self.fun_effects.entry(qualified).or_insert(effects);
                     }
                 }
@@ -1111,7 +1119,9 @@ impl<'a> Lowerer<'a> {
                         CPat::Tuple(
                             params
                                 .iter()
-                                .map(|p| lower_pat(p, &self.record_fields, &self.constructor_modules))
+                                .map(|p| {
+                                    lower_pat(p, &self.record_fields, &self.constructor_modules)
+                                })
                                 .collect(),
                         )
                     };
@@ -1412,6 +1422,11 @@ impl<'a> Lowerer<'a> {
 
         // Dict builtins
         if let Some(ce) = self.lower_builtin_dict(module, func_name, args) {
+            return ce;
+        }
+
+        // String builtins
+        if let Some(ce) = self.lower_builtin_string(module, func_name, args) {
             return ce;
         }
 

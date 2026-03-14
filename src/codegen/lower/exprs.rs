@@ -316,7 +316,7 @@ impl<'a> Lowerer<'a> {
                     Stmt::LetFun { name, .. } => name.clone(),
                     _ => unreachable!(),
                 };
-                let mut clauses: Vec<(&[Pat], &Option<Box<Expr>>, &Expr)> = Vec::new();
+                let mut clauses: Vec<super::Clause> = Vec::new();
                 let mut consumed = 0;
                 for stmt in stmts {
                     if let Stmt::LetFun {
@@ -361,7 +361,16 @@ impl<'a> Lowerer<'a> {
                     let arms: Vec<CArm> = clauses
                         .iter()
                         .map(|(params, guard, body)| {
-                            let pats_ce: Vec<CPat> = params.iter().map(|p| pats::lower_pat(p, &self.record_fields, &self.constructor_modules)).collect();
+                            let pats_ce: Vec<CPat> = params
+                                .iter()
+                                .map(|p| {
+                                    pats::lower_pat(
+                                        p,
+                                        &self.record_fields,
+                                        &self.constructor_modules,
+                                    )
+                                })
+                                .collect();
                             let pat = if pats_ce.len() == 1 {
                                 pats_ce.into_iter().next().unwrap()
                             } else {
@@ -388,10 +397,7 @@ impl<'a> Lowerer<'a> {
                     self.lower_block(rest)
                 };
 
-                CExpr::LetRec(
-                    vec![(fun_name, arity, fun_body)],
-                    Box::new(rest_ce),
-                )
+                CExpr::LetRec(vec![(fun_name, arity, fun_body)], Box::new(rest_ce))
             }
             [first, rest @ ..] => {
                 // Check if the value is a `with` expression. If so, capture the rest

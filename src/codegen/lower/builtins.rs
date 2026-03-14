@@ -148,6 +148,234 @@ impl Lowerer<'_> {
         }
     }
 
+    /// Lower String builtins that need Erlang return value transformation.
+    /// - String.find/strip_prefix: nomatch -> None, value -> Some value
+    /// - String.contains/starts_with/ends_with: nomatch -> false, _ -> true
+    /// - String.split: string:split(S, Sep, all) needs a fixed atom arg
+    pub(super) fn lower_builtin_string(
+        &mut self,
+        module: &str,
+        func_name: &str,
+        args: &[&crate::ast::Expr],
+    ) -> Option<CExpr> {
+        if module != "String" {
+            return None;
+        }
+
+        // Helper: case Result of nomatch -> 'undefined' (None); V -> V (Some) end
+        let nomatch_to_maybe = |result_var: String, v: String| {
+            CExpr::Case(
+                Box::new(CExpr::Var(result_var)),
+                vec![
+                    CArm {
+                        pat: CPat::Lit(CLit::Atom("nomatch".to_string())),
+                        guard: None,
+                        body: CExpr::Lit(CLit::Atom("undefined".to_string())),
+                    },
+                    CArm {
+                        pat: CPat::Var(v.clone()),
+                        guard: None,
+                        body: CExpr::Var(v),
+                    },
+                ],
+            )
+        };
+
+        // Helper: case Result of nomatch -> 'false'; _ -> 'true' end
+        let nomatch_to_bool = |result_var: String| {
+            CExpr::Case(
+                Box::new(CExpr::Var(result_var)),
+                vec![
+                    CArm {
+                        pat: CPat::Lit(CLit::Atom("nomatch".to_string())),
+                        guard: None,
+                        body: CExpr::Lit(CLit::Atom("false".to_string())),
+                    },
+                    CArm {
+                        pat: CPat::Wildcard,
+                        guard: None,
+                        body: CExpr::Lit(CLit::Atom("true".to_string())),
+                    },
+                ],
+            )
+        };
+
+        match func_name {
+            // String.find s sub -> case string:find(S, Sub) of nomatch -> None; V -> Some V end
+            "find" => {
+                let s = self.lower_expr(args[0]);
+                let sub = self.lower_expr(args[1]);
+                let sv = self.fresh();
+                let subv = self.fresh();
+                let result = self.fresh();
+                let v = self.fresh();
+                let call = cerl_call(
+                    "string",
+                    "find",
+                    vec![CExpr::Var(sv.clone()), CExpr::Var(subv.clone())],
+                );
+                Some(CExpr::Let(
+                    sv,
+                    Box::new(s),
+                    Box::new(CExpr::Let(
+                        subv,
+                        Box::new(sub),
+                        Box::new(CExpr::Let(
+                            result.clone(),
+                            Box::new(call),
+                            Box::new(nomatch_to_maybe(result, v)),
+                        )),
+                    )),
+                ))
+            }
+
+            // String.strip_prefix s prefix -> case string:prefix(S, P) of nomatch -> None; V -> Some V end
+            "strip_prefix" => {
+                let s = self.lower_expr(args[0]);
+                let prefix = self.lower_expr(args[1]);
+                let sv = self.fresh();
+                let pv = self.fresh();
+                let result = self.fresh();
+                let v = self.fresh();
+                let call = cerl_call(
+                    "string",
+                    "prefix",
+                    vec![CExpr::Var(sv.clone()), CExpr::Var(pv.clone())],
+                );
+                Some(CExpr::Let(
+                    sv,
+                    Box::new(s),
+                    Box::new(CExpr::Let(
+                        pv,
+                        Box::new(prefix),
+                        Box::new(CExpr::Let(
+                            result.clone(),
+                            Box::new(call),
+                            Box::new(nomatch_to_maybe(result, v)),
+                        )),
+                    )),
+                ))
+            }
+
+            // String.contains s sub -> case string:find(S, Sub) of nomatch -> false; _ -> true end
+            "contains" => {
+                let s = self.lower_expr(args[0]);
+                let sub = self.lower_expr(args[1]);
+                let sv = self.fresh();
+                let subv = self.fresh();
+                let result = self.fresh();
+                let call = cerl_call(
+                    "string",
+                    "find",
+                    vec![CExpr::Var(sv.clone()), CExpr::Var(subv.clone())],
+                );
+                Some(CExpr::Let(
+                    sv,
+                    Box::new(s),
+                    Box::new(CExpr::Let(
+                        subv,
+                        Box::new(sub),
+                        Box::new(CExpr::Let(
+                            result.clone(),
+                            Box::new(call),
+                            Box::new(nomatch_to_bool(result)),
+                        )),
+                    )),
+                ))
+            }
+
+            // String.starts_with s prefix -> case string:prefix(S, P) of nomatch -> false; _ -> true end
+            "starts_with" => {
+                let s = self.lower_expr(args[0]);
+                let prefix = self.lower_expr(args[1]);
+                let sv = self.fresh();
+                let pv = self.fresh();
+                let result = self.fresh();
+                let call = cerl_call(
+                    "string",
+                    "prefix",
+                    vec![CExpr::Var(sv.clone()), CExpr::Var(pv.clone())],
+                );
+                Some(CExpr::Let(
+                    sv,
+                    Box::new(s),
+                    Box::new(CExpr::Let(
+                        pv,
+                        Box::new(prefix),
+                        Box::new(CExpr::Let(
+                            result.clone(),
+                            Box::new(call),
+                            Box::new(nomatch_to_bool(result)),
+                        )),
+                    )),
+                ))
+            }
+
+            // String.ends_with: reverse both, then prefix check
+            "ends_with" => {
+                let s = self.lower_expr(args[0]);
+                let suffix = self.lower_expr(args[1]);
+                let sv = self.fresh();
+                let sufv = self.fresh();
+                let rs = self.fresh();
+                let rsuf = self.fresh();
+                let result = self.fresh();
+                let rev_s = cerl_call("string", "reverse", vec![CExpr::Var(sv.clone())]);
+                let rev_suf = cerl_call("string", "reverse", vec![CExpr::Var(sufv.clone())]);
+                let call = cerl_call(
+                    "string",
+                    "prefix",
+                    vec![CExpr::Var(rs.clone()), CExpr::Var(rsuf.clone())],
+                );
+                Some(CExpr::Let(
+                    sv,
+                    Box::new(s),
+                    Box::new(CExpr::Let(
+                        sufv,
+                        Box::new(suffix),
+                        Box::new(CExpr::Let(
+                            rs,
+                            Box::new(rev_s),
+                            Box::new(CExpr::Let(
+                                rsuf,
+                                Box::new(rev_suf),
+                                Box::new(CExpr::Let(
+                                    result.clone(),
+                                    Box::new(call),
+                                    Box::new(nomatch_to_bool(result)),
+                                )),
+                            )),
+                        )),
+                    )),
+                ))
+            }
+
+            // String.split s sep -> string:split(S, Sep, all)
+            "split" => {
+                let s = self.lower_expr(args[0]);
+                let sep = self.lower_expr(args[1]);
+                let sv = self.fresh();
+                let sepv = self.fresh();
+                let call = cerl_call(
+                    "string",
+                    "split",
+                    vec![
+                        CExpr::Var(sv.clone()),
+                        CExpr::Var(sepv.clone()),
+                        CExpr::Lit(CLit::Atom("all".to_string())),
+                    ],
+                );
+                Some(CExpr::Let(
+                    sv,
+                    Box::new(s),
+                    Box::new(CExpr::Let(sepv, Box::new(sep), Box::new(call))),
+                ))
+            }
+
+            _ => None,
+        }
+    }
+
     /// Lower `print(dict, x)` to `let S = apply show(X) in io:format("~s~n", [S])`.
     /// After elaboration, `print x` becomes `print(__dict_Show_a, x)`.
     pub(super) fn lower_builtin_print(&mut self, args: &[&crate::ast::Expr]) -> Option<CExpr> {

@@ -1,5 +1,40 @@
 module String
 
+import Std.Maybe as Maybe (Maybe)
+
 impl Show for String {
   show x = x
 }
+
+pub @external("erlang", "string", "length")
+fun length (s: String) -> Int
+
+pub @external("erlang", "string", "to_graphemes")
+fun graphemes (s: String) -> List String
+
+pub @external("erlang", "string", "trim")
+fun trim (s: String) -> String
+
+pub @external("erlang", "string", "lowercase")
+fun to_lower (s: String) -> String
+
+pub @external("erlang", "string", "uppercase")
+fun to_upper (s: String) -> String
+
+pub @external("erlang", "string", "reverse")
+fun reverse (s: String) -> String
+
+pub @external("erlang", "string", "slice")
+fun slice (s: String) (start: Int) (len: Int) -> String
+
+pub fun find (s: String) (sub: String) -> Maybe String
+
+pub fun strip_prefix (s: String) (prefix: String) -> Maybe String
+
+pub fun contains (s: String) (sub: String) -> Bool
+
+pub fun starts_with (s: String) (prefix: String) -> Bool
+
+pub fun ends_with (s: String) (suffix: String) -> Bool
+
+pub fun split (s: String) (sep: String) -> List String
