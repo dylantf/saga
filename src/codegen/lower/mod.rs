@@ -318,7 +318,10 @@ impl<'a> Lowerer<'a> {
             } = decl
             {
                 let module_name = module_path.join(".");
-                let prefix = alias.as_deref().unwrap_or(&module_name).to_string();
+                let prefix = alias
+                    .as_deref()
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| module_path.last().unwrap().to_string());
                 let erlang_name = util::module_name_to_erlang(module_path);
                 self.module_aliases
                     .insert(prefix.clone(), erlang_name.clone());

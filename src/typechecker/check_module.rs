@@ -68,7 +68,9 @@ impl Checker {
         span: Span,
     ) -> Result<(), TypeError> {
         let module_name = module_path.join(".");
-        let prefix = alias.unwrap_or(&module_name).to_string();
+        let prefix = alias
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| module_path.last().unwrap().to_string());
 
         let is_builtin = builtin_module_source(module_path).is_some();
 

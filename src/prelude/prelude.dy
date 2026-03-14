@@ -1,11 +1,11 @@
-import Std.Bool as Bool (not)
-import Std.Maybe as Maybe (Maybe)
-import Std.Result as Result (Result)
-import Std.List as List
-import Std.Dict as Dict
-import Std.Int as Int
-import Std.Float as Float
-import Std.String as String
+import Std.Bool (not)
+import Std.Maybe (Maybe)
+import Std.Result (Result)
+import Std.List
+import Std.Dict
+import Std.Int
+import Std.Float
+import Std.String
 import Std.Tuple (fst, snd)
 
 trait Show a {

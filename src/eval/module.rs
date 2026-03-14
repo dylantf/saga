@@ -140,7 +140,8 @@ pub(super) fn load_module(
     loader: &ModuleLoader,
 ) -> EvalResult {
     let module_name = module_path.join(".");
-    let prefix = alias.unwrap_or(&module_name);
+    let last_component = module_path.last().unwrap().as_str();
+    let prefix = alias.unwrap_or(last_component);
 
     let is_builtin = builtin_module_source(module_path).is_some();
 
