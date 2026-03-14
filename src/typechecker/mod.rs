@@ -1,5 +1,6 @@
 mod check_decl;
 mod check_module;
+pub use check_module::builtin_module_source;
 mod check_traits;
 pub(crate) mod exhaustiveness;
 mod infer;
@@ -101,7 +102,7 @@ impl std::fmt::Display for Type {
 // --- Substitution ---
 
 /// Maps type variable IDs to their solved types.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Substitution {
     map: HashMap<u32, Type>,
 }
@@ -243,6 +244,10 @@ impl TypeEnv {
         self.bindings.remove(name);
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Scheme)> {
+        self.bindings.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
     /// Free type variables in the environment (used for generalization).
     fn free_vars(&self, sub: &Substitution) -> Vec<u32> {
         let mut vars = Vec::new();
@@ -360,10 +365,15 @@ pub struct TraitEvidence {
     /// The concrete type that satisfied the constraint.
     /// None if resolved via a where-bound type variable (polymorphic passthrough).
     pub resolved_type: Option<(String, Vec<Type>)>,
+    /// For polymorphic evidence, the name of the type variable that was bounded.
+    /// Used to select the correct dict param when multiple where-clause bounds
+    /// exist for the same trait (e.g. `where {e: Show, a: Show}`).
+    pub type_var_name: Option<String>,
 }
 
 // --- Inference engine ---
 
+#[derive(Clone)]
 pub struct Checker {
     pub(crate) next_var: u32,
     pub sub: Substitution,
@@ -399,6 +409,8 @@ pub struct Checker {
     pub(crate) field_candidates: HashMap<u32, (Vec<String>, Span)>,
     /// Where clause bounds: var_id -> set of trait names assumed satisfied
     pub(crate) where_bounds: HashMap<u32, HashSet<String>>,
+    /// Reverse map from type var ID to original type parameter name (for polymorphic evidence)
+    pub(crate) where_bound_var_names: HashMap<u32, String>,
     /// Project root for resolving imports. None = script mode.
     pub(crate) project_root: Option<std::path::PathBuf>,
     /// Cache of already-typechecked modules: module name -> public type bindings.
@@ -411,6 +423,9 @@ pub struct Checker {
     pub(crate) tc_record_defs: HashMap<String, HashMap<String, Vec<(String, Type)>>>,
     /// Cache of trait impls from typechecked modules: module name -> (trait, type) -> impl info.
     pub(crate) tc_trait_impls: HashMap<String, HashMap<(String, String), ImplInfo>>,
+    pub(crate) tc_traits: HashMap<String, HashMap<String, TraitInfo>>,
+    /// Cached checker state after prelude has been loaded (avoids re-checking prelude for each module import).
+    pub(crate) tc_prelude_snapshot: Option<Box<Checker>>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) tc_loading: HashSet<String>,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
@@ -445,12 +460,15 @@ impl Checker {
             pending_constraints: Vec::new(),
             field_candidates: HashMap::new(),
             where_bounds: HashMap::new(),
+            where_bound_var_names: HashMap::new(),
             project_root: None,
             tc_loaded: HashMap::new(),
             tc_type_ctors: HashMap::new(),
             tc_codegen_info: HashMap::new(),
             tc_record_defs: HashMap::new(),
             tc_trait_impls: HashMap::new(),
+            tc_traits: HashMap::new(),
+            tc_prelude_snapshot: None,
             tc_loading: HashSet::new(),
             adt_variants: HashMap::new(),
             evidence: Vec::new(),
@@ -472,49 +490,8 @@ impl Checker {
     }
 
     fn register_builtins(&mut self) {
-        // Built-in Show trait and impls for primitives
-        self.traits.insert(
-            "Show".into(),
-            TraitInfo {
-                type_param: "a".into(),
-                supertraits: vec![],
-                methods: vec![("show".into(), vec![Type::Var(u32::MAX)], Type::string())],
-            },
-        );
-        for prim in &["Int", "Float", "String", "Bool", "Unit"] {
-            self.trait_impls.insert(
-                ("Show".into(), prim.to_string()),
-                ImplInfo {
-                    param_constraints: vec![],
-                    span: None,
-                },
-            );
-        }
-        // Show for compound types requires Show on type params
-        // List a: Show on param 0
-        self.trait_impls.insert(
-            ("Show".into(), "List".into()),
-            ImplInfo {
-                param_constraints: vec![("Show".into(), 0)],
-                span: None,
-            },
-        );
-        // Maybe a: Show on param 0
-        self.trait_impls.insert(
-            ("Show".into(), "Maybe".into()),
-            ImplInfo {
-                param_constraints: vec![("Show".into(), 0)],
-                span: None,
-            },
-        );
-        // Result a b: Show on params 0 and 1
-        self.trait_impls.insert(
-            ("Show".into(), "Result".into()),
-            ImplInfo {
-                param_constraints: vec![("Show".into(), 0), ("Show".into(), 1)],
-                span: None,
-            },
-        );
+        // Note: Show trait is defined in prelude.dy and propagated to module
+        // checkers via typecheck_import.
 
         // Built-in Num trait (arithmetic: +, -, *, /, %, unary -)
         self.traits.insert(
@@ -572,36 +549,6 @@ impl Checker {
                 },
             );
         }
-
-        // print : Show a => a -> Unit
-        let a = self.fresh_var();
-        let a_id = match &a {
-            Type::Var(id) => *id,
-            _ => unreachable!(),
-        };
-        self.env.insert(
-            "print".into(),
-            Scheme {
-                forall: vec![a_id],
-                constraints: vec![("Show".into(), a_id)],
-                ty: Type::Arrow(Box::new(a), Box::new(Type::unit())),
-            },
-        );
-
-        // show : Show a => a -> String
-        let a = self.fresh_var();
-        let a_id = match &a {
-            Type::Var(id) => *id,
-            _ => unreachable!(),
-        };
-        self.env.insert(
-            "show".into(),
-            Scheme {
-                forall: vec![a_id],
-                constraints: vec![("Show".into(), a_id)],
-                ty: Type::Arrow(Box::new(a), Box::new(Type::string())),
-            },
-        );
 
         // panic : String -> a (crashes at runtime, polymorphic return type)
         let a = self.fresh_var();
@@ -710,14 +657,6 @@ impl Checker {
 
         // --- Dict type ---
 
-        // Show for Dict k v: requires Show on both k and v
-        self.trait_impls.insert(
-            ("Show".into(), "Dict".into()),
-            ImplInfo {
-                param_constraints: vec![("Show".into(), 0), ("Show".into(), 1)],
-                span: None,
-            },
-        );
         // Eq for Dict k v: requires Eq on both k and v
         self.trait_impls.insert(
             ("Eq".into(), "Dict".into()),
@@ -776,208 +715,6 @@ impl Checker {
             );
         }
 
-        // Dict.put : forall k v. Eq k => k -> v -> Dict k v -> Dict k v
-        {
-            let k = self.fresh_var();
-            let k_id = match &k {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let v = self.fresh_var();
-            let v_id = match &v {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v.clone()]);
-            self.env.insert(
-                "Dict.put".into(),
-                Scheme {
-                    forall: vec![k_id, v_id],
-                    constraints: vec![("Eq".into(), k_id)],
-                    ty: Type::Arrow(
-                        Box::new(k),
-                        Box::new(Type::Arrow(
-                            Box::new(v),
-                            Box::new(Type::Arrow(Box::new(dict_kv.clone()), Box::new(dict_kv))),
-                        )),
-                    ),
-                },
-            );
-        }
-
-        // Dict.remove : forall k v. Eq k => k -> Dict k v -> Dict k v
-        {
-            let k = self.fresh_var();
-            let k_id = match &k {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let v = self.fresh_var();
-            let v_id = match &v {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v.clone()]);
-            self.env.insert(
-                "Dict.remove".into(),
-                Scheme {
-                    forall: vec![k_id, v_id],
-                    constraints: vec![("Eq".into(), k_id)],
-                    ty: Type::Arrow(
-                        Box::new(k),
-                        Box::new(Type::Arrow(Box::new(dict_kv.clone()), Box::new(dict_kv))),
-                    ),
-                },
-            );
-        }
-
-        // Dict.keys : forall k v. Dict k v -> List k
-        {
-            let k = self.fresh_var();
-            let k_id = match &k {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let v = self.fresh_var();
-            let v_id = match &v {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v]);
-            let list_k = Type::Con("List".into(), vec![k]);
-            self.env.insert(
-                "Dict.keys".into(),
-                Scheme {
-                    forall: vec![k_id, v_id],
-                    constraints: vec![],
-                    ty: Type::Arrow(Box::new(dict_kv), Box::new(list_k)),
-                },
-            );
-        }
-
-        // Dict.values : forall k v. Dict k v -> List v
-        {
-            let k = self.fresh_var();
-            let k_id = match &k {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let v = self.fresh_var();
-            let v_id = match &v {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let dict_kv = Type::Con("Dict".into(), vec![k, v.clone()]);
-            let list_v = Type::Con("List".into(), vec![v]);
-            self.env.insert(
-                "Dict.values".into(),
-                Scheme {
-                    forall: vec![k_id, v_id],
-                    constraints: vec![],
-                    ty: Type::Arrow(Box::new(dict_kv), Box::new(list_v)),
-                },
-            );
-        }
-
-        // Dict.size : forall k v. Dict k v -> Int
-        {
-            let k = self.fresh_var();
-            let k_id = match &k {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let v = self.fresh_var();
-            let v_id = match &v {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let dict_kv = Type::Con("Dict".into(), vec![k, v]);
-            self.env.insert(
-                "Dict.size".into(),
-                Scheme {
-                    forall: vec![k_id, v_id],
-                    constraints: vec![],
-                    ty: Type::Arrow(Box::new(dict_kv), Box::new(Type::int())),
-                },
-            );
-        }
-
-        // Dict.from_list : forall k v. Eq k => List (k, v) -> Dict k v
-        {
-            let k = self.fresh_var();
-            let k_id = match &k {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let v = self.fresh_var();
-            let v_id = match &v {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let tuple_kv = Type::Con("Tuple".into(), vec![k.clone(), v.clone()]);
-            let list_kv = Type::Con("List".into(), vec![tuple_kv]);
-            let dict_kv = Type::Con("Dict".into(), vec![k, v]);
-            self.env.insert(
-                "Dict.from_list".into(),
-                Scheme {
-                    forall: vec![k_id, v_id],
-                    constraints: vec![("Eq".into(), k_id)],
-                    ty: Type::Arrow(Box::new(list_kv), Box::new(dict_kv)),
-                },
-            );
-        }
-
-        // Dict.to_list : forall k v. Dict k v -> List (k, v)
-        {
-            let k = self.fresh_var();
-            let k_id = match &k {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let v = self.fresh_var();
-            let v_id = match &v {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v.clone()]);
-            let tuple_kv = Type::Con("Tuple".into(), vec![k, v]);
-            let list_kv = Type::Con("List".into(), vec![tuple_kv]);
-            self.env.insert(
-                "Dict.to_list".into(),
-                Scheme {
-                    forall: vec![k_id, v_id],
-                    constraints: vec![],
-                    ty: Type::Arrow(Box::new(dict_kv), Box::new(list_kv)),
-                },
-            );
-        }
-
-        // Dict.member : forall k v. Eq k => k -> Dict k v -> Bool
-        {
-            let k = self.fresh_var();
-            let k_id = match &k {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let v = self.fresh_var();
-            let v_id = match &v {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v]);
-            self.env.insert(
-                "Dict.member".into(),
-                Scheme {
-                    forall: vec![k_id, v_id],
-                    constraints: vec![("Eq".into(), k_id)],
-                    ty: Type::Arrow(
-                        Box::new(k),
-                        Box::new(Type::Arrow(Box::new(dict_kv), Box::new(Type::bool()))),
-                    ),
-                },
-            );
-        }
-
         // --- Conversion builtins ---
 
         // Int.parse : String -> Maybe Int
@@ -993,16 +730,6 @@ impl Checker {
             },
         );
 
-        // Int.to_float : Int -> Float
-        self.env.insert(
-            "Int.to_float".into(),
-            Scheme {
-                forall: vec![],
-                constraints: vec![],
-                ty: Type::Arrow(Box::new(Type::int()), Box::new(Type::float())),
-            },
-        );
-
         // Float.parse : String -> Maybe Float
         self.env.insert(
             "Float.parse".into(),
@@ -1015,18 +742,6 @@ impl Checker {
                 ),
             },
         );
-
-        // Float.trunc, Float.round, Float.floor, Float.ceil : Float -> Int
-        for name in ["Float.trunc", "Float.round", "Float.floor", "Float.ceil"] {
-            self.env.insert(
-                name.into(),
-                Scheme {
-                    forall: vec![],
-                    constraints: vec![],
-                    ty: Type::Arrow(Box::new(Type::float()), Box::new(Type::int())),
-                },
-            );
-        }
     }
 
     // --- Unification ---

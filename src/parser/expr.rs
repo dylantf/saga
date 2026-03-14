@@ -369,6 +369,13 @@ impl Parser {
                             }
                         }
                         InterpPart::Hole(mut tokens) => {
+                            // Use the last token's end position + 1 for the desugared
+                            // `show` call so it doesn't collide with a user-written `show`
+                            // inside the hole (which would share the first token's span).
+                            let hole_span = tokens
+                                .last()
+                                .map(|t| Span { start: t.span.end + 1, end: t.span.end + 2 })
+                                .unwrap_or(span);
                             tokens.push(crate::token::Spanned {
                                 token: crate::token::Token::Eof,
                                 span,
@@ -378,10 +385,10 @@ impl Parser {
                             segments.push(Expr::App {
                                 func: Box::new(Expr::Var {
                                     name: "show".to_string(),
-                                    span,
+                                    span: hole_span,
                                 }),
                                 arg: Box::new(hole_expr),
-                                span,
+                                span: hole_span,
                             });
                         }
                     }

@@ -43,34 +43,78 @@ impl Checker {
             }
         }
 
-        // Register impls (after traits so we can validate against them)
+        // Process imports (before impls so imported traits are available)
         for decl in program {
-            if let Decl::ImplDef {
-                trait_name,
-                target_type,
-                type_params,
-                where_clause,
-                needs,
-                methods,
+            if let Decl::Import {
+                module_path,
+                alias,
+                exposing,
                 span,
+                ..
             } = decl
             {
-                self.register_impl(
-                    trait_name,
-                    target_type,
-                    type_params,
-                    where_clause,
-                    needs,
-                    methods,
-                    *span,
-                )?;
+                self.typecheck_import(module_path, alias.as_deref(), exposing.as_deref(), *span)?;
             }
         }
 
-        // Check supertrait requirements (after all impls are registered so order doesn't matter)
-        self.check_supertrait_impls()?;
+        // Register external functions early so they're available in impl bodies
+        for decl in program {
+            if let Decl::ExternalFun {
+                name,
+                params,
+                return_type,
+                effects,
+                where_clause,
+                span,
+                ..
+            } = decl
+            {
+                let mut params_list: Vec<(String, u32)> = vec![];
+                let mut fun_ty = self.convert_type_expr(return_type, &mut params_list);
+                for (_, texpr) in params.iter().rev() {
+                    let param_ty = self.convert_type_expr(texpr, &mut params_list);
+                    fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
+                }
+
+                if !effects.is_empty() {
+                    return Err(TypeError::at(
+                        *span,
+                        format!(
+                            "external function '{}' cannot declare effects with `needs` -- wrap it in a local function instead",
+                            name
+                        ),
+                    ));
+                }
+
+                let mut scheme_constraints = Vec::new();
+                if !where_clause.is_empty() {
+                    for bound in where_clause {
+                        if let Some((_, var_id)) =
+                            params_list.iter().find(|(n, _)| *n == bound.type_var)
+                        {
+                            for trait_name in &bound.traits {
+                                scheme_constraints.push((trait_name.clone(), *var_id));
+                            }
+                        } else {
+                            return Err(TypeError::at(
+                                *span,
+                                format!(
+                                    "where clause references unknown type variable '{}'",
+                                    bound.type_var
+                                ),
+                            ));
+                        }
+                    }
+                }
+
+                let mut scheme = self.generalize(&fun_ty);
+                scheme.constraints = scheme_constraints;
+                self.env.insert(name.clone(), scheme);
+            }
+        }
 
         // Collect function annotations: name -> declared type, effects, and where constraints
+        // Done before impls so annotated helpers are available in impl bodies.
         let mut annotations: HashMap<std::string::String, Type> = HashMap::new();
         let mut annotation_constraints: HashMap<std::string::String, Vec<(String, u32)>> =
             HashMap::new();
@@ -91,7 +135,7 @@ impl Checker {
                     let param_ty = self.convert_type_expr(texpr, &mut params_list);
                     fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
                 }
-                annotations.insert(name.clone(), fun_ty);
+                annotations.insert(name.clone(), fun_ty.clone());
                 if !effects.is_empty() {
                     self.fun_effects.insert(
                         name.clone(),
@@ -122,6 +166,8 @@ impl Checker {
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
                         {
+                            self.where_bound_var_names
+                                .insert(*var_id, bound.type_var.clone());
                             for trait_name in &bound.traits {
                                 constraints.push((trait_name.clone(), *var_id));
                             }
@@ -137,15 +183,29 @@ impl Checker {
                     }
                     annotation_constraints.insert(name.clone(), constraints);
                 }
+
+                // Pre-register annotated functions so they're available in impl bodies
+                let mut scheme = self.generalize(&fun_ty);
+                if let Some(c) = annotation_constraints.get(name) {
+                    scheme.constraints = c.clone();
+                }
+                self.env.insert(name.clone(), scheme);
             }
         }
 
-        // Second pass: pre-bind all function names with fresh vars (enables mutual recursion)
+        // Pre-bind all function names with fresh vars (enables mutual recursion
+        // and makes unannotated helpers available in impl bodies)
         let mut fun_vars: HashMap<std::string::String, Type> = HashMap::new();
         for decl in program {
             if let Decl::FunBinding { name, .. } = decl
                 && !fun_vars.contains_key(name)
             {
+                // Skip if already registered by an annotation above
+                if annotations.contains_key(name) {
+                    let var = self.fresh_var();
+                    fun_vars.insert(name.clone(), var);
+                    continue;
+                }
                 let var = self.fresh_var();
                 fun_vars.insert(name.clone(), var.clone());
                 self.env.insert(
@@ -158,6 +218,33 @@ impl Checker {
                 );
             }
         }
+
+        // Register impls (after traits, imports, externals, annotations, and function pre-binding)
+        for decl in program {
+            if let Decl::ImplDef {
+                trait_name,
+                target_type,
+                type_params,
+                where_clause,
+                needs,
+                methods,
+                span,
+            } = decl
+            {
+                self.register_impl(
+                    trait_name,
+                    target_type,
+                    type_params,
+                    where_clause,
+                    needs,
+                    methods,
+                    *span,
+                )?;
+            }
+        }
+
+        // Check supertrait requirements (after all impls are registered so order doesn't matter)
+        self.check_supertrait_impls()?;
 
         // Third pass: group multi-clause function bindings, then check everything
         let mut i = 0;
@@ -191,8 +278,9 @@ impl Checker {
 
         // Validate that `main` does not declare effects (it's the top of the call stack,
         // there is no caller above to provide handlers)
-        if let Some(effects) = self.fun_effects.get("main") {
-            if !effects.is_empty() {
+        if let Some(effects) = self.fun_effects.get("main")
+            && !effects.is_empty()
+        {
                 // Find the span from the annotation
                 let span = program.iter().find_map(|d| {
                     if let Decl::FunAnnotation { name, span, .. } = d
@@ -210,7 +298,6 @@ impl Checker {
                         effects.iter().cloned().collect::<Vec<_>>().join(", ")
                     ),
                 ));
-            }
         }
 
         // Check all accumulated trait constraints now that types are resolved
@@ -263,13 +350,8 @@ impl Checker {
                 Ok(())
             }
 
-            Decl::Import {
-                module_path,
-                alias,
-                exposing,
-                span,
-                ..
-            } => self.typecheck_import(module_path, alias.as_deref(), exposing.as_deref(), *span),
+            // Imports are already processed in the early import pass
+            Decl::Import { .. } => Ok(()),
 
             // Type annotations, type defs (already registered), effects, traits, impls,
             // module declarations -- skip
@@ -952,12 +1034,18 @@ impl Checker {
         // Build resolved where bounds (substitution may have chained var IDs)
         let mut resolved_bounds: std::collections::HashMap<u32, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
+        // Also resolve var names through substitution
+        let mut resolved_var_names: std::collections::HashMap<u32, String> =
+            std::collections::HashMap::new();
         for (&var_id, traits) in &self.where_bounds {
             if let Type::Var(resolved_id) = self.sub.apply(&Type::Var(var_id)) {
                 resolved_bounds
                     .entry(resolved_id)
                     .or_default()
                     .extend(traits.iter().cloned());
+                if let Some(name) = self.where_bound_var_names.get(&var_id) {
+                    resolved_var_names.insert(resolved_id, name.clone());
+                }
             }
         }
 
@@ -988,6 +1076,7 @@ impl Checker {
                                     span,
                                     trait_name: trait_name.clone(),
                                     resolved_type: Some((type_name.clone(), args.clone())),
+                                    type_var_name: None,
                                 });
                                 // Push conditional constraints for type parameters
                                 if type_name == "Tuple" {
@@ -1028,10 +1117,12 @@ impl Checker {
                             ));
                         }
                         // Record evidence for polymorphic passthrough
+                        let var_name = resolved_var_names.get(id).cloned();
                         self.evidence.push(super::TraitEvidence {
                             span,
                             trait_name: trait_name.clone(),
                             resolved_type: None,
+                            type_var_name: var_name,
                         });
                     }
                     Type::Arrow(_, _) | Type::EffArrow(_, _, _) => {

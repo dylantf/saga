@@ -3,11 +3,24 @@ use crate::codegen::cerl::{CExpr, CLit};
 use crate::typechecker::Type;
 use std::collections::{BTreeSet, HashMap};
 
-/// Mangle a constructor atom with its module prefix.
-/// If the constructor is in `constructor_modules`, returns `"module_Name"`.
-/// Otherwise returns the name unchanged (prelude builtins like True/False
-/// are handled as literals, not constructors).
+/// Map a constructor name to its Erlang atom, applying BEAM convention
+/// overrides for Result/Maybe and module-prefix mangling for user types.
+///
+/// Result: Ok -> "ok", Err -> "error"
+/// Maybe:  None -> "undefined" (Some is special-cased structurally, not here)
+/// Module types: Circle -> "shapes_Circle"
+/// Prelude builtins: True -> "True", False -> "False"
 pub(super) fn mangle_ctor_atom(name: &str, constructor_modules: &HashMap<String, String>) -> String {
+    // BEAM convention overrides for Result, Maybe, and Bool
+    match name {
+        "Ok" => return "ok".to_string(),
+        "Err" => return "error".to_string(),
+        "None" => return "undefined".to_string(),
+        "True" => return "true".to_string(),
+        "False" => return "false".to_string(),
+        // Some is handled structurally (bare value, no tag) -- not here
+        _ => {}
+    }
     if let Some(module) = constructor_modules.get(name) {
         format!("{}_{}", module, name)
     } else {

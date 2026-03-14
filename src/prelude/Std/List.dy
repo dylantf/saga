@@ -12,23 +12,14 @@ tail xs = case xs {
   Nil -> panic "tail: empty list"
 }
 
-pub fun length (xs: List a) -> Int
-length xs = case xs {
-  Nil -> 0
-  _ :: t -> 1 + length t
-}
+pub @external("erlang", "erlang", "length")
+fun length (xs: List a) -> Int
 
-pub fun map (f: a -> b) (xs: List a) -> List b
-map f xs = case xs {
-  Nil -> Nil
-  h :: t -> f h :: map f t
-}
+pub @external("erlang", "lists", "map")
+fun map (f: a -> b) (xs: List a) -> List b
 
-pub fun filter (pred: a -> Bool) (xs: List a) -> List a
-filter pred xs = case xs {
-  Nil -> Nil
-  h :: t -> if pred h then h :: filter pred t else filter pred t
-}
+pub @external("erlang", "lists", "filter")
+fun filter (pred: a -> Bool) (xs: List a) -> List a
 
 pub fun foldl (f: b -> a -> b) (acc: b) (xs: List a) -> b
 foldl f acc xs = case xs {
@@ -36,23 +27,24 @@ foldl f acc xs = case xs {
   h :: t -> foldl f (f acc h) t
 }
 
-pub fun foldr (f: a -> b -> b) (acc: b) (xs: List a) -> b
-foldr f acc xs = case xs {
-  Nil -> acc
-  h :: t -> f h (foldr f acc t)
-}
+pub @external("erlang", "lists", "foldr")
+fun foldr (f: a -> b -> b) (acc: b) (xs: List a) -> b
 
-pub fun reverse (xs: List a) -> List a
-reverse xs = foldl (fun acc x -> x :: acc) Nil xs
+pub @external("erlang", "lists", "reverse")
+fun reverse (xs: List a) -> List a
 
-pub fun append (xs: List a) (ys: List a) -> List a
-append xs ys = case xs {
-  Nil -> ys
-  h :: t -> h :: append t ys
-}
+pub @external("erlang", "lists", "append")
+fun append (xs: List a) (ys: List a) -> List a
 
-pub fun flat_map (f: a -> List b) (xs: List a) -> List b
-flat_map f xs = case xs {
-  Nil -> Nil
-  h :: t -> append (f h) (flat_map f t)
+pub @external("erlang", "lists", "flatmap")
+fun flat_map (f: a -> List b) (xs: List a) -> List b
+
+pub @external("erlang", "lists", "join")
+fun join (sep: String) (xs: List String) -> List String
+
+pub @external("erlang", "lists", "flatten")
+fun flatten (xs: List String) -> String
+
+impl Show for List a where {a: Show} {
+  show xs = "[" <> flatten (join ", " (map show xs)) <> "]"
 }

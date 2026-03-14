@@ -1,0 +1,21 @@
+module Float
+
+
+@external("erlang", "erlang", "float_to_list")
+fun to_string (x: Float) -> String
+
+impl Show for Float {
+  show x = to_string x
+}
+
+pub @external("erlang", "erlang", "trunc")
+fun trunc (x: Float) -> Int
+
+pub @external("erlang", "erlang", "round")
+fun round (x: Float) -> Int
+
+pub @external("erlang", "erlang", "floor")
+fun floor (x: Float) -> Int
+
+pub @external("erlang", "erlang", "ceil")
+fun ceil (x: Float) -> Int

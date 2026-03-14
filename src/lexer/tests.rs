@@ -179,8 +179,13 @@ fn backslash() {
 }
 
 #[test]
+fn at_sign() {
+    assert_eq!(toks("@"), vec![At, Eof]);
+}
+
+#[test]
 fn unexpected_character() {
-    let result = Lexer::new("@").lex();
+    let result = Lexer::new("~").lex();
     assert!(result.is_err());
 }
 

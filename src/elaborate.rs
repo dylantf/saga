@@ -46,6 +46,28 @@ struct Elaborator {
 
 impl Elaborator {
     fn new(checker: &Checker, module_name: &str) -> Self {
+        // Build inferred dict params from checker's env (for functions without
+        // explicit where clauses that still have inferred trait constraints).
+        // Traits that use operator dispatch, not dictionary dispatch.
+        // These should not generate dict params.
+        let operator_traits: std::collections::HashSet<&str> =
+            ["Num", "Eq", "Ord"].into_iter().collect();
+
+        let mut inferred_dict_params: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for (name, scheme) in checker.env.iter() {
+            if !scheme.constraints.is_empty() {
+                let dict_params: Vec<(String, String)> = scheme
+                    .constraints
+                    .iter()
+                    .filter(|(trait_name, _)| !operator_traits.contains(trait_name.as_str()))
+                    .map(|(trait_name, var_id)| (trait_name.clone(), format!("v{}", var_id)))
+                    .collect();
+                if !dict_params.is_empty() {
+                    inferred_dict_params.insert(name.to_string(), dict_params);
+                }
+            }
+        }
+
         // Build evidence lookup by span
         let mut evidence_by_span: HashMap<Span, Vec<TraitEvidence>> = HashMap::new();
         for ev in &checker.evidence {
@@ -76,7 +98,7 @@ impl Elaborator {
 
         Elaborator {
             trait_methods: HashMap::new(),
-            fun_dict_params: HashMap::new(),
+            fun_dict_params: inferred_dict_params,
             dict_names,
             traits: checker.traits.clone(),
             evidence_by_span,
@@ -103,6 +125,9 @@ impl Elaborator {
                     }
                 }
                 Decl::FunAnnotation {
+                    name, where_clause, ..
+                }
+                | Decl::ExternalFun {
                     name, where_clause, ..
                 } => {
                     if !where_clause.is_empty() {
@@ -135,27 +160,14 @@ impl Elaborator {
             }
         }
 
-        // Register built-in trait methods (Show is built-in, not in user TraitDefs)
+        // Register trait methods from checker's trait info (for traits not
+        // defined in the current program, e.g. Show in Std modules).
         for (trait_name, info) in &self.traits {
             for (idx, (method_name, _, _)) in info.methods.iter().enumerate() {
                 self.trait_methods
                     .entry(method_name.clone())
                     .or_insert_with(|| (trait_name.clone(), idx));
             }
-        }
-
-        // Register `print` as a dict-parameterized function (Show a => a -> Unit)
-        self.fun_dict_params
-            .insert("print".into(), vec![("Show".into(), "a".into())]);
-
-        // Register built-in Show dicts
-        for type_name in [
-            "Int", "Float", "String", "Bool", "Unit", "List", "Maybe", "Result", "Dict",
-        ] {
-            let key = ("Show".to_string(), type_name.to_string());
-            self.dict_names
-                .entry(key)
-                .or_insert_with(|| format!("__dict_Show_{}", type_name));
         }
 
         // Pass 2: Emit new program with dict constructors and elaborated functions
@@ -323,110 +335,6 @@ impl Elaborator {
 
                 // Pass through everything else
                 _ => output.push(decl.clone()),
-            }
-        }
-
-        // Emit synthesized `print` function: print(__dict_Show_a, x) = io:format(...)
-        {
-            let s = Span { start: 0, end: 0 };
-            // Annotation so the lowerer knows print/2
-            output.push(Decl::FunAnnotation {
-                public: false,
-                name: "print".into(),
-                params: vec![
-                    ("__dict_Show_a".into(), TypeExpr::Var("a".into())),
-                    ("x".into(), TypeExpr::Var("a".into())),
-                ],
-                return_type: TypeExpr::Named("Unit".into()),
-                effects: vec![],
-                where_clause: vec![],
-                span: s,
-            });
-            // Body: let s = show(x) in io:format("~s~n", [s])
-            let show_x = Expr::App {
-                func: Box::new(Expr::DictMethodAccess {
-                    dict: Box::new(Expr::Var {
-                        name: "__dict_Show_a".into(),
-                        span: s,
-                    }),
-                    method_index: 0,
-                    span: s,
-                }),
-                arg: Box::new(Expr::Var {
-                    name: "x".into(),
-                    span: s,
-                }),
-                span: s,
-            };
-            // io:format("~s~n", [show(x)]) -- build [show_x] as Cons(show_x, Nil)
-            let args_list = Expr::App {
-                func: Box::new(Expr::App {
-                    func: Box::new(Expr::Constructor {
-                        name: "Cons".into(),
-                        span: s,
-                    }),
-                    arg: Box::new(show_x),
-                    span: s,
-                }),
-                arg: Box::new(Expr::Constructor {
-                    name: "Nil".into(),
-                    span: s,
-                }),
-                span: s,
-            };
-            let print_body = Expr::ForeignCall {
-                module: "io".into(),
-                func: "format".into(),
-                args: vec![
-                    Expr::Lit {
-                        value: Lit::String("~s~n".into()),
-                        span: s,
-                    },
-                    args_list,
-                ],
-                span: s,
-            };
-            output.push(Decl::FunBinding {
-                name: "print".into(),
-                params: vec![
-                    Pat::Var {
-                        name: "__dict_Show_a".into(),
-                        span: s,
-                    },
-                    Pat::Var {
-                        name: "x".into(),
-                        span: s,
-                    },
-                ],
-                guard: None,
-                body: print_body,
-                span: s,
-            });
-        }
-
-        // Emit built-in Show dict constructors
-        let builtin_show_types: Vec<(&str, Vec<String>)> = vec![
-            ("Int", vec![]),
-            ("Float", vec![]),
-            ("String", vec![]),
-            ("Bool", vec![]),
-            ("Unit", vec![]),
-            ("List", vec!["__dict_Show_a".into()]),
-            ("Maybe", vec!["__dict_Show_a".into()]),
-            (
-                "Result",
-                vec!["__dict_Show_a".into(), "__dict_Show_b".into()],
-            ),
-            ("Dict", vec!["__dict_Show_a".into(), "__dict_Show_b".into()]),
-        ];
-        for (type_name, dict_params) in builtin_show_types {
-            if let Some(methods) = self.builtin_show_methods(type_name) {
-                output.push(Decl::DictConstructor {
-                    name: format!("__dict_Show_{}", type_name),
-                    dict_params,
-                    methods,
-                    span: Span { start: 0, end: 0 },
-                });
             }
         }
 
@@ -793,42 +701,65 @@ impl Elaborator {
     /// Returns a DictRef expression or None if no evidence found.
     fn resolve_dict(&self, trait_name: &str, span: Span) -> Option<Expr> {
         // Check if we have evidence for this span
-        let evidence_list = self.evidence_by_span.get(&span)?;
-        for ev in evidence_list {
-            if ev.trait_name == trait_name {
-                return match &ev.resolved_type {
-                    Some((type_name, args)) => {
-                        // Concrete type: reference the dict constructor
-                        let dict_name = self
-                            .dict_names
-                            .get(&(trait_name.to_string(), type_name.clone()))?;
-                        let mut dict_expr: Expr = Expr::DictRef {
-                            name: dict_name.clone(),
-                            span,
-                        };
-                        // Apply sub-dictionaries for each type argument
-                        for arg_ty in args {
-                            if let Some(sub_dict) = self.dict_for_type(trait_name, arg_ty, span) {
-                                dict_expr = Expr::App {
-                                    func: Box::new(dict_expr),
-                                    arg: Box::new(sub_dict),
+        if let Some(evidence_list) = self.evidence_by_span.get(&span) {
+            for ev in evidence_list {
+                if ev.trait_name == trait_name {
+                    return match &ev.resolved_type {
+                        Some((type_name, args)) => {
+                            // Concrete type: reference the dict constructor
+                            let dict_name = self
+                                .dict_names
+                                .get(&(trait_name.to_string(), type_name.clone()))?;
+                            let mut dict_expr: Expr = Expr::DictRef {
+                                name: dict_name.clone(),
+                                span,
+                            };
+                            // Apply sub-dictionaries for each type argument
+                            for arg_ty in args {
+                                if let Some(sub_dict) = self.dict_for_type(trait_name, arg_ty, span)
+                                {
+                                    dict_expr = Expr::App {
+                                        func: Box::new(dict_expr),
+                                        arg: Box::new(sub_dict),
+                                        span,
+                                    };
+                                }
+                            }
+                            Some(dict_expr)
+                        }
+                        None => {
+                            // Polymorphic: use the dict param from current function.
+                            // If evidence has a type_var_name, use it to build the
+                            // specific dict param name (handles multiple where-clause
+                            // bounds for the same trait, e.g. `where {e: Show, a: Show}`).
+                            if let Some(ref var_name) = ev.type_var_name {
+                                let param_name = format!("__dict_{}_{}", trait_name, var_name);
+                                Some(Expr::Var {
+                                    name: param_name,
                                     span,
-                                };
+                                })
+                            } else {
+                                self.current_dict_params
+                                    .get(trait_name)
+                                    .map(|name| Expr::Var {
+                                        name: name.clone(),
+                                        span,
+                                    })
                             }
                         }
-                        Some(dict_expr)
-                    }
-                    None => {
-                        // Polymorphic: use the dict param from current function
-                        self.current_dict_params
-                            .get(trait_name)
-                            .map(|name| Expr::Var {
-                                name: name.clone(),
-                                span,
-                            })
-                    }
-                };
+                    };
+                }
             }
+        }
+
+        // No evidence at this span -- fall back to current function's dict param
+        // (handles inferred constraints where the typechecker absorbed the constraint
+        // into the function's scheme rather than recording span-level evidence).
+        if let Some(name) = self.current_dict_params.get(trait_name) {
+            return Some(Expr::Var {
+                name: name.clone(),
+                span,
+            });
         }
 
         // No matching evidence for this trait. Might be a built-in trait
@@ -850,6 +781,15 @@ impl Elaborator {
     /// Build the dict expression for a concrete type (the dict itself, not the method).
     fn dict_for_type(&self, trait_name: &str, ty: &Type, span: Span) -> Option<Expr> {
         match ty {
+            Type::Con(name, args) if name == "Tuple" && trait_name == "Show" => {
+                // Tuples don't have a dict constructor; build an inline dict
+                // containing the show lambda: {fun t -> "(" ++ ... ++ ")"}
+                let show_lambda = self.build_tuple_show_lambda(args, span)?;
+                Some(Expr::Tuple {
+                    elements: vec![show_lambda],
+                    span,
+                })
+            }
             Type::Con(name, args) => {
                 let dict_name = self.dict_names.get(&(trait_name.into(), name.clone()))?;
                 let mut dict_expr: Expr = Expr::DictRef {
@@ -888,7 +828,11 @@ impl Elaborator {
                     .is_some_and(|(name, _)| name == "Tuple")
         })?;
         let (_type_name, type_args) = tuple_ev.resolved_type.as_ref()?;
+        self.build_tuple_show_lambda(type_args, span)
+    }
 
+    /// Build a show lambda for a tuple with the given element types.
+    fn build_tuple_show_lambda(&self, type_args: &[Type], span: Span) -> Option<Expr> {
         let s = span;
         let t_var = Expr::Var {
             name: "__tup".into(),
@@ -977,438 +921,5 @@ impl Elaborator {
             body: Box::new(result),
             span: s,
         })
-    }
-
-    /// Generate the method lambdas for a built-in Show impl.
-    /// Show has exactly one method (`show`), so returns a vec of one lambda.
-    fn builtin_show_methods(&self, type_name: &str) -> Option<Vec<Expr>> {
-        let s = Span { start: 0, end: 0 };
-        let x_var = || Expr::Var {
-            name: "x".into(),
-            span: s,
-        };
-        let x_pat = Pat::Var {
-            name: "x".into(),
-            span: s,
-        };
-
-        let body = match type_name {
-            "Int" => Expr::ForeignCall {
-                module: "erlang".into(),
-                func: "integer_to_list".into(),
-                args: vec![x_var()],
-                span: s,
-            },
-            "Float" => Expr::ForeignCall {
-                module: "erlang".into(),
-                func: "float_to_list".into(),
-                args: vec![x_var()],
-                span: s,
-            },
-            "String" => x_var(),
-            "Bool" => Expr::Case {
-                scrutinee: Box::new(x_var()),
-                arms: vec![
-                    CaseArm {
-                        pattern: Pat::Constructor {
-                            name: "True".into(),
-                            args: vec![],
-                            span: s,
-                        },
-                        guard: None,
-                        body: Expr::Lit {
-                            value: Lit::String("True".into()),
-                            span: s,
-                        },
-                        span: s,
-                    },
-                    CaseArm {
-                        pattern: Pat::Constructor {
-                            name: "False".into(),
-                            args: vec![],
-                            span: s,
-                        },
-                        guard: None,
-                        body: Expr::Lit {
-                            value: Lit::String("False".into()),
-                            span: s,
-                        },
-                        span: s,
-                    },
-                ],
-                span: s,
-            },
-            "Unit" => Expr::Lit {
-                value: Lit::String("()".into()),
-                span: s,
-            },
-            "List" => {
-                // fun xs ->
-                //   let show_fn = element(1, __dict_Show_a)
-                //   let mapped = lists:map(show_fn, xs)
-                //   let joined = lists:join(", ", mapped)
-                //   "[" ++ lists:flatten(joined) ++ "]"
-                let show_fn = Expr::DictMethodAccess {
-                    dict: Box::new(Expr::Var {
-                        name: "__dict_Show_a".into(),
-                        span: s,
-                    }),
-                    method_index: 0,
-                    span: s,
-                };
-                let mapped = Expr::ForeignCall {
-                    module: "lists".into(),
-                    func: "map".into(),
-                    args: vec![show_fn, x_var()],
-                    span: s,
-                };
-                let joined = Expr::ForeignCall {
-                    module: "lists".into(),
-                    func: "join".into(),
-                    args: vec![
-                        Expr::Lit {
-                            value: Lit::String(", ".into()),
-                            span: s,
-                        },
-                        mapped,
-                    ],
-                    span: s,
-                };
-                let flat = Expr::ForeignCall {
-                    module: "lists".into(),
-                    func: "flatten".into(),
-                    args: vec![joined],
-                    span: s,
-                };
-                // "[" ++ flat ++ "]"
-                Expr::BinOp {
-                    op: BinOp::Concat,
-                    left: Box::new(Expr::Lit {
-                        value: Lit::String("[".into()),
-                        span: s,
-                    }),
-                    right: Box::new(Expr::BinOp {
-                        op: BinOp::Concat,
-                        left: Box::new(flat),
-                        right: Box::new(Expr::Lit {
-                            value: Lit::String("]".into()),
-                            span: s,
-                        }),
-                        span: s,
-                    }),
-                    span: s,
-                }
-            }
-            "Maybe" => {
-                // fun x -> case x { None -> "None", Some(v) -> "Some(" ++ show(v) ++ ")" }
-                let show_v = Expr::App {
-                    func: Box::new(Expr::DictMethodAccess {
-                        dict: Box::new(Expr::Var {
-                            name: "__dict_Show_a".into(),
-                            span: s,
-                        }),
-                        method_index: 0,
-                        span: s,
-                    }),
-                    arg: Box::new(Expr::Var {
-                        name: "v".into(),
-                        span: s,
-                    }),
-                    span: s,
-                };
-                Expr::Case {
-                    scrutinee: Box::new(x_var()),
-                    arms: vec![
-                        CaseArm {
-                            pattern: Pat::Constructor {
-                                name: "None".into(),
-                                args: vec![],
-                                span: s,
-                            },
-                            guard: None,
-                            body: Expr::Lit {
-                                value: Lit::String("None".into()),
-                                span: s,
-                            },
-                            span: s,
-                        },
-                        CaseArm {
-                            pattern: Pat::Constructor {
-                                name: "Some".into(),
-                                args: vec![Pat::Var {
-                                    name: "v".into(),
-                                    span: s,
-                                }],
-                                span: s,
-                            },
-                            guard: None,
-                            body: Expr::BinOp {
-                                op: BinOp::Concat,
-                                left: Box::new(Expr::Lit {
-                                    value: Lit::String("Some(".into()),
-                                    span: s,
-                                }),
-                                right: Box::new(Expr::BinOp {
-                                    op: BinOp::Concat,
-                                    left: Box::new(show_v),
-                                    right: Box::new(Expr::Lit {
-                                        value: Lit::String(")".into()),
-                                        span: s,
-                                    }),
-                                    span: s,
-                                }),
-                                span: s,
-                            },
-                            span: s,
-                        },
-                    ],
-                    span: s,
-                }
-            }
-            "Result" => {
-                // fun x -> case x {
-                //   Ok(v) -> "Ok(" ++ show_a(v) ++ ")"
-                //   Err(e) -> "Err(" ++ show_b(e) ++ ")"
-                // }
-                let show_a = |arg: Expr| Expr::App {
-                    func: Box::new(Expr::DictMethodAccess {
-                        dict: Box::new(Expr::Var {
-                            name: "__dict_Show_a".into(),
-                            span: s,
-                        }),
-                        method_index: 0,
-                        span: s,
-                    }),
-                    arg: Box::new(arg),
-                    span: s,
-                };
-                let show_b = |arg: Expr| Expr::App {
-                    func: Box::new(Expr::DictMethodAccess {
-                        dict: Box::new(Expr::Var {
-                            name: "__dict_Show_b".into(),
-                            span: s,
-                        }),
-                        method_index: 0,
-                        span: s,
-                    }),
-                    arg: Box::new(arg),
-                    span: s,
-                };
-                Expr::Case {
-                    scrutinee: Box::new(x_var()),
-                    arms: vec![
-                        CaseArm {
-                            pattern: Pat::Constructor {
-                                name: "Ok".into(),
-                                args: vec![Pat::Var {
-                                    name: "v".into(),
-                                    span: s,
-                                }],
-                                span: s,
-                            },
-                            guard: None,
-                            body: Expr::BinOp {
-                                op: BinOp::Concat,
-                                left: Box::new(Expr::Lit {
-                                    value: Lit::String("Ok(".into()),
-                                    span: s,
-                                }),
-                                right: Box::new(Expr::BinOp {
-                                    op: BinOp::Concat,
-                                    left: Box::new(show_a(Expr::Var {
-                                        name: "v".into(),
-                                        span: s,
-                                    })),
-                                    right: Box::new(Expr::Lit {
-                                        value: Lit::String(")".into()),
-                                        span: s,
-                                    }),
-                                    span: s,
-                                }),
-                                span: s,
-                            },
-                            span: s,
-                        },
-                        CaseArm {
-                            pattern: Pat::Constructor {
-                                name: "Err".into(),
-                                args: vec![Pat::Var {
-                                    name: "e".into(),
-                                    span: s,
-                                }],
-                                span: s,
-                            },
-                            guard: None,
-                            body: Expr::BinOp {
-                                op: BinOp::Concat,
-                                left: Box::new(Expr::Lit {
-                                    value: Lit::String("Err(".into()),
-                                    span: s,
-                                }),
-                                right: Box::new(Expr::BinOp {
-                                    op: BinOp::Concat,
-                                    left: Box::new(show_b(Expr::Var {
-                                        name: "e".into(),
-                                        span: s,
-                                    })),
-                                    right: Box::new(Expr::Lit {
-                                        value: Lit::String(")".into()),
-                                        span: s,
-                                    }),
-                                    span: s,
-                                }),
-                                span: s,
-                            },
-                            span: s,
-                        },
-                    ],
-                    span: s,
-                }
-            }
-            "Dict" => {
-                // fun d ->
-                //   let pairs = maps:to_list(d)
-                //   let show_pair = fun({k, v}) -> show_k(k) ++ ": " ++ show_v(v)
-                //   let mapped = lists:map(show_pair, pairs)
-                //   let joined = lists:join(", ", mapped)
-                //   "{" ++ lists:flatten(joined) ++ "}"
-                let show_k = |arg: Expr| Expr::App {
-                    func: Box::new(Expr::DictMethodAccess {
-                        dict: Box::new(Expr::Var {
-                            name: "__dict_Show_a".into(),
-                            span: s,
-                        }),
-                        method_index: 0,
-                        span: s,
-                    }),
-                    arg: Box::new(arg),
-                    span: s,
-                };
-                let show_v = |arg: Expr| Expr::App {
-                    func: Box::new(Expr::DictMethodAccess {
-                        dict: Box::new(Expr::Var {
-                            name: "__dict_Show_b".into(),
-                            span: s,
-                        }),
-                        method_index: 0,
-                        span: s,
-                    }),
-                    arg: Box::new(arg),
-                    span: s,
-                };
-
-                let pairs = Expr::ForeignCall {
-                    module: "maps".into(),
-                    func: "to_list".into(),
-                    args: vec![x_var()],
-                    span: s,
-                };
-
-                // Build: fun (k, v) -> show_k(k) ++ ": " ++ show_v(v)
-                // On the BEAM, maps:to_list returns [{K,V}], so the lambda
-                // receives an Erlang 2-tuple. Use erlang:element to extract.
-                let pair_k = Expr::ForeignCall {
-                    module: "erlang".into(),
-                    func: "element".into(),
-                    args: vec![
-                        Expr::Lit {
-                            value: Lit::Int(1),
-                            span: s,
-                        },
-                        Expr::Var {
-                            name: "pair".into(),
-                            span: s,
-                        },
-                    ],
-                    span: s,
-                };
-                let pair_v = Expr::ForeignCall {
-                    module: "erlang".into(),
-                    func: "element".into(),
-                    args: vec![
-                        Expr::Lit {
-                            value: Lit::Int(2),
-                            span: s,
-                        },
-                        Expr::Var {
-                            name: "pair".into(),
-                            span: s,
-                        },
-                    ],
-                    span: s,
-                };
-                let show_pair_body = Expr::BinOp {
-                    op: BinOp::Concat,
-                    left: Box::new(show_k(pair_k)),
-                    right: Box::new(Expr::BinOp {
-                        op: BinOp::Concat,
-                        left: Box::new(Expr::Lit {
-                            value: Lit::String(": ".into()),
-                            span: s,
-                        }),
-                        right: Box::new(show_v(pair_v)),
-                        span: s,
-                    }),
-                    span: s,
-                };
-                let show_pair_fn = Expr::Lambda {
-                    params: vec![Pat::Var {
-                        name: "pair".into(),
-                        span: s,
-                    }],
-                    body: Box::new(show_pair_body),
-                    span: s,
-                };
-
-                let mapped = Expr::ForeignCall {
-                    module: "lists".into(),
-                    func: "map".into(),
-                    args: vec![show_pair_fn, pairs],
-                    span: s,
-                };
-                let joined = Expr::ForeignCall {
-                    module: "lists".into(),
-                    func: "join".into(),
-                    args: vec![
-                        Expr::Lit {
-                            value: Lit::String(", ".into()),
-                            span: s,
-                        },
-                        mapped,
-                    ],
-                    span: s,
-                };
-                let flat = Expr::ForeignCall {
-                    module: "lists".into(),
-                    func: "flatten".into(),
-                    args: vec![joined],
-                    span: s,
-                };
-                Expr::BinOp {
-                    op: BinOp::Concat,
-                    left: Box::new(Expr::Lit {
-                        value: Lit::String("{".into()),
-                        span: s,
-                    }),
-                    right: Box::new(Expr::BinOp {
-                        op: BinOp::Concat,
-                        left: Box::new(flat),
-                        right: Box::new(Expr::Lit {
-                            value: Lit::String("}".into()),
-                            span: s,
-                        }),
-                        span: s,
-                    }),
-                    span: s,
-                }
-            }
-            _ => return None,
-        };
-
-        Some(vec![Expr::Lambda {
-            params: vec![x_pat],
-            body: Box::new(body),
-            span: s,
-        }])
     }
 }

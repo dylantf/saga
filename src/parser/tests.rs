@@ -2032,3 +2032,80 @@ fn needs_mixed_parameterized_and_plain() {
         _ => panic!("expected FunAnnotation"),
     }
 }
+
+// --- @external ---
+
+#[test]
+fn external_fun_basic() {
+    let decls = parse(r#"@external("erlang", "lists", "reverse") fun reverse (list: List a) -> List a"#);
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::ExternalFun {
+            public,
+            name,
+            runtime,
+            module,
+            func,
+            params,
+            ..
+        } => {
+            assert!(!public);
+            assert_eq!(name, "reverse");
+            assert_eq!(runtime, "erlang");
+            assert_eq!(module, "lists");
+            assert_eq!(func, "reverse");
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0].0, "list");
+        }
+        _ => panic!("expected ExternalFun"),
+    }
+}
+
+#[test]
+fn external_fun_pub() {
+    let decls = parse(r#"pub @external("erlang", "maps", "new") fun empty () -> Dict a b"#);
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::ExternalFun {
+            public, name, module, func, params, ..
+        } => {
+            assert!(public);
+            assert_eq!(name, "empty");
+            assert_eq!(module, "maps");
+            assert_eq!(func, "new");
+            assert_eq!(params.len(), 1); // () counts as a unit param
+        }
+        _ => panic!("expected ExternalFun"),
+    }
+}
+
+#[test]
+fn external_fun_multiline() {
+    let decls = parse(r#"
+@external("erlang", "lists", "foldl")
+fun foldl (f: a -> b -> a) (acc: a) (list: List b) -> a
+"#);
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::ExternalFun { name, params, .. } => {
+            assert_eq!(name, "foldl");
+            assert_eq!(params.len(), 3);
+        }
+        _ => panic!("expected ExternalFun"),
+    }
+}
+
+#[test]
+fn external_fun_with_where_clause() {
+    let decls = parse(r#"@external("erlang", "my_mod", "do_thing") fun do_thing (x: a) -> String where {a: Show}"#);
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::ExternalFun { name, where_clause, .. } => {
+            assert_eq!(name, "do_thing");
+            assert_eq!(where_clause.len(), 1);
+            assert_eq!(where_clause[0].type_var, "a");
+            assert_eq!(where_clause[0].traits, vec!["Show"]);
+        }
+        _ => panic!("expected ExternalFun"),
+    }
+}

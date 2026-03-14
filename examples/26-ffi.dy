@@ -1,0 +1,19 @@
+# FFI: calling Erlang functions directly via @external
+
+@external("erlang", "lists", "reverse")
+fun reverse (list: List a) -> List a
+
+@external("erlang", "lists", "sort")
+fun sort (list: List Int) -> List Int
+
+@external("erlang", "erlang", "length")
+fun len (list: List a) -> Int
+
+fun main () -> Unit
+main () = {
+  let nums = [5, 3, 1, 4, 2]
+
+  print (reverse nums)
+  print (sort nums)
+  print (len nums)
+}

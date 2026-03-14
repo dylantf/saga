@@ -29,8 +29,9 @@ distance p = {
 }
 
 # Pattern matching: all branches must return the same type
+fun describe (m: Maybe Int) -> String
 describe m = case m {
-  Just(x) -> "got: " <> show x
+  Just(x) -> $"got: {x}"
   Nothing -> "nothing"
 }
 

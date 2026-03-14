@@ -77,6 +77,9 @@ pub enum Token {
     Comma,    // ,
     Colon,    // :
 
+    // Annotations
+    At, // @
+
     // End of statement/line
     Terminator,
 

@@ -35,6 +35,14 @@ impl<'a> Lowerer<'a> {
     /// into:
     ///   `Pat -> if complex_guard then body else case scrut_var of <remaining arms>`
     pub(super) fn lower_case_arms(&mut self, scrut_var: &str, arms: &[CaseArm]) -> Vec<CArm> {
+        // Reorder arms so that Some(v) patterns (which lower to bare variables)
+        // come after more specific patterns like None (which lowers to 'undefined').
+        // Without this, Some(v) would match everything before None gets a chance.
+        let reordered = Self::reorder_maybe_arms(arms);
+        self.lower_case_arms_inner(scrut_var, &reordered)
+    }
+
+    fn lower_case_arms_inner(&mut self, scrut_var: &str, arms: &[&CaseArm]) -> Vec<CArm> {
         let mut result = Vec::new();
 
         for (i, arm) in arms.iter().enumerate() {
@@ -68,7 +76,7 @@ impl<'a> Lowerer<'a> {
                     } else {
                         CExpr::Case(
                             Box::new(CExpr::Var(scrut_var.to_string())),
-                            self.lower_case_arms(scrut_var, remaining),
+                            self.lower_case_arms_inner(scrut_var, remaining),
                         )
                     };
 
@@ -103,9 +111,34 @@ impl<'a> Lowerer<'a> {
         result
     }
 
+    /// Reorder case arms so that `Some(v)` patterns (which compile to bare
+    /// variables) come after `None` patterns (which compile to `'undefined'`).
+    /// This prevents the wildcard-like Some arm from shadowing None.
+    fn reorder_maybe_arms(arms: &[CaseArm]) -> Vec<&CaseArm> {
+        let is_some_pat = |arm: &&CaseArm| matches!(&arm.pattern, Pat::Constructor { name, args, .. } if name == "Some" && args.len() == 1);
+        let has_some = arms.iter().any(|a| is_some_pat(&a));
+        if !has_some {
+            return arms.iter().collect();
+        }
+        // Put non-Some arms first, then Some arms
+        let mut reordered: Vec<&CaseArm> = Vec::new();
+        let mut some_arms: Vec<&CaseArm> = Vec::new();
+        for arm in arms {
+            if is_some_pat(&arm) {
+                some_arms.push(arm);
+            } else {
+                reordered.push(arm);
+            }
+        }
+        reordered.extend(some_arms);
+        reordered
+    }
+
     /// Lower a saturated constructor call to the appropriate Core Erlang form.
     pub(super) fn lower_ctor(&mut self, name: &str, args: Vec<&Expr>) -> CExpr {
         match name {
+            // Some(v) -> bare value (no tuple wrapping)
+            "Some" if args.len() == 1 => self.lower_expr(args[0]),
             "Nil" => CExpr::Nil,
             "Cons" if args.len() == 2 => {
                 let head_var = self.fresh();
@@ -244,6 +277,30 @@ impl<'a> Lowerer<'a> {
         match stmts {
             [] => self.apply_return_k(CExpr::Tuple(vec![])), // unit
             [Stmt::Expr(e)] => {
+                if self.current_return_k.is_some() {
+                    // Terminal effect call: pass _ReturnK as K directly for abort semantics
+                    if let Some((op_name, qualifier, args)) = collect_effect_call(e) {
+                        let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
+                        return self.lower_effect_call(
+                            op_name,
+                            qualifier,
+                            &args_owned,
+                            self.current_return_k.clone(),
+                        );
+                    }
+                    // Terminal effectful function call: pass current_return_k as _ReturnK
+                    // so abort-style handlers skip the return clause wrapping.
+                    if let Some((name, _)) = collect_fun_call(e)
+                        && (self.fun_effects.contains_key(name)
+                            || self.current_effectful_vars.contains_key(name))
+                    {
+                        let saved = self.pending_callee_return_k.take();
+                        self.pending_callee_return_k = self.current_return_k.clone();
+                        let result = self.lower_expr(e);
+                        self.pending_callee_return_k = saved;
+                        return result;
+                    }
+                }
                 let val = self.lower_expr(e);
                 self.apply_return_k(val)
             }
@@ -254,6 +311,80 @@ impl<'a> Lowerer<'a> {
                 CExpr::Let(var, Box::new(val_ce), Box::new(body))
             }
             [first, rest @ ..] => {
+                // Check if the value is a `with` expression. If so, capture the rest
+                // of the block as _ReturnK so abort-style handlers skip subsequent stmts.
+                let with_info = match first {
+                    Stmt::Let {
+                        pattern,
+                        value: Expr::With { .. },
+                        ..
+                    } => Some((
+                        Some(pattern),
+                        match first {
+                            Stmt::Let { value, .. } => value,
+                            _ => unreachable!(),
+                        },
+                    )),
+                    Stmt::Expr(e @ Expr::With { .. }) => Some((None, e)),
+                    _ => None,
+                };
+                if let Some((pat_opt, with_expr)) = with_info {
+                    let rest_ce = self.lower_block(rest);
+                    let (k_param, rest_ce) = match pat_opt {
+                        Some(p) => self.destructure_pat(p, rest_ce),
+                        None => (self.fresh(), rest_ce),
+                    };
+                    let rest_k = CExpr::Fun(vec![k_param], Box::new(rest_ce));
+                    let saved = self.pending_callee_return_k.take();
+                    self.pending_callee_return_k = Some(rest_k);
+                    let result = self.lower_expr(with_expr);
+                    if let Some(unused_k) = self.pending_callee_return_k.take() {
+                        // Non-direct path: pending wasn't consumed, apply rest manually
+                        self.pending_callee_return_k = saved;
+                        let v = self.fresh();
+                        return CExpr::Let(
+                            v.clone(),
+                            Box::new(result),
+                            Box::new(CExpr::Apply(Box::new(unused_k), vec![CExpr::Var(v)])),
+                        );
+                    }
+                    self.pending_callee_return_k = saved;
+                    return result;
+                }
+
+                // Check if the value is a call to an effectful function. If so,
+                // capture the rest of the block as _ReturnK so abort-style handlers
+                // skip subsequent statements (same CPS treatment as `with`).
+                if self.current_return_k.is_some() {
+                    let value_expr = match first {
+                        Stmt::Let { value, .. } => value,
+                        Stmt::Expr(e) => e,
+                    };
+                    let is_effectful_call = collect_fun_call(value_expr)
+                        .map(|(name, _)| {
+                            self.fun_effects.contains_key(name)
+                                || self.current_effectful_vars.contains_key(name)
+                        })
+                        .unwrap_or(false);
+                    if is_effectful_call {
+                        let (pat_opt, value_expr) = match first {
+                            Stmt::Let { pattern, value, .. } => (Some(pattern), value),
+                            Stmt::Expr(e) => (None, e),
+                        };
+                        let rest_ce = self.lower_block(rest);
+                        let (k_param, rest_ce) = match pat_opt {
+                            Some(p) => self.destructure_pat(p, rest_ce),
+                            None => (self.fresh(), rest_ce),
+                        };
+                        let rest_k = CExpr::Fun(vec![k_param], Box::new(rest_ce));
+                        let saved = self.pending_callee_return_k.take();
+                        self.pending_callee_return_k = Some(rest_k);
+                        let result = self.lower_expr(value_expr);
+                        self.pending_callee_return_k = saved;
+                        return result;
+                    }
+                }
+
                 // Check if the first statement contains an effect call -- if so, CPS transform:
                 // everything in `rest` becomes the continuation closure K.
                 // Effect calls may be bare (EffectCall) or wrapped in App nodes
@@ -328,7 +459,7 @@ impl<'a> Lowerer<'a> {
     // interpreter's semantics.
 
     /// Lower an expression with an outer continuation K threaded through branches.
-    fn lower_expr_with_k(&mut self, expr: &Expr, k_var: &str) -> CExpr {
+    pub(super) fn lower_expr_with_k(&mut self, expr: &Expr, k_var: &str) -> CExpr {
         match expr {
             Expr::If {
                 cond,
@@ -365,10 +496,12 @@ impl<'a> Lowerer<'a> {
             } => {
                 let scrut_var = self.fresh();
                 let scrut_ce = self.lower_expr(scrutinee);
-                let arms_ce: Vec<CArm> = arms
+                let reordered = Self::reorder_maybe_arms(arms);
+                let arms_ce: Vec<CArm> = reordered
                     .iter()
                     .map(|arm| {
-                        let pat = lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules);
+                        let pat =
+                            lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules);
                         let guard_ce = arm.guard.as_ref().map(|g| self.lower_expr(g));
                         let body_ce = self.lower_branch_with_k(&arm.body, k_var);
                         CArm {
@@ -414,8 +547,22 @@ impl<'a> Lowerer<'a> {
                 &args_owned,
                 Some(CExpr::Var(k_var.to_string())),
             )
-        } else if has_nested_effect_call(expr) {
-            // Contains nested effects: recurse into branches
+        } else if collect_fun_call(expr)
+            .map(|(name, _)| {
+                self.fun_effects.contains_key(name)
+                    || self.current_effectful_vars.contains_key(name)
+            })
+            .unwrap_or(false)
+        {
+            // Call to an effectful function: pass K as _ReturnK
+            let saved = self.pending_callee_return_k.take();
+            self.pending_callee_return_k = Some(CExpr::Var(k_var.to_string()));
+            let ce = self.lower_expr(expr);
+            self.pending_callee_return_k = saved;
+            ce
+        } else if has_nested_effect_call(expr) || matches!(expr, Expr::Block { .. }) {
+            // Contains nested effects or is a block (which may have effectful
+            // function calls not detected by has_nested_effect_call): recurse
             self.lower_expr_with_k(expr, k_var)
         } else {
             // No effects: apply K to the result
@@ -466,6 +613,29 @@ impl<'a> Lowerer<'a> {
                         Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                         Stmt::Expr(e) => (None, e),
                     };
+
+                    // Check for call to an effectful function. Capture the
+                    // rest of the block as _ReturnK so CPS chains correctly
+                    // (e.g. state-threading handlers need real continuations).
+                    let is_effectful_call = collect_fun_call(value_expr)
+                        .map(|(name, _)| {
+                            self.fun_effects.contains_key(name)
+                                || self.current_effectful_vars.contains_key(name)
+                        })
+                        .unwrap_or(false);
+                    if is_effectful_call {
+                        let rest_ce = self.lower_block_with_k(rest, k_var);
+                        let (k_param, rest_ce) = match pat_opt {
+                            Some(p) => self.destructure_pat(p, rest_ce),
+                            None => (self.fresh(), rest_ce),
+                        };
+                        let rest_k = CExpr::Fun(vec![k_param], Box::new(rest_ce));
+                        let saved = self.pending_callee_return_k.take();
+                        self.pending_callee_return_k = Some(rest_k);
+                        let result = self.lower_expr(value_expr);
+                        self.pending_callee_return_k = saved;
+                        return result;
+                    }
 
                     if has_nested_effect_call(value_expr) {
                         // Value has nested effects: build inner K and thread through
@@ -692,18 +862,33 @@ impl<'a> Lowerer<'a> {
             .unwrap_or(false);
 
         let result = if is_direct_effectful_call {
-            // Pass return clause as _ReturnK to the callee via pending_callee_return_k
+            // Pass return clause as _ReturnK to the callee via pending_callee_return_k.
+            // When there IS a return clause: save the outer pending (e.g. rest-of-block
+            // continuation) so the block can apply it to the CPS result afterwards.
+            // When there is NO return clause: let the outer pending flow through as
+            // _ReturnK so abort-style handlers skip subsequent statements.
             if let Some(rk) = return_k_lambda {
+                let saved_outer = self.pending_callee_return_k.take();
                 self.pending_callee_return_k = Some(rk);
+                let ce = self.lower_expr(expr);
+                self.pending_callee_return_k = saved_outer;
+                ce
+            } else {
+                self.lower_expr(expr)
             }
-            self.lower_expr(expr)
         } else {
             // Block form or non-call: use current_return_k for terminal application
             if let Some(rk) = return_k_lambda {
                 self.current_return_k = Some(rk);
             }
             let inner_ce = self.lower_expr(expr);
-            self.apply_return_k(inner_ce)
+            // Block expressions apply current_return_k internally (at the terminal
+            // statement), so don't apply it again here to avoid double-wrapping.
+            if matches!(expr, Expr::Block { .. }) {
+                inner_ce
+            } else {
+                self.apply_return_k(inner_ce)
+            }
         };
 
         self.current_handler_params = saved_handler_params;

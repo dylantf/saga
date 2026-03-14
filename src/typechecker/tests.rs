@@ -8,6 +8,13 @@ fn check(src: &str) -> Result<Checker, TypeError> {
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program().expect("parse error");
     let mut checker = Checker::new();
+    // Load the prelude so Show, print, etc. are available
+    let prelude_src = include_str!("../prelude/prelude.dy");
+    let prelude_tokens = Lexer::new(prelude_src).lex().expect("prelude lex error");
+    let prelude_program = Parser::new(prelude_tokens)
+        .parse_program()
+        .expect("prelude parse error");
+    checker.check_program(&prelude_program)?;
     checker.check_program(&program)?;
     Ok(checker)
 }
@@ -2061,108 +2068,36 @@ fn dict_empty_typechecks() {
     assert!(check("main () = Dict.empty").is_ok());
 }
 
-#[test]
-fn dict_put_get() {
-    assert!(check("main () = Dict.get \"a\" (Dict.put \"a\" 1 Dict.empty)").is_ok());
-}
-
-#[test]
-fn dict_size_returns_int() {
-    assert!(check(
-        "fun f (d: Dict String Int) -> Int
-f d = Dict.size d"
-    )
-    .is_ok());
-}
-
-#[test]
-fn dict_keys_returns_list() {
-    assert!(check(
-        "fun f (d: Dict String Int) -> List String
-f d = Dict.keys d"
-    )
-    .is_ok());
-}
-
-#[test]
-fn dict_values_returns_list() {
-    assert!(check(
-        "fun f (d: Dict String Int) -> List Int
-f d = Dict.values d"
-    )
-    .is_ok());
-}
-
-#[test]
-fn dict_eq_constraint_propagates() {
-    // Using Dict.put in a polymorphic function should require Eq on the key
-    let result = check(
-        "fun insert (k: a) (v: b) (d: Dict a b) -> Dict a b
-insert k v d = Dict.put k v d",
-    );
-    assert!(result.is_err(), "should require Eq constraint on key type");
-}
-
-#[test]
-fn dict_eq_constraint_satisfied_by_where() {
-    assert!(check(
-        "fun insert (k: a) (v: b) (d: Dict a b) -> Dict a b where {a: Eq}
-insert k v d = Dict.put k v d"
-    )
-    .is_ok());
-}
-
-#[test]
-fn dict_function_key_fails() {
-    let result = check("main () = Dict.put (fun x -> x) 1 Dict.empty");
-    assert!(result.is_err(), "function type should not satisfy Eq");
-}
-
-#[test]
-fn dict_from_list() {
-    assert!(check("main () = Dict.from_list [(\"a\", 1), (\"b\", 2)]").is_ok());
-}
-
-#[test]
-fn dict_to_list() {
-    assert!(check(
-        "fun f (d: Dict String Int) -> List (String, Int)
-f d = Dict.to_list d"
-    )
-    .is_ok());
-}
-
-#[test]
-fn dict_member() {
-    assert!(check(
-        "fun f (d: Dict String Int) -> Bool
-f d = Dict.member \"a\" d"
-    )
-    .is_ok());
-}
+// Dict.put, Dict.keys, Dict.values, Dict.size, Dict.from_list, Dict.to_list,
+// Dict.member are now defined in Std/Dict.dy via @external declarations.
+// Their type checking is covered by module integration tests.
 
 #[test]
 fn string_literal_pattern() {
-    assert!(check(
-        "fun f (s: String) -> Int
+    assert!(
+        check(
+            "fun f (s: String) -> Int
 f s = case s {
   \"hello\" -> 1
   _ -> 0
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn string_prefix_pattern() {
-    assert!(check(
-        "fun f (s: String) -> String
+    assert!(
+        check(
+            "fun f (s: String) -> String
 f s = case s {
   \"prefix\" <> rest -> rest
   _ -> s
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -2176,7 +2111,7 @@ fun filter (x: Int) -> Int needs {Check}
 filter x = case x {
   n if check! n -> n
   _ -> 0
-}"
+}",
     );
     assert!(result.is_err());
     let err = result.err().expect("expected type error");
@@ -2196,7 +2131,7 @@ fn effect_call_in_multi_clause_guard_rejected() {
 
 fun filter (x: Int) -> Int needs {Check}
 filter x | check! x = x
-filter _ = 0"
+filter _ = 0",
     );
     assert!(result.is_err());
     let err = result.err().expect("expected type error");
@@ -2210,13 +2145,15 @@ filter _ = 0"
 #[test]
 fn pure_guard_still_works() {
     // Make sure we didn't break normal guards
-    assert!(check(
-        "clamp x = case x {
+    assert!(
+        check(
+            "clamp x = case x {
   n if n < 0 -> 0
   n -> n
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 // --- Generic effects ---
@@ -2224,8 +2161,9 @@ fn pure_guard_still_works() {
 #[test]
 fn generic_effect_basic() {
     // effect State s with get/put, handler for State Int, function using it
-    assert!(check(
-        "effect State s {
+    assert!(
+        check(
+            "effect State s {
   fun get () -> s
   fun put (val: s) -> Unit
 }
@@ -2240,16 +2178,18 @@ use_state () = {
   let x = get! ()
   put! (x + 1)
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn generic_effect_type_shared_across_ops() {
     // get returns s, put takes s -- they must agree
     // Here the handler says State Int, so get returns Int and put takes Int
-    assert!(check(
-        "effect State s {
+    assert!(
+        check(
+            "effect State s {
   fun get () -> s
   fun put (val: s) -> Unit
 }
@@ -2264,15 +2204,17 @@ use_string_state () = {
   let s = get! ()
   put! (s <> \" world\")
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn non_parameterized_effects_still_work() {
     // Existing non-parameterized effects should work exactly as before
-    assert!(check(
-        "effect Log {
+    assert!(
+        check(
+            "effect Log {
   fun log (msg: String) -> Unit
 }
 
@@ -2282,8 +2224,9 @@ handler console for Log {
 
 fun work () -> Unit needs {Log}
 work () = log! \"hello\""
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -2306,8 +2249,9 @@ handler bad for State Int {
 #[test]
 fn generic_effect_get_infers_type() {
     // get! returns s, and adding 1 to it constrains s to Int
-    assert!(check(
-        "effect State s {
+    assert!(
+        check(
+            "effect State s {
   fun get () -> s
   fun put (val: s) -> Unit
 }
@@ -2317,8 +2261,9 @@ inc () = {
   let x = get! ()
   put! (x + 1)
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -2343,8 +2288,9 @@ bad () = {
 #[test]
 fn generic_effect_multiple_type_params() {
     // Effect with two type params
-    assert!(check(
-        "effect Store k v {
+    assert!(
+        check(
+            "effect Store k v {
   fun read (key: k) -> v
   fun write (key: k) (val: v) -> Unit
 }
@@ -2353,15 +2299,17 @@ handler dict_store for Store String Int {
   read key -> resume 0
   write key val -> resume ()
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn generic_effect_with_existing_effects() {
     // Generic and non-generic effects together
-    assert!(check(
-        "effect Log {
+    assert!(
+        check(
+            "effect Log {
   fun log (msg: String) -> Unit
 }
 
@@ -2377,15 +2325,17 @@ work () = {
   put! (x + 1)
   log! \"done\"
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn generic_effect_independent_across_functions() {
     // Two functions can use the same generic effect at different types
-    assert!(check(
-        "effect State s {
+    assert!(
+        check(
+            "effect State s {
   fun get () -> s
   fun put (val: s) -> Unit
 }
@@ -2401,15 +2351,17 @@ use_string () = {
   let s = get! ()
   put! (s <> \"!\")
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn generic_effect_put_then_get() {
     // Inference works when put constrains the type first, then get uses it
-    assert!(check(
-        "effect State s {
+    assert!(
+        check(
+            "effect State s {
   fun get () -> s
   fun put (val: s) -> Unit
 }
@@ -2419,8 +2371,9 @@ put_then_get () = {
   put! 42
   get! ()
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -2444,8 +2397,9 @@ bad () = {
 #[test]
 fn generic_effect_complex_type_param() {
     // Type param can be a complex type like List Int
-    assert!(check(
-        "effect State s {
+    assert!(
+        check(
+            "effect State s {
   fun get () -> s
   fun put (val: s) -> Unit
 }
@@ -2456,15 +2410,17 @@ handler list_state for State (List Int) {
   get () -> resume Nil
   put val -> resume ()
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn generic_effect_handler_return_clause() {
     // Return clause should work with the specialized type
-    assert!(check(
-        "effect State s {
+    assert!(
+        check(
+            "effect State s {
   fun get () -> s
   fun put (val: s) -> Unit
 }
@@ -2476,15 +2432,17 @@ handler safe_state for State Int {
   put val -> resume ()
   return value -> Ok(value)
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn generic_effect_op_with_function_param() {
     // Effect op that takes a function over the type param
-    assert!(check(
-        "effect State s {
+    assert!(
+        check(
+            "effect State s {
   fun get () -> s
   fun put (val: s) -> Unit
   fun modify (f: s -> s) -> Unit
@@ -2501,8 +2459,9 @@ use_modify () = {
   put! 10
   modify! (fun x -> x + x)
 }",
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -2546,8 +2505,9 @@ bad () = {
 #[test]
 fn generic_effect_with_scopes_independent() {
     // Effect type params should be independent across with scopes
-    assert!(check(
-        "effect State s {
+    assert!(
+        check(
+            "effect State s {
   fun get () -> s
   fun put (val: s) -> Unit
 }
@@ -2579,8 +2539,9 @@ main () = {
   use_int () with int_state
   use_string () with string_state
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -2601,8 +2562,9 @@ bad () = put! \"hello\"",
 #[test]
 fn generic_effect_needs_type_arg_allows_matching_usage() {
     // needs {State Int} with consistent Int usage should pass
-    assert!(check(
-        "effect State s {
+    assert!(
+        check(
+            "effect State s {
   fun get () -> s
   fun put (val: s) -> Unit
 }
@@ -2612,8 +2574,9 @@ good () = {
   let x = get! ()
   put! (x + 1)
 }"
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -2682,8 +2645,9 @@ fn generic_effect_effarrow_polymorphic_hof() {
     // A polymorphic HOF that takes an effectful callback and returns a type var
     // should be callable at different types (regression: EffArrow + return type var
     // caused generalization failure when prelude is loaded)
-    assert!(check(
-        "effect State s {
+    assert!(
+        check(
+            "effect State s {
   fun get () -> s
   fun put (val: s) -> Unit
 }
@@ -2697,8 +2661,9 @@ use_it () = {
   let (b, _) = run_state \"\" (fun () -> get! ())
   a
 }",
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -2718,4 +2683,63 @@ main () = log! \"hello\"",
         "expected error about main + needs, got: {}",
         err.message
     );
+}
+
+#[test]
+fn external_fun_cannot_have_effects() {
+    let result = check(
+        r#"
+        @external("erlang", "file", "read_file")
+        fun read_file (path: String) -> String needs {IO}
+        "#,
+    );
+    let err = result.err().expect("expected error");
+    assert!(
+        err.message.contains("external function") && err.message.contains("cannot declare effects"),
+        "expected error about external + needs, got: {}",
+        err.message
+    );
+}
+
+// --- Impl body can call helper functions defined in the same file ---
+
+#[test]
+fn impl_body_calls_helper_function() {
+    check(
+        r#"
+trait Display a {
+    fun display (x: a) -> String
+}
+
+fun helper (n: Int) -> String
+helper n = show n
+
+type Wrapper { Wrapper(Int) }
+
+impl Display for Wrapper {
+  display Wrapper(n) = "Wrapped: " <> helper n
+}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn impl_body_calls_unannotated_helper() {
+    check(
+        r#"
+trait Display a {
+    fun display (x: a) -> String
+}
+
+helper n = show n
+
+type Wrapper { Wrapper(Int) }
+
+impl Display for Wrapper {
+    display Wrapper(n) = "Wrapped: " <> helper n
+}
+"#,
+    )
+    .unwrap();
 }

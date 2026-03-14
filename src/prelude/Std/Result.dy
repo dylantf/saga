@@ -1,5 +1,6 @@
 module Result
 
+
 pub type Result a b {
   Ok(a)
   Err(b)
@@ -27,4 +28,11 @@ pub fun and_then (f: a -> Result c b) (r: Result a b) -> Result c b
 and_then f r = case r {
   Ok(x) -> f x
   Err(e) -> Err(e)
+}
+
+impl Show for Result a b where {a: Show, b: Show} {
+  show r = case r {
+    Ok(x) -> "Ok(" <> show x <> ")"
+    Err(e) -> "Err(" <> show e <> ")"
+  }
 }

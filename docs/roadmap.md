@@ -101,7 +101,6 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ## Syntax
 
-
 ## Backend
 
 ### Infrastructure
@@ -152,6 +151,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Cross-module trait impl injection (importing a module imports its pub trait impls)
 - [x] Module-qualified dict names (`__dict_Show_Graphics_Color` not `__dict_Show_Color`)
 - [x] Entry point validation (`main` cannot have `needs`, effects handled via `with`)
+- [ ] Opaque types (constructors visible inside defining module, hidden to importers)
 
 ### Data structures
 
@@ -190,8 +190,11 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ### Stdlib / prelude
 
-- [ ] Wire prelude functions to BEAM equivalents (`List`, `Maybe`, `Result`)
-- [ ] FFI (`foreign erlang "mod" "fun" as f in Effect`)
+- [x] Wire prelude functions to BEAM equivalents (`List`, `Maybe`, `Result`)
+- [x] FFI (`@external` declarations for Erlang module calls)
+- [x] Compile Std.\* modules to BEAM (script mode auto-compiles stdlib into `_build/`)
+- [x] Prelude imports flow into lowerer (script mode resolves `List` -> `std_list`)
+- [x] Deduplicate prelude impls (Show dicts, `print` currently emitted into every module; should live in one place)
 
 ## Runtime Optimization
 
@@ -215,6 +218,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - `Functor` / `Applicative` traits in stdlib
 - `Semigroup` / `Monoid` in stdlib
 - Effect row polymorphism / effect variables (`needs e`)
+- `Dynamic` type for consuming untyped Erlang data (JSON parsers, ETS, message passing)
 
 ## Out of Scope
 

@@ -39,6 +39,17 @@ pub(super) fn lower_pat(
                 Box::new(lower_pat(&args[1], record_fields, constructor_modules)),
             ),
             "Nil" if args.is_empty() => CPat::Nil,
+            // Some(v) -> bare variable pattern (the value itself, no tuple)
+            "Some" if args.len() == 1 => {
+                lower_pat(&args[0], record_fields, constructor_modules)
+            }
+            // None -> match the atom 'undefined'
+            "None" if args.is_empty() => {
+                CPat::Lit(CLit::Atom("undefined".to_string()))
+            }
+            // Booleans are bare atoms to match Erlang's native true/false
+            "True" if args.is_empty() => CPat::Lit(CLit::Atom("true".to_string())),
+            "False" if args.is_empty() => CPat::Lit(CLit::Atom("false".to_string())),
             _ => {
                 let atom = mangle_ctor_atom(name, constructor_modules);
                 let mut elems = vec![CPat::Lit(CLit::Atom(atom))];

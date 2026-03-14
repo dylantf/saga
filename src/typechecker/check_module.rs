@@ -2,13 +2,16 @@ use super::{Checker, EffectDef, EffectOpDef, ModuleCodegenInfo, Scheme, TypeErro
 use crate::token::Span;
 
 /// Returns the embedded source for a builtin stdlib module, if it exists.
-fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
+pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
     if module_path.len() == 2 && module_path[0] == "Std" {
         match module_path[1].as_str() {
             "Maybe" => Some(include_str!("../prelude/Std/Maybe.dy")),
             "Result" => Some(include_str!("../prelude/Std/Result.dy")),
             "List" => Some(include_str!("../prelude/Std/List.dy")),
             "Bool" => Some(include_str!("../prelude/Std/Bool.dy")),
+            "Dict" => Some(include_str!("../prelude/Std/Dict.dy")),
+            "Int" => Some(include_str!("../prelude/Std/Int.dy")),
+            "Float" => Some(include_str!("../prelude/Std/Float.dy")),
             _ => None,
         }
     } else {
@@ -93,6 +96,23 @@ impl Checker {
                         .or_insert_with(|| info.clone());
                 }
             }
+            // Inject cached trait definitions and their methods
+            if let Some(cached_traits) = self.tc_traits.get(&module_name).cloned() {
+                let cached_binding_map: std::collections::HashMap<&str, &Scheme> =
+                    cached.iter().map(|(n, s)| (n.as_str(), s)).collect();
+                for (name, info) in &cached_traits {
+                    self.traits
+                        .entry(name.clone())
+                        .or_insert_with(|| info.clone());
+                    for (method_name, _, _) in &info.methods {
+                        if let Some(&scheme) = cached_binding_map.get(method_name.as_str())
+                            && self.env.get(method_name).is_none()
+                        {
+                            self.env.insert(method_name.clone(), scheme.clone());
+                        }
+                    }
+                }
+            }
             self.inject_module_types(
                 &cached,
                 &cached_ctors,
@@ -133,41 +153,60 @@ impl Checker {
 
         self.tc_loading.insert(module_name.clone());
 
-        let mut mod_checker = match project_root {
-            Some(root) => super::Checker::with_project_root(root),
-            None => super::Checker::new(),
+        // Create a module checker. For non-builtin modules, clone the prelude
+        // snapshot so we don't re-parse/re-check the prelude for every import.
+        // For builtin Std modules, start from a fresh checker with the parent's
+        // traits copied in (they can't load the prelude due to circular imports).
+        let mut mod_checker = if !is_builtin {
+            // Build or reuse the prelude snapshot
+            if self.tc_prelude_snapshot.is_none() {
+                let mut snapshot = match &project_root {
+                    Some(root) => super::Checker::with_project_root(root.clone()),
+                    None => super::Checker::new(),
+                };
+                let prelude_src = include_str!("../prelude/prelude.dy");
+                let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
+                    .lex()
+                    .expect("prelude lex error");
+                let prelude_program = crate::parser::Parser::new(prelude_tokens)
+                    .parse_program()
+                    .expect("prelude parse error");
+                snapshot
+                    .check_program(&prelude_program)
+                    .expect("prelude type error");
+                self.tc_prelude_snapshot = Some(Box::new(snapshot));
+            }
+            let mut mc = *self.tc_prelude_snapshot.as_ref().unwrap().clone();
+            mc.next_var = self.next_var;
+            mc
+        } else {
+            let mut mc = match project_root {
+                Some(root) => super::Checker::with_project_root(root),
+                None => super::Checker::new(),
+            };
+            mc.next_var = self.next_var;
+            // Share parent's trait definitions so builtin modules can impl traits like Show
+            for (name, info) in &self.traits {
+                if !mc.traits.contains_key(name) {
+                    mc.traits.insert(name.clone(), info.clone());
+                    for (method_name, _, _) in &info.methods {
+                        if let Some(scheme) = self.env.get(method_name) {
+                            if mc.env.get(method_name).is_none() {
+                                mc.env.insert(method_name.clone(), scheme.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            mc
         };
-        // Start the module checker's var IDs after the parent's current counter
-        // to avoid var ID collisions when module schemes are injected into the parent.
-        mod_checker.next_var = self.next_var;
         // Share the module cache so transitive imports benefit from caching
         mod_checker.tc_loaded = self.tc_loaded.clone();
         mod_checker.tc_type_ctors = self.tc_type_ctors.clone();
         mod_checker.tc_codegen_info = self.tc_codegen_info.clone();
         mod_checker.tc_record_defs = self.tc_record_defs.clone();
         mod_checker.tc_trait_impls = self.tc_trait_impls.clone();
-
-        // Run a fresh checker on prelude + module.
-        // Builtin Std modules skip the prelude to avoid circular imports
-        // (the prelude itself imports Std modules).
-        if !is_builtin {
-            let prelude_src = include_str!("../prelude/prelude.dy");
-            let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
-                .lex()
-                .expect("prelude lex error");
-            let prelude_program = crate::parser::Parser::new(prelude_tokens)
-                .parse_program()
-                .expect("prelude parse error");
-            mod_checker.check_program(&prelude_program).map_err(|e| {
-                TypeError::at(
-                    span,
-                    format!(
-                        "type error in prelude (for module '{}'): {}",
-                        module_name, e
-                    ),
-                )
-            })?;
-        }
+        mod_checker.tc_traits = self.tc_traits.clone();
         mod_checker.check_program(&program).map_err(|e| {
             TypeError::at(
                 span,
@@ -203,6 +242,19 @@ impl Checker {
             }
         }
 
+        // Collect public trait definitions from the module.
+        let mut module_traits: std::collections::HashMap<String, super::TraitInfo> =
+            std::collections::HashMap::new();
+        for decl in &program {
+            if let crate::ast::Decl::TraitDef {
+                public: true, name, ..
+            } = decl
+                && let Some(info) = mod_checker.traits.get(name.as_str())
+            {
+                module_traits.insert(name.clone(), info.clone());
+            }
+        }
+
         // Collect the module's own trait impls (from ImplDef declarations in the source).
         let mut module_trait_impls: std::collections::HashMap<(String, String), super::ImplInfo> =
             std::collections::HashMap::new();
@@ -234,11 +286,32 @@ impl Checker {
             .insert(module_name.clone(), pub_records.clone());
         self.tc_trait_impls
             .insert(module_name.clone(), module_trait_impls.clone());
+        self.tc_traits
+            .insert(module_name.clone(), module_traits.clone());
 
         // Build codegen info from the module's public declarations
         let codegen_info = collect_codegen_info(&module_name, &program, &public_bindings);
         self.tc_codegen_info
             .insert(module_name.clone(), codegen_info);
+
+        // Inject the module's trait definitions into the parent checker.
+        // Trait methods are also registered unqualified so impl bodies can use them.
+        let binding_map: std::collections::HashMap<&str, &Scheme> = public_bindings
+            .iter()
+            .map(|(n, s)| (n.as_str(), s))
+            .collect();
+        for (name, info) in &module_traits {
+            self.traits
+                .entry(name.clone())
+                .or_insert_with(|| info.clone());
+            for (method_name, _, _) in &info.methods {
+                if let Some(&scheme) = binding_map.get(method_name.as_str())
+                    && self.env.get(method_name).is_none()
+                {
+                    self.env.insert(method_name.clone(), scheme.clone());
+                }
+            }
+        }
 
         // Inject the module's trait impls into the parent checker
         for (key, info) in &module_trait_impls {
@@ -460,6 +533,11 @@ pub(super) fn public_names_for_tc(
                 names.insert(name.clone());
             }
             Decl::HandlerDef {
+                public: true, name, ..
+            } => {
+                names.insert(name.clone());
+            }
+            Decl::ExternalFun {
                 public: true, name, ..
             } => {
                 names.insert(name.clone());

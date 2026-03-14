@@ -59,11 +59,16 @@ impl Parser {
                     value,
                 })
             }
+            Token::At => {
+                let start = self.tokens[self.pos].span;
+                self.parse_external_fun(false, start)
+            }
             Token::Pub => {
                 let start = self.tokens[self.pos].span;
                 self.advance(); // consume 'pub'
                 match self.peek() {
                     Token::Fun => self.parse_fun_annotation(true, start),
+                    Token::At => self.parse_external_fun(true, start),
                     Token::Type => self.parse_type_def(true),
                     Token::Record => self.parse_record_def(true),
                     Token::Effect => self.parse_effect_def(true),
@@ -221,6 +226,111 @@ impl Parser {
         Ok(Decl::FunAnnotation {
             public,
             name,
+            params,
+            return_type,
+            effects,
+            where_clause,
+            span: start.to(end),
+        })
+    }
+
+    // Parses: @external("erlang", "module", "func") [pub] fun name (params) -> RetType
+    fn parse_external_fun(&mut self, public: bool, start: Span) -> Result<Decl, ParseError> {
+        self.advance(); // consume '@'
+
+        // Expect 'external' identifier
+        match self.peek() {
+            Token::Ident(s) if s == "external" => {
+                self.advance();
+            }
+            _ => {
+                return Err(ParseError {
+                    message: format!("expected 'external' after '@', got {:?}", self.peek()),
+                    span: self.tokens[self.pos].span,
+                });
+            }
+        }
+
+        // Parse (runtime, module, func)
+        self.expect(Token::LParen)?;
+        let runtime = match self.advance() {
+            Token::String(s) => s,
+            tok => {
+                return Err(ParseError {
+                    message: format!("expected string literal for runtime, got {:?}", tok),
+                    span: self.tokens[self.pos - 1].span,
+                });
+            }
+        };
+        self.expect(Token::Comma)?;
+        let module = match self.advance() {
+            Token::String(s) => s,
+            tok => {
+                return Err(ParseError {
+                    message: format!("expected string literal for module, got {:?}", tok),
+                    span: self.tokens[self.pos - 1].span,
+                });
+            }
+        };
+        self.expect(Token::Comma)?;
+        let func = match self.advance() {
+            Token::String(s) => s,
+            tok => {
+                return Err(ParseError {
+                    message: format!("expected string literal for function, got {:?}", tok),
+                    span: self.tokens[self.pos - 1].span,
+                });
+            }
+        };
+        self.expect(Token::RParen)?;
+
+        // Skip terminators between @external(...) and fun signature
+        self.skip_terminators();
+
+        // Parse the fun signature (no body)
+        self.expect(Token::Fun)?;
+        let name = self.expect_ident()?;
+
+        let mut params = Vec::new();
+        while matches!(self.peek(), Token::LParen) {
+            self.advance(); // consume '('
+            if matches!(self.peek(), Token::RParen) {
+                // `()` -- unit parameter
+                self.advance(); // consume ')'
+                params.push(("_".into(), TypeExpr::Named("Unit".into())));
+            } else {
+                let param_name = self.expect_ident()?;
+                self.expect(Token::Colon)?;
+                let param_type = self.parse_type_expr()?;
+                self.expect(Token::RParen)?;
+                params.push((param_name, param_type));
+            }
+        }
+
+        self.expect(Token::Arrow)?;
+        let return_type = self.parse_type_expr()?;
+
+        let mut effects = Vec::new();
+        if matches!(self.peek(), Token::Needs) {
+            self.advance();
+            self.expect(Token::LBrace)?;
+            effects.push(self.parse_effect_ref()?);
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                effects.push(self.parse_effect_ref()?);
+            }
+            self.expect(Token::RBrace)?;
+        }
+
+        let where_clause = self.parse_where_clause()?;
+
+        let end = self.tokens[self.pos - 1].span;
+        Ok(Decl::ExternalFun {
+            public,
+            name,
+            runtime,
+            module,
+            func,
             params,
             return_type,
             effects,

@@ -115,6 +115,23 @@ pub enum Decl {
         span: Span,
     },
 
+    /// `@external("erlang", "lists", "reverse") pub fun reverse (list: List a) -> List a`
+    ExternalFun {
+        public: bool,
+        name: String,
+        /// Target runtime, e.g. "erlang"
+        runtime: String,
+        /// Erlang module name, e.g. "lists"
+        module: String,
+        /// Erlang function name, e.g. "reverse"
+        func: String,
+        params: Vec<(String, TypeExpr)>,
+        return_type: TypeExpr,
+        effects: Vec<EffectRef>,
+        where_clause: Vec<TraitBound>,
+        span: Span,
+    },
+
     /// `import Math exposing { abs, max }`
     Import {
         module_path: Vec<String>,

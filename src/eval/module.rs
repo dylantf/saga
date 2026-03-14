@@ -80,6 +80,11 @@ fn public_names(program: &[Decl]) -> HashSet<String> {
                     names.insert(m.name.clone());
                 }
             }
+            Decl::ExternalFun {
+                public: true, name, ..
+            } => {
+                names.insert(name.clone());
+            }
             Decl::ImplDef {
                 trait_name,
                 target_type,
@@ -128,6 +133,9 @@ fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
             "Result" => Some(include_str!("../prelude/Std/Result.dy")),
             "List"   => Some(include_str!("../prelude/Std/List.dy")),
             "Bool"   => Some(include_str!("../prelude/Std/Bool.dy")),
+            "Dict"   => Some(include_str!("../prelude/Std/Dict.dy")),
+            "Int"    => Some(include_str!("../prelude/Std/Int.dy")),
+            "Float"  => Some(include_str!("../prelude/Std/Float.dy")),
             _ => None,
         }
     } else {

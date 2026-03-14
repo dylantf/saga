@@ -1,3 +1,4 @@
+mod builtins;
 mod exprs;
 mod pats;
 mod util;
@@ -10,7 +11,7 @@ use std::collections::HashMap;
 use pats::{lower_params, lower_pat};
 use util::{
     cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_qualified_call,
-    collect_type_effects, core_var, field_access_record_name, lower_lit,
+    collect_type_effects, core_var, field_access_record_name, has_nested_effect_call, lower_lit,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -81,6 +82,9 @@ pub struct Lowerer<'a> {
     /// e.g. "Circle" -> "shapes", "Some" -> "std_maybe".
     /// Constructors not in this map are prelude builtins and are not mangled.
     constructor_modules: HashMap<String, String>,
+    /// Maps external function name -> (erlang_module, erlang_func, arity).
+    /// Populated from `Decl::ExternalFun` declarations.
+    external_funs: HashMap<String, (String, String, usize)>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -105,6 +109,7 @@ impl<'a> Lowerer<'a> {
             pending_callee_return_k: None,
             constructor_modules: HashMap::new(),
             current_handler_k: None,
+            external_funs: HashMap::new(),
         }
     }
 
@@ -112,6 +117,17 @@ impl<'a> Lowerer<'a> {
         let n = self.counter;
         self.counter += 1;
         format!("_Cor{}", n)
+    }
+
+    /// Find a record name that contains the given field.
+    fn find_record_by_field(&self, field: &str) -> Option<&str> {
+        self.record_fields.iter().find_map(|(rname, fields)| {
+            if fields.iter().any(|f| f == field) {
+                Some(rname.as_str())
+            } else {
+                None
+            }
+        })
     }
 
     /// Find a record name whose field list contains all the given update field names.
@@ -200,6 +216,36 @@ impl<'a> Lowerer<'a> {
                     if !param_effs.is_empty() {
                         self.param_absorbed_effects.insert(name.clone(), param_effs);
                     }
+                }
+                Decl::ExternalFun {
+                    public,
+                    name,
+                    module: erl_module,
+                    func: erl_func,
+                    params,
+                    effects,
+                    ..
+                } => {
+                    if *public {
+                        self.pub_names.insert(name.clone());
+                    }
+                    let real_arity = params.len();
+                    self.external_funs.insert(
+                        name.clone(),
+                        (erl_module.clone(), erl_func.clone(), real_arity),
+                    );
+                    // Register effects if declared
+                    if !effects.is_empty() {
+                        let mut sorted: Vec<String> =
+                            effects.iter().map(|e| e.name.clone()).collect();
+                        sorted.sort();
+                        self.fun_effects.insert(name.clone(), sorted);
+                    }
+                    // Register as a top-level function with the appropriate arity
+                    let effect_count = effects.len();
+                    let expanded_arity =
+                        real_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
+                    self.top_level_funs.insert(name.clone(), expanded_arity);
                 }
                 _ => {}
             }
@@ -356,6 +402,34 @@ impl<'a> Lowerer<'a> {
         // If there's no module declaration, it's a single-file script -- export everything.
         let is_module = program.iter().any(|d| matches!(d, Decl::ModuleDecl { .. }));
 
+        // Generate wrapper functions for external declarations so cross-module
+        // imports can call them by the local name.
+        for decl in program {
+            if let Decl::ExternalFun {
+                public,
+                name,
+                module: erl_module,
+                func: erl_func,
+                params,
+                ..
+            } = decl
+            {
+                let arity = params.len();
+                let arg_vars: Vec<String> = (0..arity).map(|i| format!("_Ext{}", i)).collect();
+                let call_args: Vec<CExpr> =
+                    arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
+                let call = CExpr::Call(erl_module.clone(), erl_func.clone(), call_args);
+                fun_defs.push(CFunDef {
+                    name: name.clone(),
+                    arity,
+                    body: CExpr::Fun(arg_vars, Box::new(call)),
+                });
+                if *public || !is_module {
+                    exports.push((name.clone(), arity));
+                }
+            }
+        }
+
         for (name, arity, clauses) in clause_groups {
             if !is_module || self.pub_names.contains(&name) {
                 exports.push((name.clone(), arity));
@@ -398,7 +472,19 @@ impl<'a> Lowerer<'a> {
                 self.current_return_k = Some(CExpr::Var("_ReturnK".to_string()));
             }
 
-            let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
+            let all_simple_params = clauses.len() == 1
+                && clauses[0].0.iter().all(|p| {
+                    matches!(
+                        p,
+                        Pat::Var { .. }
+                            | Pat::Wildcard { .. }
+                            | Pat::Lit {
+                                value: ast::Lit::Unit,
+                                ..
+                            }
+                    )
+                });
+            let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() && all_simple_params {
                 // Single clause, no guard: emit directly without a case wrapper.
                 let (params, _, body) = clauses[0];
                 let mut params_ce = lower_params(params);
@@ -406,12 +492,46 @@ impl<'a> Lowerer<'a> {
                 if has_effects {
                     params_ce.push("_ReturnK".to_string());
                 }
-                let body_ce = self.lower_expr(body);
-                // For non-block bodies, lower_block didn't run, so apply return_k
+                // For non-block bodies, lower_block didn't run, so apply return_k.
+                // Special case: if the body is a terminal effect call, pass _ReturnK
+                // directly as K so abort-style handlers skip the rest (proper CPS).
                 let body_ce = if has_effects && !matches!(body, Expr::Block { .. }) {
-                    self.apply_return_k(body_ce)
+                    if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
+                        let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
+                        self.lower_effect_call(
+                            op_name,
+                            qualifier,
+                            &args_owned,
+                            self.current_return_k.clone(),
+                        )
+                    } else if has_nested_effect_call(body) {
+                        // Nested effect calls in branches (e.g. if/case with fail!):
+                        // thread _ReturnK through branches so abort skips the wrap.
+                        let k_var = self.fresh();
+                        let k_ce = self.current_return_k.clone().unwrap();
+                        let body_ce = self.lower_expr_with_k(body, &k_var);
+                        CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
+                    } else {
+                        // Check for effectful function call: pass _ReturnK directly
+                        let is_eff_call = collect_fun_call(body)
+                            .map(|(name, _)| {
+                                self.fun_effects.contains_key(name)
+                                    || self.current_effectful_vars.contains_key(name)
+                            })
+                            .unwrap_or(false);
+                        if is_eff_call {
+                            let saved = self.pending_callee_return_k.take();
+                            self.pending_callee_return_k = self.current_return_k.clone();
+                            let result = self.lower_expr(body);
+                            self.pending_callee_return_k = saved;
+                            result
+                        } else {
+                            let body_ce = self.lower_expr(body);
+                            self.apply_return_k(body_ce)
+                        }
+                    }
                 } else {
-                    body_ce
+                    self.lower_expr(body)
                 };
                 CExpr::Fun(params_ce, Box::new(body_ce))
             } else {
@@ -461,11 +581,26 @@ impl<'a> Lowerer<'a> {
                             )
                         };
                         let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
-                        let body_ce = self.lower_expr(body);
                         let body_ce = if has_effects && !matches!(body, Expr::Block { .. }) {
-                            self.apply_return_k(body_ce)
+                            if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
+                                let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
+                                self.lower_effect_call(
+                                    op_name,
+                                    qualifier,
+                                    &args_owned,
+                                    self.current_return_k.clone(),
+                                )
+                            } else if has_nested_effect_call(body) {
+                                let k_var = self.fresh();
+                                let k_ce = self.current_return_k.clone().unwrap();
+                                let body_ce = self.lower_expr_with_k(body, &k_var);
+                                CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
+                            } else {
+                                let body_ce = self.lower_expr(body);
+                                self.apply_return_k(body_ce)
+                            }
                         } else {
-                            body_ce
+                            self.lower_expr(body)
                         };
                         CArm {
                             pat,
@@ -576,6 +711,28 @@ impl<'a> Lowerer<'a> {
                     return self.lower_qualified_call(module, func_name, &args);
                 }
 
+                // Lower `print(dict, x)` to io:format("~s~n", [show(x)])
+                if let Some((func_name, args)) = collect_fun_call(expr)
+                    && func_name == "print"
+                    && let Some(ce) = self.lower_builtin_print(&args)
+                {
+                    return ce;
+                }
+
+                // Lower `panic msg` / `todo msg` to erlang:error(msg)
+                if let Some((func_name, args)) = collect_fun_call(expr)
+                    && (func_name == "panic" || func_name == "todo")
+                    && args.len() == 1
+                {
+                    let arg = self.lower_expr(args[0]);
+                    let v = self.fresh();
+                    return CExpr::Let(
+                        v.clone(),
+                        Box::new(arg),
+                        Box::new(cerl_call("erlang", "error", vec![CExpr::Var(v)])),
+                    );
+                }
+
                 // Check for a saturated call to a known top-level function.
                 // e.g. `add 3 4` -> App(App(Var("add"), 3), 4)
                 // For effectful functions, the user provides N args but the function
@@ -647,15 +804,36 @@ impl<'a> Lowerer<'a> {
                         }
                         let call_args: Vec<CExpr> =
                             arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-                        let call =
-                            if let Some((erl_mod, erl_name)) = self.imported_names.get(func_name) {
-                                CExpr::Call(erl_mod.clone(), erl_name.clone(), call_args)
-                            } else {
-                                CExpr::Apply(
-                                    Box::new(CExpr::FunRef(func_name.to_string(), arity)),
-                                    call_args,
+                        let call = if let Some((erl_mod, erl_func, _)) =
+                            self.external_funs.get(func_name)
+                        {
+                            // float_to_list/1 -> float_to_list/2 with [short] option
+                            if erl_mod == "erlang"
+                                && erl_func == "float_to_list"
+                                && call_args.len() == 1
+                            {
+                                let opts = CExpr::Cons(
+                                    Box::new(CExpr::Lit(CLit::Atom("short".into()))),
+                                    Box::new(CExpr::Nil),
+                                );
+                                CExpr::Call(
+                                    erl_mod.clone(),
+                                    erl_func.clone(),
+                                    vec![call_args.into_iter().next().unwrap(), opts],
                                 )
-                            };
+                            } else {
+                                // External function: direct call to the foreign module
+                                CExpr::Call(erl_mod.clone(), erl_func.clone(), call_args)
+                            }
+                        } else if let Some((erl_mod, erl_name)) = self.imported_names.get(func_name)
+                        {
+                            CExpr::Call(erl_mod.clone(), erl_name.clone(), call_args)
+                        } else {
+                            CExpr::Apply(
+                                Box::new(CExpr::FunRef(func_name.to_string(), arity)),
+                                call_args,
+                            )
+                        };
                         return bindings.into_iter().rev().fold(call, |body, (var, val)| {
                             CExpr::Let(var, Box::new(val), Box::new(body))
                         });
@@ -718,37 +896,49 @@ impl<'a> Lowerer<'a> {
                     });
                 }
 
-                let (func, arg) = match expr {
-                    Expr::App { func, arg, .. } => (func, arg),
-                    _ => unreachable!(),
-                };
-                // General curried application (partial application or unknown function)
+                // Collect the full App chain and emit a single multi-arg Apply.
+                // e.g. `f acc h` = App(App(f, acc), h) -> apply F(Acc, H)
+                let mut callee = expr;
+                let mut args_rev = Vec::new();
+                while let Expr::App { func, arg, .. } = callee {
+                    args_rev.push(arg.as_ref());
+                    callee = func.as_ref();
+                }
+                args_rev.reverse();
+
+                let mut bindings = Vec::new();
                 let func_var = self.fresh();
-                let arg_var = self.fresh();
-                let func_ce = self.lower_expr(func);
-                let arg_ce = self.lower_expr(arg);
-                CExpr::Let(
-                    func_var.clone(),
-                    Box::new(func_ce),
-                    Box::new(CExpr::Let(
-                        arg_var.clone(),
-                        Box::new(arg_ce),
-                        Box::new(CExpr::Apply(
-                            Box::new(CExpr::Var(func_var)),
-                            vec![CExpr::Var(arg_var)],
-                        )),
-                    )),
-                )
+                let func_ce = self.lower_expr(callee);
+                bindings.push((func_var.clone(), func_ce));
+
+                let mut arg_vars = Vec::new();
+                for arg in &args_rev {
+                    let v = self.fresh();
+                    let ce = self.lower_expr(arg);
+                    bindings.push((v.clone(), ce));
+                    arg_vars.push(v);
+                }
+
+                let call = CExpr::Apply(
+                    Box::new(CExpr::Var(func_var)),
+                    arg_vars.into_iter().map(CExpr::Var).collect(),
+                );
+                bindings.into_iter().rev().fold(call, |body, (var, val)| {
+                    CExpr::Let(var, Box::new(val), Box::new(body))
+                })
             }
 
-            Expr::Constructor { name, .. } => {
-                if name == "Nil" {
-                    CExpr::Nil
-                } else {
+            Expr::Constructor { name, .. } => match name.as_str() {
+                "Nil" => CExpr::Nil,
+                // Booleans are bare atoms to match Erlang's native true/false
+                "True" => CExpr::Lit(CLit::Atom("true".to_string())),
+                "False" => CExpr::Lit(CLit::Atom("false".to_string())),
+                _ => {
                     let atom = util::mangle_ctor_atom(name, &self.constructor_modules);
-                    CExpr::Lit(CLit::Atom(atom))
+                    // Wrap in a 1-tuple to match pattern representation and avoid atom collisions
+                    CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(atom))])
                 }
-            }
+            },
 
             Expr::BinOp {
                 op, left, right, ..
@@ -802,6 +992,17 @@ impl<'a> Lowerer<'a> {
             Expr::Block { stmts, .. } => self.lower_block(stmts),
 
             Expr::Lambda { params, body, .. } => {
+                let all_simple = params.iter().all(|p| {
+                    matches!(
+                        p,
+                        Pat::Var { .. }
+                            | Pat::Wildcard { .. }
+                            | Pat::Lit {
+                                value: ast::Lit::Unit,
+                                ..
+                            }
+                    )
+                });
                 let mut param_vars = lower_params(params);
                 let saved_handler_params = self.current_handler_params.clone();
                 let saved_return_k = self.current_return_k.take();
@@ -824,14 +1025,73 @@ impl<'a> Lowerer<'a> {
                     // directly (e.g. lambda defined in a block that already has
                     // handler params in scope -- those are captured, not parameterized).
                 }
-                let body_ce = self.lower_expr(body);
                 let body_ce = if is_effectful_lambda && !matches!(**body, Expr::Block { .. }) {
-                    self.apply_return_k(body_ce)
+                    if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
+                        let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
+                        self.lower_effect_call(
+                            op_name,
+                            qualifier,
+                            &args_owned,
+                            self.current_return_k.clone(),
+                        )
+                    } else if has_nested_effect_call(body) {
+                        let k_var = self.fresh();
+                        let k_ce = self.current_return_k.clone().unwrap();
+                        let body_ce = self.lower_expr_with_k(body, &k_var);
+                        CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
+                    } else {
+                        // Check for effectful function call: pass _ReturnK directly
+                        let is_eff_call = collect_fun_call(body)
+                            .map(|(name, _)| {
+                                self.fun_effects.contains_key(name)
+                                    || self.current_effectful_vars.contains_key(name)
+                            })
+                            .unwrap_or(false);
+                        if is_eff_call {
+                            let saved = self.pending_callee_return_k.take();
+                            self.pending_callee_return_k = self.current_return_k.clone();
+                            let result = self.lower_expr(body);
+                            self.pending_callee_return_k = saved;
+                            result
+                        } else {
+                            let body_ce = self.lower_expr(body);
+                            self.apply_return_k(body_ce)
+                        }
+                    }
                 } else {
-                    body_ce
+                    self.lower_expr(body)
                 };
                 self.current_handler_params = saved_handler_params;
                 self.current_return_k = saved_return_k;
+                // If lambda has complex params (tuples, constructors), wrap
+                // the body in a case expression for destructuring.
+                let body_ce = if !all_simple {
+                    let scrutinee = if param_vars.len() == 1 {
+                        CExpr::Var(param_vars[0].clone())
+                    } else {
+                        CExpr::Tuple(param_vars.iter().map(|v| CExpr::Var(v.clone())).collect())
+                    };
+                    let pat = if params.len() == 1 {
+                        lower_pat(&params[0], &self.record_fields, &self.constructor_modules)
+                    } else {
+                        CPat::Tuple(
+                            params
+                                .iter()
+                                .map(|p| lower_pat(p, &self.record_fields, &self.constructor_modules))
+                                .collect(),
+                        )
+                    };
+                    CExpr::Case(
+                        Box::new(scrutinee),
+                        vec![CArm {
+                            pat,
+                            guard: None,
+                            body: body_ce,
+                        }],
+                    )
+                } else {
+                    body_ce
+                };
                 CExpr::Fun(param_vars, Box::new(body_ce))
             }
 
@@ -906,7 +1166,8 @@ impl<'a> Lowerer<'a> {
             }
 
             Expr::FieldAccess { expr, field, .. } => {
-                let record_name = field_access_record_name(expr);
+                let record_name =
+                    field_access_record_name(expr).or_else(|| self.find_record_by_field(field));
                 let idx = record_name
                     .and_then(|rname| self.record_fields.get(rname))
                     .and_then(|fields| fields.iter().position(|f| f == field))
@@ -1009,11 +1270,24 @@ impl<'a> Lowerer<'a> {
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
-                let call = CExpr::Call(
-                    module.clone(),
-                    func.clone(),
-                    vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-                );
+                // float_to_list/1 -> float_to_list/2 with [short] option
+                let call = if module == "erlang" && func == "float_to_list" && vars.len() == 1 {
+                    let opts = CExpr::Cons(
+                        Box::new(CExpr::Lit(CLit::Atom("short".into()))),
+                        Box::new(CExpr::Nil),
+                    );
+                    CExpr::Call(
+                        module.clone(),
+                        func.clone(),
+                        vec![CExpr::Var(vars[0].clone()), opts],
+                    )
+                } else {
+                    CExpr::Call(
+                        module.clone(),
+                        func.clone(),
+                        vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+                    )
+                };
                 bindings.into_iter().rev().fold(call, |body, (var, val)| {
                     CExpr::Let(var, Box::new(val), Box::new(body))
                 })
@@ -1107,11 +1381,6 @@ impl<'a> Lowerer<'a> {
             return ce;
         }
 
-        // List builtins
-        if let Some(ce) = self.lower_builtin_list(module, func_name, args) {
-            return ce;
-        }
-
         let erlang_module = self
             .module_aliases
             .get(module)
@@ -1173,346 +1442,6 @@ impl<'a> Lowerer<'a> {
         let call = CExpr::Call(
             erlang_module,
             func_name.to_string(),
-            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-        );
-
-        bindings.into_iter().rev().fold(call, |body, (var, val)| {
-            CExpr::Let(var, Box::new(val), Box::new(body))
-        })
-    }
-
-    /// Lower builtin conversion functions (Int.parse, Float.trunc, etc.)
-    /// to direct Erlang BIF calls. Returns None if not a builtin.
-    fn lower_builtin_conversion(
-        &mut self,
-        module: &str,
-        func_name: &str,
-        args: &[&Expr],
-    ) -> Option<CExpr> {
-        let some_atom = util::mangle_ctor_atom("Some", &self.constructor_modules);
-        let none_atom = util::mangle_ctor_atom("None", &self.constructor_modules);
-
-        match (module, func_name) {
-            // Int.to_float x  ->  call 'erlang':'float'(X)
-            ("Int", "to_float") => {
-                let arg = self.lower_expr(args[0]);
-                let v = self.fresh();
-                Some(CExpr::Let(
-                    v.clone(),
-                    Box::new(arg),
-                    Box::new(cerl_call("erlang", "float", vec![CExpr::Var(v)])),
-                ))
-            }
-
-            // Float.trunc x  ->  call 'erlang':'trunc'(X)
-            ("Float", "trunc") => {
-                let arg = self.lower_expr(args[0]);
-                let v = self.fresh();
-                Some(CExpr::Let(
-                    v.clone(),
-                    Box::new(arg),
-                    Box::new(cerl_call("erlang", "trunc", vec![CExpr::Var(v)])),
-                ))
-            }
-
-            // Float.round x  ->  call 'erlang':'round'(X)
-            ("Float", "round") => {
-                let arg = self.lower_expr(args[0]);
-                let v = self.fresh();
-                Some(CExpr::Let(
-                    v.clone(),
-                    Box::new(arg),
-                    Box::new(cerl_call("erlang", "round", vec![CExpr::Var(v)])),
-                ))
-            }
-
-            // Float.floor x  ->  call 'erlang':'floor'(X)
-            ("Float", "floor") => {
-                let arg = self.lower_expr(args[0]);
-                let v = self.fresh();
-                Some(CExpr::Let(
-                    v.clone(),
-                    Box::new(arg),
-                    Box::new(cerl_call("erlang", "floor", vec![CExpr::Var(v)])),
-                ))
-            }
-
-            // Float.ceil x  ->  call 'erlang':'ceil'(X)
-            ("Float", "ceil") => {
-                let arg = self.lower_expr(args[0]);
-                let v = self.fresh();
-                Some(CExpr::Let(
-                    v.clone(),
-                    Box::new(arg),
-                    Box::new(cerl_call("erlang", "ceil", vec![CExpr::Var(v)])),
-                ))
-            }
-
-            // Int.parse s  ->  case string:to_integer(S) of
-            //   {N, []} -> {Some, N}    (fully consumed)
-            //   _       -> {None}
-            ("Int", "parse") => {
-                let arg = self.lower_expr(args[0]);
-                let v = self.fresh();
-                let n = self.fresh();
-                let result = self.fresh();
-                let call = cerl_call("string", "to_integer", vec![CExpr::Var(v.clone())]);
-                let case = CExpr::Case(
-                    Box::new(CExpr::Var(result.clone())),
-                    vec![
-                        CArm {
-                            pat: CPat::Tuple(vec![CPat::Var(n.clone()), CPat::Nil]),
-                            guard: None,
-                            body: CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(some_atom)),
-                                CExpr::Var(n),
-                            ]),
-                        },
-                        CArm {
-                            pat: CPat::Wildcard,
-                            guard: None,
-                            body: CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(none_atom))]),
-                        },
-                    ],
-                );
-                Some(CExpr::Let(
-                    v,
-                    Box::new(arg),
-                    Box::new(CExpr::Let(result, Box::new(call), Box::new(case))),
-                ))
-            }
-
-            // Float.parse s  ->  case string:to_float(S) of
-            //   {F, []} -> {Some, F}
-            //   _       -> {None}
-            ("Float", "parse") => {
-                let arg = self.lower_expr(args[0]);
-                let v = self.fresh();
-                let f = self.fresh();
-                let result = self.fresh();
-                let call = cerl_call("string", "to_float", vec![CExpr::Var(v.clone())]);
-                let case = CExpr::Case(
-                    Box::new(CExpr::Var(result.clone())),
-                    vec![
-                        CArm {
-                            pat: CPat::Tuple(vec![CPat::Var(f.clone()), CPat::Nil]),
-                            guard: None,
-                            body: CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(some_atom)),
-                                CExpr::Var(f),
-                            ]),
-                        },
-                        CArm {
-                            pat: CPat::Wildcard,
-                            guard: None,
-                            body: CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(none_atom))]),
-                        },
-                    ],
-                );
-                Some(CExpr::Let(
-                    v,
-                    Box::new(arg),
-                    Box::new(CExpr::Let(result, Box::new(call), Box::new(case))),
-                ))
-            }
-
-            _ => None,
-        }
-    }
-
-    /// Lower Dict.* builtins to Erlang `maps` module BIF calls.
-    fn lower_builtin_dict(
-        &mut self,
-        module: &str,
-        func_name: &str,
-        args: &[&Expr],
-    ) -> Option<CExpr> {
-        if module != "Dict" {
-            return None;
-        }
-
-        match func_name {
-            // Dict.get key dict -> case maps:find(Key, Dict) of
-            //   {ok, V} -> {Some, V}
-            //   error   -> {None}
-            "get" => {
-                let some_atom = util::mangle_ctor_atom("Some", &self.constructor_modules);
-                let none_atom = util::mangle_ctor_atom("None", &self.constructor_modules);
-
-                let key_expr = self.lower_expr(args[0]);
-                let dict_expr = self.lower_expr(args[1]);
-                let k = self.fresh();
-                let d = self.fresh();
-                let result = self.fresh();
-                let v = self.fresh();
-
-                let call = cerl_call("maps", "find", vec![
-                    CExpr::Var(k.clone()),
-                    CExpr::Var(d.clone()),
-                ]);
-                let case = CExpr::Case(
-                    Box::new(CExpr::Var(result.clone())),
-                    vec![
-                        CArm {
-                            pat: CPat::Tuple(vec![
-                                CPat::Lit(CLit::Atom("ok".to_string())),
-                                CPat::Var(v.clone()),
-                            ]),
-                            guard: None,
-                            body: CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(some_atom)),
-                                CExpr::Var(v),
-                            ]),
-                        },
-                        CArm {
-                            pat: CPat::Lit(CLit::Atom("error".to_string())),
-                            guard: None,
-                            body: CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(none_atom))]),
-                        },
-                    ],
-                );
-
-                Some(CExpr::Let(
-                    k,
-                    Box::new(key_expr),
-                    Box::new(CExpr::Let(
-                        d,
-                        Box::new(dict_expr),
-                        Box::new(CExpr::Let(result, Box::new(call), Box::new(case))),
-                    )),
-                ))
-            }
-
-            // Dict.put key value dict -> maps:put(Key, Value, Dict)
-            "put" => Some(self.lower_bif_call("maps","put", args)),
-
-            // Dict.remove key dict -> maps:remove(Key, Dict)
-            "remove" => Some(self.lower_bif_call("maps","remove", args)),
-
-            // Dict.keys dict -> maps:keys(Dict)
-            "keys" => Some(self.lower_bif_call("maps","keys", args)),
-
-            // Dict.values dict -> maps:values(Dict)
-            "values" => Some(self.lower_bif_call("maps","values", args)),
-
-            // Dict.size dict -> maps:size(Dict)
-            "size" => Some(self.lower_bif_call("maps","size", args)),
-
-            // Dict.from_list list -> maps:from_list(List)
-            "from_list" => Some(self.lower_bif_call("maps","from_list", args)),
-
-            // Dict.to_list dict -> maps:to_list(Dict)
-            "to_list" => Some(self.lower_bif_call("maps","to_list", args)),
-
-            // Dict.member key dict -> maps:is_key(Key, Dict)
-            "member" => Some(self.lower_bif_call("maps","is_key", args)),
-
-            _ => None,
-        }
-    }
-
-    /// Lower List.* calls to Erlang `lists` / `erlang` BIF calls.
-    fn lower_builtin_list(
-        &mut self,
-        module: &str,
-        func_name: &str,
-        args: &[&Expr],
-    ) -> Option<CExpr> {
-        if module != "List" {
-            return None;
-        }
-
-        match (func_name, args.len()) {
-            // List.head xs -> erlang:hd(Xs)
-            ("head", 1) => Some(self.lower_bif_call("erlang", "hd", args)),
-
-            // List.tail xs -> erlang:tl(Xs)
-            ("tail", 1) => Some(self.lower_bif_call("erlang", "tl", args)),
-
-            // List.length xs -> erlang:length(Xs)
-            ("length", 1) => Some(self.lower_bif_call("erlang", "length", args)),
-
-            // List.map f xs -> lists:map(F, Xs)
-            ("map", 2) => Some(self.lower_bif_call("lists", "map", args)),
-
-            // List.filter pred xs -> lists:filter(Pred, Xs)
-            ("filter", 2) => Some(self.lower_bif_call("lists", "filter", args)),
-
-            // List.foldl f acc xs -> lists:foldl(Wrapper, Acc, Xs)
-            // Language: f(acc, elem), Erlang: f(elem, acc) -- need arg swap
-            ("foldl", 3) => {
-                let f_expr = self.lower_expr(args[0]);
-                let acc_expr = self.lower_expr(args[1]);
-                let xs_expr = self.lower_expr(args[2]);
-                let f_var = self.fresh();
-                let acc_var = self.fresh();
-                let xs_var = self.fresh();
-                let elem = self.fresh();
-                let acc_in = self.fresh();
-
-                // fun(Elem, AccIn) -> apply F(AccIn, Elem)
-                let wrapper = CExpr::Fun(
-                    vec![elem.clone(), acc_in.clone()],
-                    Box::new(CExpr::Apply(
-                        Box::new(CExpr::Var(f_var.clone())),
-                        vec![CExpr::Var(acc_in), CExpr::Var(elem)],
-                    )),
-                );
-                let w_var = self.fresh();
-
-                let call = cerl_call("lists", "foldl", vec![
-                    CExpr::Var(w_var.clone()),
-                    CExpr::Var(acc_var.clone()),
-                    CExpr::Var(xs_var.clone()),
-                ]);
-
-                Some(CExpr::Let(
-                    f_var,
-                    Box::new(f_expr),
-                    Box::new(CExpr::Let(
-                        acc_var,
-                        Box::new(acc_expr),
-                        Box::new(CExpr::Let(
-                            xs_var,
-                            Box::new(xs_expr),
-                            Box::new(CExpr::Let(w_var, Box::new(wrapper), Box::new(call))),
-                        )),
-                    )),
-                ))
-            }
-
-            // List.foldr f acc xs -> lists:foldr(F, Acc, Xs)
-            // Both use f(elem, acc) -- direct match
-            ("foldr", 3) => Some(self.lower_bif_call("lists", "foldr", args)),
-
-            // List.reverse xs -> lists:reverse(Xs)
-            ("reverse", 1) => Some(self.lower_bif_call("lists", "reverse", args)),
-
-            // List.append xs ys -> lists:append(Xs, Ys)
-            ("append", 2) => Some(self.lower_bif_call("lists", "append", args)),
-
-            // List.flat_map f xs -> lists:flatmap(F, Xs)
-            ("flat_map", 2) => Some(self.lower_bif_call("lists", "flatmap", args)),
-
-            _ => None,
-        }
-    }
-
-    /// Helper: lower args and emit a BIF call with no result wrapping.
-    fn lower_bif_call(&mut self, erl_module: &str, bif_name: &str, args: &[&Expr]) -> CExpr {
-        let mut arg_vars = Vec::new();
-        let mut bindings = Vec::new();
-
-        for arg in args {
-            let v = self.fresh();
-            let ce = self.lower_expr(arg);
-            arg_vars.push(v.clone());
-            bindings.push((v, ce));
-        }
-
-        let call = cerl_call(
-            erl_module,
-            bif_name,
             arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
         );
 

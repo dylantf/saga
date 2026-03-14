@@ -715,6 +715,20 @@ pub fn eval_decl(decl: &Decl, env: &Env, loader: &ModuleLoader) -> EvalResult {
         Decl::DictConstructor { .. } => {
             unreachable!("elaboration-only construct in interpreter")
         }
+
+        // External functions can't run in the interpreter.
+        // Register a placeholder that panics if called.
+        Decl::ExternalFun { name, params, .. } => {
+            env.set(
+                name.clone(),
+                value::Value::BuiltIn {
+                    name: format!("__external_{}", name),
+                    arity: params.len(),
+                    args: vec![],
+                },
+            );
+            EvalResult::Ok(value::Value::Unit)
+        }
     }
 }
 
@@ -936,6 +950,14 @@ fn eval_builtin(name: &str, args: Vec<Value>) -> EvalResult {
             } else {
                 EvalResult::error("Float.ceil: expected a Float")
             }
+        }
+
+        name if name.starts_with("__external_") => {
+            let fn_name = &name["__external_".len()..];
+            EvalResult::error(format!(
+                "external function '{}' cannot be evaluated in the interpreter",
+                fn_name
+            ))
         }
 
         _ => EvalResult::error(format!("Unknown builtin {}", name)),

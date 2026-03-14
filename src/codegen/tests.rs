@@ -90,18 +90,36 @@ main () = id 42
 // --- ADT constructors ---
 
 #[test]
-fn adt_zero_arg_is_atom() {
-    // `None` with no args -> bare atom 'None'
-    assert_contains("main () = None", "'None'");
+fn none_is_undefined_atom() {
+    // `None` -> 'undefined' (BEAM convention)
+    assert_contains("main () = None", "'undefined'");
 }
 
 #[test]
-fn adt_one_arg_is_tagged_tuple() {
-    // `Some(42)` -> {'Some', 42}
+fn some_is_bare_value() {
+    // `Some(42)` -> 42 (bare value, no tuple wrapping)
     let out = emit("main () = Some(42)");
-    assert!(out.contains("'Some'"), "missing tag\n{out}");
     assert!(out.contains("42"), "missing value\n{out}");
-    assert!(out.contains("{"), "missing tuple\n{out}");
+    assert!(!out.contains("'Some'"), "should not have Some tag\n{out}");
+}
+
+#[test]
+fn ok_uses_lowercase_atom() {
+    // `Ok(1)` -> {ok, 1}
+    let out = emit("main () = Ok(1)");
+    assert!(out.contains("'ok'"), "missing ok atom\n{out}");
+    assert!(!out.contains("'Ok'"), "should not have uppercase Ok\n{out}");
+}
+
+#[test]
+fn err_uses_error_atom() {
+    // `Err(1)` -> {error, 1}
+    let out = emit("main () = Err(1)");
+    assert!(out.contains("'error'"), "missing error atom\n{out}");
+    assert!(
+        !out.contains("'Err'"),
+        "should not have uppercase Err\n{out}"
+    );
 }
 
 // --- Lists ---
@@ -143,7 +161,9 @@ main () = case True {
 }
 
 #[test]
-fn case_constructor_patterns() {
+fn case_maybe_patterns() {
+    // Some(v) lowers to bare variable, None to 'undefined'.
+    // None arm must come before Some arm (specific before wildcard).
     let src = "
 unwrap opt = case opt {
   Some(v) -> v
@@ -151,8 +171,19 @@ unwrap opt = case opt {
 }
 ";
     let out = emit(src);
-    assert!(out.contains("'Some'"), "missing Some pattern\n{out}");
-    assert!(out.contains("'None'"), "missing None pattern\n{out}");
+    assert!(
+        out.contains("'undefined'"),
+        "missing undefined pattern for None\n{out}"
+    );
+    // Some(v) becomes a bare variable pattern
+    assert!(!out.contains("'Some'"), "should not have Some tag\n{out}");
+    // undefined arm should come before the variable arm
+    let undef_pos = out.find("'undefined'").unwrap();
+    let v_pos = out.rfind("V").unwrap();
+    assert!(
+        undef_pos < v_pos,
+        "undefined arm should come before variable arm\n{out}"
+    );
 }
 
 // --- Records ---
@@ -175,10 +206,7 @@ fn field_access_uses_element() {
 record Point { x: Int, y: Int }
 get_x p = p.x
 ";
-    assert_contains(
-        src,
-        "call 'erlang':'element'",
-    );
+    assert_contains(src, "call 'erlang':'element'");
 }
 
 #[test]
@@ -228,7 +256,10 @@ clamp x = case x {
 }
 ";
     let out = emit(src);
-    assert!(out.contains("when"), "simple guard should emit 'when'\n{out}");
+    assert!(
+        out.contains("when"),
+        "simple guard should emit 'when'\n{out}"
+    );
 }
 
 #[test]
@@ -247,7 +278,9 @@ filter_pos n = case n {
     // Instead it becomes a nested case inside the arm body.
     // Verify: every `when` in the output is immediately followed by `'true'`.
     assert!(
-        out.split("when").skip(1).all(|s| s.trim_start().starts_with("'true'")),
+        out.split("when")
+            .skip(1)
+            .all(|s| s.trim_start().starts_with("'true'")),
         "complex guard must only emit `when 'true'`, not a function call\n{out}"
     );
 }
@@ -276,10 +309,7 @@ process () = {
     // non-identity continuation that captures the rest of the block (x).
     // Specifically, the continuation K should reference the variable bound
     // from the effect result, not just return it unchanged.
-    assert!(
-        out.contains("case"),
-        "expected case for if-branch\n{out}"
-    );
+    assert!(out.contains("case"), "expected case for if-branch\n{out}");
     // The continuation for the non-effect branch should apply K to 42
     assert!(
         out.contains("apply"),
@@ -380,7 +410,10 @@ fn and_short_circuits() {
     let src = "main () = True && False";
     let out = emit(src);
     assert!(out.contains("case"), "expected case for &&\n{out}");
-    assert!(out.contains("'false'"), "expected false short-circuit\n{out}");
+    assert!(
+        out.contains("'false'"),
+        "expected false short-circuit\n{out}"
+    );
 }
 
 #[test]
@@ -405,69 +438,45 @@ main () = {
 ";
     let out = emit(src);
     // The destructuring should produce a case on the tuple
-    assert!(out.contains("case"), "expected case for tuple destructure\n{out}");
+    assert!(
+        out.contains("case"),
+        "expected case for tuple destructure\n{out}"
+    );
     // Variable A (lowered from `a`) should appear in the output
     assert!(out.contains("A"), "expected bound variable A\n{out}");
 }
 
 // --- Conversion builtins ---
 
-#[test]
-fn int_to_float() {
-    assert_contains(
-        "main () = Int.to_float 5",
-        "call 'erlang':'float'",
-    );
-}
-
-#[test]
-fn float_trunc() {
-    assert_contains(
-        "main () = Float.trunc 3.7",
-        "call 'erlang':'trunc'",
-    );
-}
-
-#[test]
-fn float_round() {
-    assert_contains(
-        "main () = Float.round 3.5",
-        "call 'erlang':'round'",
-    );
-}
-
-#[test]
-fn float_floor() {
-    assert_contains(
-        "main () = Float.floor 3.9",
-        "call 'erlang':'floor'",
-    );
-}
-
-#[test]
-fn float_ceil() {
-    assert_contains(
-        "main () = Float.ceil 3.1",
-        "call 'erlang':'ceil'",
-    );
-}
+// Int.to_float, Float.trunc/round/floor/ceil are now @external in Std/Int.dy and Std/Float.dy.
+// Their codegen is covered by module integration tests.
 
 #[test]
 fn int_parse() {
     let src = r#"main () = Int.parse "42""#;
     let out = emit(src);
-    assert!(out.contains("call 'string':'to_integer'"), "expected string:to_integer\n{out}");
-    assert!(out.contains("Some"), "expected Some constructor\n{out}");
-    assert!(out.contains("None"), "expected None constructor\n{out}");
+    assert!(
+        out.contains("call 'string':'to_integer'"),
+        "expected string:to_integer\n{out}"
+    );
+    assert!(
+        out.contains("'undefined'"),
+        "expected undefined for None\n{out}"
+    );
 }
 
 #[test]
 fn float_parse() {
     let src = r#"main () = Float.parse "2.5""#;
     let out = emit(src);
-    assert!(out.contains("call 'string':'to_float'"), "expected string:to_float\n{out}");
-    assert!(out.contains("Some"), "expected Some constructor\n{out}");
-    assert!(out.contains("None"), "expected None constructor\n{out}");
+    assert!(
+        out.contains("call 'string':'to_float'"),
+        "expected string:to_float\n{out}"
+    );
+    assert!(
+        out.contains("'undefined'"),
+        "expected undefined for None\n{out}"
+    );
 }
 
 // --- Dict builtins ---
@@ -477,131 +486,139 @@ fn dict_empty() {
     assert_contains("main () = Dict.empty", "call 'maps':'new'");
 }
 
-#[test]
-fn dict_put() {
-    let src = r#"main () = Dict.put "a" 1 Dict.empty"#;
-    assert_contains(src, "call 'maps':'put'");
-}
+// Dict.put, Dict.remove, Dict.keys, Dict.values, Dict.size, Dict.from_list,
+// Dict.to_list, Dict.member are now @external in Std/Dict.dy.
 
 #[test]
 fn dict_get() {
     let src = r#"
-main () = {
-  let d = Dict.put "a" 1 Dict.empty
-  Dict.get "a" d
+fun main () -> Maybe Int
+main () = Dict.get "a" Dict.empty
+"#;
+    let out = emit(src);
+    assert!(
+        out.contains("call 'maps':'find'"),
+        "expected maps:find\n{out}"
+    );
+    assert!(out.contains("'ok'"), "expected ok atom for Some\n{out}");
+    assert!(
+        out.contains("'undefined'"),
+        "expected undefined for None\n{out}"
+    );
+}
+
+// List.head, List.tail, List.length, List.map, List.filter, List.foldl, List.foldr,
+// List.reverse, List.append, List.flat_map are now defined in Std/List.dy.
+
+// --- @external ---
+
+#[test]
+fn external_fun_generates_wrapper() {
+    let src = r#"
+@external("erlang", "lists", "reverse")
+fun reverse (list: List a) -> List a
+main () = 42
+"#;
+    let out = emit(src);
+    // Should generate a wrapper function that calls lists:reverse
+    assert!(
+        out.contains("call 'lists':'reverse'"),
+        "Expected call to lists:reverse in:\n{out}"
+    );
+    // Wrapper should be exported
+    assert!(
+        out.contains("'reverse'/1"),
+        "Expected reverse/1 export in:\n{out}"
+    );
+}
+
+#[test]
+fn external_fun_direct_call() {
+    let src = r#"
+@external("erlang", "lists", "reverse")
+fun reverse (list: List a) -> List a
+
+main () = reverse [1, 2, 3]
+"#;
+    let out = emit(src);
+    assert!(
+        out.contains("call 'lists':'reverse'"),
+        "Expected direct call to lists:reverse in:\n{out}"
+    );
+}
+
+#[test]
+fn external_fun_multi_param() {
+    let src = r#"
+@external("erlang", "maps", "get")
+fun get (key: a) (map: Dict a b) -> b
+
+main () = get "x" Dict.empty
+"#;
+    let out = emit(src);
+    assert!(
+        out.contains("call 'maps':'get'"),
+        "Expected call to maps:get in:\n{out}"
+    );
+}
+
+#[test]
+fn external_fun_returning_maybe() {
+    // An external function returning Maybe should need no wrapping --
+    // Some(v) is a bare value and None is 'undefined', matching Erlang conventions.
+    let src = r#"
+@external("erlang", "os", "getenv")
+fun getenv (name: String) -> Maybe String
+
+main () = case getenv "HOME" {
+  Some(dir) -> dir
+  None -> "/tmp"
 }
 "#;
     let out = emit(src);
-    assert!(out.contains("call 'maps':'find'"), "expected maps:find\n{out}");
-    assert!(out.contains("Some"), "expected Some constructor\n{out}");
-    assert!(out.contains("None"), "expected None constructor\n{out}");
-}
-
-#[test]
-fn dict_remove() {
-    let src = r#"main () = Dict.remove "a" Dict.empty"#;
-    assert_contains(src, "call 'maps':'remove'");
-}
-
-#[test]
-fn dict_keys() {
-    assert_contains("main () = Dict.keys Dict.empty", "call 'maps':'keys'");
-}
-
-#[test]
-fn dict_values() {
-    assert_contains("main () = Dict.values Dict.empty", "call 'maps':'values'");
-}
-
-#[test]
-fn dict_size() {
-    assert_contains("main () = Dict.size Dict.empty", "call 'maps':'size'");
-}
-
-#[test]
-fn dict_from_list() {
-    let src = r#"main () = Dict.from_list [("a", 1)]"#;
-    assert_contains(src, "call 'maps':'from_list'");
-}
-
-#[test]
-fn dict_to_list() {
-    assert_contains("main () = Dict.to_list Dict.empty", "call 'maps':'to_list'");
-}
-
-#[test]
-fn dict_member() {
-    let src = r#"main () = Dict.member "a" Dict.empty"#;
-    assert_contains(src, "call 'maps':'is_key'");
-}
-
-// --- List builtins ---
-
-#[test]
-fn list_head() {
-    assert_contains("main () = List.head [1, 2]", "call 'erlang':'hd'");
-}
-
-#[test]
-fn list_tail() {
-    assert_contains("main () = List.tail [1, 2]", "call 'erlang':'tl'");
-}
-
-#[test]
-fn list_length() {
-    assert_contains("main () = List.length [1, 2]", "call 'erlang':'length'");
-}
-
-#[test]
-fn list_map() {
-    assert_contains(
-        "main () = List.map (fun x -> x + 1) [1, 2]",
-        "call 'lists':'map'",
+    // Direct call, no wrapping logic
+    assert!(
+        out.contains("call 'os':'getenv'"),
+        "Expected direct call to os:getenv in:\n{out}"
+    );
+    // No tuple wrapping around the result
+    assert!(
+        !out.contains("'Some'"),
+        "Should not have Some tag in:\n{out}"
+    );
+    // Pattern match should use 'undefined' for None
+    assert!(
+        out.contains("'undefined'"),
+        "Expected undefined pattern for None in:\n{out}"
     );
 }
 
 #[test]
-fn list_filter() {
-    assert_contains(
-        "main () = List.filter (fun x -> x > 0) [1, 2]",
-        "call 'lists':'filter'",
-    );
-}
+fn external_fun_returning_result() {
+    // An external function returning Result should need no wrapping --
+    // Ok(v) is {ok, v} and Err(e) is {error, e}, matching Erlang conventions.
+    let src = r#"
+@external("erlang", "file", "read_file")
+fun read_file (path: String) -> Result String String
 
-#[test]
-fn list_foldl() {
-    let src = "main () = List.foldl (fun acc x -> acc + x) 0 [1, 2, 3]";
+main () = case read_file "/etc/hostname" {
+  Ok(contents) -> contents
+  Err(reason) -> reason
+}
+"#;
     let out = emit(src);
-    assert!(out.contains("call 'lists':'foldl'"), "expected lists:foldl\n{out}");
-    // Should have a wrapper fun for arg swap
-    assert!(out.contains("fun ("), "expected wrapper lambda\n{out}");
-}
-
-#[test]
-fn list_foldr() {
-    assert_contains(
-        "main () = List.foldr (fun x acc -> x + acc) 0 [1, 2, 3]",
-        "call 'lists':'foldr'",
+    // Direct call, no wrapping logic
+    assert!(
+        out.contains("call 'file':'read_file'"),
+        "Expected direct call to file:read_file in:\n{out}"
     );
-}
-
-#[test]
-fn list_reverse() {
-    assert_contains("main () = List.reverse [1, 2]", "call 'lists':'reverse'");
-}
-
-#[test]
-fn list_append() {
-    assert_contains(
-        "main () = List.append [1] [2]",
-        "call 'lists':'append'",
+    // Pattern match should use lowercase atoms
+    assert!(
+        out.contains("'ok'"),
+        "Expected ok atom for Ok pattern in:\n{out}"
     );
-}
-
-#[test]
-fn list_flat_map() {
-    assert_contains(
-        "main () = List.flat_map (fun x -> [x, x]) [1, 2]",
-        "call 'lists':'flatmap'",
+    assert!(
+        out.contains("'error'"),
+        "Expected error atom for Err pattern in:\n{out}"
     );
 }
