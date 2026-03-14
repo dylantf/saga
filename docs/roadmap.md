@@ -219,6 +219,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - `Semigroup` / `Monoid` in stdlib
 - Effect row polymorphism / effect variables (`needs e`)
 - `Dynamic` type for consuming untyped Erlang data (JSON parsers, ETS, message passing)
+- Cache cloning in typecheck_import: At check_module.rs:204-209, six HashMap caches are .clone()d into every module checker. For deep import trees this is a lot of allocation. The caches are read-heavy and append-only during module checking. Using Rc<RefCell<...>> or passing references would avoid the cloning, but this makes the borrow checker harder to work with. Can be revisited if performance becomes a concern (and after profiling to see if the cloning is the issue).
 
 ## Out of Scope
 
