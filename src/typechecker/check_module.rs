@@ -153,13 +153,53 @@ impl Checker {
 
         self.tc_loading.insert(module_name.clone());
 
-        let mut mod_checker = match project_root {
-            Some(root) => super::Checker::with_project_root(root),
-            None => super::Checker::new(),
+        // Create a module checker. For non-builtin modules, clone the prelude
+        // snapshot so we don't re-parse/re-check the prelude for every import.
+        // For builtin Std modules, start from a fresh checker with the parent's
+        // traits copied in (they can't load the prelude due to circular imports).
+        let mut mod_checker = if !is_builtin {
+            // Build or reuse the prelude snapshot
+            if self.tc_prelude_snapshot.is_none() {
+                let mut snapshot = match &project_root {
+                    Some(root) => super::Checker::with_project_root(root.clone()),
+                    None => super::Checker::new(),
+                };
+                let prelude_src = include_str!("../prelude/prelude.dy");
+                let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
+                    .lex()
+                    .expect("prelude lex error");
+                let prelude_program = crate::parser::Parser::new(prelude_tokens)
+                    .parse_program()
+                    .expect("prelude parse error");
+                snapshot
+                    .check_program(&prelude_program)
+                    .expect("prelude type error");
+                self.tc_prelude_snapshot = Some(Box::new(snapshot));
+            }
+            let mut mc = *self.tc_prelude_snapshot.as_ref().unwrap().clone();
+            mc.next_var = self.next_var;
+            mc
+        } else {
+            let mut mc = match project_root {
+                Some(root) => super::Checker::with_project_root(root),
+                None => super::Checker::new(),
+            };
+            mc.next_var = self.next_var;
+            // Share parent's trait definitions so builtin modules can impl traits like Show
+            for (name, info) in &self.traits {
+                if !mc.traits.contains_key(name) {
+                    mc.traits.insert(name.clone(), info.clone());
+                    for (method_name, _, _) in &info.methods {
+                        if let Some(scheme) = self.env.get(method_name) {
+                            if mc.env.get(method_name).is_none() {
+                                mc.env.insert(method_name.clone(), scheme.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            mc
         };
-        // Start the module checker's var IDs after the parent's current counter
-        // to avoid var ID collisions when module schemes are injected into the parent.
-        mod_checker.next_var = self.next_var;
         // Share the module cache so transitive imports benefit from caching
         mod_checker.tc_loaded = self.tc_loaded.clone();
         mod_checker.tc_type_ctors = self.tc_type_ctors.clone();
@@ -167,45 +207,6 @@ impl Checker {
         mod_checker.tc_record_defs = self.tc_record_defs.clone();
         mod_checker.tc_trait_impls = self.tc_trait_impls.clone();
         mod_checker.tc_traits = self.tc_traits.clone();
-        // Share parent's trait definitions so builtin modules (which skip
-        // the prelude) can still impl traits like Show.
-        for (name, info) in &self.traits {
-            if !mod_checker.traits.contains_key(name) {
-                mod_checker.traits.insert(name.clone(), info.clone());
-                for (method_name, _, _) in &info.methods {
-                    if self.env.get(method_name).is_some()
-                        && mod_checker.env.get(method_name).is_none()
-                    {
-                        mod_checker.env.insert(
-                            method_name.clone(),
-                            self.env.get(method_name).unwrap().clone(),
-                        );
-                    }
-                }
-            }
-        }
-
-        // Run a fresh checker on prelude + module.
-        // Builtin Std modules skip the prelude to avoid circular imports
-        // (the prelude itself imports Std modules).
-        if !is_builtin {
-            let prelude_src = include_str!("../prelude/prelude.dy");
-            let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
-                .lex()
-                .expect("prelude lex error");
-            let prelude_program = crate::parser::Parser::new(prelude_tokens)
-                .parse_program()
-                .expect("prelude parse error");
-            mod_checker.check_program(&prelude_program).map_err(|e| {
-                TypeError::at(
-                    span,
-                    format!(
-                        "type error in prelude (for module '{}'): {}",
-                        module_name, e
-                    ),
-                )
-            })?;
-        }
         mod_checker.check_program(&program).map_err(|e| {
             TypeError::at(
                 span,

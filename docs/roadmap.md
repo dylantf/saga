@@ -101,7 +101,6 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ## Syntax
 
-
 ## Backend
 
 ### Infrastructure
@@ -193,9 +192,9 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 - [x] Wire prelude functions to BEAM equivalents (`List`, `Maybe`, `Result`)
 - [x] FFI (`@external` declarations for Erlang module calls)
-- [x] Compile Std.* modules to BEAM (script mode auto-compiles stdlib into `_build/`)
+- [x] Compile Std.\* modules to BEAM (script mode auto-compiles stdlib into `_build/`)
 - [x] Prelude imports flow into lowerer (script mode resolves `List` -> `std_list`)
-- [ ] Deduplicate prelude impls (Show dicts, `print` currently emitted into every module; should live in one place)
+- [x] Deduplicate prelude impls (Show dicts, `print` currently emitted into every module; should live in one place)
 
 ## Runtime Optimization
 

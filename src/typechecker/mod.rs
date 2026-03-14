@@ -102,7 +102,7 @@ impl std::fmt::Display for Type {
 // --- Substitution ---
 
 /// Maps type variable IDs to their solved types.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Substitution {
     map: HashMap<u32, Type>,
 }
@@ -373,6 +373,7 @@ pub struct TraitEvidence {
 
 // --- Inference engine ---
 
+#[derive(Clone)]
 pub struct Checker {
     pub(crate) next_var: u32,
     pub sub: Substitution,
@@ -423,6 +424,8 @@ pub struct Checker {
     /// Cache of trait impls from typechecked modules: module name -> (trait, type) -> impl info.
     pub(crate) tc_trait_impls: HashMap<String, HashMap<(String, String), ImplInfo>>,
     pub(crate) tc_traits: HashMap<String, HashMap<String, TraitInfo>>,
+    /// Cached checker state after prelude has been loaded (avoids re-checking prelude for each module import).
+    pub(crate) tc_prelude_snapshot: Option<Box<Checker>>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) tc_loading: HashSet<String>,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
@@ -465,6 +468,7 @@ impl Checker {
             tc_record_defs: HashMap::new(),
             tc_trait_impls: HashMap::new(),
             tc_traits: HashMap::new(),
+            tc_prelude_snapshot: None,
             tc_loading: HashSet::new(),
             adt_variants: HashMap::new(),
             evidence: Vec::new(),
