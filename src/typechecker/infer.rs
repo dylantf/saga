@@ -1162,7 +1162,36 @@ impl Checker {
         type_params: &[u32],
     ) -> EffectOpSig {
         if type_params.is_empty() {
-            return op.clone();
+            // No effect-level type params, but the op may have free type vars
+            // (e.g. Process.spawn returns Pid msg where msg is free).
+            // Collect all var IDs and instantiate fresh per call.
+            let mut free_vars = std::collections::HashSet::new();
+            fn collect_vars(ty: &Type, vars: &mut std::collections::HashSet<u32>) {
+                match ty {
+                    Type::Var(id) => { vars.insert(*id); }
+                    Type::Arrow(a, b) | Type::EffArrow(a, b, _) => {
+                        collect_vars(a, vars);
+                        collect_vars(b, vars);
+                    }
+                    Type::Con(_, args) => {
+                        for a in args { collect_vars(a, vars); }
+                    }
+                }
+            }
+            for p in &op.params { collect_vars(p, &mut free_vars); }
+            collect_vars(&op.return_type, &mut free_vars);
+            if free_vars.is_empty() {
+                return op.clone();
+            }
+            let mapping: std::collections::HashMap<u32, Type> = free_vars
+                .iter()
+                .map(|&id| (id, self.fresh_var()))
+                .collect();
+            return EffectOpSig {
+                name: op.name.clone(),
+                params: op.params.iter().map(|t| self.replace_vars(t, &mapping)).collect(),
+                return_type: self.replace_vars(&op.return_type, &mapping),
+            };
         }
         // Reuse cached mapping or create fresh vars
         let mapping = if let Some(cached) = self.effect_type_param_cache.get(effect_name) {

@@ -748,32 +748,21 @@ impl Checker {
 
         // --- Pid type and Actor effect ---
 
-        // Pid is a parameterized type (Pid msg). No constructors, no ADT variants.
-        // Just needs to exist so Type::Con("Pid", vec![msg]) resolves.
+        // --- Pid type and concurrency effects ---
 
-        // Actor effect has two type params:
-        //   msg   -- the current process's message type (for receive, self)
-        //   child -- the spawned process's message type (for spawn)
-        // send is a standalone builtin (polymorphic over any Pid type).
+        // Pid msg: parameterized type, compile-time only. No constructors.
+
+        // Process effect: spawn and send. No type params on the effect itself.
+        // spawn and send have free type vars (msg) that are inferred per call site.
         {
             let msg = self.fresh_var();
-            let msg_id = match &msg {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let child = self.fresh_var();
-            let child_id = match &child {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
             let pid_msg = Type::Con("Pid".into(), vec![msg.clone()]);
-            let pid_child = Type::Con("Pid".into(), vec![child.clone()]);
             let unit = Type::unit();
 
             self.effects.insert(
-                "Actor".into(),
+                "Process".into(),
                 EffectDefInfo {
-                    type_params: vec![msg_id, child_id],
+                    type_params: vec![],
                     ops: vec![
                         EffectOpSig {
                             name: "spawn".into(),
@@ -781,51 +770,57 @@ impl Checker {
                                 Box::new(unit.clone()),
                                 Box::new(unit.clone()),
                             )],
-                            return_type: pid_child,
+                            return_type: pid_msg.clone(),
                         },
                         EffectOpSig {
-                            name: "self".into(),
-                            params: vec![],
-                            return_type: pid_msg,
+                            name: "send".into(),
+                            params: vec![pid_msg, msg],
+                            return_type: unit,
                         },
                     ],
                 },
             );
-
-            // Register beam_actor handler
-            self.handlers.insert(
-                "beam_actor".into(),
-                HandlerInfo {
-                    effects: vec!["Actor".into()],
-                    return_type: None,
-                },
-            );
         }
 
-        // send : Pid a -> a -> Unit (standalone builtin, not an effect op)
-        // Independent of Actor's type params so you can send to any typed Pid.
+        // Actor msg: parameterized by the current process's message type.
+        // Only self and receive use this (scoped to this process's mailbox).
         {
-            let a = self.fresh_var();
-            let a_id = match &a {
+            let msg = self.fresh_var();
+            let msg_id = match &msg {
                 Type::Var(id) => *id,
                 _ => unreachable!(),
             };
-            let pid_a = Type::Con("Pid".into(), vec![a.clone()]);
-            self.env.insert(
-                "send".into(),
-                Scheme {
-                    forall: vec![a_id],
-                    constraints: vec![],
-                    ty: Type::Arrow(
-                        Box::new(pid_a),
-                        Box::new(Type::Arrow(
-                            Box::new(a),
-                            Box::new(Type::unit()),
-                        )),
-                    ),
+            let pid_msg = Type::Con("Pid".into(), vec![msg.clone()]);
+
+            self.effects.insert(
+                "Actor".into(),
+                EffectDefInfo {
+                    type_params: vec![msg_id],
+                    ops: vec![EffectOpSig {
+                        name: "self".into(),
+                        params: vec![],
+                        return_type: pid_msg,
+                    }],
                 },
             );
         }
+
+        // beam_runtime: handles both Process and Actor
+        self.handlers.insert(
+            "beam_runtime".into(),
+            HandlerInfo {
+                effects: vec!["Process".into(), "Actor".into()],
+                return_type: None,
+            },
+        );
+        // Keep beam_actor as alias for backwards compat
+        self.handlers.insert(
+            "beam_actor".into(),
+            HandlerInfo {
+                effects: vec!["Process".into(), "Actor".into()],
+                return_type: None,
+            },
+        );
     }
 
     // --- Unification ---

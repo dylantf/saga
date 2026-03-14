@@ -112,14 +112,26 @@ impl<'a> Lowerer<'a> {
             external_funs: HashMap::new(),
         };
         // Register builtin Actor effect ops
-        lowerer.op_to_effect.insert("spawn".into(), "Actor".into());
+        // Register builtin concurrency effects
+        lowerer.op_to_effect.insert("spawn".into(), "Process".into());
+        lowerer.op_to_effect.insert("send".into(), "Process".into());
         lowerer.op_to_effect.insert("self".into(), "Actor".into());
+        lowerer.effect_defs.insert(
+            "Process".into(),
+            EffectInfo {
+                ops: {
+                    let mut ops = HashMap::new();
+                    ops.insert("spawn".into(), 1);
+                    ops.insert("send".into(), 2);
+                    ops
+                },
+            },
+        );
         lowerer.effect_defs.insert(
             "Actor".into(),
             EffectInfo {
                 ops: {
                     let mut ops = HashMap::new();
-                    ops.insert("spawn".into(), 1); // f: () -> Unit
                     ops.insert("self".into(), 0);
                     ops
                 },
@@ -794,29 +806,7 @@ impl<'a> Lowerer<'a> {
                     );
                 }
 
-                // Lower `send pid msg` to erlang:send(pid, msg)
-                if let Some((func_name, args)) = collect_fun_call(expr)
-                    && func_name == "send"
-                    && args.len() == 2
-                {
-                    let pid = self.lower_expr(args[0]);
-                    let msg = self.lower_expr(args[1]);
-                    let pid_var = self.fresh();
-                    let msg_var = self.fresh();
-                    return CExpr::Let(
-                        pid_var.clone(),
-                        Box::new(pid),
-                        Box::new(CExpr::Let(
-                            msg_var.clone(),
-                            Box::new(msg),
-                            Box::new(cerl_call(
-                                "erlang",
-                                "send",
-                                vec![CExpr::Var(pid_var), CExpr::Var(msg_var)],
-                            )),
-                        )),
-                    );
-                }
+
 
                 // Check for a saturated call to a known top-level function.
                 // e.g. `add 3 4` -> App(App(Var("add"), 3), 4)

@@ -895,17 +895,18 @@ impl<'a> Lowerer<'a> {
     /// Builds handler function(s) from the handler definition and passes them
     /// as extra parameters to the effectful computation.
     pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
-        // beam_actor: Actor ops are already transformed to ForeignCall by elaboration,
-        // so just lower the inner expression directly -- nothing to handle.
+        // beam_actor/beam_runtime: ops are already ForeignCall from elaboration.
+        // Just lower the inner expression directly.
+        let is_beam_handler = |n: &str| n == "beam_actor" || n == "beam_runtime";
         if let Handler::Named(name) = handler {
-            if name == "beam_actor" {
+            if is_beam_handler(name) {
                 return self.lower_expr(expr);
             }
         }
         if let Handler::Inline { named, arms, .. } = handler {
-            if named.iter().any(|n| n == "beam_actor") {
+            if named.iter().any(|n| is_beam_handler(n)) {
                 let remaining_named: Vec<String> =
-                    named.iter().filter(|n| *n != "beam_actor").cloned().collect();
+                    named.iter().filter(|n| !is_beam_handler(n)).cloned().collect();
                 if remaining_named.is_empty() && arms.is_empty() {
                     return self.lower_expr(expr);
                 }

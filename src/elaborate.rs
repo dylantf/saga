@@ -42,8 +42,6 @@ struct Elaborator {
     current_dict_params: HashMap<String, String>,
     /// Erlang module name for this module (e.g. "animals"), used for dict name qualification
     erlang_module: String,
-    /// When true, Actor effect calls are transformed to ForeignCall (inside `with beam_actor`)
-    in_beam_actor_scope: bool,
 }
 
 impl Elaborator {
@@ -107,7 +105,6 @@ impl Elaborator {
             current_fun: None,
             current_dict_params: HashMap::new(),
             erlang_module,
-            in_beam_actor_scope: false,
         }
     }
 
@@ -250,11 +247,11 @@ impl Elaborator {
                 Decl::TraitDef { .. } => {}
                 Decl::FunAnnotation { .. } => {
                     // Keep annotations for the lowerer (it uses them for arity).
-                    // Strip Actor effect -- it's handled by beam_actor (ForeignCall),
-                    // not by the CPS handler machinery.
+                    // Strip Process and Actor effects -- they're handled by
+                    // beam_runtime (ForeignCall), not CPS.
                     let mut d = decl.clone();
                     if let Decl::FunAnnotation { effects, .. } = &mut d {
-                        effects.retain(|e| e.name != "Actor");
+                        effects.retain(|e| e.name != "Actor" && e.name != "Process");
                     }
                     output.push(d);
                 }
@@ -401,7 +398,8 @@ impl Elaborator {
 
             // Function application: check if we need to insert dict args
             Expr::App { func, arg, span } => {
-                // Actor effect calls: transform App(EffectCall, arg) to ForeignCall
+                // Concurrency effect calls -> ForeignCall
+                // spawn! f => App(EffectCall("spawn"), f)
                 if let Expr::EffectCall { name, .. } = func.as_ref() {
                     if name == "spawn" {
                         return Expr::ForeignCall {
@@ -419,6 +417,27 @@ impl Elaborator {
                             args: vec![],
                             span: *span,
                         };
+                    }
+                }
+                // send! pid msg => App(App(EffectCall("send"), pid), msg)
+                if let Expr::App {
+                    func: inner_func,
+                    arg: first_arg,
+                    ..
+                } = func.as_ref()
+                {
+                    if let Expr::EffectCall { name, .. } = inner_func.as_ref() {
+                        if name == "send" {
+                            return Expr::ForeignCall {
+                                module: "erlang".into(),
+                                func: "send".into(),
+                                args: vec![
+                                    self.elaborate_expr(first_arg),
+                                    self.elaborate_expr(arg),
+                                ],
+                                span: *span,
+                            };
+                        }
                     }
                 }
 
@@ -686,24 +705,19 @@ impl Elaborator {
                 handler,
                 span,
             } => {
-                // beam_actor: transform Actor ops to ForeignCall, strip the handler
-                let is_beam_actor = matches!(handler.as_ref(), Handler::Named(n) if n == "beam_actor");
-                let has_beam_actor = matches!(handler.as_ref(),
-                    Handler::Inline { named, .. } if named.iter().any(|n| n == "beam_actor")
+                let is_beam_handler = |n: &str| n == "beam_actor" || n == "beam_runtime";
+
+                // beam_actor/beam_runtime: ops are already ForeignCall, strip the handler
+                let is_beam = matches!(handler.as_ref(), Handler::Named(n) if is_beam_handler(n));
+                let has_beam = matches!(handler.as_ref(),
+                    Handler::Inline { named, .. } if named.iter().any(|n| is_beam_handler(n))
                 );
 
-                if is_beam_actor {
-                    let saved = self.in_beam_actor_scope;
-                    self.in_beam_actor_scope = true;
-                    let result = self.elaborate_expr(e);
-                    self.in_beam_actor_scope = saved;
-                    return result;
+                if is_beam {
+                    return self.elaborate_expr(e);
                 }
 
-                if has_beam_actor {
-                    let saved = self.in_beam_actor_scope;
-                    self.in_beam_actor_scope = true;
-                    // Filter beam_actor out of the handler, keep other handlers
+                if has_beam {
                     if let Handler::Inline {
                         named,
                         arms,
@@ -711,24 +725,20 @@ impl Elaborator {
                     } = handler.as_ref()
                     {
                         let remaining: Vec<String> =
-                            named.iter().filter(|n| *n != "beam_actor").cloned().collect();
+                            named.iter().filter(|n| !is_beam_handler(n)).cloned().collect();
                         if remaining.is_empty() && arms.is_empty() {
-                            let result = self.elaborate_expr(e);
-                            self.in_beam_actor_scope = saved;
-                            return result;
+                            return self.elaborate_expr(e);
                         }
                         let filtered = Handler::Inline {
                             named: remaining,
                             arms: arms.clone(),
                             return_clause: return_clause.clone(),
                         };
-                        let result = Expr::With {
+                        return Expr::With {
                             expr: Box::new(self.elaborate_expr(e)),
                             handler: Box::new(self.elaborate_handler(&filtered)),
                             span: *span,
                         };
-                        self.in_beam_actor_scope = saved;
-                        return result;
                     }
                 }
 
