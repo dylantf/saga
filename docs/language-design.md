@@ -59,9 +59,9 @@ main () = {
 ## 2. ADTs and Pattern Matching
 
 ```
-type Option a {
-  Some(a)
-  None
+type Maybe a {
+  Maybe(a)
+  Nothing
 }
 
 type Result a e {
@@ -77,8 +77,8 @@ type List a {
 # Exhaustive pattern matching
 pub fun unwrap (opt: Option a) (default: a) -> a
 unwrap opt default = case opt {
-  Some(x) -> x
-  None -> default
+  Just x -> x
+  Nothing -> default
 }
 
 # Nested patterns
@@ -205,13 +205,13 @@ header_only resp = case resp {
 # `_` for positional ADT discards
 fun has_value (opt: Option a) -> Bool
 has_value opt = case opt {
-  Some(_) -> True
+  Just _ -> True
   None -> False
 }
 
 # ADTs can still have simple positional variants
-type Option a {
-  Some(a)
+type Maybe a {
+  Just(a)
   None
 }
 

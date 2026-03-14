@@ -60,6 +60,7 @@ pub enum Decl {
         name: String,
         type_params: Vec<String>,
         variants: Vec<TypeConstructor>,
+        deriving: Vec<String>,
         span: Span,
     },
 

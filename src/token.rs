@@ -38,6 +38,7 @@ pub enum Token {
     Needs,
     For,
     Do,
+    Deriving,
     EffectCall(String),
 
     // Operators

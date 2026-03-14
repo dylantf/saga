@@ -161,7 +161,7 @@ impl Checker {
                 format!("lex error in module '{}': {}", module_name, e.message),
             )
         })?;
-        let program = crate::parser::Parser::new(tokens)
+        let mut program = crate::parser::Parser::new(tokens)
             .parse_program()
             .map_err(|e| {
                 TypeError::at(
@@ -169,6 +169,7 @@ impl Checker {
                     format!("parse error in module '{}': {}", module_name, e.message),
                 )
             })?;
+        crate::derive::expand_derives(&mut program);
 
         // Cache the parsed program so the build step can skip re-parsing
         self.tc_programs
@@ -191,9 +192,10 @@ impl Checker {
                 let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
                     .lex()
                     .expect("prelude lex error");
-                let prelude_program = crate::parser::Parser::new(prelude_tokens)
+                let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
                     .parse_program()
                     .expect("prelude parse error");
+                crate::derive::expand_derives(&mut prelude_program);
                 snapshot
                     .check_program(&prelude_program)
                     .expect("prelude type error");

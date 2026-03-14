@@ -1,4 +1,4 @@
-use dylang::{ast, codegen, elaborate, eval, lexer, parser, typechecker};
+use dylang::{ast, codegen, derive, elaborate, eval, lexer, parser, typechecker};
 
 use std::env;
 use std::fs;
@@ -50,7 +50,7 @@ fn parse_and_typecheck(
             std::process::exit(1);
         }
     };
-    let program = match parser::Parser::new(tokens).parse_program() {
+    let mut program = match parser::Parser::new(tokens).parse_program() {
         Ok(p) => p,
         Err(e) => {
             let (line, col) = byte_offset_to_line_col(source, e.span.start);
@@ -61,6 +61,7 @@ fn parse_and_typecheck(
             std::process::exit(1);
         }
     };
+    derive::expand_derives(&mut program);
     if let Err(e) = checker.check_program(&program) {
         if let Some(span) = e.span {
             let (line, col) = byte_offset_to_line_col(source, span.start);
@@ -82,9 +83,10 @@ fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
     let prelude_tokens = lexer::Lexer::new(prelude_src)
         .lex()
         .expect("prelude lex error");
-    let prelude_program = parser::Parser::new(prelude_tokens)
+    let mut prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
+    derive::expand_derives(&mut prelude_program);
     if let Err(e) = checker.check_program(&prelude_program) {
         eprintln!("Prelude type error: {}", e);
         std::process::exit(1);
@@ -105,7 +107,7 @@ fn compile_std_modules(checker: &typechecker::Checker, build_dir: &std::path::Pa
     for module_name in &std_modules {
         let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
 
-        let program = if let Some(cached) = checker.tc_programs.get(module_name) {
+        let mut program = if let Some(cached) = checker.tc_programs.get(module_name) {
             cached.clone()
         } else {
             let source = typechecker::builtin_module_source(&module_path)
@@ -121,6 +123,7 @@ fn compile_std_modules(checker: &typechecker::Checker, build_dir: &std::path::Pa
                     std::process::exit(1);
                 })
         };
+        derive::expand_derives(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(None, true);
         if let Err(e) = mod_checker.check_program(&program) {
@@ -235,7 +238,7 @@ fn build_project(profile: &str) -> PathBuf {
         .collect();
 
     for module_name in &module_names {
-        let program = if let Some(cached) = checker.tc_programs.get(module_name) {
+        let mut program = if let Some(cached) = checker.tc_programs.get(module_name) {
             cached.clone()
         } else {
             let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
@@ -256,6 +259,7 @@ fn build_project(profile: &str) -> PathBuf {
                     std::process::exit(1);
                 })
         };
+        derive::expand_derives(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
         if let Err(e) = mod_checker.check_program(&program) {

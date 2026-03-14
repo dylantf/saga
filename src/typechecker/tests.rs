@@ -6,14 +6,16 @@ fn check(src: &str) -> Result<Checker, TypeError> {
     let mut lexer = Lexer::new(src);
     let tokens = lexer.lex().expect("lex error");
     let mut parser = Parser::new(tokens);
-    let program = parser.parse_program().expect("parse error");
+    let mut program = parser.parse_program().expect("parse error");
+    crate::derive::expand_derives(&mut program);
     let mut checker = Checker::new();
     // Load the prelude so Show, print, etc. are available
     let prelude_src = include_str!("../prelude/prelude.dy");
     let prelude_tokens = Lexer::new(prelude_src).lex().expect("prelude lex error");
-    let prelude_program = Parser::new(prelude_tokens)
+    let mut prelude_program = Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
+    crate::derive::expand_derives(&mut prelude_program);
     checker.check_program(&prelude_program)?;
     checker.check_program(&program)?;
     Ok(checker)
@@ -2797,6 +2799,43 @@ let result = {
   let fib n = fib (n - 1) + fib (n - 2)
   fib 10
 }
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_show_simple_enum() {
+    check(
+        r#"
+type Color { Red | Green | Blue } deriving (Show)
+let x = show Red
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_show_with_fields() {
+    check(
+        r#"
+type Shape {
+  Circle(Int)
+  Rect(Int, Int)
+  Point
+} deriving (Show)
+let x = show (Circle 5)
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_show_polymorphic() {
+    check(
+        r#"
+type Box a { Box(a) | Empty } deriving (Show)
+let x = show (Box 42)
 "#,
     )
     .unwrap();

@@ -269,6 +269,7 @@ impl Lexer {
             "needs" => Token::Needs,
             "for" => Token::For,
             "do" => Token::Do,
+            "deriving" => Token::Deriving,
             "mut" => Token::Ident("mut".into()),
             // Lex True/False as keywords even though they are treated as types
             "True" => Token::True,

@@ -1,0 +1,15 @@
+type Animal {
+  Dog(age: Int)
+  Cat
+} deriving (Show)
+
+speak animal = case animal {
+  Dog(age) if age > 15 -> "im tired"
+  Dog(_) -> "woof"
+  Cat -> "meow"
+}
+
+main () = {
+  let hans = Dog 5
+  print $"{show hans} says {hans |> speak}"
+}

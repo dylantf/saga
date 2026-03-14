@@ -2201,3 +2201,43 @@ fn external_fun_with_where_clause() {
         _ => panic!("expected ExternalFun"),
     }
 }
+
+#[test]
+fn type_def_deriving_show() {
+    let decls = parse("type Color { Red | Green | Blue } deriving (Show)");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::TypeDef {
+            name, deriving, ..
+        } => {
+            assert_eq!(name, "Color");
+            assert_eq!(deriving, &vec!["Show".to_string()]);
+        }
+        _ => panic!("expected TypeDef"),
+    }
+}
+
+#[test]
+fn type_def_deriving_multiple() {
+    // Parser accepts multiple traits even if not all are implemented yet
+    let decls = parse("type Foo { A | B } deriving (Show, Eq)");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::TypeDef { deriving, .. } => {
+            assert_eq!(deriving, &vec!["Show".to_string(), "Eq".to_string()]);
+        }
+        _ => panic!("expected TypeDef"),
+    }
+}
+
+#[test]
+fn type_def_no_deriving() {
+    let decls = parse("type Foo { A | B }");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::TypeDef { deriving, .. } => {
+            assert!(deriving.is_empty());
+        }
+        _ => panic!("expected TypeDef"),
+    }
+}
