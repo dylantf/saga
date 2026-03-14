@@ -190,10 +190,10 @@ impl Checker {
                 if !mc.traits.contains_key(name) {
                     mc.traits.insert(name.clone(), info.clone());
                     for (method_name, _, _) in &info.methods {
-                        if let Some(scheme) = self.env.get(method_name) {
-                            if mc.env.get(method_name).is_none() {
-                                mc.env.insert(method_name.clone(), scheme.clone());
-                            }
+                        if let Some(scheme) = self.env.get(method_name)
+                            && mc.env.get(method_name).is_none()
+                        {
+                            mc.env.insert(method_name.clone(), scheme.clone());
                         }
                     }
                 }
