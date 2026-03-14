@@ -23,13 +23,14 @@ fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
 
 fn print_usage() {
     eprintln!("Usage:");
-    eprintln!("  dylang run              Run project (requires project.toml, runs Main.main)");
-    eprintln!("  dylang run <file.dy>    Run a single file (no module resolution)");
-    eprintln!("  dylang check            Typecheck project without running");
+    eprintln!("  dylang run              Build and run project (requires project.toml)");
+    eprintln!("  dylang run <file.dy>    Build and run a single file");
+    eprintln!("  dylang run --release    Run existing release build");
+    eprintln!("  dylang build            Build project to _build/dev/");
+    eprintln!("  dylang build <file.dy>  Build a single file to _build/dev/");
+    eprintln!("  dylang build --release  Build project to _build/release/");
+    eprintln!("  dylang check            Typecheck project without building");
     eprintln!("  dylang check <file.dy>  Typecheck a single file");
-    eprintln!(
-        "  dylang build            Build project (requires project.toml, compiles all modules)"
-    );
     eprintln!("  dylang emit <file.dy>   Print generated Core Erlang to stdout");
 }
 
@@ -88,13 +89,11 @@ fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
         eprintln!("Prelude type error: {}", e);
         std::process::exit(1);
     }
-    // Cache the prelude snapshot eagerly so seeded_module_checker can use it
     checker.tc_prelude_snapshot = Some(Box::new(checker.clone()));
     checker
 }
 
 /// Compile all Std.* modules referenced in codegen_info into the build directory.
-/// These are embedded in the binary, so we parse, elaborate, lower, and emit them.
 fn compile_std_modules(checker: &typechecker::Checker, build_dir: &std::path::Path) {
     let std_modules: Vec<String> = checker
         .tc_codegen_info
@@ -106,7 +105,6 @@ fn compile_std_modules(checker: &typechecker::Checker, build_dir: &std::path::Pa
     for module_name in &std_modules {
         let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
 
-        // Use cached program if available, otherwise parse from embedded source
         let program = if let Some(cached) = checker.tc_programs.get(module_name) {
             cached.clone()
         } else {
@@ -124,8 +122,6 @@ fn compile_std_modules(checker: &typechecker::Checker, build_dir: &std::path::Pa
                 })
         };
 
-        // Seeded checker: imports resolve via cache hits, only module body is re-checked.
-        // Std modules are builtin so they get a fresh checker with traits copied in.
         let mut mod_checker = checker.seeded_module_checker(None, true);
         if let Err(e) = mod_checker.check_program(&program) {
             eprintln!("Std module {} type error: {}", module_name, e);
@@ -145,52 +141,69 @@ fn compile_std_modules(checker: &typechecker::Checker, build_dir: &std::path::Pa
     }
 }
 
-fn run_program(program: &ast::Program, loader: &eval::ModuleLoader) {
-    match eval::eval_program(program, loader) {
-        eval::EvalResult::Ok(_) => {}
-        eval::EvalResult::Error(err) => {
-            eprintln!("Runtime error: {}", err.message);
-            std::process::exit(1);
-        }
-        eval::EvalResult::Effect { name, .. } => {
-            eprintln!("Unhandled effect: {}", name);
+/// Compile all .core files in a directory with erlc.
+fn run_erlc(build_dir: &std::path::Path) {
+    let core_files: Vec<_> = fs::read_dir(build_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "core"))
+        .map(|e| e.path())
+        .collect();
+
+    for core_file in &core_files {
+        let status = std::process::Command::new("erlc")
+            .arg("-o")
+            .arg(build_dir)
+            .arg(core_file)
+            .status()
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to run erlc: {}", e);
+                std::process::exit(1);
+            });
+
+        if !status.success() {
+            eprintln!("erlc failed on {}", core_file.display());
             std::process::exit(1);
         }
     }
+
+    eprintln!(
+        "Built {} module(s) in {}",
+        core_files.len(),
+        build_dir.display()
+    );
 }
 
-fn cmd_run_script(file: &str) {
-    let source = fs::read_to_string(file).unwrap_or_else(|e| {
-        eprintln!("Error reading {}: {}", file, e);
-        std::process::exit(1);
-    });
-    let mut checker = make_checker(None);
-    let program = parse_and_typecheck(&source, file, &mut checker);
-    let loader = eval::ModuleLoader::script();
-    run_program(&program, &loader);
+/// Run a compiled module on the BEAM.
+fn exec_erl(build_dir: &std::path::Path, entry_module: &str) {
+    let status = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(build_dir)
+        .arg("-s")
+        .arg(entry_module)
+        .arg("main")
+        .arg("-s")
+        .arg("init")
+        .arg("stop")
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to run erl: {}", e);
+            std::process::exit(1);
+        });
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
-fn cmd_run_project() {
+// --- Build functions ---
+
+/// Build a project (with project.toml) into the given build directory.
+/// Returns the build directory path.
+fn build_project(profile: &str) -> PathBuf {
     let project_root = find_project_root().unwrap_or_else(|| {
-        eprintln!("No project.toml found. Run with a filename to use script mode.");
-        std::process::exit(1);
-    });
-
-    let main_path = project_root.join("Main.dy");
-    let source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
-        eprintln!("Error reading Main.dy: {}", e);
-        std::process::exit(1);
-    });
-
-    let mut checker = make_checker(Some(project_root.clone()));
-    let program = parse_and_typecheck(&source, "Main.dy", &mut checker);
-    let loader = eval::ModuleLoader::project(project_root);
-    run_program(&program, &loader);
-}
-
-fn cmd_build_project() {
-    let project_root = find_project_root().unwrap_or_else(|| {
-        eprintln!("No project.toml found. Run with a filename to build a single file.");
+        eprintln!("No project.toml found. Use `dylang build <file.dy>` for single files.");
         std::process::exit(1);
     });
 
@@ -200,17 +213,17 @@ fn cmd_build_project() {
         std::process::exit(1);
     });
 
-    // Typecheck Main.dy (transitively typechecks all imports, populating caches)
     let mut checker = make_checker(Some(project_root.clone()));
     let main_program = parse_and_typecheck(&main_source, "Main.dy", &mut checker);
 
-    let build_dir = project_root.join("_build");
+    let build_dir = project_root.join("_build").join(profile);
+    // Clean and recreate build dir to remove stale artifacts
+    let _ = fs::remove_dir_all(&build_dir);
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| {
-        eprintln!("Error creating _build dir: {}", e);
+        eprintln!("Error creating build dir: {}", e);
         std::process::exit(1);
     });
 
-    // Compile Std library modules
     compile_std_modules(&checker, &build_dir);
 
     // Compile each imported user module
@@ -222,7 +235,6 @@ fn cmd_build_project() {
         .collect();
 
     for module_name in &module_names {
-        // Use cached program if available, otherwise read from disk and parse
         let program = if let Some(cached) = checker.tc_programs.get(module_name) {
             cached.clone()
         } else {
@@ -245,7 +257,6 @@ fn cmd_build_project() {
                 })
         };
 
-        // Seeded checker: imports resolve via cache hits, only module body is re-checked
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
         if let Err(e) = mod_checker.check_program(&program) {
             eprintln!("Type error in module {}: {}", module_name, e);
@@ -262,7 +273,6 @@ fn cmd_build_project() {
             eprintln!("Error writing {}: {}", core_path.display(), e);
             std::process::exit(1);
         });
-        eprintln!("Emitted {}", core_path.display());
     }
 
     // Compile Main module
@@ -274,45 +284,14 @@ fn cmd_build_project() {
         eprintln!("Error writing {}: {}", core_path.display(), e);
         std::process::exit(1);
     });
-    eprintln!("Emitted {}", core_path.display());
 
-    // Compile all .core files with erlc
-    let core_files: Vec<_> = fs::read_dir(&build_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "core"))
-        .map(|e| e.path())
-        .collect();
-
-    for core_file in &core_files {
-        let status = std::process::Command::new("erlc")
-            .arg("-o")
-            .arg(&build_dir)
-            .arg(core_file)
-            .status()
-            .unwrap_or_else(|e| {
-                eprintln!("Failed to run erlc: {}", e);
-                std::process::exit(1);
-            });
-
-        if !status.success() {
-            eprintln!("erlc failed on {}", core_file.display());
-            std::process::exit(1);
-        }
-    }
-
-    eprintln!(
-        "Built {} module(s) in {}",
-        core_files.len(),
-        build_dir.display()
-    );
-    eprintln!(
-        "Run with: erl -noshell -pa {} -s main main -s init stop",
-        build_dir.display()
-    );
+    run_erlc(&build_dir);
+    build_dir
 }
 
-fn cmd_build(file: &str) {
+/// Build a single script file into the given build directory.
+/// Returns the build directory path.
+fn build_script(file: &str, profile: &str) -> PathBuf {
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
@@ -320,81 +299,91 @@ fn cmd_build(file: &str) {
     let mut checker = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
 
-    let module_name = "_script";
-
     let elaborated = elaborate::elaborate(&program, &checker);
     let core_src =
-        codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info);
+        codegen::emit_module_with_imports("_script", &elaborated, &checker.tc_codegen_info);
 
     let build_dir = std::path::Path::new(file)
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join("_build");
+        .join("_build")
+        .join(profile);
+    // Clean and recreate build dir to remove stale artifacts
+    let _ = fs::remove_dir_all(&build_dir);
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| {
-        eprintln!("Error creating _build dir: {}", e);
+        eprintln!("Error creating build dir: {}", e);
         std::process::exit(1);
     });
 
-    let core_path = build_dir.join(format!("{}.core", module_name));
+    let core_path = build_dir.join("_script.core");
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
         std::process::exit(1);
     });
 
-    // Compile Std library modules into the build directory
     compile_std_modules(&checker, &build_dir);
-
-    // Invoke erlc on all .core files
-    let core_files: Vec<_> = fs::read_dir(&build_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "core"))
-        .map(|e| e.path())
-        .collect();
-
-    for core_file in &core_files {
-        let status = std::process::Command::new("erlc")
-            .arg("-o")
-            .arg(&build_dir)
-            .arg(core_file)
-            .status()
-            .unwrap_or_else(|e| {
-                eprintln!("Failed to run erlc: {}", e);
-                std::process::exit(1);
-            });
-
-        if !status.success() {
-            eprintln!("erlc failed on {}", core_file.display());
-            std::process::exit(1);
-        }
-    }
-
-    eprintln!(
-        "Built {} module(s) in {}",
-        core_files.len(),
-        build_dir.display()
-    );
-    eprintln!(
-        "Run with: erl -noshell -pa {} -s {} main -s init stop",
-        build_dir.display(),
-        module_name
-    );
+    run_erlc(&build_dir);
+    build_dir
 }
 
-fn cmd_emit(file: &str) {
-    let source = fs::read_to_string(file).unwrap_or_else(|e| {
-        eprintln!("Error reading {}: {}", file, e);
-        std::process::exit(1);
-    });
-    let mut checker = make_checker(None);
-    let program = parse_and_typecheck(&source, file, &mut checker);
+/// Get the build directory for a script without building.
+fn script_build_dir(file: &str, profile: &str) -> PathBuf {
+    std::path::Path::new(file)
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("_build")
+        .join(profile)
+}
 
-    let module_name = "_script";
+// --- Commands ---
 
-    let elaborated = elaborate::elaborate(&program, &checker);
-    let core_src =
-        codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info);
-    print!("{}", core_src);
+fn cmd_run(args: &[String]) {
+    let release = args.contains(&"--release".to_string());
+    let file = args.iter().find(|a| a.ends_with(".dy"));
+
+    if release {
+        // --release: use existing build if present, build only if missing
+        if let Some(f) = file {
+            let build_dir = script_build_dir(f, "release");
+            if !build_dir.join("_script.beam").exists() {
+                build_script(f, "release");
+            }
+            exec_erl(&build_dir, "_script");
+        } else {
+            let project_root = find_project_root().unwrap_or_else(|| {
+                eprintln!("No project.toml found.");
+                std::process::exit(1);
+            });
+            let build_dir = project_root.join("_build").join("release");
+            if !build_dir.join("main.beam").exists() {
+                build_project("release");
+            }
+            exec_erl(&build_dir, "main");
+        }
+    } else {
+        // dev: always clean rebuild
+        if let Some(f) = file {
+            let build_dir = build_script(f, "dev");
+            exec_erl(&build_dir, "_script");
+        } else {
+            let build_dir = build_project("dev");
+            exec_erl(&build_dir, "main");
+        }
+    }
+}
+
+fn cmd_build(args: &[String]) {
+    let profile = if args.contains(&"--release".to_string()) {
+        "release"
+    } else {
+        "dev"
+    };
+
+    if let Some(file) = args.iter().find(|a| a.ends_with(".dy")) {
+        build_script(file, profile);
+    } else {
+        build_project(profile);
+    }
 }
 
 fn cmd_check(file: Option<&str>) {
@@ -425,6 +414,41 @@ fn cmd_check(file: Option<&str>) {
     }
 }
 
+fn cmd_eval(file: &str) {
+    let source = fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Error reading {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let mut checker = make_checker(None);
+    let program = parse_and_typecheck(&source, file, &mut checker);
+    let loader = eval::ModuleLoader::script();
+    match eval::eval_program(&program, &loader) {
+        eval::EvalResult::Ok(_) => {}
+        eval::EvalResult::Error(err) => {
+            eprintln!("Runtime error: {}", err.message);
+            std::process::exit(1);
+        }
+        eval::EvalResult::Effect { name, .. } => {
+            eprintln!("Unhandled effect: {}", name);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_emit(file: &str) {
+    let source = fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Error reading {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let mut checker = make_checker(None);
+    let program = parse_and_typecheck(&source, file, &mut checker);
+
+    let elaborated = elaborate::elaborate(&program, &checker);
+    let core_src =
+        codegen::emit_module_with_imports("_script", &elaborated, &checker.tc_codegen_info);
+    print!("{}", core_src);
+}
+
 /// Walk up from cwd looking for project.toml.
 fn find_project_root() -> Option<PathBuf> {
     let mut dir = env::current_dir().ok()?;
@@ -442,17 +466,15 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
-        Some("run") => match args.get(2).map(|s| s.as_str()) {
-            Some(file) => cmd_run_script(file),
-            None => cmd_run_project(),
-        },
-        Some("check") => match args.get(2).map(|s| s.as_str()) {
-            Some(file) => cmd_check(Some(file)),
-            None => cmd_check(None),
-        },
-        Some("build") => match args.get(2).map(|s| s.as_str()) {
-            Some(file) => cmd_build(file),
-            None => cmd_build_project(),
+        Some("run") => cmd_run(&args[2..]),
+        Some("build") => cmd_build(&args[2..]),
+        Some("check") => cmd_check(args.get(2).map(|s| s.as_str())),
+        Some("eval") => match args.get(2).map(|s| s.as_str()) {
+            Some(file) => cmd_eval(file),
+            None => {
+                eprintln!("Usage: dylang eval <file.dy>");
+                std::process::exit(1);
+            }
         },
         Some("emit") => match args.get(2).map(|s| s.as_str()) {
             Some(file) => cmd_emit(file),

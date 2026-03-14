@@ -92,7 +92,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Number literal separators
 - [x] Multiline strings (`"""..."""`, `$"""..."""`)
 - [x] Raw strings (`@"..."`, `@"""..."""`)
-- [ ] Regular expressions
+- [x] Regular expressions
 - [x] List comprehensions
 - [x] Function composition
 - [x] Conversion builtins (`Int.parse`, `Int.to_float`, `Float.parse`, `Float.trunc`, `Float.round`, `Float.floor`, `Float.ceil`)
