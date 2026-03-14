@@ -97,7 +97,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Function composition
 - [x] Conversion builtins (`Int.parse`, `Int.to_float`, `Float.parse`, `Float.trunc`, `Float.round`, `Float.floor`, `Float.ceil`)
 - [x] String operations (`string_length`, `string_split`, `string_chars`, etc.)
-- [ ] More list functions (`zip`, `range`, `take`, `drop`, `any`, `all`)
+- [x] More list functions (`zip`, `range`, `take`, `drop`, `any`, `all`)
 
 ## Syntax
 
