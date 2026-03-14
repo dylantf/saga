@@ -482,6 +482,75 @@ impl Checker {
                 Ok(result_ty)
             }
 
+            Expr::Receive {
+                arms,
+                after_clause,
+                span,
+            } => {
+                // Look up Actor effect's message type from the effect type param cache
+                let msg_ty = if let Some(cache) = self.effect_type_param_cache.get("Actor") {
+                    if let Some(info) = self.effects.get("Actor") {
+                        if let Some(&param_id) = info.type_params.first() {
+                            cache
+                                .get(&param_id)
+                                .cloned()
+                                .unwrap_or_else(|| self.fresh_var())
+                        } else {
+                            return Err(TypeError::at(
+                                *span,
+                                "Actor effect has no type parameter".to_string(),
+                            ));
+                        }
+                    } else {
+                        return Err(TypeError::at(
+                            *span,
+                            "receive requires the Actor effect (declare `needs {Actor MsgType}`)".to_string(),
+                        ));
+                    }
+                } else {
+                    return Err(TypeError::at(
+                        *span,
+                        "receive requires the Actor effect (declare `needs {Actor MsgType}`)".to_string(),
+                    ));
+                };
+
+                let result_ty = self.fresh_var();
+
+                for arm in arms {
+                    let saved_env = self.env.clone();
+                    self.bind_pattern(&arm.pattern, &msg_ty)?;
+
+                    if let Some(guard) = &arm.guard {
+                        if let Some(span) = super::find_effect_call(guard) {
+                            return Err(TypeError::at(
+                                span,
+                                "Effect calls are not allowed in guard expressions".to_string(),
+                            ));
+                        }
+                        let guard_ty = self.infer_expr(guard)?;
+                        self.unify_at(&guard_ty, &Type::bool(), guard.span())?;
+                    }
+
+                    let body_ty = self.infer_expr(&arm.body)?;
+                    self.unify_at(&result_ty, &body_ty, arm.body.span())?;
+
+                    self.env = saved_env;
+                }
+
+                if let Some((timeout, body)) = after_clause {
+                    let timeout_ty = self.infer_expr(timeout)?;
+                    self.unify_at(&timeout_ty, &Type::int(), timeout.span())?;
+                    let body_ty = self.infer_expr(body)?;
+                    self.unify_at(&result_ty, &body_ty, body.span())?;
+                }
+
+                // receive implies Actor effect usage
+                self.current_effects.insert("Actor".to_string());
+
+                // No exhaustiveness checking -- mailbox is open
+                Ok(result_ty)
+            }
+
             Expr::DictMethodAccess { .. } | Expr::DictRef { .. } | Expr::ForeignCall { .. } => {
                 unreachable!("elaboration-only construct in typechecker")
             }

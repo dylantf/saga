@@ -272,6 +272,14 @@ pub enum Expr {
         span: Span,
     },
 
+    /// `receive { Pat -> body, after N -> timeout_body }`
+    Receive {
+        arms: Vec<CaseArm>,
+        /// Optional (timeout_expr, timeout_body)
+        after_clause: Option<(Box<Expr>, Box<Expr>)>,
+        span: Span,
+    },
+
     // --- Elaboration-only (never produced by the parser) ---
     /// Extract a method from a dictionary tuple (does not apply it).
     /// Lowered to `erlang:element(method_index+1, dict)`.
@@ -313,6 +321,7 @@ impl Expr {
             | Expr::Tuple { span, .. }
             | Expr::QualifiedName { span, .. }
             | Expr::Do { span, .. }
+            | Expr::Receive { span, .. }
             | Expr::DictMethodAccess { span, .. }
             | Expr::DictRef { span, .. }
             | Expr::ForeignCall { span, .. } => *span,

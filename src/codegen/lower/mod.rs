@@ -89,7 +89,7 @@ pub struct Lowerer<'a> {
 
 impl<'a> Lowerer<'a> {
     pub fn new(codegen_info: &'a HashMap<String, ModuleCodegenInfo>) -> Self {
-        Lowerer {
+        let mut lowerer = Lowerer {
             counter: 0,
             codegen_info,
             module_aliases: HashMap::new(),
@@ -110,7 +110,22 @@ impl<'a> Lowerer<'a> {
             constructor_modules: HashMap::new(),
             current_handler_k: None,
             external_funs: HashMap::new(),
-        }
+        };
+        // Register builtin Actor effect ops
+        lowerer.op_to_effect.insert("spawn".into(), "Actor".into());
+        lowerer.op_to_effect.insert("self".into(), "Actor".into());
+        lowerer.effect_defs.insert(
+            "Actor".into(),
+            EffectInfo {
+                ops: {
+                    let mut ops = HashMap::new();
+                    ops.insert("spawn".into(), 1); // f: () -> Unit
+                    ops.insert("self".into(), 0);
+                    ops
+                },
+            },
+        );
+        lowerer
     }
 
     pub(super) fn fresh(&mut self) -> String {
@@ -481,6 +496,7 @@ impl<'a> Lowerer<'a> {
             }
 
             // Set up handler param context for effectful functions
+            // Filter out beam-native effects (e.g. Actor) -- they don't use CPS
             let effects = self.fun_effects.get(&name).cloned().unwrap_or_default();
             let handler_params: Vec<String> = effects
                 .iter()
@@ -778,6 +794,30 @@ impl<'a> Lowerer<'a> {
                     );
                 }
 
+                // Lower `send pid msg` to erlang:send(pid, msg)
+                if let Some((func_name, args)) = collect_fun_call(expr)
+                    && func_name == "send"
+                    && args.len() == 2
+                {
+                    let pid = self.lower_expr(args[0]);
+                    let msg = self.lower_expr(args[1]);
+                    let pid_var = self.fresh();
+                    let msg_var = self.fresh();
+                    return CExpr::Let(
+                        pid_var.clone(),
+                        Box::new(pid),
+                        Box::new(CExpr::Let(
+                            msg_var.clone(),
+                            Box::new(msg),
+                            Box::new(cerl_call(
+                                "erlang",
+                                "send",
+                                vec![CExpr::Var(pid_var), CExpr::Var(msg_var)],
+                            )),
+                        )),
+                    );
+                }
+
                 // Check for a saturated call to a known top-level function.
                 // e.g. `add 3 4` -> App(App(Var("add"), 3), 4)
                 // For effectful functions, the user provides N args but the function
@@ -913,6 +953,7 @@ impl<'a> Lowerer<'a> {
                     }
                     // Append handler params for absorbed effects
                     for eff in &absorbed {
+                        // Skip beam-native effects (no handler params)
                         if let Some(param) = self.current_handler_params.get(eff) {
                             arg_vars.push(param.clone());
                         } else {
@@ -1153,6 +1194,34 @@ impl<'a> Lowerer<'a> {
                     Box::new(scrut_ce),
                     Box::new(CExpr::Case(Box::new(CExpr::Var(scrut_var)), arms_ce)),
                 )
+            }
+
+            Expr::Receive {
+                arms, after_clause, ..
+            } => {
+                // Lower arms: same pattern/guard/body as case, but for receive
+                // there is no scrutinee variable to fall through to.
+                let lowered_arms: Vec<CArm> = arms
+                    .iter()
+                    .map(|arm| {
+                        let pat =
+                            lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules);
+                        let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
+                        let body = self.lower_expr(&arm.body);
+                        CArm { pat, guard, body }
+                    })
+                    .collect();
+
+                let (timeout, timeout_body) = if let Some((t, b)) = after_clause {
+                    (self.lower_expr(t), self.lower_expr(b))
+                } else {
+                    (
+                        CExpr::Lit(CLit::Atom("infinity".into())),
+                        CExpr::Lit(CLit::Atom("true".into())),
+                    )
+                };
+
+                CExpr::Receive(lowered_arms, Box::new(timeout), Box::new(timeout_body))
             }
 
             Expr::Tuple { elements, .. } => self.lower_tuple_elems(elements),

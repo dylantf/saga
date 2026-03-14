@@ -42,6 +42,8 @@ struct Elaborator {
     current_dict_params: HashMap<String, String>,
     /// Erlang module name for this module (e.g. "animals"), used for dict name qualification
     erlang_module: String,
+    /// When true, Actor effect calls are transformed to ForeignCall (inside `with beam_actor`)
+    in_beam_actor_scope: bool,
 }
 
 impl Elaborator {
@@ -105,6 +107,7 @@ impl Elaborator {
             current_fun: None,
             current_dict_params: HashMap::new(),
             erlang_module,
+            in_beam_actor_scope: false,
         }
     }
 
@@ -246,8 +249,14 @@ impl Elaborator {
                 // TraitDef and FunAnnotation are consumed (not emitted)
                 Decl::TraitDef { .. } => {}
                 Decl::FunAnnotation { .. } => {
-                    // Keep annotations for the lowerer (it uses them for arity)
-                    output.push(decl.clone());
+                    // Keep annotations for the lowerer (it uses them for arity).
+                    // Strip Actor effect -- it's handled by beam_actor (ForeignCall),
+                    // not by the CPS handler machinery.
+                    let mut d = decl.clone();
+                    if let Decl::FunAnnotation { effects, .. } = &mut d {
+                        effects.retain(|e| e.name != "Actor");
+                    }
+                    output.push(d);
                 }
 
                 // Elaborate function bodies
@@ -392,6 +401,27 @@ impl Elaborator {
 
             // Function application: check if we need to insert dict args
             Expr::App { func, arg, span } => {
+                // Actor effect calls: transform App(EffectCall, arg) to ForeignCall
+                if let Expr::EffectCall { name, .. } = func.as_ref() {
+                    if name == "spawn" {
+                        return Expr::ForeignCall {
+                            module: "erlang".into(),
+                            func: "spawn".into(),
+                            args: vec![self.elaborate_expr(arg)],
+                            span: *span,
+                        };
+                    }
+                    if name == "self" {
+                        // self! () -- the () is a unit arg, self takes no real args
+                        return Expr::ForeignCall {
+                            module: "erlang".into(),
+                            func: "self".into(),
+                            args: vec![],
+                            span: *span,
+                        };
+                    }
+                }
+
                 // Check if this is a direct call to a function with where clauses
                 if let Expr::Var { name, .. } = func.as_ref() {
                     // If calling a trait method directly with an argument,
@@ -641,22 +671,73 @@ impl Elaborator {
                 qualifier,
                 args,
                 span,
-            } => Expr::EffectCall {
-                name: name.clone(),
-                qualifier: qualifier.clone(),
-                args: args.iter().map(|a| self.elaborate_expr(a)).collect(),
-                span: *span,
-            },
+            } => {
+                // Actor spawn! and self! are handled in the App case above.
+                Expr::EffectCall {
+                    name: name.clone(),
+                    qualifier: qualifier.clone(),
+                    args: args.iter().map(|a| self.elaborate_expr(a)).collect(),
+                    span: *span,
+                }
+            }
 
             Expr::With {
                 expr: e,
                 handler,
                 span,
-            } => Expr::With {
-                expr: Box::new(self.elaborate_expr(e)),
-                handler: Box::new(self.elaborate_handler(handler)),
-                span: *span,
-            },
+            } => {
+                // beam_actor: transform Actor ops to ForeignCall, strip the handler
+                let is_beam_actor = matches!(handler.as_ref(), Handler::Named(n) if n == "beam_actor");
+                let has_beam_actor = matches!(handler.as_ref(),
+                    Handler::Inline { named, .. } if named.iter().any(|n| n == "beam_actor")
+                );
+
+                if is_beam_actor {
+                    let saved = self.in_beam_actor_scope;
+                    self.in_beam_actor_scope = true;
+                    let result = self.elaborate_expr(e);
+                    self.in_beam_actor_scope = saved;
+                    return result;
+                }
+
+                if has_beam_actor {
+                    let saved = self.in_beam_actor_scope;
+                    self.in_beam_actor_scope = true;
+                    // Filter beam_actor out of the handler, keep other handlers
+                    if let Handler::Inline {
+                        named,
+                        arms,
+                        return_clause,
+                    } = handler.as_ref()
+                    {
+                        let remaining: Vec<String> =
+                            named.iter().filter(|n| *n != "beam_actor").cloned().collect();
+                        if remaining.is_empty() && arms.is_empty() {
+                            let result = self.elaborate_expr(e);
+                            self.in_beam_actor_scope = saved;
+                            return result;
+                        }
+                        let filtered = Handler::Inline {
+                            named: remaining,
+                            arms: arms.clone(),
+                            return_clause: return_clause.clone(),
+                        };
+                        let result = Expr::With {
+                            expr: Box::new(self.elaborate_expr(e)),
+                            handler: Box::new(self.elaborate_handler(&filtered)),
+                            span: *span,
+                        };
+                        self.in_beam_actor_scope = saved;
+                        return result;
+                    }
+                }
+
+                Expr::With {
+                    expr: Box::new(self.elaborate_expr(e)),
+                    handler: Box::new(self.elaborate_handler(handler)),
+                    span: *span,
+                }
+            }
 
             Expr::Resume { value, span } => Expr::Resume {
                 value: Box::new(self.elaborate_expr(value)),
@@ -672,6 +753,29 @@ impl Elaborator {
                 module: module.clone(),
                 func: func.clone(),
                 args: args.iter().map(|a| self.elaborate_expr(a)).collect(),
+                span: *span,
+            },
+
+            Expr::Receive {
+                arms,
+                after_clause,
+                span,
+            } => Expr::Receive {
+                arms: arms
+                    .iter()
+                    .map(|arm| CaseArm {
+                        pattern: arm.pattern.clone(),
+                        guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
+                        body: self.elaborate_expr(&arm.body),
+                        span: arm.span,
+                    })
+                    .collect(),
+                after_clause: after_clause.as_ref().map(|(timeout, body)| {
+                    (
+                        Box::new(self.elaborate_expr(timeout)),
+                        Box::new(self.elaborate_expr(body)),
+                    )
+                }),
                 span: *span,
             },
 

@@ -2241,3 +2241,40 @@ fn type_def_no_deriving() {
         _ => panic!("expected TypeDef"),
     }
 }
+
+#[test]
+fn receive_simple() {
+    let expr = parse_expr("receive {\n  Ping(sender) -> sender\n  Stop -> 0\n}");
+    match expr {
+        Expr::Receive { arms, after_clause, .. } => {
+            assert_eq!(arms.len(), 2);
+            assert!(after_clause.is_none());
+        }
+        _ => panic!("expected Receive, got {:?}", expr),
+    }
+}
+
+#[test]
+fn receive_with_after() {
+    let expr = parse_expr("receive {\n  Msg(x) -> x\n  after 5000 -> 0\n}");
+    match expr {
+        Expr::Receive { arms, after_clause, .. } => {
+            assert_eq!(arms.len(), 1);
+            assert!(after_clause.is_some());
+        }
+        _ => panic!("expected Receive, got {:?}", expr),
+    }
+}
+
+#[test]
+fn receive_with_guard() {
+    let expr = parse_expr("receive {\n  Msg(x) | x > 0 -> x\n  _ -> 0\n}");
+    match expr {
+        Expr::Receive { arms, .. } => {
+            assert_eq!(arms.len(), 2);
+            assert!(arms[0].guard.is_some());
+            assert!(arms[1].guard.is_none());
+        }
+        _ => panic!("expected Receive, got {:?}", expr),
+    }
+}

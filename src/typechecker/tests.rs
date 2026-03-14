@@ -2840,3 +2840,71 @@ let x = show (Box 42)
     )
     .unwrap();
 }
+
+#[test]
+fn receive_requires_actor_effect() {
+    let result = check(
+        r#"
+type Msg { Ping | Stop }
+foo () = receive {
+  Ping -> 1
+  Stop -> 0
+}
+"#,
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Actor"),
+        "expected Actor error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn receive_typechecks_with_actor() {
+    check(
+        r#"
+type Msg { Ping | Stop }
+
+fun handle_msg (x: Int) -> Int needs {Actor Msg}
+handle_msg x = receive {
+  Ping -> 1
+  Stop -> 0
+}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn receive_after_timeout_must_be_int() {
+    let result = check(
+        r#"
+type Msg { Ping }
+
+fun handle_msg () -> Int needs {Actor Msg}
+handle_msg () = receive {
+  Ping -> 1
+  after "not an int" -> 0
+}
+"#,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn receive_no_exhaustiveness_error() {
+    // Partial match in receive should not error (no exhaustiveness)
+    check(
+        r#"
+type Msg { A | B | C }
+
+fun handle_msg () -> Int needs {Actor Msg}
+handle_msg () = receive {
+  A -> 1
+}
+"#,
+    )
+    .unwrap();
+}

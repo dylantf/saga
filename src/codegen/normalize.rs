@@ -392,6 +392,29 @@ impl Normalizer {
             // Effect calls should not reach here (handled by caller), but be safe.
             Expr::EffectCall { .. } => unreachable!("effect call should be handled by caller"),
 
+            Expr::Receive {
+                arms,
+                after_clause,
+                span,
+            } => Expr::Receive {
+                arms: arms
+                    .iter()
+                    .map(|arm| CaseArm {
+                        pattern: arm.pattern.clone(),
+                        guard: arm.guard.as_ref().map(|g| self.normalize_expr(g)),
+                        body: self.normalize_expr(&arm.body),
+                        span: arm.span,
+                    })
+                    .collect(),
+                after_clause: after_clause.as_ref().map(|(timeout, body)| {
+                    (
+                        Box::new(self.normalize_expr(timeout)),
+                        Box::new(self.normalize_expr(body)),
+                    )
+                }),
+                span: *span,
+            },
+
             // Leaves: no sub-expressions to normalize.
             Expr::Lit { .. }
             | Expr::Var { .. }

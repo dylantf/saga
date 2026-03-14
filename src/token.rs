@@ -39,6 +39,8 @@ pub enum Token {
     For,
     Do,
     Deriving,
+    Receive,
+    After,
     EffectCall(String),
 
     // Operators

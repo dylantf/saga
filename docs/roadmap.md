@@ -187,7 +187,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Effect calls in non-block positions (nested in `if` conditions, binary ops, etc.)
 - [x] HOF effect absorption (passing effectful closures through higher-order functions like `try`)
 - [x] Return clause bypass on handler abort (return clause wraps abort results incorrectly)
-- [ ] Actor effect (see messaging.md)
+- [ ] Actor effect (see concurrency.md)
 
 ### Stdlib / prelude
 

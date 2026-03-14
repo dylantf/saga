@@ -220,6 +220,10 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> EvalResult {
             eval_do_expr(&bindings, 0, &success, &else_arms, &env)
         }
 
+        Expr::Receive { .. } => {
+            panic!("receive is not supported in the interpreter (BEAM-only)")
+        }
+
         Expr::DictMethodAccess { .. } | Expr::DictRef { .. } | Expr::ForeignCall { .. } => {
             unreachable!("elaboration-only construct in interpreter")
         }
