@@ -46,10 +46,10 @@ pub enum Type {
     Var(u32),
     /// Function type: a -> b
     Arrow(Box<Type>, Box<Type>),
-    /// Function type with effect annotation: a -> b needs {Eff}
+    /// Function type with effect annotation: a -> b needs {Eff1, Eff2 T}
     /// Used for HOF parameter types that declare which effects they absorb.
-    /// Unification treats EffArrow the same as Arrow (effects are not unified).
-    EffArrow(Box<Type>, Box<Type>, Vec<String>),
+    /// Each effect is (name, type_args), e.g. ("Actor", [CounterMsg]).
+    EffArrow(Box<Type>, Box<Type>, Vec<(String, Vec<Type>)>),
     /// Named type constructor with args: Int = Con("Int", []), List a = Con("List", [a])
     Con(std::string::String, Vec<Type>),
 }
@@ -126,7 +126,11 @@ impl Substitution {
             Type::EffArrow(a, b, effs) => Type::EffArrow(
                 Box::new(self.apply(a)),
                 Box::new(self.apply(b)),
-                effs.clone(),
+                effs.iter()
+                    .map(|(name, args)| {
+                        (name.clone(), args.iter().map(|t| self.apply(t)).collect())
+                    })
+                    .collect(),
             ),
             Type::Con(name, args) => {
                 Type::Con(name.clone(), args.iter().map(|a| self.apply(a)).collect())
@@ -165,7 +169,14 @@ impl Substitution {
                     false
                 }
             }
-            Type::Arrow(a, b) | Type::EffArrow(a, b, _) => self.occurs(id, a) || self.occurs(id, b),
+            Type::Arrow(a, b) => self.occurs(id, a) || self.occurs(id, b),
+            Type::EffArrow(a, b, effs) => {
+                self.occurs(id, a)
+                    || self.occurs(id, b)
+                    || effs
+                        .iter()
+                        .any(|(_, args)| args.iter().any(|t| self.occurs(id, t)))
+            }
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
         }
     }
@@ -265,9 +276,18 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                 out.push(*id);
             }
         }
-        Type::Arrow(a, b) | Type::EffArrow(a, b, _) => {
+        Type::Arrow(a, b) => {
             free_vars_in_type(a, bound, out);
             free_vars_in_type(b, bound, out);
+        }
+        Type::EffArrow(a, b, effs) => {
+            free_vars_in_type(a, bound, out);
+            free_vars_in_type(b, bound, out);
+            for (_, args) in effs {
+                for t in args {
+                    free_vars_in_type(t, bound, out);
+                }
+            }
         }
         Type::Con(_, args) => {
             for arg in args {
@@ -766,9 +786,10 @@ impl Checker {
                     ops: vec![
                         EffectOpSig {
                             name: "spawn".into(),
-                            params: vec![Type::Arrow(
+                            params: vec![Type::EffArrow(
                                 Box::new(unit.clone()),
                                 Box::new(unit.clone()),
+                                vec![("Actor".into(), vec![msg.clone()])],
                             )],
                             return_type: pid_msg.clone(),
                         },
@@ -805,15 +826,7 @@ impl Checker {
             );
         }
 
-        // beam_runtime: handles both Process and Actor
-        self.handlers.insert(
-            "beam_runtime".into(),
-            HandlerInfo {
-                effects: vec!["Process".into(), "Actor".into()],
-                return_type: None,
-            },
-        );
-        // Keep beam_actor as alias for backwards compat
+        // beam_actor: handles both Process and Actor
         self.handlers.insert(
             "beam_actor".into(),
             HandlerInfo {
@@ -837,10 +850,22 @@ impl Checker {
 
             (Type::Arrow(a1, a2), Type::Arrow(b1, b2))
             | (Type::Arrow(a1, a2), Type::EffArrow(b1, b2, _))
-            | (Type::EffArrow(a1, a2, _), Type::Arrow(b1, b2))
-            | (Type::EffArrow(a1, a2, _), Type::EffArrow(b1, b2, _)) => {
+            | (Type::EffArrow(a1, a2, _), Type::Arrow(b1, b2)) => {
                 self.unify(a1, b1)?;
                 self.unify(a2, b2)
+            }
+            (Type::EffArrow(a1, a2, effs1), Type::EffArrow(b1, b2, effs2)) => {
+                self.unify(a1, b1)?;
+                self.unify(a2, b2)?;
+                // Unify effect type args pairwise (matched by effect name)
+                for (name, args1) in effs1 {
+                    if let Some((_, args2)) = effs2.iter().find(|(n, _)| n == name) {
+                        for (t1, t2) in args1.iter().zip(args2.iter()) {
+                            self.unify(t1, t2)?;
+                        }
+                    }
+                }
+                Ok(())
             }
 
             (Type::Con(n1, args1), Type::Con(n2, args2))
@@ -896,7 +921,14 @@ impl Checker {
             Type::EffArrow(a, b, effs) => Type::EffArrow(
                 Box::new(self.replace_vars(a, mapping)),
                 Box::new(self.replace_vars(b, mapping)),
-                effs.clone(),
+                effs.iter()
+                    .map(|(name, args)| {
+                        (
+                            name.clone(),
+                            args.iter().map(|t| self.replace_vars(t, mapping)).collect(),
+                        )
+                    })
+                    .collect(),
             ),
             Type::Con(name, args) => Type::Con(
                 name.clone(),
@@ -975,8 +1007,18 @@ impl Checker {
                 if needs.is_empty() {
                     Type::Arrow(Box::new(a_ty), Box::new(b_ty))
                 } else {
-                    let effect_names: Vec<String> = needs.iter().map(|e| e.name.clone()).collect();
-                    Type::EffArrow(Box::new(a_ty), Box::new(b_ty), effect_names)
+                    let effect_refs: Vec<(String, Vec<Type>)> = needs
+                        .iter()
+                        .map(|e| {
+                            let args = e
+                                .type_args
+                                .iter()
+                                .map(|te| self.convert_type_expr(te, params))
+                                .collect();
+                            (e.name.clone(), args)
+                        })
+                        .collect();
+                    Type::EffArrow(Box::new(a_ty), Box::new(b_ty), effect_refs)
                 }
             }
         }
@@ -990,9 +1032,18 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
                 out.push(*id);
             }
         }
-        Type::Arrow(a, b) | Type::EffArrow(a, b, _) => {
+        Type::Arrow(a, b) => {
             collect_free_vars(a, out);
             collect_free_vars(b, out);
+        }
+        Type::EffArrow(a, b, effs) => {
+            collect_free_vars(a, out);
+            collect_free_vars(b, out);
+            for (_, args) in effs {
+                for t in args {
+                    collect_free_vars(t, out);
+                }
+            }
         }
         Type::Con(_, args) => {
             for arg in args {

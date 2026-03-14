@@ -705,7 +705,7 @@ impl Elaborator {
                 handler,
                 span,
             } => {
-                let is_beam_handler = |n: &str| n == "beam_actor" || n == "beam_runtime";
+                let is_beam_handler = |n: &str| n == "beam_actor";
 
                 // beam_actor/beam_runtime: ops are already ForeignCall, strip the handler
                 let is_beam = matches!(handler.as_ref(), Handler::Named(n) if is_beam_handler(n));

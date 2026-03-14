@@ -28,7 +28,16 @@ impl Checker {
             Type::EffArrow(a, b, effs) => Type::EffArrow(
                 Box::new(self.substitute_trait_param(replacement, a)),
                 Box::new(self.substitute_trait_param(replacement, b)),
-                effs.clone(),
+                effs.iter()
+                    .map(|(name, args)| {
+                        (
+                            name.clone(),
+                            args.iter()
+                                .map(|t| self.substitute_trait_param(replacement, t))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
             ),
             Type::Con(name, args) => Type::Con(
                 name.clone(),

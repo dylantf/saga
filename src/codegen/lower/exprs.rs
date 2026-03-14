@@ -897,7 +897,7 @@ impl<'a> Lowerer<'a> {
     pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
         // beam_actor/beam_runtime: ops are already ForeignCall from elaboration.
         // Just lower the inner expression directly.
-        let is_beam_handler = |n: &str| n == "beam_actor" || n == "beam_runtime";
+        let is_beam_handler = |n: &str| n == "beam_actor";
         if let Handler::Named(name) = handler {
             if is_beam_handler(name) {
                 return self.lower_expr(expr);

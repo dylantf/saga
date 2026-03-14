@@ -28,4 +28,4 @@ run_counter () = {
 
 main () = {
   run_counter ()
-} with beam_runtime
+} with beam_actor
