@@ -472,7 +472,10 @@ impl<'a> Lowerer<'a> {
                 self.current_return_k = Some(CExpr::Var("_ReturnK".to_string()));
             }
 
-            let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
+            let all_simple_params = clauses.len() == 1 && clauses[0].0.iter().all(|p| {
+                matches!(p, Pat::Var { .. } | Pat::Wildcard { .. } | Pat::Lit { value: ast::Lit::Unit, .. })
+            });
+            let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() && all_simple_params {
                 // Single clause, no guard: emit directly without a case wrapper.
                 let (params, _, body) = clauses[0];
                 let mut params_ce = lower_params(params);
@@ -1195,11 +1198,24 @@ impl<'a> Lowerer<'a> {
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
-                let call = CExpr::Call(
-                    module.clone(),
-                    func.clone(),
-                    vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-                );
+                // float_to_list/1 -> float_to_list/2 with [short] option
+                let call = if module == "erlang" && func == "float_to_list" && vars.len() == 1 {
+                    let opts = CExpr::Cons(
+                        Box::new(CExpr::Lit(CLit::Atom("short".into()))),
+                        Box::new(CExpr::Nil),
+                    );
+                    CExpr::Call(
+                        module.clone(),
+                        func.clone(),
+                        vec![CExpr::Var(vars[0].clone()), opts],
+                    )
+                } else {
+                    CExpr::Call(
+                        module.clone(),
+                        func.clone(),
+                        vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+                    )
+                };
                 bindings.into_iter().rev().fold(call, |body, (var, val)| {
                     CExpr::Let(var, Box::new(val), Box::new(body))
                 })

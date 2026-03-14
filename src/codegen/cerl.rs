@@ -240,7 +240,15 @@ impl Printer {
     fn print_lit(&mut self, lit: &CLit) {
         match lit {
             CLit::Int(n) => self.push(&n.to_string()),
-            CLit::Float(f) => self.push(&f.to_string()),
+            CLit::Float(f) => {
+                let s = f.to_string();
+                // Core Erlang requires a decimal point to distinguish floats from integers
+                if s.contains('.') {
+                    self.push(&s);
+                } else {
+                    self.push(&format!("{}.0", s));
+                }
+            }
             CLit::Atom(a) => self.push(&format!("'{}'", a)),
             CLit::Str(s) => self.push(&format!("\"{}\"", escape_str(s))),
         }
