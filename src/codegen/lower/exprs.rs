@@ -863,17 +863,19 @@ impl<'a> Lowerer<'a> {
 
         let result = if is_direct_effectful_call {
             // Pass return clause as _ReturnK to the callee via pending_callee_return_k.
-            // Save any outer pending (e.g. rest-of-block continuation from
-            // `let x = f() with { ... }; use x`) so it survives -- lower_expr
-            // will consume the handler's return clause, and the block needs its
-            // original rest_k back to wrap the CPS result.
-            let saved_outer = self.pending_callee_return_k.take();
+            // When there IS a return clause: save the outer pending (e.g. rest-of-block
+            // continuation) so the block can apply it to the CPS result afterwards.
+            // When there is NO return clause: let the outer pending flow through as
+            // _ReturnK so abort-style handlers skip subsequent statements.
             if let Some(rk) = return_k_lambda {
+                let saved_outer = self.pending_callee_return_k.take();
                 self.pending_callee_return_k = Some(rk);
+                let ce = self.lower_expr(expr);
+                self.pending_callee_return_k = saved_outer;
+                ce
+            } else {
+                self.lower_expr(expr)
             }
-            let ce = self.lower_expr(expr);
-            self.pending_callee_return_k = saved_outer;
-            ce
         } else {
             // Block form or non-call: use current_return_k for terminal application
             if let Some(rk) = return_k_lambda {

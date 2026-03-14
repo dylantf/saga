@@ -91,16 +91,6 @@ fn make_checker(project_root: Option<PathBuf>) -> (typechecker::Checker, ast::Pr
     (checker, prelude_program)
 }
 
-/// Extract just the import declarations from the prelude program.
-/// Used in script mode to give the lowerer visibility into prelude imports.
-fn prelude_imports(prelude: &ast::Program) -> ast::Program {
-    prelude
-        .iter()
-        .filter(|d| matches!(d, ast::Decl::Import { .. }))
-        .cloned()
-        .collect()
-}
-
 /// Compile all Std.* modules referenced in codegen_info into the build directory.
 /// These are embedded in the binary, so we parse, elaborate, lower, and emit them.
 fn compile_std_modules(checker: &typechecker::Checker, build_dir: &std::path::Path) {
