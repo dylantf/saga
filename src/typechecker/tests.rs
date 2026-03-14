@@ -2723,3 +2723,23 @@ impl Display for Wrapper {
     )
     .unwrap();
 }
+
+#[test]
+fn impl_body_calls_unannotated_helper() {
+    check(
+        r#"
+trait Display a {
+    fun display (x: a) -> String
+}
+
+helper n = show n
+
+type Wrapper { Wrapper(Int) }
+
+impl Display for Wrapper {
+    display Wrapper(n) = "Wrapped: " <> helper n
+}
+"#,
+    )
+    .unwrap();
+}

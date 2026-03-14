@@ -193,7 +193,33 @@ impl Checker {
             }
         }
 
-        // Register impls (after traits, imports, externals, and annotations)
+        // Pre-bind all function names with fresh vars (enables mutual recursion
+        // and makes unannotated helpers available in impl bodies)
+        let mut fun_vars: HashMap<std::string::String, Type> = HashMap::new();
+        for decl in program {
+            if let Decl::FunBinding { name, .. } = decl
+                && !fun_vars.contains_key(name)
+            {
+                // Skip if already registered by an annotation above
+                if annotations.contains_key(name) {
+                    let var = self.fresh_var();
+                    fun_vars.insert(name.clone(), var);
+                    continue;
+                }
+                let var = self.fresh_var();
+                fun_vars.insert(name.clone(), var.clone());
+                self.env.insert(
+                    name.clone(),
+                    Scheme {
+                        forall: vec![],
+                        constraints: vec![],
+                        ty: var,
+                    },
+                );
+            }
+        }
+
+        // Register impls (after traits, imports, externals, annotations, and function pre-binding)
         for decl in program {
             if let Decl::ImplDef {
                 trait_name,
@@ -219,25 +245,6 @@ impl Checker {
 
         // Check supertrait requirements (after all impls are registered so order doesn't matter)
         self.check_supertrait_impls()?;
-
-        // Second pass: pre-bind all function names with fresh vars (enables mutual recursion)
-        let mut fun_vars: HashMap<std::string::String, Type> = HashMap::new();
-        for decl in program {
-            if let Decl::FunBinding { name, .. } = decl
-                && !fun_vars.contains_key(name)
-            {
-                let var = self.fresh_var();
-                fun_vars.insert(name.clone(), var.clone());
-                self.env.insert(
-                    name.clone(),
-                    Scheme {
-                        forall: vec![],
-                        constraints: vec![],
-                        ty: var,
-                    },
-                );
-            }
-        }
 
         // Third pass: group multi-clause function bindings, then check everything
         let mut i = 0;
