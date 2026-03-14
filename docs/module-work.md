@@ -1,10 +1,10 @@
-- [ ] 1. Redundant re-parse/re-typecheck in cmd_build_project (the biggest one)
+- [x] 1. Redundant re-parse/re-typecheck in cmd_build_project (the biggest one)
 
   In main.rs:217-228, each imported user module is re-parsed and re-typechecked with a fresh make_checker. The typechecker cache from the initial Main.dy pass (which already transitively checked everything) is not reused. The comment says "typechecker caches make this fast" but that's not true: each mod_checker is a brand new checker, so there's no cache hit. This means every module gets fully typechecked twice: once during Main.dy's transitive import resolution, and once during the build loop. For a project with N modules, this is O(N^2) in the worst case due to transitive re-checking.
 
   The fix: pass the already-populated checker.tc_codegen_info and cached data to the per-module elaboration step, or restructure so that the initial pass stores enough to skip the second typecheck entirely.
 
-- [ ] 2. compile_std_modules also re-typechecks redundantly
+- [x] 2. compile_std_modules also re-typechecks redundantly
 
   In main.rs:122-126, each Std module gets a fresh make_checker(None) and is fully re-typechecked. Same issue as above. The main checker already typechecked these during import resolution.
 

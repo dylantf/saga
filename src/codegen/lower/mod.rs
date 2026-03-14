@@ -251,12 +251,20 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        // Register prelude (Std.*) constructors so they're mangled consistently
-        // even when not explicitly imported by user code.
+        // Register trait impl dicts and constructors from all modules in codegen_info
+        // so they're available even when not explicitly imported by user code. The
+        // elaborator resolves dicts from all tc_codegen_info entries (not just direct
+        // imports), so the lowerer must match that scope.
         for (mod_name, info) in self.codegen_info {
+            let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
+            let erlang_name = util::module_name_to_erlang(&mod_path);
+            for (_trait_name, _target_type, dict_name, arity) in &info.trait_impl_dicts {
+                self.top_level_funs.entry(dict_name.clone()).or_insert(*arity);
+                self.imported_names
+                    .entry(dict_name.clone())
+                    .or_insert_with(|| (erlang_name.clone(), dict_name.clone()));
+            }
             if mod_name.starts_with("Std.") {
-                let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
-                let erlang_name = util::module_name_to_erlang(&mod_path);
                 for (_type_name, ctors) in &info.type_constructors {
                     for ctor in ctors {
                         self.constructor_modules

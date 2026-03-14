@@ -159,6 +159,9 @@ impl Checker {
                 )
             })?;
 
+        // Cache the parsed program so the build step can skip re-parsing
+        self.tc_programs.insert(module_name.clone(), program.clone());
+
         self.tc_loading.insert(module_name.clone());
 
         // Create a module checker. For non-builtin modules, clone the prelude
@@ -215,6 +218,7 @@ impl Checker {
         mod_checker.tc_record_defs = self.tc_record_defs.clone();
         mod_checker.tc_trait_impls = self.tc_trait_impls.clone();
         mod_checker.tc_traits = self.tc_traits.clone();
+        mod_checker.tc_programs = self.tc_programs.clone();
         mod_checker.check_program(&program).map_err(|e| {
             TypeError::at(
                 span,
@@ -285,6 +289,11 @@ impl Checker {
             self.next_var = mod_checker.next_var;
         }
 
+        // Merge back any programs discovered by transitive imports
+        for (k, v) in mod_checker.tc_programs {
+            self.tc_programs.entry(k).or_insert(v);
+        }
+
         self.tc_loading.remove(&module_name);
         self.tc_loaded
             .insert(module_name.clone(), public_bindings.clone());
@@ -336,6 +345,58 @@ impl Checker {
             exposing,
             span,
         )
+    }
+
+    /// Create a module checker seeded with this checker's caches.
+    /// Import resolution will be O(1) cache hits. The caller still needs to
+    /// call `check_program` to produce per-module `env` and `evidence` for elaboration.
+    pub fn seeded_module_checker(
+        &self,
+        project_root: Option<std::path::PathBuf>,
+        is_builtin: bool,
+    ) -> Checker {
+        let mut mc = if !is_builtin {
+            if let Some(ref snapshot) = self.tc_prelude_snapshot {
+                let mut mc = *snapshot.clone();
+                if let Some(root) = project_root {
+                    mc.project_root = Some(root);
+                }
+                mc
+            } else {
+                match project_root {
+                    Some(root) => super::Checker::with_project_root(root),
+                    None => super::Checker::new(),
+                }
+            }
+        } else {
+            let mut mc = match project_root {
+                Some(root) => super::Checker::with_project_root(root),
+                None => super::Checker::new(),
+            };
+            // Share parent's trait definitions so builtin modules can impl traits like Show
+            for (name, info) in &self.traits {
+                if !mc.traits.contains_key(name) {
+                    mc.traits.insert(name.clone(), info.clone());
+                    for (method_name, _, _) in &info.methods {
+                        if let Some(scheme) = self.env.get(method_name)
+                            && mc.env.get(method_name).is_none()
+                        {
+                            mc.env.insert(method_name.clone(), scheme.clone());
+                        }
+                    }
+                }
+            }
+            mc
+        };
+        mc.next_var = self.next_var;
+        mc.tc_loaded = self.tc_loaded.clone();
+        mc.tc_type_ctors = self.tc_type_ctors.clone();
+        mc.tc_codegen_info = self.tc_codegen_info.clone();
+        mc.tc_record_defs = self.tc_record_defs.clone();
+        mc.tc_trait_impls = self.tc_trait_impls.clone();
+        mc.tc_traits = self.tc_traits.clone();
+        mc.tc_programs = self.tc_programs.clone();
+        mc
     }
 
     fn inject_module_types(

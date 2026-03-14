@@ -88,6 +88,8 @@ fn make_checker(project_root: Option<PathBuf>) -> (typechecker::Checker, ast::Pr
         eprintln!("Prelude type error: {}", e);
         std::process::exit(1);
     }
+    // Cache the prelude snapshot eagerly so seeded_module_checker can use it
+    checker.tc_prelude_snapshot = Some(Box::new(checker.clone()));
     (checker, prelude_program)
 }
 
@@ -103,23 +105,28 @@ fn compile_std_modules(checker: &typechecker::Checker, build_dir: &std::path::Pa
 
     for module_name in &std_modules {
         let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
-        let source = typechecker::builtin_module_source(&module_path)
-            .expect("Std module missing from embedded sources");
 
-        let tokens = lexer::Lexer::new(source).lex().unwrap_or_else(|e| {
-            eprintln!("Std module {} lex error: {:?}", module_name, e);
-            std::process::exit(1);
-        });
-        let program = parser::Parser::new(tokens)
-            .parse_program()
-            .unwrap_or_else(|e| {
-                eprintln!("Std module {} parse error: {:?}", module_name, e);
+        // Use cached program if available, otherwise parse from embedded source
+        let program = if let Some(cached) = checker.tc_programs.get(module_name) {
+            cached.clone()
+        } else {
+            let source = typechecker::builtin_module_source(&module_path)
+                .expect("Std module missing from embedded sources");
+            let tokens = lexer::Lexer::new(source).lex().unwrap_or_else(|e| {
+                eprintln!("Std module {} lex error: {:?}", module_name, e);
                 std::process::exit(1);
             });
+            parser::Parser::new(tokens)
+                .parse_program()
+                .unwrap_or_else(|e| {
+                    eprintln!("Std module {} parse error: {:?}", module_name, e);
+                    std::process::exit(1);
+                })
+        };
 
-        // Use a checker with the prelude loaded so Std modules can see
-        // trait definitions (e.g. Show) and other Std modules.
-        let (mut mod_checker, _prelude) = make_checker(None);
+        // Seeded checker: imports resolve via cache hits, only module body is re-checked.
+        // Std modules are builtin so they get a fresh checker with traits copied in.
+        let mut mod_checker = checker.seeded_module_checker(None, true);
         if let Err(e) = mod_checker.check_program(&program) {
             eprintln!("Std module {} type error: {}", module_name, e);
             std::process::exit(1);
@@ -215,19 +222,37 @@ fn cmd_build_project() {
         .collect();
 
     for module_name in &module_names {
-        let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
-        let rel: PathBuf = module_path.iter().collect();
-        let file_path = project_root.join(rel).with_extension("dy");
-        let source = fs::read_to_string(&file_path).unwrap_or_else(|e| {
-            eprintln!("Error reading {}: {}", file_path.display(), e);
+        // Use cached program if available, otherwise read from disk and parse
+        let program = if let Some(cached) = checker.tc_programs.get(module_name) {
+            cached.clone()
+        } else {
+            let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
+            let rel: PathBuf = module_path.iter().collect();
+            let file_path = project_root.join(rel).with_extension("dy");
+            let source = fs::read_to_string(&file_path).unwrap_or_else(|e| {
+                eprintln!("Error reading {}: {}", file_path.display(), e);
+                std::process::exit(1);
+            });
+            let tokens = lexer::Lexer::new(&source).lex().unwrap_or_else(|e| {
+                eprintln!("Lex error in module {}: {:?}", module_name, e);
+                std::process::exit(1);
+            });
+            parser::Parser::new(tokens)
+                .parse_program()
+                .unwrap_or_else(|e| {
+                    eprintln!("Parse error in module {}: {:?}", module_name, e);
+                    std::process::exit(1);
+                })
+        };
+
+        // Seeded checker: imports resolve via cache hits, only module body is re-checked
+        let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
+        if let Err(e) = mod_checker.check_program(&program) {
+            eprintln!("Type error in module {}: {}", module_name, e);
             std::process::exit(1);
-        });
+        }
 
-        // Re-parse and re-typecheck the module (typechecker caches make this fast)
-        let (mut mod_checker, _prelude) = make_checker(Some(project_root.clone()));
-        let mod_program = parse_and_typecheck(&source, module_name, &mut mod_checker);
-
-        let elaborated = elaborate::elaborate_module(&mod_program, &mod_checker, module_name);
+        let elaborated = elaborate::elaborate_module(&program, &mod_checker, module_name);
         let erlang_name = module_name.to_lowercase().replace('.', "_");
         let core_src =
             codegen::emit_module_with_imports(&erlang_name, &elaborated, &checker.tc_codegen_info);
