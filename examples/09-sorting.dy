@@ -28,8 +28,10 @@ bubblesort xs = bubble_times (List.length xs) xs
 quicksort xs = case xs {
   [] -> []
   h :: t -> {
-    let smaller = List.filter (fun x -> x <= h) t
-    let larger = List.filter (fun x -> x > h) t
+    let lte x = x <= h
+    let gt x = x > h
+    let smaller = List.filter lte t
+    let larger = List.filter gt t
     List.append (quicksort smaller) (h :: quicksort larger)
   }
 }

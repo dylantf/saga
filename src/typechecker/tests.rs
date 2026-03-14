@@ -2760,3 +2760,44 @@ fn script_mode_rejects_user_imports() {
         Ok(_) => panic!("should reject user import in script mode"),
     }
 }
+
+#[test]
+fn local_function_simple() {
+    check(
+        r#"
+let result = {
+  let double x = x + 1
+  double 5
+}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn local_function_recursive() {
+    check(
+        r#"
+let result = {
+  let fact n = if n == 0 then 1 else n * fact (n - 1)
+  fact 5
+}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn local_function_multi_clause() {
+    check(
+        r#"
+let result = {
+  let fib 0 = 0
+  let fib 1 = 1
+  let fib n = fib (n - 1) + fib (n - 2)
+  fib 10
+}
+"#,
+    )
+    .unwrap();
+}

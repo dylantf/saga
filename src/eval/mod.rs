@@ -335,6 +335,41 @@ fn eval_block_stmts(stmts: &[Stmt], index: usize, env: &Env) -> EvalResult {
                 eval_block_stmts(&stmts, index + 1, &env)
             })
         }
+        Stmt::LetFun {
+            name, params, guard, body, ..
+        } => {
+            // Group consecutive LetFun clauses with the same name
+            let mut arms = vec![ClosureArm {
+                params: params.clone(),
+                guard: guard.as_deref().cloned(),
+                body: body.clone(),
+                env: env.clone(),
+            }];
+            let mut skip = 1;
+            while let Some(Stmt::LetFun {
+                name: next_name,
+                params: next_params,
+                guard: next_guard,
+                body: next_body,
+                ..
+            }) = stmts.get(index + skip)
+            {
+                if next_name != name {
+                    break;
+                }
+                arms.push(ClosureArm {
+                    params: next_params.clone(),
+                    guard: next_guard.as_deref().cloned(),
+                    body: next_body.clone(),
+                    env: env.clone(),
+                });
+                skip += 1;
+            }
+            // Insert into env before evaluating remaining stmts (enables recursion
+            // via shared Rc<RefCell> env)
+            env.set(name.clone(), Value::Closure(arms));
+            eval_block_stmts(stmts, index + skip, env)
+        }
         Stmt::Expr(expr) => {
             if is_last {
                 eval_expr(expr, env)

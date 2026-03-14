@@ -51,6 +51,23 @@ impl Normalizer {
                         span: *span,
                     });
                 }
+                Stmt::LetFun {
+                    name,
+                    params,
+                    guard,
+                    body,
+                    span,
+                } => {
+                    let new_body = self.normalize_expr(body);
+                    let new_guard = guard.as_ref().map(|g| Box::new(self.normalize_expr(g)));
+                    result.push(Stmt::LetFun {
+                        name: name.clone(),
+                        params: params.clone(),
+                        guard: new_guard,
+                        body: new_body,
+                        span: *span,
+                    });
+                }
                 Stmt::Expr(e) => {
                     let mut lifted = Vec::new();
                     let new_expr = self.normalize_top(e, &mut lifted);

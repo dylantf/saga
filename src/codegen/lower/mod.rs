@@ -265,6 +265,13 @@ impl<'a> Lowerer<'a> {
                     .or_insert_with(|| (erlang_name.clone(), dict_name.clone()));
             }
             if mod_name.starts_with("Std.") {
+                // Register the prelude's module alias so qualified calls like
+                // `List.map` resolve to `std_list:map` instead of `list:map`.
+                let alias = mod_path.last().unwrap().clone();
+                self.module_aliases
+                    .entry(alias)
+                    .or_insert_with(|| erlang_name.clone());
+
                 // Register Std exports so prelude-imported functions (e.g. fst, snd)
                 // resolve to cross-module calls without an explicit import in user code.
                 for (name, scheme) in &info.exports {
@@ -272,12 +279,16 @@ impl<'a> Lowerer<'a> {
                     let effect_count = effects.len();
                     let expanded_arity =
                         base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
+                    // Register both unqualified and qualified (alias.name) forms
                     self.top_level_funs.entry(name.clone()).or_insert(expanded_arity);
+                    let qualified = format!("{}.{}", mod_path.last().unwrap(), name);
+                    self.top_level_funs.entry(qualified.clone()).or_insert(expanded_arity);
                     self.imported_names
                         .entry(name.clone())
                         .or_insert_with(|| (erlang_name.clone(), name.clone()));
                     if !effects.is_empty() {
-                        self.fun_effects.entry(name.clone()).or_insert(effects);
+                        self.fun_effects.entry(name.clone()).or_insert(effects.clone());
+                        self.fun_effects.entry(qualified).or_insert(effects);
                     }
                 }
                 for (_type_name, ctors) in &info.type_constructors {

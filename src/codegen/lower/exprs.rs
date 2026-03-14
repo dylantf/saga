@@ -6,7 +6,7 @@ use crate::ast::{BinOp, CaseArm, Expr, Handler, HandlerArm, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::Lowerer;
-use super::pats::lower_pat;
+use super::pats::{self, lower_pat};
 use super::util::{
     binop_call, collect_effect_call, collect_fun_call, core_var, has_nested_effect_call,
     mangle_ctor_atom, pat_binding_var,
@@ -310,6 +310,89 @@ impl<'a> Lowerer<'a> {
                 let body = self.apply_return_k(CExpr::Var(var.clone()));
                 CExpr::Let(var, Box::new(val_ce), Box::new(body))
             }
+            [Stmt::LetFun { .. }, ..] => {
+                // Group consecutive LetFun clauses with the same name
+                let fun_name = match &stmts[0] {
+                    Stmt::LetFun { name, .. } => name.clone(),
+                    _ => unreachable!(),
+                };
+                let mut clauses: Vec<(&[Pat], &Option<Box<Expr>>, &Expr)> = Vec::new();
+                let mut consumed = 0;
+                for stmt in stmts {
+                    if let Stmt::LetFun {
+                        name,
+                        params,
+                        guard,
+                        body,
+                        ..
+                    } = stmt
+                    {
+                        if *name != fun_name {
+                            break;
+                        }
+                        clauses.push((params, guard, body));
+                        consumed += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let rest = &stmts[consumed..];
+
+                // Build the function body (same logic as top-level multi-clause funs)
+                let arity = pats::lower_params(clauses[0].0).len();
+                let param_names: Vec<String> = (0..arity).map(|i| format!("_LF{}", i)).collect();
+
+                // Register in top_level_funs BEFORE lowering body so recursive
+                // calls are recognized as saturated apply
+                self.top_level_funs.entry(fun_name.clone()).or_insert(arity);
+
+                let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
+                    // Single clause, no guard
+                    let params_ce = pats::lower_params(clauses[0].0);
+                    let body_ce = self.lower_expr(clauses[0].2);
+                    CExpr::Fun(params_ce, Box::new(body_ce))
+                } else {
+                    // Multi-clause: build case expression over params
+                    let scrutinee = if arity == 1 {
+                        CExpr::Var(param_names[0].clone())
+                    } else {
+                        CExpr::Tuple(param_names.iter().map(|n| CExpr::Var(n.clone())).collect())
+                    };
+                    let arms: Vec<CArm> = clauses
+                        .iter()
+                        .map(|(params, guard, body)| {
+                            let pats_ce: Vec<CPat> = params.iter().map(|p| pats::lower_pat(p, &self.record_fields, &self.constructor_modules)).collect();
+                            let pat = if pats_ce.len() == 1 {
+                                pats_ce.into_iter().next().unwrap()
+                            } else {
+                                CPat::Tuple(pats_ce)
+                            };
+                            let guard_ce = guard.as_ref().map(|g| self.lower_expr(g));
+                            let body_ce = self.lower_expr(body);
+                            CArm {
+                                pat,
+                                guard: guard_ce,
+                                body: body_ce,
+                            }
+                        })
+                        .collect();
+                    CExpr::Fun(
+                        param_names.clone(),
+                        Box::new(CExpr::Case(Box::new(scrutinee), arms)),
+                    )
+                };
+
+                let rest_ce = if rest.is_empty() {
+                    self.apply_return_k(CExpr::Tuple(vec![]))
+                } else {
+                    self.lower_block(rest)
+                };
+
+                CExpr::LetRec(
+                    vec![(fun_name, arity, fun_body)],
+                    Box::new(rest_ce),
+                )
+            }
             [first, rest @ ..] => {
                 // Check if the value is a `with` expression. If so, capture the rest
                 // of the block as _ReturnK so abort-style handlers skip subsequent stmts.
@@ -359,6 +442,7 @@ impl<'a> Lowerer<'a> {
                     let value_expr = match first {
                         Stmt::Let { value, .. } => value,
                         Stmt::Expr(e) => e,
+                        Stmt::LetFun { .. } => unreachable!(),
                     };
                     let is_effectful_call = collect_fun_call(value_expr)
                         .map(|(name, _)| {
@@ -370,6 +454,7 @@ impl<'a> Lowerer<'a> {
                         let (pat_opt, value_expr) = match first {
                             Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                             Stmt::Expr(e) => (None, e),
+                            Stmt::LetFun { .. } => unreachable!(),
                         };
                         let rest_ce = self.lower_block(rest);
                         let (k_param, rest_ce) = match pat_opt {
@@ -395,6 +480,7 @@ impl<'a> Lowerer<'a> {
                     }
                     Stmt::Let { pattern, value, .. } => collect_effect_call(value)
                         .map(|(name, qual, args)| (Some(pattern), name, qual, args)),
+                    Stmt::LetFun { .. } => None,
                 };
 
                 if let Some((pat, op_name, qualifier, args)) = effect_info {
@@ -414,12 +500,14 @@ impl<'a> Lowerer<'a> {
                     let value_has_nested = match first {
                         Stmt::Expr(e) => has_nested_effect_call(e),
                         Stmt::Let { value, .. } => has_nested_effect_call(value),
+                        Stmt::LetFun { .. } => false,
                     };
 
                     if value_has_nested {
                         let (pat_opt, value_expr) = match first {
                             Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                             Stmt::Expr(e) => (None, e),
+                            Stmt::LetFun { .. } => unreachable!(),
                         };
                         let rest_ce = self.lower_block(rest);
                         let (k_param, rest_ce) = match pat_opt {
@@ -437,6 +525,7 @@ impl<'a> Lowerer<'a> {
                                 (Some(pattern), self.lower_expr(value))
                             }
                             Stmt::Expr(e) => (None, self.lower_expr(e)),
+                            Stmt::LetFun { .. } => unreachable!(),
                         };
                         let rest_ce = self.lower_block(rest);
                         let (var, rest_ce) = match pat_opt {
@@ -596,6 +685,7 @@ impl<'a> Lowerer<'a> {
                     }
                     Stmt::Let { pattern, value, .. } => collect_effect_call(value)
                         .map(|(name, qual, args)| (Some(pattern), name, qual, args)),
+                    Stmt::LetFun { .. } => None,
                 };
 
                 if let Some((pat, op_name, qualifier, args)) = effect_info {
@@ -612,6 +702,7 @@ impl<'a> Lowerer<'a> {
                     let (pat_opt, value_expr) = match first {
                         Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                         Stmt::Expr(e) => (None, e),
+                        Stmt::LetFun { .. } => unreachable!(),
                     };
 
                     // Check for call to an effectful function. Capture the

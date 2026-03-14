@@ -618,23 +618,53 @@ impl Parser {
                         let let_start = self.tokens[self.pos].span;
                         self.advance(); // consume 'let'
                         let pattern = self.parse_pattern()?;
-                        let annotation = if matches!(self.peek(), Token::Colon)
-                            && matches!(pattern, Pat::Var { .. })
+
+                        // Check for local function definition: `let f x y = body`
+                        // If the first pattern is a variable and next token is NOT
+                        // `=` or `:`, we have parameter patterns following the name.
+                        if let Pat::Var { name, .. } = &pattern
+                            && !matches!(self.peek(), Token::Eq | Token::Colon)
                         {
-                            self.advance(); // consume ':'
-                            Some(self.parse_type_expr()?)
+                            let fun_name = name.clone();
+                            let mut params = Vec::new();
+                            while !matches!(self.peek(), Token::Eq | Token::Bar | Token::Eof) {
+                                params.push(self.parse_pattern()?);
+                            }
+                            let guard = if matches!(self.peek(), Token::Bar) {
+                                self.advance();
+                                Some(Box::new(self.parse_expr(0)?))
+                            } else {
+                                None
+                            };
+                            self.expect(Token::Eq)?;
+                            let body = self.parse_expr(0)?;
+                            let stmt_span = let_start.to(body.span());
+                            stmts.push(Stmt::LetFun {
+                                name: fun_name,
+                                params,
+                                guard,
+                                body,
+                                span: stmt_span,
+                            });
                         } else {
-                            None
-                        };
-                        self.expect(Token::Eq)?;
-                        let value = self.parse_expr(0)?;
-                        let stmt_span = let_start.to(value.span());
-                        stmts.push(Stmt::Let {
-                            pattern,
-                            annotation,
-                            value,
-                            span: stmt_span,
-                        });
+                            let annotation = if matches!(self.peek(), Token::Colon)
+                                && matches!(pattern, Pat::Var { .. })
+                            {
+                                self.advance(); // consume ':'
+                                Some(self.parse_type_expr()?)
+                            } else {
+                                None
+                            };
+                            self.expect(Token::Eq)?;
+                            let value = self.parse_expr(0)?;
+                            let stmt_span = let_start.to(value.span());
+                            stmts.push(Stmt::Let {
+                                pattern,
+                                annotation,
+                                value,
+                                span: stmt_span,
+                            });
+                        }
                     } else {
                         stmts.push(Stmt::Expr(self.parse_expr(0)?));
                     }

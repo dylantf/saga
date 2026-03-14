@@ -490,8 +490,9 @@ impl Checker {
 
     pub(crate) fn infer_block(&mut self, stmts: &[Stmt]) -> Result<Type, TypeError> {
         let mut last_ty = Type::unit();
-        for stmt in stmts {
-            match stmt {
+        let mut i = 0;
+        while i < stmts.len() {
+            match &stmts[i] {
                 Stmt::Let {
                     pattern,
                     annotation,
@@ -510,9 +511,89 @@ impl Checker {
                         self.bind_pattern(pattern, &ty)?;
                     }
                     last_ty = Type::unit();
+                    i += 1;
+                }
+                Stmt::LetFun {
+                    name, span, ..
+                } => {
+                    // Group consecutive LetFun clauses with the same name
+                    let fun_name = name.clone();
+                    let fun_span = *span;
+                    let mut clauses: Vec<(&[Pat], &Option<Box<Expr>>, &Expr)> = Vec::new();
+                    while i < stmts.len() {
+                        if let Stmt::LetFun {
+                            name: n,
+                            params,
+                            guard,
+                            body,
+                            ..
+                        } = &stmts[i]
+                        {
+                            if *n != fun_name {
+                                break;
+                            }
+                            clauses.push((params, guard, body));
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Create a fresh type var for the function and insert it
+                    // into env before checking clauses (enables recursion)
+                    let fun_ty = self.fresh_var();
+                    self.env.insert(
+                        fun_name.clone(),
+                        Scheme {
+                            forall: vec![],
+                            constraints: vec![],
+                            ty: fun_ty.clone(),
+                        },
+                    );
+
+                    // Check each clause like a lambda, unifying with fun_ty
+                    let arity = clauses[0].0.len();
+                    for (params, guard, body) in &clauses {
+                        if params.len() != arity {
+                            return Err(TypeError::at(
+                                fun_span,
+                                format!(
+                                    "clause for '{}' has {} parameters, expected {}",
+                                    fun_name,
+                                    params.len(),
+                                    arity
+                                ),
+                            ));
+                        }
+                        let saved_env = self.env.clone();
+                        let mut param_types = Vec::new();
+                        for pat in *params {
+                            let ty = self.fresh_var();
+                            self.bind_pattern(pat, &ty)?;
+                            param_types.push(ty);
+                        }
+                        if let Some(g) = guard {
+                            let guard_ty = self.infer_expr(g)?;
+                            self.unify_at(&guard_ty, &Type::bool(), g.span())?;
+                        }
+                        let body_ty = self.infer_expr(body)?;
+                        // Build curried arrow type
+                        let mut clause_ty = body_ty;
+                        for param_ty in param_types.into_iter().rev() {
+                            clause_ty = Type::Arrow(Box::new(param_ty), Box::new(clause_ty));
+                        }
+                        self.unify_at(&fun_ty, &clause_ty, fun_span)?;
+                        self.env = saved_env;
+                    }
+
+                    // Generalize and update env with the final type
+                    let scheme = self.generalize(&fun_ty);
+                    self.env.insert(fun_name, scheme);
+                    last_ty = Type::unit();
                 }
                 Stmt::Expr(expr) => {
                     last_ty = self.infer_expr(expr)?;
+                    i += 1;
                 }
             }
         }

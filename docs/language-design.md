@@ -119,6 +119,24 @@ abs n | n < 0 = -n
 abs n = n
 ```
 
+Opaque types are also possible. The type is exposed to other modules, but the constructors are hidden. This allows pattern matching on the type, but not construction outside of the module it is defined in.
+
+```
+module A
+opaque type Foo { Bar | Baz }
+
+module B
+# This is ok
+case foo {
+  Bar -> "bar"
+  Baz -> "baz
+}
+
+# Type error
+let foo = Bar
+
+```
+
 ---
 
 ## 3. Records

@@ -38,6 +38,8 @@ pub enum CExpr {
     FunRef(String, usize),
     /// `<E1, E2, ...>` -- Core Erlang values expression (multi-value scrutinee)
     Values(Vec<CExpr>),
+    /// `letrec 'name'/arity = fun(...) -> ... in Body`
+    LetRec(Vec<(String, usize, CExpr)>, Box<CExpr>),
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +153,24 @@ impl Printer {
                 self.with_indent(2, |p| {
                     p.newline();
                     p.print_expr(val);
+                });
+                self.newline();
+                self.push("in");
+                self.newline();
+                self.print_expr(body);
+            }
+
+            CExpr::LetRec(defs, body) => {
+                self.push("letrec");
+                self.with_indent(4, |p| {
+                    for (name, arity, fun_body) in defs {
+                        p.newline();
+                        p.push(&format!("'{}'/{}  =", name, arity));
+                        p.with_indent(2, |p| {
+                            p.newline();
+                            p.print_expr(fun_body);
+                        });
+                    }
                 });
                 self.newline();
                 self.push("in");

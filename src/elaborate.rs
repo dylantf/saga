@@ -549,6 +549,19 @@ impl Elaborator {
                             value: self.elaborate_expr(value),
                             span: *span,
                         },
+                        Stmt::LetFun {
+                            name,
+                            params,
+                            guard,
+                            body,
+                            span,
+                        } => Stmt::LetFun {
+                            name: name.clone(),
+                            params: params.clone(),
+                            guard: guard.as_ref().map(|g| Box::new(self.elaborate_expr(g))),
+                            body: self.elaborate_expr(body),
+                            span: *span,
+                        },
                         Stmt::Expr(e) => Stmt::Expr(self.elaborate_expr(e)),
                     })
                     .collect(),

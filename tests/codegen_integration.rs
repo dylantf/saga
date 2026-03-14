@@ -1600,3 +1600,51 @@ fn float_division_emits_erlang_slash() {
     let out = emit_elaborated(src);
     assert_contains(&out, "call 'erlang':'/'");
 }
+
+#[test]
+fn local_function_emits_letrec() {
+    let src = r#"
+main () = {
+  let double x = x + x
+  double 5
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "letrec");
+    assert_contains(&out, "'double'/1");
+}
+
+#[test]
+fn local_function_compiles() {
+    let src = r#"
+main () = {
+  let double x = x + x
+  double 5
+}
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn local_recursive_function_compiles() {
+    let src = r#"
+main () = {
+  let fact n = if n == 0 then 1 else n * fact (n - 1)
+  fact 5
+}
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn local_multi_clause_function_compiles() {
+    let src = r#"
+main () = {
+  let fib 0 = 0
+  let fib 1 = 1
+  let fib n = fib (n - 1) + fib (n - 2)
+  fib 10
+}
+"#;
+    assert_compiles(src);
+}

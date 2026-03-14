@@ -331,6 +331,15 @@ pub enum Stmt {
         span: Span,
     },
 
+    /// `let f x y = body` -- local function definition (may be multi-clause)
+    LetFun {
+        name: String,
+        params: Vec<Pat>,
+        guard: Option<Box<Expr>>,
+        body: Expr,
+        span: Span,
+    },
+
     /// Expression used as a statement (last one is the block's value)
     Expr(Expr),
 }
