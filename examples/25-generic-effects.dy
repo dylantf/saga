@@ -1,49 +1,34 @@
-# Generic effects: State s with get/put
+# Generic effects: parameterized effect types
 #
-# The same State effect can be used at different types
-# by declaring handlers that specialize the type parameter.
+# The Fail effect has a type parameter for the error type.
+# Different handlers can catch failures and transform the error
+# into a result value.
 
-effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+effect Fail e {
+  fun fail (err: e) -> a
 }
 
-# Handler that manages an Int counter, starting at 0
-handler int_state for State Int {
-  get () -> resume 0
-  put val -> resume ()
+fun safe_div (x: Int) (y: Int) -> Int needs {Fail String}
+safe_div _ 0 = fail! "division by zero"
+safe_div x y = x / y
+
+handler to_result for Fail String {
+  fail msg -> $"Error: {msg}"
+  return value -> show value
 }
 
-# Handler that manages a String accumulator
-handler string_state for State String {
-  get () -> resume ""
-  put val -> resume ()
+handler to_default for Fail String {
+  fail _ -> 0
 }
 
-# Use State as an Int counter
-fun count_up () -> Int needs {State}
-count_up () = {
-  let x = get! ()
-  put! (x + 1)
-  let y = get! ()
-  put! (y + 1)
-  get! ()
-}
+fun test_result (x: Int) (y: Int) -> String
+test_result x y = safe_div x y with to_result
 
-# Use State as a String accumulator
-fun build_greeting (name: String) -> String needs {State}
-build_greeting name = {
-  let s = get! ()
-  put! (s <> "Hello, ")
-  let s2 = get! ()
-  put! (s2 <> name <> "!")
-  get! ()
-}
+fun test_default (x: Int) (y: Int) -> Int
+test_default x y = safe_div x y with to_default
 
 main () = {
-  let n = count_up () with int_state
-  print n
-
-  let greeting = build_greeting "world" with string_state
-  print greeting
+  print (test_result 10 2)
+  print (test_result 10 0)
+  print (test_default 10 0)
 }
