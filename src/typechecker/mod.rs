@@ -422,6 +422,7 @@ pub struct Checker {
     pub(crate) tc_record_defs: HashMap<String, HashMap<String, Vec<(String, Type)>>>,
     /// Cache of trait impls from typechecked modules: module name -> (trait, type) -> impl info.
     pub(crate) tc_trait_impls: HashMap<String, HashMap<(String, String), ImplInfo>>,
+    pub(crate) tc_traits: HashMap<String, HashMap<String, TraitInfo>>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) tc_loading: HashSet<String>,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
@@ -463,6 +464,7 @@ impl Checker {
             tc_codegen_info: HashMap::new(),
             tc_record_defs: HashMap::new(),
             tc_trait_impls: HashMap::new(),
+            tc_traits: HashMap::new(),
             tc_loading: HashSet::new(),
             adt_variants: HashMap::new(),
             evidence: Vec::new(),
@@ -484,49 +486,8 @@ impl Checker {
     }
 
     fn register_builtins(&mut self) {
-        // Built-in Show trait and impls for primitives
-        self.traits.insert(
-            "Show".into(),
-            TraitInfo {
-                type_param: "a".into(),
-                supertraits: vec![],
-                methods: vec![("show".into(), vec![Type::Var(u32::MAX)], Type::string())],
-            },
-        );
-        for prim in &["Int", "Float", "String", "Bool", "Unit"] {
-            self.trait_impls.insert(
-                ("Show".into(), prim.to_string()),
-                ImplInfo {
-                    param_constraints: vec![],
-                    span: None,
-                },
-            );
-        }
-        // Show for compound types requires Show on type params
-        // List a: Show on param 0
-        self.trait_impls.insert(
-            ("Show".into(), "List".into()),
-            ImplInfo {
-                param_constraints: vec![("Show".into(), 0)],
-                span: None,
-            },
-        );
-        // Maybe a: Show on param 0
-        self.trait_impls.insert(
-            ("Show".into(), "Maybe".into()),
-            ImplInfo {
-                param_constraints: vec![("Show".into(), 0)],
-                span: None,
-            },
-        );
-        // Result a b: Show on params 0 and 1
-        self.trait_impls.insert(
-            ("Show".into(), "Result".into()),
-            ImplInfo {
-                param_constraints: vec![("Show".into(), 0), ("Show".into(), 1)],
-                span: None,
-            },
-        );
+        // Note: Show trait is defined in prelude.dy and propagated to module
+        // checkers via typecheck_import.
 
         // Built-in Num trait (arithmetic: +, -, *, /, %, unary -)
         self.traits.insert(
@@ -584,36 +545,6 @@ impl Checker {
                 },
             );
         }
-
-        // print : Show a => a -> Unit
-        let a = self.fresh_var();
-        let a_id = match &a {
-            Type::Var(id) => *id,
-            _ => unreachable!(),
-        };
-        self.env.insert(
-            "print".into(),
-            Scheme {
-                forall: vec![a_id],
-                constraints: vec![("Show".into(), a_id)],
-                ty: Type::Arrow(Box::new(a), Box::new(Type::unit())),
-            },
-        );
-
-        // show : Show a => a -> String
-        let a = self.fresh_var();
-        let a_id = match &a {
-            Type::Var(id) => *id,
-            _ => unreachable!(),
-        };
-        self.env.insert(
-            "show".into(),
-            Scheme {
-                forall: vec![a_id],
-                constraints: vec![("Show".into(), a_id)],
-                ty: Type::Arrow(Box::new(a), Box::new(Type::string())),
-            },
-        );
 
         // panic : String -> a (crashes at runtime, polymorphic return type)
         let a = self.fresh_var();
@@ -722,14 +653,6 @@ impl Checker {
 
         // --- Dict type ---
 
-        // Show for Dict k v: requires Show on both k and v
-        self.trait_impls.insert(
-            ("Show".into(), "Dict".into()),
-            ImplInfo {
-                param_constraints: vec![("Show".into(), 0), ("Show".into(), 1)],
-                span: None,
-            },
-        );
         // Eq for Dict k v: requires Eq on both k and v
         self.trait_impls.insert(
             ("Eq".into(), "Dict".into()),

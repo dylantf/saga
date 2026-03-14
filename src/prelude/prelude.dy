@@ -1,3 +1,7 @@
+trait Show a {
+  fun show (x: a) -> String
+}
+
 import Std.Bool as Bool (not)
 import Std.Maybe as Maybe (Maybe)
 import Std.Result as Result (Result)
@@ -8,3 +12,17 @@ import Std.Float as Float
 
 fst (x, _) = x
 snd (_, y) = y
+
+impl Show for String {
+  show x = x
+}
+
+impl Show for Unit {
+  show _ = "()"
+}
+
+impl Show for Dict k v where {k: Show, v: Show} {
+  show d = "{" <> List.flatten (List.join ", " (List.map (fun (k, v) -> show k <> ": " <> show v) (Dict.to_list d))) <> "}"
+}
+
+fun print (x: a) -> () where {a: Show}

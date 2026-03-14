@@ -1,5 +1,13 @@
 module Bool
 
+
 pub fun not (x: Bool) -> Bool
 not True = False
 not False = True
+
+impl Show for Bool {
+  show b = case b {
+    True -> "True"
+    False -> "False"
+  }
+}

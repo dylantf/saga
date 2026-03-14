@@ -38,3 +38,13 @@ fun append (xs: List a) (ys: List a) -> List a
 
 pub @external("erlang", "lists", "flatmap")
 fun flat_map (f: a -> List b) (xs: List a) -> List b
+
+pub @external("erlang", "lists", "join")
+fun join (sep: String) (xs: List String) -> List String
+
+pub @external("erlang", "lists", "flatten")
+fun flatten (xs: List String) -> String
+
+impl Show for List a where {a: Show} {
+  show xs = "[" <> flatten (join ", " (map show xs)) <> "]"
+}

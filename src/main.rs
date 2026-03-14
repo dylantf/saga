@@ -117,9 +117,9 @@ fn compile_std_modules(checker: &typechecker::Checker, build_dir: &std::path::Pa
                 std::process::exit(1);
             });
 
-        // Std modules are self-contained (only use @external FFI), so we can
-        // typecheck with a fresh checker and elaborate directly.
-        let mut mod_checker = typechecker::Checker::new();
+        // Use a checker with the prelude loaded so Std modules can see
+        // trait definitions (e.g. Show) and other Std modules.
+        let (mut mod_checker, _prelude) = make_checker(None);
         if let Err(e) = mod_checker.check_program(&program) {
             eprintln!("Std module {} type error: {}", module_name, e);
             std::process::exit(1);

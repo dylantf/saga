@@ -1,5 +1,6 @@
 module Maybe
 
+
 pub type Maybe a {
   None
   Some(a)
@@ -21,4 +22,11 @@ pub fun and_then (f: a -> Maybe b) (m: Maybe a) -> Maybe b
 and_then f m = case m {
   None -> None
   Some(x) -> f x
+}
+
+impl Show for Maybe a where {a: Show} {
+  show m = case m {
+    None -> "None"
+    Some(x) -> "Some(" <> show x <> ")"
+  }
 }

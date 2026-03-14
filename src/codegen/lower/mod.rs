@@ -472,9 +472,18 @@ impl<'a> Lowerer<'a> {
                 self.current_return_k = Some(CExpr::Var("_ReturnK".to_string()));
             }
 
-            let all_simple_params = clauses.len() == 1 && clauses[0].0.iter().all(|p| {
-                matches!(p, Pat::Var { .. } | Pat::Wildcard { .. } | Pat::Lit { value: ast::Lit::Unit, .. })
-            });
+            let all_simple_params = clauses.len() == 1
+                && clauses[0].0.iter().all(|p| {
+                    matches!(
+                        p,
+                        Pat::Var { .. }
+                            | Pat::Wildcard { .. }
+                            | Pat::Lit {
+                                value: ast::Lit::Unit,
+                                ..
+                            }
+                    )
+                });
             let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() && all_simple_params {
                 // Single clause, no guard: emit directly without a case wrapper.
                 let (params, _, body) = clauses[0];
@@ -574,8 +583,7 @@ impl<'a> Lowerer<'a> {
                         let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
                         let body_ce = if has_effects && !matches!(body, Expr::Block { .. }) {
                             if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
-                                let args_owned: Vec<Expr> =
-                                    args.into_iter().cloned().collect();
+                                let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                                 self.lower_effect_call(
                                     op_name,
                                     qualifier,
@@ -703,6 +711,14 @@ impl<'a> Lowerer<'a> {
                     return self.lower_qualified_call(module, func_name, &args);
                 }
 
+                // Lower `print(dict, x)` to io:format("~s~n", [show(x)])
+                if let Some((func_name, args)) = collect_fun_call(expr)
+                    && func_name == "print"
+                    && let Some(ce) = self.lower_builtin_print(&args)
+                {
+                    return ce;
+                }
+
                 // Lower `panic msg` / `todo msg` to erlang:error(msg)
                 if let Some((func_name, args)) = collect_fun_call(expr)
                     && (func_name == "panic" || func_name == "todo")
@@ -791,8 +807,24 @@ impl<'a> Lowerer<'a> {
                         let call = if let Some((erl_mod, erl_func, _)) =
                             self.external_funs.get(func_name)
                         {
-                            // External function: direct call to the foreign module
-                            CExpr::Call(erl_mod.clone(), erl_func.clone(), call_args)
+                            // float_to_list/1 -> float_to_list/2 with [short] option
+                            if erl_mod == "erlang"
+                                && erl_func == "float_to_list"
+                                && call_args.len() == 1
+                            {
+                                let opts = CExpr::Cons(
+                                    Box::new(CExpr::Lit(CLit::Atom("short".into()))),
+                                    Box::new(CExpr::Nil),
+                                );
+                                CExpr::Call(
+                                    erl_mod.clone(),
+                                    erl_func.clone(),
+                                    vec![call_args.into_iter().next().unwrap(), opts],
+                                )
+                            } else {
+                                // External function: direct call to the foreign module
+                                CExpr::Call(erl_mod.clone(), erl_func.clone(), call_args)
+                            }
                         } else if let Some((erl_mod, erl_name)) = self.imported_names.get(func_name)
                         {
                             CExpr::Call(erl_mod.clone(), erl_name.clone(), call_args)
@@ -960,6 +992,17 @@ impl<'a> Lowerer<'a> {
             Expr::Block { stmts, .. } => self.lower_block(stmts),
 
             Expr::Lambda { params, body, .. } => {
+                let all_simple = params.iter().all(|p| {
+                    matches!(
+                        p,
+                        Pat::Var { .. }
+                            | Pat::Wildcard { .. }
+                            | Pat::Lit {
+                                value: ast::Lit::Unit,
+                                ..
+                            }
+                    )
+                });
                 let mut param_vars = lower_params(params);
                 let saved_handler_params = self.current_handler_params.clone();
                 let saved_return_k = self.current_return_k.take();
@@ -1020,6 +1063,35 @@ impl<'a> Lowerer<'a> {
                 };
                 self.current_handler_params = saved_handler_params;
                 self.current_return_k = saved_return_k;
+                // If lambda has complex params (tuples, constructors), wrap
+                // the body in a case expression for destructuring.
+                let body_ce = if !all_simple {
+                    let scrutinee = if param_vars.len() == 1 {
+                        CExpr::Var(param_vars[0].clone())
+                    } else {
+                        CExpr::Tuple(param_vars.iter().map(|v| CExpr::Var(v.clone())).collect())
+                    };
+                    let pat = if params.len() == 1 {
+                        lower_pat(&params[0], &self.record_fields, &self.constructor_modules)
+                    } else {
+                        CPat::Tuple(
+                            params
+                                .iter()
+                                .map(|p| lower_pat(p, &self.record_fields, &self.constructor_modules))
+                                .collect(),
+                        )
+                    };
+                    CExpr::Case(
+                        Box::new(scrutinee),
+                        vec![CArm {
+                            pat,
+                            guard: None,
+                            body: body_ce,
+                        }],
+                    )
+                } else {
+                    body_ce
+                };
                 CExpr::Fun(param_vars, Box::new(body_ce))
             }
 
@@ -1094,8 +1166,8 @@ impl<'a> Lowerer<'a> {
             }
 
             Expr::FieldAccess { expr, field, .. } => {
-                let record_name = field_access_record_name(expr)
-                    .or_else(|| self.find_record_by_field(field));
+                let record_name =
+                    field_access_record_name(expr).or_else(|| self.find_record_by_field(field));
                 let idx = record_name
                     .and_then(|rname| self.record_fields.get(rname))
                     .and_then(|fields| fields.iter().position(|f| f == field))

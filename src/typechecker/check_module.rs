@@ -96,6 +96,23 @@ impl Checker {
                         .or_insert_with(|| info.clone());
                 }
             }
+            // Inject cached trait definitions and their methods
+            if let Some(cached_traits) = self.tc_traits.get(&module_name).cloned() {
+                let cached_binding_map: std::collections::HashMap<&str, &Scheme> =
+                    cached.iter().map(|(n, s)| (n.as_str(), s)).collect();
+                for (name, info) in &cached_traits {
+                    self.traits
+                        .entry(name.clone())
+                        .or_insert_with(|| info.clone());
+                    for (method_name, _, _) in &info.methods {
+                        if let Some(&scheme) = cached_binding_map.get(method_name.as_str())
+                            && self.env.get(method_name).is_none()
+                        {
+                            self.env.insert(method_name.clone(), scheme.clone());
+                        }
+                    }
+                }
+            }
             self.inject_module_types(
                 &cached,
                 &cached_ctors,
@@ -149,6 +166,24 @@ impl Checker {
         mod_checker.tc_codegen_info = self.tc_codegen_info.clone();
         mod_checker.tc_record_defs = self.tc_record_defs.clone();
         mod_checker.tc_trait_impls = self.tc_trait_impls.clone();
+        mod_checker.tc_traits = self.tc_traits.clone();
+        // Share parent's trait definitions so builtin modules (which skip
+        // the prelude) can still impl traits like Show.
+        for (name, info) in &self.traits {
+            if !mod_checker.traits.contains_key(name) {
+                mod_checker.traits.insert(name.clone(), info.clone());
+                for (method_name, _, _) in &info.methods {
+                    if self.env.get(method_name).is_some()
+                        && mod_checker.env.get(method_name).is_none()
+                    {
+                        mod_checker.env.insert(
+                            method_name.clone(),
+                            self.env.get(method_name).unwrap().clone(),
+                        );
+                    }
+                }
+            }
+        }
 
         // Run a fresh checker on prelude + module.
         // Builtin Std modules skip the prelude to avoid circular imports
@@ -206,6 +241,19 @@ impl Checker {
             }
         }
 
+        // Collect public trait definitions from the module.
+        let mut module_traits: std::collections::HashMap<String, super::TraitInfo> =
+            std::collections::HashMap::new();
+        for decl in &program {
+            if let crate::ast::Decl::TraitDef {
+                public: true, name, ..
+            } = decl
+                && let Some(info) = mod_checker.traits.get(name.as_str())
+            {
+                module_traits.insert(name.clone(), info.clone());
+            }
+        }
+
         // Collect the module's own trait impls (from ImplDef declarations in the source).
         let mut module_trait_impls: std::collections::HashMap<(String, String), super::ImplInfo> =
             std::collections::HashMap::new();
@@ -237,11 +285,32 @@ impl Checker {
             .insert(module_name.clone(), pub_records.clone());
         self.tc_trait_impls
             .insert(module_name.clone(), module_trait_impls.clone());
+        self.tc_traits
+            .insert(module_name.clone(), module_traits.clone());
 
         // Build codegen info from the module's public declarations
         let codegen_info = collect_codegen_info(&module_name, &program, &public_bindings);
         self.tc_codegen_info
             .insert(module_name.clone(), codegen_info);
+
+        // Inject the module's trait definitions into the parent checker.
+        // Trait methods are also registered unqualified so impl bodies can use them.
+        let binding_map: std::collections::HashMap<&str, &Scheme> = public_bindings
+            .iter()
+            .map(|(n, s)| (n.as_str(), s))
+            .collect();
+        for (name, info) in &module_traits {
+            self.traits
+                .entry(name.clone())
+                .or_insert_with(|| info.clone());
+            for (method_name, _, _) in &info.methods {
+                if let Some(&scheme) = binding_map.get(method_name.as_str())
+                    && self.env.get(method_name).is_none()
+                {
+                    self.env.insert(method_name.clone(), scheme.clone());
+                }
+            }
+        }
 
         // Inject the module's trait impls into the parent checker
         for (key, info) in &module_trait_impls {

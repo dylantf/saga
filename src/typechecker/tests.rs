@@ -8,6 +8,13 @@ fn check(src: &str) -> Result<Checker, TypeError> {
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program().expect("parse error");
     let mut checker = Checker::new();
+    // Load the prelude so Show, print, etc. are available
+    let prelude_src = include_str!("../prelude/prelude.dy");
+    let prelude_tokens = Lexer::new(prelude_src).lex().expect("prelude lex error");
+    let prelude_program = Parser::new(prelude_tokens)
+        .parse_program()
+        .expect("prelude parse error");
+    checker.check_program(&prelude_program)?;
     checker.check_program(&program)?;
     Ok(checker)
 }

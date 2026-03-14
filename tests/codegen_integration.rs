@@ -1,5 +1,19 @@
 use dylang::{codegen, elaborate, lexer, parser, typechecker};
 
+/// Load the prelude into a checker and return both.
+fn bootstrap() -> (typechecker::Checker, Vec<dylang::ast::Decl>) {
+    let prelude_src = include_str!("../src/prelude/prelude.dy");
+    let prelude_tokens = lexer::Lexer::new(prelude_src).lex().expect("prelude lex error");
+    let prelude_program = parser::Parser::new(prelude_tokens)
+        .parse_program()
+        .expect("prelude parse error");
+    let mut checker = typechecker::Checker::new();
+    checker
+        .check_program(&prelude_program)
+        .expect("prelude typecheck error");
+    (checker, prelude_program)
+}
+
 fn emit(src: &str) -> String {
     let tokens = lexer::Lexer::new(src).lex().expect("lex error");
     let program = parser::Parser::new(tokens)
@@ -15,9 +29,11 @@ fn emit_elaborated(src: &str) -> String {
     let program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
-    let mut checker = typechecker::Checker::new();
+    let (mut checker, prelude_program) = bootstrap();
     checker.check_program(&program).expect("typecheck error");
-    let elaborated = elaborate::elaborate(&program, &checker);
+    let mut full_program = prelude_program;
+    full_program.extend(program);
+    let elaborated = elaborate::elaborate(&full_program, &checker);
     codegen::emit_module("_script", &elaborated)
 }
 
@@ -192,17 +208,12 @@ main () = describe Red
 fn show_int_uses_dict_dispatch() {
     let src = "main () = show 42";
     let out = emit_elaborated(src);
-    // Should emit a dict constructor for Show/Int
+    // Should reference the Show/Int dict from the std_int module
     assert!(
-        out.contains("'__dict_Show_Int'/0"),
-        "expected Show/Int dict constructor\n{out}"
+        out.contains("__dict_Show_std_int_Int"),
+        "expected Show/Int dict reference\n{out}"
     );
-    // Should call erlang:integer_to_list for Int show
-    assert!(
-        out.contains("'erlang':'integer_to_list'"),
-        "expected integer_to_list call\n{out}"
-    );
-    // main should actually call the dict via element() dispatch
+    // main should call the dict via element() dispatch
     assert!(
         out.contains("'erlang':'element'"),
         "expected element() for dict method access\n{out}"
@@ -213,14 +224,10 @@ fn show_int_uses_dict_dispatch() {
 fn show_bool_uses_case() {
     let src = "main () = show True";
     let out = emit_elaborated(src);
+    // Should reference the Show/Bool dict from the std_bool module
     assert!(
-        out.contains("'__dict_Show_Bool'/0"),
-        "expected Show/Bool dict constructor\n{out}"
-    );
-    // Bool show should produce "True"/"False" strings via case
-    assert!(
-        out.contains("\"True\""),
-        "expected \"True\" string in Show Bool\n{out}"
+        out.contains("__dict_Show_std_bool_Bool"),
+        "expected Show/Bool dict reference\n{out}"
     );
 }
 
@@ -228,15 +235,15 @@ fn show_bool_uses_case() {
 fn print_uses_show_dict() {
     let src = "main () = print 42";
     let out = emit_elaborated(src);
-    // print should be a function that takes a Show dict param
-    assert!(
-        out.contains("'print'/2"),
-        "expected print/2 (dict + value)\n{out}"
-    );
-    // print should call io:format
+    // print is lowered inline as io:format("~s~n", [show(x)])
     assert!(
         out.contains("'io':'format'"),
         "expected io:format call in print\n{out}"
+    );
+    // Should reference the Show/Int dict for the argument
+    assert!(
+        out.contains("__dict_Show_std_int_Int"),
+        "expected Show/Int dict reference\n{out}"
     );
 }
 
@@ -256,7 +263,7 @@ fn string_interpolation_uses_show_dict() {
     let out = emit_elaborated(src);
     // String interpolation desugars to show(x), which should use dict dispatch
     assert!(
-        out.contains("'__dict_Show_Int'/0"),
+        out.contains("__dict_Show_std_int_Int"),
         "expected Show/Int dict for interpolation\n{out}"
     );
 }
@@ -275,13 +282,13 @@ fn show_tuple_inlines_per_element() {
         out.contains("'erlang':'element'"),
         "expected erlang:element calls for tuple elements\n{out}"
     );
-    // Should use Show dicts for the element types
+    // Should reference Show dicts for the element types
     assert!(
-        out.contains("'__dict_Show_Int'/0"),
+        out.contains("__dict_Show_std_int_Int"),
         "expected Show/Int dict for first element\n{out}"
     );
     assert!(
-        out.contains("'__dict_Show_Bool'/0"),
+        out.contains("__dict_Show_std_bool_Bool"),
         "expected Show/Bool dict for second element\n{out}"
     );
     // Should produce parens and comma separator
@@ -310,15 +317,15 @@ fn show_triple_tuple_has_three_elements() {
     let out = emit_elaborated(src);
     // Should reference Show dicts for all three element types
     assert!(
-        out.contains("'__dict_Show_Int'/0"),
+        out.contains("__dict_Show_std_int_Int"),
         "expected Show/Int dict\n{out}"
     );
     assert!(
-        out.contains("'__dict_Show_String'/0"),
+        out.contains("__dict_Show_String"),
         "expected Show/String dict\n{out}"
     );
     assert!(
-        out.contains("'__dict_Show_Bool'/0"),
+        out.contains("__dict_Show_std_bool_Bool"),
         "expected Show/Bool dict\n{out}"
     );
     // Should have the inline tuple lambda, not a Tuple dict
@@ -415,7 +422,7 @@ main () = show (Wrap 42)
         "expected Show/Box dict constructor\n{out}"
     );
     assert!(
-        out.contains("'__dict_Show_Int'"),
+        out.contains("__dict_Show_std_int_Int"),
         "expected Show/Int sub-dict applied to Box dict\n{out}"
     );
 }
@@ -834,8 +841,8 @@ do_work () = {
 main () = do_work () with console_log
 "#;
     let out = emit_elaborated(src);
-    // The handler arm body should call print/2 with a Show dict
-    assert_contains(&out, "'print'/2");
+    // The handler arm body should call io:format (print is lowered inline)
+    assert_contains(&out, "'io':'format'");
     assert_contains(&out, "__dict_Show_String");
 }
 
