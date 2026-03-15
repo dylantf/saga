@@ -251,7 +251,8 @@ impl Elaborator {
                     // beam_runtime (ForeignCall), not CPS.
                     let mut d = decl.clone();
                     if let Decl::FunAnnotation { effects, .. } = &mut d {
-                        effects.retain(|e| e.name != "Actor" && e.name != "Process");
+                        effects
+                            .retain(|e| e.name != "Actor" && e.name != "Process" && e.name != "Monitor");
                     }
                     output.push(d);
                 }
@@ -415,6 +416,22 @@ impl Elaborator {
                             module: "erlang".into(),
                             func: "self".into(),
                             args: vec![],
+                            span: *span,
+                        };
+                    }
+                    if name == "monitor" {
+                        return Expr::ForeignCall {
+                            module: "erlang".into(),
+                            func: "monitor".into(),
+                            args: vec![self.elaborate_expr(arg)],
+                            span: *span,
+                        };
+                    }
+                    if name == "demonitor" {
+                        return Expr::ForeignCall {
+                            module: "erlang".into(),
+                            func: "demonitor".into(),
+                            args: vec![self.elaborate_expr(arg)],
                             span: *span,
                         };
                     }

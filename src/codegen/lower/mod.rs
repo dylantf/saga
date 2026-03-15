@@ -137,6 +137,21 @@ impl<'a> Lowerer<'a> {
                 },
             },
         );
+        lowerer.op_to_effect.insert("monitor".into(), "Monitor".into());
+        lowerer
+            .op_to_effect
+            .insert("demonitor".into(), "Monitor".into());
+        lowerer.effect_defs.insert(
+            "Monitor".into(),
+            EffectInfo {
+                ops: {
+                    let mut ops = HashMap::new();
+                    ops.insert("monitor".into(), 1);
+                    ops.insert("demonitor".into(), 1);
+                    ops
+                },
+            },
+        );
         lowerer
     }
 
@@ -1016,6 +1031,11 @@ impl<'a> Lowerer<'a> {
                 // Booleans are bare atoms to match Erlang's native true/false
                 "True" => CExpr::Lit(CLit::Atom("true".to_string())),
                 "False" => CExpr::Lit(CLit::Atom("false".to_string())),
+                // ExitReason constructors are bare atoms to match Erlang exit reasons
+                "Normal" => CExpr::Lit(CLit::Atom("normal".to_string())),
+                "Shutdown" => CExpr::Lit(CLit::Atom("shutdown".to_string())),
+                "Killed" => CExpr::Lit(CLit::Atom("killed".to_string())),
+                "Noproc" => CExpr::Lit(CLit::Atom("noproc".to_string())),
                 _ => {
                     let atom = util::mangle_ctor_atom(name, &self.constructor_modules);
                     // Wrap in a 1-tuple to match pattern representation and avoid atom collisions
@@ -1201,8 +1221,40 @@ impl<'a> Lowerer<'a> {
                 let lowered_arms: Vec<CArm> = arms
                     .iter()
                     .map(|arm| {
-                        let pat =
-                            lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules);
+                        // Down(pid, reason) -> {'DOWN', _Ref, 'process', Pid, Reason}
+                        // The reason is an Erlang exit atom (normal, shutdown, killed, etc.)
+                        // which maps directly to ExitReason constructors via BEAM convention overrides.
+                        let pat = if let Pat::Constructor { name, args, .. } = &arm.pattern {
+                            if name == "Down" && args.len() == 2 {
+                                CPat::Tuple(vec![
+                                    CPat::Lit(CLit::Atom("DOWN".into())),
+                                    CPat::Wildcard, // MonitorRef
+                                    CPat::Lit(CLit::Atom("process".into())),
+                                    lower_pat(
+                                        &args[0],
+                                        &self.record_fields,
+                                        &self.constructor_modules,
+                                    ),
+                                    lower_pat(
+                                        &args[1],
+                                        &self.record_fields,
+                                        &self.constructor_modules,
+                                    ),
+                                ])
+                            } else {
+                                lower_pat(
+                                    &arm.pattern,
+                                    &self.record_fields,
+                                    &self.constructor_modules,
+                                )
+                            }
+                        } else {
+                            lower_pat(
+                                &arm.pattern,
+                                &self.record_fields,
+                                &self.constructor_modules,
+                            )
+                        };
                         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
                         let body = self.lower_expr(&arm.body);
                         CArm { pat, guard, body }
@@ -1383,8 +1435,18 @@ impl<'a> Lowerer<'a> {
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
+                // erlang:monitor/1 -> erlang:monitor/2 with 'process' atom
+                let call = if module == "erlang" && func == "monitor" && vars.len() == 1 {
+                    CExpr::Call(
+                        module.clone(),
+                        func.clone(),
+                        vec![
+                            CExpr::Lit(CLit::Atom("process".into())),
+                            CExpr::Var(vars[0].clone()),
+                        ],
+                    )
                 // float_to_list/1 -> float_to_list/2 with [short] option
-                let call = if module == "erlang" && func == "float_to_list" && vars.len() == 1 {
+                } else if module == "erlang" && func == "float_to_list" && vars.len() == 1 {
                     let opts = CExpr::Cons(
                         Box::new(CExpr::Lit(CLit::Atom("short".into()))),
                         Box::new(CExpr::Nil),

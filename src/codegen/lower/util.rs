@@ -11,7 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 /// Module types: Circle -> "shapes_Circle"
 /// Prelude builtins: True -> "True", False -> "False"
 pub(super) fn mangle_ctor_atom(name: &str, constructor_modules: &HashMap<String, String>) -> String {
-    // BEAM convention overrides for Result, Maybe, and Bool
+    // BEAM convention overrides for Result, Maybe, Bool, and ExitReason
     match name {
         "Ok" => return "ok".to_string(),
         "Err" => return "error".to_string(),
@@ -19,6 +19,12 @@ pub(super) fn mangle_ctor_atom(name: &str, constructor_modules: &HashMap<String,
         "True" => return "true".to_string(),
         "False" => return "false".to_string(),
         // Just is handled structurally (bare value, no tag) -- not here
+        // ExitReason constructors map to Erlang exit reason atoms
+        "Normal" => return "normal".to_string(),
+        "Shutdown" => return "shutdown".to_string(),
+        "Killed" => return "killed".to_string(),
+        "Noproc" => return "noproc".to_string(),
+        // Other(String) stays as-is (tuple form)
         _ => {}
     }
     if let Some(module) = constructor_modules.get(name) {

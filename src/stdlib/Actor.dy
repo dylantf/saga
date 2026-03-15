@@ -13,6 +13,39 @@ pub effect Actor msg {
   fun self () -> Pid msg
 }
 
-# beam_actor: handles both Process and Actor.
-# Compiler builtin -- ops are lowered to direct BEAM calls (erlang:spawn, erlang:send, erlang:self).
-pub handler beam_actor for Process, Actor msg {}
+# Exit reasons for monitored processes
+pub type ExitReason {
+  Normal
+  Shutdown
+  Killed
+  Noproc
+  Other(String)
+}
+
+# System messages delivered to the mailbox by the runtime (e.g. monitor notifications).
+# These can be matched in receive blocks alongside regular messages.
+pub type SystemMsg {
+  Down(Pid a, ExitReason)
+}
+
+impl Show for ExitReason {
+  show r = case r {
+    Normal -> "Normal"
+    Shutdown -> "Shutdown"
+    Killed -> "Killed"
+    Noproc -> "Noproc"
+    Other(msg) -> "Other(" <> msg <> ")"
+  }
+}
+
+# Monitor effect: watch processes and get notified when they die.
+pub opaque type MonitorRef { MonitorRef }
+
+pub effect Monitor {
+  fun monitor (pid: Pid msg) -> MonitorRef
+  fun demonitor (ref: MonitorRef) -> Unit
+}
+
+# beam_actor: handles Process, Actor, and Monitor.
+# Compiler builtin -- ops are lowered to direct BEAM calls.
+pub handler beam_actor for Process, Actor msg, Monitor {}
