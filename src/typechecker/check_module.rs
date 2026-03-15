@@ -25,41 +25,6 @@ pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
     }
 }
 
-/// Maps type names to their constructor names, for `type T` hoist support.
-fn type_constructors(
-    program: &[crate::ast::Decl],
-) -> std::collections::HashMap<String, Vec<String>> {
-    use crate::ast::Decl;
-    let mut map = std::collections::HashMap::new();
-    for decl in program {
-        match decl {
-            Decl::TypeDef {
-                public: true,
-                opaque,
-                name,
-                variants,
-                ..
-            } => {
-                if *opaque {
-                    // Opaque types export the type name but no constructors
-                    map.insert(name.clone(), vec![]);
-                } else {
-                    let ctors: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-                    map.insert(name.clone(), ctors);
-                }
-            }
-            Decl::RecordDef {
-                public: true, name, ..
-            } => {
-                // Records use their name as the constructor atom
-                map.insert(name.clone(), vec![name.clone()]);
-            }
-            _ => {}
-        }
-    }
-    map
-}
-
 impl Checker {
     // --- Module import typechecking ---
 
@@ -98,52 +63,9 @@ impl Checker {
             ));
         }
 
-        // Cache hit: inject cached bindings
-        if let Some(cached) = self.tc_loaded.get(&module_name).cloned() {
-            let cached_ctors = self
-                .tc_type_ctors
-                .get(&module_name)
-                .cloned()
-                .unwrap_or_default();
-            let cached_records = self
-                .tc_record_defs
-                .get(&module_name)
-                .cloned()
-                .unwrap_or_default();
-            // Inject cached trait impls
-            if let Some(cached_impls) = self.tc_trait_impls.get(&module_name).cloned() {
-                for (key, info) in &cached_impls {
-                    self.trait_impls
-                        .entry(key.clone())
-                        .or_insert_with(|| info.clone());
-                }
-            }
-            // Inject cached trait definitions and their methods
-            if let Some(cached_traits) = self.tc_traits.get(&module_name).cloned() {
-                let cached_binding_map: std::collections::HashMap<&str, &Scheme> =
-                    cached.iter().map(|(n, s)| (n.as_str(), s)).collect();
-                for (name, info) in &cached_traits {
-                    self.traits
-                        .entry(name.clone())
-                        .or_insert_with(|| info.clone());
-                    for (method_name, _, _) in &info.methods {
-                        if let Some(&scheme) = cached_binding_map.get(method_name.as_str())
-                            && self.env.get(method_name).is_none()
-                        {
-                            self.env.insert(method_name.clone(), scheme.clone());
-                        }
-                    }
-                }
-            }
-            self.inject_module_types(
-                &cached,
-                &cached_ctors,
-                &cached_records,
-                &prefix,
-                exposing,
-                span,
-            )?;
-            return Ok(());
+        // Cache hit: inject cached exports
+        if let Some(exports) = self.tc_modules.get(&module_name).cloned() {
+            return self.inject_exports(&exports, &prefix, exposing, span);
         }
 
         // Resolve source: builtin modules are embedded, others read from disk
@@ -229,12 +151,8 @@ impl Checker {
             mc
         };
         // Share the module cache so transitive imports benefit from caching
-        mod_checker.tc_loaded = self.tc_loaded.clone();
-        mod_checker.tc_type_ctors = self.tc_type_ctors.clone();
+        mod_checker.tc_modules = self.tc_modules.clone();
         mod_checker.tc_codegen_info = self.tc_codegen_info.clone();
-        mod_checker.tc_record_defs = self.tc_record_defs.clone();
-        mod_checker.tc_trait_impls = self.tc_trait_impls.clone();
-        mod_checker.tc_traits = self.tc_traits.clone();
         mod_checker.tc_programs = self.tc_programs.clone();
         mod_checker.check_program(&program).map_err(|e| {
             TypeError::at(
@@ -243,63 +161,8 @@ impl Checker {
             )
         })?;
 
-        // Determine which names are public
-        let pub_names = public_names_for_tc(&program);
-        let ctors_map = type_constructors(&program);
-
-        // Collect public type bindings (from env; constructors are in mod_checker.constructors)
-        let mut public_bindings: Vec<(String, Scheme)> = Vec::new();
-        for name in &pub_names {
-            // Check env first, then constructors
-            if let Some(scheme) = mod_checker.env.get(name) {
-                public_bindings.push((name.clone(), scheme.clone()));
-            } else if let Some(scheme) = mod_checker.constructors.get(name) {
-                public_bindings.push((name.clone(), scheme.clone()));
-            }
-        }
-
-        // Collect public record definitions from the module checker
-        let mut pub_records: std::collections::HashMap<String, Vec<(String, super::Type)>> =
-            std::collections::HashMap::new();
-        for decl in &program {
-            if let crate::ast::Decl::RecordDef {
-                public: true, name, ..
-            } = decl
-                && let Some(fields) = mod_checker.records.get(name.as_str())
-            {
-                pub_records.insert(name.clone(), fields.clone());
-            }
-        }
-
-        // Collect public trait definitions from the module.
-        let mut module_traits: std::collections::HashMap<String, super::TraitInfo> =
-            std::collections::HashMap::new();
-        for decl in &program {
-            if let crate::ast::Decl::TraitDef {
-                public: true, name, ..
-            } = decl
-                && let Some(info) = mod_checker.traits.get(name.as_str())
-            {
-                module_traits.insert(name.clone(), info.clone());
-            }
-        }
-
-        // Collect the module's own trait impls (from ImplDef declarations in the source).
-        let mut module_trait_impls: std::collections::HashMap<(String, String), super::ImplInfo> =
-            std::collections::HashMap::new();
-        for decl in &program {
-            if let crate::ast::Decl::ImplDef {
-                trait_name,
-                target_type,
-                ..
-            } = decl
-            {
-                let key = (trait_name.clone(), target_type.clone());
-                if let Some(info) = mod_checker.trait_impls.get(&key) {
-                    module_trait_impls.insert(key, info.clone());
-                }
-            }
-        }
+        // Collect all public exports into a single struct
+        let exports = super::ModuleExports::collect(&program, &mod_checker);
 
         // Advance the parent's var counter past the module's to keep IDs disjoint.
         if mod_checker.next_var > self.next_var {
@@ -311,83 +174,24 @@ impl Checker {
             self.tc_programs.entry(k).or_insert(v);
         }
 
+        // Merge back any caches populated by transitive imports
+        for (k, v) in mod_checker.tc_modules {
+            self.tc_modules.entry(k).or_insert(v);
+        }
+        for (k, v) in mod_checker.tc_codegen_info {
+            self.tc_codegen_info.entry(k).or_insert(v);
+        }
+
         self.tc_loading.remove(&module_name);
-        self.tc_loaded
-            .insert(module_name.clone(), public_bindings.clone());
-        self.tc_type_ctors
-            .insert(module_name.clone(), ctors_map.clone());
-        self.tc_record_defs
-            .insert(module_name.clone(), pub_records.clone());
-        self.tc_trait_impls
-            .insert(module_name.clone(), module_trait_impls.clone());
-        self.tc_traits
-            .insert(module_name.clone(), module_traits.clone());
 
         // Build codegen info from the module's public declarations
-        let codegen_info = collect_codegen_info(&module_name, &program, &public_bindings);
+        let codegen_info = collect_codegen_info(&module_name, &program, &exports);
         self.tc_codegen_info
             .insert(module_name.clone(), codegen_info);
 
-        // Inject the module's trait definitions into the parent checker.
-        // Trait methods are also registered unqualified so impl bodies can use them.
-        let binding_map: std::collections::HashMap<&str, &Scheme> = public_bindings
-            .iter()
-            .map(|(n, s)| (n.as_str(), s))
-            .collect();
-        for (name, info) in &module_traits {
-            self.traits
-                .entry(name.clone())
-                .or_insert_with(|| info.clone());
-            for (method_name, _, _) in &info.methods {
-                if let Some(&scheme) = binding_map.get(method_name.as_str())
-                    && self.env.get(method_name).is_none()
-                {
-                    self.env.insert(method_name.clone(), scheme.clone());
-                }
-            }
-        }
-
-        // Inject the module's trait impls into the parent checker
-        for (key, info) in &module_trait_impls {
-            self.trait_impls
-                .entry(key.clone())
-                .or_insert_with(|| info.clone());
-        }
-
-        // Inject the module's public effects into the parent checker
-        for decl in &program {
-            if let crate::ast::Decl::EffectDef {
-                public: true, name, ..
-            } = decl
-                && let Some(info) = mod_checker.effects.get(name)
-            {
-                self.effects
-                    .entry(name.clone())
-                    .or_insert_with(|| info.clone());
-            }
-        }
-
-        // Inject the module's public handlers into the parent checker
-        for decl in &program {
-            if let crate::ast::Decl::HandlerDef {
-                public: true, name, ..
-            } = decl
-                && let Some(info) = mod_checker.handlers.get(name)
-            {
-                self.handlers
-                    .entry(name.clone())
-                    .or_insert_with(|| info.clone());
-            }
-        }
-
-        self.inject_module_types(
-            &public_bindings,
-            &ctors_map,
-            &pub_records,
-            &prefix,
-            exposing,
-            span,
-        )
+        // Cache and inject
+        self.tc_modules.insert(module_name.clone(), exports.clone());
+        self.inject_exports(&exports, &prefix, exposing, span)
     }
 
     /// Create a module checker seeded with this checker's caches.
@@ -432,17 +236,82 @@ impl Checker {
             mc
         };
         mc.next_var = self.next_var;
-        mc.tc_loaded = self.tc_loaded.clone();
-        mc.tc_type_ctors = self.tc_type_ctors.clone();
+        mc.tc_modules = self.tc_modules.clone();
         mc.tc_codegen_info = self.tc_codegen_info.clone();
-        mc.tc_record_defs = self.tc_record_defs.clone();
-        mc.tc_trait_impls = self.tc_trait_impls.clone();
-        mc.tc_traits = self.tc_traits.clone();
         mc.tc_programs = self.tc_programs.clone();
         mc
     }
 
-    fn inject_module_types(
+    /// Inject all exports from a module into this checker.
+    /// Destructures ModuleExports so adding a new field is a compile error until handled here.
+    fn inject_exports(
+        &mut self,
+        exports: &super::ModuleExports,
+        prefix: &str,
+        exposing: Option<&[crate::ast::ExposedItem]>,
+        span: Span,
+    ) -> Result<(), TypeError> {
+        let super::ModuleExports {
+            bindings,
+            type_constructors,
+            record_defs,
+            traits,
+            trait_impls,
+            effects,
+            handlers,
+        } = exports;
+
+        // Traits and their methods (unqualified, so impl bodies can reference them)
+        let binding_map: std::collections::HashMap<&str, &Scheme> = bindings
+            .iter()
+            .map(|(n, s)| (n.as_str(), s))
+            .collect();
+        for (name, info) in traits {
+            self.traits
+                .entry(name.clone())
+                .or_insert_with(|| info.clone());
+            for (method_name, _, _) in &info.methods {
+                if let Some(&scheme) = binding_map.get(method_name.as_str())
+                    && self.env.get(method_name).is_none()
+                {
+                    self.env.insert(method_name.clone(), scheme.clone());
+                }
+            }
+        }
+
+        // Trait impls
+        for (key, info) in trait_impls {
+            self.trait_impls
+                .entry(key.clone())
+                .or_insert_with(|| info.clone());
+        }
+
+        // Effects
+        for (name, info) in effects {
+            self.effects
+                .entry(name.clone())
+                .or_insert_with(|| info.clone());
+        }
+
+        // Handlers
+        for (name, info) in handlers {
+            self.handlers
+                .entry(name.clone())
+                .or_insert_with(|| info.clone());
+        }
+
+        // Bindings, type constructors, records (qualified + exposing)
+        self.inject_scoped_bindings(
+            bindings,
+            type_constructors,
+            record_defs,
+            prefix,
+            exposing,
+            span,
+        )
+    }
+
+    fn inject_scoped_bindings(
         &mut self,
         bindings: &[(String, Scheme)],
         ctors_map: &std::collections::HashMap<String, Vec<String>>,
@@ -540,7 +409,7 @@ impl Checker {
 fn collect_codegen_info(
     module_name: &str,
     program: &[crate::ast::Decl],
-    public_bindings: &[(String, Scheme)],
+    exports: &super::ModuleExports,
 ) -> ModuleCodegenInfo {
     use crate::ast::Decl;
     let mut effect_defs = Vec::new();
@@ -605,14 +474,12 @@ fn collect_codegen_info(
         }
     }
 
-    let type_ctors = type_constructors(program);
-
     ModuleCodegenInfo {
-        exports: public_bindings.to_vec(),
+        exports: exports.bindings.clone(),
         effect_defs,
         record_fields,
         handler_defs,
-        type_constructors: type_ctors.into_iter().collect(),
+        type_constructors: exports.type_constructors.clone().into_iter().collect(),
         trait_impl_dicts,
     }
 }

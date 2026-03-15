@@ -5,7 +5,7 @@
 use crate::ast::{BinOp, CaseArm, Expr, Handler, HandlerArm, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
-use super::Lowerer;
+use super::{FunInfo, Lowerer};
 use super::pats::{self, lower_pat};
 use super::util::{
     binop_call, collect_effect_call, collect_fun_call, core_var, has_nested_effect_call,
@@ -291,7 +291,7 @@ impl<'a> Lowerer<'a> {
                     // Terminal effectful function call: pass current_return_k as _ReturnK
                     // so abort-style handlers skip the return clause wrapping.
                     if let Some((name, _)) = collect_fun_call(e)
-                        && (self.fun_effects.contains_key(name)
+                        && (self.is_effectful(name)
                             || self.current_effectful_vars.contains_key(name))
                     {
                         let saved = self.pending_callee_return_k.take();
@@ -344,7 +344,7 @@ impl<'a> Lowerer<'a> {
 
                 // Register in top_level_funs BEFORE lowering body so recursive
                 // calls are recognized as saturated apply
-                self.top_level_funs.entry(fun_name.clone()).or_insert(arity);
+                self.fun_info.entry(fun_name.clone()).or_insert(FunInfo { arity, ..Default::default() });
 
                 let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
                     // Single clause, no guard
@@ -452,7 +452,7 @@ impl<'a> Lowerer<'a> {
                     };
                     let is_effectful_call = collect_fun_call(value_expr)
                         .map(|(name, _)| {
-                            self.fun_effects.contains_key(name)
+                            self.is_effectful(name)
                                 || self.current_effectful_vars.contains_key(name)
                         })
                         .unwrap_or(false);
@@ -644,7 +644,7 @@ impl<'a> Lowerer<'a> {
             )
         } else if collect_fun_call(expr)
             .map(|(name, _)| {
-                self.fun_effects.contains_key(name)
+                self.is_effectful(name)
                     || self.current_effectful_vars.contains_key(name)
             })
             .unwrap_or(false)
@@ -716,7 +716,7 @@ impl<'a> Lowerer<'a> {
                     // (e.g. state-threading handlers need real continuations).
                     let is_effectful_call = collect_fun_call(value_expr)
                         .map(|(name, _)| {
-                            self.fun_effects.contains_key(name)
+                            self.is_effectful(name)
                                 || self.current_effectful_vars.contains_key(name)
                         })
                         .unwrap_or(false);
@@ -983,7 +983,7 @@ impl<'a> Lowerer<'a> {
         // wrapping externally. This prevents abort values from being wrapped.
         let is_direct_effectful_call = collect_fun_call(expr)
             .map(|(name, _)| {
-                self.fun_effects.contains_key(name)
+                self.is_effectful(name)
                     || self.current_effectful_vars.contains_key(name)
             })
             .unwrap_or(false);
