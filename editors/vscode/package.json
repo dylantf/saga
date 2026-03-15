@@ -1,14 +1,15 @@
 {
   "name": "dylang",
   "displayName": "dylang",
-  "description": "Syntax highlighting for the dylang programming language",
-  "version": "0.1.0",
+  "description": "Language support for the dylang programming language",
+  "version": "0.2.0",
   "engines": {
     "vscode": "^1.75.0"
   },
   "categories": [
     "Programming Languages"
   ],
+  "main": "./extension.js",
   "contributes": {
     "languages": [
       {
@@ -29,5 +30,8 @@
         "path": "./syntaxes/dylang.tmLanguage.json"
       }
     ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
   }
 }
