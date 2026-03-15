@@ -771,69 +771,7 @@ impl Checker {
         // --- Pid type and concurrency effects ---
 
         // Pid msg: parameterized type, compile-time only. No constructors.
-
-        // Process effect: spawn and send. No type params on the effect itself.
-        // spawn and send have free type vars (msg) that are inferred per call site.
-        {
-            let msg = self.fresh_var();
-            let pid_msg = Type::Con("Pid".into(), vec![msg.clone()]);
-            let unit = Type::unit();
-
-            self.effects.insert(
-                "Process".into(),
-                EffectDefInfo {
-                    type_params: vec![],
-                    ops: vec![
-                        EffectOpSig {
-                            name: "spawn".into(),
-                            params: vec![Type::EffArrow(
-                                Box::new(unit.clone()),
-                                Box::new(unit.clone()),
-                                vec![("Actor".into(), vec![msg.clone()])],
-                            )],
-                            return_type: pid_msg.clone(),
-                        },
-                        EffectOpSig {
-                            name: "send".into(),
-                            params: vec![pid_msg, msg],
-                            return_type: unit,
-                        },
-                    ],
-                },
-            );
-        }
-
-        // Actor msg: parameterized by the current process's message type.
-        // Only self and receive use this (scoped to this process's mailbox).
-        {
-            let msg = self.fresh_var();
-            let msg_id = match &msg {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let pid_msg = Type::Con("Pid".into(), vec![msg.clone()]);
-
-            self.effects.insert(
-                "Actor".into(),
-                EffectDefInfo {
-                    type_params: vec![msg_id],
-                    ops: vec![EffectOpSig {
-                        name: "self".into(),
-                        params: vec![],
-                        return_type: pid_msg,
-                    }],
-                },
-            );
-        }
-
-        // beam_actor: handles both Process and Actor
-        self.handlers.insert(
-            "beam_actor".into(),
-            HandlerInfo {
-                effects: vec!["Process".into(), "Actor".into()],
-                return_type: None,
-            },
-        );
+        // Process, Actor, beam_actor are in Std.Actor (import Std.Actor to use).
     }
 
     // --- Unification ---

@@ -79,7 +79,7 @@ fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
         Some(root) => typechecker::Checker::with_project_root(root),
         None => typechecker::Checker::new(),
     };
-    let prelude_src = include_str!("prelude/prelude.dy");
+    let prelude_src = include_str!("stdlib/prelude.dy");
     let prelude_tokens = lexer::Lexer::new(prelude_src)
         .lex()
         .expect("prelude lex error");
