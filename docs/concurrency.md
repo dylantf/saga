@@ -184,51 +184,99 @@ wait_for_reply () = {
    - `Pid` registered as built-in parameterized type
    - `Process` effect (spawn, send) with per-call-site fresh type vars
    - `Actor msg` effect (self) with shared type param for receive
-   - `beam_runtime` / `beam_actor` registered as builtin handlers
+   - `beam_actor` registered as builtin handler
    - `receive` typechecked against Actor's `msg` param, no exhaustiveness
+   - Typed spawn: `EffArrow` carries effect type arguments, lambdas and
+     function references produce EffArrow when they use effects, unification
+     links spawn's return type to the spawned function's Actor type param
 5. **Elaboration**: Actor/Process effect calls (`spawn!`, `send!`, `self!`)
    transformed to `ForeignCall` nodes, stripping them from CPS. The
-   `with beam_runtime` handler is stripped entirely.
+   `with beam_actor` handler is stripped entirely.
 6. **Core Erlang IR**: `CExpr::Receive` variant with arms, timeout, timeout body
 7. **Codegen**: `receive` lowers directly to Core Erlang `receive ... after`
 8. **Interpreter**: `receive` panics with "BEAM-only"
 
-### Key design decision: elaboration bypass
+### Key design decisions
 
-Actor/Process operations are transformed to `Expr::ForeignCall` during
-elaboration, before the lowerer sees them. This means the CPS effect
-machinery never touches them -- no handler params, no continuations, no
-`_ReturnK`. Just direct `erlang:spawn/1`, `erlang:send/2`, `erlang:self/0`
-calls.
+**Elaboration bypass**: Actor/Process operations are transformed to
+`Expr::ForeignCall` during elaboration, before the lowerer sees them.
+No CPS, no handler params, no continuations. Just direct BEAM calls.
 
-This is cleaner than trying to thread `beam_native_effects` through the
-lowerer's arity calculations, effect detection, and handler param threading.
+**Typed spawn via EffArrow**: `Type::EffArrow` carries effect type arguments
+`Vec<(String, Vec<Type>)>` not just effect names. Lambdas produce EffArrow
+when they use effects, and function references with effect type constraints
+are also typed as EffArrow. When spawn's EffArrow parameter unifies with
+the callback's EffArrow, the Actor type args link, making the returned pid
+carry the correct message type. Sending the wrong message type is a compile
+error.
 
-### Known limitation: spawn return type is unlinked
+**Effect absorption fix**: When a HOF absorbs effects from a callback
+(e.g. `try` absorbs `Fail`), only effects the callback *introduced* are
+removed from the caller's effect set. Effects the caller already had are
+preserved. This prevents spawn from accidentally absorbing the caller's
+own Actor effect.
 
-`spawn!` returns `Pid a` where `a` is a free type variable, inferred from
-usage (what you `send!` to the pid). It's NOT connected to the spawned
-function's `Actor` type parameter.
+## Future: OTP-style effects
 
-This means `send! counter_pid wrong_msg_type` typechecks if it's the only
-send to that pid -- the type variable just unifies with the wrong type.
-The error surfaces at runtime (message sits unmatched in the mailbox).
-
-### Future improvement: typed spawn via EffArrow
-
-The fix is to make spawn's signature carry the child's Actor type:
+### Timer
 
 ```
-fun spawn (f: () -> Unit needs {Actor msg}) -> Pid msg
+effect Timer {
+  fun sleep (ms: Int) -> Unit
+  fun send_after (pid: Pid msg) (ms: Int) (msg: msg) -> TimerRef
+  fun cancel_timer (ref: TimerRef) -> Unit
+}
 ```
 
-The `msg` is extracted from the callback's effect annotation. This requires
-extending `Type::EffArrow` to carry effect type arguments, not just effect
-names. Currently `EffArrow(Unit, Unit, ["Actor"])` stores the effect name
-but loses the type param. It would need to become something like
-`EffArrow(Unit, Unit, [("Actor", [msg])])`.
+The `after` clause in `receive` handles the common case, but `send_after`
+allows sending a message to a process on a delay independently.
 
-This touches: the `Type` enum, unification, substitution, occurs check,
-type printing, and anywhere EffArrow is handled. Meaningful but bounded
-work. Once done, spawn becomes fully type-safe: the returned pid's type
-is linked to the spawned function's declared message type.
+### Monitor
+
+```
+effect Monitor {
+  fun monitor (pid: Pid msg) -> MonitorRef
+  fun demonitor (ref: MonitorRef) -> Unit
+}
+```
+
+Monitoring delivers a `Down` message to the caller's mailbox when the
+monitored process dies. Open question: how to handle system messages that
+aren't part of the declared message type. Options: require a `Down` variant
+in the message type, or make monitor delivery its own mechanism.
+
+### Link
+
+```
+effect Link {
+  fun link (pid: Pid msg) -> Unit
+  fun unlink (pid: Pid msg) -> Unit
+}
+```
+
+Bidirectional crash propagation. Simpler than monitors, used for
+"die together" semantics.
+
+### Supervisors
+
+Supervisors are just effect handlers that catch failures and restart
+computations. No new language support needed:
+
+```
+supervised f = {
+  f () with {
+    fail reason -> {
+      print $"Crashed: {reason}, restarting..."
+      supervised f
+    }
+  }
+}
+```
+
+More sophisticated supervisors (restart limits, backoff, one-for-one vs
+all-for-one) are library code built on top of Monitor and Link.
+
+### Async
+
+Higher-level wrapper around Actor for request/response patterns.
+Potential API TBD.

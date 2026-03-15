@@ -425,20 +425,15 @@ impl Elaborator {
                     arg: first_arg,
                     ..
                 } = func.as_ref()
+                    && let Expr::EffectCall { name, .. } = inner_func.as_ref()
+                    && name == "send"
                 {
-                    if let Expr::EffectCall { name, .. } = inner_func.as_ref() {
-                        if name == "send" {
-                            return Expr::ForeignCall {
-                                module: "erlang".into(),
-                                func: "send".into(),
-                                args: vec![
-                                    self.elaborate_expr(first_arg),
-                                    self.elaborate_expr(arg),
-                                ],
-                                span: *span,
-                            };
-                        }
-                    }
+                    return Expr::ForeignCall {
+                        module: "erlang".into(),
+                        func: "send".into(),
+                        args: vec![self.elaborate_expr(first_arg), self.elaborate_expr(arg)],
+                        span: *span,
+                    };
                 }
 
                 // Check if this is a direct call to a function with where clauses
@@ -717,29 +712,31 @@ impl Elaborator {
                     return self.elaborate_expr(e);
                 }
 
-                if has_beam {
-                    if let Handler::Inline {
+                if has_beam
+                    && let Handler::Inline {
                         named,
                         arms,
                         return_clause,
                     } = handler.as_ref()
-                    {
-                        let remaining: Vec<String> =
-                            named.iter().filter(|n| !is_beam_handler(n)).cloned().collect();
-                        if remaining.is_empty() && arms.is_empty() {
-                            return self.elaborate_expr(e);
-                        }
-                        let filtered = Handler::Inline {
-                            named: remaining,
-                            arms: arms.clone(),
-                            return_clause: return_clause.clone(),
-                        };
-                        return Expr::With {
-                            expr: Box::new(self.elaborate_expr(e)),
-                            handler: Box::new(self.elaborate_handler(&filtered)),
-                            span: *span,
-                        };
+                {
+                    let remaining: Vec<String> = named
+                        .iter()
+                        .filter(|n| !is_beam_handler(n))
+                        .cloned()
+                        .collect();
+                    if remaining.is_empty() && arms.is_empty() {
+                        return self.elaborate_expr(e);
                     }
+                    let filtered = Handler::Inline {
+                        named: remaining,
+                        arms: arms.clone(),
+                        return_clause: return_clause.clone(),
+                    };
+                    return Expr::With {
+                        expr: Box::new(self.elaborate_expr(e)),
+                        handler: Box::new(self.elaborate_handler(&filtered)),
+                        span: *span,
+                    };
                 }
 
                 Expr::With {

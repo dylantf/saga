@@ -28,9 +28,7 @@ impl Checker {
                     // Propagate effect type params from callee's annotations.
                     // e.g. calling `counter` which has `needs {Actor CounterMsg}`
                     // populates the cache so lambdas can build typed EffArrows.
-                    if let Some(constraints) =
-                        self.fun_effect_type_constraints.get(name).cloned()
-                    {
+                    if let Some(constraints) = self.fun_effect_type_constraints.get(name).cloned() {
                         for (effect_name, concrete_types) in &constraints {
                             if let Some(info) = self.effects.get(effect_name).cloned() {
                                 let mapping: std::collections::HashMap<u32, Type> = info
@@ -52,14 +50,11 @@ impl Checker {
                     // outermost Arrow to EffArrow so spawn! can link type args.
                     if let Some(eff_constraints) =
                         self.fun_effect_type_constraints.get(name).cloned()
+                        && let Type::Arrow(a, b) = ty
                     {
-                        if let Type::Arrow(a, b) = ty {
-                            let eff_refs: Vec<(String, Vec<Type>)> = eff_constraints
-                                .into_iter()
-                                .map(|(eff_name, types)| (eff_name, types))
-                                .collect();
-                            ty = Type::EffArrow(a, b, eff_refs);
-                        }
+                        let eff_refs: Vec<(String, Vec<Type>)> =
+                            eff_constraints.into_iter().collect();
+                        ty = Type::EffArrow(a, b, eff_refs);
                     }
                     Ok(ty)
                 } else {
@@ -207,19 +202,18 @@ impl Checker {
                 let eff_refs: Vec<(String, Vec<Type>)> = lambda_effects
                     .iter()
                     .map(|name| {
-                        let args =
-                            if let Some(cache) = self.effect_type_param_cache.get(name) {
-                                if let Some(info) = self.effects.get(name) {
-                                    info.type_params
-                                        .iter()
-                                        .filter_map(|pid| cache.get(pid).cloned())
-                                        .collect()
-                                } else {
-                                    vec![]
-                                }
+                        let args = if let Some(cache) = self.effect_type_param_cache.get(name) {
+                            if let Some(info) = self.effects.get(name) {
+                                info.type_params
+                                    .iter()
+                                    .filter_map(|pid| cache.get(pid).cloned())
+                                    .collect()
                             } else {
                                 vec![]
-                            };
+                            }
+                        } else {
+                            vec![]
+                        };
                         (name.clone(), args)
                     })
                     .collect();
@@ -233,10 +227,10 @@ impl Checker {
                 }
 
                 // If the lambda has effects, wrap the outermost arrow as EffArrow
-                if !eff_refs.is_empty() {
-                    if let Type::Arrow(a, b) = result {
-                        result = Type::EffArrow(a, b, eff_refs);
-                    }
+                if !eff_refs.is_empty()
+                    && let Type::Arrow(a, b) = result
+                {
+                    result = Type::EffArrow(a, b, eff_refs);
                 }
 
                 Ok(result)
@@ -579,13 +573,15 @@ impl Checker {
                     } else {
                         return Err(TypeError::at(
                             *span,
-                            "receive requires the Actor effect (declare `needs {Actor MsgType}`)".to_string(),
+                            "receive requires the Actor effect (declare `needs {Actor MsgType}`)"
+                                .to_string(),
                         ));
                     }
                 } else {
                     return Err(TypeError::at(
                         *span,
-                        "receive requires the Actor effect (declare `needs {Actor MsgType}`)".to_string(),
+                        "receive requires the Actor effect (declare `needs {Actor MsgType}`)"
+                            .to_string(),
                     ));
                 };
 
@@ -1243,28 +1239,36 @@ impl Checker {
             let mut free_vars = std::collections::HashSet::new();
             fn collect_vars(ty: &Type, vars: &mut std::collections::HashSet<u32>) {
                 match ty {
-                    Type::Var(id) => { vars.insert(*id); }
+                    Type::Var(id) => {
+                        vars.insert(*id);
+                    }
                     Type::Arrow(a, b) | Type::EffArrow(a, b, _) => {
                         collect_vars(a, vars);
                         collect_vars(b, vars);
                     }
                     Type::Con(_, args) => {
-                        for a in args { collect_vars(a, vars); }
+                        for a in args {
+                            collect_vars(a, vars);
+                        }
                     }
                 }
             }
-            for p in &op.params { collect_vars(p, &mut free_vars); }
+            for p in &op.params {
+                collect_vars(p, &mut free_vars);
+            }
             collect_vars(&op.return_type, &mut free_vars);
             if free_vars.is_empty() {
                 return op.clone();
             }
-            let mapping: std::collections::HashMap<u32, Type> = free_vars
-                .iter()
-                .map(|&id| (id, self.fresh_var()))
-                .collect();
+            let mapping: std::collections::HashMap<u32, Type> =
+                free_vars.iter().map(|&id| (id, self.fresh_var())).collect();
             return EffectOpSig {
                 name: op.name.clone(),
-                params: op.params.iter().map(|t| self.replace_vars(t, &mapping)).collect(),
+                params: op
+                    .params
+                    .iter()
+                    .map(|t| self.replace_vars(t, &mapping))
+                    .collect(),
                 return_type: self.replace_vars(&op.return_type, &mapping),
             };
         }

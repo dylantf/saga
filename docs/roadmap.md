@@ -187,7 +187,17 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Effect calls in non-block positions (nested in `if` conditions, binary ops, etc.)
 - [x] HOF effect absorption (passing effectful closures through higher-order functions like `try`)
 - [x] Return clause bypass on handler abort (return clause wraps abort results incorrectly)
-- [ ] Actor effect (see concurrency.md)
+- [x] Actor concurrency (see concurrency.md)
+  - `Process` effect (spawn, send) with per-call-site polymorphic Pid types
+  - `Actor msg` effect (self) with typed mailbox
+  - `receive` keyword expression (selective receive, no exhaustiveness, `after` timeout)
+  - `beam_actor` builtin handler (elaboration transforms ops to ForeignCall, bypasses CPS)
+  - Typed spawn: lambda/function EffArrow carries effect type args, unification links Pid type
+- [ ] Supervisors (handler-based crash recovery, see concurrency.md)
+- [ ] Timer effect (`sleep`, `send_after`, `cancel_timer`)
+- [ ] Monitor effect (`monitor`, `demonitor`, system `Down` messages)
+- [ ] Link effect (`link`, `unlink`, bidirectional crash propagation)
+- [ ] Async effect (higher-level wrapper around Actor for request/response patterns)
 
 ### Stdlib / prelude
 

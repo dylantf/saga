@@ -898,28 +898,31 @@ impl<'a> Lowerer<'a> {
         // beam_actor/beam_runtime: ops are already ForeignCall from elaboration.
         // Just lower the inner expression directly.
         let is_beam_handler = |n: &str| n == "beam_actor";
-        if let Handler::Named(name) = handler {
-            if is_beam_handler(name) {
+        if let Handler::Named(name) = handler
+            && is_beam_handler(name)
+        {
+            return self.lower_expr(expr);
+        }
+        if let Handler::Inline { named, arms, .. } = handler
+            && named.iter().any(|n| is_beam_handler(n))
+        {
+            let remaining_named: Vec<String> = named
+                .iter()
+                .filter(|n| !is_beam_handler(n))
+                .cloned()
+                .collect();
+            if remaining_named.is_empty() && arms.is_empty() {
                 return self.lower_expr(expr);
             }
-        }
-        if let Handler::Inline { named, arms, .. } = handler {
-            if named.iter().any(|n| is_beam_handler(n)) {
-                let remaining_named: Vec<String> =
-                    named.iter().filter(|n| !is_beam_handler(n)).cloned().collect();
-                if remaining_named.is_empty() && arms.is_empty() {
-                    return self.lower_expr(expr);
-                }
-                let filtered_handler = Handler::Inline {
-                    named: remaining_named,
-                    arms: arms.clone(),
-                    return_clause: match handler {
-                        Handler::Inline { return_clause, .. } => return_clause.clone(),
-                        _ => None,
-                    },
-                };
-                return self.lower_with(expr, &filtered_handler);
-            }
+            let filtered_handler = Handler::Inline {
+                named: remaining_named,
+                arms: arms.clone(),
+                return_clause: match handler {
+                    Handler::Inline { return_clause, .. } => return_clause.clone(),
+                    _ => None,
+                },
+            };
+            return self.lower_with(expr, &filtered_handler);
         }
 
         // Resolve all handler arms, return clause, and which effects are handled
