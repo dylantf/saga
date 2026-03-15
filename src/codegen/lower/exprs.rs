@@ -4,13 +4,14 @@
 /// traits.rs, etc.
 use crate::ast::{BinOp, CaseArm, Expr, Handler, HandlerArm, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
+use crate::token::Span;
 
-use super::{FunInfo, Lowerer};
 use super::pats::{self, lower_pat};
 use super::util::{
     binop_call, collect_effect_call, collect_fun_call, core_var, has_nested_effect_call,
     mangle_ctor_atom, pat_binding_var,
 };
+use super::{FunInfo, Lowerer};
 
 /// Returns true if `expr` is a valid Core Erlang guard expression:
 /// comparisons, arithmetic, boolean ops, unary minus, and literals/variables.
@@ -256,21 +257,52 @@ impl<'a> Lowerer<'a> {
     /// destructuring `case` if the pattern is non-trivial (tuple, constructor, etc.).
     /// Returns `(var_name, body)` where `var_name` is safe to use in a `Let` or `Fun` param.
     fn destructure_pat(&mut self, pat: &Pat, body: CExpr) -> (String, CExpr) {
-        if let Some(var) = pat_binding_var(pat) {
-            (var, body)
-        } else {
-            let tmp = self.fresh();
-            let cpat = lower_pat(pat, &self.record_fields, &self.constructor_modules);
-            let wrapped = CExpr::Case(
-                Box::new(CExpr::Var(tmp.clone())),
-                vec![CArm {
-                    pat: cpat,
-                    guard: None,
-                    body,
-                }],
-            );
-            (tmp, wrapped)
+        self.destructure_pat_inner(pat, body, false, None)
+    }
+
+    fn destructure_pat_assert(&mut self, pat: &Pat, body: CExpr, span: Span) -> (String, CExpr) {
+        self.destructure_pat_inner(pat, body, true, Some(span))
+    }
+
+    fn destructure_pat_inner(
+        &mut self,
+        pat: &Pat,
+        body: CExpr,
+        is_assert: bool,
+        span: Option<Span>,
+    ) -> (String, CExpr) {
+        if !is_assert && let Some(var) = pat_binding_var(pat) {
+            return (var, body);
         }
+        let tmp = self.fresh();
+        let cpat = lower_pat(pat, &self.record_fields, &self.constructor_modules);
+        let mut arms = vec![CArm {
+            pat: cpat,
+            guard: None,
+            body,
+        }];
+        if is_assert {
+            // Add wildcard arm that panics with file/line info
+            let msg = if let Some(s) = span {
+                format!(
+                    "Assertion failed: pattern did not match at offset {}",
+                    s.start
+                )
+            } else {
+                "Assertion failed: pattern did not match".to_string()
+            };
+            arms.push(CArm {
+                pat: CPat::Wildcard,
+                guard: None,
+                body: CExpr::Call(
+                    "erlang".into(),
+                    "error".into(),
+                    vec![CExpr::Lit(CLit::Str(msg))],
+                ),
+            });
+        }
+        let wrapped = CExpr::Case(Box::new(CExpr::Var(tmp.clone())), arms);
+        (tmp, wrapped)
     }
 
     pub(super) fn lower_block(&mut self, stmts: &[Stmt]) -> CExpr {
@@ -344,7 +376,10 @@ impl<'a> Lowerer<'a> {
 
                 // Register in top_level_funs BEFORE lowering body so recursive
                 // calls are recognized as saturated apply
-                self.fun_info.entry(fun_name.clone()).or_insert(FunInfo { arity, ..Default::default() });
+                self.fun_info.entry(fun_name.clone()).or_insert(FunInfo {
+                    arity,
+                    ..Default::default()
+                });
 
                 let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
                     // Single clause, no guard
@@ -526,15 +561,22 @@ impl<'a> Lowerer<'a> {
                         CExpr::Let(k_var, Box::new(k), Box::new(body))
                     } else {
                         // Normal (non-effect) statement
-                        let (pat_opt, val_ce) = match first {
-                            Stmt::Let { pattern, value, .. } => {
-                                (Some(pattern), self.lower_expr(value))
-                            }
-                            Stmt::Expr(e) => (None, self.lower_expr(e)),
+                        let (pat_opt, is_assert, let_span, val_ce) = match first {
+                            Stmt::Let {
+                                pattern,
+                                value,
+                                assert,
+                                span,
+                                ..
+                            } => (Some(pattern), *assert, *span, self.lower_expr(value)),
+                            Stmt::Expr(e) => (None, false, e.span(), self.lower_expr(e)),
                             Stmt::LetFun { .. } => unreachable!(),
                         };
                         let rest_ce = self.lower_block(rest);
                         let (var, rest_ce) = match pat_opt {
+                            Some(p) if is_assert => {
+                                self.destructure_pat_assert(p, rest_ce, let_span)
+                            }
                             Some(p) => self.destructure_pat(p, rest_ce),
                             None => (self.fresh(), rest_ce),
                         };
@@ -644,8 +686,7 @@ impl<'a> Lowerer<'a> {
             )
         } else if collect_fun_call(expr)
             .map(|(name, _)| {
-                self.is_effectful(name)
-                    || self.current_effectful_vars.contains_key(name)
+                self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
             })
             .unwrap_or(false)
         {
@@ -993,8 +1034,7 @@ impl<'a> Lowerer<'a> {
         // wrapping externally. This prevents abort values from being wrapped.
         let is_direct_effectful_call = collect_fun_call(expr)
             .map(|(name, _)| {
-                self.is_effectful(name)
-                    || self.current_effectful_vars.contains_key(name)
+                self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
             })
             .unwrap_or(false);
 

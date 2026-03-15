@@ -15,6 +15,7 @@ pub enum Token {
     True,
     False,
     Let,
+    Assert,
     Type,
     Case,
     If,
@@ -44,32 +45,32 @@ pub enum Token {
     EffectCall(String),
 
     // Operators
-    Plus,        // +
-    Minus,       // -
-    Star,        // *
-    Slash,       // /
-    Modulo,      // %
-    Eq,          // =
-    EqEq,        // ==
-    NotEq,       // !=
-    Lt,          // <
-    Gt,          // >
-    LtEq,        // <=
-    GtEq,        // >=
-    Arrow,       // ->
-    LeftArrow,   // <-
+    Plus,           // +
+    Minus,          // -
+    Star,           // *
+    Slash,          // /
+    Modulo,         // %
+    Eq,             // =
+    EqEq,           // ==
+    NotEq,          // !=
+    Lt,             // <
+    Gt,             // >
+    LtEq,           // <=
+    GtEq,           // >=
+    Arrow,          // ->
+    LeftArrow,      // <-
     Pipe,           // |>
     PipeBack,       // <|
     Concat,         // <>
     ComposeForward, // >>
     ComposeBack,    // <<
-    And,         // &&
-    Or,          // ||
-    Dot,         // .
-    DotDot,      // ..
-    Backslash,   // \
-    Bar,         // |
-    DoubleColon, // ::
+    And,            // &&
+    Or,             // ||
+    Dot,            // .
+    DotDot,         // ..
+    Backslash,      // \
+    Bar,            // |
+    DoubleColon,    // ::
 
     // Delimiters
     LParen,   // (

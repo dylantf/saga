@@ -37,6 +37,7 @@ impl Normalizer {
                     pattern,
                     annotation,
                     value,
+                    assert,
                     span,
                 } => {
                     let mut lifted = Vec::new();
@@ -48,6 +49,7 @@ impl Normalizer {
                         pattern: pattern.clone(),
                         annotation: annotation.clone(),
                         value: new_value,
+                        assert: *assert,
                         span: *span,
                     });
                 }
@@ -149,6 +151,7 @@ impl Normalizer {
             },
             annotation: None,
             value: expr,
+            assert: false,
             span,
         });
         Expr::Var {

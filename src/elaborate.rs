@@ -665,11 +665,13 @@ impl Elaborator {
                             pattern,
                             annotation,
                             value,
+                            assert,
                             span,
                         } => Stmt::Let {
                             pattern: pattern.clone(),
                             annotation: annotation.clone(),
                             value: self.elaborate_expr(value),
+                            assert: *assert,
                             span: *span,
                         },
                         Stmt::LetFun {

@@ -678,6 +678,7 @@ impl Checker {
                     annotation,
                     value,
                     span,
+                    ..
                 } => {
                     let ty = self.infer_expr(value)?;
                     if let Some(ann) = annotation {

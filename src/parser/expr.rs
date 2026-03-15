@@ -374,7 +374,10 @@ impl Parser {
                             // inside the hole (which would share the first token's span).
                             let hole_span = tokens
                                 .last()
-                                .map(|t| Span { start: t.span.end + 1, end: t.span.end + 2 })
+                                .map(|t| Span {
+                                    start: t.span.end + 1,
+                                    end: t.span.end + 2,
+                                })
                                 .unwrap_or(span);
                             tokens.push(crate::token::Spanned {
                                 token: crate::token::Token::Eof,
@@ -617,6 +620,10 @@ impl Parser {
                     if matches!(self.peek(), Token::Let) {
                         let let_start = self.tokens[self.pos].span;
                         self.advance(); // consume 'let'
+                        let is_assert = matches!(self.peek(), Token::Assert);
+                        if is_assert {
+                            self.advance(); // consume 'assert'
+                        }
                         let pattern = self.parse_pattern()?;
 
                         // Check for local function definition: `let f x y = body`
@@ -662,6 +669,7 @@ impl Parser {
                                 pattern,
                                 annotation,
                                 value,
+                                assert: is_assert,
                                 span: stmt_span,
                             });
                         }
@@ -1012,6 +1020,7 @@ impl Parser {
                             pattern: pat.clone(),
                             annotation: None,
                             value: value.clone(),
+                            assert: false,
                             span,
                         },
                         Stmt::Expr(inner),

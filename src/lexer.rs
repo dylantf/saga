@@ -206,7 +206,11 @@ impl Lexer {
             if ch.is_ascii_digit() {
                 left_hand.push(ch);
                 self.advance();
-            } else if ch == '_' && self.peek_next().is_some_and(|c| c.is_ascii_digit() || c == '_') {
+            } else if ch == '_'
+                && self
+                    .peek_next()
+                    .is_some_and(|c| c.is_ascii_digit() || c == '_')
+            {
                 self.advance(); // skip separator
             } else {
                 break;
@@ -220,7 +224,11 @@ impl Lexer {
                 if ch.is_ascii_digit() {
                     right_hand.push(ch);
                     self.advance();
-                } else if ch == '_' && self.peek_next().is_some_and(|c| c.is_ascii_digit() || c == '_') {
+                } else if ch == '_'
+                    && self
+                        .peek_next()
+                        .is_some_and(|c| c.is_ascii_digit() || c == '_')
+                {
                     self.advance(); // skip separator
                 } else {
                     break;
@@ -246,6 +254,7 @@ impl Lexer {
 
         match s.as_str() {
             "let" => Token::Let,
+            "assert" => Token::Assert,
             "type" => Token::Type,
             "case" => Token::Case,
             "if" => Token::If,

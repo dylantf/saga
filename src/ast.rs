@@ -338,6 +338,7 @@ pub enum Stmt {
         pattern: Pat,
         annotation: Option<TypeExpr>,
         value: Expr,
+        assert: bool,
         span: Span,
     },
 

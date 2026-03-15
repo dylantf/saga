@@ -1,12 +1,12 @@
-import Std.Actor
-import Std.Async (all)
+import Actor
+import Async
 
 fun run () -> List Int needs {Async}
 run () = {
   let f1 = async! (fun () -> 1)
   let f2 = async! (fun () -> 2)
   let f3 = async! (fun () -> 3)
-  all [f1, f2, f3]
+  Async.all [f1, f2, f3]
 }
 
 main () = {
