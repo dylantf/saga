@@ -1,5 +1,6 @@
 module Actor
 
+
 # Process effect: spawn and send
 # Type variable `msg` is free per call site, inferred from the pid / spawned function.
 pub effect Process {
@@ -19,6 +20,7 @@ pub type ExitReason {
   Shutdown
   Killed
   Noproc
+  Error(String)
   Other(String)
 }
 
@@ -26,6 +28,7 @@ pub type ExitReason {
 # These can be matched in receive blocks alongside regular messages.
 pub type SystemMsg {
   Down(Pid a, ExitReason)
+  Exit(Pid a, ExitReason)
 }
 
 impl Show for ExitReason {
@@ -34,6 +37,7 @@ impl Show for ExitReason {
     Shutdown -> "Shutdown"
     Killed -> "Killed"
     Noproc -> "Noproc"
+    Error(msg) -> "Error(" <> msg <> ")"
     Other(msg) -> "Other(" <> msg <> ")"
   }
 }
@@ -46,6 +50,21 @@ pub effect Monitor {
   fun demonitor (ref: MonitorRef) -> Unit
 }
 
-# beam_actor: handles Process, Actor, and Monitor.
+# Link effect: bidirectional crash propagation between processes.
+pub effect Link {
+  fun link (pid: Pid msg) -> Unit
+  fun unlink (pid: Pid msg) -> Unit
+}
+
+# Timer effect: delays and scheduled messages.
+pub opaque type TimerRef { TimerRef }
+
+pub effect Timer {
+  fun sleep (ms: Int) -> Unit
+  fun send_after (pid: Pid msg) (ms: Int) (msg: msg) -> TimerRef
+  fun cancel_timer (ref: TimerRef) -> Unit
+}
+
+# beam_actor: handles Process, Actor, Monitor, Link, and Timer.
 # Compiler builtin -- ops are lowered to direct BEAM calls.
-pub handler beam_actor for Process, Actor msg, Monitor {}
+pub handler beam_actor for Process, Actor msg, Monitor, Link, Timer {}

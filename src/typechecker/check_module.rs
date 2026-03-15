@@ -359,12 +359,11 @@ impl Checker {
             if let crate::ast::Decl::EffectDef {
                 public: true, name, ..
             } = decl
+                && let Some(info) = mod_checker.effects.get(name)
             {
-                if let Some(info) = mod_checker.effects.get(name) {
-                    self.effects
-                        .entry(name.clone())
-                        .or_insert_with(|| info.clone());
-                }
+                self.effects
+                    .entry(name.clone())
+                    .or_insert_with(|| info.clone());
             }
         }
 
@@ -373,12 +372,11 @@ impl Checker {
             if let crate::ast::Decl::HandlerDef {
                 public: true, name, ..
             } = decl
+                && let Some(info) = mod_checker.handlers.get(name)
             {
-                if let Some(info) = mod_checker.handlers.get(name) {
-                    self.handlers
-                        .entry(name.clone())
-                        .or_insert_with(|| info.clone());
-                }
+                self.handlers
+                    .entry(name.clone())
+                    .or_insert_with(|| info.clone());
             }
         }
 

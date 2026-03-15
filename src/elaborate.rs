@@ -251,8 +251,12 @@ impl Elaborator {
                     // beam_runtime (ForeignCall), not CPS.
                     let mut d = decl.clone();
                     if let Decl::FunAnnotation { effects, .. } = &mut d {
-                        effects
-                            .retain(|e| e.name != "Actor" && e.name != "Process" && e.name != "Monitor");
+                        effects.retain(|e| {
+                            !matches!(
+                                e.name.as_str(),
+                                "Actor" | "Process" | "Monitor" | "Link" | "Timer"
+                            )
+                        });
                     }
                     output.push(d);
                 }
@@ -435,6 +439,38 @@ impl Elaborator {
                             span: *span,
                         };
                     }
+                    if name == "link" {
+                        return Expr::ForeignCall {
+                            module: "erlang".into(),
+                            func: "link".into(),
+                            args: vec![self.elaborate_expr(arg)],
+                            span: *span,
+                        };
+                    }
+                    if name == "unlink" {
+                        return Expr::ForeignCall {
+                            module: "erlang".into(),
+                            func: "unlink".into(),
+                            args: vec![self.elaborate_expr(arg)],
+                            span: *span,
+                        };
+                    }
+                    if name == "sleep" {
+                        return Expr::ForeignCall {
+                            module: "timer".into(),
+                            func: "sleep".into(),
+                            args: vec![self.elaborate_expr(arg)],
+                            span: *span,
+                        };
+                    }
+                    if name == "cancel_timer" {
+                        return Expr::ForeignCall {
+                            module: "erlang".into(),
+                            func: "cancel_timer".into(),
+                            args: vec![self.elaborate_expr(arg)],
+                            span: *span,
+                        };
+                    }
                 }
                 // send! pid msg => App(App(EffectCall("send"), pid), msg)
                 if let Expr::App {
@@ -449,6 +485,32 @@ impl Elaborator {
                         module: "erlang".into(),
                         func: "send".into(),
                         args: vec![self.elaborate_expr(first_arg), self.elaborate_expr(arg)],
+                        span: *span,
+                    };
+                }
+                // send_after! pid ms msg => App(App(App(EffectCall("send_after"), pid), ms), msg)
+                if let Expr::App {
+                    func: mid_func,
+                    arg: second_arg,
+                    ..
+                } = func.as_ref()
+                    && let Expr::App {
+                        func: inner_func,
+                        arg: first_arg,
+                        ..
+                    } = mid_func.as_ref()
+                    && let Expr::EffectCall { name, .. } = inner_func.as_ref()
+                    && name == "send_after"
+                {
+                    // erlang:send_after(Time, Dest, Msg)
+                    return Expr::ForeignCall {
+                        module: "erlang".into(),
+                        func: "send_after".into(),
+                        args: vec![
+                            self.elaborate_expr(second_arg), // ms
+                            self.elaborate_expr(first_arg),  // pid
+                            self.elaborate_expr(arg),        // msg
+                        ],
                         span: *span,
                     };
                 }

@@ -589,43 +589,45 @@ impl Checker {
 
                 for arm in arms {
                     let saved_env = self.env.clone();
-                    // Down(pid, reason) is a system message pattern, not part of the user's message type
-                    if let Pat::Constructor { name, args, span: pat_span } = &arm.pattern {
-                        if name == "Down" {
-                            if args.len() != 2 {
+                    // System message patterns (Down, Exit) are not part of the user's message type
+                    if let Pat::Constructor {
+                        name,
+                        args,
+                        span: pat_span,
+                    } = &arm.pattern
+                        && matches!(name.as_str(), "Down" | "Exit")
+                    {
+                        if args.len() != 2 {
+                            return Err(TypeError::at(
+                                *pat_span,
+                                format!(
+                                    "{} pattern requires exactly 2 arguments: {}(pid, reason)",
+                                    name, name
+                                ),
+                            ));
+                        }
+                        // pid: Pid a (fresh type var -- could be any process)
+                        let msg_var = self.fresh_var();
+                        let pid_ty = Type::Con("Pid".into(), vec![msg_var]);
+                        self.bind_pattern(&args[0], &pid_ty)?;
+                        // reason: ExitReason
+                        self.bind_pattern(&args[1], &Type::Con("ExitReason".into(), vec![]))?;
+
+                        if let Some(guard) = &arm.guard {
+                            if let Some(span) = super::find_effect_call(guard) {
                                 return Err(TypeError::at(
-                                    *pat_span,
-                                    "Down pattern requires exactly 2 arguments: Down(pid, reason)"
-                                        .to_string(),
+                                    span,
+                                    "Effect calls are not allowed in guard expressions".to_string(),
                                 ));
                             }
-                            // pid: Pid a (fresh type var -- could be any process)
-                            let msg_var = self.fresh_var();
-                            let pid_ty = Type::Con("Pid".into(), vec![msg_var]);
-                            self.bind_pattern(&args[0], &pid_ty)?;
-                            // reason: ExitReason
-                            self.bind_pattern(
-                                &args[1],
-                                &Type::Con("ExitReason".into(), vec![]),
-                            )?;
-
-                            if let Some(guard) = &arm.guard {
-                                if let Some(span) = super::find_effect_call(guard) {
-                                    return Err(TypeError::at(
-                                        span,
-                                        "Effect calls are not allowed in guard expressions"
-                                            .to_string(),
-                                    ));
-                                }
-                                let guard_ty = self.infer_expr(guard)?;
-                                self.unify_at(&guard_ty, &Type::bool(), guard.span())?;
-                            }
-
-                            let body_ty = self.infer_expr(&arm.body)?;
-                            self.unify_at(&result_ty, &body_ty, arm.body.span())?;
-                            self.env = saved_env;
-                            continue;
+                            let guard_ty = self.infer_expr(guard)?;
+                            self.unify_at(&guard_ty, &Type::bool(), guard.span())?;
                         }
+
+                        let body_ty = self.infer_expr(&arm.body)?;
+                        self.unify_at(&result_ty, &body_ty, arm.body.span())?;
+                        self.env = saved_env;
+                        continue;
                     }
                     self.bind_pattern(&arm.pattern, &msg_ty)?;
 

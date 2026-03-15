@@ -152,6 +152,38 @@ impl<'a> Lowerer<'a> {
                 },
             },
         );
+        lowerer.op_to_effect.insert("link".into(), "Link".into());
+        lowerer.op_to_effect.insert("unlink".into(), "Link".into());
+        lowerer.effect_defs.insert(
+            "Link".into(),
+            EffectInfo {
+                ops: {
+                    let mut ops = HashMap::new();
+                    ops.insert("link".into(), 1);
+                    ops.insert("unlink".into(), 1);
+                    ops
+                },
+            },
+        );
+        lowerer.op_to_effect.insert("sleep".into(), "Timer".into());
+        lowerer
+            .op_to_effect
+            .insert("send_after".into(), "Timer".into());
+        lowerer
+            .op_to_effect
+            .insert("cancel_timer".into(), "Timer".into());
+        lowerer.effect_defs.insert(
+            "Timer".into(),
+            EffectInfo {
+                ops: {
+                    let mut ops = HashMap::new();
+                    ops.insert("sleep".into(), 1);
+                    ops.insert("send_after".into(), 3);
+                    ops.insert("cancel_timer".into(), 1);
+                    ops
+                },
+            },
+        );
         lowerer
     }
 
@@ -1221,42 +1253,164 @@ impl<'a> Lowerer<'a> {
                 let lowered_arms: Vec<CArm> = arms
                     .iter()
                     .map(|arm| {
-                        // Down(pid, reason) -> {'DOWN', _Ref, 'process', Pid, Reason}
-                        // The reason is an Erlang exit atom (normal, shutdown, killed, etc.)
-                        // which maps directly to ExitReason constructors via BEAM convention overrides.
-                        let pat = if let Pat::Constructor { name, args, .. } = &arm.pattern {
-                            if name == "Down" && args.len() == 2 {
-                                CPat::Tuple(vec![
-                                    CPat::Lit(CLit::Atom("DOWN".into())),
-                                    CPat::Wildcard, // MonitorRef
-                                    CPat::Lit(CLit::Atom("process".into())),
-                                    lower_pat(
-                                        &args[0],
-                                        &self.record_fields,
-                                        &self.constructor_modules,
-                                    ),
-                                    lower_pat(
-                                        &args[1],
-                                        &self.record_fields,
-                                        &self.constructor_modules,
-                                    ),
-                                ])
+                        // System message patterns: bind a raw reason variable
+                        // and wrap the body with a conversion case.
+                        let (pat, reason_wrapper) =
+                            if let Pat::Constructor { name, args, .. } = &arm.pattern {
+                                if matches!(name.as_str(), "Down" | "Exit") && args.len() == 2 {
+                                    // Check if reason arg is a variable that needs conversion
+                                    let (reason_pat, wrapper) =
+                                        if let Pat::Var { name: var_name, .. } = &args[1] {
+                                            let raw = self.fresh();
+                                            (
+                                                CPat::Var(raw.clone()),
+                                                Some((core_var(var_name), raw)),
+                                            )
+                                        } else {
+                                            (
+                                                lower_pat(
+                                                    &args[1],
+                                                    &self.record_fields,
+                                                    &self.constructor_modules,
+                                                ),
+                                                None,
+                                            )
+                                        };
+
+                                    let tuple_pat = if name == "Down" {
+                                        // {'DOWN', _Ref, 'process', Pid, Reason}
+                                        CPat::Tuple(vec![
+                                            CPat::Lit(CLit::Atom("DOWN".into())),
+                                            CPat::Wildcard,
+                                            CPat::Lit(CLit::Atom("process".into())),
+                                            lower_pat(
+                                                &args[0],
+                                                &self.record_fields,
+                                                &self.constructor_modules,
+                                            ),
+                                            reason_pat,
+                                        ])
+                                    } else {
+                                        // {'EXIT', Pid, Reason}
+                                        CPat::Tuple(vec![
+                                            CPat::Lit(CLit::Atom("EXIT".into())),
+                                            lower_pat(
+                                                &args[0],
+                                                &self.record_fields,
+                                                &self.constructor_modules,
+                                            ),
+                                            reason_pat,
+                                        ])
+                                    };
+                                    (tuple_pat, wrapper)
+                                } else {
+                                    (
+                                        lower_pat(
+                                            &arm.pattern,
+                                            &self.record_fields,
+                                            &self.constructor_modules,
+                                        ),
+                                        None,
+                                    )
+                                }
                             } else {
-                                lower_pat(
-                                    &arm.pattern,
-                                    &self.record_fields,
-                                    &self.constructor_modules,
+                                (
+                                    lower_pat(
+                                        &arm.pattern,
+                                        &self.record_fields,
+                                        &self.constructor_modules,
+                                    ),
+                                    None,
                                 )
-                            }
-                        } else {
-                            lower_pat(
-                                &arm.pattern,
-                                &self.record_fields,
-                                &self.constructor_modules,
-                            )
-                        };
+                            };
                         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
-                        let body = self.lower_expr(&arm.body);
+                        let raw_body = self.lower_expr(&arm.body);
+                        // Convert raw Erlang exit reason to ExitReason type
+                        let body = if let Some((user_var, raw_var)) = reason_wrapper {
+                            let cm = &self.constructor_modules;
+                            let normal = util::mangle_ctor_atom("Normal", cm);
+                            let shutdown = util::mangle_ctor_atom("Shutdown", cm);
+                            let killed = util::mangle_ctor_atom("Killed", cm);
+                            let noproc = util::mangle_ctor_atom("Noproc", cm);
+                            let error = util::mangle_ctor_atom("Error", cm);
+                            let other = util::mangle_ctor_atom("Other", cm);
+                            // case RawReason of
+                            //   'normal' -> Normal
+                            //   'shutdown' -> Shutdown
+                            //   'killed' -> Killed
+                            //   'noproc' -> Noproc
+                            //   {'error', Msg, _} -> Error(Msg)
+                            //   Other -> Other(lists:flatten(io_lib:format("~p", [Other])))
+                            let other_var = self.fresh();
+                            let fmt_var = self.fresh();
+                            let stringify = CExpr::Call(
+                                "lists".into(),
+                                "flatten".into(),
+                                vec![CExpr::Call(
+                                    "io_lib".into(),
+                                    "format".into(),
+                                    vec![
+                                        CExpr::Lit(CLit::Str("~p".into())),
+                                        CExpr::Cons(
+                                            Box::new(CExpr::Var(other_var.clone())),
+                                            Box::new(CExpr::Nil),
+                                        ),
+                                    ],
+                                )],
+                            );
+                            let error_msg_var = self.fresh();
+                            let conversion = CExpr::Case(
+                                Box::new(CExpr::Var(raw_var)),
+                                vec![
+                                    CArm {
+                                        pat: CPat::Lit(CLit::Atom("normal".into())),
+                                        guard: None,
+                                        body: CExpr::Lit(CLit::Atom(normal.clone())),
+                                    },
+                                    CArm {
+                                        pat: CPat::Lit(CLit::Atom("shutdown".into())),
+                                        guard: None,
+                                        body: CExpr::Lit(CLit::Atom(shutdown.clone())),
+                                    },
+                                    CArm {
+                                        pat: CPat::Lit(CLit::Atom("killed".into())),
+                                        guard: None,
+                                        body: CExpr::Lit(CLit::Atom(killed.clone())),
+                                    },
+                                    CArm {
+                                        pat: CPat::Lit(CLit::Atom("noproc".into())),
+                                        guard: None,
+                                        body: CExpr::Lit(CLit::Atom(noproc.clone())),
+                                    },
+                                    CArm {
+                                        pat: CPat::Tuple(vec![
+                                            CPat::Var(error_msg_var.clone()),
+                                            CPat::Wildcard, // stacktrace
+                                        ]),
+                                        guard: None,
+                                        body: CExpr::Tuple(vec![
+                                            CExpr::Lit(CLit::Atom(error.clone())),
+                                            CExpr::Var(error_msg_var),
+                                        ]),
+                                    },
+                                    CArm {
+                                        pat: CPat::Var(other_var.clone()),
+                                        guard: None,
+                                        body: CExpr::Let(
+                                            fmt_var.clone(),
+                                            Box::new(stringify),
+                                            Box::new(CExpr::Tuple(vec![
+                                                CExpr::Lit(CLit::Atom(other.clone())),
+                                                CExpr::Var(fmt_var),
+                                            ])),
+                                        ),
+                                    },
+                                ],
+                            );
+                            CExpr::Let(user_var, Box::new(conversion), Box::new(raw_body))
+                        } else {
+                            raw_body
+                        };
                         CArm { pat, guard, body }
                     })
                     .collect();

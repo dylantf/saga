@@ -1,0 +1,30 @@
+import Std.Actor
+
+type WorkerMsg { Go | Crash }
+
+fun worker () -> Unit needs {Process, Actor WorkerMsg}
+worker () = receive {
+  Go -> {
+    print "Worker doing work..."
+    worker ()
+  }
+  Crash -> panic "something broke!"
+}
+
+fun supervisor () -> Unit needs {Process, Actor WorkerMsg, Monitor}
+supervisor () = {
+  let pid = spawn! (fun () -> worker ())
+  let _ref = monitor! pid
+
+  send! pid Go
+  send! pid Crash
+
+  receive {
+    Down(dead_pid, reason) -> print $"Child exited: {reason}"
+    after 3000 -> print "No exit received"
+  }
+}
+
+main () = {
+  supervisor ()
+} with beam_actor
