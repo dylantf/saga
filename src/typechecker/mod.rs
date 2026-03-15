@@ -194,6 +194,137 @@ pub struct Scheme {
     pub ty: Type,
 }
 
+// --- Module exports ---
+
+/// All public items exported by a typechecked module, cached as a single unit.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleExports {
+    /// Public type bindings: name -> scheme.
+    pub bindings: Vec<(String, Scheme)>,
+    /// Type name -> constructor names (empty vec for opaque types).
+    pub type_constructors: HashMap<String, Vec<String>>,
+    /// Record name -> ordered field types.
+    pub record_defs: HashMap<String, Vec<(String, Type)>>,
+    /// Trait name -> trait info.
+    pub traits: HashMap<String, TraitInfo>,
+    /// (trait_name, target_type) -> impl info.
+    pub trait_impls: HashMap<(String, String), ImplInfo>,
+    /// Effect name -> effect def info.
+    pub(crate) effects: HashMap<String, EffectDefInfo>,
+    /// Handler name -> handler info.
+    pub(crate) handlers: HashMap<String, HandlerInfo>,
+}
+
+impl ModuleExports {
+    /// Collect all public exports from a typechecked module.
+    pub fn collect(
+        program: &[crate::ast::Decl],
+        checker: &Checker,
+    ) -> Self {
+        use crate::ast::Decl;
+
+        let pub_names = crate::typechecker::check_module::public_names_for_tc(program);
+
+        // Bindings: from env and constructors
+        let mut bindings: Vec<(String, Scheme)> = Vec::new();
+        for name in &pub_names {
+            if let Some(scheme) = checker.env.get(name) {
+                bindings.push((name.to_string(), scheme.clone()));
+            } else if let Some(scheme) = checker.constructors.get(name) {
+                bindings.push((name.to_string(), scheme.clone()));
+            }
+        }
+
+        // Type constructors
+        let mut type_constructors: HashMap<String, Vec<String>> = HashMap::new();
+        for decl in program {
+            match decl {
+                Decl::TypeDef {
+                    public: true,
+                    opaque,
+                    name,
+                    variants,
+                    ..
+                } => {
+                    if *opaque {
+                        type_constructors.insert(name.clone(), vec![]);
+                    } else {
+                        let ctors: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                        type_constructors.insert(name.clone(), ctors);
+                    }
+                }
+                Decl::RecordDef {
+                    public: true, name, ..
+                } => {
+                    type_constructors.insert(name.clone(), vec![name.clone()]);
+                }
+                _ => {}
+            }
+        }
+
+        // Records, traits, trait impls, effects, handlers: all from AST + checker state
+        let mut record_defs: HashMap<String, Vec<(String, Type)>> = HashMap::new();
+        let mut traits: HashMap<String, TraitInfo> = HashMap::new();
+        let mut trait_impls: HashMap<(String, String), ImplInfo> = HashMap::new();
+        let mut effects: HashMap<String, EffectDefInfo> = HashMap::new();
+        let mut handlers: HashMap<String, HandlerInfo> = HashMap::new();
+
+        for decl in program {
+            match decl {
+                Decl::RecordDef {
+                    public: true, name, ..
+                } => {
+                    if let Some(fields) = checker.records.get(name.as_str()) {
+                        record_defs.insert(name.clone(), fields.clone());
+                    }
+                }
+                Decl::TraitDef {
+                    public: true, name, ..
+                } => {
+                    if let Some(info) = checker.traits.get(name.as_str()) {
+                        traits.insert(name.clone(), info.clone());
+                    }
+                }
+                Decl::ImplDef {
+                    trait_name,
+                    target_type,
+                    ..
+                } => {
+                    let key = (trait_name.clone(), target_type.clone());
+                    if let Some(info) = checker.trait_impls.get(&key) {
+                        trait_impls.insert(key, info.clone());
+                    }
+                }
+                Decl::EffectDef {
+                    public: true, name, ..
+                } => {
+                    if let Some(info) = checker.effects.get(name) {
+                        effects.insert(name.clone(), info.clone());
+                    }
+                }
+                Decl::HandlerDef {
+                    public: true, name, ..
+                } => {
+                    if let Some(info) = checker.handlers.get(name) {
+                        handlers.insert(name.clone(), info.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        ModuleExports {
+            bindings,
+            type_constructors,
+            record_defs,
+            traits,
+            trait_impls,
+            effects,
+            handlers,
+        }
+    }
+}
+
 // --- Module codegen info ---
 
 /// An effect operation definition for codegen: operation name and parameter count.
@@ -212,10 +343,10 @@ pub struct EffectDef {
 }
 
 /// Information about a module's exports needed by the lowerer/codegen.
-/// Populated during typechecking alongside `tc_loaded`.
+/// Populated during typechecking alongside `tc_modules`.
 #[derive(Debug, Clone, Default)]
 pub struct ModuleCodegenInfo {
-    /// Public type bindings: name -> scheme (same data as tc_loaded).
+    /// Public type bindings: name -> scheme.
     pub exports: Vec<(String, Scheme)>,
     /// Public effect definitions.
     pub effect_defs: Vec<EffectDef>,
@@ -433,17 +564,10 @@ pub struct Checker {
     pub(crate) where_bound_var_names: HashMap<u32, String>,
     /// Project root for resolving imports. None = script mode.
     pub(crate) project_root: Option<std::path::PathBuf>,
-    /// Cache of already-typechecked modules: module name -> public type bindings.
-    pub(crate) tc_loaded: HashMap<String, Vec<(String, Scheme)>>,
-    /// Cache of type->constructors maps for already-typechecked modules.
-    pub(crate) tc_type_ctors: HashMap<String, HashMap<String, Vec<String>>>,
+    /// Cache of already-typechecked modules: module name -> all public exports.
+    pub(crate) tc_modules: HashMap<String, ModuleExports>,
     /// Cache of codegen-relevant info for each typechecked module.
     pub tc_codegen_info: HashMap<String, ModuleCodegenInfo>,
-    /// Cache of record definitions from typechecked modules: module name -> record name -> field types.
-    pub(crate) tc_record_defs: HashMap<String, HashMap<String, Vec<(String, Type)>>>,
-    /// Cache of trait impls from typechecked modules: module name -> (trait, type) -> impl info.
-    pub(crate) tc_trait_impls: HashMap<String, HashMap<(String, String), ImplInfo>>,
-    pub(crate) tc_traits: HashMap<String, HashMap<String, TraitInfo>>,
     /// Cache of parsed programs for each typechecked module (avoids re-reading/re-lexing/re-parsing).
     pub tc_programs: HashMap<String, crate::ast::Program>,
     /// Cached checker state after prelude has been loaded (avoids re-checking prelude for each module import).
@@ -484,12 +608,8 @@ impl Checker {
             where_bounds: HashMap::new(),
             where_bound_var_names: HashMap::new(),
             project_root: None,
-            tc_loaded: HashMap::new(),
-            tc_type_ctors: HashMap::new(),
+            tc_modules: HashMap::new(),
             tc_codegen_info: HashMap::new(),
-            tc_record_defs: HashMap::new(),
-            tc_trait_impls: HashMap::new(),
-            tc_traits: HashMap::new(),
             tc_programs: HashMap::new(),
             tc_prelude_snapshot: None,
             tc_loading: HashSet::new(),
