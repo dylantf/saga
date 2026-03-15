@@ -5,8 +5,8 @@ import MathLib (add, double)
 pub fun main () -> Unit
 main () = {
   print (add 10 20)
-  print (double 7)
-  print (MathLib.add 100 200)
+  print (double 7) 
+  print (MathLib.add 100 200) 
   let pair = (42, "hello")
   print (fst pair)
   print (snd pair)

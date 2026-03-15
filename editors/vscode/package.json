@@ -29,6 +29,12 @@
         "scopeName": "source.dylang",
         "path": "./syntaxes/dylang.tmLanguage.json"
       }
+    ],
+    "commands": [
+      {
+        "command": "dylang.restartServer",
+        "title": "dylang: Restart Language Server"
+      }
     ]
   },
   "dependencies": {

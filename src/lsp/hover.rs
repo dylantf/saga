@@ -71,7 +71,17 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<String> {
         {
             Some(name.clone())
         }
-        Expr::QualifiedName { name, span, .. } if contains(span, offset) => Some(name.clone()),
+        Expr::QualifiedName { module, name, span } => {
+            // The span covers "Module.name". The dot separates them.
+            // module part: span.start .. span.start + module.len()
+            // name part:   span.start + module.len() + 1 .. span.end
+            let dot_offset = span.start + module.len();
+            if offset <= dot_offset {
+                Some(format!("module:{}", module))
+            } else {
+                Some(name.clone())
+            }
+        }
         Expr::App { func, arg, .. } => {
             find_in_expr(func, offset).or_else(|| find_in_expr(arg, offset))
         }

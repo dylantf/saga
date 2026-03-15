@@ -6,6 +6,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use dylang::typechecker;
 
 mod checker;
+mod definition;
 mod diagnostics;
 mod hover;
 mod line_index;
@@ -16,13 +17,13 @@ struct Backend {
     client: Client,
     /// Cached base checker with prelude + module map loaded.
     base_checker: Mutex<Option<typechecker::Checker>>,
-    /// Last successful check result per file, for hover queries.
+    /// Last check result, for hover/goto queries.
     last_check: Mutex<Option<(Url, CheckResult)>>,
 }
 
 impl Backend {
     fn get_checker(&self, uri: &Url) -> typechecker::Checker {
-        let mut cached = self.base_checker.lock().unwrap();
+        let mut cached = self.base_checker.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(base) = &*cached {
             return base.clone();
         }
@@ -40,13 +41,34 @@ impl Backend {
 
     fn check_file(&self, uri: Url, text: &str) -> Vec<Diagnostic> {
         let checker = self.get_checker(&uri);
-        let result = diagnostics::check(checker, text);
-        let diagnostics = result.diagnostics.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            diagnostics::check(checker, text)
+        }));
+        match result {
+            Ok(result) => {
+                let diagnostics = result.diagnostics.clone();
+                let mut last = self.last_check.lock().unwrap_or_else(|e| e.into_inner());
+                *last = Some((uri, result));
+                diagnostics
+            }
+            Err(e) => {
+                eprintln!("[check_file] panic: {:?}", e);
+                vec![]
+            }
+        }
+    }
 
-        let mut last = self.last_check.lock().unwrap();
-        *last = Some((uri, result));
-
-        diagnostics
+    /// Clone the last check result out of the lock to avoid holding it
+    /// across async boundaries (which would deadlock with did_open).
+    fn snapshot(&self) -> Option<(Url, typechecker::Checker, Vec<dylang::ast::Decl>, line_index::LineIndex)> {
+        let last = self.last_check.lock().ok()?;
+        let (uri, result) = last.as_ref()?;
+        Some((
+            uri.clone(),
+            result.checker.clone(),
+            result.program.clone()?,
+            result.line_index.clone(),
+        ))
     }
 }
 
@@ -59,6 +81,7 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -104,25 +127,18 @@ impl LanguageServer for Backend {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let last = self.last_check.lock().unwrap();
-        let Some((ref _uri, ref result)) = *last else {
-            return Ok(None);
-        };
-
-        let Some(ref program) = result.program else {
+        let Some((_uri, checker, program, line_index)) = self.snapshot() else {
             return Ok(None);
         };
 
         let position = params.text_document_position_params.position;
-        let offset = result
-            .line_index
-            .line_col_to_offset(position.line as usize, position.character as usize);
+        let offset = line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
-        let Some(name) = hover::find_name_at_offset(program, offset) else {
+        let Some(name) = hover::find_name_at_offset(&program, offset) else {
             return Ok(None);
         };
 
-        let Some(type_str) = hover::type_at_name(&result.checker, &name, program) else {
+        let Some(type_str) = hover::type_at_name(&checker, &name, &program) else {
             return Ok(None);
         };
 
@@ -133,6 +149,52 @@ impl LanguageServer for Backend {
             }),
             range: None,
         }))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let Some((uri, checker, program, line_index)) = self.snapshot() else {
+            return Ok(None);
+        };
+
+        let position = params.text_document_position_params.position;
+        let offset =
+            line_index.line_col_to_offset(position.line as usize, position.character as usize);
+
+        let Some(name) = hover::find_name_at_offset(&program, offset) else {
+            return Ok(None);
+        };
+
+        let Some(def_result) = definition::find_definition(&program, &name, &checker) else {
+            return Ok(None);
+        };
+
+        // For cross-module definitions, build a line index for the target file
+        let (target_uri, target_line_index);
+        if let Some(ref file_path) = def_result.file_path {
+            target_uri = Url::from_file_path(file_path)
+                .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
+            let source = std::fs::read_to_string(file_path)
+                .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
+            target_line_index = Some(line_index::LineIndex::new(&source));
+        } else {
+            target_uri = uri;
+            target_line_index = None;
+        }
+
+        let li = target_line_index.as_ref().unwrap_or(&line_index);
+        let (start_line, start_col) = li.offset_to_line_col(def_result.span.start);
+        let (end_line, end_col) = li.offset_to_line_col(def_result.span.end);
+
+        Ok(Some(GotoDefinitionResponse::Scalar(Location {
+            uri: target_uri,
+            range: Range {
+                start: Position::new(start_line as u32, start_col as u32),
+                end: Position::new(end_line as u32, end_col as u32),
+            },
+        })))
     }
 }
 

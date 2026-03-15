@@ -1,4 +1,5 @@
 /// Maps byte offsets to line:column positions.
+#[derive(Clone)]
 pub struct LineIndex {
     /// Byte offset of the start of each line.
     line_starts: Vec<usize>,

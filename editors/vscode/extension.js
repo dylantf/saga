@@ -1,10 +1,10 @@
+const vscode = require("vscode");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 const path = require("path");
 
 let client;
 
-function activate(context) {
-  // Look for dylang-lsp in PATH, or use a local debug build
+function createClient() {
   const serverCommand =
     process.env.DYLANG_LSP_PATH ||
     path.join(__dirname, "..", "..", "target", "debug", "dylang-lsp");
@@ -18,14 +18,30 @@ function activate(context) {
     documentSelector: [{ scheme: "file", language: "dylang" }],
   };
 
-  client = new LanguageClient(
+  return new LanguageClient(
     "dylang-lsp",
     "dylang Language Server",
     serverOptions,
     clientOptions,
   );
+}
 
+function activate(context) {
+  client = createClient();
   client.start();
+
+  const restartCommand = vscode.commands.registerCommand(
+    "dylang.restartServer",
+    async () => {
+      if (client) {
+        await client.stop();
+      }
+      client = createClient();
+      await client.start();
+    },
+  );
+
+  context.subscriptions.push(restartCommand);
 }
 
 function deactivate() {
