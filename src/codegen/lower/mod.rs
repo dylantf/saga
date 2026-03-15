@@ -30,38 +30,43 @@ struct EffectInfo {
     ops: HashMap<String, usize>,
 }
 
+/// All information about a top-level function needed by the lowerer.
+/// A single struct replaces separate `top_level_funs`, `fun_effects`,
+/// `param_absorbed_effects`, and `imported_names` maps.
+#[derive(Debug, Clone, Default)]
+struct FunInfo {
+    /// Exported arity (including handler params). 0 if not yet known (set by FunBinding).
+    arity: usize,
+    /// Effect names from `needs` clause (sorted).
+    effects: Vec<String>,
+    /// For EffArrow params: param_index -> absorbed effects.
+    param_absorbed_effects: HashMap<usize, Vec<String>>,
+    /// If imported: (erlang_module, original_name).
+    import_origin: Option<(String, String)>,
+}
+
 pub struct Lowerer<'a> {
     counter: usize,
     /// Codegen info for imported modules (from typechecker cache).
     codegen_info: &'a HashMap<String, ModuleCodegenInfo>,
     /// Maps module alias/name used in source -> Erlang module atom name.
     module_aliases: HashMap<String, String>,
-    /// Maps unqualified imported name -> (erlang_module, original_name).
-    /// For exposed imports like `import Math (add)`, `add` maps to `("math", "add")`.
-    imported_names: HashMap<String, (String, String)>,
     /// Names declared as `pub` in the current module (for export filtering).
     pub_names: std::collections::HashSet<String>,
     /// Maps record name -> ordered field names (from RecordDef declarations).
     record_fields: HashMap<String, Vec<String>>,
-    /// Maps top-level function name -> its exported arity (including handler params).
-    /// All multi-arg functions are curried to arity 1.
-    top_level_funs: HashMap<String, usize>,
+    /// All top-level function info: name -> FunInfo.
+    fun_info: HashMap<String, FunInfo>,
     /// Maps effect name -> EffectInfo (op names and param counts).
     effect_defs: HashMap<String, EffectInfo>,
     /// Maps handler name -> handler arms + return clause.
     handler_defs: HashMap<String, HandlerInfo>,
-    /// Maps function name -> list of effect names from `needs` (declaration order).
-    fun_effects: HashMap<String, Vec<String>>,
     /// Maps op_name -> effect name (reverse lookup).
     op_to_effect: HashMap<String, String>,
     /// When lowering inside an effectful function, maps effect name -> handler param var name.
     current_handler_params: HashMap<String, String>,
-    /// Maps function name -> (param_index -> absorbed effects) for EffArrow params.
-    /// e.g. for `fun try (computation: () -> a needs {Fail}) -> ...`,
-    /// stores `"try" -> {0 -> ["Fail"]}`.
-    param_absorbed_effects: HashMap<String, HashMap<usize, Vec<String>>>,
     /// When lowering inside a function, maps local variable name -> effects it absorbs.
-    /// Set from `param_absorbed_effects` for the current function.
+    /// Set from FunInfo.param_absorbed_effects for the current function.
     current_effectful_vars: HashMap<String, Vec<String>>,
     /// Effects that the next lambda being lowered should accept as extra params.
     /// Set by the call site that passes the lambda to an effectful parameter.
@@ -93,16 +98,13 @@ impl<'a> Lowerer<'a> {
             counter: 0,
             codegen_info,
             module_aliases: HashMap::new(),
-            imported_names: HashMap::new(),
             pub_names: std::collections::HashSet::new(),
             record_fields: HashMap::new(),
-            top_level_funs: HashMap::new(),
+            fun_info: HashMap::new(),
             effect_defs: HashMap::new(),
             handler_defs: HashMap::new(),
-            fun_effects: HashMap::new(),
             op_to_effect: HashMap::new(),
             current_handler_params: HashMap::new(),
-            param_absorbed_effects: HashMap::new(),
             current_effectful_vars: HashMap::new(),
             lambda_effect_context: None,
             current_return_k: None,
@@ -193,6 +195,49 @@ impl<'a> Lowerer<'a> {
         format!("_Cor{}", n)
     }
 
+    /// Register a function with all its metadata in one call.
+    fn register_fun(&mut self, name: String, info: FunInfo) {
+        self.fun_info.insert(name, info);
+    }
+
+    /// Register a function only if not already registered.
+    fn register_fun_default(&mut self, name: String, info: FunInfo) {
+        self.fun_info.entry(name).or_insert(info);
+    }
+
+    /// Check if a function is effectful.
+    fn is_effectful(&self, name: &str) -> bool {
+        self.fun_info
+            .get(name)
+            .is_some_and(|f| !f.effects.is_empty())
+    }
+
+    /// Get a function's arity.
+    fn fun_arity(&self, name: &str) -> Option<usize> {
+        self.fun_info.get(name).map(|f| f.arity)
+    }
+
+    /// Get a function's effects.
+    fn fun_effects(&self, name: &str) -> Option<&Vec<String>> {
+        self.fun_info
+            .get(name)
+            .map(|f| &f.effects)
+            .filter(|e| !e.is_empty())
+    }
+
+    /// Get a function's import origin (erlang_module, original_name).
+    fn import_origin(&self, name: &str) -> Option<&(String, String)> {
+        self.fun_info.get(name).and_then(|f| f.import_origin.as_ref())
+    }
+
+    /// Get a function's param absorbed effects.
+    fn param_absorbed_effects(&self, name: &str) -> Option<&HashMap<usize, Vec<String>>> {
+        self.fun_info
+            .get(name)
+            .map(|f| &f.param_absorbed_effects)
+            .filter(|m| !m.is_empty())
+    }
+
     /// Find a record name that contains the given field.
     fn find_record_by_field(&self, field: &str) -> Option<&str> {
         self.record_fields.iter().find_map(|(rname, fields)| {
@@ -271,11 +316,10 @@ impl<'a> Lowerer<'a> {
                     if *public {
                         self.pub_names.insert(name.clone());
                     }
+                    let mut sorted_effects = Vec::new();
                     if !effects.is_empty() {
-                        let mut sorted: Vec<String> =
-                            effects.iter().map(|e| e.name.clone()).collect();
-                        sorted.sort();
-                        self.fun_effects.insert(name.clone(), sorted);
+                        sorted_effects = effects.iter().map(|e| e.name.clone()).collect();
+                        sorted_effects.sort();
                     }
                     // Extract EffArrow info from parameter types
                     let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
@@ -287,9 +331,14 @@ impl<'a> Lowerer<'a> {
                             param_effs.insert(i, sorted);
                         }
                     }
-                    if !param_effs.is_empty() {
-                        self.param_absorbed_effects.insert(name.clone(), param_effs);
-                    }
+                    // Arity is computed later by FunBinding (needs pattern params
+                    // to account for unit-param filtering in lower_params).
+                    self.register_fun(name.clone(), FunInfo {
+                        arity: 0,
+                        effects: sorted_effects,
+                        param_absorbed_effects: param_effs,
+                        import_origin: None,
+                    });
                 }
                 Decl::ExternalFun {
                     public,
@@ -308,18 +357,20 @@ impl<'a> Lowerer<'a> {
                         name.clone(),
                         (erl_module.clone(), erl_func.clone(), real_arity),
                     );
-                    // Register effects if declared
+                    let mut sorted_effects = Vec::new();
                     if !effects.is_empty() {
-                        let mut sorted: Vec<String> =
-                            effects.iter().map(|e| e.name.clone()).collect();
-                        sorted.sort();
-                        self.fun_effects.insert(name.clone(), sorted);
+                        sorted_effects = effects.iter().map(|e| e.name.clone()).collect();
+                        sorted_effects.sort();
                     }
-                    // Register as a top-level function with the appropriate arity
-                    let effect_count = effects.len();
+                    let effect_count = sorted_effects.len();
                     let expanded_arity =
                         real_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
-                    self.top_level_funs.insert(name.clone(), expanded_arity);
+                    self.register_fun(name.clone(), FunInfo {
+                        arity: expanded_arity,
+                        effects: sorted_effects,
+                        param_absorbed_effects: HashMap::new(),
+                        import_origin: None,
+                    });
                 }
                 _ => {}
             }
@@ -333,12 +384,12 @@ impl<'a> Lowerer<'a> {
             let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
             let erlang_name = util::module_name_to_erlang(&mod_path);
             for (_trait_name, _target_type, dict_name, arity) in &info.trait_impl_dicts {
-                self.top_level_funs
-                    .entry(dict_name.clone())
-                    .or_insert(*arity);
-                self.imported_names
-                    .entry(dict_name.clone())
-                    .or_insert_with(|| (erlang_name.clone(), dict_name.clone()));
+                self.register_fun_default(dict_name.clone(), FunInfo {
+                    arity: *arity,
+                    effects: Vec::new(),
+                    param_absorbed_effects: HashMap::new(),
+                    import_origin: Some((erlang_name.clone(), dict_name.clone())),
+                });
             }
             if mod_name.starts_with("Std.") {
                 // Register the prelude's module alias so qualified calls like
@@ -355,23 +406,22 @@ impl<'a> Lowerer<'a> {
                     let effect_count = effects.len();
                     let expanded_arity =
                         base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
-                    // Register both unqualified and qualified (alias.name) forms
-                    self.top_level_funs
-                        .entry(name.clone())
-                        .or_insert(expanded_arity);
+                    let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
+                    // Register unqualified form
+                    self.register_fun_default(name.clone(), FunInfo {
+                        arity: expanded_arity,
+                        effects: effects.clone(),
+                        param_absorbed_effects: param_effs,
+                        import_origin: Some((erlang_name.clone(), name.clone())),
+                    });
+                    // Register qualified (alias.name) form
                     let qualified = format!("{}.{}", mod_path.last().unwrap(), name);
-                    self.top_level_funs
-                        .entry(qualified.clone())
-                        .or_insert(expanded_arity);
-                    self.imported_names
-                        .entry(name.clone())
-                        .or_insert_with(|| (erlang_name.clone(), name.clone()));
-                    if !effects.is_empty() {
-                        self.fun_effects
-                            .entry(name.clone())
-                            .or_insert(effects.clone());
-                        self.fun_effects.entry(qualified).or_insert(effects);
-                    }
+                    self.register_fun_default(qualified, FunInfo {
+                        arity: expanded_arity,
+                        effects,
+                        param_absorbed_effects: HashMap::new(),
+                        import_origin: None,
+                    });
                 }
                 for (_type_name, ctors) in &info.type_constructors {
                     for ctor in ctors {
@@ -411,43 +461,26 @@ impl<'a> Lowerer<'a> {
                         let effect_count = effects.len();
                         let expanded_arity =
                             base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
+                        let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
                         let qualified = format!("{}.{}", prefix, name);
-                        self.top_level_funs
-                            .insert(qualified.clone(), expanded_arity);
-                        if !effects.is_empty() {
-                            self.fun_effects.insert(qualified, effects);
-                        }
-                    }
+                        self.register_fun(qualified, FunInfo {
+                            arity: expanded_arity,
+                            effects: effects.clone(),
+                            param_absorbed_effects: param_effs.clone(),
+                            import_origin: None,
+                        });
 
-                    // Register exposed (unqualified) names
-                    if let Some(exposed) = exposing {
-                        for name in exposed {
-                            if exported_names.contains(name.as_str()) {
-                                // Find the scheme to get arity/effects
-                                if let Some((_, scheme)) =
-                                    info.exports.iter().find(|(n, _)| n == name)
-                                {
-                                    let (base_arity, effects) =
-                                        util::arity_and_effects_from_type(&scheme.ty);
-                                    let effect_count = effects.len();
-                                    let expanded_arity = base_arity
-                                        + effect_count
-                                        + if effect_count > 0 { 1 } else { 0 };
-                                    self.top_level_funs.insert(name.clone(), expanded_arity);
-                                    self.imported_names
-                                        .insert(name.clone(), (erlang_name.clone(), name.clone()));
-                                    if !effects.is_empty() {
-                                        self.fun_effects.insert(name.clone(), effects);
-                                    }
-                                    // Register EffArrow param info for cross-module calls
-                                    let param_effs =
-                                        util::param_absorbed_effects_from_type(&scheme.ty);
-                                    if !param_effs.is_empty() {
-                                        self.param_absorbed_effects
-                                            .insert(name.clone(), param_effs);
-                                    }
-                                }
-                            }
+                        // Register exposed (unqualified) names
+                        if let Some(exposed) = exposing
+                            && exposed.iter().any(|e| e == name)
+                            && exported_names.contains(name.as_str())
+                        {
+                            self.register_fun(name.clone(), FunInfo {
+                                arity: expanded_arity,
+                                effects,
+                                param_absorbed_effects: param_effs,
+                                import_origin: Some((erlang_name.clone(), name.clone())),
+                            });
                         }
                     }
 
@@ -475,9 +508,12 @@ impl<'a> Lowerer<'a> {
                     }
                     // Register imported trait impl dicts for cross-module calls
                     for (_trait_name, _target_type, dict_name, arity) in &info.trait_impl_dicts {
-                        self.top_level_funs.insert(dict_name.clone(), *arity);
-                        self.imported_names
-                            .insert(dict_name.clone(), (erlang_name.clone(), dict_name.clone()));
+                        self.register_fun(dict_name.clone(), FunInfo {
+                            arity: *arity,
+                            effects: Vec::new(),
+                            param_absorbed_effects: HashMap::new(),
+                            import_origin: Some((erlang_name.clone(), dict_name.clone())),
+                        });
                     }
                 }
             }
@@ -498,11 +534,14 @@ impl<'a> Lowerer<'a> {
                 } => {
                     let base_arity = lower_params(params).len();
                     let effect_count = self
-                        .fun_effects
+                        .fun_info
                         .get(name.as_str())
-                        .map_or(0, |effs| effs.len());
+                        .map_or(0, |f| f.effects.len());
                     let arity = base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
-                    self.top_level_funs.entry(name.clone()).or_insert(arity);
+                    // Update arity on existing entry (created by FunAnnotation) or create new
+                    self.fun_info.entry(name.clone())
+                        .and_modify(|f| f.arity = arity)
+                        .or_insert(FunInfo { arity, ..Default::default() });
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _)| n == name) {
                         group.2.push((params, guard, body));
                     } else {
@@ -515,7 +554,10 @@ impl<'a> Lowerer<'a> {
                     methods,
                     ..
                 } => {
-                    self.top_level_funs.insert(name.clone(), dict_params.len());
+                    self.register_fun(name.clone(), FunInfo {
+                        arity: dict_params.len(),
+                        ..Default::default()
+                    });
                     dict_constructors.push((name, dict_params, methods));
                 }
                 _ => {}
@@ -563,7 +605,7 @@ impl<'a> Lowerer<'a> {
 
             // Set up handler param context for effectful functions
             // Filter out beam-native effects (e.g. Actor) -- they don't use CPS
-            let effects = self.fun_effects.get(&name).cloned().unwrap_or_default();
+            let effects = self.fun_effects(&name).cloned().unwrap_or_default();
             let handler_params: Vec<String> = effects
                 .iter()
                 .map(|eff| format!("_Handle{}", eff))
@@ -576,9 +618,9 @@ impl<'a> Lowerer<'a> {
             // Set up effectful variable tracking for HOF absorption.
             // Map param indices to param names from the first clause's patterns.
             let saved_effectful_vars = std::mem::take(&mut self.current_effectful_vars);
-            if let Some(param_effs) = self.param_absorbed_effects.get(&name) {
+            if let Some(param_effs) = self.param_absorbed_effects(&name).cloned() {
                 let first_clause_params = clauses[0].0;
-                for (idx, effs) in param_effs {
+                for (idx, effs) in &param_effs {
                     if let Some(pat) = first_clause_params.get(*idx)
                         && let Pat::Var { name: src_name, .. } = pat
                     {
@@ -642,7 +684,7 @@ impl<'a> Lowerer<'a> {
                         // Check for effectful function call: pass _ReturnK directly
                         let is_eff_call = collect_fun_call(body)
                             .map(|(name, _)| {
-                                self.fun_effects.contains_key(name)
+                                self.is_effectful(name)
                                     || self.current_effectful_vars.contains_key(name)
                             })
                             .unwrap_or(false);
@@ -794,21 +836,21 @@ impl<'a> Lowerer<'a> {
 
             Expr::Var { name, .. } => {
                 // If it's an imported name used bare, emit an external fun ref.
-                if let Some((erl_mod, erl_name)) = self.imported_names.get(name.as_str()) {
-                    if let Some(&arity) = self.top_level_funs.get(name.as_str()) {
+                if let Some((erl_mod, erl_name)) = self.import_origin(name).cloned() {
+                    if let Some(arity) = self.fun_arity(name) {
                         CExpr::Call(
                             "erlang".to_string(),
                             "make_fun".to_string(),
                             vec![
-                                CExpr::Lit(CLit::Atom(erl_mod.clone())),
-                                CExpr::Lit(CLit::Atom(erl_name.clone())),
+                                CExpr::Lit(CLit::Atom(erl_mod)),
+                                CExpr::Lit(CLit::Atom(erl_name)),
                                 CExpr::Lit(CLit::Int(arity as i64)),
                             ],
                         )
                     } else {
                         CExpr::Var(core_var(name))
                     }
-                } else if let Some(&arity) = self.top_level_funs.get(name.as_str()) {
+                } else if let Some(arity) = self.fun_arity(name) {
                     // If referenced bare (not in application position), emit a FunRef
                     // so it can be passed as a value.
                     CExpr::FunRef(name.clone(), arity)
@@ -868,9 +910,9 @@ impl<'a> Lowerer<'a> {
                 // takes N+M where M is the number of handler params. We thread
                 // the caller's handler params through automatically.
                 if let Some((func_name, args)) = collect_fun_call(expr) {
-                    let callee_effects = self.fun_effects.get(func_name).cloned();
+                    let callee_effects = self.fun_effects(func_name).cloned();
                     let effect_count = callee_effects.as_ref().map_or(0, |e| e.len());
-                    let total_arity = self.top_level_funs.get(func_name).copied();
+                    let total_arity = self.fun_arity(func_name);
 
                     // Filter out unit literal args (they don't count toward arity)
                     let non_unit_args: Vec<&Expr> = args
@@ -893,7 +935,7 @@ impl<'a> Lowerer<'a> {
                         // Saturated call: apply fun 'name'/N(arg1, ..., argN, handler1, ...)
                         let mut arg_vars: Vec<String> = Vec::new();
                         let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                        let callee_param_effs = self.param_absorbed_effects.get(func_name).cloned();
+                        let callee_param_effs = self.param_absorbed_effects(func_name).cloned();
                         for (i, arg) in non_unit_args.iter().enumerate() {
                             let v = self.fresh();
                             // If this arg position has absorbed effects, set context
@@ -954,8 +996,7 @@ impl<'a> Lowerer<'a> {
                                 // External function: direct call to the foreign module
                                 CExpr::Call(erl_mod.clone(), erl_func.clone(), call_args)
                             }
-                        } else if let Some((erl_mod, erl_name)) = self.imported_names.get(func_name)
-                        {
+                        } else if let Some((erl_mod, erl_name)) = self.import_origin(func_name) {
                             CExpr::Call(erl_mod.clone(), erl_name.clone(), call_args)
                         } else {
                             CExpr::Apply(
@@ -1178,7 +1219,7 @@ impl<'a> Lowerer<'a> {
                         // Check for effectful function call: pass _ReturnK directly
                         let is_eff_call = collect_fun_call(body)
                             .map(|(name, _)| {
-                                self.fun_effects.contains_key(name)
+                                self.is_effectful(name)
                                     || self.current_effectful_vars.contains_key(name)
                             })
                             .unwrap_or(false);
@@ -1438,7 +1479,7 @@ impl<'a> Lowerer<'a> {
                 // When used as a bare reference (not in application position),
                 // emit a FunRef if it's a known imported function, otherwise a Var.
                 let qualified = format!("{}.{}", module, name);
-                if let Some(&arity) = self.top_level_funs.get(&qualified) {
+                if let Some(arity) = self.fun_arity(&qualified) {
                     let erlang_module = self
                         .module_aliases
                         .get(module.as_str())
@@ -1623,23 +1664,23 @@ impl<'a> Lowerer<'a> {
             }
 
             Expr::DictRef { name, .. } => {
-                if let Some((erl_mod, erl_name)) = self.imported_names.get(name.as_str()) {
+                if let Some((erl_mod, erl_name)) = self.import_origin(name).cloned() {
                     // Cross-module dict constructor
-                    let arity = self.top_level_funs.get(name.as_str()).copied().unwrap_or(0);
+                    let arity = self.fun_arity(name).unwrap_or(0);
                     if arity == 0 {
-                        CExpr::Call(erl_mod.clone(), erl_name.clone(), vec![])
+                        CExpr::Call(erl_mod, erl_name, vec![])
                     } else {
                         CExpr::Call(
                             "erlang".to_string(),
                             "make_fun".to_string(),
                             vec![
-                                CExpr::Lit(CLit::Atom(erl_mod.clone())),
-                                CExpr::Lit(CLit::Atom(erl_name.clone())),
+                                CExpr::Lit(CLit::Atom(erl_mod)),
+                                CExpr::Lit(CLit::Atom(erl_name)),
                                 CExpr::Lit(CLit::Int(arity as i64)),
                             ],
                         )
                     }
-                } else if let Some(&arity) = self.top_level_funs.get(name.as_str()) {
+                } else if let Some(arity) = self.fun_arity(name) {
                     if arity == 0 {
                         // Nullary dict constructor: call it to get the dict tuple
                         CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])
@@ -1727,7 +1768,7 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|| module.to_lowercase());
 
         let qualified = format!("{}.{}", module, func_name);
-        let callee_effects = self.fun_effects.get(&qualified).cloned();
+        let callee_effects = self.fun_effects(&qualified).cloned();
         let effect_count = callee_effects.as_ref().map_or(0, |e| e.len());
 
         // Filter out unit literal args
