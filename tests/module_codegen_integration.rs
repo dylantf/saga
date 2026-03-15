@@ -739,9 +739,9 @@ import OpaqueLib (Token, make_token)
 pub fun main () -> Token
 main () = make_token \"abc\"
 ";
-    let mut checker = make_project_checker();
     let lib_path = fixtures_root().join("OpaqueLib.dy");
     std::fs::write(&lib_path, lib_src).unwrap();
+    let mut checker = make_project_checker();
     typecheck_source(main_src, &mut checker);
     let _out = emit_project_module(main_src, "main", &checker);
     let _ = std::fs::remove_file(&lib_path);
@@ -761,9 +761,9 @@ import OpaqueLib2 (Token, Secret)
 pub fun main () -> Token
 main () = Secret \"abc\"
 ";
-    let mut checker = make_project_checker();
     let lib_path = fixtures_root().join("OpaqueLib2.dy");
     std::fs::write(&lib_path, lib_src).unwrap();
+    let mut checker = make_project_checker();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         typecheck_source(main_src, &mut checker);
     }));
@@ -788,9 +788,9 @@ import OpaqueLib3 (Token, make_token, reveal)
 pub fun main () -> String
 main () = reveal (make_token \"hello\")
 ";
-    let mut checker = make_project_checker();
     let lib_path = fixtures_root().join("OpaqueLib3.dy");
     std::fs::write(&lib_path, lib_src).unwrap();
+    let mut checker = make_project_checker();
     typecheck_source(main_src, &mut checker);
 
     let lib_core = emit_project_module(lib_src, "opaquelib3", &checker);
