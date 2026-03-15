@@ -1,94 +1,42 @@
+use std::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use dylang::{lexer, parser, typechecker};
+use dylang::typechecker;
 
+mod checker;
+mod diagnostics;
 mod line_index;
-use line_index::LineIndex;
 
 struct Backend {
     client: Client,
+    /// Cached base checker with prelude + module map loaded.
+    /// Clone this per-check instead of rebuilding from scratch.
+    base_checker: Mutex<Option<typechecker::Checker>>,
 }
 
 impl Backend {
-    fn check_and_report(&self, _uri: Url, text: &str) -> Vec<Diagnostic> {
-        let line_index = LineIndex::new(text);
-
-        let tokens = match lexer::Lexer::new(text).lex() {
-            Ok(tokens) => tokens,
-            Err(e) => {
-                let (line, col) = line_index.offset_to_line_col(e.pos);
-                return vec![Diagnostic {
-                    range: Range {
-                        start: Position::new(line as u32, col as u32),
-                        end: Position::new(line as u32, col as u32 + 1),
-                    },
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    message: e.message,
-                    ..Default::default()
-                }];
-            }
-        };
-
-        let mut program = match parser::Parser::new(tokens).parse_program() {
-            Ok(program) => program,
-            Err(e) => {
-                let (line, col) = line_index.offset_to_line_col(e.span.start);
-                return vec![Diagnostic {
-                    range: Range {
-                        start: Position::new(line as u32, col as u32),
-                        end: Position::new(line as u32, col as u32 + 1),
-                    },
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    message: e.message,
-                    ..Default::default()
-                }];
-            }
-        };
-
-        dylang::derive::expand_derives(&mut program);
-
-        let mut checker = typechecker::Checker::new();
-        let prelude_src = include_str!("../stdlib/prelude.dy");
-        let prelude_tokens = lexer::Lexer::new(prelude_src).lex().expect("prelude lex");
-        let mut prelude_program = parser::Parser::new(prelude_tokens)
-            .parse_program()
-            .expect("prelude parse");
-        dylang::derive::expand_derives(&mut prelude_program);
-        if let Err(e) = checker.check_program(&prelude_program) {
-            return vec![Diagnostic {
-                range: Range::default(),
-                severity: Some(DiagnosticSeverity::ERROR),
-                message: format!("Prelude error: {}", e),
-                ..Default::default()
-            }];
+    fn get_checker(&self, uri: &Url) -> typechecker::Checker {
+        let mut cached = self.base_checker.lock().unwrap();
+        if let Some(base) = &*cached {
+            return base.clone();
         }
 
-        match checker.check_program(&program) {
-            Ok(()) => vec![],
-            Err(e) => {
-                let (start_line, start_col) = if let Some(span) = e.span {
-                    line_index.offset_to_line_col(span.start)
-                } else {
-                    (0, 0)
-                };
-                let (end_line, end_col) = if let Some(span) = e.span {
-                    line_index.offset_to_line_col(span.end)
-                } else {
-                    (0, 1)
-                };
-                vec![Diagnostic {
-                    range: Range {
-                        start: Position::new(start_line as u32, start_col as u32),
-                        end: Position::new(end_line as u32, end_col as u32),
-                    },
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    message: e.message,
-                    ..Default::default()
-                }]
-            }
-        }
+        let project_root = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .and_then(|d| checker::find_project_root(&d));
+
+        let base = checker::make_checker(project_root);
+        *cached = Some(base.clone());
+        base
+    }
+
+    fn check_file(&self, uri: Url, text: &str) -> Vec<Diagnostic> {
+        let mut checker = self.get_checker(&uri);
+        diagnostics::check(&mut checker, text)
     }
 }
 
@@ -119,8 +67,7 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        let text = &params.text_document.text;
-        let diagnostics = self.check_and_report(uri.clone(), text);
+        let diagnostics = self.check_file(uri.clone(), &params.text_document.text);
         self.client
             .publish_diagnostics(uri, diagnostics, None)
             .await;
@@ -129,7 +76,7 @@ impl LanguageServer for Backend {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         if let Some(change) = params.content_changes.into_iter().last() {
-            let diagnostics = self.check_and_report(uri.clone(), &change.text);
+            let diagnostics = self.check_file(uri.clone(), &change.text);
             self.client
                 .publish_diagnostics(uri, diagnostics, None)
                 .await;
@@ -139,7 +86,7 @@ impl LanguageServer for Backend {
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         if let Some(text) = &params.text {
             let uri = params.text_document.uri.clone();
-            let diagnostics = self.check_and_report(uri.clone(), text);
+            let diagnostics = self.check_file(uri.clone(), text);
             self.client
                 .publish_diagnostics(uri, diagnostics, None)
                 .await;
@@ -157,6 +104,9 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) = LspService::new(|client| Backend { client });
+    let (service, socket) = LspService::new(|client| Backend {
+        client,
+        base_checker: Mutex::new(None),
+    });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

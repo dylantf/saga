@@ -1,6 +1,6 @@
 mod check_decl;
 mod check_module;
-pub use check_module::{builtin_module_source, scan_project_modules, ModuleMap};
+pub use check_module::{ModuleMap, builtin_module_source, scan_project_modules};
 mod check_traits;
 pub(crate) mod exhaustiveness;
 mod infer;
@@ -661,6 +661,36 @@ impl Checker {
         let mut checker = Self::new();
         checker.project_root = Some(root);
         checker
+    }
+
+    /// Create a checker with the prelude loaded and (optionally) a project
+    /// root with its module map. This is the standard entry point for both
+    /// the CLI and the LSP.
+    pub fn with_prelude(
+        project_root: Option<std::path::PathBuf>,
+    ) -> std::result::Result<Self, TypeError> {
+        let mut checker = match &project_root {
+            Some(root) => Self::with_project_root(root.clone()),
+            None => Self::new(),
+        };
+
+        if let Some(root) = &project_root
+            && let Ok(module_map) = check_module::scan_project_modules(root)
+        {
+            checker.set_module_map(module_map);
+        }
+
+        let prelude_src = include_str!("../stdlib/prelude.dy");
+        let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
+            .lex()
+            .expect("prelude lex");
+        let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
+            .parse_program()
+            .expect("prelude parse");
+        crate::derive::expand_derives(&mut prelude_program);
+        checker.check_program(&prelude_program)?;
+        checker.tc_prelude_snapshot = Some(Box::new(checker.clone()));
+        Ok(checker)
     }
 
     pub fn set_module_map(&mut self, map: check_module::ModuleMap) {
