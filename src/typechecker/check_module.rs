@@ -18,6 +18,7 @@ pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
             "Actor" => Some(include_str!("../stdlib/Actor.dy")),
             "Fail" => Some(include_str!("../stdlib/Fail.dy")),
             "Supervisor" => Some(include_str!("../stdlib/Supervisor.dy")),
+            "Async" => Some(include_str!("../stdlib/Async.dy")),
             _ => None,
         }
     } else {
@@ -415,6 +416,8 @@ fn collect_codegen_info(
     let mut effect_defs = Vec::new();
     let mut record_fields = Vec::new();
     let mut handler_defs = Vec::new();
+    let mut handler_bodies = Vec::new();
+    let mut fun_effects = Vec::new();
     let mut trait_impl_dicts = Vec::new();
 
     // Erlang module name: "Foo.Bar" -> "foo_bar"
@@ -456,9 +459,42 @@ fn collect_codegen_info(
                 record_fields.push((name.clone(), field_names));
             }
             Decl::HandlerDef {
-                public: true, name, ..
+                public: true,
+                name,
+                effects,
+                arms,
+                return_clause,
+                ..
             } => {
                 handler_defs.push(name.clone());
+                handler_bodies.push(super::HandlerBody {
+                    name: name.clone(),
+                    effects: effects.iter().map(|e| e.name.clone()).collect(),
+                    arms: arms.clone(),
+                    return_clause: return_clause.clone(),
+                });
+            }
+            Decl::FunAnnotation {
+                public: true,
+                name,
+                effects,
+                ..
+            } if !effects.is_empty() => {
+                // Strip beam-native effects (same as elaboration)
+                let mut sorted: Vec<String> = effects
+                    .iter()
+                    .map(|e| e.name.clone())
+                    .filter(|n| {
+                        !matches!(
+                            n.as_str(),
+                            "Actor" | "Process" | "Monitor" | "Link" | "Timer"
+                        )
+                    })
+                    .collect();
+                sorted.sort();
+                if !sorted.is_empty() {
+                    fun_effects.push((name.clone(), sorted));
+                }
             }
             Decl::ImplDef {
                 trait_name,
@@ -479,6 +515,8 @@ fn collect_codegen_info(
         effect_defs,
         record_fields,
         handler_defs,
+        handler_bodies,
+        fun_effects,
         type_constructors: exports.type_constructors.clone().into_iter().collect(),
         trait_impl_dicts,
     }

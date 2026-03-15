@@ -396,7 +396,19 @@ impl<'a> Lowerer<'a> {
                 // Register Std exports so prelude-imported functions (e.g. fst, snd)
                 // resolve to cross-module calls without an explicit import in user code.
                 for (name, scheme) in &info.exports {
-                    let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
+                    let (base_arity, mut effects) =
+                        util::arity_and_effects_from_type(&scheme.ty);
+                    // Supplement with annotation-derived effects (needs clause)
+                    if let Some((_, ann_effs)) =
+                        info.fun_effects.iter().find(|(n, _)| n == name)
+                    {
+                        for eff in ann_effs {
+                            if !effects.contains(eff) {
+                                effects.push(eff.clone());
+                            }
+                        }
+                        effects.sort();
+                    }
                     let effect_count = effects.len();
                     let expanded_arity =
                         base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
@@ -422,6 +434,16 @@ impl<'a> Lowerer<'a> {
                         self.constructor_modules
                             .insert(ctor.clone(), erlang_name.clone());
                     }
+                }
+                // Register Std handler bodies
+                for hb in &info.handler_bodies {
+                    self.handler_defs.entry(hb.name.clone()).or_insert(
+                        HandlerInfo {
+                            effects: hb.effects.clone(),
+                            arms: hb.arms.clone(),
+                            return_clause: hb.return_clause.clone(),
+                        },
+                    );
                 }
             }
         }
@@ -451,7 +473,19 @@ impl<'a> Lowerer<'a> {
 
                     // Register imported functions with qualified keys
                     for (name, scheme) in &info.exports {
-                        let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
+                        let (base_arity, mut effects) =
+                            util::arity_and_effects_from_type(&scheme.ty);
+                        // Supplement with annotation-derived effects (needs clause)
+                        if let Some((_, ann_effs)) =
+                            info.fun_effects.iter().find(|(n, _)| n == name)
+                        {
+                            for eff in ann_effs {
+                                if !effects.contains(eff) {
+                                    effects.push(eff.clone());
+                                }
+                            }
+                            effects.sort();
+                        }
                         let effect_count = effects.len();
                         let expanded_arity =
                             base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
@@ -509,6 +543,16 @@ impl<'a> Lowerer<'a> {
                             import_origin: Some((erlang_name.clone(), dict_name.clone())),
                         });
                     }
+                    // Register imported handler bodies
+                    for hb in &info.handler_bodies {
+                        self.handler_defs.entry(hb.name.clone()).or_insert(
+                            HandlerInfo {
+                                effects: hb.effects.clone(),
+                                arms: hb.arms.clone(),
+                                return_clause: hb.return_clause.clone(),
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -534,15 +578,17 @@ impl<'a> Lowerer<'a> {
                     let base_arity = lower_params(params).len();
                     let effect_count = effects.len();
                     let arity = base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
-                    self.fun_info.entry(name.clone()).or_insert(FunInfo {
-                        arity,
-                        effects,
-                        param_absorbed_effects,
-                        import_origin: None,
-                    });
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _)| n == name) {
+                        // Additional clause: just add to existing group
                         group.2.push((params, guard, body));
                     } else {
+                        // First clause: register fun_info (overrides any pre-registration)
+                        self.fun_info.insert(name.clone(), FunInfo {
+                            arity,
+                            effects,
+                            param_absorbed_effects,
+                            import_origin: None,
+                        });
                         clause_groups.push((name.clone(), arity, vec![(params, guard, body)]));
                     }
                 }
@@ -1082,6 +1128,16 @@ impl<'a> Lowerer<'a> {
 
                 let mut arg_vars = Vec::new();
                 for arg in &args_rev {
+                    // Skip unit literal args (they don't exist at the BEAM level)
+                    if matches!(
+                        arg,
+                        Expr::Lit {
+                            value: ast::Lit::Unit,
+                            ..
+                        }
+                    ) {
+                        continue;
+                    }
                     let v = self.fresh();
                     let ce = self.lower_expr(arg);
                     bindings.push((v.clone(), ce));

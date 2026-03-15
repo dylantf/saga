@@ -96,7 +96,7 @@ fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
 }
 
 /// Compile all Std.* modules referenced in codegen_info into the build directory.
-fn compile_std_modules(checker: &typechecker::Checker, build_dir: &std::path::Path) {
+fn compile_std_modules(checker: &mut typechecker::Checker, build_dir: &std::path::Path) {
     let std_modules: Vec<String> = checker
         .tc_codegen_info
         .keys()
@@ -132,6 +132,9 @@ fn compile_std_modules(checker: &typechecker::Checker, build_dir: &std::path::Pa
         }
 
         let elaborated = elaborate::elaborate_module(&program, &mod_checker, module_name);
+        if let Some(info) = checker.tc_codegen_info.get_mut(module_name) {
+            info.update_handler_bodies(&elaborated);
+        }
         let erlang_name = module_name.to_lowercase().replace('.', "_");
         let core_src =
             codegen::emit_module_with_imports(&erlang_name, &elaborated, &checker.tc_codegen_info);
@@ -227,7 +230,7 @@ fn build_project(profile: &str) -> PathBuf {
         std::process::exit(1);
     });
 
-    compile_std_modules(&checker, &build_dir);
+    compile_std_modules(&mut checker, &build_dir);
 
     // Compile each imported user module
     let module_names: Vec<String> = checker
@@ -268,6 +271,9 @@ fn build_project(profile: &str) -> PathBuf {
         }
 
         let elaborated = elaborate::elaborate_module(&program, &mod_checker, module_name);
+        if let Some(info) = checker.tc_codegen_info.get_mut(module_name) {
+            info.update_handler_bodies(&elaborated);
+        }
         let erlang_name = module_name.to_lowercase().replace('.', "_");
         let core_src =
             codegen::emit_module_with_imports(&erlang_name, &elaborated, &checker.tc_codegen_info);
@@ -281,6 +287,7 @@ fn build_project(profile: &str) -> PathBuf {
 
     // Compile Main module
     let elaborated = elaborate::elaborate_module(&main_program, &checker, "Main");
+    // Main doesn't export handlers, but update for consistency
     let core_src = codegen::emit_module_with_imports("main", &elaborated, &checker.tc_codegen_info);
 
     let core_path = build_dir.join("main.core");
@@ -303,10 +310,6 @@ fn build_script(file: &str, profile: &str) -> PathBuf {
     let mut checker = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
 
-    let elaborated = elaborate::elaborate(&program, &checker);
-    let core_src =
-        codegen::emit_module_with_imports("_script", &elaborated, &checker.tc_codegen_info);
-
     let build_dir = std::path::Path::new(file)
         .parent()
         .unwrap_or(std::path::Path::new("."))
@@ -319,13 +322,19 @@ fn build_script(file: &str, profile: &str) -> PathBuf {
         std::process::exit(1);
     });
 
+    // Compile Std modules first so handler bodies are elaborated
+    // before the script references them
+    compile_std_modules(&mut checker, &build_dir);
+
+    let elaborated = elaborate::elaborate(&program, &checker);
+    let core_src =
+        codegen::emit_module_with_imports("_script", &elaborated, &checker.tc_codegen_info);
+
     let core_path = build_dir.join("_script.core");
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
         std::process::exit(1);
     });
-
-    compile_std_modules(&checker, &build_dir);
     run_erlc(&build_dir);
     build_dir
 }

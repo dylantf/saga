@@ -182,6 +182,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 - [x] Integer division: `/` on `Int` emits `erlang:'/'` (float division) instead of `erlang:'div'`
 - [x] Polymorphic type class dicts used as bare function refs without applying dict arguments (e.g. `'__dict_Show_Result'/2` not called with sub-dicts)
+- [ ] Builtin modules don't have access to `print` (undefined variable: `print`)
 
 ### Effects (CPS transform)
 
@@ -206,10 +207,10 @@ Checkbox = implemented and working. Unchecked = not yet done.
   - `receive` keyword expression (selective receive, no exhaustiveness, `after` timeout)
   - `beam_actor` builtin handler (elaboration transforms ops to ForeignCall, bypasses CPS)
   - Typed spawn: lambda/function EffArrow carries effect type args, unification links Pid type
-- [ ] Supervisors (handler-based crash recovery, see concurrency.md)
-- [ ] Timer effect (`sleep`, `send_after`, `cancel_timer`)
-- [ ] Monitor effect (`monitor`, `demonitor`, system `Down` messages)
-- [ ] Link effect (`link`, `unlink`, bidirectional crash propagation)
+- [x] Supervisors (handler-based crash recovery, see concurrency.md)
+- [x] Timer effect (`sleep`, `send_after`, `cancel_timer`)
+- [x] Monitor effect (`monitor`, `demonitor`, system `Down` messages)
+- [x] Link effect (`link`, `unlink`, bidirectional crash propagation)
 - [ ] Async effect (higher-level wrapper around Actor for request/response patterns)
 
 ### Stdlib / prelude

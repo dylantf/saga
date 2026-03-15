@@ -858,8 +858,8 @@ impl<'a> Lowerer<'a> {
             .get(&effect_name)
             .unwrap_or_else(|| {
                 panic!(
-                    "effect '{}' used but no handler param in scope (op: {})",
-                    effect_name, op_name
+                    "effect '{}' used but no handler param in scope (op: {}), handler_params: {:?}",
+                    effect_name, op_name, self.current_handler_params
                 )
             })
             .clone();
@@ -868,6 +868,16 @@ impl<'a> Lowerer<'a> {
         let mut call_args = vec![CExpr::Lit(CLit::Atom(op_name.to_string()))];
         let mut bindings = Vec::new();
         for arg in args {
+            // Skip unit literal args (they don't exist at the BEAM level)
+            if matches!(
+                arg,
+                Expr::Lit {
+                    value: crate::ast::Lit::Unit,
+                    ..
+                }
+            ) {
+                continue;
+            }
             let v = self.fresh();
             let ce = self.lower_expr(arg);
             bindings.push((v.clone(), ce));

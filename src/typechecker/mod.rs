@@ -342,6 +342,40 @@ pub struct EffectDef {
     pub type_param_count: usize,
 }
 
+/// A handler definition for codegen: full body (arms, return clause, effects).
+#[derive(Debug, Clone)]
+pub struct HandlerBody {
+    pub name: String,
+    pub effects: Vec<String>,
+    pub arms: Vec<crate::ast::HandlerArm>,
+    pub return_clause: Option<Box<crate::ast::HandlerArm>>,
+}
+
+impl ModuleCodegenInfo {
+    /// Update handler bodies from the elaborated program.
+    /// Called after elaboration so handler arms contain ForeignCall
+    /// nodes instead of raw EffectCall nodes.
+    pub fn update_handler_bodies(&mut self, elaborated: &[crate::ast::Decl]) {
+        for decl in elaborated {
+            if let crate::ast::Decl::HandlerDef {
+                public: true,
+                name,
+                effects,
+                arms,
+                return_clause,
+                ..
+            } = decl
+            {
+                if let Some(hb) = self.handler_bodies.iter_mut().find(|h| &h.name == name) {
+                    hb.effects = effects.iter().map(|e| e.name.clone()).collect();
+                    hb.arms = arms.clone();
+                    hb.return_clause = return_clause.clone();
+                }
+            }
+        }
+    }
+}
+
 /// Information about a module's exports needed by the lowerer/codegen.
 /// Populated during typechecking alongside `tc_modules`.
 #[derive(Debug, Clone, Default)]
@@ -354,6 +388,10 @@ pub struct ModuleCodegenInfo {
     pub record_fields: Vec<(String, Vec<String>)>,
     /// Public handler names.
     pub handler_defs: Vec<String>,
+    /// Public function effect annotations: name -> sorted effect names.
+    pub fun_effects: Vec<(String, Vec<String>)>,
+    /// Public handler bodies: (name, effects, arms, return_clause).
+    pub handler_bodies: Vec<HandlerBody>,
     /// Public type constructors: type name -> [constructor names].
     pub type_constructors: Vec<(String, Vec<String>)>,
     /// Trait impl dicts: (trait_name, target_type, dict_name, arity).
