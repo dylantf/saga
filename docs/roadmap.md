@@ -182,7 +182,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 - [x] Integer division: `/` on `Int` emits `erlang:'/'` (float division) instead of `erlang:'div'`
 - [x] Polymorphic type class dicts used as bare function refs without applying dict arguments (e.g. `'__dict_Show_Result'/2` not called with sub-dicts)
-- [ ] Builtin modules don't have access to `print` (undefined variable: `print`)
+- [x] Builtin modules don't have access to `print` (undefined variable: `print`)
 
 ### Effects (CPS transform)
 
@@ -211,7 +211,8 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Timer effect (`sleep`, `send_after`, `cancel_timer`)
 - [x] Monitor effect (`monitor`, `demonitor`, system `Down` messages)
 - [x] Link effect (`link`, `unlink`, bidirectional crash propagation)
-- [ ] Async effect (higher-level wrapper around Actor for request/response patterns)
+- [x] Async effect (higher-level wrapper around Actor for request/response patterns)
+- [ ] "Handler bundling"? I.e. group together all the beam handlers as "beam" so we don't need to pass in multiple at every callsite?
 
 ### Stdlib / prelude
 

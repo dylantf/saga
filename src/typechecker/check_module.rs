@@ -19,6 +19,7 @@ pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
             "Fail" => Some(include_str!("../stdlib/Fail.dy")),
             "Supervisor" => Some(include_str!("../stdlib/Supervisor.dy")),
             "Async" => Some(include_str!("../stdlib/Async.dy")),
+            "IO" => Some(include_str!("../stdlib/IO.dy")),
             _ => None,
         }
     } else {

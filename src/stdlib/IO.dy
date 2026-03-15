@@ -1,0 +1,5 @@
+module IO
+
+import Std.String
+
+pub fun print (x: a) -> () where {a: Show}
