@@ -40,6 +40,8 @@ pub enum CExpr {
     Values(Vec<CExpr>),
     /// `letrec 'name'/arity = fun(...) -> ... in Body`
     LetRec(Vec<(String, usize, CExpr)>, Box<CExpr>),
+    /// `receive <Arms> after <Timeout> -> <TimeoutBody>`
+    Receive(Vec<CArm>, Box<CExpr>, Box<CExpr>),
 }
 
 #[derive(Debug, Clone)]
@@ -244,6 +246,40 @@ impl Printer {
                 self.push("<");
                 self.print_expr_list(es);
                 self.push(">");
+            }
+
+            CExpr::Receive(arms, timeout, timeout_body) => {
+                self.push("receive");
+                for arm in arms {
+                    self.with_indent(2, |p| {
+                        p.newline();
+                        p.push("<");
+                        p.print_pat(&arm.pat);
+                        p.push(">");
+                        p.push(" when ");
+                        match &arm.guard {
+                            Some(guard) => p.print_expr(guard),
+                            None => p.push("'true'"),
+                        }
+                        p.push(" ->");
+                        p.with_indent(2, |p| {
+                            p.newline();
+                            p.print_expr(&arm.body);
+                        });
+                    });
+                }
+                self.newline();
+                self.push("after");
+                self.with_indent(2, |p| {
+                    p.newline();
+                    p.print_expr(timeout);
+                    p.push(" ->");
+                    p.with_indent(2, |p| {
+                        p.newline();
+                        p.print_expr(timeout_body);
+                    });
+                });
+                self.newline();
             }
         }
     }

@@ -81,6 +81,13 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Cycle detection
 - [x] `project.toml` root marker, `Main.dy` entry point
 - [x] Typechecker: per-module checker, shared cache, qualified name injection
+- [x] Effect and handler export/import (effects and handlers from imported modules are injected into the parent checker)
+- [ ] Unify module exports into a single `ModuleExports` struct. Currently each exportable concept
+      (bindings, types, constructors, records, traits, trait impls, effects, handlers) has its own
+      collection, its own "collect public X" loop, its own "inject X into parent" loop, and its own
+      cache entry. Adding a new exportable thing means touching all four places, and it's easy to
+      miss one (effects/handlers were missing until now). A single struct with one collect and one
+      inject method would fix this.
 
 ## Pre-Backend Polish
 
@@ -187,7 +194,17 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Effect calls in non-block positions (nested in `if` conditions, binary ops, etc.)
 - [x] HOF effect absorption (passing effectful closures through higher-order functions like `try`)
 - [x] Return clause bypass on handler abort (return clause wraps abort results incorrectly)
-- [ ] Actor effect (see messaging.md)
+- [x] Actor concurrency (see concurrency.md)
+  - `Process` effect (spawn, send) with per-call-site polymorphic Pid types
+  - `Actor msg` effect (self) with typed mailbox
+  - `receive` keyword expression (selective receive, no exhaustiveness, `after` timeout)
+  - `beam_actor` builtin handler (elaboration transforms ops to ForeignCall, bypasses CPS)
+  - Typed spawn: lambda/function EffArrow carries effect type args, unification links Pid type
+- [ ] Supervisors (handler-based crash recovery, see concurrency.md)
+- [ ] Timer effect (`sleep`, `send_after`, `cancel_timer`)
+- [ ] Monitor effect (`monitor`, `demonitor`, system `Down` messages)
+- [ ] Link effect (`link`, `unlink`, bidirectional crash propagation)
+- [ ] Async effect (higher-level wrapper around Actor for request/response patterns)
 
 ### Stdlib / prelude
 

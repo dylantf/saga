@@ -5,16 +5,17 @@ use crate::token::Span;
 pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
     if module_path.len() == 2 && module_path[0] == "Std" {
         match module_path[1].as_str() {
-            "Maybe" => Some(include_str!("../prelude/Std/Maybe.dy")),
-            "Result" => Some(include_str!("../prelude/Std/Result.dy")),
-            "List" => Some(include_str!("../prelude/Std/List.dy")),
-            "Bool" => Some(include_str!("../prelude/Std/Bool.dy")),
-            "Dict" => Some(include_str!("../prelude/Std/Dict.dy")),
-            "Int" => Some(include_str!("../prelude/Std/Int.dy")),
-            "Float" => Some(include_str!("../prelude/Std/Float.dy")),
-            "String" => Some(include_str!("../prelude/Std/String.dy")),
-            "Regex" => Some(include_str!("../prelude/Std/Regex.dy")),
-            "Tuple" => Some(include_str!("../prelude/Std/Tuple.dy")),
+            "Maybe" => Some(include_str!("../stdlib/Maybe.dy")),
+            "Result" => Some(include_str!("../stdlib/Result.dy")),
+            "List" => Some(include_str!("../stdlib/List.dy")),
+            "Bool" => Some(include_str!("../stdlib/Bool.dy")),
+            "Dict" => Some(include_str!("../stdlib/Dict.dy")),
+            "Int" => Some(include_str!("../stdlib/Int.dy")),
+            "Float" => Some(include_str!("../stdlib/Float.dy")),
+            "String" => Some(include_str!("../stdlib/String.dy")),
+            "Regex" => Some(include_str!("../stdlib/Regex.dy")),
+            "Tuple" => Some(include_str!("../stdlib/Tuple.dy")),
+            "Actor" => Some(include_str!("../stdlib/Actor.dy")),
             _ => None,
         }
     } else {
@@ -188,7 +189,7 @@ impl Checker {
                     Some(root) => super::Checker::with_project_root(root.clone()),
                     None => super::Checker::new(),
                 };
-                let prelude_src = include_str!("../prelude/prelude.dy");
+                let prelude_src = include_str!("../stdlib/prelude.dy");
                 let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
                     .lex()
                     .expect("prelude lex error");
@@ -349,6 +350,34 @@ impl Checker {
             self.trait_impls
                 .entry(key.clone())
                 .or_insert_with(|| info.clone());
+        }
+
+        // Inject the module's public effects into the parent checker
+        for decl in &program {
+            if let crate::ast::Decl::EffectDef {
+                public: true, name, ..
+            } = decl
+            {
+                if let Some(info) = mod_checker.effects.get(name) {
+                    self.effects
+                        .entry(name.clone())
+                        .or_insert_with(|| info.clone());
+                }
+            }
+        }
+
+        // Inject the module's public handlers into the parent checker
+        for decl in &program {
+            if let crate::ast::Decl::HandlerDef {
+                public: true, name, ..
+            } = decl
+            {
+                if let Some(info) = mod_checker.handlers.get(name) {
+                    self.handlers
+                        .entry(name.clone())
+                        .or_insert_with(|| info.clone());
+                }
+            }
         }
 
         self.inject_module_types(

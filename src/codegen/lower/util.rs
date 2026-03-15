@@ -258,7 +258,7 @@ pub(super) fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
             }
             Type::EffArrow(_, ret, effs) => {
                 arity += 1;
-                for eff in effs {
+                for (eff, _) in effs {
                     effects.insert(eff.clone());
                 }
                 current = ret;

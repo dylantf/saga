@@ -1,0 +1,18 @@
+module Actor
+
+# Process effect: spawn and send
+# Type variable `msg` is free per call site, inferred from the pid / spawned function.
+pub effect Process {
+  fun spawn (f: () -> Unit needs {Actor msg}) -> Pid msg
+  fun send (pid: Pid msg) (msg: msg) -> Unit
+}
+
+# Actor effect: parameterized by the current process's message type.
+# Only self and receive use this (scoped to this process's mailbox).
+pub effect Actor msg {
+  fun self () -> Pid msg
+}
+
+# beam_actor: handles both Process and Actor.
+# Compiler builtin -- ops are lowered to direct BEAM calls (erlang:spawn, erlang:send, erlang:self).
+pub handler beam_actor for Process, Actor msg {}

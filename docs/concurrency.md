@@ -8,19 +8,44 @@ Actor-style concurrency on the BEAM, using the effect system.
 The type parameter exists only at compile time, giving typed send/receive
 while the BEAM mailbox stays untyped underneath.
 
-## The Actor effect
+## Effects
+
+Two separate effects cover concurrency:
 
 ```
-effect Actor msg {
+effect Process {
   fun spawn (f: () -> Unit) -> Pid msg
   fun send (pid: Pid msg) (msg: msg) -> Unit
+}
+
+effect Actor msg {
   fun self () -> Pid msg
 }
 ```
 
-Three standard effect operations. `spawn` takes a zero-arg function, runs it
-in a new process, returns a typed pid. `send` is type-safe because the pid
-carries the message type. `self` returns the current process's pid.
+**Process** is unparameterized. `spawn` and `send` have free type variables
+(`msg`) that are inferred per call site via normal HM unification. They don't
+care what the current process receives -- you can freely spawn or send to
+processes of any message type.
+
+**Actor msg** is parameterized by the current process's message type. Only
+`self` and `receive` use it (scoped to this process's mailbox).
+
+This split means a function can talk to multiple process types without
+conflict:
+
+```
+fun run () -> Unit needs {Process, Actor Int}
+run () = {
+  let c = spawn! (fun () -> counter 0)     # c : Pid CounterMsg
+  let l = spawn! (fun () -> logger ())     # l : Pid LogMsg
+  send! c (Increment 5)                    # typechecks
+  send! l (Log "hello")                    # typechecks
+  send! c (GetCount (self! ()))            # self! : Pid Int
+  let result = receive { n -> n }          # receives Int
+  print (show result)
+}
+```
 
 ## receive
 
@@ -41,78 +66,27 @@ receive {
 How it differs from `case`:
 
 - **No scrutinee.** Pulls from the mailbox, not a provided value.
-- **Selective receive.** Unmatched messages stay in the mailbox. This is why
-  it can't be `case receive!() { ... }` -- that would consume the message
-  before matching.
-- **No exhaustiveness checking.** The mailbox is open. Unmatched messages
-  stay queued.
-- **Message type from effect scope.** The typechecker looks up the `Actor msg`
-  effect in the current `needs` and uses `msg` as the type for the patterns.
-  Arms are typechecked against a known type with full pattern checking, just
-  no exhaustiveness.
+- **Selective receive.** Unmatched messages stay in the mailbox.
+- **No exhaustiveness checking.** The mailbox is open.
+- **Message type from effect scope.** The typechecker looks up `Actor msg`
+  in the current `needs` and uses `msg` for the patterns.
 - **`after N`** is a keyword clause (like `return` in handlers). Lowers to
   Erlang's `receive ... after N -> ...`.
-- **Declares `needs {Actor msg}`.** A function containing `receive` must
-  declare the Actor effect.
+- A function containing `receive` must declare `needs {Actor MsgType}`.
 
-No `!` on `receive` because it's a language construct, not an effect operation
-call. Same distinction as `case`, `if`, `do`.
-
-## ActorMessage trait
-
-Message types derive `ActorMessage` to bridge the typed/untyped boundary:
-
-```
-type CounterMsg {
-  Increment(Int)
-  GetCount(Pid Int)
-  Stop
-} deriving (Show, ActorMessage)
-```
-
-`deriving (ActorMessage)` generates the code that converts raw BEAM terms
-from the untyped mailbox into typed values the pattern match can work with.
-Messages that don't match any constructor stay in the mailbox (selective
-receive).
-
-The derived impl also provides constructors for known system messages
-(process DOWN signals, monitor notifications, etc.) so they can be handled
-in the same `receive` block:
-
-```
-counter count = {
-  receive {
-    Increment(n) -> counter (count + n)
-    Stop -> ()
-    Down(pid, reason) -> log $"process {pid} died: {reason}"
-    Unknown -> counter count    # discard unrecognized messages
-  }
-}
-```
-
-`Down`, `Monitor`, and `Unknown` are provided automatically by the
-`ActorMessage` derive. `Unknown` is an opaque catchall for anything that
-doesn't match the declared constructors or known system messages.
+No `!` on `receive` because it's a language construct, not an effect
+operation. Same distinction as `case`, `if`, `do`.
 
 ## The handler
 
-`beam_actor` is a compiler builtin. It looks like a normal handler from the
-user's perspective (`with beam_actor`), but the compiler knows how to lower
-it directly to BEAM primitives rather than going through the general handler
-machinery.
-
-This sidesteps two implementation challenges:
-- Polymorphic handlers (the existing machinery always binds to a concrete type)
-- spawn/CPS interaction (spawned processes run on a separate stack)
-
-It can always be generalized later once the semantics are proven out.
+`beam_runtime` handles both Process and Actor. It's a compiler builtin --
+looks like a normal handler (`with beam_runtime`) but the compiler transforms
+the ops to direct BEAM calls during elaboration.
 
 ```
-# Usage is the same as any handler
 main () = {
-  let pid = spawn! (fun () -> counter 0)
-  send! pid (Increment 5)
-} with beam_actor
+  run ()
+} with beam_runtime
 ```
 
 Under the hood:
@@ -121,40 +95,6 @@ Under the hood:
 - `self!` lowers to `erlang:self/0`
 - `receive` lowers to Core Erlang's `receive ... after ... end`
 
-## Multi-process typing
-
-Each process has its own `Actor msg` scope with its own message type.
-The `Pid msg` type bridges between them:
-
-```
-type PingMsg { Ping(Pid PongMsg) } deriving (ActorMessage)
-type PongMsg { Pong } deriving (ActorMessage)
-
-pong_server () = {
-  receive {
-    Ping(sender) -> {
-      send! sender Pong
-      pong_server ()
-    }
-  }
-}
-
-main () = {
-  let server = spawn! (fun () -> {
-    pong_server ()
-  } with beam_actor)
-
-  send! server (Ping (self! ()))
-  receive {
-    Pong -> print "got pong"
-  }
-} with beam_actor
-```
-
-Two `with beam_actor` scopes, two different message types. The parent's
-`Actor PongMsg` types its send/receive. The child's `Actor PingMsg` types
-the child's. Type-safe at compile time, untyped at runtime.
-
 ## Example: Counter
 
 ```
@@ -162,8 +102,9 @@ type CounterMsg {
   Increment(Int)
   GetCount(Pid Int)
   Stop
-} deriving (ActorMessage)
+}
 
+fun counter (count: Int) -> Unit needs {Process, Actor CounterMsg}
 counter count = {
   receive {
     Increment(n) -> counter (count + n)
@@ -175,91 +116,167 @@ counter count = {
   }
 }
 
-main () = {
+fun run_counter () -> Unit needs {Process, Actor Int}
+run_counter () = {
   let pid = spawn! (fun () -> counter 0)
   send! pid (Increment 5)
   send! pid (Increment 3)
   send! pid (GetCount (self! ()))
   let result = receive { n -> n }
-  print (show result)
-} with beam_actor
-```
-
-## Example: Worker pool
-
-```
-type Job { Run(Pid JobResult, Int) } deriving (ActorMessage)
-type JobResult { Done(Int) } deriving (ActorMessage)
-
-worker () = {
-  receive {
-    Run(caller, n) -> {
-      send! caller (Done (n * n))
-      worker ()
-    }
-  }
+  print (show result)    # 8
 }
 
 main () = {
-  let w1 = spawn! worker
-  let w2 = spawn! worker
-  send! w1 (Run (self! ()) 5)
-  send! w2 (Run (self! ()) 10)
-  let a = receive { Done(n) -> n }
-  let b = receive { Done(n) -> n }
-  print (show (a + b))
-} with beam_actor
+  run_counter ()
+} with beam_runtime
+```
+
+## Example: Multiple child types
+
+```
+type CounterMsg {
+  Increment(Int)
+  GetCount(Pid Int)
+}
+
+type LogMsg {
+  Log(String)
+  Flush
+}
+
+fun run () -> Unit needs {Process, Actor Int}
+run () = {
+  let c = spawn! (fun () -> counter 0)
+  let l = spawn! (fun () -> logger ())
+
+  send! c (Increment 5)
+  send! c (Increment 3)
+  send! l (Log "hello from logger")
+
+  send! c (GetCount (self! ()))
+  let result = receive { n -> n }
+  print (show result)
+
+  send! l Flush
+}
 ```
 
 ## Example: Timeout
 
 ```
-main () = {
-  let pid = spawn! (fun () -> counter 0)
-  send! pid (Increment 1)
-  send! pid (GetCount (self! ()))
-  let result = receive {
+fun wait_for_reply () -> String needs {Actor Int}
+wait_for_reply () = {
+  receive {
     n -> show n
     after 5000 -> "timed out"
   }
-  print result
-} with beam_actor
+}
 ```
 
-## Example: Supervision
+## Implementation summary
 
-Supervision is just a handler wrapping the Fail effect. No new concepts:
+### What was built
+
+1. **Tokens/Lexer**: `Receive` and `After` keywords
+2. **AST**: `Expr::Receive` with arms and optional `after` clause
+3. **Parser**: `receive { arms... after N -> expr }` expression form
+4. **Typechecker**:
+   - `Pid` registered as built-in parameterized type
+   - `Process` effect (spawn, send) with per-call-site fresh type vars
+   - `Actor msg` effect (self) with shared type param for receive
+   - `beam_actor` registered as builtin handler
+   - `receive` typechecked against Actor's `msg` param, no exhaustiveness
+   - Typed spawn: `EffArrow` carries effect type arguments, lambdas and
+     function references produce EffArrow when they use effects, unification
+     links spawn's return type to the spawned function's Actor type param
+5. **Elaboration**: Actor/Process effect calls (`spawn!`, `send!`, `self!`)
+   transformed to `ForeignCall` nodes, stripping them from CPS. The
+   `with beam_actor` handler is stripped entirely.
+6. **Core Erlang IR**: `CExpr::Receive` variant with arms, timeout, timeout body
+7. **Codegen**: `receive` lowers directly to Core Erlang `receive ... after`
+8. **Interpreter**: `receive` panics with "BEAM-only"
+
+### Key design decisions
+
+**Elaboration bypass**: Actor/Process operations are transformed to
+`Expr::ForeignCall` during elaboration, before the lowerer sees them.
+No CPS, no handler params, no continuations. Just direct BEAM calls.
+
+**Typed spawn via EffArrow**: `Type::EffArrow` carries effect type arguments
+`Vec<(String, Vec<Type>)>` not just effect names. Lambdas produce EffArrow
+when they use effects, and function references with effect type constraints
+are also typed as EffArrow. When spawn's EffArrow parameter unifies with
+the callback's EffArrow, the Actor type args link, making the returned pid
+carry the correct message type. Sending the wrong message type is a compile
+error.
+
+**Effect absorption fix**: When a HOF absorbs effects from a callback
+(e.g. `try` absorbs `Fail`), only effects the callback *introduced* are
+removed from the caller's effect set. Effects the caller already had are
+preserved. This prevents spawn from accidentally absorbing the caller's
+own Actor effect.
+
+## Future: OTP-style effects
+
+### Timer
+
+```
+effect Timer {
+  fun sleep (ms: Int) -> Unit
+  fun send_after (pid: Pid msg) (ms: Int) (msg: msg) -> TimerRef
+  fun cancel_timer (ref: TimerRef) -> Unit
+}
+```
+
+The `after` clause in `receive` handles the common case, but `send_after`
+allows sending a message to a process on a delay independently.
+
+### Monitor
+
+```
+effect Monitor {
+  fun monitor (pid: Pid msg) -> MonitorRef
+  fun demonitor (ref: MonitorRef) -> Unit
+}
+```
+
+Monitoring delivers a `Down` message to the caller's mailbox when the
+monitored process dies. Open question: how to handle system messages that
+aren't part of the declared message type. Options: require a `Down` variant
+in the message type, or make monitor delivery its own mechanism.
+
+### Link
+
+```
+effect Link {
+  fun link (pid: Pid msg) -> Unit
+  fun unlink (pid: Pid msg) -> Unit
+}
+```
+
+Bidirectional crash propagation. Simpler than monitors, used for
+"die together" semantics.
+
+### Supervisors
+
+Supervisors are just effect handlers that catch failures and restart
+computations. No new language support needed:
 
 ```
 supervised f = {
   f () with {
     fail reason -> {
-      print $"Worker crashed: {reason}, restarting..."
+      print $"Crashed: {reason}, restarting..."
       supervised f
     }
   }
 }
-
-main () = {
-  supervised (fun () -> {
-    let pid = spawn! (fun () -> counter 0)
-    send! pid (Increment 42)
-    send! pid (GetCount (self! ()))
-    let n = receive { n -> n }
-    print $"count = {n}"
-  })
-} with beam_actor
 ```
 
-## What touches the compiler
+More sophisticated supervisors (restart limits, backoff, one-for-one vs
+all-for-one) are library code built on top of Monitor and Link.
 
-1. **Token/Lexer**: `Receive` and `After` keywords
-2. **AST**: new `Expr::Receive` variant with arms and optional after clause
-3. **Parser**: parse `receive { arms... }` with optional `after N -> expr`
-4. **Typechecker**: type arms against `msg` from `Actor msg` in scope, skip
-   exhaustiveness, validate after clause
-5. **Codegen**: lower to Core Erlang `receive ... after ... end`, recognize
-   `beam_actor` as a builtin handler
-6. **Prelude/stdlib**: `Pid` type, `Actor` effect definition, `ActorMessage` trait
-7. **Derive**: `deriving (ActorMessage)` generates mailbox-to-typed-value
-   conversion, includes system message constructors and `Unknown` catchall
+### Async
+
+Higher-level wrapper around Actor for request/response patterns.
+Potential API TBD.

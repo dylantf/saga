@@ -41,7 +41,7 @@ fn typecheck_source(source: &str, checker: &mut typechecker::Checker) {
 /// with prelude loaded.
 fn make_project_checker() -> typechecker::Checker {
     let mut checker = typechecker::Checker::with_project_root(fixtures_root());
-    let prelude_src = include_str!("../src/prelude/prelude.dy");
+    let prelude_src = include_str!("../src/stdlib/prelude.dy");
     let prelude_tokens = lexer::Lexer::new(prelude_src)
         .lex()
         .expect("prelude lex error");

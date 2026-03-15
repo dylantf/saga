@@ -96,7 +96,7 @@ pub(crate) fn register_builtins(env: &Env) {
 }
 
 pub(super) fn parse_prelude() -> Program {
-    let src = include_str!("../prelude/prelude.dy");
+    let src = include_str!("../stdlib/prelude.dy");
     let tokens = crate::lexer::Lexer::new(src)
         .lex()
         .expect("prelude lex error");

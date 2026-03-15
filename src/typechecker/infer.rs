@@ -25,9 +25,36 @@ impl Checker {
                     if let Some(effects) = self.fun_effects.get(name).cloned() {
                         self.current_effects.extend(effects);
                     }
-                    let (ty, constraints) = self.instantiate(&scheme);
+                    // Propagate effect type params from callee's annotations.
+                    // e.g. calling `counter` which has `needs {Actor CounterMsg}`
+                    // populates the cache so lambdas can build typed EffArrows.
+                    if let Some(constraints) = self.fun_effect_type_constraints.get(name).cloned() {
+                        for (effect_name, concrete_types) in &constraints {
+                            if let Some(info) = self.effects.get(effect_name).cloned() {
+                                let mapping: std::collections::HashMap<u32, Type> = info
+                                    .type_params
+                                    .iter()
+                                    .zip(concrete_types.iter())
+                                    .map(|(&param_id, ty)| (param_id, ty.clone()))
+                                    .collect();
+                                self.effect_type_param_cache
+                                    .insert(effect_name.clone(), mapping);
+                            }
+                        }
+                    }
+                    let (mut ty, constraints) = self.instantiate(&scheme);
                     for (trait_name, trait_ty) in constraints {
                         self.pending_constraints.push((trait_name, trait_ty, *span));
+                    }
+                    // If this function has effect type constraints, convert the
+                    // outermost Arrow to EffArrow so spawn! can link type args.
+                    if let Some(eff_constraints) =
+                        self.fun_effect_type_constraints.get(name).cloned()
+                        && let Type::Arrow(a, b) = ty
+                    {
+                        let eff_refs: Vec<(String, Vec<Type>)> =
+                            eff_constraints.into_iter().collect();
+                        ty = Type::EffArrow(a, b, eff_refs);
                     }
                     Ok(ty)
                 } else {
@@ -53,6 +80,7 @@ impl Checker {
 
             Expr::App { func, arg, span } => {
                 let func_ty = self.infer_expr(func)?;
+                let effects_before_arg = self.current_effects.clone();
                 let arg_ty = self.infer_expr(arg)?;
                 let ret_ty = self.fresh_var();
                 self.unify_at(
@@ -62,15 +90,19 @@ impl Checker {
                 )?;
                 // If the function declares its argument absorbs specific effects
                 // (via EffArrow on the parameter type), subtract those from current_effects.
-                // This handles HOFs like `try (fun () -> fail! ...)` where `try` absorbs Fail.
+                // Only remove effects that the argument *introduced*, not effects the
+                // caller already had. This prevents spawn! from absorbing the caller's
+                // own Actor effect.
                 let resolved_func = self.sub.apply(&func_ty);
                 let param_ty = match resolved_func {
                     Type::Arrow(p, _) | Type::EffArrow(p, _, _) => Some(self.sub.apply(&p)),
                     _ => None,
                 };
                 if let Some(Type::EffArrow(_, _, needs)) = param_ty {
-                    for eff in &needs {
-                        self.current_effects.remove(eff);
+                    for (eff, _) in &needs {
+                        if !effects_before_arg.contains(eff) {
+                            self.current_effects.remove(eff);
+                        }
                     }
                 }
                 Ok(ret_ty)
@@ -147,6 +179,7 @@ impl Checker {
             Expr::Lambda { params, body, .. } => {
                 let saved_env = self.env.clone();
                 let saved_effect_cache = self.effect_type_param_cache.clone();
+                let saved_effects = self.current_effects.clone();
                 let mut param_types = Vec::new();
                 for pat in params {
                     let ty = self.fresh_var();
@@ -154,16 +187,52 @@ impl Checker {
                     param_types.push(ty);
                 }
                 // Lambda body effects propagate up to the enclosing context.
-                // Effects are absorbed at function boundaries (needs declarations) or
-                // by `with` handlers, same as any other expression.
                 let body_ty = self.infer_expr(body)?;
                 self.env = saved_env;
+
+                // Collect effects the lambda body introduced
+                let lambda_effects: Vec<String> = self
+                    .current_effects
+                    .difference(&saved_effects)
+                    .cloned()
+                    .collect();
+
+                // Build the effect type args from the lambda's own effect cache,
+                // not the outer scope's (which may have different type params).
+                let eff_refs: Vec<(String, Vec<Type>)> = lambda_effects
+                    .iter()
+                    .map(|name| {
+                        let args = if let Some(cache) = self.effect_type_param_cache.get(name) {
+                            if let Some(info) = self.effects.get(name) {
+                                info.type_params
+                                    .iter()
+                                    .filter_map(|pid| cache.get(pid).cloned())
+                                    .collect()
+                            } else {
+                                vec![]
+                            }
+                        } else {
+                            vec![]
+                        };
+                        (name.clone(), args)
+                    })
+                    .collect();
+
                 self.effect_type_param_cache = saved_effect_cache;
+
                 // Build curried arrow: a -> b -> c -> ret
                 let mut result = body_ty;
                 for param_ty in param_types.into_iter().rev() {
                     result = Type::Arrow(Box::new(param_ty), Box::new(result));
                 }
+
+                // If the lambda has effects, wrap the outermost arrow as EffArrow
+                if !eff_refs.is_empty()
+                    && let Type::Arrow(a, b) = result
+                {
+                    result = Type::EffArrow(a, b, eff_refs);
+                }
+
                 Ok(result)
             }
 
@@ -479,6 +548,77 @@ impl Checker {
 
                 // do-block bindings must not leak into the surrounding scope
                 self.env = saved_env;
+                Ok(result_ty)
+            }
+
+            Expr::Receive {
+                arms,
+                after_clause,
+                span,
+            } => {
+                // Look up Actor effect's message type from the effect type param cache
+                let msg_ty = if let Some(cache) = self.effect_type_param_cache.get("Actor") {
+                    if let Some(info) = self.effects.get("Actor") {
+                        if let Some(&param_id) = info.type_params.first() {
+                            cache
+                                .get(&param_id)
+                                .cloned()
+                                .unwrap_or_else(|| self.fresh_var())
+                        } else {
+                            return Err(TypeError::at(
+                                *span,
+                                "Actor effect has no type parameter".to_string(),
+                            ));
+                        }
+                    } else {
+                        return Err(TypeError::at(
+                            *span,
+                            "receive requires the Actor effect (declare `needs {Actor MsgType}`)"
+                                .to_string(),
+                        ));
+                    }
+                } else {
+                    return Err(TypeError::at(
+                        *span,
+                        "receive requires the Actor effect (declare `needs {Actor MsgType}`)"
+                            .to_string(),
+                    ));
+                };
+
+                let result_ty = self.fresh_var();
+
+                for arm in arms {
+                    let saved_env = self.env.clone();
+                    self.bind_pattern(&arm.pattern, &msg_ty)?;
+
+                    if let Some(guard) = &arm.guard {
+                        if let Some(span) = super::find_effect_call(guard) {
+                            return Err(TypeError::at(
+                                span,
+                                "Effect calls are not allowed in guard expressions".to_string(),
+                            ));
+                        }
+                        let guard_ty = self.infer_expr(guard)?;
+                        self.unify_at(&guard_ty, &Type::bool(), guard.span())?;
+                    }
+
+                    let body_ty = self.infer_expr(&arm.body)?;
+                    self.unify_at(&result_ty, &body_ty, arm.body.span())?;
+
+                    self.env = saved_env;
+                }
+
+                if let Some((timeout, body)) = after_clause {
+                    let timeout_ty = self.infer_expr(timeout)?;
+                    self.unify_at(&timeout_ty, &Type::int(), timeout.span())?;
+                    let body_ty = self.infer_expr(body)?;
+                    self.unify_at(&result_ty, &body_ty, body.span())?;
+                }
+
+                // receive implies Actor effect usage
+                self.current_effects.insert("Actor".to_string());
+
+                // No exhaustiveness checking -- mailbox is open
                 Ok(result_ty)
             }
 
@@ -1093,7 +1233,44 @@ impl Checker {
         type_params: &[u32],
     ) -> EffectOpSig {
         if type_params.is_empty() {
-            return op.clone();
+            // No effect-level type params, but the op may have free type vars
+            // (e.g. Process.spawn returns Pid msg where msg is free).
+            // Collect all var IDs and instantiate fresh per call.
+            let mut free_vars = std::collections::HashSet::new();
+            fn collect_vars(ty: &Type, vars: &mut std::collections::HashSet<u32>) {
+                match ty {
+                    Type::Var(id) => {
+                        vars.insert(*id);
+                    }
+                    Type::Arrow(a, b) | Type::EffArrow(a, b, _) => {
+                        collect_vars(a, vars);
+                        collect_vars(b, vars);
+                    }
+                    Type::Con(_, args) => {
+                        for a in args {
+                            collect_vars(a, vars);
+                        }
+                    }
+                }
+            }
+            for p in &op.params {
+                collect_vars(p, &mut free_vars);
+            }
+            collect_vars(&op.return_type, &mut free_vars);
+            if free_vars.is_empty() {
+                return op.clone();
+            }
+            let mapping: std::collections::HashMap<u32, Type> =
+                free_vars.iter().map(|&id| (id, self.fresh_var())).collect();
+            return EffectOpSig {
+                name: op.name.clone(),
+                params: op
+                    .params
+                    .iter()
+                    .map(|t| self.replace_vars(t, &mapping))
+                    .collect(),
+                return_type: self.replace_vars(&op.return_type, &mapping),
+            };
         }
         // Reuse cached mapping or create fresh vars
         let mapping = if let Some(cached) = self.effect_type_param_cache.get(effect_name) {

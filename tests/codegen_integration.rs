@@ -2,7 +2,7 @@ use dylang::{codegen, elaborate, lexer, parser, typechecker};
 
 /// Load the prelude into a checker.
 fn bootstrap() -> typechecker::Checker {
-    let prelude_src = include_str!("../src/prelude/prelude.dy");
+    let prelude_src = include_str!("../src/stdlib/prelude.dy");
     let prelude_tokens = lexer::Lexer::new(prelude_src).lex().expect("prelude lex error");
     let prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()

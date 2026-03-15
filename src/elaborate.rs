@@ -246,8 +246,14 @@ impl Elaborator {
                 // TraitDef and FunAnnotation are consumed (not emitted)
                 Decl::TraitDef { .. } => {}
                 Decl::FunAnnotation { .. } => {
-                    // Keep annotations for the lowerer (it uses them for arity)
-                    output.push(decl.clone());
+                    // Keep annotations for the lowerer (it uses them for arity).
+                    // Strip Process and Actor effects -- they're handled by
+                    // beam_runtime (ForeignCall), not CPS.
+                    let mut d = decl.clone();
+                    if let Decl::FunAnnotation { effects, .. } = &mut d {
+                        effects.retain(|e| e.name != "Actor" && e.name != "Process");
+                    }
+                    output.push(d);
                 }
 
                 // Elaborate function bodies
@@ -392,6 +398,44 @@ impl Elaborator {
 
             // Function application: check if we need to insert dict args
             Expr::App { func, arg, span } => {
+                // Concurrency effect calls -> ForeignCall
+                // spawn! f => App(EffectCall("spawn"), f)
+                if let Expr::EffectCall { name, .. } = func.as_ref() {
+                    if name == "spawn" {
+                        return Expr::ForeignCall {
+                            module: "erlang".into(),
+                            func: "spawn".into(),
+                            args: vec![self.elaborate_expr(arg)],
+                            span: *span,
+                        };
+                    }
+                    if name == "self" {
+                        // self! () -- the () is a unit arg, self takes no real args
+                        return Expr::ForeignCall {
+                            module: "erlang".into(),
+                            func: "self".into(),
+                            args: vec![],
+                            span: *span,
+                        };
+                    }
+                }
+                // send! pid msg => App(App(EffectCall("send"), pid), msg)
+                if let Expr::App {
+                    func: inner_func,
+                    arg: first_arg,
+                    ..
+                } = func.as_ref()
+                    && let Expr::EffectCall { name, .. } = inner_func.as_ref()
+                    && name == "send"
+                {
+                    return Expr::ForeignCall {
+                        module: "erlang".into(),
+                        func: "send".into(),
+                        args: vec![self.elaborate_expr(first_arg), self.elaborate_expr(arg)],
+                        span: *span,
+                    };
+                }
+
                 // Check if this is a direct call to a function with where clauses
                 if let Expr::Var { name, .. } = func.as_ref() {
                     // If calling a trait method directly with an argument,
@@ -641,22 +685,66 @@ impl Elaborator {
                 qualifier,
                 args,
                 span,
-            } => Expr::EffectCall {
-                name: name.clone(),
-                qualifier: qualifier.clone(),
-                args: args.iter().map(|a| self.elaborate_expr(a)).collect(),
-                span: *span,
-            },
+            } => {
+                // Actor spawn! and self! are handled in the App case above.
+                Expr::EffectCall {
+                    name: name.clone(),
+                    qualifier: qualifier.clone(),
+                    args: args.iter().map(|a| self.elaborate_expr(a)).collect(),
+                    span: *span,
+                }
+            }
 
             Expr::With {
                 expr: e,
                 handler,
                 span,
-            } => Expr::With {
-                expr: Box::new(self.elaborate_expr(e)),
-                handler: Box::new(self.elaborate_handler(handler)),
-                span: *span,
-            },
+            } => {
+                let is_beam_handler = |n: &str| n == "beam_actor";
+
+                // beam_actor/beam_runtime: ops are already ForeignCall, strip the handler
+                let is_beam = matches!(handler.as_ref(), Handler::Named(n) if is_beam_handler(n));
+                let has_beam = matches!(handler.as_ref(),
+                    Handler::Inline { named, .. } if named.iter().any(|n| is_beam_handler(n))
+                );
+
+                if is_beam {
+                    return self.elaborate_expr(e);
+                }
+
+                if has_beam
+                    && let Handler::Inline {
+                        named,
+                        arms,
+                        return_clause,
+                    } = handler.as_ref()
+                {
+                    let remaining: Vec<String> = named
+                        .iter()
+                        .filter(|n| !is_beam_handler(n))
+                        .cloned()
+                        .collect();
+                    if remaining.is_empty() && arms.is_empty() {
+                        return self.elaborate_expr(e);
+                    }
+                    let filtered = Handler::Inline {
+                        named: remaining,
+                        arms: arms.clone(),
+                        return_clause: return_clause.clone(),
+                    };
+                    return Expr::With {
+                        expr: Box::new(self.elaborate_expr(e)),
+                        handler: Box::new(self.elaborate_handler(&filtered)),
+                        span: *span,
+                    };
+                }
+
+                Expr::With {
+                    expr: Box::new(self.elaborate_expr(e)),
+                    handler: Box::new(self.elaborate_handler(handler)),
+                    span: *span,
+                }
+            }
 
             Expr::Resume { value, span } => Expr::Resume {
                 value: Box::new(self.elaborate_expr(value)),
@@ -672,6 +760,29 @@ impl Elaborator {
                 module: module.clone(),
                 func: func.clone(),
                 args: args.iter().map(|a| self.elaborate_expr(a)).collect(),
+                span: *span,
+            },
+
+            Expr::Receive {
+                arms,
+                after_clause,
+                span,
+            } => Expr::Receive {
+                arms: arms
+                    .iter()
+                    .map(|arm| CaseArm {
+                        pattern: arm.pattern.clone(),
+                        guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
+                        body: self.elaborate_expr(&arm.body),
+                        span: arm.span,
+                    })
+                    .collect(),
+                after_clause: after_clause.as_ref().map(|(timeout, body)| {
+                    (
+                        Box::new(self.elaborate_expr(timeout)),
+                        Box::new(self.elaborate_expr(body)),
+                    )
+                }),
                 span: *span,
             },
 

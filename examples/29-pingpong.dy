@@ -1,0 +1,40 @@
+import Std.Actor
+
+type PingMsg {
+  Ping(Pid PongMsg)
+}
+
+type PongMsg {
+  Pong(Int)
+}
+
+fun pong_server (count: Int) -> Unit needs {Process, Actor PingMsg}
+pong_server count = {
+  receive {
+    Ping(sender) -> {
+      send! sender (Pong count)
+      pong_server (count + 1)
+    }
+  }
+}
+
+fun run () -> Unit needs {Process, Actor PongMsg}
+run () = {
+  let server = spawn! (fun () -> pong_server 0)
+  send! server <| Ping (self! ())
+  receive {
+    Pong(n) -> print $"got pong #{show n}"
+  }
+  send! server <| Ping (self! ())
+  receive {
+    Pong(n) -> print $"got pong #{show n}"
+  }
+  send! server <| Ping (self! ())
+  receive {
+    Pong(n) -> print $"got pong #{show n}"
+  }
+}
+
+main () = {
+  run () with beam_actor
+}

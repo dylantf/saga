@@ -740,6 +740,60 @@ impl Parser {
                 })
             }
 
+            Token::Receive => {
+                self.expect(Token::LBrace)?;
+                self.skip_terminators();
+
+                let mut branches = Vec::new();
+                let mut after_clause = None;
+
+                while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                    // Check for `after` clause
+                    if matches!(self.peek(), Token::After) {
+                        self.advance(); // consume 'after'
+                        let timeout = self.parse_expr(0)?;
+                        self.expect(Token::Arrow)?;
+                        let body = self.parse_expr(0)?;
+                        after_clause = Some((Box::new(timeout), Box::new(body)));
+                        self.skip_terminators();
+                        break; // after must be last
+                    }
+
+                    let arm_start = self.tokens[self.pos].span;
+                    let pattern = self.parse_pattern()?;
+
+                    let guard = if matches!(self.peek(), Token::Bar) {
+                        self.advance();
+                        Some(self.parse_expr(0)?)
+                    } else {
+                        None
+                    };
+
+                    self.expect(Token::Arrow)?;
+                    let body = self.parse_expr(0)?;
+                    let end_span = body.span().end;
+                    branches.push(CaseArm {
+                        pattern,
+                        guard,
+                        body,
+                        span: Span {
+                            start: arm_start.start,
+                            end: end_span,
+                        },
+                    });
+                    self.skip_terminators();
+                }
+
+                let end = self.tokens[self.pos].span;
+                self.expect(Token::RBrace)?;
+
+                Ok(Expr::Receive {
+                    arms: branches,
+                    after_clause,
+                    span: span.to(end),
+                })
+            }
+
             // Unary negation
             Token::Minus => {
                 let expr = self.parse_primary()?;
