@@ -40,7 +40,10 @@ fn typecheck_source(source: &str, checker: &mut typechecker::Checker) {
 /// Create a project-mode checker pointed at the test fixtures directory,
 /// with prelude loaded.
 fn make_project_checker() -> typechecker::Checker {
-    let mut checker = typechecker::Checker::with_project_root(fixtures_root());
+    let root = fixtures_root();
+    let module_map = typechecker::scan_project_modules(&root).expect("scan failed");
+    let mut checker = typechecker::Checker::with_project_root(root);
+    checker.set_module_map(module_map);
     let prelude_src = include_str!("../src/stdlib/prelude.dy");
     let prelude_tokens = lexer::Lexer::new(prelude_src)
         .lex()

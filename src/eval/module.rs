@@ -3,7 +3,7 @@ use crate::ast::Decl;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
     rc::Rc,
 };
 
@@ -21,6 +21,8 @@ pub(super) struct ModuleLoaderInner {
     pub(super) loaded: HashMap<String, HashMap<String, Value>>,
     /// Modules currently being loaded (for cycle detection).
     pub(super) loading: HashSet<String>,
+    /// Map from declared module name to file path.
+    pub(super) module_map: Option<crate::typechecker::ModuleMap>,
 }
 
 impl ModuleLoader {
@@ -30,15 +32,17 @@ impl ModuleLoader {
             base_env: Env::new(),
             loaded: HashMap::new(),
             loading: HashSet::new(),
+            module_map: None,
         })))
     }
 
-    pub fn project(root: PathBuf) -> Self {
+    pub fn project(root: PathBuf, module_map: crate::typechecker::ModuleMap) -> Self {
         ModuleLoader(Rc::new(RefCell::new(ModuleLoaderInner {
             project_root: Some(root),
             base_env: Env::new(),
             loaded: HashMap::new(),
             loading: HashSet::new(),
+            module_map: Some(module_map),
         })))
     }
 }
@@ -104,27 +108,6 @@ fn public_names(program: &[Decl]) -> HashSet<String> {
     names
 }
 
-/// Verifies that the file on disk has the exact expected case for its name.
-fn check_filename_case(file_path: &Path) -> Result<(), String> {
-    let dir = file_path.parent().unwrap_or(Path::new("."));
-    let expected = match file_path.file_name() {
-        Some(n) => n.to_string_lossy().into_owned(),
-        None => return Ok(()),
-    };
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let actual = entry.file_name().to_string_lossy().into_owned();
-            if actual.to_lowercase() == expected.to_lowercase() && actual != expected {
-                return Err(format!(
-                    "module file '{}' found but expected '{}' -- file name must match module name exactly",
-                    actual, expected
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Returns the embedded source for a builtin stdlib module, if it exists.
 /// Delegates to the canonical copy in the typechecker to avoid duplication.
 fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
@@ -145,18 +128,14 @@ pub(super) fn load_module(
 
     let is_builtin = builtin_module_source(module_path).is_some();
 
-    let project_root = {
+    {
         let inner = loader.0.borrow();
-        match &inner.project_root {
-            None if !is_builtin => {
-                return EvalResult::error(
-                    "imports are not supported in script mode (run without a filename to use project mode)",
-                );
-            }
-            Some(root) => Some(root.clone()),
-            None => None,
+        if inner.project_root.is_none() && !is_builtin {
+            return EvalResult::error(
+                "imports are not supported in script mode (run without a filename to use project mode)",
+            );
         }
-    };
+    }
 
     // Cycle detection
     if loader.0.borrow().loading.contains(&module_name) {
@@ -168,18 +147,23 @@ pub(super) fn load_module(
     let public_bindings = if let Some(bindings) = cached {
         bindings
     } else {
-        // Resolve source: builtin modules are embedded, others read from disk
+        // Resolve source: builtin modules are embedded, others looked up via module map
         let source = if let Some(src) = builtin_module_source(module_path) {
             src.to_string()
         } else {
-            let root = project_root.as_ref().unwrap();
-            let rel: PathBuf = module_path.iter().collect();
-            let file_path = root.join(rel).with_extension("dy");
-
-            if let Err(e) = check_filename_case(&file_path) {
-                return EvalResult::error(e);
-            }
-
+            let file_path = {
+                let inner = loader.0.borrow();
+                inner
+                    .module_map
+                    .as_ref()
+                    .and_then(|m| m.get(&module_name).cloned())
+            };
+            let file_path = match file_path {
+                Some(p) => p,
+                None => {
+                    return EvalResult::error(format!("unknown module '{}'", module_name));
+                }
+            };
             match std::fs::read_to_string(&file_path) {
                 Ok(s) => s,
                 Err(e) => {

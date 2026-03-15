@@ -1,6 +1,6 @@
 mod check_decl;
 mod check_module;
-pub use check_module::builtin_module_source;
+pub use check_module::{builtin_module_source, scan_project_modules, ModuleMap};
 mod check_traits;
 pub(crate) mod exhaustiveness;
 mod infer;
@@ -598,6 +598,8 @@ pub struct Checker {
     pub(crate) where_bound_var_names: HashMap<u32, String>,
     /// Project root for resolving imports. None = script mode.
     pub(crate) project_root: Option<std::path::PathBuf>,
+    /// Map from declared module name to file path. Built by scanning the project at startup.
+    pub module_map: Option<check_module::ModuleMap>,
     /// Cache of already-typechecked modules: module name -> all public exports.
     pub(crate) tc_modules: HashMap<String, ModuleExports>,
     /// Cache of codegen-relevant info for each typechecked module.
@@ -642,6 +644,7 @@ impl Checker {
             where_bounds: HashMap::new(),
             where_bound_var_names: HashMap::new(),
             project_root: None,
+            module_map: None,
             tc_modules: HashMap::new(),
             tc_codegen_info: HashMap::new(),
             tc_programs: HashMap::new(),
@@ -658,6 +661,10 @@ impl Checker {
         let mut checker = Self::new();
         checker.project_root = Some(root);
         checker
+    }
+
+    pub fn set_module_map(&mut self, map: check_module::ModuleMap) {
+        self.module_map = Some(map);
     }
 
     pub(crate) fn fresh_var(&mut self) -> Type {

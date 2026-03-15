@@ -230,6 +230,11 @@ fn build_project(profile: &str) -> PathBuf {
         std::process::exit(1);
     });
 
+    let module_map = typechecker::scan_project_modules(&project_root).unwrap_or_else(|e| {
+        eprintln!("Error scanning modules: {}", e);
+        std::process::exit(1);
+    });
+
     let main_path = project_root.join("Main.dy");
     let main_source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
         eprintln!("Error reading Main.dy: {}", e);
@@ -237,6 +242,7 @@ fn build_project(profile: &str) -> PathBuf {
     });
 
     let mut checker = make_checker(Some(project_root.clone()));
+    checker.set_module_map(module_map);
     let main_program = parse_and_typecheck(&main_source, "Main.dy", &mut checker);
 
     let build_dir = project_root.join("_build").join(profile);
@@ -261,10 +267,15 @@ fn build_project(profile: &str) -> PathBuf {
         let mut program = if let Some(cached) = checker.tc_programs.get(module_name) {
             cached.clone()
         } else {
-            let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
-            let rel: PathBuf = module_path.iter().collect();
-            let file_path = project_root.join(rel).with_extension("dy");
-            let source = fs::read_to_string(&file_path).unwrap_or_else(|e| {
+            let file_path = checker
+                .module_map
+                .as_ref()
+                .and_then(|m| m.get(module_name))
+                .unwrap_or_else(|| {
+                    eprintln!("Module '{}' not found in module map", module_name);
+                    std::process::exit(1);
+                });
+            let source = fs::read_to_string(file_path).unwrap_or_else(|e| {
                 eprintln!("Error reading {}: {}", file_path.display(), e);
                 std::process::exit(1);
             });
@@ -427,12 +438,18 @@ fn cmd_check(file: Option<&str>) {
                 eprintln!("No project.toml found. Run with a filename to check a single file.");
                 std::process::exit(1);
             });
+            let module_map =
+                typechecker::scan_project_modules(&project_root).unwrap_or_else(|e| {
+                    eprintln!("Error scanning modules: {}", e);
+                    std::process::exit(1);
+                });
             let main_path = project_root.join("Main.dy");
             let source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
                 eprintln!("Error reading Main.dy: {}", e);
                 std::process::exit(1);
             });
             let mut checker = make_checker(Some(project_root));
+            checker.set_module_map(module_map);
             parse_and_typecheck(&source, "Main.dy", &mut checker);
             eprintln!("OK");
         }

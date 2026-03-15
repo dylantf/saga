@@ -76,6 +76,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 ## Module System
 
 - [x] `module Foo` declarations
+- [x] Module map: scan all `.dy` files at startup, resolve imports by declared module name (not file path)
 - [x] `import Foo`, `import Foo as F`, `import Foo (a, b)`
 - [x] Qualified names (`Math.abs`)
 - [x] `pub` exports
@@ -249,8 +250,19 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ## Tooling
 
+- [ ] Error messages with file:line:column and source context (currently byte offsets only)
 - [ ] REPL (interactive expression evaluation, type display, effect handling)
-- [ ] Dependency management (`project.toml` dependencies, package registry, version resolution)
+- [ ] Library compilation mode (`dylang build --lib`): compile modules to `.beam` without
+      an entry point, serialize type info (types, effects, handlers, trait impls) alongside
+      `.beam` files so downstream projects can typecheck against the library
+- [ ] Dependency management (`project.toml` dependencies, git deps first, Hex registry later)
+- [ ] Hex package integration: package format (`.beam` files + type info sidecar), publish/install
+      commands. Prerequisite: library compilation mode
+- [ ] LSP (go-to-definition, hover types, error squiggles, autocomplete for constructors/effects)
+- [ ] Testing framework (assert_eq, test runner, test discovery)
+- [ ] Formatter
+- [ ] Docstrings/generated docs
+- [ ] Language documentation/website
 
 ## Out of Scope
 

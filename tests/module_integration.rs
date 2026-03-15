@@ -1,4 +1,4 @@
-use dylang::{eval, lexer, parser};
+use dylang::{eval, lexer, parser, typechecker};
 use std::path::PathBuf;
 
 fn fixtures_root() -> PathBuf {
@@ -6,7 +6,9 @@ fn fixtures_root() -> PathBuf {
 }
 
 fn run(source: &str) -> eval::EvalResult {
-    let loader = eval::ModuleLoader::project(fixtures_root());
+    let root = fixtures_root();
+    let module_map = typechecker::scan_project_modules(&root).expect("scan failed");
+    let loader = eval::ModuleLoader::project(root, module_map);
     let tokens = lexer::Lexer::new(source).lex().expect("lex error");
     let program = parser::Parser::new(tokens)
         .parse_program()

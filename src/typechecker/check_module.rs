@@ -1,5 +1,105 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
 use super::{Checker, EffectDef, EffectOpDef, ModuleCodegenInfo, Scheme, TypeError};
 use crate::token::Span;
+
+/// Map from module name (e.g. "Foo.Bar.Baz") to the file path that declares it.
+pub type ModuleMap = HashMap<String, PathBuf>;
+
+/// Scan all .dy files under `root`, extract their `module` declarations,
+/// and build a map from declared module name to file path.
+pub fn scan_project_modules(root: &Path) -> Result<ModuleMap, String> {
+    let mut map = ModuleMap::new();
+    scan_dir(root, root, &mut map)?;
+    Ok(map)
+}
+
+fn scan_dir(dir: &Path, root: &Path, map: &mut ModuleMap) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {}", dir.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read_dir error: {}", e))?;
+        let path = entry.path();
+        if path.is_dir() {
+            // Skip _build directories
+            if path.file_name().is_some_and(|n| n == "_build") {
+                continue;
+            }
+            scan_dir(&path, root, map)?;
+        } else if path.extension().is_some_and(|ext| ext == "dy") {
+            match extract_module_name(&path) {
+                Ok(Some(module_name)) => {
+                    if let Some(existing) = map.get(&module_name) {
+                        return Err(format!(
+                            "module '{}' declared in both {} and {}",
+                            module_name,
+                            existing.display(),
+                            path.display()
+                        ));
+                    }
+                    map.insert(module_name, path);
+                }
+                Ok(None) => {
+                    let rel = path.strip_prefix(root).unwrap_or(&path);
+                    eprintln!(
+                        "warning: {} has no module declaration, skipping",
+                        rel.display()
+                    );
+                }
+                Err(e) => {
+                    let rel = path.strip_prefix(root).unwrap_or(&path);
+                    eprintln!("warning: could not scan {}: {}", rel.display(), e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Extract the module name from a .dy file by lexing and scanning for the
+/// first `module` declaration. Returns None if no module declaration is found.
+fn extract_module_name(path: &Path) -> Result<Option<String>, String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+    let tokens = crate::lexer::Lexer::new(&source)
+        .lex()
+        .map_err(|e| format!("lex error: {}", e.message))?;
+
+    // Scan tokens for: Module UpperIdent (.UpperIdent)*
+    use crate::token::Token;
+    let mut i = 0;
+    while i < tokens.len() {
+        if matches!(tokens[i].token, Token::Module) {
+            i += 1;
+            // Collect the dotted module path
+            let mut parts: Vec<String> = Vec::new();
+            if i < tokens.len()
+                && let Token::UpperIdent(name) = &tokens[i].token
+            {
+                parts.push(name.clone());
+                i += 1;
+                while i + 1 < tokens.len() {
+                    if matches!(tokens[i].token, Token::Dot) {
+                        if let Token::UpperIdent(name) = &tokens[i + 1].token {
+                            parts.push(name.clone());
+                            i += 2;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if !parts.is_empty() {
+                return Ok(Some(parts.join(".")));
+            }
+        }
+        i += 1;
+    }
+    Ok(None)
+}
 
 /// Returns the embedded source for a builtin stdlib module, if it exists.
 pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
@@ -70,13 +170,16 @@ impl Checker {
             return self.inject_exports(&exports, &prefix, exposing, span);
         }
 
-        // Resolve source: builtin modules are embedded, others read from disk
+        // Resolve source: builtin modules are embedded, others looked up via module map
         let source = if let Some(src) = builtin_module_source(module_path) {
             src.to_string()
         } else {
-            let root = project_root.as_ref().unwrap();
-            let rel: std::path::PathBuf = module_path.iter().collect();
-            let file_path = root.join(rel).with_extension("dy");
+            let file_path = self
+                .module_map
+                .as_ref()
+                .and_then(|m| m.get(&module_name))
+                .ok_or_else(|| TypeError::at(span, format!("unknown module '{}'", module_name)))?
+                .clone();
             std::fs::read_to_string(&file_path).map_err(|e| {
                 TypeError::at(span, format!("cannot read module '{}': {}", module_name, e))
             })?
@@ -115,6 +218,7 @@ impl Checker {
                     Some(root) => super::Checker::with_project_root(root.clone()),
                     None => super::Checker::new(),
                 };
+                snapshot.module_map = self.module_map.clone();
                 let prelude_src = include_str!("../stdlib/prelude.dy");
                 let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
                     .lex()
@@ -156,6 +260,7 @@ impl Checker {
         mod_checker.tc_modules = self.tc_modules.clone();
         mod_checker.tc_codegen_info = self.tc_codegen_info.clone();
         mod_checker.tc_programs = self.tc_programs.clone();
+        mod_checker.module_map = self.module_map.clone();
         mod_checker.check_program(&program).map_err(|e| {
             TypeError::at(
                 span,
@@ -241,6 +346,7 @@ impl Checker {
         mc.tc_modules = self.tc_modules.clone();
         mc.tc_codegen_info = self.tc_codegen_info.clone();
         mc.tc_programs = self.tc_programs.clone();
+        mc.module_map = self.module_map.clone();
         mc
     }
 
@@ -264,10 +370,8 @@ impl Checker {
         } = exports;
 
         // Traits and their methods (unqualified, so impl bodies can reference them)
-        let binding_map: std::collections::HashMap<&str, &Scheme> = bindings
-            .iter()
-            .map(|(n, s)| (n.as_str(), s))
-            .collect();
+        let binding_map: std::collections::HashMap<&str, &Scheme> =
+            bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
         for (name, info) in traits {
             self.traits
                 .entry(name.clone())
