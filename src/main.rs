@@ -159,7 +159,7 @@ fn compile_std_modules(checker: &mut typechecker::Checker, build_dir: &std::path
             &program,
             &mod_checker,
             &mut checker.tc_codegen_info,
-            &build_dir,
+            build_dir,
         );
     }
 }
@@ -298,7 +298,9 @@ fn build_project(profile: &str) -> PathBuf {
 
     // Compile Main module
     let elaborated = elaborate::elaborate_module(&main_program, &checker, "Main");
-    checker.tc_codegen_info.get_mut("Main").map(|info| info.update_handler_bodies(&elaborated));
+    if let Some(info) = checker.tc_codegen_info.get_mut("Main") {
+        info.update_handler_bodies(&elaborated)
+    }
     let core_src = codegen::emit_module_with_imports("main", &elaborated, &checker.tc_codegen_info);
     let core_path = build_dir.join("main.core");
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {

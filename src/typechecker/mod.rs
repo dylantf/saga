@@ -217,10 +217,7 @@ pub struct ModuleExports {
 
 impl ModuleExports {
     /// Collect all public exports from a typechecked module.
-    pub fn collect(
-        program: &[crate::ast::Decl],
-        checker: &Checker,
-    ) -> Self {
+    pub fn collect(program: &[crate::ast::Decl], checker: &Checker) -> Self {
         use crate::ast::Decl;
 
         let pub_names = crate::typechecker::check_module::public_names_for_tc(program);
@@ -365,12 +362,11 @@ impl ModuleCodegenInfo {
                 return_clause,
                 ..
             } = decl
+                && let Some(hb) = self.handler_bodies.iter_mut().find(|h| &h.name == name)
             {
-                if let Some(hb) = self.handler_bodies.iter_mut().find(|h| &h.name == name) {
-                    hb.effects = effects.iter().map(|e| e.name.clone()).collect();
-                    hb.arms = arms.clone();
-                    hb.return_clause = return_clause.clone();
-                }
+                hb.effects = effects.iter().map(|e| e.name.clone()).collect();
+                hb.arms = arms.clone();
+                hb.return_clause = return_clause.clone();
             }
         }
     }
