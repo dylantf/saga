@@ -194,6 +194,57 @@ pub struct Scheme {
     pub ty: Type,
 }
 
+impl Scheme {
+    /// Return the type with forall variables replaced by readable names (a, b, c, ...).
+    /// Apply a substitution first to resolve any solved variables.
+    pub fn display_type(&self, sub: &Substitution) -> Type {
+        let resolved = sub.apply(&self.ty);
+        if self.forall.is_empty() {
+            return resolved;
+        }
+        // Map forall var IDs to named type variables: a, b, c, ...
+        let names: HashMap<u32, String> = self
+            .forall
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| {
+                let name = ((b'a' + i as u8) as char).to_string();
+                (id, name)
+            })
+            .collect();
+        rename_vars(&resolved, &names)
+    }
+}
+
+/// Replace `Type::Var(id)` with `Type::Con(name, [])` for display purposes.
+fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
+    match ty {
+        Type::Var(id) => {
+            if let Some(name) = names.get(id) {
+                Type::Con(name.clone(), vec![])
+            } else {
+                ty.clone()
+            }
+        }
+        Type::Arrow(a, b) => Type::Arrow(
+            Box::new(rename_vars(a, names)),
+            Box::new(rename_vars(b, names)),
+        ),
+        Type::EffArrow(a, b, effs) => Type::EffArrow(
+            Box::new(rename_vars(a, names)),
+            Box::new(rename_vars(b, names)),
+            effs.iter()
+                .map(|(name, args)| {
+                    (name.clone(), args.iter().map(|t| rename_vars(t, names)).collect())
+                })
+                .collect(),
+        ),
+        Type::Con(name, args) => {
+            Type::Con(name.clone(), args.iter().map(|a| rename_vars(a, names)).collect())
+        }
+    }
+}
+
 // --- Module exports ---
 
 /// All public items exported by a typechecked module, cached as a single unit.
@@ -564,7 +615,7 @@ pub struct Checker {
     pub sub: Substitution,
     pub env: TypeEnv,
     /// Constructor types from type definitions: name -> (arity, type scheme)
-    pub(crate) constructors: HashMap<std::string::String, Scheme>,
+    pub constructors: HashMap<std::string::String, Scheme>,
     /// Record definitions: record name -> vec of (field_name, field_type)
     pub(crate) records: HashMap<std::string::String, Vec<(std::string::String, Type)>>,
     /// Effect definitions: effect name -> definition info (type params + operations)
@@ -1006,10 +1057,14 @@ impl Checker {
                 Ok(())
             }
 
-            _ => Err(TypeError::new(format!(
-                "type mismatch: expected {}, got {}",
-                a, b
-            ))),
+            _ => {
+                let a_display = self.sub.apply(&a);
+                let b_display = self.sub.apply(&b);
+                Err(TypeError::new(format!(
+                    "type mismatch: expected {}, got {}",
+                    a_display, b_display
+                )))
+            }
         }
     }
 

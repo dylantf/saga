@@ -24,4 +24,14 @@ impl LineIndex {
         let col = offset - self.line_starts[line];
         (line, col)
     }
+
+    /// Convert (line, column) back to a byte offset. Both 0-based.
+    pub fn line_col_to_offset(&self, line: usize, col: usize) -> usize {
+        if line < self.line_starts.len() {
+            self.line_starts[line] + col
+        } else {
+            // Past end of file
+            *self.line_starts.last().unwrap_or(&0)
+        }
+    }
 }

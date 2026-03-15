@@ -1,8 +1,15 @@
 use tower_lsp::lsp_types::*;
 
-use dylang::{derive, lexer, parser, typechecker};
+use dylang::{ast, derive, lexer, parser, typechecker};
 
 use crate::line_index::LineIndex;
+
+pub struct CheckResult {
+    pub diagnostics: Vec<Diagnostic>,
+    pub checker: typechecker::Checker,
+    pub program: Option<ast::Program>,
+    pub line_index: LineIndex,
+}
 
 fn make_diagnostic(line_index: &LineIndex, message: String, offset: usize) -> Diagnostic {
     let (line, col) = line_index.offset_to_line_col(offset);
@@ -17,22 +24,37 @@ fn make_diagnostic(line_index: &LineIndex, message: String, offset: usize) -> Di
     }
 }
 
-pub fn check(checker: &mut typechecker::Checker, text: &str) -> Vec<Diagnostic> {
+pub fn check(checker: typechecker::Checker, text: &str) -> CheckResult {
     let line_index = LineIndex::new(text);
+    let mut checker = checker;
 
     let tokens = match lexer::Lexer::new(text).lex() {
         Ok(tokens) => tokens,
-        Err(e) => return vec![make_diagnostic(&line_index, e.message, e.pos)],
+        Err(e) => {
+            return CheckResult {
+                diagnostics: vec![make_diagnostic(&line_index, e.message, e.pos)],
+                checker,
+                program: None,
+                line_index,
+            }
+        }
     };
 
     let mut program = match parser::Parser::new(tokens).parse_program() {
         Ok(program) => program,
-        Err(e) => return vec![make_diagnostic(&line_index, e.message, e.span.start)],
+        Err(e) => {
+            return CheckResult {
+                diagnostics: vec![make_diagnostic(&line_index, e.message, e.span.start)],
+                checker,
+                program: None,
+                line_index,
+            }
+        }
     };
 
     derive::expand_derives(&mut program);
 
-    match checker.check_program(&program) {
+    let diagnostics = match checker.check_program(&program) {
         Ok(()) => vec![],
         Err(e) => {
             let start_offset = e.span.map(|s| s.start).unwrap_or(0);
@@ -49,5 +71,12 @@ pub fn check(checker: &mut typechecker::Checker, text: &str) -> Vec<Diagnostic> 
                 ..Default::default()
             }]
         }
+    };
+
+    CheckResult {
+        diagnostics,
+        checker,
+        program: Some(program),
+        line_index,
     }
 }

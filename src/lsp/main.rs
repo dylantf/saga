@@ -7,13 +7,17 @@ use dylang::typechecker;
 
 mod checker;
 mod diagnostics;
+mod hover;
 mod line_index;
+
+use diagnostics::CheckResult;
 
 struct Backend {
     client: Client,
     /// Cached base checker with prelude + module map loaded.
-    /// Clone this per-check instead of rebuilding from scratch.
     base_checker: Mutex<Option<typechecker::Checker>>,
+    /// Last successful check result per file, for hover queries.
+    last_check: Mutex<Option<(Url, CheckResult)>>,
 }
 
 impl Backend {
@@ -35,8 +39,14 @@ impl Backend {
     }
 
     fn check_file(&self, uri: Url, text: &str) -> Vec<Diagnostic> {
-        let mut checker = self.get_checker(&uri);
-        diagnostics::check(&mut checker, text)
+        let checker = self.get_checker(&uri);
+        let result = diagnostics::check(checker, text);
+        let diagnostics = result.diagnostics.clone();
+
+        let mut last = self.last_check.lock().unwrap();
+        *last = Some((uri, result));
+
+        diagnostics
     }
 }
 
@@ -93,9 +103,36 @@ impl LanguageServer for Backend {
         }
     }
 
-    async fn hover(&self, _params: HoverParams) -> Result<Option<Hover>> {
-        // TODO: look up type at cursor position
-        Ok(None)
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let last = self.last_check.lock().unwrap();
+        let Some((ref _uri, ref result)) = *last else {
+            return Ok(None);
+        };
+
+        let Some(ref program) = result.program else {
+            return Ok(None);
+        };
+
+        let position = params.text_document_position_params.position;
+        let offset = result
+            .line_index
+            .line_col_to_offset(position.line as usize, position.character as usize);
+
+        let Some(name) = hover::find_name_at_offset(program, offset) else {
+            return Ok(None);
+        };
+
+        let Some(type_str) = hover::type_at_name(&result.checker, &name, program) else {
+            return Ok(None);
+        };
+
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!("```dylang\n{}: {}\n```", name, type_str),
+            }),
+            range: None,
+        }))
     }
 }
 
@@ -107,6 +144,7 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         base_checker: Mutex::new(None),
+        last_check: Mutex::new(None),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }
