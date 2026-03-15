@@ -195,16 +195,6 @@ impl<'a> Lowerer<'a> {
         format!("_Cor{}", n)
     }
 
-    /// Register a function with all its metadata in one call.
-    fn register_fun(&mut self, name: String, info: FunInfo) {
-        self.fun_info.insert(name, info);
-    }
-
-    /// Register a function only if not already registered.
-    fn register_fun_default(&mut self, name: String, info: FunInfo) {
-        self.fun_info.entry(name).or_insert(info);
-    }
-
     /// Check if a function is effectful.
     fn is_effectful(&self, name: &str) -> bool {
         self.fun_info
@@ -261,6 +251,14 @@ impl<'a> Lowerer<'a> {
     }
 
     pub fn lower_module(&mut self, module_name: &str, program: &ast::Program) -> CModule {
+        // Staging area for FunAnnotation data consumed by FunBinding.
+        // Keeps fun_info free of half-initialized entries.
+        struct PendingAnnotation {
+            effects: Vec<String>,
+            param_absorbed_effects: HashMap<usize, Vec<String>>,
+        }
+        let mut pending_annotations: HashMap<String, PendingAnnotation> = HashMap::new();
+
         // Collect record field orders, effect definitions, handler definitions,
         // and function effect requirements.
         for decl in program {
@@ -331,13 +329,9 @@ impl<'a> Lowerer<'a> {
                             param_effs.insert(i, sorted);
                         }
                     }
-                    // Arity is computed later by FunBinding (needs pattern params
-                    // to account for unit-param filtering in lower_params).
-                    self.register_fun(name.clone(), FunInfo {
-                        arity: 0,
+                    pending_annotations.insert(name.clone(), PendingAnnotation {
                         effects: sorted_effects,
                         param_absorbed_effects: param_effs,
-                        import_origin: None,
                     });
                 }
                 Decl::ExternalFun {
@@ -365,7 +359,7 @@ impl<'a> Lowerer<'a> {
                     let effect_count = sorted_effects.len();
                     let expanded_arity =
                         real_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
-                    self.register_fun(name.clone(), FunInfo {
+                    self.fun_info.insert(name.clone(), FunInfo {
                         arity: expanded_arity,
                         effects: sorted_effects,
                         param_absorbed_effects: HashMap::new(),
@@ -384,7 +378,7 @@ impl<'a> Lowerer<'a> {
             let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
             let erlang_name = util::module_name_to_erlang(&mod_path);
             for (_trait_name, _target_type, dict_name, arity) in &info.trait_impl_dicts {
-                self.register_fun_default(dict_name.clone(), FunInfo {
+                self.fun_info.entry(dict_name.clone()).or_insert(FunInfo {
                     arity: *arity,
                     effects: Vec::new(),
                     param_absorbed_effects: HashMap::new(),
@@ -408,7 +402,7 @@ impl<'a> Lowerer<'a> {
                         base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
                     let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
                     // Register unqualified form
-                    self.register_fun_default(name.clone(), FunInfo {
+                    self.fun_info.entry(name.clone()).or_insert(FunInfo {
                         arity: expanded_arity,
                         effects: effects.clone(),
                         param_absorbed_effects: param_effs,
@@ -416,7 +410,7 @@ impl<'a> Lowerer<'a> {
                     });
                     // Register qualified (alias.name) form
                     let qualified = format!("{}.{}", mod_path.last().unwrap(), name);
-                    self.register_fun_default(qualified, FunInfo {
+                    self.fun_info.entry(qualified).or_insert(FunInfo {
                         arity: expanded_arity,
                         effects,
                         param_absorbed_effects: HashMap::new(),
@@ -463,7 +457,7 @@ impl<'a> Lowerer<'a> {
                             base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
                         let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
                         let qualified = format!("{}.{}", prefix, name);
-                        self.register_fun(qualified, FunInfo {
+                        self.fun_info.insert(qualified, FunInfo {
                             arity: expanded_arity,
                             effects: effects.clone(),
                             param_absorbed_effects: param_effs.clone(),
@@ -475,7 +469,7 @@ impl<'a> Lowerer<'a> {
                             && exposed.iter().any(|e| e == name)
                             && exported_names.contains(name.as_str())
                         {
-                            self.register_fun(name.clone(), FunInfo {
+                            self.fun_info.insert(name.clone(), FunInfo {
                                 arity: expanded_arity,
                                 effects,
                                 param_absorbed_effects: param_effs,
@@ -508,7 +502,7 @@ impl<'a> Lowerer<'a> {
                     }
                     // Register imported trait impl dicts for cross-module calls
                     for (_trait_name, _target_type, dict_name, arity) in &info.trait_impl_dicts {
-                        self.register_fun(dict_name.clone(), FunInfo {
+                        self.fun_info.insert(dict_name.clone(), FunInfo {
                             arity: *arity,
                             effects: Vec::new(),
                             param_absorbed_effects: HashMap::new(),
@@ -532,16 +526,20 @@ impl<'a> Lowerer<'a> {
                     body,
                     ..
                 } => {
+                    let PendingAnnotation { effects, param_absorbed_effects } =
+                        pending_annotations.remove(name.as_str()).unwrap_or(PendingAnnotation {
+                            effects: Vec::new(),
+                            param_absorbed_effects: HashMap::new(),
+                        });
                     let base_arity = lower_params(params).len();
-                    let effect_count = self
-                        .fun_info
-                        .get(name.as_str())
-                        .map_or(0, |f| f.effects.len());
+                    let effect_count = effects.len();
                     let arity = base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
-                    // Update arity on existing entry (created by FunAnnotation) or create new
-                    self.fun_info.entry(name.clone())
-                        .and_modify(|f| f.arity = arity)
-                        .or_insert(FunInfo { arity, ..Default::default() });
+                    self.fun_info.entry(name.clone()).or_insert(FunInfo {
+                        arity,
+                        effects,
+                        param_absorbed_effects,
+                        import_origin: None,
+                    });
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _)| n == name) {
                         group.2.push((params, guard, body));
                     } else {
@@ -554,7 +552,7 @@ impl<'a> Lowerer<'a> {
                     methods,
                     ..
                 } => {
-                    self.register_fun(name.clone(), FunInfo {
+                    self.fun_info.insert(name.clone(), FunInfo {
                         arity: dict_params.len(),
                         ..Default::default()
                     });

@@ -243,6 +243,7 @@ impl Checker {
     }
 
     /// Inject all exports from a module into this checker.
+    /// Destructures ModuleExports so adding a new field is a compile error until handled here.
     fn inject_exports(
         &mut self,
         exports: &super::ModuleExports,
@@ -250,13 +251,22 @@ impl Checker {
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
     ) -> Result<(), TypeError> {
+        let super::ModuleExports {
+            bindings,
+            type_constructors,
+            record_defs,
+            traits,
+            trait_impls,
+            effects,
+            handlers,
+        } = exports;
+
         // Traits and their methods (unqualified, so impl bodies can reference them)
-        let binding_map: std::collections::HashMap<&str, &Scheme> = exports
-            .bindings
+        let binding_map: std::collections::HashMap<&str, &Scheme> = bindings
             .iter()
             .map(|(n, s)| (n.as_str(), s))
             .collect();
-        for (name, info) in &exports.traits {
+        for (name, info) in traits {
             self.traits
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
@@ -270,21 +280,21 @@ impl Checker {
         }
 
         // Trait impls
-        for (key, info) in &exports.trait_impls {
+        for (key, info) in trait_impls {
             self.trait_impls
                 .entry(key.clone())
                 .or_insert_with(|| info.clone());
         }
 
         // Effects
-        for (name, info) in &exports.effects {
+        for (name, info) in effects {
             self.effects
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
         }
 
         // Handlers
-        for (name, info) in &exports.handlers {
+        for (name, info) in handlers {
             self.handlers
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
@@ -292,9 +302,9 @@ impl Checker {
 
         // Bindings, type constructors, records (qualified + exposing)
         self.inject_scoped_bindings(
-            &exports.bindings,
-            &exports.type_constructors,
-            &exports.record_defs,
+            bindings,
+            type_constructors,
+            record_defs,
             prefix,
             exposing,
             span,
