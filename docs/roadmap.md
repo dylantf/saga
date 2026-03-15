@@ -88,6 +88,11 @@ Checkbox = implemented and working. Unchecked = not yet done.
       cache entry. Adding a new exportable thing means touching all four places, and it's easy to
       miss one (effects/handlers were missing until now). A single struct with one collect and one
       inject method would fix this.
+- [ ] Same problem in the lowerer: imported functions need separate registration for arity
+      (`top_level_funs`), effects (`fun_effects`), param absorption (`param_absorbed_effects`),
+      module mapping (`imported_names`), etc. A single `FunctionInfo` struct bundling all of these
+      would mean one registration path instead of N. This is how the cross-module EffArrow bug
+      happened -- `param_absorbed_effects` was registered for local functions but not imports.
 
 ## Pre-Backend Polish
 

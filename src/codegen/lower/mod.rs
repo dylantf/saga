@@ -392,6 +392,13 @@ impl<'a> Lowerer<'a> {
                                     if !effects.is_empty() {
                                         self.fun_effects.insert(name.clone(), effects);
                                     }
+                                    // Register EffArrow param info for cross-module calls
+                                    let param_effs =
+                                        util::param_absorbed_effects_from_type(&scheme.ty);
+                                    if !param_effs.is_empty() {
+                                        self.param_absorbed_effects
+                                            .insert(name.clone(), param_effs);
+                                    }
                                 }
                             }
                         }

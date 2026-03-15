@@ -268,3 +268,58 @@ pub(super) fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
     }
     (arity, effects.into_iter().collect())
 }
+
+/// Extract per-parameter absorbed effects from a function type.
+/// Returns a map of param_index -> sorted effect names for parameters
+/// that have EffArrow types (i.e., callbacks that carry effects).
+pub(super) fn param_absorbed_effects_from_type(
+    ty: &Type,
+) -> HashMap<usize, Vec<String>> {
+    let mut result = HashMap::new();
+    let mut current = ty;
+    let mut param_index = 0;
+    loop {
+        match current {
+            Type::Arrow(param, ret) => {
+                // Check if the parameter itself is an EffArrow
+                let effs = collect_effarrow_effects(param);
+                if !effs.is_empty() {
+                    result.insert(param_index, effs);
+                }
+                param_index += 1;
+                current = ret;
+            }
+            Type::EffArrow(param, ret, _) => {
+                let effs = collect_effarrow_effects(param);
+                if !effs.is_empty() {
+                    result.insert(param_index, effs);
+                }
+                param_index += 1;
+                current = ret;
+            }
+            _ => break,
+        }
+    }
+    result
+}
+
+/// Collect effect names from an EffArrow type (used for parameter types).
+fn collect_effarrow_effects(ty: &Type) -> Vec<String> {
+    let mut effects = BTreeSet::new();
+    let mut current = ty;
+    loop {
+        match current {
+            Type::EffArrow(_, ret, effs) => {
+                for (eff, _) in effs {
+                    effects.insert(eff.clone());
+                }
+                current = ret;
+            }
+            Type::Arrow(_, ret) => {
+                current = ret;
+            }
+            _ => break,
+        }
+    }
+    effects.into_iter().collect()
+}

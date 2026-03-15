@@ -16,6 +16,8 @@ pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
             "Regex" => Some(include_str!("../stdlib/Regex.dy")),
             "Tuple" => Some(include_str!("../stdlib/Tuple.dy")),
             "Actor" => Some(include_str!("../stdlib/Actor.dy")),
+            "Fail" => Some(include_str!("../stdlib/Fail.dy")),
+            "Supervisor" => Some(include_str!("../stdlib/Supervisor.dy")),
             _ => None,
         }
     } else {

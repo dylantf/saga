@@ -1,0 +1,18 @@
+import Std.Fail
+import Std.Supervisor (supervised)
+
+# A computation that always fails
+fun unreliable () -> Int needs {Fail String}
+unreliable () = fail! "something went wrong"
+
+# A computation that succeeds
+fun reliable () -> Int needs {Fail String}
+reliable () = 42
+
+main () = {
+  let r1 = supervised 3 (fun () -> unreliable ())
+  print $"unreliable: {show r1}"
+
+  let r2 = supervised 3 (fun () -> reliable ())
+  print $"reliable: {show r2}"
+}
