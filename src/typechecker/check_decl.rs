@@ -438,9 +438,7 @@ impl Checker {
         let constraints_before = self.pending_constraints.len();
 
         // Save and clear effect tracking and field candidate tracking for this function body
-        let saved_effects = std::mem::take(&mut self.current_effects);
-        let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
-        let saved_field_candidates = std::mem::take(&mut self.field_candidates);
+        let body_scope = self.save_body_scope();
 
         // Pre-populate effect type param cache from annotation constraints (e.g. needs {State Int})
         if let Some(constraints) = self.fun_effect_type_constraints.get(name).cloned() {
@@ -524,40 +522,20 @@ impl Checker {
         }
 
         // Check effect requirements against declared needs
-        let body_effects = std::mem::replace(&mut self.current_effects, saved_effects);
-        self.effect_type_param_cache = saved_effect_cache;
+        let (body_effects, body_field_candidates) = self.restore_body_scope(body_scope);
         let declared_effects = self.fun_effects.get(name).cloned().unwrap_or_default();
 
         if !body_effects.is_empty() || !declared_effects.is_empty() {
-            // Check for effects used but not declared
-            let undeclared: Vec<_> = body_effects.difference(&declared_effects).collect();
-            if !undeclared.is_empty() {
-                let span = match clauses[0] {
-                    Decl::FunBinding { span, .. } => *span,
-                    _ => unreachable!(),
-                };
-                let mut effects: Vec<_> = undeclared.into_iter().cloned().collect();
-                effects.sort();
-                if declared_effects.is_empty() {
-                    return Err(TypeError::at(
-                        span,
-                        format!(
-                            "function '{}' uses effects {{{}}} but has no 'needs' declaration",
-                            name,
-                            effects.join(", ")
-                        ),
-                    ));
-                } else {
-                    return Err(TypeError::at(
-                        span,
-                        format!(
-                            "function '{}' uses effect{{{}}} not declared in its 'needs' clause",
-                            name,
-                            effects.join(", ")
-                        ),
-                    ));
-                }
-            }
+            let err_span = match clauses[0] {
+                Decl::FunBinding { span, .. } => *span,
+                _ => unreachable!(),
+            };
+            Self::check_undeclared_effects(
+                &body_effects,
+                &declared_effects,
+                &format!("function '{}'", name),
+                err_span,
+            )?;
 
             // Check for effects declared but never used
             let unused: Vec<_> = declared_effects.difference(&body_effects).collect();
@@ -580,8 +558,6 @@ impl Checker {
         // Check for unresolved ambiguous field accesses. Any var still in field_candidates
         // after the full body was checked is genuinely ambiguous -- the programmer needs
         // to add a type annotation to disambiguate.
-        let body_field_candidates =
-            std::mem::replace(&mut self.field_candidates, saved_field_candidates);
         for (var_id, (record_names, field_span)) in body_field_candidates {
             let resolved = self.sub.apply(&Type::Var(var_id));
             if matches!(resolved, Type::Var(_)) {
@@ -900,9 +876,8 @@ impl Checker {
         return_clause: Option<&ast::HandlerArm>,
         span: crate::token::Span,
     ) -> Result<(), TypeError> {
-        // Save and clear effect tracking for this handler body
-        let saved_effects = std::mem::take(&mut self.current_effects);
-        let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
+        // Save and clear effect/field tracking for this handler body
+        let body_scope = self.save_body_scope();
 
         // Build type param bindings from handler's effect refs.
         // E.g. `handler counter for State Int` with effect State s:
@@ -1015,37 +990,18 @@ impl Checker {
         };
 
         // Check effect requirements against declared needs
-        let body_effects = std::mem::replace(&mut self.current_effects, saved_effects);
-        self.effect_type_param_cache = saved_effect_cache;
+        let (body_effects, _body_field_candidates) = self.restore_body_scope(body_scope);
         let declared_effects: std::collections::HashSet<String> =
             needs.iter().map(|e| e.name.clone()).collect();
 
         if !body_effects.is_empty() || !declared_effects.is_empty() {
-            let undeclared: Vec<_> = body_effects.difference(&declared_effects).collect();
-            if !undeclared.is_empty() {
-                let err_span = arms.first().map(|a| a.span).unwrap_or(span);
-                let mut effects: Vec<_> = undeclared.into_iter().cloned().collect();
-                effects.sort();
-                if declared_effects.is_empty() {
-                    return Err(TypeError::at(
-                        err_span,
-                        format!(
-                            "handler '{}' uses effects {{{}}} but has no 'needs' declaration",
-                            name,
-                            effects.join(", ")
-                        ),
-                    ));
-                } else {
-                    return Err(TypeError::at(
-                        err_span,
-                        format!(
-                            "handler '{}' uses effects {{{}}} not declared in its 'needs' clause",
-                            name,
-                            effects.join(", ")
-                        ),
-                    ));
-                }
-            }
+            let err_span = arms.first().map(|a| a.span).unwrap_or(span);
+            Self::check_undeclared_effects(
+                &body_effects,
+                &declared_effects,
+                &format!("handler '{}'", name),
+                err_span,
+            )?;
         }
 
         self.handlers.insert(

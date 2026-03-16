@@ -236,10 +236,7 @@ impl Scheme {
                 .get(var_id)
                 .cloned()
                 .unwrap_or_else(|| format!("?{}", var_id));
-            bounds
-                .entry(var_name)
-                .or_default()
-                .push(trait_name.clone());
+            bounds.entry(var_name).or_default().push(trait_name.clone());
         }
         let mut parts: Vec<String> = bounds
             .iter()
@@ -705,7 +702,7 @@ pub struct Checker {
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
     /// Tracks which records are still candidates for an unresolved type variable based on
     /// the intersection of all fields accessed on it. Checked at end of each function body.
-    pub(crate) field_candidates: HashMap<u32, (Vec<String>, Span)>,
+    pub(crate) field_candidates: FieldCandidates,
     /// Where clause bounds: var_id -> set of trait names assumed satisfied
     pub(crate) where_bounds: HashMap<u32, HashSet<String>>,
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence)
@@ -732,6 +729,18 @@ pub struct Checker {
     pub(crate) collected_errors: Vec<TypeError>,
     /// Warnings collected during type checking.
     pub warnings: Vec<TypeWarning>,
+}
+
+/// Per-variable record candidate narrowing: var_id -> (candidate record names, span).
+pub(crate) type FieldCandidates = HashMap<u32, (Vec<String>, Span)>;
+
+/// Snapshot of per-function-body inference state, saved before checking a body
+/// and restored afterward. Prevents effect tracking and field candidate narrowing
+/// from one body leaking into the next.
+pub(crate) struct BodyScope {
+    effects: HashSet<String>,
+    effect_cache: HashMap<String, HashMap<u32, Type>>,
+    field_candidates: FieldCandidates,
 }
 
 impl Default for Checker {
@@ -831,6 +840,65 @@ impl Checker {
         let id = self.next_var;
         self.next_var += 1;
         Type::Var(id)
+    }
+
+    /// Save and clear the per-body inference state (effects, effect cache, field candidates).
+    /// Call `restore_body_scope` after checking the body to get back the collected effects.
+    pub(crate) fn save_body_scope(&mut self) -> BodyScope {
+        BodyScope {
+            effects: std::mem::take(&mut self.current_effects),
+            effect_cache: std::mem::take(&mut self.effect_type_param_cache),
+            field_candidates: std::mem::take(&mut self.field_candidates),
+        }
+    }
+
+    /// Restore the saved scope, returning the effects and field candidates that
+    /// the body accumulated while it was active.
+    pub(crate) fn restore_body_scope(
+        &mut self,
+        scope: BodyScope,
+    ) -> (HashSet<String>, FieldCandidates) {
+        let body_effects = std::mem::replace(&mut self.current_effects, scope.effects);
+        self.effect_type_param_cache = scope.effect_cache;
+        let body_field_candidates =
+            std::mem::replace(&mut self.field_candidates, scope.field_candidates);
+        (body_effects, body_field_candidates)
+    }
+
+    /// Check that all effects used in a body are covered by the declared `needs` set.
+    /// Returns an error if any undeclared effects are found.
+    /// `label` is used in the error message (e.g. "function 'foo'", "handler 'bar'").
+    pub(crate) fn check_undeclared_effects(
+        body_effects: &HashSet<String>,
+        declared_effects: &HashSet<String>,
+        label: &str,
+        span: Span,
+    ) -> Result<(), TypeError> {
+        let undeclared: Vec<_> = body_effects.difference(declared_effects).collect();
+        if undeclared.is_empty() {
+            return Ok(());
+        }
+        let mut effects: Vec<_> = undeclared.into_iter().cloned().collect();
+        effects.sort();
+        if declared_effects.is_empty() {
+            Err(TypeError::at(
+                span,
+                format!(
+                    "{} uses effects {{{}}} but has no 'needs' declaration",
+                    label,
+                    effects.join(", ")
+                ),
+            ))
+        } else {
+            Err(TypeError::at(
+                span,
+                format!(
+                    "{} uses effects {{{}}} not declared in its 'needs' clause",
+                    label,
+                    effects.join(", ")
+                ),
+            ))
+        }
     }
 
     fn register_builtins(&mut self) {

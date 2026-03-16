@@ -210,9 +210,7 @@ impl Checker {
             let expected_return = self.substitute_trait_param(&target, &trait_method.2);
 
             let saved_env = self.env.clone();
-            let saved_effects = std::mem::take(&mut self.current_effects);
-            let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
-            let saved_field_candidates = std::mem::take(&mut self.field_candidates);
+            let body_scope = self.save_body_scope();
 
             // Bind params with expected types
             for (i, pat) in params.iter().enumerate() {
@@ -235,37 +233,17 @@ impl Checker {
                 })?;
 
             // Check that body effects are covered by the impl's needs declaration
-            let body_effects = std::mem::replace(&mut self.current_effects, saved_effects);
-            self.effect_type_param_cache = saved_effect_cache;
+            let (body_effects, body_field_candidates) = self.restore_body_scope(body_scope);
             if !body_effects.is_empty() || !declared_effects.is_empty() {
-                let undeclared: Vec<_> = body_effects.difference(&declared_effects).collect();
-                if !undeclared.is_empty() {
-                    let mut effects: Vec<_> = undeclared.into_iter().cloned().collect();
-                    effects.sort();
-                    if declared_effects.is_empty() {
-                        return Err(TypeError::at(
-                            body.span(),
-                            format!(
-                                "impl {} for {}, method '{}' uses effects {{{}}} but the impl has no 'needs' declaration",
-                                trait_name,
-                                target_type,
-                                method_name,
-                                effects.join(", ")
-                            ),
-                        ));
-                    } else {
-                        return Err(TypeError::at(
-                            body.span(),
-                            format!(
-                                "impl {} for {}, method '{}' uses effects {{{}}} not declared in 'needs'",
-                                trait_name,
-                                target_type,
-                                method_name,
-                                effects.join(", ")
-                            ),
-                        ));
-                    }
-                }
+                Self::check_undeclared_effects(
+                    &body_effects,
+                    &declared_effects,
+                    &format!(
+                        "impl {} for {}, method '{}'",
+                        trait_name, target_type, method_name
+                    ),
+                    body.span(),
+                )?;
             }
 
             // Register effects so callers of this method know what they propagate.
@@ -278,8 +256,6 @@ impl Checker {
             }
 
             // Check for unresolved field access ambiguities at end of method body
-            let body_field_candidates =
-                std::mem::replace(&mut self.field_candidates, saved_field_candidates);
             for (var_id, (record_names, field_span)) in body_field_candidates {
                 let resolved = self.sub.apply(&Type::Var(var_id));
                 if matches!(resolved, Type::Var(_)) {
