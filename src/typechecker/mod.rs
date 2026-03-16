@@ -1070,14 +1070,34 @@ impl Checker {
             }
 
             _ => {
-                let a_display = self.sub.apply(&a);
-                let b_display = self.sub.apply(&b);
+                let a_display = self.prettify_type(&a);
+                let b_display = self.prettify_type(&b);
                 Err(TypeError::new(format!(
                     "type mismatch: expected {}, got {}",
                     a_display, b_display
                 )))
             }
         }
+    }
+
+    /// Format a type for error messages: apply substitutions, then replace
+    /// any remaining unresolved type variables with readable names (a, b, c, ...).
+    fn prettify_type(&self, ty: &Type) -> Type {
+        let resolved = self.sub.apply(ty);
+        let mut vars = Vec::new();
+        collect_free_vars(&resolved, &mut vars);
+        if vars.is_empty() {
+            return resolved;
+        }
+        let names: HashMap<u32, String> = vars
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| {
+                let name = ((b'a' + i as u8) as char).to_string();
+                (id, name)
+            })
+            .collect();
+        rename_vars(&resolved, &names)
     }
 
     /// Unify with span context: if unification fails, attach the span to the error.
