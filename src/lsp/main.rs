@@ -6,6 +6,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use dylang::typechecker;
 
 mod checker;
+mod completion;
 mod definition;
 mod diagnostics;
 mod hover;
@@ -60,7 +61,7 @@ impl Backend {
 
     /// Clone the last check result out of the lock to avoid holding it
     /// across async boundaries (which would deadlock with did_open).
-    fn snapshot(&self) -> Option<(Url, typechecker::Checker, Vec<dylang::ast::Decl>, line_index::LineIndex)> {
+    fn snapshot(&self) -> Option<(Url, typechecker::Checker, Vec<dylang::ast::Decl>, line_index::LineIndex, String)> {
         let last = self.last_check.lock().ok()?;
         let (uri, result) = last.as_ref()?;
         Some((
@@ -68,6 +69,7 @@ impl Backend {
             result.checker.clone(),
             result.program.clone()?,
             result.line_index.clone(),
+            result.source.clone(),
         ))
     }
 }
@@ -82,6 +84,10 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".to_string()]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -127,7 +133,7 @@ impl LanguageServer for Backend {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let Some((_uri, checker, program, line_index)) = self.snapshot() else {
+        let Some((_uri, checker, program, line_index, _source)) = self.snapshot() else {
             return Ok(None);
         };
 
@@ -155,7 +161,7 @@ impl LanguageServer for Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let Some((uri, checker, program, line_index)) = self.snapshot() else {
+        let Some((uri, checker, program, line_index, _source)) = self.snapshot() else {
             return Ok(None);
         };
 
@@ -195,6 +201,24 @@ impl LanguageServer for Backend {
                 end: Position::new(end_line as u32, end_col as u32),
             },
         })))
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> Result<Option<CompletionResponse>> {
+        let Some((_uri, checker, _program, line_index, source)) = self.snapshot() else {
+            return Ok(None);
+        };
+
+        let position = params.text_document_position.position;
+        let offset =
+            line_index.line_col_to_offset(position.line as usize, position.character as usize);
+
+        let prefix = completion::extract_prefix(&source, offset);
+        let items = completion::collect_completions(&checker, prefix);
+
+        Ok(Some(CompletionResponse::Array(items)))
     }
 }
 

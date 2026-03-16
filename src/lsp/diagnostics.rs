@@ -9,6 +9,7 @@ pub struct CheckResult {
     pub checker: typechecker::Checker,
     pub program: Option<ast::Program>,
     pub line_index: LineIndex,
+    pub source: String,
 }
 
 fn make_diagnostic(line_index: &LineIndex, message: String, offset: usize) -> Diagnostic {
@@ -26,6 +27,7 @@ fn make_diagnostic(line_index: &LineIndex, message: String, offset: usize) -> Di
 
 pub fn check(checker: typechecker::Checker, text: &str) -> CheckResult {
     let line_index = LineIndex::new(text);
+    let source = text.to_string();
     let mut checker = checker;
 
     let tokens = match lexer::Lexer::new(text).lex() {
@@ -36,7 +38,8 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckResult {
                 checker,
                 program: None,
                 line_index,
-            }
+                source,
+            };
         }
     };
 
@@ -48,7 +51,8 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckResult {
                 checker,
                 program: None,
                 line_index,
-            }
+                source,
+            };
         }
     };
 
@@ -81,5 +85,6 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckResult {
         checker,
         program: Some(program),
         line_index,
+        source,
     }
 }

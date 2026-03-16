@@ -760,6 +760,14 @@ impl Checker {
         Ok(checker)
     }
 
+    pub fn effect_names(&self) -> Vec<String> {
+        self.effects.keys().cloned().collect()
+    }
+
+    pub fn handler_names(&self) -> Vec<String> {
+        self.handlers.keys().cloned().collect()
+    }
+
     pub fn set_module_map(&mut self, map: check_module::ModuleMap) {
         self.module_map = Some(map);
     }
