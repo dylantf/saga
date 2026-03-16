@@ -7,7 +7,7 @@ use super::{Checker, EffectDefInfo, EffectOpSig, HandlerInfo, Scheme, Type, Type
 impl Checker {
     // --- Top-level declarations ---
 
-    pub fn check_program(&mut self, program: &[Decl]) -> Result<(), TypeError> {
+    pub fn check_program(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<TypeError>> {
         // First pass: register type definitions and record definitions
         for decl in program {
             match decl {
@@ -17,10 +17,10 @@ impl Checker {
                     variants,
                     ..
                 } => {
-                    self.register_type_def(name, type_params, variants)?;
+                    self.register_type_def(name, type_params, variants).map_err(|e| vec![e])?;
                 }
                 Decl::RecordDef { name, fields, .. } => {
-                    self.register_record_def(name, fields)?;
+                    self.register_record_def(name, fields).map_err(|e| vec![e])?;
                 }
                 Decl::EffectDef {
                     name,
@@ -28,7 +28,7 @@ impl Checker {
                     operations,
                     ..
                 } => {
-                    self.register_effect_def(name, type_params, operations)?;
+                    self.register_effect_def(name, type_params, operations).map_err(|e| vec![e])?;
                 }
                 Decl::TraitDef {
                     name,
@@ -37,7 +37,7 @@ impl Checker {
                     methods,
                     ..
                 } => {
-                    self.register_trait_def(name, type_param, supertraits, methods)?;
+                    self.register_trait_def(name, type_param, supertraits, methods).map_err(|e| vec![e])?;
                 }
                 _ => {}
             }
@@ -53,7 +53,7 @@ impl Checker {
                 ..
             } = decl
             {
-                self.typecheck_import(module_path, alias.as_deref(), exposing.as_deref(), *span)?;
+                self.typecheck_import(module_path, alias.as_deref(), exposing.as_deref(), *span).map_err(|e| vec![e])?;
             }
         }
 
@@ -77,13 +77,13 @@ impl Checker {
                 }
 
                 if !effects.is_empty() {
-                    return Err(TypeError::at(
+                    return Err(vec![TypeError::at(
                         *span,
                         format!(
                             "external function '{}' cannot declare effects with `needs` -- wrap it in a local function instead",
                             name
                         ),
-                    ));
+                    )]);
                 }
 
                 let mut scheme_constraints = Vec::new();
@@ -96,13 +96,13 @@ impl Checker {
                                 scheme_constraints.push((trait_name.clone(), *var_id));
                             }
                         } else {
-                            return Err(TypeError::at(
+                            return Err(vec![TypeError::at(
                                 *span,
                                 format!(
                                     "where clause references unknown type variable '{}'",
                                     bound.type_var
                                 ),
-                            ));
+                            )]);
                         }
                     }
                 }
@@ -172,13 +172,13 @@ impl Checker {
                                 constraints.push((trait_name.clone(), *var_id));
                             }
                         } else {
-                            return Err(TypeError::at(
+                            return Err(vec![TypeError::at(
                                 *span,
                                 format!(
                                     "where clause references unknown type variable '{}'",
                                     bound.type_var
                                 ),
-                            ));
+                            )]);
                         }
                     }
                     annotation_constraints.insert(name.clone(), constraints);
@@ -239,14 +239,16 @@ impl Checker {
                     needs,
                     methods,
                     *span,
-                )?;
+                ).map_err(|e| vec![e])?;
             }
         }
 
         // Check supertrait requirements (after all impls are registered so order doesn't matter)
-        self.check_supertrait_impls()?;
+        self.check_supertrait_impls().map_err(|e| vec![e])?;
 
-        // Third pass: group multi-clause function bindings, then check everything
+        // Third pass: group multi-clause function bindings, then check everything.
+        // Collect errors instead of failing on the first one.
+        let mut errors: Vec<TypeError> = Vec::new();
         let mut i = 0;
         while i < program.len() {
             if let Decl::FunBinding { name, .. } = &program[i] {
@@ -269,9 +271,22 @@ impl Checker {
                     .get(&name)
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
-                self.check_fun_clauses(&name, &clauses, &fun_var, annotation.as_ref(), where_cons)?;
+                if let Err(e) = self.check_fun_clauses(&name, &clauses, &fun_var, annotation.as_ref(), where_cons) {
+                    errors.push(e);
+                    // Clear pending constraints for this function -- they may reference
+                    // unresolved types from the error site and would produce cascading errors
+                    self.pending_constraints.clear();
+                }
+                // Drain any additional errors collected during block inference
+                if !self.collected_errors.is_empty() {
+                    self.pending_constraints.clear();
+                }
+                errors.append(&mut self.collected_errors);
             } else {
-                self.check_decl(&program[i])?;
+                if let Err(e) = self.check_decl(&program[i]) {
+                    errors.push(e);
+                }
+                errors.append(&mut self.collected_errors);
                 i += 1;
             }
         }
@@ -281,7 +296,6 @@ impl Checker {
         if let Some(effects) = self.fun_effects.get("main")
             && !effects.is_empty()
         {
-                // Find the span from the annotation
                 let span = program.iter().find_map(|d| {
                     if let Decl::FunAnnotation { name, span, .. } = d
                         && name == "main"
@@ -291,7 +305,7 @@ impl Checker {
                         None
                     }
                 });
-                return Err(TypeError::at(
+                errors.push(TypeError::at(
                     span.unwrap_or(crate::token::Span { start: 0, end: 0 }),
                     format!(
                         "`main` cannot use `needs` -- it is the entry point and there is no caller to provide handlers for {{{}}}. Handle effects inside `main` using `with` instead.",
@@ -301,9 +315,15 @@ impl Checker {
         }
 
         // Check all accumulated trait constraints now that types are resolved
-        self.check_pending_constraints()?;
+        if let Err(e) = self.check_pending_constraints() {
+            errors.push(e);
+        }
 
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     pub(crate) fn check_decl(&mut self, decl: &Decl) -> Result<(), TypeError> {
@@ -1057,6 +1077,9 @@ impl Checker {
             }
             for (trait_name, ty, span) in constraints {
                 let resolved = self.sub.apply(&ty);
+                if matches!(resolved, Type::Error) {
+                    continue;
+                }
                 match &resolved {
                     // Concrete type (includes primitives): check that an impl exists
                     Type::Con(type_name, args) => {
@@ -1131,6 +1154,8 @@ impl Checker {
                             format!("no impl of {} for function type", trait_name),
                         ));
                     }
+                    // Error type: skip trait checking (already errored elsewhere)
+                    Type::Error => {}
                 }
             }
         }

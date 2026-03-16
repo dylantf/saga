@@ -670,6 +670,7 @@ impl Checker {
 
     pub(crate) fn infer_block(&mut self, stmts: &[Stmt]) -> Result<Type, TypeError> {
         let mut last_ty = Type::unit();
+        let mut errors: Vec<TypeError> = Vec::new();
         let mut i = 0;
         while i < stmts.len() {
             match &stmts[i] {
@@ -680,16 +681,30 @@ impl Checker {
                     span,
                     ..
                 } => {
-                    let ty = self.infer_expr(value)?;
-                    if let Some(ann) = annotation {
-                        let ann_ty = self.convert_type_expr(ann, &mut vec![]);
-                        self.unify_at(&ty, &ann_ty, *span)?;
-                    }
+                    let ty = match self.infer_expr(value) {
+                        Ok(ty) => {
+                            if let Some(ann) = annotation {
+                                let ann_ty = self.convert_type_expr(ann, &mut vec![]);
+                                if let Err(e) = self.unify_at(&ty, &ann_ty, *span) {
+                                    errors.push(e);
+                                    Type::Error
+                                } else {
+                                    ty
+                                }
+                            } else {
+                                ty
+                            }
+                        }
+                        Err(e) => {
+                            errors.push(e);
+                            Type::Error
+                        }
+                    };
                     if let Pat::Var { name, .. } = pattern {
                         let scheme = self.generalize(&ty);
                         self.env.insert(name.clone(), scheme);
-                    } else {
-                        self.bind_pattern(pattern, &ty)?;
+                    } else if let Err(e) = self.bind_pattern(pattern, &ty) {
+                        errors.push(e);
                     }
                     last_ty = Type::unit();
                     i += 1;
@@ -772,12 +787,25 @@ impl Checker {
                     last_ty = Type::unit();
                 }
                 Stmt::Expr(expr) => {
-                    last_ty = self.infer_expr(expr)?;
+                    match self.infer_expr(expr) {
+                        Ok(ty) => last_ty = ty,
+                        Err(e) => {
+                            errors.push(e);
+                            last_ty = Type::Error;
+                        }
+                    }
                     i += 1;
                 }
             }
         }
-        Ok(last_ty)
+        if !errors.is_empty() {
+            // Return the first error (others are collected on self.collected_errors)
+            let first = errors.remove(0);
+            self.collected_errors.extend(errors);
+            Err(first)
+        } else {
+            Ok(last_ty)
+        }
     }
 
     // --- Pattern binding ---
@@ -1292,6 +1320,7 @@ impl Checker {
                             collect_vars(a, vars);
                         }
                     }
+                    Type::Error => {}
                 }
             }
             for p in &op.params {

@@ -62,12 +62,14 @@ fn parse_and_typecheck(
         }
     };
     derive::expand_derives(&mut program);
-    if let Err(e) = checker.check_program(&program) {
-        if let Some(span) = e.span {
-            let (line, col) = byte_offset_to_line_col(source, span.start);
-            eprintln!("Type error at {}:{}:{}: {}", source_path, line, col, e);
-        } else {
-            eprintln!("Type error: {}", e);
+    if let Err(errors) = checker.check_program(&program) {
+        for e in &errors {
+            if let Some(span) = e.span {
+                let (line, col) = byte_offset_to_line_col(source, span.start);
+                eprintln!("Type error at {}:{}:{}: {}", source_path, line, col, e);
+            } else {
+                eprintln!("Type error: {}", e);
+            }
         }
         std::process::exit(1);
     }
@@ -135,8 +137,10 @@ fn compile_std_modules(checker: &mut typechecker::Checker, build_dir: &std::path
         derive::expand_derives(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(None, true);
-        if let Err(e) = mod_checker.check_program(&program) {
-            eprintln!("Std module {} type error: {}", module_name, e);
+        if let Err(errors) = mod_checker.check_program(&program) {
+            for e in &errors {
+                eprintln!("Std module {} type error: {}", module_name, e);
+            }
             std::process::exit(1);
         }
 
@@ -273,8 +277,10 @@ fn build_project(profile: &str) -> PathBuf {
         derive::expand_derives(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
-        if let Err(e) = mod_checker.check_program(&program) {
-            eprintln!("Type error in module {}: {}", module_name, e);
+        if let Err(errors) = mod_checker.check_program(&program) {
+            for e in &errors {
+                eprintln!("Type error in module {}: {}", module_name, e);
+            }
             std::process::exit(1);
         }
 

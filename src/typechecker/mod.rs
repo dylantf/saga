@@ -52,6 +52,8 @@ pub enum Type {
     EffArrow(Box<Type>, Box<Type>, Vec<(String, Vec<Type>)>),
     /// Named type constructor with args: Int = Con("Int", []), List a = Con("List", [a])
     Con(std::string::String, Vec<Type>),
+    /// Error recovery type: unifies with everything, suppresses cascading errors.
+    Error,
 }
 
 /// Convenience constructors for built-in types
@@ -95,6 +97,7 @@ impl std::fmt::Display for Type {
                     Ok(())
                 }
             }
+            Type::Error => write!(f, "<error>"),
         }
     }
 }
@@ -135,6 +138,7 @@ impl Substitution {
             Type::Con(name, args) => {
                 Type::Con(name.clone(), args.iter().map(|a| self.apply(a)).collect())
             }
+            Type::Error => Type::Error,
         }
     }
 
@@ -178,6 +182,7 @@ impl Substitution {
                         .any(|(_, args)| args.iter().any(|t| self.occurs(id, t)))
             }
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
+            Type::Error => false,
         }
     }
 }
@@ -235,13 +240,18 @@ fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
             Box::new(rename_vars(b, names)),
             effs.iter()
                 .map(|(name, args)| {
-                    (name.clone(), args.iter().map(|t| rename_vars(t, names)).collect())
+                    (
+                        name.clone(),
+                        args.iter().map(|t| rename_vars(t, names)).collect(),
+                    )
                 })
                 .collect(),
         ),
-        Type::Con(name, args) => {
-            Type::Con(name.clone(), args.iter().map(|a| rename_vars(a, names)).collect())
-        }
+        Type::Con(name, args) => Type::Con(
+            name.clone(),
+            args.iter().map(|a| rename_vars(a, names)).collect(),
+        ),
+        Type::Error => Type::Error,
     }
 }
 
@@ -510,6 +520,7 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                 free_vars_in_type(arg, bound, out);
             }
         }
+        Type::Error => {}
     }
 }
 
@@ -665,6 +676,8 @@ pub struct Checker {
     pub(crate) adt_variants: HashMap<std::string::String, Vec<(std::string::String, usize)>>,
     /// Evidence collected during constraint solving for the elaboration pass.
     pub evidence: Vec<TraitEvidence>,
+    /// Errors collected during block inference (for multi-error reporting).
+    pub(crate) collected_errors: Vec<TypeError>,
 }
 
 impl Default for Checker {
@@ -703,6 +716,7 @@ impl Checker {
             tc_loading: HashSet::new(),
             adt_variants: HashMap::new(),
             evidence: Vec::new(),
+            collected_errors: Vec::new(),
         };
         checker.register_builtins();
         checker
@@ -739,7 +753,9 @@ impl Checker {
             .parse_program()
             .expect("prelude parse");
         crate::derive::expand_derives(&mut prelude_program);
-        checker.check_program(&prelude_program)?;
+        checker
+            .check_program(&prelude_program)
+            .map_err(|errs| errs.into_iter().next().unwrap())?;
         checker.tc_prelude_snapshot = Some(Box::new(checker.clone()));
         Ok(checker)
     }
@@ -1007,13 +1023,6 @@ impl Checker {
                 ),
             },
         );
-
-        // --- Pid type and Actor effect ---
-
-        // --- Pid type and concurrency effects ---
-
-        // Pid msg: parameterized type, compile-time only. No constructors.
-        // Process, Actor, beam_actor are in Std.Actor (import Std.Actor to use).
     }
 
     // --- Unification ---
@@ -1024,6 +1033,9 @@ impl Checker {
 
         match (&a, &b) {
             _ if a == b => Ok(()),
+
+            // Error type unifies with anything (suppresses cascading errors)
+            (Type::Error, _) | (_, Type::Error) => Ok(()),
 
             (Type::Var(id), _) => self.sub.bind(*id, &b),
             (_, Type::Var(id)) => self.sub.bind(*id, &a),
@@ -1118,6 +1130,7 @@ impl Checker {
                 name.clone(),
                 args.iter().map(|a| self.replace_vars(a, mapping)).collect(),
             ),
+            Type::Error => Type::Error,
         }
     }
 
@@ -1234,5 +1247,6 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
                 collect_free_vars(arg, out);
             }
         }
+        Type::Error => {}
     }
 }

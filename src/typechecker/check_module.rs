@@ -229,7 +229,7 @@ impl Checker {
                 crate::derive::expand_derives(&mut prelude_program);
                 snapshot
                     .check_program(&prelude_program)
-                    .expect("prelude type error");
+                    .expect("prelude type errors");
                 self.tc_prelude_snapshot = Some(Box::new(snapshot));
             }
             let mut mc = *self.tc_prelude_snapshot.as_ref().unwrap().clone();
@@ -261,10 +261,10 @@ impl Checker {
         mod_checker.tc_codegen_info = self.tc_codegen_info.clone();
         mod_checker.tc_programs = self.tc_programs.clone();
         mod_checker.module_map = self.module_map.clone();
-        mod_checker.check_program(&program).map_err(|e| {
+        mod_checker.check_program(&program).map_err(|errs| {
             TypeError::at(
                 span,
-                format!("type error in module '{}': {}", module_name, e),
+                format!("type error in module '{}': {}", module_name, errs[0]),
             )
         })?;
 

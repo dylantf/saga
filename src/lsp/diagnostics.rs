@@ -56,21 +56,24 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckResult {
 
     let diagnostics = match checker.check_program(&program) {
         Ok(()) => vec![],
-        Err(e) => {
-            let start_offset = e.span.map(|s| s.start).unwrap_or(0);
-            let end_offset = e.span.map(|s| s.end).unwrap_or(1);
-            let (start_line, start_col) = line_index.offset_to_line_col(start_offset);
-            let (end_line, end_col) = line_index.offset_to_line_col(end_offset);
-            vec![Diagnostic {
-                range: Range {
-                    start: Position::new(start_line as u32, start_col as u32),
-                    end: Position::new(end_line as u32, end_col as u32),
-                },
-                severity: Some(DiagnosticSeverity::ERROR),
-                message: e.message,
-                ..Default::default()
-            }]
-        }
+        Err(errors) => errors
+            .into_iter()
+            .map(|e| {
+                let start_offset = e.span.map(|s| s.start).unwrap_or(0);
+                let end_offset = e.span.map(|s| s.end).unwrap_or(1);
+                let (start_line, start_col) = line_index.offset_to_line_col(start_offset);
+                let (end_line, end_col) = line_index.offset_to_line_col(end_offset);
+                Diagnostic {
+                    range: Range {
+                        start: Position::new(start_line as u32, start_col as u32),
+                        end: Position::new(end_line as u32, end_col as u32),
+                    },
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: e.message,
+                    ..Default::default()
+                }
+            })
+            .collect(),
     };
 
     CheckResult {

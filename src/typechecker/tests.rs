@@ -16,8 +16,8 @@ fn check(src: &str) -> Result<Checker, TypeError> {
         .parse_program()
         .expect("prelude parse error");
     crate::derive::expand_derives(&mut prelude_program);
-    checker.check_program(&prelude_program)?;
-    checker.check_program(&program)?;
+    checker.check_program(&prelude_program).map_err(|e| e.into_iter().next().unwrap())?;
+    checker.check_program(&program).map_err(|e| e.into_iter().next().unwrap())?;
     Ok(checker)
 }
 
