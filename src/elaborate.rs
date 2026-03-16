@@ -247,18 +247,7 @@ impl Elaborator {
                 Decl::TraitDef { .. } => {}
                 Decl::FunAnnotation { .. } => {
                     // Keep annotations for the lowerer (it uses them for arity).
-                    // Strip Process and Actor effects -- they're handled by
-                    // beam_runtime (ForeignCall), not CPS.
-                    let mut d = decl.clone();
-                    if let Decl::FunAnnotation { effects, .. } = &mut d {
-                        effects.retain(|e| {
-                            !matches!(
-                                e.name.as_str(),
-                                "Actor" | "Process" | "Monitor" | "Link" | "Timer"
-                            )
-                        });
-                    }
-                    output.push(d);
+                    output.push(decl.clone());
                 }
 
                 // Elaborate function bodies
@@ -403,118 +392,6 @@ impl Elaborator {
 
             // Function application: check if we need to insert dict args
             Expr::App { func, arg, span } => {
-                // Concurrency effect calls -> ForeignCall
-                // spawn! f => App(EffectCall("spawn"), f)
-                if let Expr::EffectCall { name, .. } = func.as_ref() {
-                    if name == "spawn" {
-                        return Expr::ForeignCall {
-                            module: "erlang".into(),
-                            func: "spawn".into(),
-                            args: vec![self.elaborate_expr(arg)],
-                            span: *span,
-                        };
-                    }
-                    if name == "self" {
-                        // self! () -- the () is a unit arg, self takes no real args
-                        return Expr::ForeignCall {
-                            module: "erlang".into(),
-                            func: "self".into(),
-                            args: vec![],
-                            span: *span,
-                        };
-                    }
-                    if name == "monitor" {
-                        return Expr::ForeignCall {
-                            module: "erlang".into(),
-                            func: "monitor".into(),
-                            args: vec![self.elaborate_expr(arg)],
-                            span: *span,
-                        };
-                    }
-                    if name == "demonitor" {
-                        return Expr::ForeignCall {
-                            module: "erlang".into(),
-                            func: "demonitor".into(),
-                            args: vec![self.elaborate_expr(arg)],
-                            span: *span,
-                        };
-                    }
-                    if name == "link" {
-                        return Expr::ForeignCall {
-                            module: "erlang".into(),
-                            func: "link".into(),
-                            args: vec![self.elaborate_expr(arg)],
-                            span: *span,
-                        };
-                    }
-                    if name == "unlink" {
-                        return Expr::ForeignCall {
-                            module: "erlang".into(),
-                            func: "unlink".into(),
-                            args: vec![self.elaborate_expr(arg)],
-                            span: *span,
-                        };
-                    }
-                    if name == "sleep" {
-                        return Expr::ForeignCall {
-                            module: "timer".into(),
-                            func: "sleep".into(),
-                            args: vec![self.elaborate_expr(arg)],
-                            span: *span,
-                        };
-                    }
-                    if name == "cancel_timer" {
-                        return Expr::ForeignCall {
-                            module: "erlang".into(),
-                            func: "cancel_timer".into(),
-                            args: vec![self.elaborate_expr(arg)],
-                            span: *span,
-                        };
-                    }
-                }
-                // send! pid msg => App(App(EffectCall("send"), pid), msg)
-                if let Expr::App {
-                    func: inner_func,
-                    arg: first_arg,
-                    ..
-                } = func.as_ref()
-                    && let Expr::EffectCall { name, .. } = inner_func.as_ref()
-                    && name == "send"
-                {
-                    return Expr::ForeignCall {
-                        module: "erlang".into(),
-                        func: "send".into(),
-                        args: vec![self.elaborate_expr(first_arg), self.elaborate_expr(arg)],
-                        span: *span,
-                    };
-                }
-                // send_after! pid ms msg => App(App(App(EffectCall("send_after"), pid), ms), msg)
-                if let Expr::App {
-                    func: mid_func,
-                    arg: second_arg,
-                    ..
-                } = func.as_ref()
-                    && let Expr::App {
-                        func: inner_func,
-                        arg: first_arg,
-                        ..
-                    } = mid_func.as_ref()
-                    && let Expr::EffectCall { name, .. } = inner_func.as_ref()
-                    && name == "send_after"
-                {
-                    // erlang:send_after(Time, Dest, Msg)
-                    return Expr::ForeignCall {
-                        module: "erlang".into(),
-                        func: "send_after".into(),
-                        args: vec![
-                            self.elaborate_expr(second_arg), // ms
-                            self.elaborate_expr(first_arg),  // pid
-                            self.elaborate_expr(arg),        // msg
-                        ],
-                        span: *span,
-                    };
-                }
-
                 // Check if this is a direct call to a function with where clauses
                 if let Expr::Var { name, .. } = func.as_ref() {
                     // If calling a trait method directly with an argument,
@@ -767,7 +644,6 @@ impl Elaborator {
                 args,
                 span,
             } => {
-                // Actor spawn! and self! are handled in the App case above.
                 Expr::EffectCall {
                     name: name.clone(),
                     qualifier: qualifier.clone(),
@@ -780,52 +656,11 @@ impl Elaborator {
                 expr: e,
                 handler,
                 span,
-            } => {
-                let is_beam_handler = |n: &str| n == "beam_actor";
-
-                // beam_actor/beam_runtime: ops are already ForeignCall, strip the handler
-                let is_beam = matches!(handler.as_ref(), Handler::Named(n) if is_beam_handler(n));
-                let has_beam = matches!(handler.as_ref(),
-                    Handler::Inline { named, .. } if named.iter().any(|n| is_beam_handler(n))
-                );
-
-                if is_beam {
-                    return self.elaborate_expr(e);
-                }
-
-                if has_beam
-                    && let Handler::Inline {
-                        named,
-                        arms,
-                        return_clause,
-                    } = handler.as_ref()
-                {
-                    let remaining: Vec<String> = named
-                        .iter()
-                        .filter(|n| !is_beam_handler(n))
-                        .cloned()
-                        .collect();
-                    if remaining.is_empty() && arms.is_empty() {
-                        return self.elaborate_expr(e);
-                    }
-                    let filtered = Handler::Inline {
-                        named: remaining,
-                        arms: arms.clone(),
-                        return_clause: return_clause.clone(),
-                    };
-                    return Expr::With {
-                        expr: Box::new(self.elaborate_expr(e)),
-                        handler: Box::new(self.elaborate_handler(&filtered)),
-                        span: *span,
-                    };
-                }
-
-                Expr::With {
-                    expr: Box::new(self.elaborate_expr(e)),
-                    handler: Box::new(self.elaborate_handler(handler)),
-                    span: *span,
-                }
-            }
+            } => Expr::With {
+                expr: Box::new(self.elaborate_expr(e)),
+                handler: Box::new(self.elaborate_handler(handler)),
+                span: *span,
+            },
 
             Expr::Resume { value, span } => Expr::Resume {
                 value: Box::new(self.elaborate_expr(value)),

@@ -21,6 +21,9 @@ struct HandlerInfo {
     effects: Vec<String>,
     arms: Vec<HandlerArm>,
     return_clause: Option<Box<HandlerArm>>,
+    /// The module this handler was defined in (e.g. "Std.Actor").
+    /// Used to identify BEAM-native handlers that need special lowering.
+    source_module: Option<String>,
 }
 
 /// Stored effect definition: maps op_name -> number of parameters.
@@ -94,7 +97,7 @@ pub struct Lowerer<'a> {
 
 impl<'a> Lowerer<'a> {
     pub fn new(codegen_info: &'a HashMap<String, ModuleCodegenInfo>) -> Self {
-        let mut lowerer = Lowerer {
+        let lowerer = Lowerer {
             counter: 0,
             codegen_info,
             module_aliases: HashMap::new(),
@@ -113,79 +116,6 @@ impl<'a> Lowerer<'a> {
             current_handler_k: None,
             external_funs: HashMap::new(),
         };
-        // Register builtin Actor effect ops
-        // Register builtin concurrency effects
-        lowerer.op_to_effect.insert("spawn".into(), "Process".into());
-        lowerer.op_to_effect.insert("send".into(), "Process".into());
-        lowerer.op_to_effect.insert("self".into(), "Actor".into());
-        lowerer.effect_defs.insert(
-            "Process".into(),
-            EffectInfo {
-                ops: {
-                    let mut ops = HashMap::new();
-                    ops.insert("spawn".into(), 1);
-                    ops.insert("send".into(), 2);
-                    ops
-                },
-            },
-        );
-        lowerer.effect_defs.insert(
-            "Actor".into(),
-            EffectInfo {
-                ops: {
-                    let mut ops = HashMap::new();
-                    ops.insert("self".into(), 0);
-                    ops
-                },
-            },
-        );
-        lowerer.op_to_effect.insert("monitor".into(), "Monitor".into());
-        lowerer
-            .op_to_effect
-            .insert("demonitor".into(), "Monitor".into());
-        lowerer.effect_defs.insert(
-            "Monitor".into(),
-            EffectInfo {
-                ops: {
-                    let mut ops = HashMap::new();
-                    ops.insert("monitor".into(), 1);
-                    ops.insert("demonitor".into(), 1);
-                    ops
-                },
-            },
-        );
-        lowerer.op_to_effect.insert("link".into(), "Link".into());
-        lowerer.op_to_effect.insert("unlink".into(), "Link".into());
-        lowerer.effect_defs.insert(
-            "Link".into(),
-            EffectInfo {
-                ops: {
-                    let mut ops = HashMap::new();
-                    ops.insert("link".into(), 1);
-                    ops.insert("unlink".into(), 1);
-                    ops
-                },
-            },
-        );
-        lowerer.op_to_effect.insert("sleep".into(), "Timer".into());
-        lowerer
-            .op_to_effect
-            .insert("send_after".into(), "Timer".into());
-        lowerer
-            .op_to_effect
-            .insert("cancel_timer".into(), "Timer".into());
-        lowerer.effect_defs.insert(
-            "Timer".into(),
-            EffectInfo {
-                ops: {
-                    let mut ops = HashMap::new();
-                    ops.insert("sleep".into(), 1);
-                    ops.insert("send_after".into(), 3);
-                    ops.insert("cancel_timer".into(), 1);
-                    ops
-                },
-            },
-        );
         lowerer
     }
 
@@ -194,6 +124,24 @@ impl<'a> Lowerer<'a> {
         self.counter += 1;
         format!("_Cor{}", n)
     }
+
+    /// Known BEAM-native handlers: (module, handler_name) pairs.
+    /// These handlers' effects are lowered to direct BEAM calls instead of CPS.
+    const BEAM_NATIVE_HANDLERS: &'static [(&'static str, &'static str)] =
+        &[("Std.Actor", "beam_actor")];
+
+    /// Check if a handler is BEAM-native (should be lowered to direct BEAM calls).
+    pub(super) fn is_beam_native_handler(&self, name: &str) -> bool {
+        self.handler_defs
+            .get(name)
+            .and_then(|info| info.source_module.as_deref())
+            .is_some_and(|module| {
+                Self::BEAM_NATIVE_HANDLERS
+                    .iter()
+                    .any(|(m, h)| *m == module && *h == name)
+            })
+    }
+
 
     /// Check if a function is effectful.
     fn is_effectful(&self, name: &str) -> bool {
@@ -301,6 +249,7 @@ impl<'a> Lowerer<'a> {
                             effects: effects.iter().map(|e| e.name.clone()).collect(),
                             arms: arms.clone(),
                             return_clause: return_clause.clone(),
+                            source_module: Some(module_name.to_string()),
                         },
                     );
                 }
@@ -442,6 +391,7 @@ impl<'a> Lowerer<'a> {
                             effects: hb.effects.clone(),
                             arms: hb.arms.clone(),
                             return_clause: hb.return_clause.clone(),
+                            source_module: Some(mod_name.clone()),
                         },
                     );
                 }
@@ -550,6 +500,7 @@ impl<'a> Lowerer<'a> {
                                 effects: hb.effects.clone(),
                                 arms: hb.arms.clone(),
                                 return_clause: hb.return_clause.clone(),
+                                source_module: Some(module_name.clone()),
                             },
                         );
                     }

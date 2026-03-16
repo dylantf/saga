@@ -905,9 +905,10 @@ impl<'a> Lowerer<'a> {
             })
             .clone();
 
-        // Build: apply Handler('op', arg1, ..., argN, K)
+        // Build: apply Handler('op', arg1, ..., argN, <padding...>, K)
         let mut call_args = vec![CExpr::Lit(CLit::Atom(op_name.to_string()))];
         let mut bindings = Vec::new();
+        let mut actual_arg_count = 0;
         for arg in args {
             // Skip unit literal args (they don't exist at the BEAM level)
             if matches!(
@@ -923,6 +924,15 @@ impl<'a> Lowerer<'a> {
             let ce = self.lower_expr(arg);
             bindings.push((v.clone(), ce));
             call_args.push(CExpr::Var(v));
+            actual_arg_count += 1;
+        }
+
+        // Pad args to match the handler's uniform arity (max params across all ops)
+        if let Some(effect_info) = self.effect_defs.get(&effect_name) {
+            let max_params = effect_info.ops.values().copied().max().unwrap_or(0);
+            for _ in actual_arg_count..max_params {
+                call_args.push(CExpr::Lit(CLit::Atom("undefined".to_string())));
+            }
         }
 
         // Append continuation
@@ -941,40 +951,125 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// Op-name to BEAM BIF mapping for native effect operations.
+    /// Returns (erlang_module, erlang_func, param_count, special_handling).
+    fn beam_native_op_info(op_name: &str) -> Option<(&'static str, &'static str, usize)> {
+        match op_name {
+            "spawn" => Some(("erlang", "spawn", 1)),
+            "self" => Some(("erlang", "self", 0)),
+            "send" => Some(("erlang", "send", 2)),
+            "monitor" => Some(("erlang", "monitor", 1)),  // gets 'process' atom prepended
+            "demonitor" => Some(("erlang", "demonitor", 1)),
+            "link" => Some(("erlang", "link", 1)),
+            "unlink" => Some(("erlang", "unlink", 1)),
+            "sleep" => Some(("timer", "sleep", 1)),
+            "cancel_timer" => Some(("erlang", "cancel_timer", 1)),
+            "send_after" => Some(("erlang", "send_after", 3)), // args reordered
+            _ => None,
+        }
+    }
+
+    /// Build a handler function for a BEAM-native effect.
+    /// Synthesizes: `fun ('op', Arg0, ..., K) -> let R = mod:func(...) in K(R)`
+    /// for each operation in the effect.
+    fn build_beam_native_handler_fun(&mut self, effect_name: &str) -> CExpr {
+        let effect_info = self
+            .effect_defs
+            .get(effect_name)
+            .unwrap_or_else(|| panic!("unknown effect for BEAM-native handler: {}", effect_name));
+        let ops: Vec<(String, usize)> = effect_info
+            .ops
+            .iter()
+            .map(|(name, count)| (name.clone(), *count))
+            .collect();
+
+        // Find max param count across all ops for uniform handler signature
+        let max_params = ops.iter().map(|(_, count)| *count).max().unwrap_or(0);
+
+        let op_var = "_Op".to_string();
+        let k_var = self.fresh();
+        let param_vars: Vec<String> = (0..max_params).map(|i| format!("_HArg{}", i)).collect();
+
+        let mut fun_params = vec![op_var.clone()];
+        fun_params.extend(param_vars.iter().cloned());
+        fun_params.push(k_var.clone());
+
+        // Build case arms for each op
+        let case_arms: Vec<CArm> = ops
+            .iter()
+            .filter_map(|(op_name, _param_count)| {
+                let (module, func, _) = Self::beam_native_op_info(op_name)?;
+
+                // Build the BEAM call args from handler params
+                let call_args = match op_name.as_str() {
+                    "self" => vec![], // no args
+                    "monitor" => {
+                        // prepend 'process' atom
+                        let mut a = vec![CExpr::Lit(CLit::Atom("process".into()))];
+                        a.push(CExpr::Var(param_vars[0].clone()));
+                        a
+                    }
+                    "send_after" => {
+                        // reorder: pid, ms, msg -> ms, pid, msg
+                        vec![
+                            CExpr::Var(param_vars[1].clone()), // ms
+                            CExpr::Var(param_vars[0].clone()), // pid
+                            CExpr::Var(param_vars[2].clone()), // msg
+                        ]
+                    }
+                    _ => {
+                        // use params in order
+                        let count = Self::beam_native_op_info(op_name).map(|(_, _, c)| c).unwrap_or(0);
+                        (0..count).map(|i| CExpr::Var(param_vars[i].clone())).collect()
+                    }
+                };
+
+                let call = CExpr::Call(
+                    module.to_string(),
+                    func.to_string(),
+                    call_args,
+                );
+
+                // let Result = call(...) in K(Result)
+                let result_var = self.fresh();
+                let body = CExpr::Let(
+                    result_var.clone(),
+                    Box::new(call),
+                    Box::new(CExpr::Apply(
+                        Box::new(CExpr::Var(k_var.clone())),
+                        vec![CExpr::Var(result_var)],
+                    )),
+                );
+
+                Some(CArm {
+                    pat: CPat::Lit(CLit::Atom(op_name.clone())),
+                    guard: None,
+                    body,
+                })
+            })
+            .collect();
+
+        let case_expr = CExpr::Case(Box::new(CExpr::Var(op_var)), case_arms);
+        CExpr::Fun(fun_params, Box::new(case_expr))
+    }
+
     /// Lower a `with` expression: `expr with handler`.
     ///
     /// Builds handler function(s) from the handler definition and passes them
     /// as extra parameters to the effectful computation.
     pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
-        // beam_actor/beam_runtime: ops are already ForeignCall from elaboration.
-        // Just lower the inner expression directly.
-        let is_beam_handler = |n: &str| n == "beam_actor";
-        if let Handler::Named(name) = handler
-            && is_beam_handler(name)
-        {
-            return self.lower_expr(expr);
-        }
-        if let Handler::Inline { named, arms, .. } = handler
-            && named.iter().any(|n| is_beam_handler(n))
-        {
-            let remaining_named: Vec<String> = named
-                .iter()
-                .filter(|n| !is_beam_handler(n))
-                .cloned()
-                .collect();
-            if remaining_named.is_empty() && arms.is_empty() {
-                return self.lower_expr(expr);
+        // Collect effects from BEAM-native handlers in this `with` block.
+        let beam_native_effects: std::collections::HashSet<String> = match handler {
+            Handler::Named(name) if self.is_beam_native_handler(name) => {
+                self.handler_defs[name].effects.iter().cloned().collect()
             }
-            let filtered_handler = Handler::Inline {
-                named: remaining_named,
-                arms: arms.clone(),
-                return_clause: match handler {
-                    Handler::Inline { return_clause, .. } => return_clause.clone(),
-                    _ => None,
-                },
-            };
-            return self.lower_with(expr, &filtered_handler);
-        }
+            Handler::Inline { named, .. } => named
+                .iter()
+                .filter(|n| self.is_beam_native_handler(n))
+                .flat_map(|n| self.handler_defs[n].effects.clone())
+                .collect(),
+            _ => std::collections::HashSet::new(),
+        };
 
         // Resolve all handler arms, return clause, and which effects are handled
         let (all_arms, return_clause, handled_effects) = self.resolve_handler(handler);
@@ -1007,12 +1102,23 @@ impl<'a> Lowerer<'a> {
             handler_vars.push((effect_name.clone(), handler_var));
         }
 
-        // Pass 2: build handler functions (arm bodies can now reference any handler param)
+        // Pass 2: build handler functions.
+        // BEAM-native handlers are emitted first since they're self-contained
+        // (direct BEAM calls, no closures). CPS handlers may reference them
+        // (e.g. async_handler's body calls spawn!/send!), so they must come after.
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
         for (effect_name, handler_var) in &handler_vars {
-            let arms = effect_arms.get(effect_name).cloned().unwrap_or_default();
-            let handler_fun = self.build_handler_fun(&arms);
-            handler_bindings.push((handler_var.clone(), handler_fun));
+            if beam_native_effects.contains(effect_name) {
+                let handler_fun = self.build_beam_native_handler_fun(effect_name);
+                handler_bindings.push((handler_var.clone(), handler_fun));
+            }
+        }
+        for (effect_name, handler_var) in &handler_vars {
+            if !beam_native_effects.contains(effect_name) {
+                let arms = effect_arms.get(effect_name).cloned().unwrap_or_default();
+                let handler_fun = self.build_handler_fun(&arms);
+                handler_bindings.push((handler_var.clone(), handler_fun));
+            }
         }
 
         // Build the return clause lambda (if present).
