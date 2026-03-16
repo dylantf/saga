@@ -893,22 +893,23 @@ impl<'a> Lowerer<'a> {
                 .clone()
         };
 
-        // Find the handler param variable for this effect
+        // Find the per-op handler param variable
+        let key = format!("{}.{}", effect_name, op_name);
         let handler_var = self
             .current_handler_params
-            .get(&effect_name)
+            .get(&key)
             .unwrap_or_else(|| {
                 panic!(
-                    "effect '{}' used but no handler param in scope (op: {}), handler_params: {:?}",
+                    "no handler param for op '{}.{}', handler_params: {:?}",
                     effect_name, op_name, self.current_handler_params
                 )
             })
             .clone();
 
-        // Build: apply Handler('op', arg1, ..., argN, <padding...>, K)
-        let mut call_args = vec![CExpr::Lit(CLit::Atom(op_name.to_string()))];
+        // Build: apply Handler(arg1, ..., argN, K)
+        // Per-op handlers have natural arity -- no atom dispatch, no padding.
+        let mut call_args = Vec::new();
         let mut bindings = Vec::new();
-        let mut actual_arg_count = 0;
         for arg in args {
             // Skip unit literal args (they don't exist at the BEAM level)
             if matches!(
@@ -924,15 +925,6 @@ impl<'a> Lowerer<'a> {
             let ce = self.lower_expr(arg);
             bindings.push((v.clone(), ce));
             call_args.push(CExpr::Var(v));
-            actual_arg_count += 1;
-        }
-
-        // Pad args to match the handler's uniform arity (max params across all ops)
-        if let Some(effect_info) = self.effect_defs.get(&effect_name) {
-            let max_params = effect_info.ops.values().copied().max().unwrap_or(0);
-            for _ in actual_arg_count..max_params {
-                call_args.push(CExpr::Lit(CLit::Atom("undefined".to_string())));
-            }
         }
 
         // Append continuation
@@ -969,88 +961,53 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Build a handler function for a BEAM-native effect.
-    /// Synthesizes: `fun ('op', Arg0, ..., K) -> let R = mod:func(...) in K(R)`
-    /// for each operation in the effect.
-    fn build_beam_native_handler_fun(&mut self, effect_name: &str) -> CExpr {
-        let effect_info = self
-            .effect_defs
-            .get(effect_name)
-            .unwrap_or_else(|| panic!("unknown effect for BEAM-native handler: {}", effect_name));
-        let ops: Vec<(String, usize)> = effect_info
-            .ops
-            .iter()
-            .map(|(name, count)| (name.clone(), *count))
+    /// Build a per-op handler function for a single BEAM-native operation.
+    /// Synthesizes: `fun (Arg0, ..., ArgN, K) -> let R = mod:func(...) in K(R)`
+    fn build_beam_native_op_fun(&mut self, op_name: &str) -> CExpr {
+        let (module, func, param_count) = Self::beam_native_op_info(op_name)
+            .unwrap_or_else(|| panic!("unknown BEAM-native op: {}", op_name));
+
+        let k_var = self.fresh();
+        let param_vars: Vec<String> = (0..param_count)
+            .map(|i| format!("_HArg{}", i))
             .collect();
 
-        // Find max param count across all ops for uniform handler signature
-        let max_params = ops.iter().map(|(_, count)| *count).max().unwrap_or(0);
-
-        let op_var = "_Op".to_string();
-        let k_var = self.fresh();
-        let param_vars: Vec<String> = (0..max_params).map(|i| format!("_HArg{}", i)).collect();
-
-        let mut fun_params = vec![op_var.clone()];
-        fun_params.extend(param_vars.iter().cloned());
+        let mut fun_params: Vec<String> = param_vars.clone();
         fun_params.push(k_var.clone());
 
-        // Build case arms for each op
-        let case_arms: Vec<CArm> = ops
-            .iter()
-            .filter_map(|(op_name, _param_count)| {
-                let (module, func, _) = Self::beam_native_op_info(op_name)?;
+        // Build the BEAM call args from handler params
+        let call_args = match op_name {
+            "self" => vec![],
+            "monitor" => {
+                let mut a = vec![CExpr::Lit(CLit::Atom("process".into()))];
+                a.push(CExpr::Var(param_vars[0].clone()));
+                a
+            }
+            "send_after" => {
+                // reorder: pid, ms, msg -> ms, pid, msg
+                vec![
+                    CExpr::Var(param_vars[1].clone()),
+                    CExpr::Var(param_vars[0].clone()),
+                    CExpr::Var(param_vars[2].clone()),
+                ]
+            }
+            _ => param_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+        };
 
-                // Build the BEAM call args from handler params
-                let call_args = match op_name.as_str() {
-                    "self" => vec![], // no args
-                    "monitor" => {
-                        // prepend 'process' atom
-                        let mut a = vec![CExpr::Lit(CLit::Atom("process".into()))];
-                        a.push(CExpr::Var(param_vars[0].clone()));
-                        a
-                    }
-                    "send_after" => {
-                        // reorder: pid, ms, msg -> ms, pid, msg
-                        vec![
-                            CExpr::Var(param_vars[1].clone()), // ms
-                            CExpr::Var(param_vars[0].clone()), // pid
-                            CExpr::Var(param_vars[2].clone()), // msg
-                        ]
-                    }
-                    _ => {
-                        // use params in order
-                        let count = Self::beam_native_op_info(op_name)
-                            .map(|(_, _, c)| c)
-                            .unwrap_or(0);
-                        (0..count)
-                            .map(|i| CExpr::Var(param_vars[i].clone()))
-                            .collect()
-                    }
-                };
+        let call = CExpr::Call(module.to_string(), func.to_string(), call_args);
 
-                let call = CExpr::Call(module.to_string(), func.to_string(), call_args);
+        // let Result = call(...) in K(Result)
+        let result_var = self.fresh();
+        let body = CExpr::Let(
+            result_var.clone(),
+            Box::new(call),
+            Box::new(CExpr::Apply(
+                Box::new(CExpr::Var(k_var.clone())),
+                vec![CExpr::Var(result_var)],
+            )),
+        );
 
-                // let Result = call(...) in K(Result)
-                let result_var = self.fresh();
-                let body = CExpr::Let(
-                    result_var.clone(),
-                    Box::new(call),
-                    Box::new(CExpr::Apply(
-                        Box::new(CExpr::Var(k_var.clone())),
-                        vec![CExpr::Var(result_var)],
-                    )),
-                );
-
-                Some(CArm {
-                    pat: CPat::Lit(CLit::Atom(op_name.clone())),
-                    guard: None,
-                    body,
-                })
-            })
-            .collect();
-
-        let case_expr = CExpr::Case(Box::new(CExpr::Var(op_var)), case_arms);
-        CExpr::Fun(fun_params, Box::new(case_expr))
+        CExpr::Fun(fun_params, Box::new(body))
     }
 
     /// Lower a `with` expression: `expr with handler`.
@@ -1074,50 +1031,59 @@ impl<'a> Lowerer<'a> {
         // Resolve all handler arms, return clause, and which effects are handled
         let (all_arms, return_clause, handled_effects) = self.resolve_handler(handler);
 
-        // Build a handler function for each effect.
-        // Group arms by their effect.
-        let mut effect_arms: std::collections::HashMap<String, Vec<&HandlerArm>> =
+        // Index handler arms by op name for quick lookup
+        let mut arms_by_op: std::collections::HashMap<String, &HandlerArm> =
             std::collections::HashMap::new();
         for arm in &all_arms {
-            let eff = self
-                .op_to_effect
-                .get(&arm.op_name)
-                .unwrap_or_else(|| panic!("unknown effect op in handler: {}", arm.op_name))
-                .clone();
-            effect_arms.entry(eff).or_default().push(arm);
+            arms_by_op.insert(arm.op_name.clone(), arm);
         }
 
-        // For each handled effect, build a handler function and bind it.
-        // Two passes: first set up all handler param names (so handler arm bodies
-        // that use effects from sibling handlers can find them via closure capture),
+        // Collect all (effect, op) pairs for handled effects
+        let handler_ops = self.effect_handler_ops(&handled_effects);
+
+        // For each op, build a handler function and bind it.
+        // Two passes: first register all param names (so handler arm bodies
+        // can reference sibling handlers via closure capture),
         // then build the handler functions.
         let saved_handler_params = self.current_handler_params.clone();
 
-        // Pass 1: register all handler param variables
-        let mut handler_vars: Vec<(String, String)> = Vec::new(); // (effect_name, var_name)
-        for effect_name in &handled_effects {
-            let handler_var = format!("_Handle{}", effect_name);
+        // Pass 1: register all handler param variables (one per op)
+        let mut op_vars: Vec<(String, String, String)> = Vec::new(); // (effect, op, var_name)
+        for (eff, op) in &handler_ops {
+            let var_name = Self::handler_param_name(eff, op);
+            let key = format!("{}.{}", eff, op);
             self.current_handler_params
-                .insert(effect_name.clone(), handler_var.clone());
-            handler_vars.push((effect_name.clone(), handler_var));
+                .insert(key, var_name.clone());
+            op_vars.push((eff.clone(), op.clone(), var_name));
         }
 
         // Pass 2: build handler functions.
-        // BEAM-native handlers are emitted first since they're self-contained
+        // BEAM-native ops are emitted first since they're self-contained
         // (direct BEAM calls, no closures). CPS handlers may reference them
         // (e.g. async_handler's body calls spawn!/send!), so they must come after.
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
-        for (effect_name, handler_var) in &handler_vars {
-            if beam_native_effects.contains(effect_name) {
-                let handler_fun = self.build_beam_native_handler_fun(effect_name);
-                handler_bindings.push((handler_var.clone(), handler_fun));
+        for (eff, op, var_name) in &op_vars {
+            if beam_native_effects.contains(eff) {
+                let handler_fun = self.build_beam_native_op_fun(op);
+                handler_bindings.push((var_name.clone(), handler_fun));
             }
         }
-        for (effect_name, handler_var) in &handler_vars {
-            if !beam_native_effects.contains(effect_name) {
-                let arms = effect_arms.get(effect_name).cloned().unwrap_or_default();
-                let handler_fun = self.build_handler_fun(effect_name, &arms);
-                handler_bindings.push((handler_var.clone(), handler_fun));
+        for (eff, op, var_name) in &op_vars {
+            if !beam_native_effects.contains(eff) {
+                let handler_fun = if let Some(arm) = arms_by_op.get(op.as_str()) {
+                    self.build_op_handler_fun(arm)
+                } else {
+                    // No handler arm for this op -- passthrough (call K with unit)
+                    let k_param = self.fresh();
+                    CExpr::Fun(
+                        vec![k_param.clone()],
+                        Box::new(CExpr::Apply(
+                            Box::new(CExpr::Var(k_param)),
+                            vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
+                        )),
+                    )
+                };
+                handler_bindings.push((var_name.clone(), handler_fun));
             }
         }
 
@@ -1186,78 +1152,34 @@ impl<'a> Lowerer<'a> {
             })
     }
 
-    /// Build a handler function from a set of arms for a single effect.
+    /// Build a per-op handler function from a single handler arm.
     ///
-    /// Produces: `fun (Op, Arg1, ..., K) -> case Op of 'op1' -> ...; 'op2' -> ... end`
-    ///
-    /// The handler fun's param count is the max across all ops in the effect
-    /// (from effect_defs), not just the arms present. This ensures a uniform
-    /// calling convention: callers always pass max_params + K regardless of which
-    /// op they're invoking.
-    fn build_handler_fun(&mut self, effect_name: &str, arms: &[&HandlerArm]) -> CExpr {
-        // Max params from the effect definition (all ops), not just handler arms
-        let effect_max = self
-            .effect_defs
-            .get(effect_name)
-            .map(|info| info.ops.values().copied().max().unwrap_or(0))
-            .unwrap_or(0);
+    /// Produces: `fun (Arg0, ..., ArgN, K) -> body`
+    /// Each op gets its own function with natural arity.
+    fn build_op_handler_fun(&mut self, arm: &HandlerArm) -> CExpr {
+        let k_var = self.fresh();
+        let param_vars: Vec<String> = (0..arm.params.len())
+            .map(|i| format!("_HArg{}", i))
+            .collect();
 
-        if arms.is_empty() {
-            // Shouldn't happen, but degenerate case
-            let k_param = self.fresh();
-            let mut params = vec!["_Op".to_string()];
-            for i in 0..effect_max {
-                params.push(format!("_HArg{}", i));
-            }
-            params.push(k_param.clone());
-            return CExpr::Fun(
-                params,
-                Box::new(CExpr::Apply(
-                    Box::new(CExpr::Var(k_param)),
-                    vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
-                )),
+        let mut fun_params: Vec<String> = param_vars.clone();
+        fun_params.push(k_var.clone());
+
+        // Set up K for resume references in the body
+        let prev_handler_k = self.current_handler_k.replace(k_var);
+        let mut body_ce = self.lower_expr(&arm.body);
+
+        // Bind arm's named params to the positional handler args
+        for (i, param_name) in arm.params.iter().enumerate().rev() {
+            body_ce = CExpr::Let(
+                core_var(param_name),
+                Box::new(CExpr::Var(param_vars[i].clone())),
+                Box::new(body_ce),
             );
         }
 
-        // Use the effect-level max so the signature matches padded call sites
-        let arm_max = arms.iter().map(|a| a.params.len()).max().unwrap_or(0);
-        let max_params = arm_max.max(effect_max);
-
-        // Handler function params: Op, Param1, ..., ParamN, K
-        let op_var = "_Op".to_string();
-        let k_var = self.fresh();
-        let param_vars: Vec<String> = (0..max_params).map(|i| format!("_HArg{}", i)).collect();
-
-        let mut fun_params = vec![op_var.clone()];
-        fun_params.extend(param_vars.iter().cloned());
-        fun_params.push(k_var.clone());
-
-        // Build case arms on the op atom
-        let prev_handler_k = self.current_handler_k.replace(k_var);
-        let case_arms: Vec<CArm> = arms
-            .iter()
-            .map(|arm| {
-                // Bind arm params from handler arg vars
-                let mut body_ce = self.lower_expr(&arm.body);
-                // Bind arm's named params to the positional handler args
-                for (i, param_name) in arm.params.iter().enumerate().rev() {
-                    body_ce = CExpr::Let(
-                        core_var(param_name),
-                        Box::new(CExpr::Var(param_vars[i].clone())),
-                        Box::new(body_ce),
-                    );
-                }
-                CArm {
-                    pat: CPat::Lit(CLit::Atom(arm.op_name.clone())),
-                    guard: None,
-                    body: body_ce,
-                }
-            })
-            .collect();
-
         self.current_handler_k = prev_handler_k;
-        let case_expr = CExpr::Case(Box::new(CExpr::Var(op_var)), case_arms);
-        CExpr::Fun(fun_params, Box::new(case_expr))
+        CExpr::Fun(fun_params, Box::new(body_ce))
     }
 
     /// Resolve a Handler into a flat list of arms, optional return clause,
