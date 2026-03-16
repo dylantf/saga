@@ -167,6 +167,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Module-qualified dict names (`__dict_Show_Graphics_Color` not `__dict_Show_Color`)
 - [x] Entry point validation (`main` cannot have `needs`, effects handled via `with`)
 - [x] Opaque types (constructors visible inside defining module, hidden to importers)
+- [ ] Reserve the Std.\* namespace
 
 ### Data structures
 

@@ -1,4 +1,4 @@
-use dylang::{ast, codegen, derive, elaborate, lexer, parser, typechecker};
+use dylang::{ast, codegen, derive, elaborate, lexer, parser, token, typechecker};
 
 use std::env;
 use std::fs;
@@ -26,22 +26,22 @@ fn get_source_line(source: &str, line_num: usize) -> Option<&str> {
     source.lines().nth(line_num - 1)
 }
 
-/// Print a type error with source context and underline.
-fn print_type_error(source: &str, source_path: &str, e: &typechecker::TypeError) {
-    let (start_line, start_col) = if let Some(span) = e.span {
+/// Print a diagnostic (error or warning) with source context and underline.
+fn print_diagnostic(source: &str, source_path: &str, label: &str, span: Option<token::Span>, message: &str) {
+    let (start_line, start_col) = if let Some(span) = span {
         byte_offset_to_line_col(source, span.start)
     } else {
         (1, 1)
     };
-    let end_col = if let Some(span) = e.span {
+    let end_col = if let Some(span) = span {
         byte_offset_to_line_col(source, span.end).1
     } else {
         start_col + 1
     };
 
     eprintln!(
-        "Type error at {}:{}:{}: {}",
-        source_path, start_line, start_col, e
+        "{} at {}:{}:{}: {}",
+        label, source_path, start_line, start_col, message
     );
 
     if let Some(line_text) = get_source_line(source, start_line) {
@@ -59,6 +59,14 @@ fn print_type_error(source: &str, source_path: &str, e: &typechecker::TypeError)
             "^".repeat(underline_len)
         );
     }
+}
+
+fn print_type_error(source: &str, source_path: &str, e: &typechecker::TypeError) {
+    print_diagnostic(source, source_path, "Type error", e.span, &e.message);
+}
+
+fn print_warning(source: &str, source_path: &str, w: &typechecker::TypeWarning) {
+    print_diagnostic(source, source_path, "Warning", w.span, &w.message);
 }
 
 fn print_usage() {
@@ -107,6 +115,9 @@ fn parse_and_typecheck(
             print_type_error(source, source_path, e);
         }
         std::process::exit(1);
+    }
+    for w in &checker.warnings {
+        print_warning(source, source_path, w);
     }
     program
 }
@@ -317,6 +328,9 @@ fn build_project(profile: &str) -> PathBuf {
                 eprintln!("Type error in module {}: {}", module_name, e);
             }
             std::process::exit(1);
+        }
+        for w in &mod_checker.warnings {
+            eprintln!("Warning in module {}: {}", module_name, w);
         }
 
         elaborate_and_emit(

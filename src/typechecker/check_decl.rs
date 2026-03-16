@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::ast::{self, Decl};
 
-use super::{Checker, EffectDefInfo, EffectOpSig, HandlerInfo, Scheme, Type, TypeError};
+use super::{Checker, EffectDefInfo, EffectOpSig, HandlerInfo, Scheme, Type, TypeError, TypeWarning};
 
 impl Checker {
     // --- Top-level declarations ---
@@ -553,6 +553,26 @@ impl Checker {
                         ),
                     ));
                 }
+            }
+
+            // Check for effects declared but never used
+            let unused: Vec<_> = declared_effects.difference(&body_effects).collect();
+            if !unused.is_empty() {
+                let span = match clauses[0] {
+                    Decl::FunBinding { span, .. } => *span,
+                    _ => unreachable!(),
+                };
+                let mut effects: Vec<_> = unused.into_iter().cloned().collect();
+                effects.sort();
+                self.warnings.push(TypeWarning::at(
+                    span,
+                    format!(
+                        "function '{}' declares needs {{{}}} but never uses {}",
+                        name,
+                        effects.join(", "),
+                        if effects.len() == 1 { "it" } else { "them" },
+                    ),
+                ));
             }
         }
 

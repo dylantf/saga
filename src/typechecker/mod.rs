@@ -553,6 +553,29 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
     }
 }
 
+// --- Warnings ---
+
+#[derive(Debug, Clone)]
+pub struct TypeWarning {
+    pub message: std::string::String,
+    pub span: Option<Span>,
+}
+
+impl TypeWarning {
+    pub(crate) fn at(span: Span, message: impl Into<std::string::String>) -> Self {
+        TypeWarning {
+            message: message.into(),
+            span: Some(span),
+        }
+    }
+}
+
+impl std::fmt::Display for TypeWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
 // --- Errors ---
 
 #[derive(Debug, Clone)]
@@ -707,6 +730,8 @@ pub struct Checker {
     pub evidence: Vec<TraitEvidence>,
     /// Errors collected during block inference (for multi-error reporting).
     pub(crate) collected_errors: Vec<TypeError>,
+    /// Warnings collected during type checking.
+    pub warnings: Vec<TypeWarning>,
 }
 
 impl Default for Checker {
@@ -746,6 +771,7 @@ impl Checker {
             adt_variants: HashMap::new(),
             evidence: Vec::new(),
             collected_errors: Vec::new(),
+            warnings: Vec::new(),
         };
         checker.register_builtins();
         checker

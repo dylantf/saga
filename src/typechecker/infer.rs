@@ -788,7 +788,24 @@ impl Checker {
                 }
                 Stmt::Expr(expr) => {
                     match self.infer_expr(expr) {
-                        Ok(ty) => last_ty = ty,
+                        Ok(ty) => {
+                            // Warn if a non-unit value is discarded (not last statement)
+                            if i + 1 < stmts.len() {
+                                let resolved = self.sub.apply(&ty);
+                                let is_unit = matches!(&resolved, Type::Con(n, args) if n == "Unit" && args.is_empty());
+                                if !is_unit && !matches!(resolved, Type::Error) {
+                                    let display_ty = self.prettify_type(&ty);
+                                    self.warnings.push(super::TypeWarning::at(
+                                        expr.span(),
+                                        format!(
+                                            "value of type `{}` is discarded; use `let _ = ...` to suppress",
+                                            display_ty,
+                                        ),
+                                    ));
+                                }
+                            }
+                            last_ty = ty;
+                        }
                         Err(e) => {
                             errors.push(e);
                             last_ty = Type::Error;
