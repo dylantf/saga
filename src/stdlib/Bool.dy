@@ -1,4 +1,4 @@
-module Bool
+module Std.Bool
 
 
 pub fun not (x: Bool) -> Bool

@@ -1,4 +1,4 @@
-module Supervisor
+module Std.Supervisor
 
 import Std.Fail
 import Std.Result (Result, Ok, Err)

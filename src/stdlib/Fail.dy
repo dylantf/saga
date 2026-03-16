@@ -1,4 +1,4 @@
-module Fail
+module Std.Fail
 
 pub effect Fail e {
   fun fail (e: e) -> a

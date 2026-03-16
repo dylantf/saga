@@ -1,4 +1,4 @@
-module Float
+module Std.Float
 
 
 @external("erlang", "erlang", "float_to_list")

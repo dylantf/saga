@@ -1,4 +1,4 @@
-module Maybe
+module Std.Maybe
 
 
 pub type Maybe a {

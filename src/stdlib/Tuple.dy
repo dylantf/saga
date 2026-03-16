@@ -1,4 +1,4 @@
-module Tuple
+module Std.Tuple
 
 pub fun fst (t: (a, b)) -> a
 fst (x, _) = x

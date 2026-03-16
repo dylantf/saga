@@ -1,4 +1,4 @@
-module Dict
+module Std.Dict
 
 import Std.List as List
 

@@ -1,5 +1,5 @@
-import Actor
-import Async
+import Std.Actor
+import Std.Async
 
 fun run () -> List Int needs {Async}
 run () = {

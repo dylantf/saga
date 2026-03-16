@@ -1,4 +1,4 @@
-module Regex
+module Std.Regex
 
 import Std.Maybe as Maybe (Maybe)
 

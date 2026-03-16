@@ -1,4 +1,4 @@
-module String
+module Std.String
 
 import Std.Maybe as Maybe (Maybe)
 

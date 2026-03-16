@@ -1,4 +1,4 @@
-module Int
+module Std.Int
 
 
 pub @external("erlang", "erlang", "float")
