@@ -1,4 +1,4 @@
-use dylang::{ast, codegen, derive, elaborate, eval, lexer, parser, typechecker};
+use dylang::{ast, codegen, derive, elaborate, lexer, parser, typechecker};
 
 use std::env;
 use std::fs;
@@ -471,27 +471,6 @@ fn cmd_check(file: Option<&str>) {
     }
 }
 
-fn cmd_eval(file: &str) {
-    let source = fs::read_to_string(file).unwrap_or_else(|e| {
-        eprintln!("Error reading {}: {}", file, e);
-        std::process::exit(1);
-    });
-    let mut checker = make_checker(None);
-    let program = parse_and_typecheck(&source, file, &mut checker);
-    let loader = eval::ModuleLoader::script();
-    match eval::eval_program(&program, &loader) {
-        eval::EvalResult::Ok(_) => {}
-        eval::EvalResult::Error(err) => {
-            eprintln!("Runtime error: {}", err.message);
-            std::process::exit(1);
-        }
-        eval::EvalResult::Effect { name, .. } => {
-            eprintln!("Unhandled effect: {}", name);
-            std::process::exit(1);
-        }
-    }
-}
-
 fn cmd_emit(file: &str) {
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Error reading {}: {}", file, e);
@@ -526,13 +505,6 @@ fn main() {
         Some("run") => cmd_run(&args[2..]),
         Some("build") => cmd_build(&args[2..]),
         Some("check") => cmd_check(args.get(2).map(|s| s.as_str())),
-        Some("eval") => match args.get(2).map(|s| s.as_str()) {
-            Some(file) => cmd_eval(file),
-            None => {
-                eprintln!("Usage: dylang eval <file.dy>");
-                std::process::exit(1);
-            }
-        },
         Some("emit") => match args.get(2).map(|s| s.as_str()) {
             Some(file) => cmd_emit(file),
             None => {
