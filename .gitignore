@@ -1,3 +1,4 @@
 /target
 _build/
 erl_crash.dump
+editors/vscode/node_modules

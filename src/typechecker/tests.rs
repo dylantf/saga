@@ -16,8 +16,8 @@ fn check(src: &str) -> Result<Checker, TypeError> {
         .parse_program()
         .expect("prelude parse error");
     crate::derive::expand_derives(&mut prelude_program);
-    checker.check_program(&prelude_program)?;
-    checker.check_program(&program)?;
+    checker.check_program(&prelude_program).map_err(|e| e.into_iter().next().unwrap())?;
+    checker.check_program(&program).map_err(|e| e.into_iter().next().unwrap())?;
     Ok(checker)
 }
 
@@ -2913,4 +2913,44 @@ handle_msg () = receive {
 "#,
     )
     .unwrap();
+}
+
+#[test]
+fn error_messages_show_resolved_types() {
+    // Type mismatch should show concrete type names, not ?-variables
+    let err = check("fun f (x: Int) -> String\nf x = x").err().expect("expected type error");
+    assert!(
+        err.message.contains("Int") && err.message.contains("String"),
+        "error should show concrete types, got: {}",
+        err.message
+    );
+    assert!(
+        !err.message.contains('?'),
+        "error should not contain ?-variables, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn error_messages_show_resolved_types_with_constructors() {
+    // Passing wrong type to a function should show the actual types
+    let err = check(
+        r#"
+fun add (a: Int) (b: Int) -> Int
+add a b = a + b
+
+main () = add "hello" 1
+"#,
+    )
+    .err().expect("expected type error");
+    assert!(
+        err.message.contains("String") || err.message.contains("Int"),
+        "error should show concrete types, got: {}",
+        err.message
+    );
+    assert!(
+        !err.message.contains('?'),
+        "error should not contain ?-variables, got: {}",
+        err.message
+    );
 }

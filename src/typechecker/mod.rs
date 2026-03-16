@@ -1,6 +1,6 @@
 mod check_decl;
 mod check_module;
-pub use check_module::{builtin_module_source, scan_project_modules, ModuleMap};
+pub use check_module::{ModuleMap, builtin_module_source, scan_project_modules};
 mod check_traits;
 pub(crate) mod exhaustiveness;
 mod infer;
@@ -52,6 +52,8 @@ pub enum Type {
     EffArrow(Box<Type>, Box<Type>, Vec<(String, Vec<Type>)>),
     /// Named type constructor with args: Int = Con("Int", []), List a = Con("List", [a])
     Con(std::string::String, Vec<Type>),
+    /// Error recovery type: unifies with everything, suppresses cascading errors.
+    Error,
 }
 
 /// Convenience constructors for built-in types
@@ -95,6 +97,7 @@ impl std::fmt::Display for Type {
                     Ok(())
                 }
             }
+            Type::Error => write!(f, "<error>"),
         }
     }
 }
@@ -135,6 +138,7 @@ impl Substitution {
             Type::Con(name, args) => {
                 Type::Con(name.clone(), args.iter().map(|a| self.apply(a)).collect())
             }
+            Type::Error => Type::Error,
         }
     }
 
@@ -178,6 +182,7 @@ impl Substitution {
                         .any(|(_, args)| args.iter().any(|t| self.occurs(id, t)))
             }
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
+            Type::Error => false,
         }
     }
 }
@@ -192,6 +197,91 @@ pub struct Scheme {
     /// Trait constraints: (trait_name, type_var_id)
     pub constraints: Vec<(String, u32)>,
     pub ty: Type,
+}
+
+impl Scheme {
+    /// Map forall var IDs to readable names (a, b, c, ...)
+    fn var_names(&self) -> HashMap<u32, String> {
+        self.forall
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| {
+                let name = ((b'a' + i as u8) as char).to_string();
+                (id, name)
+            })
+            .collect()
+    }
+
+    /// Return the type with forall variables replaced by readable names (a, b, c, ...).
+    /// Apply a substitution first to resolve any solved variables.
+    pub fn display_type(&self, sub: &Substitution) -> Type {
+        let resolved = sub.apply(&self.ty);
+        if self.forall.is_empty() {
+            return resolved;
+        }
+        rename_vars(&resolved, &self.var_names())
+    }
+
+    /// Format the type with constraints as a string, e.g. "a -> Unit where {a: Show}"
+    pub fn display_with_constraints(&self, sub: &Substitution) -> String {
+        let ty = self.display_type(sub);
+        if self.constraints.is_empty() {
+            return format!("{}", ty);
+        }
+        let names = self.var_names();
+        // Group constraints by type variable
+        let mut bounds: HashMap<String, Vec<String>> = HashMap::new();
+        for (trait_name, var_id) in &self.constraints {
+            let var_name = names
+                .get(var_id)
+                .cloned()
+                .unwrap_or_else(|| format!("?{}", var_id));
+            bounds
+                .entry(var_name)
+                .or_default()
+                .push(trait_name.clone());
+        }
+        let mut parts: Vec<String> = bounds
+            .iter()
+            .map(|(var, traits)| format!("{}: {}", var, traits.join(" + ")))
+            .collect();
+        parts.sort();
+        format!("{} where {{{}}}", ty, parts.join(", "))
+    }
+}
+
+/// Replace `Type::Var(id)` with `Type::Con(name, [])` for display purposes.
+fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
+    match ty {
+        Type::Var(id) => {
+            if let Some(name) = names.get(id) {
+                Type::Con(name.clone(), vec![])
+            } else {
+                ty.clone()
+            }
+        }
+        Type::Arrow(a, b) => Type::Arrow(
+            Box::new(rename_vars(a, names)),
+            Box::new(rename_vars(b, names)),
+        ),
+        Type::EffArrow(a, b, effs) => Type::EffArrow(
+            Box::new(rename_vars(a, names)),
+            Box::new(rename_vars(b, names)),
+            effs.iter()
+                .map(|(name, args)| {
+                    (
+                        name.clone(),
+                        args.iter().map(|t| rename_vars(t, names)).collect(),
+                    )
+                })
+                .collect(),
+        ),
+        Type::Con(name, args) => Type::Con(
+            name.clone(),
+            args.iter().map(|a| rename_vars(a, names)).collect(),
+        ),
+        Type::Error => Type::Error,
+    }
 }
 
 // --- Module exports ---
@@ -459,6 +549,7 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                 free_vars_in_type(arg, bound, out);
             }
         }
+        Type::Error => {}
     }
 }
 
@@ -564,7 +655,7 @@ pub struct Checker {
     pub sub: Substitution,
     pub env: TypeEnv,
     /// Constructor types from type definitions: name -> (arity, type scheme)
-    pub(crate) constructors: HashMap<std::string::String, Scheme>,
+    pub constructors: HashMap<std::string::String, Scheme>,
     /// Record definitions: record name -> vec of (field_name, field_type)
     pub(crate) records: HashMap<std::string::String, Vec<(std::string::String, Type)>>,
     /// Effect definitions: effect name -> definition info (type params + operations)
@@ -614,6 +705,8 @@ pub struct Checker {
     pub(crate) adt_variants: HashMap<std::string::String, Vec<(std::string::String, usize)>>,
     /// Evidence collected during constraint solving for the elaboration pass.
     pub evidence: Vec<TraitEvidence>,
+    /// Errors collected during block inference (for multi-error reporting).
+    pub(crate) collected_errors: Vec<TypeError>,
 }
 
 impl Default for Checker {
@@ -652,6 +745,7 @@ impl Checker {
             tc_loading: HashSet::new(),
             adt_variants: HashMap::new(),
             evidence: Vec::new(),
+            collected_errors: Vec::new(),
         };
         checker.register_builtins();
         checker
@@ -661,6 +755,46 @@ impl Checker {
         let mut checker = Self::new();
         checker.project_root = Some(root);
         checker
+    }
+
+    /// Create a checker with the prelude loaded and (optionally) a project
+    /// root with its module map. This is the standard entry point for both
+    /// the CLI and the LSP.
+    pub fn with_prelude(
+        project_root: Option<std::path::PathBuf>,
+    ) -> std::result::Result<Self, TypeError> {
+        let mut checker = match &project_root {
+            Some(root) => Self::with_project_root(root.clone()),
+            None => Self::new(),
+        };
+
+        if let Some(root) = &project_root
+            && let Ok(module_map) = check_module::scan_project_modules(root)
+        {
+            checker.set_module_map(module_map);
+        }
+
+        let prelude_src = include_str!("../stdlib/prelude.dy");
+        let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
+            .lex()
+            .expect("prelude lex");
+        let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
+            .parse_program()
+            .expect("prelude parse");
+        crate::derive::expand_derives(&mut prelude_program);
+        checker
+            .check_program(&prelude_program)
+            .map_err(|errs| errs.into_iter().next().unwrap())?;
+        checker.tc_prelude_snapshot = Some(Box::new(checker.clone()));
+        Ok(checker)
+    }
+
+    pub fn effect_names(&self) -> Vec<String> {
+        self.effects.keys().cloned().collect()
+    }
+
+    pub fn handler_names(&self) -> Vec<String> {
+        self.handlers.keys().cloned().collect()
     }
 
     pub fn set_module_map(&mut self, map: check_module::ModuleMap) {
@@ -926,13 +1060,6 @@ impl Checker {
                 ),
             },
         );
-
-        // --- Pid type and Actor effect ---
-
-        // --- Pid type and concurrency effects ---
-
-        // Pid msg: parameterized type, compile-time only. No constructors.
-        // Process, Actor, beam_actor are in Std.Actor (import Std.Actor to use).
     }
 
     // --- Unification ---
@@ -943,6 +1070,9 @@ impl Checker {
 
         match (&a, &b) {
             _ if a == b => Ok(()),
+
+            // Error type unifies with anything (suppresses cascading errors)
+            (Type::Error, _) | (_, Type::Error) => Ok(()),
 
             (Type::Var(id), _) => self.sub.bind(*id, &b),
             (_, Type::Var(id)) => self.sub.bind(*id, &a),
@@ -976,11 +1106,35 @@ impl Checker {
                 Ok(())
             }
 
-            _ => Err(TypeError::new(format!(
-                "type mismatch: expected {}, got {}",
-                a, b
-            ))),
+            _ => {
+                let a_display = self.prettify_type(&a);
+                let b_display = self.prettify_type(&b);
+                Err(TypeError::new(format!(
+                    "type mismatch: expected {}, got {}",
+                    a_display, b_display
+                )))
+            }
         }
+    }
+
+    /// Format a type for error messages: apply substitutions, then replace
+    /// any remaining unresolved type variables with readable names (a, b, c, ...).
+    fn prettify_type(&self, ty: &Type) -> Type {
+        let resolved = self.sub.apply(ty);
+        let mut vars = Vec::new();
+        collect_free_vars(&resolved, &mut vars);
+        if vars.is_empty() {
+            return resolved;
+        }
+        let names: HashMap<u32, String> = vars
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| {
+                let name = ((b'a' + i as u8) as char).to_string();
+                (id, name)
+            })
+            .collect();
+        rename_vars(&resolved, &names)
     }
 
     /// Unify with span context: if unification fails, attach the span to the error.
@@ -1033,6 +1187,7 @@ impl Checker {
                 name.clone(),
                 args.iter().map(|a| self.replace_vars(a, mapping)).collect(),
             ),
+            Type::Error => Type::Error,
         }
     }
 
@@ -1149,5 +1304,6 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
                 collect_free_vars(arg, out);
             }
         }
+        Type::Error => {}
     }
 }

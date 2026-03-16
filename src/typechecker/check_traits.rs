@@ -45,6 +45,7 @@ impl Checker {
                     .map(|a| self.substitute_trait_param(replacement, a))
                     .collect(),
             ),
+            Type::Error => Type::Error,
         }
     }
 

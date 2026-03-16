@@ -21,6 +21,46 @@ fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
+/// Get the source line at a 1-based line number.
+fn get_source_line(source: &str, line_num: usize) -> Option<&str> {
+    source.lines().nth(line_num - 1)
+}
+
+/// Print a type error with source context and underline.
+fn print_type_error(source: &str, source_path: &str, e: &typechecker::TypeError) {
+    let (start_line, start_col) = if let Some(span) = e.span {
+        byte_offset_to_line_col(source, span.start)
+    } else {
+        (1, 1)
+    };
+    let end_col = if let Some(span) = e.span {
+        byte_offset_to_line_col(source, span.end).1
+    } else {
+        start_col + 1
+    };
+
+    eprintln!(
+        "Type error at {}:{}:{}: {}",
+        source_path, start_line, start_col, e
+    );
+
+    if let Some(line_text) = get_source_line(source, start_line) {
+        let line_num_width = start_line.to_string().len();
+        eprintln!("  {} | {}", start_line, line_text);
+        let underline_len = if end_col > start_col {
+            end_col - start_col
+        } else {
+            1
+        };
+        eprintln!(
+            "  {} | {}{}",
+            " ".repeat(line_num_width),
+            " ".repeat(start_col - 1),
+            "^".repeat(underline_len)
+        );
+    }
+}
+
 fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  dylang run              Build and run project (requires project.toml)");
@@ -62,12 +102,9 @@ fn parse_and_typecheck(
         }
     };
     derive::expand_derives(&mut program);
-    if let Err(e) = checker.check_program(&program) {
-        if let Some(span) = e.span {
-            let (line, col) = byte_offset_to_line_col(source, span.start);
-            eprintln!("Type error at {}:{}:{}: {}", source_path, line, col, e);
-        } else {
-            eprintln!("Type error: {}", e);
+    if let Err(errors) = checker.check_program(&program) {
+        for e in &errors {
+            print_type_error(source, source_path, e);
         }
         std::process::exit(1);
     }
@@ -75,24 +112,10 @@ fn parse_and_typecheck(
 }
 
 fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
-    let mut checker = match project_root {
-        Some(root) => typechecker::Checker::with_project_root(root),
-        None => typechecker::Checker::new(),
-    };
-    let prelude_src = include_str!("stdlib/prelude.dy");
-    let prelude_tokens = lexer::Lexer::new(prelude_src)
-        .lex()
-        .expect("prelude lex error");
-    let mut prelude_program = parser::Parser::new(prelude_tokens)
-        .parse_program()
-        .expect("prelude parse error");
-    derive::expand_derives(&mut prelude_program);
-    if let Err(e) = checker.check_program(&prelude_program) {
+    typechecker::Checker::with_prelude(project_root).unwrap_or_else(|e| {
         eprintln!("Prelude type error: {}", e);
         std::process::exit(1);
-    }
-    checker.tc_prelude_snapshot = Some(Box::new(checker.clone()));
-    checker
+    })
 }
 
 /// Compile all Std.* modules referenced in codegen_info into the build directory.
@@ -149,8 +172,10 @@ fn compile_std_modules(checker: &mut typechecker::Checker, build_dir: &std::path
         derive::expand_derives(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(None, true);
-        if let Err(e) = mod_checker.check_program(&program) {
-            eprintln!("Std module {} type error: {}", module_name, e);
+        if let Err(errors) = mod_checker.check_program(&program) {
+            for e in &errors {
+                eprintln!("Std module {} type error: {}", module_name, e);
+            }
             std::process::exit(1);
         }
 
@@ -230,11 +255,6 @@ fn build_project(profile: &str) -> PathBuf {
         std::process::exit(1);
     });
 
-    let module_map = typechecker::scan_project_modules(&project_root).unwrap_or_else(|e| {
-        eprintln!("Error scanning modules: {}", e);
-        std::process::exit(1);
-    });
-
     let main_path = project_root.join("Main.dy");
     let main_source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
         eprintln!("Error reading Main.dy: {}", e);
@@ -242,7 +262,6 @@ fn build_project(profile: &str) -> PathBuf {
     });
 
     let mut checker = make_checker(Some(project_root.clone()));
-    checker.set_module_map(module_map);
     let main_program = parse_and_typecheck(&main_source, "Main.dy", &mut checker);
 
     let build_dir = project_root.join("_build").join(profile);
@@ -293,8 +312,10 @@ fn build_project(profile: &str) -> PathBuf {
         derive::expand_derives(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
-        if let Err(e) = mod_checker.check_program(&program) {
-            eprintln!("Type error in module {}: {}", module_name, e);
+        if let Err(errors) = mod_checker.check_program(&program) {
+            for e in &errors {
+                eprintln!("Type error in module {}: {}", module_name, e);
+            }
             std::process::exit(1);
         }
 
@@ -438,18 +459,12 @@ fn cmd_check(file: Option<&str>) {
                 eprintln!("No project.toml found. Run with a filename to check a single file.");
                 std::process::exit(1);
             });
-            let module_map =
-                typechecker::scan_project_modules(&project_root).unwrap_or_else(|e| {
-                    eprintln!("Error scanning modules: {}", e);
-                    std::process::exit(1);
-                });
             let main_path = project_root.join("Main.dy");
             let source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
                 eprintln!("Error reading Main.dy: {}", e);
                 std::process::exit(1);
             });
             let mut checker = make_checker(Some(project_root));
-            checker.set_module_map(module_map);
             parse_and_typecheck(&source, "Main.dy", &mut checker);
             eprintln!("OK");
         }
