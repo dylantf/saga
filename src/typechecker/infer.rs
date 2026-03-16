@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::ast::{self, BinOp, Expr, Lit, Pat, Stmt};
+use crate::ast::{self, BinOp, CaseArm, Expr, Lit, Pat, Stmt};
 
 use super::{Checker, EffectOpSig, Scheme, Type, TypeError};
 use crate::token::Span;
@@ -250,14 +250,7 @@ impl Checker {
                     self.bind_pattern(&arm.pattern, &scrut_ty)?;
 
                     if let Some(guard) = &arm.guard {
-                        if let Some(span) = super::find_effect_call(guard) {
-                            return Err(TypeError::at(
-                                span,
-                                "Effect calls are not allowed in guard expressions".to_string(),
-                            ));
-                        }
-                        let guard_ty = self.infer_expr(guard)?;
-                        self.unify_at(&guard_ty, &Type::bool(), guard.span())?;
+                        self.check_guard(guard)?;
                     }
 
                     let body_ty = self.infer_expr(&arm.body)?;
@@ -555,117 +548,109 @@ impl Checker {
                 arms,
                 after_clause,
                 span,
-            } => {
-                // Look up Actor effect's message type from the effect type param cache
-                let msg_ty = if let Some(cache) = self.effect_type_param_cache.get("Actor") {
-                    if let Some(info) = self.effects.get("Actor") {
-                        if let Some(&param_id) = info.type_params.first() {
-                            cache
-                                .get(&param_id)
-                                .cloned()
-                                .unwrap_or_else(|| self.fresh_var())
-                        } else {
-                            return Err(TypeError::at(
-                                *span,
-                                "Actor effect has no type parameter".to_string(),
-                            ));
-                        }
-                    } else {
-                        return Err(TypeError::at(
-                            *span,
-                            "receive requires the Actor effect (declare `needs {Actor MsgType}`)"
-                                .to_string(),
-                        ));
-                    }
-                } else {
-                    return Err(TypeError::at(
-                        *span,
-                        "receive requires the Actor effect (declare `needs {Actor MsgType}`)"
-                            .to_string(),
-                    ));
-                };
-
-                let result_ty = self.fresh_var();
-
-                for arm in arms {
-                    let saved_env = self.env.clone();
-                    // System message patterns (Down, Exit) are not part of the user's message type
-                    if let Pat::Constructor {
-                        name,
-                        args,
-                        span: pat_span,
-                    } = &arm.pattern
-                        && matches!(name.as_str(), "Down" | "Exit")
-                    {
-                        if args.len() != 2 {
-                            return Err(TypeError::at(
-                                *pat_span,
-                                format!(
-                                    "{} pattern requires exactly 2 arguments: {}(pid, reason)",
-                                    name, name
-                                ),
-                            ));
-                        }
-                        // pid: Pid a (fresh type var -- could be any process)
-                        let msg_var = self.fresh_var();
-                        let pid_ty = Type::Con("Pid".into(), vec![msg_var]);
-                        self.bind_pattern(&args[0], &pid_ty)?;
-                        // reason: ExitReason
-                        self.bind_pattern(&args[1], &Type::Con("ExitReason".into(), vec![]))?;
-
-                        if let Some(guard) = &arm.guard {
-                            if let Some(span) = super::find_effect_call(guard) {
-                                return Err(TypeError::at(
-                                    span,
-                                    "Effect calls are not allowed in guard expressions".to_string(),
-                                ));
-                            }
-                            let guard_ty = self.infer_expr(guard)?;
-                            self.unify_at(&guard_ty, &Type::bool(), guard.span())?;
-                        }
-
-                        let body_ty = self.infer_expr(&arm.body)?;
-                        self.unify_at(&result_ty, &body_ty, arm.body.span())?;
-                        self.env = saved_env;
-                        continue;
-                    }
-                    self.bind_pattern(&arm.pattern, &msg_ty)?;
-
-                    if let Some(guard) = &arm.guard {
-                        if let Some(span) = super::find_effect_call(guard) {
-                            return Err(TypeError::at(
-                                span,
-                                "Effect calls are not allowed in guard expressions".to_string(),
-                            ));
-                        }
-                        let guard_ty = self.infer_expr(guard)?;
-                        self.unify_at(&guard_ty, &Type::bool(), guard.span())?;
-                    }
-
-                    let body_ty = self.infer_expr(&arm.body)?;
-                    self.unify_at(&result_ty, &body_ty, arm.body.span())?;
-
-                    self.env = saved_env;
-                }
-
-                if let Some((timeout, body)) = after_clause {
-                    let timeout_ty = self.infer_expr(timeout)?;
-                    self.unify_at(&timeout_ty, &Type::int(), timeout.span())?;
-                    let body_ty = self.infer_expr(body)?;
-                    self.unify_at(&result_ty, &body_ty, body.span())?;
-                }
-
-                // receive implies Actor effect usage
-                self.current_effects.insert("Actor".to_string());
-
-                // No exhaustiveness checking -- mailbox is open
-                Ok(result_ty)
-            }
+            } => self.infer_receive(
+                arms,
+                after_clause
+                    .as_ref()
+                    .map(|(t, b)| (t.as_ref(), b.as_ref())),
+                *span,
+            ),
 
             Expr::DictMethodAccess { .. } | Expr::DictRef { .. } | Expr::ForeignCall { .. } => {
                 unreachable!("elaboration-only construct in typechecker")
             }
         }
+    }
+
+    /// Check that a guard expression is a pure Bool.
+    fn check_guard(&mut self, guard: &Expr) -> Result<(), TypeError> {
+        if let Some(span) = super::find_effect_call(guard) {
+            return Err(TypeError::at(
+                span,
+                "Effect calls are not allowed in guard expressions".to_string(),
+            ));
+        }
+        let guard_ty = self.infer_expr(guard)?;
+        self.unify_at(&guard_ty, &Type::bool(), guard.span())
+    }
+
+    fn infer_receive(
+        &mut self,
+        arms: &[CaseArm],
+        after_clause: Option<(&Expr, &Expr)>,
+        span: Span,
+    ) -> Result<Type, TypeError> {
+        // Look up Actor effect's message type from the effect type param cache
+        let msg_ty = match (
+            self.effect_type_param_cache.get("Actor"),
+            self.effects.get("Actor"),
+        ) {
+            (Some(cache), Some(info)) => {
+                let param_id = info.type_params.first().ok_or_else(|| {
+                    TypeError::at(span, "Actor effect has no type parameter".to_string())
+                })?;
+                cache
+                    .get(param_id)
+                    .cloned()
+                    .unwrap_or_else(|| self.fresh_var())
+            }
+            _ => {
+                return Err(TypeError::at(
+                    span,
+                    "receive requires the Actor effect (declare `needs {Actor MsgType}`)"
+                        .to_string(),
+                ));
+            }
+        };
+
+        let result_ty = self.fresh_var();
+
+        for arm in arms {
+            let saved_env = self.env.clone();
+
+            // System message patterns (Down, Exit) are not part of the user's message type
+            if let Pat::Constructor {
+                name,
+                args,
+                span: pat_span,
+            } = &arm.pattern
+                && matches!(name.as_str(), "Down" | "Exit")
+            {
+                if args.len() != 2 {
+                    return Err(TypeError::at(
+                        *pat_span,
+                        format!(
+                            "{} pattern requires exactly 2 arguments: {}(pid, reason)",
+                            name, name
+                        ),
+                    ));
+                }
+                let msg_var = self.fresh_var();
+                let pid_ty = Type::Con("Pid".into(), vec![msg_var]);
+                self.bind_pattern(&args[0], &pid_ty)?;
+                self.bind_pattern(&args[1], &Type::Con("ExitReason".into(), vec![]))?;
+            } else {
+                self.bind_pattern(&arm.pattern, &msg_ty)?;
+            }
+
+            if let Some(guard) = &arm.guard {
+                self.check_guard(guard)?;
+            }
+
+            let body_ty = self.infer_expr(&arm.body)?;
+            self.unify_at(&result_ty, &body_ty, arm.body.span())?;
+            self.env = saved_env;
+        }
+
+        if let Some((timeout, body)) = after_clause {
+            let timeout_ty = self.infer_expr(timeout)?;
+            self.unify_at(&timeout_ty, &Type::int(), timeout.span())?;
+            let body_ty = self.infer_expr(body)?;
+            self.unify_at(&result_ty, &body_ty, body.span())?;
+        }
+
+        self.current_effects.insert("Actor".to_string());
+        Ok(result_ty)
     }
 
     pub(crate) fn infer_block(&mut self, stmts: &[Stmt]) -> Result<Type, TypeError> {
