@@ -21,6 +21,9 @@ struct HandlerInfo {
     effects: Vec<String>,
     arms: Vec<HandlerArm>,
     return_clause: Option<Box<HandlerArm>>,
+    /// The module this handler was defined in (e.g. "Std.Actor").
+    /// Used to identify BEAM-native handlers that need special lowering.
+    source_module: Option<String>,
 }
 
 /// Stored effect definition: maps op_name -> number of parameters.
@@ -94,7 +97,7 @@ pub struct Lowerer<'a> {
 
 impl<'a> Lowerer<'a> {
     pub fn new(codegen_info: &'a HashMap<String, ModuleCodegenInfo>) -> Self {
-        let mut lowerer = Lowerer {
+        Lowerer {
             counter: 0,
             codegen_info,
             module_aliases: HashMap::new(),
@@ -112,87 +115,63 @@ impl<'a> Lowerer<'a> {
             constructor_modules: HashMap::new(),
             current_handler_k: None,
             external_funs: HashMap::new(),
-        };
-        // Register builtin Actor effect ops
-        // Register builtin concurrency effects
-        lowerer.op_to_effect.insert("spawn".into(), "Process".into());
-        lowerer.op_to_effect.insert("send".into(), "Process".into());
-        lowerer.op_to_effect.insert("self".into(), "Actor".into());
-        lowerer.effect_defs.insert(
-            "Process".into(),
-            EffectInfo {
-                ops: {
-                    let mut ops = HashMap::new();
-                    ops.insert("spawn".into(), 1);
-                    ops.insert("send".into(), 2);
-                    ops
-                },
-            },
-        );
-        lowerer.effect_defs.insert(
-            "Actor".into(),
-            EffectInfo {
-                ops: {
-                    let mut ops = HashMap::new();
-                    ops.insert("self".into(), 0);
-                    ops
-                },
-            },
-        );
-        lowerer.op_to_effect.insert("monitor".into(), "Monitor".into());
-        lowerer
-            .op_to_effect
-            .insert("demonitor".into(), "Monitor".into());
-        lowerer.effect_defs.insert(
-            "Monitor".into(),
-            EffectInfo {
-                ops: {
-                    let mut ops = HashMap::new();
-                    ops.insert("monitor".into(), 1);
-                    ops.insert("demonitor".into(), 1);
-                    ops
-                },
-            },
-        );
-        lowerer.op_to_effect.insert("link".into(), "Link".into());
-        lowerer.op_to_effect.insert("unlink".into(), "Link".into());
-        lowerer.effect_defs.insert(
-            "Link".into(),
-            EffectInfo {
-                ops: {
-                    let mut ops = HashMap::new();
-                    ops.insert("link".into(), 1);
-                    ops.insert("unlink".into(), 1);
-                    ops
-                },
-            },
-        );
-        lowerer.op_to_effect.insert("sleep".into(), "Timer".into());
-        lowerer
-            .op_to_effect
-            .insert("send_after".into(), "Timer".into());
-        lowerer
-            .op_to_effect
-            .insert("cancel_timer".into(), "Timer".into());
-        lowerer.effect_defs.insert(
-            "Timer".into(),
-            EffectInfo {
-                ops: {
-                    let mut ops = HashMap::new();
-                    ops.insert("sleep".into(), 1);
-                    ops.insert("send_after".into(), 3);
-                    ops.insert("cancel_timer".into(), 1);
-                    ops
-                },
-            },
-        );
-        lowerer
+        }
     }
 
     pub(super) fn fresh(&mut self) -> String {
         let n = self.counter;
         self.counter += 1;
         format!("_Cor{}", n)
+    }
+
+    /// Known BEAM-native handlers: (module, handler_name) pairs.
+    /// These handlers' effects are lowered to direct BEAM calls instead of CPS.
+    const BEAM_NATIVE_HANDLERS: &'static [(&'static str, &'static str)] =
+        &[("Std.Actor", "beam_actor")];
+
+    /// Check if a handler is BEAM-native (should be lowered to direct BEAM calls).
+    pub(super) fn is_beam_native_handler(&self, name: &str) -> bool {
+        self.handler_defs
+            .get(name)
+            .and_then(|info| info.source_module.as_deref())
+            .is_some_and(|module| {
+                Self::BEAM_NATIVE_HANDLERS
+                    .iter()
+                    .any(|(m, h)| *m == module && *h == name)
+            })
+    }
+
+    /// Given a list of effect names (from a `needs` clause), return all
+    /// (effect_name, op_name) pairs. This is the single source of truth for
+    /// what handler params a function needs.
+    pub(super) fn effect_handler_ops(&self, effects: &[String]) -> Vec<(String, String)> {
+        let mut ops = Vec::new();
+        for eff_name in effects {
+            if let Some(info) = self.effect_defs.get(eff_name) {
+                // Sort op names for deterministic ordering
+                let mut op_names: Vec<&String> = info.ops.keys().collect();
+                op_names.sort();
+                for op_name in op_names {
+                    ops.push((eff_name.clone(), op_name.clone()));
+                }
+            }
+        }
+        ops
+    }
+
+    /// Generate the handler param variable name for a specific effect op.
+    /// e.g. ("Process", "spawn") -> "_Handle_Process_spawn"
+    pub(super) fn handler_param_name(effect: &str, op: &str) -> String {
+        format!("_Handle_{}_{}", effect, op)
+    }
+
+    /// Compute the expanded arity for a function with the given base arity
+    /// and effect requirements. Accounts for one handler param per op plus
+    /// a _ReturnK param if there are any effects.
+    pub(super) fn expanded_arity(&self, base_arity: usize, effects: &[String]) -> usize {
+        let ops = self.effect_handler_ops(effects);
+        let op_count = ops.len();
+        base_arity + op_count + if op_count > 0 { 1 } else { 0 }
     }
 
     /// Check if a function is effectful.
@@ -217,7 +196,9 @@ impl<'a> Lowerer<'a> {
 
     /// Get a function's import origin (erlang_module, original_name).
     fn import_origin(&self, name: &str) -> Option<&(String, String)> {
-        self.fun_info.get(name).and_then(|f| f.import_origin.as_ref())
+        self.fun_info
+            .get(name)
+            .and_then(|f| f.import_origin.as_ref())
     }
 
     /// Get a function's param absorbed effects.
@@ -301,6 +282,7 @@ impl<'a> Lowerer<'a> {
                             effects: effects.iter().map(|e| e.name.clone()).collect(),
                             arms: arms.clone(),
                             return_clause: return_clause.clone(),
+                            source_module: Some(module_name.to_string()),
                         },
                     );
                 }
@@ -329,10 +311,13 @@ impl<'a> Lowerer<'a> {
                             param_effs.insert(i, sorted);
                         }
                     }
-                    pending_annotations.insert(name.clone(), PendingAnnotation {
-                        effects: sorted_effects,
-                        param_absorbed_effects: param_effs,
-                    });
+                    pending_annotations.insert(
+                        name.clone(),
+                        PendingAnnotation {
+                            effects: sorted_effects,
+                            param_absorbed_effects: param_effs,
+                        },
+                    );
                 }
                 Decl::ExternalFun {
                     public,
@@ -356,15 +341,16 @@ impl<'a> Lowerer<'a> {
                         sorted_effects = effects.iter().map(|e| e.name.clone()).collect();
                         sorted_effects.sort();
                     }
-                    let effect_count = sorted_effects.len();
-                    let expanded_arity =
-                        real_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
-                    self.fun_info.insert(name.clone(), FunInfo {
-                        arity: expanded_arity,
-                        effects: sorted_effects,
-                        param_absorbed_effects: HashMap::new(),
-                        import_origin: None,
-                    });
+                    let expanded_arity = self.expanded_arity(real_arity, &sorted_effects);
+                    self.fun_info.insert(
+                        name.clone(),
+                        FunInfo {
+                            arity: expanded_arity,
+                            effects: sorted_effects,
+                            param_absorbed_effects: HashMap::new(),
+                            import_origin: None,
+                        },
+                    );
                 }
                 _ => {}
             }
@@ -396,12 +382,9 @@ impl<'a> Lowerer<'a> {
                 // Register Std exports so prelude-imported functions (e.g. fst, snd)
                 // resolve to cross-module calls without an explicit import in user code.
                 for (name, scheme) in &info.exports {
-                    let (base_arity, mut effects) =
-                        util::arity_and_effects_from_type(&scheme.ty);
+                    let (base_arity, mut effects) = util::arity_and_effects_from_type(&scheme.ty);
                     // Supplement with annotation-derived effects (needs clause)
-                    if let Some((_, ann_effs)) =
-                        info.fun_effects.iter().find(|(n, _)| n == name)
-                    {
+                    if let Some((_, ann_effs)) = info.fun_effects.iter().find(|(n, _)| n == name) {
                         for eff in ann_effs {
                             if !effects.contains(eff) {
                                 effects.push(eff.clone());
@@ -409,9 +392,7 @@ impl<'a> Lowerer<'a> {
                         }
                         effects.sort();
                     }
-                    let effect_count = effects.len();
-                    let expanded_arity =
-                        base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
+                    let expanded_arity = self.expanded_arity(base_arity, &effects);
                     let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
                     // Register unqualified form
                     self.fun_info.entry(name.clone()).or_insert(FunInfo {
@@ -437,13 +418,14 @@ impl<'a> Lowerer<'a> {
                 }
                 // Register Std handler bodies
                 for hb in &info.handler_bodies {
-                    self.handler_defs.entry(hb.name.clone()).or_insert(
-                        HandlerInfo {
+                    self.handler_defs
+                        .entry(hb.name.clone())
+                        .or_insert(HandlerInfo {
                             effects: hb.effects.clone(),
                             arms: hb.arms.clone(),
                             return_clause: hb.return_clause.clone(),
-                        },
-                    );
+                            source_module: Some(mod_name.clone()),
+                        });
                 }
             }
         }
@@ -486,29 +468,33 @@ impl<'a> Lowerer<'a> {
                             }
                             effects.sort();
                         }
-                        let effect_count = effects.len();
-                        let expanded_arity =
-                            base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
+                        let expanded_arity = self.expanded_arity(base_arity, &effects);
                         let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
                         let qualified = format!("{}.{}", prefix, name);
-                        self.fun_info.insert(qualified, FunInfo {
-                            arity: expanded_arity,
-                            effects: effects.clone(),
-                            param_absorbed_effects: param_effs.clone(),
-                            import_origin: None,
-                        });
+                        self.fun_info.insert(
+                            qualified,
+                            FunInfo {
+                                arity: expanded_arity,
+                                effects: effects.clone(),
+                                param_absorbed_effects: param_effs.clone(),
+                                import_origin: None,
+                            },
+                        );
 
                         // Register exposed (unqualified) names
                         if let Some(exposed) = exposing
                             && exposed.iter().any(|e| e == name)
                             && exported_names.contains(name.as_str())
                         {
-                            self.fun_info.insert(name.clone(), FunInfo {
-                                arity: expanded_arity,
-                                effects,
-                                param_absorbed_effects: param_effs,
-                                import_origin: Some((erlang_name.clone(), name.clone())),
-                            });
+                            self.fun_info.insert(
+                                name.clone(),
+                                FunInfo {
+                                    arity: expanded_arity,
+                                    effects,
+                                    param_absorbed_effects: param_effs,
+                                    import_origin: Some((erlang_name.clone(), name.clone())),
+                                },
+                            );
                         }
                     }
 
@@ -536,22 +522,26 @@ impl<'a> Lowerer<'a> {
                     }
                     // Register imported trait impl dicts for cross-module calls
                     for (_trait_name, _target_type, dict_name, arity) in &info.trait_impl_dicts {
-                        self.fun_info.insert(dict_name.clone(), FunInfo {
-                            arity: *arity,
-                            effects: Vec::new(),
-                            param_absorbed_effects: HashMap::new(),
-                            import_origin: Some((erlang_name.clone(), dict_name.clone())),
-                        });
+                        self.fun_info.insert(
+                            dict_name.clone(),
+                            FunInfo {
+                                arity: *arity,
+                                effects: Vec::new(),
+                                param_absorbed_effects: HashMap::new(),
+                                import_origin: Some((erlang_name.clone(), dict_name.clone())),
+                            },
+                        );
                     }
                     // Register imported handler bodies
                     for hb in &info.handler_bodies {
-                        self.handler_defs.entry(hb.name.clone()).or_insert(
-                            HandlerInfo {
+                        self.handler_defs
+                            .entry(hb.name.clone())
+                            .or_insert(HandlerInfo {
                                 effects: hb.effects.clone(),
                                 arms: hb.arms.clone(),
                                 return_clause: hb.return_clause.clone(),
-                            },
-                        );
+                                source_module: Some(module_name.clone()),
+                            });
                     }
                 }
             }
@@ -570,25 +560,31 @@ impl<'a> Lowerer<'a> {
                     body,
                     ..
                 } => {
-                    let PendingAnnotation { effects, param_absorbed_effects } =
-                        pending_annotations.remove(name.as_str()).unwrap_or(PendingAnnotation {
+                    let PendingAnnotation {
+                        effects,
+                        param_absorbed_effects,
+                    } = pending_annotations
+                        .remove(name.as_str())
+                        .unwrap_or(PendingAnnotation {
                             effects: Vec::new(),
                             param_absorbed_effects: HashMap::new(),
                         });
                     let base_arity = lower_params(params).len();
-                    let effect_count = effects.len();
-                    let arity = base_arity + effect_count + if effect_count > 0 { 1 } else { 0 };
+                    let arity = self.expanded_arity(base_arity, &effects);
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _)| n == name) {
                         // Additional clause: just add to existing group
                         group.2.push((params, guard, body));
                     } else {
                         // First clause: register fun_info (overrides any pre-registration)
-                        self.fun_info.insert(name.clone(), FunInfo {
-                            arity,
-                            effects,
-                            param_absorbed_effects,
-                            import_origin: None,
-                        });
+                        self.fun_info.insert(
+                            name.clone(),
+                            FunInfo {
+                                arity,
+                                effects,
+                                param_absorbed_effects,
+                                import_origin: None,
+                            },
+                        );
                         clause_groups.push((name.clone(), arity, vec![(params, guard, body)]));
                     }
                 }
@@ -598,10 +594,13 @@ impl<'a> Lowerer<'a> {
                     methods,
                     ..
                 } => {
-                    self.fun_info.insert(name.clone(), FunInfo {
-                        arity: dict_params.len(),
-                        ..Default::default()
-                    });
+                    self.fun_info.insert(
+                        name.clone(),
+                        FunInfo {
+                            arity: dict_params.len(),
+                            ..Default::default()
+                        },
+                    );
                     dict_constructors.push((name, dict_params, methods));
                 }
                 _ => {}
@@ -647,17 +646,19 @@ impl<'a> Lowerer<'a> {
                 exports.push((name.clone(), arity));
             }
 
-            // Set up handler param context for effectful functions
-            // Filter out beam-native effects (e.g. Actor) -- they don't use CPS
+            // Set up handler param context for effectful functions.
+            // One handler param per op (e.g. _Handle_Process_spawn, _Handle_Process_send).
             let effects = self.fun_effects(&name).cloned().unwrap_or_default();
-            let handler_params: Vec<String> = effects
+            let handler_ops = self.effect_handler_ops(&effects);
+            let handler_params: Vec<String> = handler_ops
                 .iter()
-                .map(|eff| format!("_Handle{}", eff))
+                .map(|(eff, op)| Self::handler_param_name(eff, op))
                 .collect();
             let saved_handler_params = std::mem::take(&mut self.current_handler_params);
-            for (eff, param) in effects.iter().zip(handler_params.iter()) {
-                self.current_handler_params
-                    .insert(eff.clone(), param.clone());
+            for ((eff, op), param) in handler_ops.iter().zip(handler_params.iter()) {
+                // Key by "Effect.op" for unambiguous lookup from lower_effect_call
+                let key = format!("{}.{}", eff, op);
+                self.current_handler_params.insert(key, param.clone());
             }
             // Set up effectful variable tracking for HOF absorption.
             // Map param indices to param names from the first clause's patterns.
@@ -946,8 +947,6 @@ impl<'a> Lowerer<'a> {
                     );
                 }
 
-
-
                 // Check for a saturated call to a known top-level function.
                 // e.g. `add 3 4` -> App(App(Var("add"), 3), 4)
                 // For effectful functions, the user provides N args but the function
@@ -955,7 +954,10 @@ impl<'a> Lowerer<'a> {
                 // the caller's handler params through automatically.
                 if let Some((func_name, args)) = collect_fun_call(expr) {
                     let callee_effects = self.fun_effects(func_name).cloned();
-                    let effect_count = callee_effects.as_ref().map_or(0, |e| e.len());
+                    let callee_ops = callee_effects.as_ref()
+                        .map(|effs| self.effect_handler_ops(effs))
+                        .unwrap_or_default();
+                    let effect_count = callee_ops.len();
                     let total_arity = self.fun_arity(func_name);
 
                     // Filter out unit literal args (they don't count toward arity)
@@ -995,15 +997,16 @@ impl<'a> Lowerer<'a> {
                             arg_vars.push(v.clone());
                             bindings.push((v, ce));
                         }
-                        // Append handler params for effectful callees
-                        if let Some(effs) = &callee_effects {
-                            for eff in effs {
-                                if let Some(param) = self.current_handler_params.get(eff) {
+                        // Append per-op handler params for effectful callees
+                        if !callee_ops.is_empty() {
+                            for (eff, op) in &callee_ops {
+                                let key = format!("{}.{}", eff, op);
+                                if let Some(param) = self.current_handler_params.get(&key) {
                                     arg_vars.push(param.clone());
                                 } else {
                                     panic!(
-                                        "function '{}' needs effect '{}' but no handler param in scope",
-                                        func_name, eff
+                                        "function '{}' needs handler for '{}.{}' but no handler param in scope",
+                                        func_name, eff, op
                                     );
                                 }
                             }
@@ -1080,15 +1083,16 @@ impl<'a> Lowerer<'a> {
                         arg_vars.push(v.clone());
                         bindings.push((v, ce));
                     }
-                    // Append handler params for absorbed effects
-                    for eff in &absorbed {
-                        // Skip beam-native effects (no handler params)
-                        if let Some(param) = self.current_handler_params.get(eff) {
+                    // Append per-op handler params for absorbed effects
+                    let absorbed_ops = self.effect_handler_ops(&absorbed);
+                    for (eff, op) in &absorbed_ops {
+                        let key = format!("{}.{}", eff, op);
+                        if let Some(param) = self.current_handler_params.get(&key) {
                             arg_vars.push(param.clone());
                         } else {
                             panic!(
-                                "effectful variable '{}' needs effect '{}' but no handler param in scope",
-                                var_name, eff
+                                "effectful variable '{}' needs handler for '{}.{}' but no handler param in scope",
+                                var_name, eff, op
                             );
                         }
                     }
@@ -1241,10 +1245,12 @@ impl<'a> Lowerer<'a> {
                 // This ensures both pure and effectful lambdas have the right arity.
                 let mut is_effectful_lambda = false;
                 if let Some(effects) = self.lambda_effect_context.take() {
-                    for eff in &effects {
-                        let handler_var = format!("_Handle{}", eff);
+                    let lambda_ops = self.effect_handler_ops(&effects);
+                    for (eff, op) in &lambda_ops {
+                        let handler_var = Self::handler_param_name(eff, op);
                         param_vars.push(handler_var.clone());
-                        self.current_handler_params.insert(eff.clone(), handler_var);
+                        let key = format!("{}.{}", eff, op);
+                        self.current_handler_params.insert(key, handler_var);
                     }
                     // Add _ReturnK parameter for effectful lambdas
                     param_vars.push("_ReturnK".to_string());
@@ -1350,64 +1356,52 @@ impl<'a> Lowerer<'a> {
                     .map(|arm| {
                         // System message patterns: bind a raw reason variable
                         // and wrap the body with a conversion case.
-                        let (pat, reason_wrapper) =
-                            if let Pat::Constructor { name, args, .. } = &arm.pattern {
-                                if matches!(name.as_str(), "Down" | "Exit") && args.len() == 2 {
-                                    // Check if reason arg is a variable that needs conversion
-                                    let (reason_pat, wrapper) =
-                                        if let Pat::Var { name: var_name, .. } = &args[1] {
-                                            let raw = self.fresh();
-                                            (
-                                                CPat::Var(raw.clone()),
-                                                Some((core_var(var_name), raw)),
-                                            )
-                                        } else {
-                                            (
-                                                lower_pat(
-                                                    &args[1],
-                                                    &self.record_fields,
-                                                    &self.constructor_modules,
-                                                ),
-                                                None,
-                                            )
-                                        };
-
-                                    let tuple_pat = if name == "Down" {
-                                        // {'DOWN', _Ref, 'process', Pid, Reason}
-                                        CPat::Tuple(vec![
-                                            CPat::Lit(CLit::Atom("DOWN".into())),
-                                            CPat::Wildcard,
-                                            CPat::Lit(CLit::Atom("process".into())),
-                                            lower_pat(
-                                                &args[0],
-                                                &self.record_fields,
-                                                &self.constructor_modules,
-                                            ),
-                                            reason_pat,
-                                        ])
+                        let (pat, reason_wrapper) = if let Pat::Constructor { name, args, .. } =
+                            &arm.pattern
+                        {
+                            if matches!(name.as_str(), "Down" | "Exit") && args.len() == 2 {
+                                // Check if reason arg is a variable that needs conversion
+                                let (reason_pat, wrapper) =
+                                    if let Pat::Var { name: var_name, .. } = &args[1] {
+                                        let raw = self.fresh();
+                                        (CPat::Var(raw.clone()), Some((core_var(var_name), raw)))
                                     } else {
-                                        // {'EXIT', Pid, Reason}
-                                        CPat::Tuple(vec![
-                                            CPat::Lit(CLit::Atom("EXIT".into())),
+                                        (
                                             lower_pat(
-                                                &args[0],
+                                                &args[1],
                                                 &self.record_fields,
                                                 &self.constructor_modules,
                                             ),
-                                            reason_pat,
-                                        ])
+                                            None,
+                                        )
                                     };
-                                    (tuple_pat, wrapper)
-                                } else {
-                                    (
+
+                                let tuple_pat = if name == "Down" {
+                                    // {'DOWN', _Ref, 'process', Pid, Reason}
+                                    CPat::Tuple(vec![
+                                        CPat::Lit(CLit::Atom("DOWN".into())),
+                                        CPat::Wildcard,
+                                        CPat::Lit(CLit::Atom("process".into())),
                                         lower_pat(
-                                            &arm.pattern,
+                                            &args[0],
                                             &self.record_fields,
                                             &self.constructor_modules,
                                         ),
-                                        None,
-                                    )
-                                }
+                                        reason_pat,
+                                    ])
+                                } else {
+                                    // {'EXIT', Pid, Reason}
+                                    CPat::Tuple(vec![
+                                        CPat::Lit(CLit::Atom("EXIT".into())),
+                                        lower_pat(
+                                            &args[0],
+                                            &self.record_fields,
+                                            &self.constructor_modules,
+                                        ),
+                                        reason_pat,
+                                    ])
+                                };
+                                (tuple_pat, wrapper)
                             } else {
                                 (
                                     lower_pat(
@@ -1417,7 +1411,17 @@ impl<'a> Lowerer<'a> {
                                     ),
                                     None,
                                 )
-                            };
+                            }
+                        } else {
+                            (
+                                lower_pat(
+                                    &arm.pattern,
+                                    &self.record_fields,
+                                    &self.constructor_modules,
+                                ),
+                                None,
+                            )
+                        };
                         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
                         let raw_body = self.lower_expr(&arm.body);
                         // Convert raw Erlang exit reason to ExitReason type
@@ -1823,7 +1827,9 @@ impl<'a> Lowerer<'a> {
 
         let qualified = format!("{}.{}", module, func_name);
         let callee_effects = self.fun_effects(&qualified).cloned();
-        let effect_count = callee_effects.as_ref().map_or(0, |e| e.len());
+        let callee_ops = callee_effects.as_ref()
+            .map(|effs| self.effect_handler_ops(effs))
+            .unwrap_or_default();
 
         // Filter out unit literal args
         let non_unit_args: Vec<&&Expr> = args
@@ -1849,15 +1855,16 @@ impl<'a> Lowerer<'a> {
             bindings.push((v, ce));
         }
 
-        // Append handler params for effectful callees
-        if let Some(effs) = &callee_effects {
-            for eff in effs {
-                if let Some(param) = self.current_handler_params.get(eff) {
+        // Append per-op handler params for effectful callees
+        if !callee_ops.is_empty() {
+            for (eff, op) in &callee_ops {
+                let key = format!("{}.{}", eff, op);
+                if let Some(param) = self.current_handler_params.get(&key) {
                     arg_vars.push(param.clone());
                 } else {
                     panic!(
-                        "qualified call '{}.{}' needs effect '{}' but no handler param in scope",
-                        module, func_name, eff
+                        "qualified call '{}.{}' needs handler for '{}.{}' but no handler param in scope",
+                        module, func_name, eff, op
                     );
                 }
             }
@@ -1870,8 +1877,6 @@ impl<'a> Lowerer<'a> {
             bindings.push((rk_var.clone(), return_k));
             arg_vars.push(rk_var);
         }
-
-        let _ = effect_count; // used implicitly through callee_effects
 
         let call = CExpr::Call(
             erlang_module,
