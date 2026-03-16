@@ -21,6 +21,46 @@ fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
+/// Get the source line at a 1-based line number.
+fn get_source_line(source: &str, line_num: usize) -> Option<&str> {
+    source.lines().nth(line_num - 1)
+}
+
+/// Print a type error with source context and underline.
+fn print_type_error(source: &str, source_path: &str, e: &typechecker::TypeError) {
+    let (start_line, start_col) = if let Some(span) = e.span {
+        byte_offset_to_line_col(source, span.start)
+    } else {
+        (1, 1)
+    };
+    let end_col = if let Some(span) = e.span {
+        byte_offset_to_line_col(source, span.end).1
+    } else {
+        start_col + 1
+    };
+
+    eprintln!(
+        "Type error at {}:{}:{}: {}",
+        source_path, start_line, start_col, e
+    );
+
+    if let Some(line_text) = get_source_line(source, start_line) {
+        let line_num_width = start_line.to_string().len();
+        eprintln!("  {} | {}", start_line, line_text);
+        let underline_len = if end_col > start_col {
+            end_col - start_col
+        } else {
+            1
+        };
+        eprintln!(
+            "  {} | {}{}",
+            " ".repeat(line_num_width),
+            " ".repeat(start_col - 1),
+            "^".repeat(underline_len)
+        );
+    }
+}
+
 fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  dylang run              Build and run project (requires project.toml)");
@@ -64,12 +104,7 @@ fn parse_and_typecheck(
     derive::expand_derives(&mut program);
     if let Err(errors) = checker.check_program(&program) {
         for e in &errors {
-            if let Some(span) = e.span {
-                let (line, col) = byte_offset_to_line_col(source, span.start);
-                eprintln!("Type error at {}:{}:{}: {}", source_path, line, col, e);
-            } else {
-                eprintln!("Type error: {}", e);
-            }
+            print_type_error(source, source_path, e);
         }
         std::process::exit(1);
     }

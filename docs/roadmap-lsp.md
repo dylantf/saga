@@ -56,5 +56,5 @@ lock-free hover/goto/completion.
 ## Known issues
 
 - Hover doesn't work on local variables inside function bodies (env is restored after checking)
-- Completion shows all prelude names even when not relevant to context
+- Completion is not context-aware: shows functions when typing a type name and vice versa. Currently we just filter out qualified names (`String.contains` etc.) from the default list, but ideally completion should know if you're in type position (after `:`, `->`) vs expression position (after `=`, inside blocks) and show only relevant items.
 - No dot-completion for module-qualified names yet (`MathLib.` should show exports)

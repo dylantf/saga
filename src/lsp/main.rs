@@ -214,7 +214,7 @@ impl LanguageServer for Backend {
         &self,
         params: CompletionParams,
     ) -> Result<Option<CompletionResponse>> {
-        let Some((_uri, checker, _program, line_index, source)) = self.snapshot() else {
+        let Some((_uri, checker, program, line_index, source)) = self.snapshot() else {
             return Ok(None);
         };
 
@@ -223,7 +223,7 @@ impl LanguageServer for Backend {
             line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
         let prefix = completion::extract_prefix(&source, offset);
-        let items = completion::collect_completions(&checker, prefix);
+        let items = completion::collect_completions(&checker, prefix, &program);
 
         Ok(Some(CompletionResponse::Array(items)))
     }
