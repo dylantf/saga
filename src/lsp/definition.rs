@@ -226,7 +226,7 @@ fn find_module_file(
             if last == module_name {
                 let full_name = module_path.join(".");
                 let file_path = checker
-                    .module_map
+                    .modules.map
                     .as_ref()
                     .and_then(|m| m.get(&full_name))
                     .cloned()?;
@@ -270,7 +270,7 @@ fn find_cross_module(program: &[Decl], name: &str, checker: &Checker) -> Option<
 
             // Look up the module's AST and file path
             let Some(file_path) = checker
-                .module_map
+                .modules.map
                 .as_ref()
                 .and_then(|m| m.get(&module_name))
                 .cloned()
@@ -278,7 +278,7 @@ fn find_cross_module(program: &[Decl], name: &str, checker: &Checker) -> Option<
                 continue;
             };
 
-            let Some(module_program) = checker.tc_programs.get(&module_name) else {
+            let Some(module_program) = checker.modules.programs.get(&module_name) else {
                 continue;
             };
 

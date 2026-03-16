@@ -155,7 +155,7 @@ fn elaborate_and_emit(
 
 fn compile_std_modules(checker: &mut typechecker::Checker, build_dir: &std::path::Path) {
     let std_modules: Vec<String> = checker
-        .tc_codegen_info
+        .modules.codegen_info
         .keys()
         .filter(|name| name.starts_with("Std."))
         .cloned()
@@ -164,7 +164,7 @@ fn compile_std_modules(checker: &mut typechecker::Checker, build_dir: &std::path
     for module_name in &std_modules {
         let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
 
-        let mut program = if let Some(cached) = checker.tc_programs.get(module_name) {
+        let mut program = if let Some(cached) = checker.modules.programs.get(module_name) {
             cached.clone()
         } else {
             let source = typechecker::builtin_module_source(&module_path)
@@ -194,7 +194,7 @@ fn compile_std_modules(checker: &mut typechecker::Checker, build_dir: &std::path
             module_name,
             &program,
             &mod_checker,
-            &mut checker.tc_codegen_info,
+            &mut checker.modules.codegen_info,
             build_dir,
         );
     }
@@ -287,18 +287,18 @@ fn build_project(profile: &str) -> PathBuf {
 
     // Compile each imported user module
     let module_names: Vec<String> = checker
-        .tc_codegen_info
+        .modules.codegen_info
         .keys()
         .filter(|name| !name.starts_with("Std."))
         .cloned()
         .collect();
 
     for module_name in &module_names {
-        let mut program = if let Some(cached) = checker.tc_programs.get(module_name) {
+        let mut program = if let Some(cached) = checker.modules.programs.get(module_name) {
             cached.clone()
         } else {
             let file_path = checker
-                .module_map
+                .modules.map
                 .as_ref()
                 .and_then(|m| m.get(module_name))
                 .unwrap_or_else(|| {
@@ -337,17 +337,17 @@ fn build_project(profile: &str) -> PathBuf {
             module_name,
             &program,
             &mod_checker,
-            &mut checker.tc_codegen_info,
+            &mut checker.modules.codegen_info,
             &build_dir,
         );
     }
 
     // Compile Main module
     let elaborated = elaborate::elaborate_module(&main_program, &checker, "Main");
-    if let Some(info) = checker.tc_codegen_info.get_mut("Main") {
+    if let Some(info) = checker.modules.codegen_info.get_mut("Main") {
         info.update_handler_bodies(&elaborated)
     }
-    let core_src = codegen::emit_module_with_imports("main", &elaborated, &checker.tc_codegen_info);
+    let core_src = codegen::emit_module_with_imports("main", &elaborated, &checker.modules.codegen_info);
     let core_path = build_dir.join("main.core");
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
@@ -387,7 +387,7 @@ fn build_script(file: &str, profile: &str) -> PathBuf {
     // Script doesn't export handlers, so we can elaborate without updating codegen_info
     let elaborated = elaborate::elaborate(&program, &checker);
     let core_src =
-        codegen::emit_module_with_imports("_script", &elaborated, &checker.tc_codegen_info);
+        codegen::emit_module_with_imports("_script", &elaborated, &checker.modules.codegen_info);
     let core_path = build_dir.join("_script.core");
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
@@ -495,7 +495,7 @@ fn cmd_emit(file: &str) {
 
     let elaborated = elaborate::elaborate(&program, &checker);
     let core_src =
-        codegen::emit_module_with_imports("_script", &elaborated, &checker.tc_codegen_info);
+        codegen::emit_module_with_imports("_script", &elaborated, &checker.modules.codegen_info);
     print!("{}", core_src);
 }
 

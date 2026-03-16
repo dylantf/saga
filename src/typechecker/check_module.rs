@@ -144,7 +144,7 @@ impl Checker {
 
         let is_builtin = builtin_module_source(module_path).is_some();
 
-        let project_root = match &self.project_root.clone() {
+        let project_root = match &self.modules.project_root.clone() {
             None if !is_builtin => {
                 return Err(TypeError::at(
                     span,
@@ -158,7 +158,7 @@ impl Checker {
             None => None,
         };
 
-        if self.tc_loading.contains(&module_name) {
+        if self.modules.loading.contains(&module_name) {
             return Err(TypeError::at(
                 span,
                 format!("circular import: {}", module_name),
@@ -166,7 +166,7 @@ impl Checker {
         }
 
         // Cache hit: inject cached exports
-        if let Some(exports) = self.tc_modules.get(&module_name).cloned() {
+        if let Some(exports) = self.modules.exports.get(&module_name).cloned() {
             return self.inject_exports(&exports, &prefix, exposing, span);
         }
 
@@ -175,7 +175,7 @@ impl Checker {
             src.to_string()
         } else {
             let file_path = self
-                .module_map
+                .modules.map
                 .as_ref()
                 .and_then(|m| m.get(&module_name))
                 .ok_or_else(|| TypeError::at(span, format!("unknown module '{}'", module_name)))?
@@ -202,10 +202,10 @@ impl Checker {
         crate::derive::expand_derives(&mut program);
 
         // Cache the parsed program so the build step can skip re-parsing
-        self.tc_programs
+        self.modules.programs
             .insert(module_name.clone(), program.clone());
 
-        self.tc_loading.insert(module_name.clone());
+        self.modules.loading.insert(module_name.clone());
 
         // Create a module checker. For non-builtin modules, clone the prelude
         // snapshot so we don't re-parse/re-check the prelude for every import.
@@ -213,12 +213,12 @@ impl Checker {
         // traits copied in (they can't load the prelude due to circular imports).
         let mut mod_checker = if !is_builtin {
             // Build or reuse the prelude snapshot
-            if self.tc_prelude_snapshot.is_none() {
+            if self.modules.prelude_snapshot.is_none() {
                 let mut snapshot = match &project_root {
                     Some(root) => super::Checker::with_project_root(root.clone()),
                     None => super::Checker::new(),
                 };
-                snapshot.module_map = self.module_map.clone();
+                snapshot.modules.map = self.modules.map.clone();
                 let prelude_src = include_str!("../stdlib/prelude.dy");
                 let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
                     .lex()
@@ -230,9 +230,9 @@ impl Checker {
                 snapshot
                     .check_program(&prelude_program)
                     .expect("prelude type errors");
-                self.tc_prelude_snapshot = Some(Box::new(snapshot));
+                self.modules.prelude_snapshot = Some(Box::new(snapshot));
             }
-            let mut mc = *self.tc_prelude_snapshot.as_ref().unwrap().clone();
+            let mut mc = *self.modules.prelude_snapshot.as_ref().unwrap().clone();
             mc.next_var = self.next_var;
             mc
         } else {
@@ -257,10 +257,10 @@ impl Checker {
             mc
         };
         // Share the module cache so transitive imports benefit from caching
-        mod_checker.tc_modules = self.tc_modules.clone();
-        mod_checker.tc_codegen_info = self.tc_codegen_info.clone();
-        mod_checker.tc_programs = self.tc_programs.clone();
-        mod_checker.module_map = self.module_map.clone();
+        mod_checker.modules.exports = self.modules.exports.clone();
+        mod_checker.modules.codegen_info = self.modules.codegen_info.clone();
+        mod_checker.modules.programs = self.modules.programs.clone();
+        mod_checker.modules.map = self.modules.map.clone();
         mod_checker.check_program(&program).map_err(|errs| {
             TypeError::at(
                 span,
@@ -276,28 +276,26 @@ impl Checker {
             self.next_var = mod_checker.next_var;
         }
 
-        // Merge back any programs discovered by transitive imports
-        for (k, v) in mod_checker.tc_programs {
-            self.tc_programs.entry(k).or_insert(v);
-        }
-
         // Merge back any caches populated by transitive imports
-        for (k, v) in mod_checker.tc_modules {
-            self.tc_modules.entry(k).or_insert(v);
+        for (k, v) in mod_checker.modules.programs {
+            self.modules.programs.entry(k).or_insert(v);
         }
-        for (k, v) in mod_checker.tc_codegen_info {
-            self.tc_codegen_info.entry(k).or_insert(v);
+        for (k, v) in mod_checker.modules.exports {
+            self.modules.exports.entry(k).or_insert(v);
+        }
+        for (k, v) in mod_checker.modules.codegen_info {
+            self.modules.codegen_info.entry(k).or_insert(v);
         }
 
-        self.tc_loading.remove(&module_name);
+        self.modules.loading.remove(&module_name);
 
         // Build codegen info from the module's public declarations
         let codegen_info = collect_codegen_info(&module_name, &program, &exports);
-        self.tc_codegen_info
+        self.modules.codegen_info
             .insert(module_name.clone(), codegen_info);
 
         // Cache and inject
-        self.tc_modules.insert(module_name.clone(), exports.clone());
+        self.modules.exports.insert(module_name.clone(), exports.clone());
         self.inject_exports(&exports, &prefix, exposing, span)
     }
 
@@ -310,10 +308,10 @@ impl Checker {
         is_builtin: bool,
     ) -> Checker {
         let mut mc = if !is_builtin {
-            if let Some(ref snapshot) = self.tc_prelude_snapshot {
+            if let Some(ref snapshot) = self.modules.prelude_snapshot {
                 let mut mc = *snapshot.clone();
                 if let Some(root) = project_root {
-                    mc.project_root = Some(root);
+                    mc.modules.project_root = Some(root);
                 }
                 mc
             } else {
@@ -343,10 +341,10 @@ impl Checker {
             mc
         };
         mc.next_var = self.next_var;
-        mc.tc_modules = self.tc_modules.clone();
-        mc.tc_codegen_info = self.tc_codegen_info.clone();
-        mc.tc_programs = self.tc_programs.clone();
-        mc.module_map = self.module_map.clone();
+        mc.modules.exports = self.modules.exports.clone();
+        mc.modules.codegen_info = self.modules.codegen_info.clone();
+        mc.modules.programs = self.modules.programs.clone();
+        mc.modules.map = self.modules.map.clone();
         mc
     }
 

@@ -707,20 +707,8 @@ pub struct Checker {
     pub(crate) where_bounds: HashMap<u32, HashSet<String>>,
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence)
     pub(crate) where_bound_var_names: HashMap<u32, String>,
-    /// Project root for resolving imports. None = script mode.
-    pub(crate) project_root: Option<std::path::PathBuf>,
-    /// Map from declared module name to file path. Built by scanning the project at startup.
-    pub module_map: Option<check_module::ModuleMap>,
-    /// Cache of already-typechecked modules: module name -> all public exports.
-    pub(crate) tc_modules: HashMap<String, ModuleExports>,
-    /// Cache of codegen-relevant info for each typechecked module.
-    pub tc_codegen_info: HashMap<String, ModuleCodegenInfo>,
-    /// Cache of parsed programs for each typechecked module (avoids re-reading/re-lexing/re-parsing).
-    pub tc_programs: HashMap<String, crate::ast::Program>,
-    /// Cached checker state after prelude has been loaded (avoids re-checking prelude for each module import).
-    pub tc_prelude_snapshot: Option<Box<Checker>>,
-    /// Modules currently being typechecked (cycle detection).
-    pub(crate) tc_loading: HashSet<String>,
+    /// Module system state: caches, project root, import tracking.
+    pub modules: ModuleContext,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
     pub(crate) adt_variants: HashMap<std::string::String, Vec<(std::string::String, usize)>>,
     /// Evidence collected during constraint solving for the elaboration pass.
@@ -730,6 +718,26 @@ pub struct Checker {
     /// Warnings collected during type checking.
     pub warnings: Vec<TypeWarning>,
 }
+
+/// Module system state: caches, project root, and import tracking.
+#[derive(Clone, Default)]
+pub struct ModuleContext {
+    /// Project root for resolving imports. None = script mode.
+    pub(crate) project_root: Option<std::path::PathBuf>,
+    /// Map from declared module name to file path. Built by scanning the project at startup.
+    pub map: Option<check_module::ModuleMap>,
+    /// Cache of already-typechecked modules: module name -> all public exports.
+    pub(crate) exports: HashMap<String, ModuleExports>,
+    /// Cache of codegen-relevant info for each typechecked module.
+    pub codegen_info: HashMap<String, ModuleCodegenInfo>,
+    /// Cache of parsed programs for each typechecked module.
+    pub programs: HashMap<String, crate::ast::Program>,
+    /// Cached checker state after prelude has been loaded.
+    pub prelude_snapshot: Option<Box<Checker>>,
+    /// Modules currently being typechecked (cycle detection).
+    pub(crate) loading: HashSet<String>,
+}
+
 
 /// Per-variable record candidate narrowing: var_id -> (candidate record names, span).
 pub(crate) type FieldCandidates = HashMap<u32, (Vec<String>, Span)>;
@@ -770,13 +778,7 @@ impl Checker {
             field_candidates: HashMap::new(),
             where_bounds: HashMap::new(),
             where_bound_var_names: HashMap::new(),
-            project_root: None,
-            module_map: None,
-            tc_modules: HashMap::new(),
-            tc_codegen_info: HashMap::new(),
-            tc_programs: HashMap::new(),
-            tc_prelude_snapshot: None,
-            tc_loading: HashSet::new(),
+            modules: ModuleContext::default(),
             adt_variants: HashMap::new(),
             evidence: Vec::new(),
             collected_errors: Vec::new(),
@@ -788,7 +790,7 @@ impl Checker {
 
     pub fn with_project_root(root: std::path::PathBuf) -> Self {
         let mut checker = Self::new();
-        checker.project_root = Some(root);
+        checker.modules.project_root = Some(root);
         checker
     }
 
@@ -820,7 +822,7 @@ impl Checker {
         checker
             .check_program(&prelude_program)
             .map_err(|errs| errs.into_iter().next().unwrap())?;
-        checker.tc_prelude_snapshot = Some(Box::new(checker.clone()));
+        checker.modules.prelude_snapshot = Some(Box::new(checker.clone()));
         Ok(checker)
     }
 
@@ -833,7 +835,7 @@ impl Checker {
     }
 
     pub fn set_module_map(&mut self, map: check_module::ModuleMap) {
-        self.module_map = Some(map);
+        self.modules.map = Some(map);
     }
 
     pub(crate) fn fresh_var(&mut self) -> Type {
