@@ -958,7 +958,7 @@ impl<'a> Lowerer<'a> {
             "spawn" => Some(("erlang", "spawn", 1)),
             "self" => Some(("erlang", "self", 0)),
             "send" => Some(("erlang", "send", 2)),
-            "monitor" => Some(("erlang", "monitor", 1)),  // gets 'process' atom prepended
+            "monitor" => Some(("erlang", "monitor", 1)), // gets 'process' atom prepended
             "demonitor" => Some(("erlang", "demonitor", 1)),
             "link" => Some(("erlang", "link", 1)),
             "unlink" => Some(("erlang", "unlink", 1)),
@@ -1019,16 +1019,16 @@ impl<'a> Lowerer<'a> {
                     }
                     _ => {
                         // use params in order
-                        let count = Self::beam_native_op_info(op_name).map(|(_, _, c)| c).unwrap_or(0);
-                        (0..count).map(|i| CExpr::Var(param_vars[i].clone())).collect()
+                        let count = Self::beam_native_op_info(op_name)
+                            .map(|(_, _, c)| c)
+                            .unwrap_or(0);
+                        (0..count)
+                            .map(|i| CExpr::Var(param_vars[i].clone()))
+                            .collect()
                     }
                 };
 
-                let call = CExpr::Call(
-                    module.to_string(),
-                    func.to_string(),
-                    call_args,
-                );
+                let call = CExpr::Call(module.to_string(), func.to_string(), call_args);
 
                 // let Result = call(...) in K(Result)
                 let result_var = self.fresh();
@@ -1116,7 +1116,7 @@ impl<'a> Lowerer<'a> {
         for (effect_name, handler_var) in &handler_vars {
             if !beam_native_effects.contains(effect_name) {
                 let arms = effect_arms.get(effect_name).cloned().unwrap_or_default();
-                let handler_fun = self.build_handler_fun(&arms);
+                let handler_fun = self.build_handler_fun(effect_name, &arms);
                 handler_bindings.push((handler_var.clone(), handler_fun));
             }
         }
@@ -1189,12 +1189,29 @@ impl<'a> Lowerer<'a> {
     /// Build a handler function from a set of arms for a single effect.
     ///
     /// Produces: `fun (Op, Arg1, ..., K) -> case Op of 'op1' -> ...; 'op2' -> ... end`
-    fn build_handler_fun(&mut self, arms: &[&HandlerArm]) -> CExpr {
+    ///
+    /// The handler fun's param count is the max across all ops in the effect
+    /// (from effect_defs), not just the arms present. This ensures a uniform
+    /// calling convention: callers always pass max_params + K regardless of which
+    /// op they're invoking.
+    fn build_handler_fun(&mut self, effect_name: &str, arms: &[&HandlerArm]) -> CExpr {
+        // Max params from the effect definition (all ops), not just handler arms
+        let effect_max = self
+            .effect_defs
+            .get(effect_name)
+            .map(|info| info.ops.values().copied().max().unwrap_or(0))
+            .unwrap_or(0);
+
         if arms.is_empty() {
             // Shouldn't happen, but degenerate case
             let k_param = self.fresh();
+            let mut params = vec!["_Op".to_string()];
+            for i in 0..effect_max {
+                params.push(format!("_HArg{}", i));
+            }
+            params.push(k_param.clone());
             return CExpr::Fun(
-                vec!["_Op".to_string(), k_param.clone()],
+                params,
                 Box::new(CExpr::Apply(
                     Box::new(CExpr::Var(k_param)),
                     vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
@@ -1202,8 +1219,9 @@ impl<'a> Lowerer<'a> {
             );
         }
 
-        // Find the maximum param count across all arms
-        let max_params = arms.iter().map(|a| a.params.len()).max().unwrap_or(0);
+        // Use the effect-level max so the signature matches padded call sites
+        let arm_max = arms.iter().map(|a| a.params.len()).max().unwrap_or(0);
+        let max_params = arm_max.max(effect_max);
 
         // Handler function params: Op, Param1, ..., ParamN, K
         let op_var = "_Op".to_string();
