@@ -16,27 +16,32 @@ use diagnostics::CheckResult;
 
 struct Backend {
     client: Client,
-    /// Cached base checker with prelude + module map loaded.
-    base_checker: Mutex<Option<typechecker::Checker>>,
+    /// Cached base checker per project root. Key is the project root path (or empty for no project).
+    base_checkers: Mutex<std::collections::HashMap<String, typechecker::Checker>>,
     /// Last check result, for hover/goto queries.
     last_check: Mutex<Option<(Url, CheckResult)>>,
 }
 
 impl Backend {
     fn get_checker(&self, uri: &Url) -> typechecker::Checker {
-        let mut cached = self.base_checker.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(base) = &*cached {
-            return base.clone();
-        }
-
         let project_root = uri
             .to_file_path()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .and_then(|d| checker::find_project_root(&d));
 
+        let cache_key = project_root
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let mut cached = self.base_checkers.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(base) = cached.get(&cache_key) {
+            return base.clone();
+        }
+
         let base = checker::make_checker(project_root);
-        *cached = Some(base.clone());
+        cached.insert(cache_key, base.clone());
         base
     }
 
@@ -106,7 +111,9 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
+        eprintln!("[did_open] {}", uri);
         let diagnostics = self.check_file(uri.clone(), &params.text_document.text);
+        eprintln!("[did_open] {} diagnostics", diagnostics.len());
         self.client
             .publish_diagnostics(uri, diagnostics, None)
             .await;
@@ -229,7 +236,7 @@ async fn main() {
 
     let (service, socket) = LspService::new(|client| Backend {
         client,
-        base_checker: Mutex::new(None),
+        base_checkers: Mutex::new(std::collections::HashMap::new()),
         last_check: Mutex::new(None),
     });
     Server::new(stdin, stdout, socket).serve(service).await;

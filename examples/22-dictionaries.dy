@@ -26,7 +26,7 @@ main () = {
   print $"removed bob: {ages4}"
 
   # Membership
-  print $"has alice: {(Dict.member "alice" ages)}"
+  print $"has alice: {(Dict.member "alice" ages)}" 
   print $"has dave: {(Dict.member "dave" ages)}"
 
   # Keys and values
