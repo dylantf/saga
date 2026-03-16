@@ -25,11 +25,11 @@ pub fn collect_completions(checker: &Checker, prefix: &str) -> Vec<CompletionIte
         if !prefix.is_empty() && !name.to_lowercase().starts_with(&prefix_lower) {
             continue;
         }
-        let ty = scheme.display_type(&checker.sub);
+        let detail = scheme.display_with_constraints(&checker.sub);
         items.push(CompletionItem {
             label: name.to_string(),
             kind: Some(CompletionItemKind::FUNCTION),
-            detail: Some(format!("{}", ty)),
+            detail: Some(detail),
             ..Default::default()
         });
     }
@@ -43,11 +43,11 @@ pub fn collect_completions(checker: &Checker, prefix: &str) -> Vec<CompletionIte
         if name == "Cons" || name == "Nil" || name == "True" || name == "False" {
             continue;
         }
-        let ty = scheme.display_type(&checker.sub);
+        let detail = scheme.display_with_constraints(&checker.sub);
         items.push(CompletionItem {
             label: name.to_string(),
             kind: Some(CompletionItemKind::CONSTRUCTOR),
-            detail: Some(format!("{}", ty)),
+            detail: Some(detail),
             ..Default::default()
         });
     }

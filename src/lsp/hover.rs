@@ -297,14 +297,12 @@ pub fn type_at_name(checker: &Checker, name: &str, program: &[Decl]) -> Option<S
 
     // Check env (functions, variables)
     if let Some(scheme) = checker.env.get(name) {
-        let ty = scheme.display_type(&checker.sub);
-        return Some(format!("{}", ty));
+        return Some(scheme.display_with_constraints(&checker.sub));
     }
 
     // Check constructors
     if let Some(scheme) = checker.constructors.get(name) {
-        let ty = scheme.display_type(&checker.sub);
-        return Some(format!("{}", ty));
+        return Some(scheme.display_with_constraints(&checker.sub));
     }
 
     None

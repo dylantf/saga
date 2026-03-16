@@ -200,6 +200,18 @@ pub struct Scheme {
 }
 
 impl Scheme {
+    /// Map forall var IDs to readable names (a, b, c, ...)
+    fn var_names(&self) -> HashMap<u32, String> {
+        self.forall
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| {
+                let name = ((b'a' + i as u8) as char).to_string();
+                (id, name)
+            })
+            .collect()
+    }
+
     /// Return the type with forall variables replaced by readable names (a, b, c, ...).
     /// Apply a substitution first to resolve any solved variables.
     pub fn display_type(&self, sub: &Substitution) -> Type {
@@ -207,17 +219,34 @@ impl Scheme {
         if self.forall.is_empty() {
             return resolved;
         }
-        // Map forall var IDs to named type variables: a, b, c, ...
-        let names: HashMap<u32, String> = self
-            .forall
+        rename_vars(&resolved, &self.var_names())
+    }
+
+    /// Format the type with constraints as a string, e.g. "a -> Unit where {a: Show}"
+    pub fn display_with_constraints(&self, sub: &Substitution) -> String {
+        let ty = self.display_type(sub);
+        if self.constraints.is_empty() {
+            return format!("{}", ty);
+        }
+        let names = self.var_names();
+        // Group constraints by type variable
+        let mut bounds: HashMap<String, Vec<String>> = HashMap::new();
+        for (trait_name, var_id) in &self.constraints {
+            let var_name = names
+                .get(var_id)
+                .cloned()
+                .unwrap_or_else(|| format!("?{}", var_id));
+            bounds
+                .entry(var_name)
+                .or_default()
+                .push(trait_name.clone());
+        }
+        let mut parts: Vec<String> = bounds
             .iter()
-            .enumerate()
-            .map(|(i, &id)| {
-                let name = ((b'a' + i as u8) as char).to_string();
-                (id, name)
-            })
+            .map(|(var, traits)| format!("{}: {}", var, traits.join(" + ")))
             .collect();
-        rename_vars(&resolved, &names)
+        parts.sort();
+        format!("{} where {{{}}}", ty, parts.join(", "))
     }
 }
 
