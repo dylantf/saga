@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::ast::{self, Decl};
 
-use super::{Checker, EffectDefInfo, EffectOpSig, HandlerInfo, Scheme, Type, TypeError, TypeWarning};
+use super::{Checker, EffectDefInfo, EffectOpSig, HandlerInfo, Scheme, Span, Type, TypeError, TypeWarning};
 
 impl Checker {
     // --- Top-level declarations ---
@@ -115,7 +115,7 @@ impl Checker {
 
         // Collect function annotations: name -> declared type, effects, and where constraints
         // Done before impls so annotated helpers are available in impl bodies.
-        let mut annotations: HashMap<std::string::String, Type> = HashMap::new();
+        let mut annotations: HashMap<std::string::String, (Type, Span)> = HashMap::new();
         let mut annotation_constraints: HashMap<std::string::String, Vec<(String, u32)>> =
             HashMap::new();
         for decl in program {
@@ -135,7 +135,7 @@ impl Checker {
                     let param_ty = self.convert_type_expr(texpr, &mut params_list);
                     fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
                 }
-                annotations.insert(name.clone(), fun_ty.clone());
+                annotations.insert(name.clone(), (fun_ty.clone(), *span));
                 if !effects.is_empty() {
                     self.fun_effects.insert(
                         name.clone(),
@@ -266,12 +266,15 @@ impl Checker {
                 }
                 let clauses: Vec<&Decl> = program[start..i].iter().collect();
                 let fun_var = fun_vars[&name].clone();
-                let annotation = annotations.get(&name).cloned();
+                let (annotation, annotation_span) = match annotations.get(&name).cloned() {
+                    Some((ty, span)) => (Some(ty), Some(span)),
+                    None => (None, None),
+                };
                 let where_cons = annotation_constraints
                     .get(&name)
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
-                if let Err(e) = self.check_fun_clauses(&name, &clauses, &fun_var, annotation.as_ref(), where_cons) {
+                if let Err(e) = self.check_fun_clauses(&name, &clauses, &fun_var, annotation.as_ref(), annotation_span, where_cons) {
                     errors.push(e);
                     // Clear pending constraints for this function -- they may reference
                     // unresolved types from the error site and would produce cascading errors
@@ -387,6 +390,7 @@ impl Checker {
         clauses: &[&Decl],
         fun_var: &Type,
         annotation: Option<&Type>,
+        annotation_span: Option<Span>,
         where_constraints: &[(String, u32)],
     ) -> Result<(), TypeError> {
         // All clauses must have the same arity
@@ -558,10 +562,7 @@ impl Checker {
             // Check for effects declared but never used
             let unused: Vec<_> = declared_effects.difference(&body_effects).collect();
             if !unused.is_empty() {
-                let span = match clauses[0] {
-                    Decl::FunBinding { span, .. } => *span,
-                    _ => unreachable!(),
-                };
+                let span = annotation_span.expect("unused effects implies annotation exists");
                 let mut effects: Vec<_> = unused.into_iter().cloned().collect();
                 effects.sort();
                 self.warnings.push(TypeWarning::at(
