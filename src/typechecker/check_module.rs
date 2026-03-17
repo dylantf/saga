@@ -38,6 +38,14 @@ fn scan_dir(dir: &Path, root: &Path, map: &mut ModuleMap) -> Result<(), String> 
         } else if path.extension().is_some_and(|ext| ext == "dy") {
             match extract_module_name(&path) {
                 Ok(Some(module_name)) => {
+                    if module_name.starts_with("Std.") || module_name == "Std" {
+                        let rel = path.strip_prefix(root).unwrap_or(&path);
+                        return Err(format!(
+                            "module '{}' in {} uses the reserved `Std` namespace",
+                            module_name,
+                            rel.display()
+                        ));
+                    }
                     if let Some(existing) = map.get(&module_name) {
                         return Err(format!(
                             "module '{}' declared in both {} and {}",

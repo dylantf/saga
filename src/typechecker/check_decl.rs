@@ -1036,6 +1036,27 @@ impl Checker {
             )?;
         }
 
+        // Check that all operations from the handled effects are covered
+        if !self.allow_bodyless_annotations {
+            let handled_ops: std::collections::HashSet<&str> =
+                arms.iter().map(|a| a.op_name.as_str()).collect();
+            for effect_ref in effect_names {
+                if let Some(info) = self.effects.get(&effect_ref.name) {
+                    for op in &info.ops {
+                        if !handled_ops.contains(op.name.as_str()) {
+                            return Err(Diagnostic::error_at(
+                                span,
+                                format!(
+                                    "handler '{}' is missing operation '{}' from effect '{}'",
+                                    name, op.name, effect_ref.name
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         self.handlers.insert(
             name.into(),
             HandlerInfo {

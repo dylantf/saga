@@ -1577,6 +1577,23 @@ handler my_db for Db needs {Log} {
     );
 }
 
+#[test]
+fn handler_missing_operation() {
+    // Handler for an effect with two ops but only handles one
+    let result = check(
+        "effect State {\n  fun get () -> Int\n  fun put (n: Int) -> Unit\n}\nhandler partial for State {\n  get () -> resume 0\n}",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn handler_empty_body() {
+    let result = check(
+        "effect Log {\n  fun log (msg: String) -> Unit\n}\nhandler noop for Log {}",
+    );
+    assert!(result.is_err());
+}
+
 // --- Let binding type annotations ---
 
 #[test]
