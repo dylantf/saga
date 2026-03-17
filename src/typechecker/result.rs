@@ -35,6 +35,9 @@ pub struct CheckResult {
     pub handlers: HashMap<String, HandlerInfo>,
     /// Effect requirements per function.
     pub fun_effects: HashMap<String, HashSet<String>>,
+    /// Per-span type information for LSP hover.
+    /// Types may contain unresolved variables; use `type_at()` to get resolved types.
+    pub type_at_span: HashMap<crate::token::Span, super::Type>,
 }
 
 impl CheckResult {
@@ -62,6 +65,13 @@ impl CheckResult {
     pub fn handler_names(&self) -> Vec<String> {
         self.handlers.keys().cloned().collect()
     }
+
+    /// Look up the resolved type at a span, applying the substitution.
+    pub fn type_at(&self, span: &crate::token::Span) -> Option<String> {
+        let ty = self.type_at_span.get(span)?;
+        let resolved = self.sub.apply(ty);
+        Some(format!("{}", resolved))
+    }
 }
 
 impl Checker {
@@ -82,6 +92,7 @@ impl Checker {
             effects: self.effects.clone(),
             handlers: self.handlers.clone(),
             fun_effects: self.fun_effects.clone(),
+            type_at_span: self.type_at_span.clone(),
         }
     }
 }

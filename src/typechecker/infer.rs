@@ -56,6 +56,7 @@ impl Checker {
                             eff_constraints.into_iter().collect();
                         ty = Type::EffArrow(a, b, eff_refs);
                     }
+                    self.record_type(*span, &ty);
                     Ok(ty)
                 } else {
                     Err(Diagnostic::error_at(
@@ -69,6 +70,7 @@ impl Checker {
                 if let Some(scheme) = self.constructors.get(name) {
                     let scheme = scheme.clone();
                     let (ty, _) = self.instantiate(&scheme);
+                    self.record_type(*span, &ty);
                     Ok(ty)
                 } else {
                     Err(Diagnostic::error_at(
@@ -105,6 +107,7 @@ impl Checker {
                         }
                     }
                 }
+                self.record_type(*span, &ret_ty);
                 Ok(ret_ty)
             }
 
@@ -683,9 +686,10 @@ impl Checker {
                             Type::Error
                         }
                     };
-                    if let Pat::Var { name, .. } = pattern {
+                    if let Pat::Var { name, span: var_span } = pattern {
                         let scheme = self.generalize(&ty);
                         self.env.insert(name.clone(), scheme);
+                        self.record_type(*var_span, &ty);
                     } else if let Err(e) = self.bind_pattern(pattern, &ty) {
                         errors.push(e);
                     }
@@ -814,7 +818,7 @@ impl Checker {
     pub(crate) fn bind_pattern(&mut self, pat: &Pat, ty: &Type) -> Result<(), Diagnostic> {
         match pat {
             Pat::Wildcard { .. } => Ok(()),
-            Pat::Var { name, .. } => {
+            Pat::Var { name, span } => {
                 self.env.insert(
                     name.clone(),
                     Scheme {
@@ -823,6 +827,7 @@ impl Checker {
                         ty: ty.clone(),
                     },
                 );
+                self.record_type(*span, ty);
                 Ok(())
             }
             Pat::Lit { value, span } => {
@@ -887,6 +892,7 @@ impl Checker {
                                     ty: field_ty.clone(),
                                 },
                             );
+                            self.record_type(*span, field_ty);
                         }
                     }
                 }

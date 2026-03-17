@@ -721,6 +721,10 @@ pub struct Checker {
     pub evidence: Vec<TraitEvidence>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
+    /// Per-span type information for LSP hover, go-to-def, etc.
+    /// Types are stored unresolved (may contain type variables); apply `sub`
+    /// at lookup time to get the final resolved type.
+    pub(crate) type_at_span: HashMap<Span, Type>,
 }
 
 /// Module system state: caches, project root, and import tracking.
@@ -785,6 +789,7 @@ impl Checker {
             adt_variants: HashMap::new(),
             evidence: Vec::new(),
             collected_diagnostics: Vec::new(),
+            type_at_span: HashMap::new(),
         };
         checker.register_builtins();
         checker
@@ -835,6 +840,11 @@ impl Checker {
             .partition(|d| matches!(d.severity, Severity::Error));
         self.collected_diagnostics = rest;
         errors
+    }
+
+    /// Record the type of an expression or binding at a given span.
+    pub(crate) fn record_type(&mut self, span: Span, ty: &Type) {
+        self.type_at_span.entry(span).or_insert_with(|| ty.clone());
     }
 
     pub fn effect_names(&self) -> Vec<String> {

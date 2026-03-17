@@ -2,11 +2,11 @@ use dylang::ast::{Decl, Expr, Pat, Stmt};
 use dylang::token::Span;
 use dylang::typechecker::CheckResult;
 
-/// Find the name of the identifier at the given byte offset.
-pub fn find_name_at_offset(program: &[Decl], offset: usize) -> Option<String> {
+/// Find the name and span of the identifier at the given byte offset.
+pub fn find_name_at_offset(program: &[Decl], offset: usize) -> Option<(String, Span)> {
     for decl in program {
-        if let Some(name) = find_in_decl(decl, offset) {
-            return Some(name);
+        if let Some(result) = find_in_decl(decl, offset) {
+            return Some(result);
         }
     }
     None
@@ -16,7 +16,7 @@ fn contains(span: &Span, offset: usize) -> bool {
     offset >= span.start && offset < span.end
 }
 
-fn find_in_decl(decl: &Decl, offset: usize) -> Option<String> {
+fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span)> {
     match decl {
         Decl::FunBinding {
             params, body, span, ..
@@ -31,7 +31,9 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<String> {
             }
             find_in_expr(body, offset)
         }
-        Decl::FunAnnotation { name, span, .. } if contains(span, offset) => Some(name.clone()),
+        Decl::FunAnnotation { name, span, .. } if contains(span, offset) => {
+            Some((name.clone(), *span))
+        }
         Decl::ImplDef { methods, span, .. } => {
             if !contains(span, offset) {
                 return None;
@@ -58,18 +60,18 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<String> {
     }
 }
 
-fn find_in_expr(expr: &Expr, offset: usize) -> Option<String> {
+fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
     // Quick span check: skip if cursor is outside this expression
     if !contains(&expr.span(), offset) {
         return None;
     }
 
     match expr {
-        Expr::Var { name, span } if contains(span, offset) => Some(name.clone()),
+        Expr::Var { name, span } if contains(span, offset) => Some((name.clone(), *span)),
         Expr::Constructor { name, span }
             if contains(span, offset) && name != "Cons" && name != "Nil" =>
         {
-            Some(name.clone())
+            Some((name.clone(), *span))
         }
         Expr::QualifiedName { module, name, span } => {
             // The span covers "Module.name". The dot separates them.
@@ -77,9 +79,9 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<String> {
             // name part:   span.start + module.len() + 1 .. span.end
             let dot_offset = span.start + module.len();
             if offset <= dot_offset {
-                Some(format!("module:{}", module))
+                Some((format!("module:{}", module), *span))
             } else {
-                Some(name.clone())
+                Some((name.clone(), *span))
             }
         }
         Expr::App { func, arg, .. } => {
@@ -170,7 +172,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<String> {
             if contains(span, offset) {
                 // Check if cursor is on the effect name itself
                 // Return the effect op name for lookup
-                return Some(name.clone());
+                return Some((name.clone(), *span));
             }
             for arg in args {
                 if let Some(r) = find_in_expr(arg, offset) {
@@ -236,7 +238,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<String> {
     }
 }
 
-fn find_in_stmt(stmt: &Stmt, offset: usize) -> Option<String> {
+fn find_in_stmt(stmt: &Stmt, offset: usize) -> Option<(String, Span)> {
     match stmt {
         Stmt::Let { pattern, value, .. } => {
             find_in_pat(pattern, offset).or_else(|| find_in_expr(value, offset))
@@ -253,9 +255,9 @@ fn find_in_stmt(stmt: &Stmt, offset: usize) -> Option<String> {
     }
 }
 
-fn find_in_pat(pat: &Pat, offset: usize) -> Option<String> {
+fn find_in_pat(pat: &Pat, offset: usize) -> Option<(String, Span)> {
     match pat {
-        Pat::Var { name, span } if contains(span, offset) => Some(name.clone()),
+        Pat::Var { name, span } if contains(span, offset) => Some((name.clone(), *span)),
         Pat::Constructor { args, .. } => {
             for arg in args {
                 if let Some(r) = find_in_pat(arg, offset) {
@@ -289,10 +291,22 @@ fn find_in_pat(pat: &Pat, offset: usize) -> Option<String> {
 
 /// Look up the type of a name in the checker's environment.
 /// If a FunAnnotation exists for the name, prefer it (includes labels).
-pub fn type_at_name(result: &CheckResult, name: &str, program: &[Decl]) -> Option<String> {
+pub fn type_at_name(
+    result: &CheckResult,
+    name: &str,
+    span: Option<&Span>,
+    program: &[Decl],
+) -> Option<String> {
     // Check for a FunAnnotation first (has labeled params)
     if let Some(sig) = find_annotation(program, name) {
         return Some(sig);
+    }
+
+    // Check span-based type map (works for locals, params, pattern bindings)
+    if let Some(span) = span
+        && let Some(ty_str) = result.type_at(span)
+    {
+        return Some(ty_str);
     }
 
     // Check env (functions, variables)

@@ -2954,3 +2954,62 @@ main () = add "hello" 1
         err.message
     );
 }
+
+// --- Type-at-span recording tests ---
+
+#[test]
+fn type_at_span_records_function_params() {
+    // Function params go through bind_pattern which records the type
+    let checker = check(
+        "fun foo (x: Int) -> Int\nfoo x = x"
+    ).unwrap();
+    let result = checker.to_result();
+    let types: Vec<_> = result.type_at_span.iter()
+        .map(|(_, ty)| format!("{}", result.sub.apply(ty)))
+        .collect();
+    assert!(
+        types.iter().any(|ty| ty == "Int"),
+        "expected Int for param x, got: {:?}",
+        types
+    );
+}
+
+#[test]
+fn type_at_span_records_locals_in_body() {
+    // Let bindings inside function bodies are the main LSP hover use case
+    let checker = check(
+        "main () = {\n  let x = 42\n  let y = x\n  y\n}"
+    ).unwrap();
+    let result = checker.to_result();
+    let types: Vec<_> = result.type_at_span.iter()
+        .map(|(_, ty)| format!("{}", result.sub.apply(ty)))
+        .collect();
+    // x binding, y binding, x usage ref, y usage ref
+    let int_count = types.iter().filter(|ty| *ty == "Int").count();
+    assert!(
+        int_count >= 3,
+        "expected at least 3 Int entries (x bind, x use, y bind), got {} in {:?}",
+        int_count,
+        types
+    );
+}
+
+#[test]
+fn type_at_span_records_case_bindings() {
+    let checker = check(r#"
+type Maybe a { Just(a) | Nothing }
+main () = case Just 42 {
+  Just(x) -> x
+  Nothing -> 0
+}
+"#).unwrap();
+    let result = checker.to_result();
+    let types: Vec<_> = result.type_at_span.iter()
+        .map(|(_, ty)| format!("{}", result.sub.apply(ty)))
+        .collect();
+    assert!(
+        types.iter().any(|ty| ty == "Int"),
+        "expected Int for case-bound x, got: {:?}",
+        types
+    );
+}

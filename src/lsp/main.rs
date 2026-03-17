@@ -147,11 +147,11 @@ impl LanguageServer for Backend {
         let position = params.text_document_position_params.position;
         let offset = line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
-        let Some(name) = hover::find_name_at_offset(&program, offset) else {
+        let Some((name, span)) = hover::find_name_at_offset(&program, offset) else {
             return Ok(None);
         };
 
-        let Some(type_str) = hover::type_at_name(&tc_result, &name, &program) else {
+        let Some(type_str) = hover::type_at_name(&tc_result, &name, Some(&span), &program) else {
             return Ok(None);
         };
 
@@ -176,7 +176,7 @@ impl LanguageServer for Backend {
         let offset =
             line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
-        let Some(name) = hover::find_name_at_offset(&program, offset) else {
+        let Some((name, _span)) = hover::find_name_at_offset(&program, offset) else {
             return Ok(None);
         };
 

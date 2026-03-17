@@ -372,13 +372,22 @@ impl Parser {
                             // Use the last token's end position + 1 for the desugared
                             // `show` call so it doesn't collide with a user-written `show`
                             // inside the hole (which would share the first token's span).
-                            let hole_span = tokens
+                            let show_span = tokens
                                 .last()
                                 .map(|t| Span {
                                     start: t.span.end + 1,
                                     end: t.span.end + 2,
                                 })
                                 .unwrap_or(span);
+                            // Span covering the entire hole for the wrapping App node,
+                            // so LSP traversal can reach expressions inside interpolation.
+                            let app_span = match (tokens.first(), tokens.last()) {
+                                (Some(first), Some(last)) => Span {
+                                    start: first.span.start,
+                                    end: last.span.end,
+                                },
+                                _ => span,
+                            };
                             tokens.push(crate::token::Spanned {
                                 token: crate::token::Token::Eof,
                                 span,
@@ -388,10 +397,10 @@ impl Parser {
                             segments.push(Expr::App {
                                 func: Box::new(Expr::Var {
                                     name: "show".to_string(),
-                                    span: hole_span,
+                                    span: show_span,
                                 }),
                                 arg: Box::new(hole_expr),
-                                span: hole_span,
+                                span: app_span,
                             });
                         }
                     }
