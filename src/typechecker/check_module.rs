@@ -1,8 +1,16 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::{Checker, Diagnostic, EffectDef, EffectOpDef, ModuleCodegenInfo, Scheme};
+use super::{Checker, Diagnostic, EffectDef, EffectOpDef, ModuleCodegenInfo, Scheme, Type};
 use crate::token::Span;
+
+/// Count the arity of a constructor from its type (number of Arrow/EffArrow levels).
+fn ctor_arity(ty: &Type) -> usize {
+    match ty {
+        Type::Arrow(_, ret) | Type::EffArrow(_, ret, _) => 1 + ctor_arity(ret),
+        _ => 0,
+    }
+}
 
 /// Map from module name (e.g. "Foo.Bar.Baz") to the file path that declares it.
 pub type ModuleMap = HashMap<String, PathBuf>;
@@ -474,12 +482,17 @@ impl Checker {
                     // (for opaque types, ctors is empty but the type name is still valid)
                     if let Some(ctors) = ctors_map.get(name) {
                         found = true;
+                        let mut variants = Vec::new();
                         for ctor in ctors {
                             if let Some(&scheme) = binding_map.get(ctor.as_str()) {
                                 self.env.insert(ctor.clone(), scheme.clone());
                                 self.constructors.insert(ctor.clone(), scheme.clone());
+                                variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
                                 found = true;
                             }
+                        }
+                        if !variants.is_empty() {
+                            self.adt_variants.insert(name.clone(), variants);
                         }
                     }
                     // If the exposed name is a constructor (not a type), also add to constructors
