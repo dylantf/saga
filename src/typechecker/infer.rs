@@ -396,6 +396,14 @@ impl Checker {
                 *span,
             ),
 
+            Expr::Ascription { expr, type_expr, span } => {
+                let inferred = self.infer_expr(expr)?;
+                let ann_ty = self.convert_type_expr(type_expr, &mut vec![]);
+                self.unify_at(&inferred, &ann_ty, *span)?;
+                self.record_type(*span, &ann_ty);
+                Ok(ann_ty)
+            }
+
             Expr::DictMethodAccess { .. } | Expr::DictRef { .. } | Expr::ForeignCall { .. } => {
                 unreachable!("elaboration-only construct in typechecker")
             }

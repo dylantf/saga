@@ -121,6 +121,18 @@ impl Parser {
             };
         }
 
+        // Type ascription: `expr : Type` — lowest precedence, only at top level
+        if min_bp == 0 && matches!(self.peek(), Token::Colon) {
+            self.advance(); // consume ':'
+            let type_expr = self.parse_type_expr()?;
+            let end = self.tokens[self.pos - 1].span;
+            left = Expr::Ascription {
+                span: left.span().to(end),
+                expr: Box::new(left),
+                type_expr,
+            };
+        }
+
         Ok(left)
     }
 

@@ -424,6 +424,7 @@ impl Normalizer {
             | Expr::Constructor { .. }
             | Expr::QualifiedName { .. }
             | Expr::DictRef { .. } => expr.clone(),
+            Expr::Ascription { expr, .. } => self.walk_expr(expr, lifted),
         }
     }
 

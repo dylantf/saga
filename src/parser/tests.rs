@@ -259,6 +259,30 @@ fn forward_pipe() {
 }
 
 #[test]
+fn type_ascription() {
+    let expr = parse_expr("(x : Int)");
+    match expr {
+        Expr::Ascription { expr, type_expr, .. } => {
+            assert!(matches!(*expr, Expr::Var { name, .. } if name == "x"));
+            assert!(matches!(type_expr, TypeExpr::Named(n) if n == "Int"));
+        }
+        _ => panic!("expected Ascription, got {:?}", expr),
+    }
+}
+
+#[test]
+fn type_ascription_lower_than_pipe() {
+    // `x |> f : Int` should parse as `(x |> f) : Int`
+    let expr = parse_expr("x |> f : Int");
+    match expr {
+        Expr::Ascription { expr, .. } => {
+            assert!(matches!(*expr, Expr::App { .. }));
+        }
+        _ => panic!("expected Ascription wrapping App, got {:?}", expr),
+    }
+}
+
+#[test]
 fn backward_pipe() {
     // f <| x desugars to App(f, x)
     let expr = parse_expr("f <| x");

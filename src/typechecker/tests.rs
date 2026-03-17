@@ -952,6 +952,32 @@ main () = unwrap (Err(\"oops\"))",
 }
 
 #[test]
+fn ascription_correct_type() {
+    check("main () = (42 : Int)").unwrap();
+}
+
+#[test]
+fn ascription_wrong_type() {
+    let result = check("main () = (42 : String)");
+    assert!(result.is_err());
+}
+
+#[test]
+fn ascription_resolves_ambiguous_type_var() {
+    check(
+        "type MyResult a b {
+  Ok(a)
+  Err(b)
+}
+main () = {
+  let x = (Ok(1) : MyResult Int String)
+  x
+}",
+    )
+    .unwrap();
+}
+
+#[test]
 fn inferred_constraint_propagation() {
     // Function without where clause infers constraint; caller with impl succeeds
     check(

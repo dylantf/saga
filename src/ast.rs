@@ -280,6 +280,13 @@ pub enum Expr {
         span: Span,
     },
 
+    /// `(expr : Type)` — inline type annotation / ascription
+    Ascription {
+        expr: Box<Expr>,
+        type_expr: TypeExpr,
+        span: Span,
+    },
+
     // --- Elaboration-only (never produced by the parser) ---
     /// Extract a method from a dictionary tuple (does not apply it).
     /// Lowered to `erlang:element(method_index+1, dict)`.
@@ -323,6 +330,7 @@ impl Expr {
             | Expr::Do { span, .. }
             | Expr::Receive { span, .. }
             | Expr::DictMethodAccess { span, .. }
+            | Expr::Ascription { span, .. }
             | Expr::DictRef { span, .. }
             | Expr::ForeignCall { span, .. } => *span,
         }

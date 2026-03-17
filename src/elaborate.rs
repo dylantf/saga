@@ -476,20 +476,19 @@ impl Elaborator {
                     // Trait method via qualified name
                     if let Some((trait_name, method_index)) =
                         self.trait_methods.get(&qualified).cloned()
+                        && let Some(dict_expr) = self.resolve_dict(&trait_name, func.span())
                     {
-                        if let Some(dict_expr) = self.resolve_dict(&trait_name, func.span()) {
-                            let elab_arg = self.elaborate_expr(arg);
-                            let method = Expr::DictMethodAccess {
-                                dict: Box::new(dict_expr),
-                                method_index,
-                                span: func.span(),
-                            };
-                            return Expr::App {
-                                func: Box::new(method),
-                                arg: Box::new(elab_arg),
-                                span: *span,
-                            };
-                        }
+                        let elab_arg = self.elaborate_expr(arg);
+                        let method = Expr::DictMethodAccess {
+                            dict: Box::new(dict_expr),
+                            method_index,
+                            span: func.span(),
+                        };
+                        return Expr::App {
+                            func: Box::new(method),
+                            arg: Box::new(elab_arg),
+                            span: *span,
+                        };
                     }
 
                     // Dict-parameterized function via qualified name
@@ -778,6 +777,8 @@ impl Elaborator {
                 }),
                 span: *span,
             },
+
+            Expr::Ascription { expr, .. } => self.elaborate_expr(expr),
 
             // Elaboration-only variants (shouldn't appear in input)
             Expr::DictMethodAccess { .. } | Expr::DictRef { .. } => expr.clone(),
