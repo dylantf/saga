@@ -55,6 +55,8 @@ pub struct Lowerer<'a> {
     counter: usize,
     /// Codegen info for imported modules (from typechecker cache).
     codegen_info: &'a HashMap<String, ModuleCodegenInfo>,
+    /// Elaborated programs per module, for cross-module handler lookup.
+    elaborated_modules: &'a HashMap<String, ast::Program>,
     /// Maps module alias/name used in source -> Erlang module atom name.
     module_aliases: HashMap<String, String>,
     /// Names declared as `pub` in the current module (for export filtering).
@@ -99,10 +101,14 @@ pub struct Lowerer<'a> {
 }
 
 impl<'a> Lowerer<'a> {
-    pub fn new(codegen_info: &'a HashMap<String, ModuleCodegenInfo>) -> Self {
+    pub fn new(
+        codegen_info: &'a HashMap<String, ModuleCodegenInfo>,
+        elaborated_modules: &'a HashMap<String, ast::Program>,
+    ) -> Self {
         Lowerer {
             counter: 0,
             codegen_info,
+            elaborated_modules,
             module_aliases: HashMap::new(),
             pub_names: std::collections::HashSet::new(),
             record_fields: HashMap::new(),

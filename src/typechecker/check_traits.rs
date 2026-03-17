@@ -1,7 +1,7 @@
 use crate::ast;
 use crate::token::Span;
 
-use super::{Checker, ImplInfo, Scheme, Type, TypeError};
+use super::{Checker, ImplInfo, Scheme, Type, Diagnostic};
 
 impl Checker {
     // --- Trait & impl helpers ---
@@ -57,7 +57,7 @@ impl Checker {
         type_param: &str,
         supertraits: &[String],
         methods: &[ast::TraitMethod],
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         let mut method_sigs = Vec::new();
 
         for method in methods {
@@ -133,17 +133,17 @@ impl Checker {
         needs: &[ast::EffectRef],
         methods: &[(String, Vec<ast::Pat>, ast::Expr)],
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         // Check the trait exists
         let trait_info = self.traits.get(trait_name).cloned().ok_or_else(|| {
-            TypeError::at(span, format!("impl for undefined trait: {}", trait_name))
+            Diagnostic::error_at(span, format!("impl for undefined trait: {}", trait_name))
         })?;
 
         // Check all required methods are provided
         let provided: Vec<&str> = methods.iter().map(|(n, _, _)| n.as_str()).collect();
         for (required_name, _, _) in &trait_info.methods {
             if !provided.contains(&required_name.as_str()) {
-                return Err(TypeError::at(
+                return Err(Diagnostic::error_at(
                     span,
                     format!(
                         "impl {} for {} is missing method '{}'",
@@ -156,7 +156,7 @@ impl Checker {
         // Check for extra methods not in the trait
         for name in &provided {
             if !trait_info.methods.iter().any(|(n, _, _)| n == name) {
-                return Err(TypeError::at(
+                return Err(Diagnostic::error_at(
                     span,
                     format!(
                         "impl {} for {} has method '{}' not defined in trait",
@@ -223,7 +223,7 @@ impl Checker {
             let body_ty = self.infer_expr(body)?;
             self.unify_at(&body_ty, &expected_return, body.span())
                 .map_err(|e| {
-                    TypeError::at(
+                    Diagnostic::error_at(
                         span,
                         format!(
                             "in impl {} for {}, method '{}': {}",
@@ -261,7 +261,7 @@ impl Checker {
                 if matches!(resolved, Type::Var(_)) {
                     let mut names = record_names.clone();
                     names.sort();
-                    return Err(TypeError::at(
+                    return Err(Diagnostic::error_at(
                         field_span,
                         format!(
                             "ambiguous field access: could be any of [{}] which all have this field; add a type annotation to disambiguate",
@@ -285,7 +285,7 @@ impl Checker {
                     }
                 }
                 None => {
-                    return Err(TypeError::at(
+                    return Err(Diagnostic::error_at(
                         span,
                         format!(
                             "where clause references unknown type variable '{}' (params: {:?})",

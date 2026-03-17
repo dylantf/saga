@@ -4,12 +4,32 @@ use dylang::{ast, derive, lexer, parser, typechecker};
 
 use crate::line_index::LineIndex;
 
-pub struct CheckResult {
+pub struct CheckSnapshot {
     pub diagnostics: Vec<Diagnostic>,
-    pub checker: typechecker::Checker,
+    pub tc_result: typechecker::CheckResult,
     pub program: Option<ast::Program>,
     pub line_index: LineIndex,
     pub source: String,
+}
+
+fn tc_to_lsp_diagnostic(line_index: &LineIndex, d: &typechecker::Diagnostic) -> Diagnostic {
+    let start_offset = d.span.map(|s| s.start).unwrap_or(0);
+    let end_offset = d.span.map(|s| s.end).unwrap_or(1);
+    let (start_line, start_col) = line_index.offset_to_line_col(start_offset);
+    let (end_line, end_col) = line_index.offset_to_line_col(end_offset);
+    let severity = match d.severity {
+        typechecker::Severity::Error => DiagnosticSeverity::ERROR,
+        typechecker::Severity::Warning => DiagnosticSeverity::WARNING,
+    };
+    Diagnostic {
+        range: Range {
+            start: Position::new(start_line as u32, start_col as u32),
+            end: Position::new(end_line as u32, end_col as u32),
+        },
+        severity: Some(severity),
+        message: d.message.clone(),
+        ..Default::default()
+    }
 }
 
 fn make_diagnostic(line_index: &LineIndex, message: String, offset: usize) -> Diagnostic {
@@ -25,7 +45,7 @@ fn make_diagnostic(line_index: &LineIndex, message: String, offset: usize) -> Di
     }
 }
 
-pub fn check(checker: typechecker::Checker, text: &str) -> CheckResult {
+pub fn check(checker: typechecker::Checker, text: &str) -> CheckSnapshot {
     let line_index = LineIndex::new(text);
     let source = text.to_string();
     let mut checker = checker;
@@ -33,9 +53,9 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckResult {
     let tokens = match lexer::Lexer::new(text).lex() {
         Ok(tokens) => tokens,
         Err(e) => {
-            return CheckResult {
+            return CheckSnapshot {
                 diagnostics: vec![make_diagnostic(&line_index, e.message, e.pos)],
-                checker,
+                tc_result: checker.to_result(),
                 program: None,
                 line_index,
                 source,
@@ -46,9 +66,9 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckResult {
     let mut program = match parser::Parser::new(tokens).parse_program() {
         Ok(program) => program,
         Err(e) => {
-            return CheckResult {
+            return CheckSnapshot {
                 diagnostics: vec![make_diagnostic(&line_index, e.message, e.span.start)],
-                checker,
+                tc_result: checker.to_result(),
                 program: None,
                 line_index,
                 source,
@@ -58,48 +78,14 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckResult {
 
     derive::expand_derives(&mut program);
 
-    let mut diagnostics = match checker.check_program(&program) {
-        Ok(()) => vec![],
-        Err(errors) => errors
-            .into_iter()
-            .map(|e| {
-                let start_offset = e.span.map(|s| s.start).unwrap_or(0);
-                let end_offset = e.span.map(|s| s.end).unwrap_or(1);
-                let (start_line, start_col) = line_index.offset_to_line_col(start_offset);
-                let (end_line, end_col) = line_index.offset_to_line_col(end_offset);
-                Diagnostic {
-                    range: Range {
-                        start: Position::new(start_line as u32, start_col as u32),
-                        end: Position::new(end_line as u32, end_col as u32),
-                    },
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    message: e.message,
-                    ..Default::default()
-                }
-            })
-            .collect(),
-    };
+    let tc_result = checker.check_program(&program);
+    let diagnostics = tc_result.diagnostics.iter()
+        .map(|d| tc_to_lsp_diagnostic(&line_index, d))
+        .collect();
 
-    // Add warnings as WARNING-severity diagnostics
-    for w in &checker.warnings {
-        let start_offset = w.span.map(|s| s.start).unwrap_or(0);
-        let end_offset = w.span.map(|s| s.end).unwrap_or(1);
-        let (start_line, start_col) = line_index.offset_to_line_col(start_offset);
-        let (end_line, end_col) = line_index.offset_to_line_col(end_offset);
-        diagnostics.push(Diagnostic {
-            range: Range {
-                start: Position::new(start_line as u32, start_col as u32),
-                end: Position::new(end_line as u32, end_col as u32),
-            },
-            severity: Some(DiagnosticSeverity::WARNING),
-            message: w.message.clone(),
-            ..Default::default()
-        });
-    }
-
-    CheckResult {
+    CheckSnapshot {
         diagnostics,
-        checker,
+        tc_result,
         program: Some(program),
         line_index,
         source,

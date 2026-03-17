@@ -11,8 +11,9 @@ reliable () = 42
 
 main () = {
   let r1 = supervised 3 (fun () -> unreliable ())
-  print $"unreliable: {show r1}"
+  print $"unreliable: {r1}"
 
   let r2 = supervised 3 (fun () -> reliable ())
-  print $"reliable: {show r2}"
+  let shown = show r2
+  print $"reliable: {r2}"
 }

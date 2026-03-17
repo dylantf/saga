@@ -4,6 +4,8 @@ pub use check_module::{ModuleMap, builtin_module_source, scan_project_modules};
 mod check_traits;
 pub(crate) mod exhaustiveness;
 mod infer;
+mod result;
+pub use result::CheckResult;
 
 #[cfg(test)]
 mod tests;
@@ -143,7 +145,7 @@ impl Substitution {
     }
 
     /// Bind a type variable to a type, with occurs check.
-    fn bind(&mut self, id: u32, ty: &Type) -> Result<(), TypeError> {
+    fn bind(&mut self, id: u32, ty: &Type) -> Result<(), Diagnostic> {
         if let Type::Var(other) = ty
             && *other == id
         {
@@ -151,10 +153,9 @@ impl Substitution {
         }
 
         if self.occurs(id, ty) {
-            return Err(TypeError::new(format!(
-                "infinite type: ?{} occurs in {}",
-                id, ty
-            )));
+            return Err(Diagnostic::error(
+                format!("infinite type: ?{} occurs in {}", id, ty),
+            ));
         }
         self.map.insert(id, ty.clone());
         Ok(())
@@ -426,39 +427,6 @@ pub struct EffectDef {
     pub type_param_count: usize,
 }
 
-/// A handler definition for codegen: full body (arms, return clause, effects).
-#[derive(Debug, Clone)]
-pub struct HandlerBody {
-    pub name: String,
-    pub effects: Vec<String>,
-    pub arms: Vec<crate::ast::HandlerArm>,
-    pub return_clause: Option<Box<crate::ast::HandlerArm>>,
-}
-
-impl ModuleCodegenInfo {
-    /// Update handler bodies from the elaborated program.
-    /// Called after elaboration so handler arms contain ForeignCall
-    /// nodes instead of raw EffectCall nodes.
-    pub fn update_handler_bodies(&mut self, elaborated: &[crate::ast::Decl]) {
-        for decl in elaborated {
-            if let crate::ast::Decl::HandlerDef {
-                public: true,
-                name,
-                effects,
-                arms,
-                return_clause,
-                ..
-            } = decl
-                && let Some(hb) = self.handler_bodies.iter_mut().find(|h| &h.name == name)
-            {
-                hb.effects = effects.iter().map(|e| e.name.clone()).collect();
-                hb.arms = arms.clone();
-                hb.return_clause = return_clause.clone();
-            }
-        }
-    }
-}
-
 /// Information about a module's exports needed by the lowerer/codegen.
 /// Populated during typechecking alongside `tc_modules`.
 #[derive(Debug, Clone, Default)]
@@ -473,8 +441,6 @@ pub struct ModuleCodegenInfo {
     pub handler_defs: Vec<String>,
     /// Public function effect annotations: name -> sorted effect names.
     pub fun_effects: Vec<(String, Vec<String>)>,
-    /// Public handler bodies: (name, effects, arms, return_clause).
-    pub handler_bodies: Vec<HandlerBody>,
     /// Public type constructors: type name -> [constructor names].
     pub type_constructors: Vec<(String, Vec<String>)>,
     /// Trait impl dicts: (trait_name, target_type, dict_name, arity).
@@ -550,50 +516,55 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
     }
 }
 
-// --- Warnings ---
-
-#[derive(Debug, Clone)]
-pub struct TypeWarning {
-    pub message: std::string::String,
-    pub span: Option<Span>,
-}
-
-impl TypeWarning {
-    pub(crate) fn at(span: Span, message: impl Into<std::string::String>) -> Self {
-        TypeWarning {
-            message: message.into(),
-            span: Some(span),
-        }
-    }
-}
-
-impl std::fmt::Display for TypeWarning {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
 // --- Errors ---
 
 #[derive(Debug, Clone)]
-pub struct TypeError {
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone)]
+pub struct Diagnostic {
+    pub severity: Severity,
     pub message: std::string::String,
     pub span: Option<Span>,
 }
 
-impl TypeError {
-    pub(crate) fn new(message: impl Into<std::string::String>) -> Self {
-        TypeError {
+impl Diagnostic {
+    pub(crate) fn new(severity: Severity, message: impl Into<std::string::String>) -> Self {
+        Diagnostic {
+            severity,
             message: message.into(),
             span: None,
         }
     }
 
-    pub(crate) fn at(span: Span, message: impl Into<std::string::String>) -> Self {
-        TypeError {
+    pub(crate) fn at(
+        span: Span,
+        severity: Severity,
+        message: impl Into<std::string::String>,
+    ) -> Self {
+        Diagnostic {
+            severity,
             message: message.into(),
             span: Some(span),
         }
+    }
+
+    /// Convenience: error with no span.
+    pub(crate) fn error(message: impl Into<std::string::String>) -> Self {
+        Self::new(Severity::Error, message)
+    }
+
+    /// Convenience: error at a specific span.
+    pub(crate) fn error_at(span: Span, message: impl Into<std::string::String>) -> Self {
+        Self::at(span, Severity::Error, message)
+    }
+
+    /// Convenience: warning at a specific span.
+    pub(crate) fn warning_at(span: Span, message: impl Into<std::string::String>) -> Self {
+        Self::at(span, Severity::Warning, message)
     }
 
     pub(crate) fn with_span(mut self, span: Span) -> Self {
@@ -604,7 +575,7 @@ impl TypeError {
     }
 }
 
-impl std::fmt::Display for TypeError {
+impl std::fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)
     }
@@ -613,21 +584,21 @@ impl std::fmt::Display for TypeError {
 // --- Internal types used by inference ---
 
 #[derive(Debug, Clone)]
-pub(crate) struct EffectOpSig {
+pub struct EffectOpSig {
     pub name: std::string::String,
     pub params: Vec<Type>,
     pub return_type: Type,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct EffectDefInfo {
+pub struct EffectDefInfo {
     /// Fresh var IDs for the effect's type parameters (empty for non-parameterized effects)
     pub type_params: Vec<u32>,
     pub ops: Vec<EffectOpSig>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct HandlerInfo {
+pub struct HandlerInfo {
     /// Which effects this handler handles
     pub effects: Vec<std::string::String>,
     /// Return clause: (param_var_id, body_type). Used to compute the `with` expression type.
@@ -672,10 +643,10 @@ pub struct TraitEvidence {
 #[derive(Clone)]
 pub struct Checker {
     pub(crate) next_var: u32,
-    pub sub: Substitution,
-    pub env: TypeEnv,
+    pub(crate) sub: Substitution,
+    pub(crate) env: TypeEnv,
     /// Constructor types from type definitions: name -> (arity, type scheme)
-    pub constructors: HashMap<std::string::String, Scheme>,
+    pub(crate) constructors: HashMap<std::string::String, Scheme>,
     /// Record definitions: record name -> vec of (field_name, field_type)
     pub(crate) records: HashMap<std::string::String, Vec<(std::string::String, Type)>>,
     /// Effect definitions: effect name -> definition info (type params + operations)
@@ -708,15 +679,17 @@ pub struct Checker {
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence)
     pub(crate) where_bound_var_names: HashMap<u32, String>,
     /// Module system state: caches, project root, import tracking.
-    pub modules: ModuleContext,
+    pub(crate) modules: ModuleContext,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
     pub(crate) adt_variants: HashMap<std::string::String, Vec<(std::string::String, usize)>>,
     /// Evidence collected during constraint solving for the elaboration pass.
-    pub evidence: Vec<TraitEvidence>,
-    /// Errors collected during block inference (for multi-error reporting).
-    pub(crate) collected_errors: Vec<TypeError>,
-    /// Warnings collected during type checking.
-    pub warnings: Vec<TypeWarning>,
+    pub(crate) evidence: Vec<TraitEvidence>,
+    /// Diagnostics collected during block inference (for multi-error reporting).
+    pub(crate) collected_diagnostics: Vec<Diagnostic>,
+    /// Per-span type information for LSP hover, go-to-def, etc.
+    /// Types are stored unresolved (may contain type variables); apply `sub`
+    /// at lookup time to get the final resolved type.
+    pub(crate) type_at_span: HashMap<Span, Type>,
 }
 
 /// Module system state: caches, project root, and import tracking.
@@ -733,11 +706,10 @@ pub struct ModuleContext {
     /// Cache of parsed programs for each typechecked module.
     pub programs: HashMap<String, crate::ast::Program>,
     /// Cached checker state after prelude has been loaded.
-    pub prelude_snapshot: Option<Box<Checker>>,
+    pub(crate) prelude_snapshot: Option<Box<Checker>>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) loading: HashSet<String>,
 }
-
 
 /// Per-variable record candidate narrowing: var_id -> (candidate record names, span).
 pub(crate) type FieldCandidates = HashMap<u32, (Vec<String>, Span)>;
@@ -781,8 +753,8 @@ impl Checker {
             modules: ModuleContext::default(),
             adt_variants: HashMap::new(),
             evidence: Vec::new(),
-            collected_errors: Vec::new(),
-            warnings: Vec::new(),
+            collected_diagnostics: Vec::new(),
+            type_at_span: HashMap::new(),
         };
         checker.register_builtins();
         checker
@@ -799,7 +771,7 @@ impl Checker {
     /// the CLI and the LSP.
     pub fn with_prelude(
         project_root: Option<std::path::PathBuf>,
-    ) -> std::result::Result<Self, TypeError> {
+    ) -> std::result::Result<Self, Diagnostic> {
         let mut checker = match &project_root {
             Some(root) => Self::with_project_root(root.clone()),
             None => Self::new(),
@@ -820,10 +792,24 @@ impl Checker {
             .expect("prelude parse");
         crate::derive::expand_derives(&mut prelude_program);
         checker
-            .check_program(&prelude_program)
+            .check_program_inner(&prelude_program)
             .map_err(|errs| errs.into_iter().next().unwrap())?;
         checker.modules.prelude_snapshot = Some(Box::new(checker.clone()));
         Ok(checker)
+    }
+
+    /// Drain errors from collected_diagnostics, leaving warnings in place.
+    pub(crate) fn drain_errors(&mut self) -> Vec<Diagnostic> {
+        let (errors, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.collected_diagnostics)
+            .into_iter()
+            .partition(|d| matches!(d.severity, Severity::Error));
+        self.collected_diagnostics = rest;
+        errors
+    }
+
+    /// Record the type of an expression or binding at a given span.
+    pub(crate) fn record_type(&mut self, span: Span, ty: &Type) {
+        self.type_at_span.entry(span).or_insert_with(|| ty.clone());
     }
 
     pub fn effect_names(&self) -> Vec<String> {
@@ -875,7 +861,7 @@ impl Checker {
         declared_effects: &HashSet<String>,
         label: &str,
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         let undeclared: Vec<_> = body_effects.difference(declared_effects).collect();
         if undeclared.is_empty() {
             return Ok(());
@@ -883,7 +869,7 @@ impl Checker {
         let mut effects: Vec<_> = undeclared.into_iter().cloned().collect();
         effects.sort();
         if declared_effects.is_empty() {
-            Err(TypeError::at(
+            Err(Diagnostic::error_at(
                 span,
                 format!(
                     "{} uses effects {{{}}} but has no 'needs' declaration",
@@ -892,7 +878,7 @@ impl Checker {
                 ),
             ))
         } else {
-            Err(TypeError::at(
+            Err(Diagnostic::error_at(
                 span,
                 format!(
                     "{} uses effects {{{}}} not declared in its 'needs' clause",
@@ -1160,7 +1146,7 @@ impl Checker {
 
     // --- Unification ---
 
-    pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), TypeError> {
+    pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), Diagnostic> {
         let a = self.sub.apply(a);
         let b = self.sub.apply(b);
 
@@ -1205,10 +1191,9 @@ impl Checker {
             _ => {
                 let a_display = self.prettify_type(&a);
                 let b_display = self.prettify_type(&b);
-                Err(TypeError::new(format!(
-                    "type mismatch: expected {}, got {}",
-                    a_display, b_display
-                )))
+                Err(Diagnostic::error(
+                    format!("type mismatch: expected {}, got {}", a_display, b_display),
+                ))
             }
         }
     }
@@ -1234,7 +1219,7 @@ impl Checker {
     }
 
     /// Unify with span context: if unification fails, attach the span to the error.
-    pub(crate) fn unify_at(&mut self, a: &Type, b: &Type, span: Span) -> Result<(), TypeError> {
+    pub(crate) fn unify_at(&mut self, a: &Type, b: &Type, span: Span) -> Result<(), Diagnostic> {
         self.unify(a, b).map_err(|e| e.with_span(span))
     }
 

@@ -24,8 +24,9 @@ fn emit_project_module(
             None
         }
     }).unwrap_or_default();
-    let elaborated = elaborate::elaborate_module(&program, checker, &original_module_name);
-    codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info)
+    let result = checker.to_result();
+    let elaborated = elaborate::elaborate_module(&program, &result, &original_module_name);
+    codegen::emit_module_with_imports(module_name, &elaborated, result.codegen_info(), &std::collections::HashMap::new())
 }
 
 /// Parse and typecheck a source file with the given checker (project mode).
@@ -34,7 +35,8 @@ fn typecheck_source(source: &str, checker: &mut typechecker::Checker) {
     let program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
-    checker.check_program(&program).expect("typecheck error");
+    let result = checker.check_program(&program);
+    assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());
 }
 
 /// Create a project-mode checker pointed at the test fixtures directory,
@@ -51,9 +53,8 @@ fn make_project_checker() -> typechecker::Checker {
     let prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
-    checker
-        .check_program(&prelude_program)
-        .expect("prelude typecheck error");
+    let result = checker.check_program(&prelude_program);
+    assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
     checker
 }
 

@@ -11,17 +11,17 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::token::Span;
-use crate::typechecker::{Checker, TraitEvidence, TraitInfo, Type};
+use crate::typechecker::{CheckResult, TraitEvidence, TraitInfo, Type};
 
 /// Elaborate a program using typechecker results.
 /// Returns a new program with dictionary passing made explicit.
-pub fn elaborate(program: &Program, checker: &Checker) -> Program {
-    elaborate_module(program, checker, "")
+pub fn elaborate(program: &Program, result: &CheckResult) -> Program {
+    elaborate_module(program, result, "")
 }
 
 /// Elaborate with a module name for module-qualified dict names.
-pub fn elaborate_module(program: &Program, checker: &Checker, module_name: &str) -> Program {
-    let mut elab = Elaborator::new(checker, module_name);
+pub fn elaborate_module(program: &Program, result: &CheckResult, module_name: &str) -> Program {
+    let mut elab = Elaborator::new(result, module_name);
     elab.elaborate_program(program)
 }
 
@@ -45,7 +45,7 @@ struct Elaborator {
 }
 
 impl Elaborator {
-    fn new(checker: &Checker, module_name: &str) -> Self {
+    fn new(result: &CheckResult, module_name: &str) -> Self {
         // Build inferred dict params from checker's env (for functions without
         // explicit where clauses that still have inferred trait constraints).
         // Traits that use operator dispatch, not dictionary dispatch.
@@ -54,7 +54,7 @@ impl Elaborator {
             ["Num", "Eq", "Ord"].into_iter().collect();
 
         let mut inferred_dict_params: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        for (name, scheme) in checker.env.iter() {
+        for (name, scheme) in result.env.iter() {
             if !scheme.constraints.is_empty() {
                 let dict_params: Vec<(String, String)> = scheme
                     .constraints
@@ -70,7 +70,7 @@ impl Elaborator {
 
         // Build evidence lookup by span
         let mut evidence_by_span: HashMap<Span, Vec<TraitEvidence>> = HashMap::new();
-        for ev in &checker.evidence {
+        for ev in &result.evidence {
             evidence_by_span
                 .entry(ev.span)
                 .or_default()
@@ -90,7 +90,7 @@ impl Elaborator {
 
         // Pre-populate dict_names from imported modules' codegen info
         let mut dict_names = HashMap::new();
-        for info in checker.modules.codegen_info.values() {
+        for info in result.codegen_info().values() {
             for (trait_name, target_type, dict_name, _arity) in &info.trait_impl_dicts {
                 dict_names.insert((trait_name.clone(), target_type.clone()), dict_name.clone());
             }
@@ -100,7 +100,7 @@ impl Elaborator {
             trait_methods: HashMap::new(),
             fun_dict_params: inferred_dict_params,
             dict_names,
-            traits: checker.traits.clone(),
+            traits: result.traits.clone(),
             evidence_by_span,
             current_fun: None,
             current_dict_params: HashMap::new(),

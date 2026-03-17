@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use dylang::ast::{Decl, Expr, Pat, Stmt};
 use dylang::token::Span;
-use dylang::typechecker::Checker;
+use dylang::typechecker::CheckResult;
 
 pub struct DefinitionResult {
     pub span: Span,
@@ -15,11 +15,11 @@ pub struct DefinitionResult {
 pub fn find_definition(
     program: &[Decl],
     name: &str,
-    checker: &Checker,
+    result: &CheckResult,
 ) -> Option<DefinitionResult> {
     // Module name click: jump to the module file
     if let Some(module_name) = name.strip_prefix("module:") {
-        return find_module_file(program, module_name, checker);
+        return find_module_file(program, module_name, result);
     }
 
     // Try local first
@@ -31,7 +31,7 @@ pub fn find_definition(
     }
 
     // Try cross-module: find which module imported this name
-    find_cross_module(program, name, checker)
+    find_cross_module(program, name, result)
 }
 
 fn find_local(program: &[Decl], name: &str) -> Option<Span> {
@@ -217,7 +217,7 @@ fn find_def_in_pat(pat: &Pat, name: &str) -> Option<Span> {
 fn find_module_file(
     program: &[Decl],
     module_name: &str,
-    checker: &Checker,
+    result: &CheckResult,
 ) -> Option<DefinitionResult> {
     // Find the import that matches this module name
     for decl in program {
@@ -225,9 +225,8 @@ fn find_module_file(
             let last = module_path.last()?;
             if last == module_name {
                 let full_name = module_path.join(".");
-                let file_path = checker
-                    .modules.map
-                    .as_ref()
+                let file_path = result
+                    .module_map()
                     .and_then(|m| m.get(&full_name))
                     .cloned()?;
                 // Jump to the top of the file
@@ -242,7 +241,11 @@ fn find_module_file(
 }
 
 /// Find a name's definition in an imported module.
-fn find_cross_module(program: &[Decl], name: &str, checker: &Checker) -> Option<DefinitionResult> {
+fn find_cross_module(
+    program: &[Decl],
+    name: &str,
+    result: &CheckResult,
+) -> Option<DefinitionResult> {
     // Collect all imports that could have brought this name into scope
     for decl in program {
         if let Decl::Import {
@@ -269,16 +272,15 @@ fn find_cross_module(program: &[Decl], name: &str, checker: &Checker) -> Option<
             }
 
             // Look up the module's AST and file path
-            let Some(file_path) = checker
-                .modules.map
-                .as_ref()
+            let Some(file_path) = result
+                .module_map()
                 .and_then(|m| m.get(&module_name))
                 .cloned()
             else {
                 continue;
             };
 
-            let Some(module_program) = checker.modules.programs.get(&module_name) else {
+            let Some(module_program) = result.programs().get(&module_name) else {
                 continue;
             };
 

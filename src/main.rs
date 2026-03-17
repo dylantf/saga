@@ -61,12 +61,12 @@ fn print_diagnostic(source: &str, source_path: &str, label: &str, span: Option<t
     }
 }
 
-fn print_type_error(source: &str, source_path: &str, e: &typechecker::TypeError) {
-    print_diagnostic(source, source_path, "Type error", e.span, &e.message);
-}
-
-fn print_warning(source: &str, source_path: &str, w: &typechecker::TypeWarning) {
-    print_diagnostic(source, source_path, "Warning", w.span, &w.message);
+fn print_tc_diagnostic(source: &str, source_path: &str, d: &typechecker::Diagnostic) {
+    let label = match d.severity {
+        typechecker::Severity::Error => "Type error",
+        typechecker::Severity::Warning => "Warning",
+    };
+    print_diagnostic(source, source_path, label, d.span, &d.message);
 }
 
 fn print_usage() {
@@ -86,7 +86,7 @@ fn parse_and_typecheck(
     source: &str,
     source_path: &str,
     checker: &mut typechecker::Checker,
-) -> ast::Program {
+) -> (ast::Program, typechecker::CheckResult) {
     let tokens = match lexer::Lexer::new(source).lex() {
         Ok(t) => t,
         Err(e) => {
@@ -110,16 +110,17 @@ fn parse_and_typecheck(
         }
     };
     derive::expand_derives(&mut program);
-    if let Err(errors) = checker.check_program(&program) {
-        for e in &errors {
-            print_type_error(source, source_path, e);
+    let result = checker.check_program(&program);
+    for w in result.warnings() {
+        print_tc_diagnostic(source, source_path, w);
+    }
+    if result.has_errors() {
+        for e in result.errors() {
+            print_tc_diagnostic(source, source_path, e);
         }
         std::process::exit(1);
     }
-    for w in &checker.warnings {
-        print_warning(source, source_path, w);
-    }
-    program
+    (program, result)
 }
 
 fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
@@ -130,22 +131,17 @@ fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
 }
 
 /// Compile all Std.* modules referenced in codegen_info into the build directory.
-/// Elaborate, lower, and write a module's Core Erlang to the build directory.
-/// Also updates handler bodies in codegen_info so cross-module named handlers
-/// have elaborated (ForeignCall) AST nodes.
-fn elaborate_and_emit(
+/// Lower an elaborated module to Core Erlang and write it to the build directory.
+fn emit_module(
     module_name: &str,
-    program: &ast::Program,
-    checker_for_elab: &typechecker::Checker,
-    codegen_info: &mut std::collections::HashMap<String, typechecker::ModuleCodegenInfo>,
+    elaborated: &ast::Program,
+    codegen_info: &std::collections::HashMap<String, typechecker::ModuleCodegenInfo>,
+    elaborated_modules: &std::collections::HashMap<String, ast::Program>,
     build_dir: &std::path::Path,
 ) {
-    let elaborated = elaborate::elaborate_module(program, checker_for_elab, module_name);
-    if let Some(info) = codegen_info.get_mut(module_name) {
-        info.update_handler_bodies(&elaborated);
-    }
     let erlang_name = module_name.to_lowercase().replace('.', "_");
-    let core_src = codegen::emit_module_with_imports(&erlang_name, &elaborated, codegen_info);
+    let core_src =
+        codegen::emit_module_with_imports(&erlang_name, elaborated, codegen_info, elaborated_modules);
     let core_path = build_dir.join(format!("{}.core", erlang_name));
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
@@ -153,18 +149,24 @@ fn elaborate_and_emit(
     });
 }
 
-fn compile_std_modules(checker: &mut typechecker::Checker, build_dir: &std::path::Path) {
-    let std_modules: Vec<String> = checker
-        .modules.codegen_info
+/// Typecheck and elaborate Std modules. Returns their elaborated programs.
+fn compile_std_modules(
+    checker: &typechecker::Checker,
+    result: &typechecker::CheckResult,
+) -> std::collections::HashMap<String, ast::Program> {
+    let std_modules: Vec<String> = result
+        .codegen_info()
         .keys()
         .filter(|name| name.starts_with("Std."))
         .cloned()
         .collect();
 
+    let mut elaborated_modules = std::collections::HashMap::new();
+
     for module_name in &std_modules {
         let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
 
-        let mut program = if let Some(cached) = checker.modules.programs.get(module_name) {
+        let mut program = if let Some(cached) = result.programs().get(module_name) {
             cached.clone()
         } else {
             let source = typechecker::builtin_module_source(&module_path)
@@ -183,21 +185,19 @@ fn compile_std_modules(checker: &mut typechecker::Checker, build_dir: &std::path
         derive::expand_derives(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(None, true);
-        if let Err(errors) = mod_checker.check_program(&program) {
-            for e in &errors {
+        let mod_result = mod_checker.check_program(&program);
+        if mod_result.has_errors() {
+            for e in mod_result.errors() {
                 eprintln!("Std module {} type error: {}", module_name, e);
             }
             std::process::exit(1);
         }
 
-        elaborate_and_emit(
-            module_name,
-            &program,
-            &mod_checker,
-            &mut checker.modules.codegen_info,
-            build_dir,
-        );
+        let elaborated = elaborate::elaborate_module(&program, &mod_result, module_name);
+        elaborated_modules.insert(module_name.clone(), elaborated);
     }
+
+    elaborated_modules
 }
 
 /// Compile all .core files in a directory with erlc.
@@ -272,34 +272,35 @@ fn build_project(profile: &str) -> PathBuf {
         std::process::exit(1);
     });
 
+    // Phase 1: Typecheck
     let mut checker = make_checker(Some(project_root.clone()));
-    let main_program = parse_and_typecheck(&main_source, "Main.dy", &mut checker);
+    let (main_program, _) = parse_and_typecheck(&main_source, "Main.dy", &mut checker);
+    let result = checker.to_result();
 
     let build_dir = project_root.join("_build").join(profile);
-    // Clean and recreate build dir to remove stale artifacts
     let _ = fs::remove_dir_all(&build_dir);
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| {
         eprintln!("Error creating build dir: {}", e);
         std::process::exit(1);
     });
 
-    compile_std_modules(&mut checker, &build_dir);
+    // Phase 2: Elaborate all modules
+    let mut elaborated_modules = compile_std_modules(&checker, &result);
 
-    // Compile each imported user module
-    let module_names: Vec<String> = checker
-        .modules.codegen_info
+    // Elaborate user modules
+    let user_modules: Vec<String> = result
+        .codegen_info()
         .keys()
         .filter(|name| !name.starts_with("Std."))
         .cloned()
         .collect();
 
-    for module_name in &module_names {
-        let mut program = if let Some(cached) = checker.modules.programs.get(module_name) {
+    for module_name in &user_modules {
+        let mut program = if let Some(cached) = result.programs().get(module_name) {
             cached.clone()
         } else {
-            let file_path = checker
-                .modules.map
-                .as_ref()
+            let file_path = result
+                .module_map()
                 .and_then(|m| m.get(module_name))
                 .unwrap_or_else(|| {
                     eprintln!("Module '{}' not found in module map", module_name);
@@ -323,36 +324,40 @@ fn build_project(profile: &str) -> PathBuf {
         derive::expand_derives(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
-        if let Err(errors) = mod_checker.check_program(&program) {
-            for e in &errors {
+        let mod_result = mod_checker.check_program(&program);
+        for w in mod_result.warnings() {
+            eprintln!("Warning in module {}: {}", module_name, w);
+        }
+        if mod_result.has_errors() {
+            for e in mod_result.errors() {
                 eprintln!("Type error in module {}: {}", module_name, e);
             }
             std::process::exit(1);
         }
-        for w in &mod_checker.warnings {
-            eprintln!("Warning in module {}: {}", module_name, w);
-        }
 
-        elaborate_and_emit(
-            module_name,
-            &program,
-            &mod_checker,
-            &mut checker.modules.codegen_info,
+        let elaborated = elaborate::elaborate_module(&program, &mod_result, module_name);
+        elaborated_modules.insert(module_name.clone(), elaborated);
+    }
+
+    // Elaborate Main
+    let main_elaborated = elaborate::elaborate_module(&main_program, &result, "Main");
+    elaborated_modules.insert("Main".to_string(), main_elaborated);
+
+    // Phase 3: Lower and emit all modules
+    for (module_name, elaborated) in &elaborated_modules {
+        let erlang_name = if module_name == "Main" {
+            "main".to_string()
+        } else {
+            module_name.to_lowercase().replace('.', "_")
+        };
+        emit_module(
+            &erlang_name,
+            elaborated,
+            result.codegen_info(),
+            &elaborated_modules,
             &build_dir,
         );
     }
-
-    // Compile Main module
-    let elaborated = elaborate::elaborate_module(&main_program, &checker, "Main");
-    if let Some(info) = checker.modules.codegen_info.get_mut("Main") {
-        info.update_handler_bodies(&elaborated)
-    }
-    let core_src = codegen::emit_module_with_imports("main", &elaborated, &checker.modules.codegen_info);
-    let core_path = build_dir.join("main.core");
-    fs::write(&core_path, &core_src).unwrap_or_else(|e| {
-        eprintln!("Error writing {}: {}", core_path.display(), e);
-        std::process::exit(1);
-    });
 
     run_erlc(&build_dir);
     build_dir
@@ -366,33 +371,37 @@ fn build_script(file: &str, profile: &str) -> PathBuf {
         std::process::exit(1);
     });
     let mut checker = make_checker(None);
-    let program = parse_and_typecheck(&source, file, &mut checker);
+    let (program, _) = parse_and_typecheck(&source, file, &mut checker);
+    let result = checker.to_result();
 
     let build_dir = std::path::Path::new(file)
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .join("_build")
         .join(profile);
-    // Clean and recreate build dir to remove stale artifacts
     let _ = fs::remove_dir_all(&build_dir);
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| {
         eprintln!("Error creating build dir: {}", e);
         std::process::exit(1);
     });
 
-    // Compile Std modules first so handler bodies are elaborated
-    // before the script references them
-    compile_std_modules(&mut checker, &build_dir);
+    // Phase 2: Elaborate all modules
+    let mut elaborated_modules = compile_std_modules(&checker, &result);
+    let elaborated = elaborate::elaborate(&program, &result);
+    elaborated_modules.insert("_script".to_string(), elaborated);
 
-    // Script doesn't export handlers, so we can elaborate without updating codegen_info
-    let elaborated = elaborate::elaborate(&program, &checker);
-    let core_src =
-        codegen::emit_module_with_imports("_script", &elaborated, &checker.modules.codegen_info);
-    let core_path = build_dir.join("_script.core");
-    fs::write(&core_path, &core_src).unwrap_or_else(|e| {
-        eprintln!("Error writing {}: {}", core_path.display(), e);
-        std::process::exit(1);
-    });
+    // Phase 3: Emit all modules
+    for (module_name, elaborated) in &elaborated_modules {
+        let erlang_name = module_name.to_lowercase().replace('.', "_");
+        emit_module(
+            &erlang_name,
+            elaborated,
+            result.codegen_info(),
+            &elaborated_modules,
+            &build_dir,
+        );
+    }
+
     run_erlc(&build_dir);
     build_dir
 }
@@ -465,7 +474,7 @@ fn cmd_check(file: Option<&str>) {
                 std::process::exit(1);
             });
             let mut checker = make_checker(None);
-            parse_and_typecheck(&source, f, &mut checker);
+            let _ = parse_and_typecheck(&source, f, &mut checker);
             eprintln!("OK");
         }
         None => {
@@ -479,7 +488,7 @@ fn cmd_check(file: Option<&str>) {
                 std::process::exit(1);
             });
             let mut checker = make_checker(Some(project_root));
-            parse_and_typecheck(&source, "Main.dy", &mut checker);
+            let _ = parse_and_typecheck(&source, "Main.dy", &mut checker);
             eprintln!("OK");
         }
     }
@@ -491,11 +500,16 @@ fn cmd_emit(file: &str) {
         std::process::exit(1);
     });
     let mut checker = make_checker(None);
-    let program = parse_and_typecheck(&source, file, &mut checker);
+    let (program, result) = parse_and_typecheck(&source, file, &mut checker);
 
-    let elaborated = elaborate::elaborate(&program, &checker);
-    let core_src =
-        codegen::emit_module_with_imports("_script", &elaborated, &checker.modules.codegen_info);
+    let elaborated = elaborate::elaborate(&program, &result);
+    let elaborated_modules = std::collections::HashMap::new();
+    let core_src = codegen::emit_module_with_imports(
+        "_script",
+        &elaborated,
+        result.codegen_info(),
+        &elaborated_modules,
+    );
     print!("{}", core_src);
 }
 

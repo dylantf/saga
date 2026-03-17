@@ -12,14 +12,14 @@ mod diagnostics;
 mod hover;
 mod line_index;
 
-use diagnostics::CheckResult;
+use diagnostics::CheckSnapshot;
 
 struct Backend {
     client: Client,
     /// Cached base checker per project root. Key is the project root path (or empty for no project).
     base_checkers: Mutex<std::collections::HashMap<String, typechecker::Checker>>,
     /// Last check result, for hover/goto queries.
-    last_check: Mutex<Option<(Url, CheckResult)>>,
+    last_check: Mutex<Option<(Url, CheckSnapshot)>>,
 }
 
 impl Backend {
@@ -66,12 +66,12 @@ impl Backend {
 
     /// Clone the last check result out of the lock to avoid holding it
     /// across async boundaries (which would deadlock with did_open).
-    fn snapshot(&self) -> Option<(Url, typechecker::Checker, Vec<dylang::ast::Decl>, line_index::LineIndex, String)> {
+    fn snapshot(&self) -> Option<(Url, typechecker::CheckResult, Vec<dylang::ast::Decl>, line_index::LineIndex, String)> {
         let last = self.last_check.lock().ok()?;
         let (uri, result) = last.as_ref()?;
         Some((
             uri.clone(),
-            result.checker.clone(),
+            result.tc_result.clone(),
             result.program.clone()?,
             result.line_index.clone(),
             result.source.clone(),
@@ -140,18 +140,18 @@ impl LanguageServer for Backend {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let Some((_uri, checker, program, line_index, _source)) = self.snapshot() else {
+        let Some((_uri, tc_result, program, line_index, _source)) = self.snapshot() else {
             return Ok(None);
         };
 
         let position = params.text_document_position_params.position;
         let offset = line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
-        let Some(name) = hover::find_name_at_offset(&program, offset) else {
+        let Some((name, span)) = hover::find_name_at_offset(&program, offset) else {
             return Ok(None);
         };
 
-        let Some(type_str) = hover::type_at_name(&checker, &name, &program) else {
+        let Some(type_str) = hover::type_at_name(&tc_result, &name, Some(&span), &program) else {
             return Ok(None);
         };
 
@@ -168,7 +168,7 @@ impl LanguageServer for Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let Some((uri, checker, program, line_index, _source)) = self.snapshot() else {
+        let Some((uri, tc_result, program, line_index, _source)) = self.snapshot() else {
             return Ok(None);
         };
 
@@ -176,11 +176,11 @@ impl LanguageServer for Backend {
         let offset =
             line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
-        let Some(name) = hover::find_name_at_offset(&program, offset) else {
+        let Some((name, _span)) = hover::find_name_at_offset(&program, offset) else {
             return Ok(None);
         };
 
-        let Some(def_result) = definition::find_definition(&program, &name, &checker) else {
+        let Some(def_result) = definition::find_definition(&program, &name, &tc_result) else {
             return Ok(None);
         };
 
@@ -214,7 +214,7 @@ impl LanguageServer for Backend {
         &self,
         params: CompletionParams,
     ) -> Result<Option<CompletionResponse>> {
-        let Some((_uri, checker, program, line_index, source)) = self.snapshot() else {
+        let Some((_uri, tc_result, program, line_index, source)) = self.snapshot() else {
             return Ok(None);
         };
 
@@ -223,7 +223,7 @@ impl LanguageServer for Backend {
             line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
         let prefix = completion::extract_prefix(&source, offset);
-        let items = completion::collect_completions(&checker, prefix, &program);
+        let items = completion::collect_completions(&tc_result, prefix, &program);
 
         Ok(Some(CompletionResponse::Array(items)))
     }

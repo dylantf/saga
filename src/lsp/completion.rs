@@ -1,7 +1,7 @@
 use tower_lsp::lsp_types::*;
 
 use dylang::ast::Decl;
-use dylang::typechecker::Checker;
+use dylang::typechecker::CheckResult;
 
 /// Extract the identifier prefix at the cursor position by scanning backwards.
 pub fn extract_prefix(source: &str, offset: usize) -> &str {
@@ -14,19 +14,19 @@ pub fn extract_prefix(source: &str, offset: usize) -> &str {
 }
 
 /// Collect completion items from the checker's environment.
-pub fn collect_completions(checker: &Checker, prefix: &str, program: &[Decl]) -> Vec<CompletionItem> {
+pub fn collect_completions(result: &CheckResult, prefix: &str, program: &[Decl]) -> Vec<CompletionItem> {
     let mut items = Vec::new();
     let prefix_lower = prefix.to_lowercase();
 
     // Functions and variables from env
-    for (name, scheme) in checker.env.iter() {
+    for (name, scheme) in result.env.iter() {
         if name.starts_with("__") || name.contains('.') {
             continue; // skip internal dict constructors and qualified names
         }
         if !prefix.is_empty() && !name.to_lowercase().starts_with(&prefix_lower) {
             continue;
         }
-        let detail = scheme.display_with_constraints(&checker.sub);
+        let detail = scheme.display_with_constraints(&result.sub);
         items.push(CompletionItem {
             label: name.to_string(),
             kind: Some(CompletionItemKind::FUNCTION),
@@ -36,7 +36,7 @@ pub fn collect_completions(checker: &Checker, prefix: &str, program: &[Decl]) ->
     }
 
     // Type constructors
-    for (name, scheme) in &checker.constructors {
+    for (name, scheme) in &result.constructors {
         if !prefix.is_empty() && !name.to_lowercase().starts_with(&prefix_lower) {
             continue;
         }
@@ -44,7 +44,7 @@ pub fn collect_completions(checker: &Checker, prefix: &str, program: &[Decl]) ->
         if name == "Cons" || name == "Nil" || name == "True" || name == "False" {
             continue;
         }
-        let detail = scheme.display_with_constraints(&checker.sub);
+        let detail = scheme.display_with_constraints(&result.sub);
         items.push(CompletionItem {
             label: name.to_string(),
             kind: Some(CompletionItemKind::CONSTRUCTOR),
@@ -54,7 +54,7 @@ pub fn collect_completions(checker: &Checker, prefix: &str, program: &[Decl]) ->
     }
 
     // Effect names
-    for name in checker.effect_names() {
+    for name in result.effect_names() {
         if !prefix.is_empty() && !name.to_lowercase().starts_with(&prefix_lower) {
             continue;
         }
@@ -67,7 +67,7 @@ pub fn collect_completions(checker: &Checker, prefix: &str, program: &[Decl]) ->
     }
 
     // Handler names
-    for name in checker.handler_names() {
+    for name in result.handler_names() {
         if !prefix.is_empty() && !name.to_lowercase().starts_with(&prefix_lower) {
             continue;
         }
