@@ -690,6 +690,9 @@ pub struct Checker {
     /// Types are stored unresolved (may contain type variables); apply `sub`
     /// at lookup time to get the final resolved type.
     pub(crate) type_at_span: HashMap<Span, Type>,
+    /// When true, function annotations without matching bodies are allowed
+    /// (used for builtin stdlib modules where implementations are in Rust).
+    pub(crate) allow_bodyless_annotations: bool,
 }
 
 /// Module system state: caches, project root, and import tracking.
@@ -755,6 +758,7 @@ impl Checker {
             evidence: Vec::new(),
             collected_diagnostics: Vec::new(),
             type_at_span: HashMap::new(),
+            allow_bodyless_annotations: false,
         };
         checker.register_builtins();
         checker

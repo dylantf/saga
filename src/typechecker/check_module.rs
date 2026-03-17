@@ -253,6 +253,7 @@ impl Checker {
                 None => super::Checker::new(),
             };
             mc.next_var = self.next_var;
+            mc.allow_bodyless_annotations = true;
             // Share parent's trait definitions so builtin modules can impl traits like Show
             for (name, info) in &self.traits {
                 if !mc.traits.contains_key(name) {
@@ -355,6 +356,7 @@ impl Checker {
             }
             mc
         };
+        mc.allow_bodyless_annotations = is_builtin;
         mc.next_var = self.next_var;
         mc.modules.exports = self.modules.exports.clone();
         mc.modules.codegen_info = self.modules.codegen_info.clone();

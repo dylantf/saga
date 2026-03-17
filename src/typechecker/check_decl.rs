@@ -114,6 +114,25 @@ impl Checker {
                 ));
         }
 
+        // Check for annotations without a matching function binding
+        if !self.allow_bodyless_annotations {
+            let bound_names: std::collections::HashSet<&str> = program
+                .iter()
+                .filter_map(|d| match d {
+                    Decl::FunBinding { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for (name, (_, span)) in &annotations {
+                if !bound_names.contains(name.as_str()) {
+                    errors.push(Diagnostic::error_at(
+                        *span,
+                        format!("type annotation for `{name}` has no matching function definition"),
+                    ));
+                }
+            }
+        }
+
         // Check all accumulated trait constraints now that types are resolved
         if let Err(e) = self.check_pending_constraints() {
             errors.push(e);

@@ -366,6 +366,12 @@ fn annotation_mismatch() {
 }
 
 #[test]
+fn annotation_without_body() {
+    let result = check("fun foo (x: Int) -> Int");
+    assert!(result.is_err());
+}
+
+#[test]
 fn annotation_multi_param() {
     let checker = check("fun add (a: Int) (b: Int) -> Int\nadd a b = a + b").unwrap();
     let ty = checker.sub.apply(&checker.env.get("add").unwrap().ty);
