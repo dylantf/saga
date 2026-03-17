@@ -1,0 +1,5 @@
+main () = {
+  let x: Result String String = Ok("foo")
+  x |> Result.unwrap |> print
+  Err("bar") |> Result.unwrap |> print
+}

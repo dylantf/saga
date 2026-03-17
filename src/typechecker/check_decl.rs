@@ -607,11 +607,16 @@ impl Checker {
             let resolved = self.sub.apply(&ty);
             match resolved {
                 Type::Var(id) => {
-                    if self
-                        .where_bounds
-                        .get(&id)
-                        .is_some_and(|b| b.contains(&trait_name))
-                    {
+                    // Check where_bounds, resolving bound var IDs through
+                    // substitution so they match after annotation unification.
+                    let in_where = self.where_bounds.iter().any(|(bound_id, traits)| {
+                        traits.contains(&trait_name)
+                            && match self.sub.apply(&Type::Var(*bound_id)) {
+                                Type::Var(resolved) => resolved == id,
+                                _ => false,
+                            }
+                    });
+                    if in_where {
                         continue;
                     }
                     if has_annotation {

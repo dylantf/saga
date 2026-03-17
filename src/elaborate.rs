@@ -453,6 +453,50 @@ impl Elaborator {
                     }
                 }
 
+                // Same logic for qualified module calls: Result.unwrap, etc.
+                if let Expr::QualifiedName { module, name, .. } = func.as_ref() {
+                    let qualified = format!("{}.{}", module, name);
+
+                    // Trait method via qualified name
+                    if let Some((trait_name, method_index)) =
+                        self.trait_methods.get(&qualified).cloned()
+                    {
+                        if let Some(dict_expr) = self.resolve_dict(&trait_name, func.span()) {
+                            let elab_arg = self.elaborate_expr(arg);
+                            let method = Expr::DictMethodAccess {
+                                dict: Box::new(dict_expr),
+                                method_index,
+                                span: func.span(),
+                            };
+                            return Expr::App {
+                                func: Box::new(method),
+                                arg: Box::new(elab_arg),
+                                span: *span,
+                            };
+                        }
+                    }
+
+                    // Dict-parameterized function via qualified name
+                    if let Some(dict_param_info) = self.fun_dict_params.get(&qualified).cloned() {
+                        let elab_arg = self.elaborate_expr(arg);
+                        let mut result: Expr = func.as_ref().clone();
+                        for (trait_name, _type_var) in &dict_param_info {
+                            if let Some(dict_expr) = self.resolve_dict(trait_name, func.span()) {
+                                result = Expr::App {
+                                    func: Box::new(result),
+                                    arg: Box::new(dict_expr),
+                                    span: *span,
+                                };
+                            }
+                        }
+                        return Expr::App {
+                            func: Box::new(result),
+                            arg: Box::new(elab_arg),
+                            span: *span,
+                        };
+                    }
+                }
+
                 // Also handle nested App chains (multi-arg calls)
                 // For App(App(Var(f), arg1), arg2) where f has dict params,
                 // we need to insert dicts before the first user arg.
@@ -636,7 +680,24 @@ impl Elaborator {
                 span: *span,
             },
 
-            Expr::QualifiedName { .. } => expr.clone(),
+            Expr::QualifiedName { module, name, span } => {
+                let qualified = format!("{}.{}", module, name);
+                // Dict-parameterized function used as a bare value (not directly applied).
+                if let Some(dict_param_info) = self.fun_dict_params.get(&qualified).cloned() {
+                    let mut result: Expr = expr.clone();
+                    for (trait_name, _type_var) in &dict_param_info {
+                        if let Some(dict_expr) = self.resolve_dict(trait_name, *span) {
+                            result = Expr::App {
+                                func: Box::new(result),
+                                arg: Box::new(dict_expr),
+                                span: *span,
+                            };
+                        }
+                    }
+                    return result;
+                }
+                expr.clone()
+            }
 
             Expr::EffectCall {
                 name,
