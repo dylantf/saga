@@ -61,12 +61,12 @@ fn print_diagnostic(source: &str, source_path: &str, label: &str, span: Option<t
     }
 }
 
-fn print_type_error(source: &str, source_path: &str, e: &typechecker::TypeError) {
-    print_diagnostic(source, source_path, "Type error", e.span, &e.message);
-}
-
-fn print_warning(source: &str, source_path: &str, w: &typechecker::TypeWarning) {
-    print_diagnostic(source, source_path, "Warning", w.span, &w.message);
+fn print_tc_diagnostic(source: &str, source_path: &str, d: &typechecker::Diagnostic) {
+    let label = match d.severity {
+        typechecker::Severity::Error => "Type error",
+        typechecker::Severity::Warning => "Warning",
+    };
+    print_diagnostic(source, source_path, label, d.span, &d.message);
 }
 
 fn print_usage() {
@@ -112,12 +112,12 @@ fn parse_and_typecheck(
     derive::expand_derives(&mut program);
     if let Err(errors) = checker.check_program(&program) {
         for e in &errors {
-            print_type_error(source, source_path, e);
+            print_tc_diagnostic(source, source_path, e);
         }
         std::process::exit(1);
     }
-    for w in &checker.warnings {
-        print_warning(source, source_path, w);
+    for w in checker.to_result().warnings() {
+        print_tc_diagnostic(source, source_path, w);
     }
     program
 }
@@ -136,11 +136,11 @@ fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
 fn elaborate_and_emit(
     module_name: &str,
     program: &ast::Program,
-    checker_for_elab: &typechecker::Checker,
+    result: &typechecker::CheckResult,
     codegen_info: &mut std::collections::HashMap<String, typechecker::ModuleCodegenInfo>,
     build_dir: &std::path::Path,
 ) {
-    let elaborated = elaborate::elaborate_module(program, checker_for_elab, module_name);
+    let elaborated = elaborate::elaborate_module(program, result, module_name);
     if let Some(info) = codegen_info.get_mut(module_name) {
         info.update_handler_bodies(&elaborated);
     }
@@ -189,11 +189,12 @@ fn compile_std_modules(checker: &mut typechecker::Checker, build_dir: &std::path
             }
             std::process::exit(1);
         }
+        let mod_result = mod_checker.to_result();
 
         elaborate_and_emit(
             module_name,
             &program,
-            &mod_checker,
+            &mod_result,
             &mut checker.modules.codegen_info,
             build_dir,
         );
@@ -329,21 +330,23 @@ fn build_project(profile: &str) -> PathBuf {
             }
             std::process::exit(1);
         }
-        for w in &mod_checker.warnings {
+        let mod_result = mod_checker.to_result();
+        for w in mod_result.warnings() {
             eprintln!("Warning in module {}: {}", module_name, w);
         }
 
         elaborate_and_emit(
             module_name,
             &program,
-            &mod_checker,
+            &mod_result,
             &mut checker.modules.codegen_info,
             &build_dir,
         );
     }
 
     // Compile Main module
-    let elaborated = elaborate::elaborate_module(&main_program, &checker, "Main");
+    let main_result = checker.to_result();
+    let elaborated = elaborate::elaborate_module(&main_program, &main_result, "Main");
     if let Some(info) = checker.modules.codegen_info.get_mut("Main") {
         info.update_handler_bodies(&elaborated)
     }
@@ -385,9 +388,10 @@ fn build_script(file: &str, profile: &str) -> PathBuf {
     compile_std_modules(&mut checker, &build_dir);
 
     // Script doesn't export handlers, so we can elaborate without updating codegen_info
-    let elaborated = elaborate::elaborate(&program, &checker);
+    let result = checker.to_result();
+    let elaborated = elaborate::elaborate(&program, &result);
     let core_src =
-        codegen::emit_module_with_imports("_script", &elaborated, &checker.modules.codegen_info);
+        codegen::emit_module_with_imports("_script", &elaborated, &result.modules.codegen_info);
     let core_path = build_dir.join("_script.core");
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
@@ -493,9 +497,10 @@ fn cmd_emit(file: &str) {
     let mut checker = make_checker(None);
     let program = parse_and_typecheck(&source, file, &mut checker);
 
-    let elaborated = elaborate::elaborate(&program, &checker);
+    let result = checker.to_result();
+    let elaborated = elaborate::elaborate(&program, &result);
     let core_src =
-        codegen::emit_module_with_imports("_script", &elaborated, &checker.modules.codegen_info);
+        codegen::emit_module_with_imports("_script", &elaborated, &result.modules.codegen_info);
     print!("{}", core_src);
 }
 

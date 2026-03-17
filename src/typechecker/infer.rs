@@ -2,13 +2,13 @@ use std::collections::HashSet;
 
 use crate::ast::{self, BinOp, CaseArm, Expr, Lit, Pat, Stmt};
 
-use super::{Checker, EffectOpSig, Scheme, Type, TypeError};
+use super::{Checker, Diagnostic, EffectOpSig, Scheme, Type};
 use crate::token::Span;
 
 impl Checker {
     // --- Expression inference ---
 
-    pub fn infer_expr(&mut self, expr: &Expr) -> Result<Type, TypeError> {
+    pub fn infer_expr(&mut self, expr: &Expr) -> Result<Type, Diagnostic> {
         match expr {
             Expr::Lit { value, .. } => Ok(match value {
                 Lit::Int(_) => Type::int(),
@@ -58,7 +58,7 @@ impl Checker {
                     }
                     Ok(ty)
                 } else {
-                    Err(TypeError::at(
+                    Err(Diagnostic::error_at(
                         *span,
                         format!("undefined variable: {}", name),
                     ))
@@ -71,7 +71,7 @@ impl Checker {
                     let (ty, _) = self.instantiate(&scheme);
                     Ok(ty)
                 } else {
-                    Err(TypeError::at(
+                    Err(Diagnostic::error_at(
                         *span,
                         format!("undefined constructor: {}", name),
                     ))
@@ -266,12 +266,12 @@ impl Checker {
 
             Expr::RecordCreate { name, fields, span } => {
                 let def = self.records.get(name).cloned().ok_or_else(|| {
-                    TypeError::at(*span, format!("undefined record type: {}", name))
+                    Diagnostic::error_at(*span, format!("undefined record type: {}", name))
                 })?;
 
                 for (fname, fexpr) in fields {
                     let expected = def.iter().find(|(n, _)| n == fname).ok_or_else(|| {
-                        TypeError::at(
+                        Diagnostic::error_at(
                             fexpr.span(),
                             format!("unknown field '{}' on record {}", fname, name),
                         )
@@ -290,11 +290,11 @@ impl Checker {
                 match &resolved {
                     Type::Con(name, _) => {
                         let def = self.records.get(name).cloned().ok_or_else(|| {
-                            TypeError::at(*span, format!("type {} is not a record", name))
+                            Diagnostic::error_at(*span, format!("type {} is not a record", name))
                         })?;
                         let (_, field_ty) =
                             def.iter().find(|(n, _)| n == field).ok_or_else(|| {
-                                TypeError::at(
+                                Diagnostic::error_at(
                                     *span,
                                     format!("no field '{}' on record {}", field, name),
                                 )
@@ -318,7 +318,7 @@ impl Checker {
                                 self.unify(&resolved, &Type::Con(rname.clone(), vec![]))?;
                                 Ok(field_ty.clone())
                             }
-                            0 => Err(TypeError::at(
+                            0 => Err(Diagnostic::error_at(
                                 *span,
                                 format!("no record has field '{}'", field),
                             )),
@@ -339,7 +339,7 @@ impl Checker {
                                         None => candidates,
                                     };
                                 match narrowed.len() {
-                                    0 => Err(TypeError::at(
+                                    0 => Err(Diagnostic::error_at(
                                         *span,
                                         format!(
                                             "no single record type has all accessed fields (including '{}')",
@@ -367,7 +367,7 @@ impl Checker {
                                             self.field_candidates.insert(id, (names, *span));
                                             Ok(first_ty)
                                         } else {
-                                            Err(TypeError::at(
+                                            Err(Diagnostic::error_at(
                                                 *span,
                                                 format!(
                                                     "ambiguous field '{}': found in [{}] with different types; add a type annotation",
@@ -381,7 +381,7 @@ impl Checker {
                             }
                         }
                     }
-                    _ => Err(TypeError::at(
+                    _ => Err(Diagnostic::error_at(
                         *span,
                         format!("cannot access field '{}' on type {}", field, resolved),
                     )),
@@ -414,12 +414,12 @@ impl Checker {
                 match &resolved {
                     Type::Con(name, _) => {
                         let def = self.records.get(name).cloned().ok_or_else(|| {
-                            TypeError::at(*span, format!("type {} is not a record", name))
+                            Diagnostic::error_at(*span, format!("type {} is not a record", name))
                         })?;
                         for (fname, fexpr) in fields {
                             let expected =
                                 def.iter().find(|(n, _)| n == fname).ok_or_else(|| {
-                                    TypeError::at(
+                                    Diagnostic::error_at(
                                         fexpr.span(),
                                         format!("unknown field '{}' on record {}", fname, name),
                                     )
@@ -429,7 +429,7 @@ impl Checker {
                         }
                         Ok(resolved.clone())
                     }
-                    _ => Err(TypeError::at(
+                    _ => Err(Diagnostic::error_at(
                         *span,
                         format!("cannot update non-record type {}", resolved),
                     )),
@@ -491,10 +491,10 @@ impl Checker {
                         }
                         Ok(ty)
                     }
-                    None => Err(TypeError {
-                        message: format!("unknown qualified name '{}.{}'", module, name),
-                        span: Some(*span),
-                    }),
+                    None => Err(Diagnostic::error_at(
+                        *span,
+                        format!("unknown qualified name '{}.{}'", module, name),
+                    )),
                 }
             }
 
@@ -550,9 +550,7 @@ impl Checker {
                 span,
             } => self.infer_receive(
                 arms,
-                after_clause
-                    .as_ref()
-                    .map(|(t, b)| (t.as_ref(), b.as_ref())),
+                after_clause.as_ref().map(|(t, b)| (t.as_ref(), b.as_ref())),
                 *span,
             ),
 
@@ -563,9 +561,9 @@ impl Checker {
     }
 
     /// Check that a guard expression is a pure Bool.
-    fn check_guard(&mut self, guard: &Expr) -> Result<(), TypeError> {
+    fn check_guard(&mut self, guard: &Expr) -> Result<(), Diagnostic> {
         if let Some(span) = super::find_effect_call(guard) {
-            return Err(TypeError::at(
+            return Err(Diagnostic::error_at(
                 span,
                 "Effect calls are not allowed in guard expressions".to_string(),
             ));
@@ -579,7 +577,7 @@ impl Checker {
         arms: &[CaseArm],
         after_clause: Option<(&Expr, &Expr)>,
         span: Span,
-    ) -> Result<Type, TypeError> {
+    ) -> Result<Type, Diagnostic> {
         // Look up Actor effect's message type from the effect type param cache
         let msg_ty = match (
             self.effect_type_param_cache.get("Actor"),
@@ -587,7 +585,7 @@ impl Checker {
         ) {
             (Some(cache), Some(info)) => {
                 let param_id = info.type_params.first().ok_or_else(|| {
-                    TypeError::at(span, "Actor effect has no type parameter".to_string())
+                    Diagnostic::error_at(span, "Actor effect has no type parameter".to_string())
                 })?;
                 cache
                     .get(param_id)
@@ -595,7 +593,7 @@ impl Checker {
                     .unwrap_or_else(|| self.fresh_var())
             }
             _ => {
-                return Err(TypeError::at(
+                return Err(Diagnostic::error_at(
                     span,
                     "receive requires the Actor effect (declare `needs {Actor MsgType}`)"
                         .to_string(),
@@ -617,7 +615,7 @@ impl Checker {
                 && matches!(name.as_str(), "Down" | "Exit")
             {
                 if args.len() != 2 {
-                    return Err(TypeError::at(
+                    return Err(Diagnostic::error_at(
                         *pat_span,
                         format!(
                             "{} pattern requires exactly 2 arguments: {}(pid, reason)",
@@ -653,9 +651,9 @@ impl Checker {
         Ok(result_ty)
     }
 
-    pub(crate) fn infer_block(&mut self, stmts: &[Stmt]) -> Result<Type, TypeError> {
+    pub(crate) fn infer_block(&mut self, stmts: &[Stmt]) -> Result<Type, Diagnostic> {
         let mut last_ty = Type::unit();
-        let mut errors: Vec<TypeError> = Vec::new();
+        let mut errors: Vec<Diagnostic> = Vec::new();
         let mut i = 0;
         while i < stmts.len() {
             match &stmts[i] {
@@ -735,7 +733,7 @@ impl Checker {
                     let arity = clauses[0].0.len();
                     for (params, guard, body) in &clauses {
                         if params.len() != arity {
-                            return Err(TypeError::at(
+                            return Err(Diagnostic::error_at(
                                 fun_span,
                                 format!(
                                     "clause for '{}' has {} parameters, expected {}",
@@ -780,7 +778,7 @@ impl Checker {
                                 let is_unit = matches!(&resolved, Type::Con(n, args) if n == "Unit" && args.is_empty());
                                 if !is_unit && !matches!(resolved, Type::Error) {
                                     let display_ty = self.prettify_type(&ty);
-                                    self.warnings.push(super::TypeWarning::at(
+                                    self.collected_diagnostics.push(Diagnostic::warning_at(
                                         expr.span(),
                                         format!(
                                             "value of type `{}` is discarded; use `let _ = ...` to suppress",
@@ -801,9 +799,9 @@ impl Checker {
             }
         }
         if !errors.is_empty() {
-            // Return the first error (others are collected on self.collected_errors)
+            // Return the first error (others are collected on self.collected_diagnostics)
             let first = errors.remove(0);
-            self.collected_errors.extend(errors);
+            self.collected_diagnostics.extend(errors);
             Err(first)
         } else {
             Ok(last_ty)
@@ -813,7 +811,7 @@ impl Checker {
     // --- Pattern binding ---
 
     /// Bind a pattern to a type, adding variables to the environment.
-    pub(crate) fn bind_pattern(&mut self, pat: &Pat, ty: &Type) -> Result<(), TypeError> {
+    pub(crate) fn bind_pattern(&mut self, pat: &Pat, ty: &Type) -> Result<(), Diagnostic> {
         match pat {
             Pat::Wildcard { .. } => Ok(()),
             Pat::Var { name, .. } => {
@@ -839,7 +837,10 @@ impl Checker {
             }
             Pat::Constructor { name, args, span } => {
                 let ctor_scheme = self.constructors.get(name).cloned().ok_or_else(|| {
-                    TypeError::at(*span, format!("undefined constructor in pattern: {}", name))
+                    Diagnostic::error_at(
+                        *span,
+                        format!("undefined constructor in pattern: {}", name),
+                    )
                 })?;
                 let (ctor_ty, _) = self.instantiate(&ctor_scheme);
                 let mut current = ctor_ty;
@@ -850,7 +851,7 @@ impl Checker {
                             current = *ret_ty;
                         }
                         _ => {
-                            return Err(TypeError::at(
+                            return Err(Diagnostic::error_at(
                                 *span,
                                 format!("constructor {} applied to too many arguments", name),
                             ));
@@ -861,13 +862,16 @@ impl Checker {
             }
             Pat::Record { name, fields, span } => {
                 let def = self.records.get(name).cloned().ok_or_else(|| {
-                    TypeError::at(*span, format!("undefined record type in pattern: {}", name))
+                    Diagnostic::error_at(
+                        *span,
+                        format!("undefined record type in pattern: {}", name),
+                    )
                 })?;
                 self.unify_at(ty, &Type::Con(name.clone(), vec![]), *span)?;
 
                 for (fname, alias_pat) in fields {
                     let (_, field_ty) = def.iter().find(|(n, _)| n == fname).ok_or_else(|| {
-                        TypeError::at(
+                        Diagnostic::error_at(
                             *span,
                             format!("unknown field '{}' on record {}", fname, name),
                         )
@@ -915,7 +919,7 @@ impl Checker {
         arms: &[ast::CaseArm],
         scrutinee_ty: &Type,
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         use super::exhaustiveness::{self as exh, ExhaustivenessCtx, SPat};
 
         let resolved = self.sub.apply(scrutinee_ty);
@@ -945,7 +949,7 @@ impl Checker {
                         && matches!(&arm.pattern, Pat::Wildcard { .. } | Pat::Var { .. })
                 });
                 if !has_catchall {
-                    return Err(TypeError::at(
+                    return Err(Diagnostic::error_at(
                         span,
                         format!(
                             "non-exhaustive pattern match on {}: add a wildcard `_` or variable pattern",
@@ -979,7 +983,7 @@ impl Checker {
             // Redundancy check: is this arm useful w.r.t. prior unguarded arms?
             if arm.guard.is_none() && !exh::useful(&ctx, &matrix, &row) {
                 let pat_str = exh::format_witness(&[spat]);
-                return Err(TypeError::at(
+                return Err(Diagnostic::error_at(
                     arm.pattern.span(),
                     format!("unreachable pattern: {} already covered", pat_str),
                 ));
@@ -999,7 +1003,7 @@ impl Checker {
             if !witnesses.is_empty() {
                 let formatted: Vec<String> =
                     witnesses.iter().map(|w| exh::format_witness(w)).collect();
-                return Err(TypeError::at(
+                return Err(Diagnostic::error_at(
                     span,
                     format!(
                         "non-exhaustive pattern match: missing {}",
@@ -1007,7 +1011,7 @@ impl Checker {
                     ),
                 ));
             }
-            return Err(TypeError::at(span, "non-exhaustive pattern match"));
+            return Err(Diagnostic::error_at(span, "non-exhaustive pattern match"));
         }
 
         Ok(())
@@ -1022,7 +1026,7 @@ impl Checker {
         binding_types: &[Type],
         else_arms: &[ast::CaseArm],
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         use super::exhaustiveness::{self as exh, ExhaustivenessCtx, SPat};
 
         // Collect all bail constructors needed across all bindings
@@ -1101,7 +1105,7 @@ impl Checker {
             Ok(())
         } else {
             missing_ctors.sort();
-            Err(TypeError::at(
+            Err(Diagnostic::error_at(
                 span,
                 format!(
                     "non-exhaustive do...else: missing {}",
@@ -1118,7 +1122,7 @@ impl Checker {
         &mut self,
         expr: &Expr,
         handler: &ast::Handler,
-    ) -> Result<Type, TypeError> {
+    ) -> Result<Type, Diagnostic> {
         let handled = self.handler_handled_effects(handler);
 
         // Infer the inner expression, tracking its effects separately
@@ -1137,7 +1141,7 @@ impl Checker {
         match handler {
             ast::Handler::Named(name) => {
                 if !self.handlers.contains_key(name) && self.env.get(name).is_none() {
-                    return Err(TypeError::at(
+                    return Err(Diagnostic::error_at(
                         with_span,
                         format!("undefined handler: {}", name),
                     ));
@@ -1160,7 +1164,7 @@ impl Checker {
             } => {
                 for name in named {
                     if !self.handlers.contains_key(name) && self.env.get(name).is_none() {
-                        return Err(TypeError::at(
+                        return Err(Diagnostic::error_at(
                             with_span,
                             format!("undefined handler: {}", name),
                         ));
@@ -1374,15 +1378,17 @@ impl Checker {
         op_name: &str,
         qualifier: Option<&str>,
         span: Span,
-    ) -> Result<EffectOpSig, TypeError> {
+    ) -> Result<EffectOpSig, Diagnostic> {
         if let Some(effect_name) = qualifier {
             let info = self
                 .effects
                 .get(effect_name)
-                .ok_or_else(|| TypeError::at(span, format!("undefined effect: {}", effect_name)))?
+                .ok_or_else(|| {
+                    Diagnostic::error_at(span, format!("undefined effect: {}", effect_name))
+                })?
                 .clone();
             let op = info.ops.iter().find(|o| o.name == op_name).ok_or_else(|| {
-                TypeError::at(
+                Diagnostic::error_at(
                     span,
                     format!("effect '{}' has no operation '{}'", effect_name, op_name),
                 )
@@ -1393,7 +1399,7 @@ impl Checker {
             for (eff_name, info) in &self.effects {
                 if let Some(op) = info.ops.iter().find(|o| o.name == op_name) {
                     if found.is_some() {
-                        return Err(TypeError::at(
+                        return Err(Diagnostic::error_at(
                             span,
                             format!(
                                 "ambiguous effect operation '{}': found in multiple effects",
@@ -1405,7 +1411,7 @@ impl Checker {
                 }
             }
             let (eff_name, op, type_params) = found.ok_or_else(|| {
-                TypeError::at(span, format!("undefined effect operation: {}", op_name))
+                Diagnostic::error_at(span, format!("undefined effect operation: {}", op_name))
             })?;
             Ok(self.instantiate_effect_op(&eff_name, &op, &type_params))
         }

@@ -3,7 +3,9 @@ use dylang::{codegen, elaborate, lexer, parser, typechecker};
 /// Load the prelude into a checker.
 fn bootstrap() -> typechecker::Checker {
     let prelude_src = include_str!("../src/stdlib/prelude.dy");
-    let prelude_tokens = lexer::Lexer::new(prelude_src).lex().expect("prelude lex error");
+    let prelude_tokens = lexer::Lexer::new(prelude_src)
+        .lex()
+        .expect("prelude lex error");
     let prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
@@ -31,8 +33,9 @@ fn emit_elaborated(src: &str) -> String {
         .expect("parse error");
     let mut checker = bootstrap();
     checker.check_program(&program).expect("typecheck error");
-    let elaborated = elaborate::elaborate(&program, &checker);
-    codegen::emit_module_with_imports("_script", &elaborated, &checker.tc_codegen_info)
+    let result = checker.to_result();
+    let elaborated = elaborate::elaborate(&program, &result);
+    codegen::emit_module_with_imports("_script", &elaborated, &result.modules.codegen_info)
 }
 
 /// Emit Core Erlang and compile it with erlc, asserting no compilation errors.
@@ -42,10 +45,7 @@ fn assert_compiles(src: &str) {
 
     let out = emit_elaborated(src);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "dylang_test_{}_{id}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("dylang_test_{}_{id}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let core_path = dir.join("_script.core");
     std::fs::write(&core_path, &out).unwrap();
@@ -1549,7 +1549,10 @@ use_pair () = {
 main () = use_pair () with answer
 "#;
     let out = emit_elaborated(src);
-    assert!(out.contains("case"), "expected case for tuple destructure\n{out}");
+    assert!(
+        out.contains("case"),
+        "expected case for tuple destructure\n{out}"
+    );
     assert_compiles(src);
 }
 

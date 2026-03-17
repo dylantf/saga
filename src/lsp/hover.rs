@@ -1,6 +1,6 @@
 use dylang::ast::{Decl, Expr, Pat, Stmt};
 use dylang::token::Span;
-use dylang::typechecker::Checker;
+use dylang::typechecker::CheckResult;
 
 /// Find the name of the identifier at the given byte offset.
 pub fn find_name_at_offset(program: &[Decl], offset: usize) -> Option<String> {
@@ -289,20 +289,20 @@ fn find_in_pat(pat: &Pat, offset: usize) -> Option<String> {
 
 /// Look up the type of a name in the checker's environment.
 /// If a FunAnnotation exists for the name, prefer it (includes labels).
-pub fn type_at_name(checker: &Checker, name: &str, program: &[Decl]) -> Option<String> {
+pub fn type_at_name(result: &CheckResult, name: &str, program: &[Decl]) -> Option<String> {
     // Check for a FunAnnotation first (has labeled params)
     if let Some(sig) = find_annotation(program, name) {
         return Some(sig);
     }
 
     // Check env (functions, variables)
-    if let Some(scheme) = checker.env.get(name) {
-        return Some(scheme.display_with_constraints(&checker.sub));
+    if let Some(scheme) = result.env.get(name) {
+        return Some(scheme.display_with_constraints(&result.sub));
     }
 
     // Check constructors
-    if let Some(scheme) = checker.constructors.get(name) {
-        return Some(scheme.display_with_constraints(&checker.sub));
+    if let Some(scheme) = result.constructors.get(name) {
+        return Some(scheme.display_with_constraints(&result.sub));
     }
 
     None

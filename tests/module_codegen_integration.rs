@@ -24,8 +24,9 @@ fn emit_project_module(
             None
         }
     }).unwrap_or_default();
-    let elaborated = elaborate::elaborate_module(&program, checker, &original_module_name);
-    codegen::emit_module_with_imports(module_name, &elaborated, &checker.tc_codegen_info)
+    let result = checker.to_result();
+    let elaborated = elaborate::elaborate_module(&program, &result, &original_module_name);
+    codegen::emit_module_with_imports(module_name, &elaborated, &result.modules.codegen_info)
 }
 
 /// Parse and typecheck a source file with the given checker (project mode).

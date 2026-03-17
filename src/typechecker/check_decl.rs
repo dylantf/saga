@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use crate::ast::{self, Decl};
 
-use super::{Checker, EffectDefInfo, EffectOpSig, HandlerInfo, Scheme, Span, Type, TypeError, TypeWarning};
+use super::{Checker, Diagnostic, EffectDefInfo, EffectOpSig, HandlerInfo, Scheme, Span, Type};
 
 impl Checker {
     // --- Top-level declarations ---
 
-    pub fn check_program(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<TypeError>> {
+    pub fn check_program(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
         // First pass: register type definitions and record definitions
         for decl in program {
             match decl {
@@ -17,10 +17,12 @@ impl Checker {
                     variants,
                     ..
                 } => {
-                    self.register_type_def(name, type_params, variants).map_err(|e| vec![e])?;
+                    self.register_type_def(name, type_params, variants)
+                        .map_err(|e| vec![e])?;
                 }
                 Decl::RecordDef { name, fields, .. } => {
-                    self.register_record_def(name, fields).map_err(|e| vec![e])?;
+                    self.register_record_def(name, fields)
+                        .map_err(|e| vec![e])?;
                 }
                 Decl::EffectDef {
                     name,
@@ -28,7 +30,8 @@ impl Checker {
                     operations,
                     ..
                 } => {
-                    self.register_effect_def(name, type_params, operations).map_err(|e| vec![e])?;
+                    self.register_effect_def(name, type_params, operations)
+                        .map_err(|e| vec![e])?;
                 }
                 Decl::TraitDef {
                     name,
@@ -37,7 +40,8 @@ impl Checker {
                     methods,
                     ..
                 } => {
-                    self.register_trait_def(name, type_param, supertraits, methods).map_err(|e| vec![e])?;
+                    self.register_trait_def(name, type_param, supertraits, methods)
+                        .map_err(|e| vec![e])?;
                 }
                 _ => {}
             }
@@ -53,7 +57,8 @@ impl Checker {
                 ..
             } = decl
             {
-                self.typecheck_import(module_path, alias.as_deref(), exposing.as_deref(), *span).map_err(|e| vec![e])?;
+                self.typecheck_import(module_path, alias.as_deref(), exposing.as_deref(), *span)
+                    .map_err(|e| vec![e])?;
             }
         }
 
@@ -77,7 +82,7 @@ impl Checker {
                 }
 
                 if !effects.is_empty() {
-                    return Err(vec![TypeError::at(
+                    return Err(vec![Diagnostic::error_at(
                         *span,
                         format!(
                             "external function '{}' cannot declare effects with `needs` -- wrap it in a local function instead",
@@ -96,7 +101,7 @@ impl Checker {
                                 scheme_constraints.push((trait_name.clone(), *var_id));
                             }
                         } else {
-                            return Err(vec![TypeError::at(
+                            return Err(vec![Diagnostic::error_at(
                                 *span,
                                 format!(
                                     "where clause references unknown type variable '{}'",
@@ -172,7 +177,7 @@ impl Checker {
                                 constraints.push((trait_name.clone(), *var_id));
                             }
                         } else {
-                            return Err(vec![TypeError::at(
+                            return Err(vec![Diagnostic::error_at(
                                 *span,
                                 format!(
                                     "where clause references unknown type variable '{}'",
@@ -239,7 +244,8 @@ impl Checker {
                     needs,
                     methods,
                     *span,
-                ).map_err(|e| vec![e])?;
+                )
+                .map_err(|e| vec![e])?;
             }
         }
 
@@ -248,7 +254,7 @@ impl Checker {
 
         // Third pass: group multi-clause function bindings, then check everything.
         // Collect errors instead of failing on the first one.
-        let mut errors: Vec<TypeError> = Vec::new();
+        let mut errors: Vec<Diagnostic> = Vec::new();
         let mut i = 0;
         while i < program.len() {
             if let Decl::FunBinding { name, .. } = &program[i] {
@@ -274,22 +280,30 @@ impl Checker {
                     .get(&name)
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
-                if let Err(e) = self.check_fun_clauses(&name, &clauses, &fun_var, annotation.as_ref(), annotation_span, where_cons) {
+                if let Err(e) = self.check_fun_clauses(
+                    &name,
+                    &clauses,
+                    &fun_var,
+                    annotation.as_ref(),
+                    annotation_span,
+                    where_cons,
+                ) {
                     errors.push(e);
                     // Clear pending constraints for this function -- they may reference
                     // unresolved types from the error site and would produce cascading errors
                     self.pending_constraints.clear();
                 }
                 // Drain any additional errors collected during block inference
-                if !self.collected_errors.is_empty() {
+                let has_errors = self.collected_diagnostics.iter().any(|d| matches!(d.severity, super::Severity::Error));
+                if has_errors {
                     self.pending_constraints.clear();
                 }
-                errors.append(&mut self.collected_errors);
+                errors.extend(self.drain_errors());
             } else {
                 if let Err(e) = self.check_decl(&program[i]) {
                     errors.push(e);
                 }
-                errors.append(&mut self.collected_errors);
+                errors.extend(self.drain_errors());
                 i += 1;
             }
         }
@@ -299,16 +313,16 @@ impl Checker {
         if let Some(effects) = self.fun_effects.get("main")
             && !effects.is_empty()
         {
-                let span = program.iter().find_map(|d| {
-                    if let Decl::FunAnnotation { name, span, .. } = d
-                        && name == "main"
-                    {
-                        Some(*span)
-                    } else {
-                        None
-                    }
-                });
-                errors.push(TypeError::at(
+            let span = program.iter().find_map(|d| {
+                if let Decl::FunAnnotation { name, span, .. } = d
+                    && name == "main"
+                {
+                    Some(*span)
+                } else {
+                    None
+                }
+            });
+            errors.push(Diagnostic::error_at(
                     span.unwrap_or(crate::token::Span { start: 0, end: 0 }),
                     format!(
                         "`main` cannot use `needs` -- it is the entry point and there is no caller to provide handlers for {{{}}}. Handle effects inside `main` using `with` instead.",
@@ -329,7 +343,7 @@ impl Checker {
         }
     }
 
-    pub(crate) fn check_decl(&mut self, decl: &Decl) -> Result<(), TypeError> {
+    pub(crate) fn check_decl(&mut self, decl: &Decl) -> Result<(), Diagnostic> {
         match decl {
             Decl::Let {
                 name,
@@ -392,7 +406,7 @@ impl Checker {
         annotation: Option<&Type>,
         annotation_span: Option<Span>,
         where_constraints: &[(String, u32)],
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         // All clauses must have the same arity
         let arity = match clauses[0] {
             Decl::FunBinding { params, .. } => params.len(),
@@ -469,7 +483,7 @@ impl Checker {
             };
 
             if params.len() != arity {
-                return Err(TypeError::at(
+                return Err(Diagnostic::error_at(
                     *span,
                     format!(
                         "clause for '{}' has {} params, expected {}",
@@ -488,7 +502,7 @@ impl Checker {
 
             if let Some(guard) = guard {
                 if let Some(span) = super::find_effect_call(guard) {
-                    return Err(TypeError::at(
+                    return Err(Diagnostic::error_at(
                         span,
                         "Effect calls are not allowed in guard expressions".to_string(),
                     ));
@@ -543,7 +557,7 @@ impl Checker {
                 let span = annotation_span.expect("unused effects implies annotation exists");
                 let mut effects: Vec<_> = unused.into_iter().cloned().collect();
                 effects.sort();
-                self.warnings.push(TypeWarning::at(
+                self.collected_diagnostics.push(Diagnostic::warning_at(
                     span,
                     format!(
                         "function '{}' declares needs {{{}}} but never uses {}",
@@ -563,7 +577,7 @@ impl Checker {
             if matches!(resolved, Type::Var(_)) {
                 let mut names = record_names.clone();
                 names.sort();
-                return Err(TypeError::at(
+                return Err(Diagnostic::error_at(
                     field_span,
                     format!(
                         "ambiguous field access: could be any of [{}] which all have this field; add a type annotation to disambiguate",
@@ -589,7 +603,7 @@ impl Checker {
                     Decl::FunBinding { span, .. } => *span,
                     _ => unreachable!(),
                 };
-                TypeError::at(
+                Diagnostic::error_at(
                     span,
                     format!("type annotation mismatch for '{}': {}", name, e.message),
                 )
@@ -613,7 +627,7 @@ impl Checker {
                     }
                     if annotation.is_some() {
                         // Function has a type annotation: where clause must be explicit
-                        return Err(TypeError::at(
+                        return Err(Diagnostic::error_at(
                             span,
                             format!(
                                 "trait {} required but not declared in where clause for '{}'",
@@ -669,7 +683,7 @@ impl Checker {
         name: &str,
         clauses: &[&Decl],
         param_types: &[Type],
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         use super::exhaustiveness::{self as exh, ExhaustivenessCtx, SPat};
 
         // Only check if at least one param resolves to a known ADT or Tuple
@@ -704,7 +718,7 @@ impl Checker {
 
             // Redundancy check
             if guard.is_none() && !exh::useful(&ctx, &matrix, &row) {
-                return Err(TypeError::at(
+                return Err(Diagnostic::error_at(
                     *span,
                     format!(
                         "unreachable clause for '{}': all cases already covered",
@@ -729,7 +743,7 @@ impl Checker {
             if !witnesses.is_empty() {
                 let formatted: Vec<String> =
                     witnesses.iter().map(|w| exh::format_witness(w)).collect();
-                return Err(TypeError::at(
+                return Err(Diagnostic::error_at(
                     span,
                     format!(
                         "non-exhaustive clauses for '{}': missing {}",
@@ -738,7 +752,7 @@ impl Checker {
                     ),
                 ));
             }
-            return Err(TypeError::at(
+            return Err(Diagnostic::error_at(
                 span,
                 format!("non-exhaustive clauses for '{}'", name),
             ));
@@ -754,7 +768,7 @@ impl Checker {
         name: &str,
         type_params: &[String],
         variants: &[ast::TypeConstructor],
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         // Create fresh type variables for the type parameters
         let mut param_vars: Vec<(String, u32)> = type_params
             .iter()
@@ -810,7 +824,7 @@ impl Checker {
         &mut self,
         name: &str,
         fields: &[(String, ast::TypeExpr)],
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         let mut params: Vec<(String, u32)> = vec![];
         let field_types: Vec<(std::string::String, Type)> = fields
             .iter()
@@ -825,7 +839,7 @@ impl Checker {
         name: &str,
         effect_type_params: &[String],
         operations: &[ast::EffectOp],
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         // Create fresh vars for the effect's type params, shared across all operations.
         // E.g. for `effect State s { get () -> s; put (val: s) -> Unit }`,
         // a single var ID for `s` is used by both `get` and `put`.
@@ -875,7 +889,7 @@ impl Checker {
         arms: &[ast::HandlerArm],
         return_clause: Option<&ast::HandlerArm>,
         span: crate::token::Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         // Save and clear effect/field tracking for this handler body
         let body_scope = self.save_body_scope();
 
@@ -920,7 +934,7 @@ impl Checker {
                 }
             }
             if !belongs_to_declared {
-                return Err(TypeError::at(
+                return Err(Diagnostic::error_at(
                     arm.span,
                     format!(
                         "handler arm '{}' is not an operation of {}",
@@ -1027,7 +1041,7 @@ impl Checker {
 
     // --- Trait constraint checking ---
 
-    pub(crate) fn check_pending_constraints(&mut self) -> Result<(), TypeError> {
+    pub(crate) fn check_pending_constraints(&mut self) -> Result<(), Diagnostic> {
         // Build resolved where bounds (substitution may have chained var IDs)
         let mut resolved_bounds: std::collections::HashMap<u32, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
@@ -1065,7 +1079,7 @@ impl Checker {
                             .get(&(trait_name.clone(), type_name.clone()));
                         match impl_info {
                             None => {
-                                return Err(TypeError::at(
+                                return Err(Diagnostic::error_at(
                                     span,
                                     format!("no impl of {} for {}", trait_name, type_name),
                                 ));
@@ -1108,7 +1122,7 @@ impl Checker {
                             .get(id)
                             .is_some_and(|b| b.contains(&trait_name));
                         if !covered {
-                            return Err(TypeError::at(
+                            return Err(Diagnostic::error_at(
                                 span,
                                 format!(
                                     "trait {} required but no impl or where clause bound for this type",
@@ -1126,7 +1140,7 @@ impl Checker {
                         });
                     }
                     Type::Arrow(_, _) | Type::EffArrow(_, _, _) => {
-                        return Err(TypeError::at(
+                        return Err(Diagnostic::error_at(
                             span,
                             format!("no impl of {} for function type", trait_name),
                         ));
@@ -1142,7 +1156,7 @@ impl Checker {
     // --- Supertrait checking ---
 
     /// Verify that every impl's trait has its supertraits also implemented for the same type.
-    pub(crate) fn check_supertrait_impls(&self) -> Result<(), TypeError> {
+    pub(crate) fn check_supertrait_impls(&self) -> Result<(), Diagnostic> {
         for ((trait_name, target_type), impl_info) in &self.trait_impls {
             if let Some(trait_info) = self.traits.get(trait_name) {
                 for supertrait in &trait_info.supertraits {
@@ -1155,8 +1169,8 @@ impl Checker {
                             trait_name, target_type, supertrait, target_type
                         );
                         return Err(match impl_info.span {
-                            Some(span) => TypeError::at(span, msg),
-                            None => TypeError::new(msg),
+                            Some(span) => Diagnostic::error_at(span, msg),
+                            None => Diagnostic::error(msg),
                         });
                     }
                 }

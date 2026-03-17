@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::{Checker, EffectDef, EffectOpDef, ModuleCodegenInfo, Scheme, TypeError};
+use super::{Checker, Diagnostic, EffectDef, EffectOpDef, ModuleCodegenInfo, Scheme};
 use crate::token::Span;
 
 /// Map from module name (e.g. "Foo.Bar.Baz") to the file path that declares it.
@@ -136,7 +136,7 @@ impl Checker {
         alias: Option<&str>,
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         let module_name = module_path.join(".");
         let prefix = alias
             .map(|a| a.to_string())
@@ -146,7 +146,7 @@ impl Checker {
 
         let project_root = match &self.modules.project_root.clone() {
             None if !is_builtin => {
-                return Err(TypeError::at(
+                return Err(Diagnostic::error_at(
                     span,
                     format!(
                         "cannot import '{}': user module imports require a project (create a project.toml)",
@@ -159,7 +159,7 @@ impl Checker {
         };
 
         if self.modules.loading.contains(&module_name) {
-            return Err(TypeError::at(
+            return Err(Diagnostic::error_at(
                 span,
                 format!("circular import: {}", module_name),
             ));
@@ -175,18 +175,21 @@ impl Checker {
             src.to_string()
         } else {
             let file_path = self
-                .modules.map
+                .modules
+                .map
                 .as_ref()
                 .and_then(|m| m.get(&module_name))
-                .ok_or_else(|| TypeError::at(span, format!("unknown module '{}'", module_name)))?
+                .ok_or_else(|| {
+                    Diagnostic::error_at(span, format!("unknown module '{}'", module_name))
+                })?
                 .clone();
             std::fs::read_to_string(&file_path).map_err(|e| {
-                TypeError::at(span, format!("cannot read module '{}': {}", module_name, e))
+                Diagnostic::error_at(span, format!("cannot read module '{}': {}", module_name, e))
             })?
         };
 
         let tokens = crate::lexer::Lexer::new(&source).lex().map_err(|e| {
-            TypeError::at(
+            Diagnostic::error_at(
                 span,
                 format!("lex error in module '{}': {}", module_name, e.message),
             )
@@ -194,7 +197,7 @@ impl Checker {
         let mut program = crate::parser::Parser::new(tokens)
             .parse_program()
             .map_err(|e| {
-                TypeError::at(
+                Diagnostic::error_at(
                     span,
                     format!("parse error in module '{}': {}", module_name, e.message),
                 )
@@ -202,7 +205,8 @@ impl Checker {
         crate::derive::expand_derives(&mut program);
 
         // Cache the parsed program so the build step can skip re-parsing
-        self.modules.programs
+        self.modules
+            .programs
             .insert(module_name.clone(), program.clone());
 
         self.modules.loading.insert(module_name.clone());
@@ -262,7 +266,7 @@ impl Checker {
         mod_checker.modules.programs = self.modules.programs.clone();
         mod_checker.modules.map = self.modules.map.clone();
         mod_checker.check_program(&program).map_err(|errs| {
-            TypeError::at(
+            Diagnostic::error_at(
                 span,
                 format!("type error in module '{}': {}", module_name, errs[0]),
             )
@@ -291,11 +295,14 @@ impl Checker {
 
         // Build codegen info from the module's public declarations
         let codegen_info = collect_codegen_info(&module_name, &program, &exports);
-        self.modules.codegen_info
+        self.modules
+            .codegen_info
             .insert(module_name.clone(), codegen_info);
 
         // Cache and inject
-        self.modules.exports.insert(module_name.clone(), exports.clone());
+        self.modules
+            .exports
+            .insert(module_name.clone(), exports.clone());
         self.inject_exports(&exports, &prefix, exposing, span)
     }
 
@@ -356,7 +363,7 @@ impl Checker {
         prefix: &str,
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         let super::ModuleExports {
             bindings,
             type_constructors,
@@ -423,7 +430,7 @@ impl Checker {
         prefix: &str,
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Diagnostic> {
         // Build a lookup map for fast access
         let binding_map: std::collections::HashMap<&str, &Scheme> =
             bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
@@ -484,7 +491,7 @@ impl Checker {
                         found = true;
                     }
                     if !found {
-                        return Err(TypeError::at(
+                        return Err(Diagnostic::error_at(
                             span,
                             format!("'{}' is not exported by module '{}'", name, prefix),
                         ));
@@ -496,7 +503,7 @@ impl Checker {
                             self.env.insert(name.clone(), scheme);
                         }
                         None => {
-                            return Err(TypeError::at(
+                            return Err(Diagnostic::error_at(
                                 span,
                                 format!("'{}' is not exported by module '{}'", name, prefix),
                             ));

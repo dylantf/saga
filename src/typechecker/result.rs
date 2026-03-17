@@ -1,0 +1,87 @@
+//! Typechecker output: the public result of typechecking a program.
+//!
+//! Downstream consumers (elaborator, lowerer, LSP) depend on CheckResult
+//! instead of reaching into Checker internals. The Checker builds this
+//! at the end of check_program.
+
+use std::collections::{HashMap, HashSet};
+
+use super::{
+    Checker, Diagnostic, EffectDefInfo, HandlerInfo, ModuleContext, Scheme, Severity, Substitution,
+    TraitEvidence, TraitInfo, TypeEnv,
+};
+
+/// The public output of typechecking. Downstream consumers (elaborator, lowerer,
+/// LSP) read from this instead of reaching into Checker internals.
+#[derive(Clone)]
+pub struct CheckResult {
+    /// Type environment: function and constructor type schemes.
+    pub env: TypeEnv,
+    /// Substitution (for resolving display types in the LSP).
+    pub sub: Substitution,
+    /// Constructor type schemes (for LSP hover/completion).
+    pub constructors: HashMap<String, Scheme>,
+    /// Trait evidence for elaboration (dictionary passing).
+    pub evidence: Vec<TraitEvidence>,
+    /// All diagnostics (errors and warnings) from typechecking.
+    pub diagnostics: Vec<Diagnostic>,
+    /// Module system output (codegen info, parsed programs, module map).
+    pub modules: ModuleContext,
+    /// Trait definitions (for elaboration).
+    pub traits: HashMap<String, TraitInfo>,
+    /// Effect definitions (for LSP completion, lowerer).
+    pub effects: HashMap<String, EffectDefInfo>,
+    /// Handler definitions (for LSP completion, lowerer).
+    pub handlers: HashMap<String, HandlerInfo>,
+    /// Effect requirements per function.
+    pub fun_effects: HashMap<String, HashSet<String>>,
+}
+
+impl CheckResult {
+    /// Whether typechecking found any errors.
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics.iter().any(|d| matches!(d.severity, Severity::Error))
+    }
+
+    /// All errors.
+    pub fn errors(&self) -> Vec<&Diagnostic> {
+        self.diagnostics.iter().filter(|d| matches!(d.severity, Severity::Error)).collect()
+    }
+
+    /// All warnings.
+    pub fn warnings(&self) -> Vec<&Diagnostic> {
+        self.diagnostics.iter().filter(|d| matches!(d.severity, Severity::Warning)).collect()
+    }
+
+    /// Effect names for LSP completion.
+    pub fn effect_names(&self) -> Vec<String> {
+        self.effects.keys().cloned().collect()
+    }
+
+    /// Handler names for LSP completion.
+    pub fn handler_names(&self) -> Vec<String> {
+        self.handlers.keys().cloned().collect()
+    }
+}
+
+impl Checker {
+    /// Extract the public-facing result from the current checker state.
+    /// Clones the output-relevant fields, leaving the Checker intact
+    /// (needed because with_prelude continues using the Checker after
+    /// checking the prelude).
+    pub fn to_result(&self) -> CheckResult {
+        let diagnostics = self.collected_diagnostics.clone();
+        CheckResult {
+            env: self.env.clone(),
+            sub: self.sub.clone(),
+            constructors: self.constructors.clone(),
+            evidence: self.evidence.clone(),
+            diagnostics,
+            modules: self.modules.clone(),
+            traits: self.traits.clone(),
+            effects: self.effects.clone(),
+            handlers: self.handlers.clone(),
+            fun_effects: self.fun_effects.clone(),
+        }
+    }
+}

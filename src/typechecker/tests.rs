@@ -2,7 +2,7 @@ use super::*;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 
-fn check(src: &str) -> Result<Checker, TypeError> {
+fn check(src: &str) -> Result<Checker, Diagnostic> {
     let mut lexer = Lexer::new(src);
     let tokens = lexer.lex().expect("lex error");
     let mut parser = Parser::new(tokens);
@@ -21,7 +21,7 @@ fn check(src: &str) -> Result<Checker, TypeError> {
     Ok(checker)
 }
 
-fn infer_expr_type(src: &str) -> Result<Type, TypeError> {
+fn infer_expr_type(src: &str) -> Result<Type, Diagnostic> {
     // Wrap expression in a let binding so we can pull its type
     let wrapped = format!("let _result = {}", src);
     let checker = check(&wrapped)?;
