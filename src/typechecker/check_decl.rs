@@ -5,6 +5,10 @@ use crate::ast::{self, Decl};
 use super::{Checker, Diagnostic, EffectDefInfo, EffectOpSig, HandlerInfo, Scheme, Span, Type};
 use super::result::CheckResult;
 
+/// Annotations collected from FunAnnotation declarations:
+/// (name -> (type, span)) and (name -> where clause constraints).
+type Annotations = (HashMap<String, (Type, Span)>, HashMap<String, Vec<(String, u32)>>);
+
 impl Checker {
     // --- Top-level declarations ---
 
@@ -23,251 +27,15 @@ impl Checker {
     /// Returns Err for fatal errors that prevent further checking.
     /// Non-fatal diagnostics are accumulated in collected_diagnostics.
     pub(crate) fn check_program_inner(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
-        // First pass: register type definitions and record definitions
-        for decl in program {
-            match decl {
-                Decl::TypeDef {
-                    name,
-                    type_params,
-                    variants,
-                    ..
-                } => {
-                    self.register_type_def(name, type_params, variants)
-                        .map_err(|e| vec![e])?;
-                }
-                Decl::RecordDef { name, fields, .. } => {
-                    self.register_record_def(name, fields)
-                        .map_err(|e| vec![e])?;
-                }
-                Decl::EffectDef {
-                    name,
-                    type_params,
-                    operations,
-                    ..
-                } => {
-                    self.register_effect_def(name, type_params, operations)
-                        .map_err(|e| vec![e])?;
-                }
-                Decl::TraitDef {
-                    name,
-                    type_param,
-                    supertraits,
-                    methods,
-                    ..
-                } => {
-                    self.register_trait_def(name, type_param, supertraits, methods)
-                        .map_err(|e| vec![e])?;
-                }
-                _ => {}
-            }
-        }
-
-        // Process imports (before impls so imported traits are available)
-        for decl in program {
-            if let Decl::Import {
-                module_path,
-                alias,
-                exposing,
-                span,
-                ..
-            } = decl
-            {
-                self.typecheck_import(module_path, alias.as_deref(), exposing.as_deref(), *span)
-                    .map_err(|e| vec![e])?;
-            }
-        }
-
-        // Register external functions early so they're available in impl bodies
-        for decl in program {
-            if let Decl::ExternalFun {
-                name,
-                params,
-                return_type,
-                effects,
-                where_clause,
-                span,
-                ..
-            } = decl
-            {
-                let mut params_list: Vec<(String, u32)> = vec![];
-                let mut fun_ty = self.convert_type_expr(return_type, &mut params_list);
-                for (_, texpr) in params.iter().rev() {
-                    let param_ty = self.convert_type_expr(texpr, &mut params_list);
-                    fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
-                }
-
-                if !effects.is_empty() {
-                    return Err(vec![Diagnostic::error_at(
-                        *span,
-                        format!(
-                            "external function '{}' cannot declare effects with `needs` -- wrap it in a local function instead",
-                            name
-                        ),
-                    )]);
-                }
-
-                let mut scheme_constraints = Vec::new();
-                if !where_clause.is_empty() {
-                    for bound in where_clause {
-                        if let Some((_, var_id)) =
-                            params_list.iter().find(|(n, _)| *n == bound.type_var)
-                        {
-                            for trait_name in &bound.traits {
-                                scheme_constraints.push((trait_name.clone(), *var_id));
-                            }
-                        } else {
-                            return Err(vec![Diagnostic::error_at(
-                                *span,
-                                format!(
-                                    "where clause references unknown type variable '{}'",
-                                    bound.type_var
-                                ),
-                            )]);
-                        }
-                    }
-                }
-
-                let mut scheme = self.generalize(&fun_ty);
-                scheme.constraints = scheme_constraints;
-                self.env.insert(name.clone(), scheme);
-            }
-        }
-
-        // Collect function annotations: name -> declared type, effects, and where constraints
-        // Done before impls so annotated helpers are available in impl bodies.
-        let mut annotations: HashMap<std::string::String, (Type, Span)> = HashMap::new();
-        let mut annotation_constraints: HashMap<std::string::String, Vec<(String, u32)>> =
-            HashMap::new();
-        for decl in program {
-            if let Decl::FunAnnotation {
-                name,
-                params,
-                return_type,
-                effects,
-                where_clause,
-                span,
-                ..
-            } = decl
-            {
-                let mut params_list: Vec<(String, u32)> = vec![];
-                let mut fun_ty = self.convert_type_expr(return_type, &mut params_list);
-                for (_, texpr) in params.iter().rev() {
-                    let param_ty = self.convert_type_expr(texpr, &mut params_list);
-                    fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
-                }
-                annotations.insert(name.clone(), (fun_ty.clone(), *span));
-                if !effects.is_empty() {
-                    self.fun_effects.insert(
-                        name.clone(),
-                        effects.iter().map(|e| e.name.clone()).collect(),
-                    );
-                    // Store effect type arg constraints for pre-populating the cache
-                    let mut constraints = Vec::new();
-                    for eff in effects {
-                        if !eff.type_args.is_empty() {
-                            let concrete_types: Vec<Type> = eff
-                                .type_args
-                                .iter()
-                                .map(|ta| self.convert_type_expr(ta, &mut params_list))
-                                .collect();
-                            constraints.push((eff.name.clone(), concrete_types));
-                        }
-                    }
-                    if !constraints.is_empty() {
-                        self.fun_effect_type_constraints
-                            .insert(name.clone(), constraints);
-                    }
-                }
-
-                // Process where clause into (trait_name, var_id) constraints
-                if !where_clause.is_empty() {
-                    let mut constraints = Vec::new();
-                    for bound in where_clause {
-                        if let Some((_, var_id)) =
-                            params_list.iter().find(|(n, _)| *n == bound.type_var)
-                        {
-                            self.where_bound_var_names
-                                .insert(*var_id, bound.type_var.clone());
-                            for trait_name in &bound.traits {
-                                constraints.push((trait_name.clone(), *var_id));
-                            }
-                        } else {
-                            return Err(vec![Diagnostic::error_at(
-                                *span,
-                                format!(
-                                    "where clause references unknown type variable '{}'",
-                                    bound.type_var
-                                ),
-                            )]);
-                        }
-                    }
-                    annotation_constraints.insert(name.clone(), constraints);
-                }
-
-                // Pre-register annotated functions so they're available in impl bodies
-                let mut scheme = self.generalize(&fun_ty);
-                if let Some(c) = annotation_constraints.get(name) {
-                    scheme.constraints = c.clone();
-                }
-                self.env.insert(name.clone(), scheme);
-            }
-        }
-
-        // Pre-bind all function names with fresh vars (enables mutual recursion
-        // and makes unannotated helpers available in impl bodies)
-        let mut fun_vars: HashMap<std::string::String, Type> = HashMap::new();
-        for decl in program {
-            if let Decl::FunBinding { name, .. } = decl
-                && !fun_vars.contains_key(name)
-            {
-                // Skip if already registered by an annotation above
-                if annotations.contains_key(name) {
-                    let var = self.fresh_var();
-                    fun_vars.insert(name.clone(), var);
-                    continue;
-                }
-                let var = self.fresh_var();
-                fun_vars.insert(name.clone(), var.clone());
-                self.env.insert(
-                    name.clone(),
-                    Scheme {
-                        forall: vec![],
-                        constraints: vec![],
-                        ty: var,
-                    },
-                );
-            }
-        }
-
-        // Register impls (after traits, imports, externals, annotations, and function pre-binding)
-        for decl in program {
-            if let Decl::ImplDef {
-                trait_name,
-                target_type,
-                type_params,
-                where_clause,
-                needs,
-                methods,
-                span,
-            } = decl
-            {
-                self.register_impl(
-                    trait_name,
-                    target_type,
-                    type_params,
-                    where_clause,
-                    needs,
-                    methods,
-                    *span,
-                )
-                .map_err(|e| vec![e])?;
-            }
-        }
-
-        // Check supertrait requirements (after all impls are registered so order doesn't matter)
+        self.register_definitions(program)?;
+        self.process_imports(program)?;
+        self.register_externals(program)?;
+        let (annotations, annotation_constraints) = self.collect_annotations(program)?;
+        let fun_vars = self.pre_bind_functions(program, &annotations);
+        self.register_all_impls(program)?;
         self.check_supertrait_impls().map_err(|e| vec![e])?;
 
-        // Third pass: group multi-clause function bindings, then check everything.
+        // Main pass: group multi-clause function bindings, then check everything.
         // Collect errors instead of failing on the first one.
         let mut errors: Vec<Diagnostic> = Vec::new();
         let mut i = 0;
@@ -409,6 +177,193 @@ impl Checker {
             // module declarations -- skip
             _ => Ok(()),
         }
+    }
+
+    // --- check_program_inner passes ---
+
+    /// Pass 1: Register type, record, effect, and trait definitions.
+    fn register_definitions(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
+        for decl in program {
+            match decl {
+                Decl::TypeDef { name, type_params, variants, .. } => {
+                    self.register_type_def(name, type_params, variants).map_err(|e| vec![e])?;
+                }
+                Decl::RecordDef { name, fields, .. } => {
+                    self.register_record_def(name, fields).map_err(|e| vec![e])?;
+                }
+                Decl::EffectDef { name, type_params, operations, .. } => {
+                    self.register_effect_def(name, type_params, operations).map_err(|e| vec![e])?;
+                }
+                Decl::TraitDef { name, type_param, supertraits, methods, .. } => {
+                    self.register_trait_def(name, type_param, supertraits, methods).map_err(|e| vec![e])?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Pass 2: Process imports (before impls so imported traits are available).
+    fn process_imports(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
+        for decl in program {
+            if let Decl::Import { module_path, alias, exposing, span, .. } = decl {
+                self.typecheck_import(module_path, alias.as_deref(), exposing.as_deref(), *span)
+                    .map_err(|e| vec![e])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Pass 3: Register external functions so they're available in impl bodies.
+    fn register_externals(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
+        for decl in program {
+            if let Decl::ExternalFun { name, params, return_type, effects, where_clause, span, .. } = decl {
+                let mut params_list: Vec<(String, u32)> = vec![];
+                let mut fun_ty = self.convert_type_expr(return_type, &mut params_list);
+                for (_, texpr) in params.iter().rev() {
+                    let param_ty = self.convert_type_expr(texpr, &mut params_list);
+                    fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
+                }
+
+                if !effects.is_empty() {
+                    return Err(vec![Diagnostic::error_at(
+                        *span,
+                        format!(
+                            "external function '{}' cannot declare effects with `needs` -- wrap it in a local function instead",
+                            name
+                        ),
+                    )]);
+                }
+
+                let mut scheme_constraints = Vec::new();
+                if !where_clause.is_empty() {
+                    for bound in where_clause {
+                        if let Some((_, var_id)) = params_list.iter().find(|(n, _)| *n == bound.type_var) {
+                            for trait_name in &bound.traits {
+                                scheme_constraints.push((trait_name.clone(), *var_id));
+                            }
+                        } else {
+                            return Err(vec![Diagnostic::error_at(
+                                *span,
+                                format!("where clause references unknown type variable '{}'", bound.type_var),
+                            )]);
+                        }
+                    }
+                }
+
+                let mut scheme = self.generalize(&fun_ty);
+                scheme.constraints = scheme_constraints;
+                self.env.insert(name.clone(), scheme);
+            }
+        }
+        Ok(())
+    }
+
+    /// Pass 4: Collect function annotations and their where clause constraints.
+    /// Returns (annotations, annotation_constraints) maps.
+    fn collect_annotations(
+        &mut self,
+        program: &[Decl],
+    ) -> std::result::Result<Annotations, Vec<Diagnostic>> {
+        let mut annotations: HashMap<String, (Type, Span)> = HashMap::new();
+        let mut annotation_constraints: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+
+        for decl in program {
+            if let Decl::FunAnnotation { name, params, return_type, effects, where_clause, span, .. } = decl {
+                let mut params_list: Vec<(String, u32)> = vec![];
+                let mut fun_ty = self.convert_type_expr(return_type, &mut params_list);
+                for (_, texpr) in params.iter().rev() {
+                    let param_ty = self.convert_type_expr(texpr, &mut params_list);
+                    fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
+                }
+                annotations.insert(name.clone(), (fun_ty.clone(), *span));
+
+                if !effects.is_empty() {
+                    self.fun_effects.insert(
+                        name.clone(),
+                        effects.iter().map(|e| e.name.clone()).collect(),
+                    );
+                    let mut constraints = Vec::new();
+                    for eff in effects {
+                        if !eff.type_args.is_empty() {
+                            let concrete_types: Vec<Type> = eff
+                                .type_args
+                                .iter()
+                                .map(|ta| self.convert_type_expr(ta, &mut params_list))
+                                .collect();
+                            constraints.push((eff.name.clone(), concrete_types));
+                        }
+                    }
+                    if !constraints.is_empty() {
+                        self.fun_effect_type_constraints.insert(name.clone(), constraints);
+                    }
+                }
+
+                if !where_clause.is_empty() {
+                    let mut constraints = Vec::new();
+                    for bound in where_clause {
+                        if let Some((_, var_id)) = params_list.iter().find(|(n, _)| *n == bound.type_var) {
+                            self.where_bound_var_names.insert(*var_id, bound.type_var.clone());
+                            for trait_name in &bound.traits {
+                                constraints.push((trait_name.clone(), *var_id));
+                            }
+                        } else {
+                            return Err(vec![Diagnostic::error_at(
+                                *span,
+                                format!("where clause references unknown type variable '{}'", bound.type_var),
+                            )]);
+                        }
+                    }
+                    annotation_constraints.insert(name.clone(), constraints);
+                }
+
+                let mut scheme = self.generalize(&fun_ty);
+                if let Some(c) = annotation_constraints.get(name) {
+                    scheme.constraints = c.clone();
+                }
+                self.env.insert(name.clone(), scheme);
+            }
+        }
+
+        Ok((annotations, annotation_constraints))
+    }
+
+    /// Pass 5: Pre-bind all function names with fresh vars (enables mutual recursion).
+    fn pre_bind_functions(
+        &mut self,
+        program: &[Decl],
+        annotations: &HashMap<String, (Type, Span)>,
+    ) -> HashMap<String, Type> {
+        let mut fun_vars: HashMap<String, Type> = HashMap::new();
+        for decl in program {
+            if let Decl::FunBinding { name, .. } = decl
+                && !fun_vars.contains_key(name)
+            {
+                if annotations.contains_key(name) {
+                    let var = self.fresh_var();
+                    fun_vars.insert(name.clone(), var);
+                    continue;
+                }
+                let var = self.fresh_var();
+                fun_vars.insert(name.clone(), var.clone());
+                self.env.insert(
+                    name.clone(),
+                    Scheme { forall: vec![], constraints: vec![], ty: var },
+                );
+            }
+        }
+        fun_vars
+    }
+
+    /// Pass 6: Register trait impls.
+    fn register_all_impls(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
+        for decl in program {
+            if let Decl::ImplDef { trait_name, target_type, type_params, where_clause, needs, methods, span } = decl {
+                self.register_impl(trait_name, target_type, type_params, where_clause, needs, methods, *span)
+                    .map_err(|e| vec![e])?;
+            }
+        }
+        Ok(())
     }
 
     /// Check a group of function clauses that share the same name.
@@ -625,14 +580,33 @@ impl Checker {
             })?;
         }
 
-        // Partition new pending constraints: vars go to scheme, concrete stay for global check
+        let scheme = self.build_fun_scheme(
+            name,
+            fun_ty,
+            constraints_before,
+            annotation.is_some(),
+            where_constraints,
+        )?;
+        self.env.insert(name.into(), scheme);
+        Ok(())
+    }
+
+    /// Partition pending constraints into scheme-level (polymorphic) vs global
+    /// (concrete), then generalize the function type into a scheme with constraints.
+    fn build_fun_scheme(
+        &mut self,
+        name: &str,
+        fun_ty: Type,
+        constraints_before: usize,
+        has_annotation: bool,
+        where_constraints: &[(String, u32)],
+    ) -> Result<Scheme, Diagnostic> {
         let new_constraints = self.pending_constraints.split_off(constraints_before);
         let mut scheme_constraints: Vec<(String, u32)> = Vec::new();
         for (trait_name, ty, span) in new_constraints {
             let resolved = self.sub.apply(&ty);
             match resolved {
                 Type::Var(id) => {
-                    // Covered by where clause -- satisfied, don't propagate
                     if self
                         .where_bounds
                         .get(&id)
@@ -640,8 +614,7 @@ impl Checker {
                     {
                         continue;
                     }
-                    if annotation.is_some() {
-                        // Function has a type annotation: where clause must be explicit
+                    if has_annotation {
                         return Err(Diagnostic::error_at(
                             span,
                             format!(
@@ -650,22 +623,17 @@ impl Checker {
                             ),
                         ));
                     }
-                    // No annotation -- infer as scheme constraint
                     scheme_constraints.push((trait_name, id));
                 }
                 _ => {
-                    // Concrete type -- push back for global checking
                     self.pending_constraints.push((trait_name, ty, span));
                 }
             }
         }
 
-        // Remove the function's own pre-bound entry before generalizing,
-        // otherwise its type vars appear in env_vars and block generalization
         self.env.remove(name);
         let mut scheme = self.generalize(&fun_ty);
 
-        // Add explicit where clause constraints
         for (trait_name, var_id) in where_constraints {
             let resolved_id = match self.sub.apply(&Type::Var(*var_id)) {
                 Type::Var(id) => id,
@@ -676,7 +644,6 @@ impl Checker {
             }
         }
 
-        // Add inferred constraints from body
         for (trait_name, var_id) in scheme_constraints {
             if scheme.forall.contains(&var_id)
                 && !scheme
@@ -688,8 +655,7 @@ impl Checker {
             }
         }
 
-        self.env.insert(name.into(), scheme);
-        Ok(())
+        Ok(scheme)
     }
 
     /// Check exhaustiveness of multi-clause function patterns using Maranget.
