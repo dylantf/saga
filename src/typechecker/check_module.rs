@@ -526,7 +526,6 @@ fn collect_codegen_info(
     let mut effect_defs = Vec::new();
     let mut record_fields = Vec::new();
     let mut handler_defs = Vec::new();
-    let mut handler_bodies = Vec::new();
     let mut fun_effects = Vec::new();
     let mut trait_impl_dicts = Vec::new();
 
@@ -571,18 +570,9 @@ fn collect_codegen_info(
             Decl::HandlerDef {
                 public: true,
                 name,
-                effects,
-                arms,
-                return_clause,
                 ..
             } => {
                 handler_defs.push(name.clone());
-                handler_bodies.push(super::HandlerBody {
-                    name: name.clone(),
-                    effects: effects.iter().map(|e| e.name.clone()).collect(),
-                    arms: arms.clone(),
-                    return_clause: return_clause.clone(),
-                });
             }
             Decl::FunAnnotation {
                 public: true,
@@ -625,7 +615,6 @@ fn collect_codegen_info(
         effect_defs,
         record_fields,
         handler_defs,
-        handler_bodies,
         fun_effects,
         type_constructors: exports.type_constructors.clone().into_iter().collect(),
         trait_impl_dicts,

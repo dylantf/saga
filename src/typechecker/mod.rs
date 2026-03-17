@@ -427,39 +427,6 @@ pub struct EffectDef {
     pub type_param_count: usize,
 }
 
-/// A handler definition for codegen: full body (arms, return clause, effects).
-#[derive(Debug, Clone)]
-pub struct HandlerBody {
-    pub name: String,
-    pub effects: Vec<String>,
-    pub arms: Vec<crate::ast::HandlerArm>,
-    pub return_clause: Option<Box<crate::ast::HandlerArm>>,
-}
-
-impl ModuleCodegenInfo {
-    /// Update handler bodies from the elaborated program.
-    /// Called after elaboration so handler arms contain ForeignCall
-    /// nodes instead of raw EffectCall nodes.
-    pub fn update_handler_bodies(&mut self, elaborated: &[crate::ast::Decl]) {
-        for decl in elaborated {
-            if let crate::ast::Decl::HandlerDef {
-                public: true,
-                name,
-                effects,
-                arms,
-                return_clause,
-                ..
-            } = decl
-                && let Some(hb) = self.handler_bodies.iter_mut().find(|h| &h.name == name)
-            {
-                hb.effects = effects.iter().map(|e| e.name.clone()).collect();
-                hb.arms = arms.clone();
-                hb.return_clause = return_clause.clone();
-            }
-        }
-    }
-}
-
 /// Information about a module's exports needed by the lowerer/codegen.
 /// Populated during typechecking alongside `tc_modules`.
 #[derive(Debug, Clone, Default)]
@@ -474,8 +441,6 @@ pub struct ModuleCodegenInfo {
     pub handler_defs: Vec<String>,
     /// Public function effect annotations: name -> sorted effect names.
     pub fun_effects: Vec<(String, Vec<String>)>,
-    /// Public handler bodies: (name, effects, arms, return_clause).
-    pub handler_bodies: Vec<HandlerBody>,
     /// Public type constructors: type name -> [constructor names].
     pub type_constructors: Vec<(String, Vec<String>)>,
     /// Trait impl dicts: (trait_name, target_type, dict_name, arity).
@@ -678,10 +643,10 @@ pub struct TraitEvidence {
 #[derive(Clone)]
 pub struct Checker {
     pub(crate) next_var: u32,
-    pub sub: Substitution,
-    pub env: TypeEnv,
+    pub(crate) sub: Substitution,
+    pub(crate) env: TypeEnv,
     /// Constructor types from type definitions: name -> (arity, type scheme)
-    pub constructors: HashMap<std::string::String, Scheme>,
+    pub(crate) constructors: HashMap<std::string::String, Scheme>,
     /// Record definitions: record name -> vec of (field_name, field_type)
     pub(crate) records: HashMap<std::string::String, Vec<(std::string::String, Type)>>,
     /// Effect definitions: effect name -> definition info (type params + operations)
@@ -714,11 +679,11 @@ pub struct Checker {
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence)
     pub(crate) where_bound_var_names: HashMap<u32, String>,
     /// Module system state: caches, project root, import tracking.
-    pub modules: ModuleContext,
+    pub(crate) modules: ModuleContext,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
     pub(crate) adt_variants: HashMap<std::string::String, Vec<(std::string::String, usize)>>,
     /// Evidence collected during constraint solving for the elaboration pass.
-    pub evidence: Vec<TraitEvidence>,
+    pub(crate) evidence: Vec<TraitEvidence>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Per-span type information for LSP hover, go-to-def, etc.
@@ -741,7 +706,7 @@ pub struct ModuleContext {
     /// Cache of parsed programs for each typechecked module.
     pub programs: HashMap<String, crate::ast::Program>,
     /// Cached checker state after prelude has been loaded.
-    pub prelude_snapshot: Option<Box<Checker>>,
+    pub(crate) prelude_snapshot: Option<Box<Checker>>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) loading: HashSet<String>,
 }

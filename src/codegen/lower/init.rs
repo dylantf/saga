@@ -204,16 +204,25 @@ impl<'a> Lowerer<'a> {
                             .insert(ctor.clone(), erlang_name.clone());
                     }
                 }
-                // Register Std handler bodies
-                for hb in &info.handler_bodies {
-                    self.handler_defs
-                        .entry(hb.name.clone())
-                        .or_insert(HandlerInfo {
-                            effects: hb.effects.clone(),
-                            arms: hb.arms.clone(),
-                            return_clause: hb.return_clause.clone(),
-                            source_module: Some(mod_name.clone()),
-                        });
+                // Register Std handler bodies from elaborated programs
+                if let Some(elab_program) = self.elaborated_modules.get(mod_name) {
+                    for decl in elab_program {
+                        if let Decl::HandlerDef {
+                            name,
+                            effects,
+                            arms,
+                            return_clause,
+                            ..
+                        } = decl
+                        {
+                            self.handler_defs.entry(name.clone()).or_insert(HandlerInfo {
+                                effects: effects.iter().map(|e| e.name.clone()).collect(),
+                                arms: arms.clone(),
+                                return_clause: return_clause.clone(),
+                                source_module: Some(mod_name.clone()),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -320,16 +329,25 @@ impl<'a> Lowerer<'a> {
                             },
                         );
                     }
-                    // Register imported handler bodies
-                    for hb in &info.handler_bodies {
-                        self.handler_defs
-                            .entry(hb.name.clone())
-                            .or_insert(HandlerInfo {
-                                effects: hb.effects.clone(),
-                                arms: hb.arms.clone(),
-                                return_clause: hb.return_clause.clone(),
-                                source_module: Some(module_name.clone()),
-                            });
+                    // Register imported handler bodies from elaborated programs
+                    if let Some(elab_program) = self.elaborated_modules.get(&module_name) {
+                        for decl in elab_program {
+                            if let Decl::HandlerDef {
+                                name,
+                                effects,
+                                arms,
+                                return_clause,
+                                ..
+                            } = decl
+                            {
+                                self.handler_defs.entry(name.clone()).or_insert(HandlerInfo {
+                                    effects: effects.iter().map(|e| e.name.clone()).collect(),
+                                    arms: arms.clone(),
+                                    return_clause: return_clause.clone(),
+                                    source_module: Some(module_name.clone()),
+                                });
+                            }
+                        }
                     }
                 }
             }
