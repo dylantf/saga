@@ -90,7 +90,7 @@ impl Elaborator {
 
         // Pre-populate dict_names from imported modules' codegen info
         let mut dict_names = HashMap::new();
-        for info in result.modules.codegen_info.values() {
+        for info in result.codegen_info().values() {
             for (trait_name, target_type, dict_name, _arity) in &info.trait_impl_dicts {
                 dict_names.insert((trait_name.clone(), target_type.clone()), dict_name.clone());
             }

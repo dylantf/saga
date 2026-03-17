@@ -155,7 +155,7 @@ fn compile_std_modules(
     result: &typechecker::CheckResult,
 ) -> std::collections::HashMap<String, ast::Program> {
     let std_modules: Vec<String> = result
-        .modules.codegen_info
+        .codegen_info()
         .keys()
         .filter(|name| name.starts_with("Std."))
         .cloned()
@@ -166,7 +166,7 @@ fn compile_std_modules(
     for module_name in &std_modules {
         let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
 
-        let mut program = if let Some(cached) = result.modules.programs.get(module_name) {
+        let mut program = if let Some(cached) = result.programs().get(module_name) {
             cached.clone()
         } else {
             let source = typechecker::builtin_module_source(&module_path)
@@ -289,19 +289,18 @@ fn build_project(profile: &str) -> PathBuf {
 
     // Elaborate user modules
     let user_modules: Vec<String> = result
-        .modules.codegen_info
+        .codegen_info()
         .keys()
         .filter(|name| !name.starts_with("Std."))
         .cloned()
         .collect();
 
     for module_name in &user_modules {
-        let mut program = if let Some(cached) = result.modules.programs.get(module_name) {
+        let mut program = if let Some(cached) = result.programs().get(module_name) {
             cached.clone()
         } else {
             let file_path = result
-                .modules.map
-                .as_ref()
+                .module_map()
                 .and_then(|m| m.get(module_name))
                 .unwrap_or_else(|| {
                     eprintln!("Module '{}' not found in module map", module_name);
@@ -354,7 +353,7 @@ fn build_project(profile: &str) -> PathBuf {
         emit_module(
             &erlang_name,
             elaborated,
-            &result.modules.codegen_info,
+            result.codegen_info(),
             &elaborated_modules,
             &build_dir,
         );
@@ -397,7 +396,7 @@ fn build_script(file: &str, profile: &str) -> PathBuf {
         emit_module(
             &erlang_name,
             elaborated,
-            &result.modules.codegen_info,
+            result.codegen_info(),
             &elaborated_modules,
             &build_dir,
         );
@@ -508,7 +507,7 @@ fn cmd_emit(file: &str) {
     let core_src = codegen::emit_module_with_imports(
         "_script",
         &elaborated,
-        &result.modules.codegen_info,
+        result.codegen_info(),
         &elaborated_modules,
     );
     print!("{}", core_src);

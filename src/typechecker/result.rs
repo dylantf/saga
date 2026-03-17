@@ -26,7 +26,7 @@ pub struct CheckResult {
     /// All diagnostics (errors and warnings) from typechecking.
     pub diagnostics: Vec<Diagnostic>,
     /// Module system output (codegen info, parsed programs, module map).
-    pub modules: ModuleContext,
+    pub(crate) modules: ModuleContext,
     /// Trait definitions (for elaboration).
     pub traits: HashMap<String, TraitInfo>,
     /// Effect definitions (for LSP completion, lowerer).
@@ -64,6 +64,21 @@ impl CheckResult {
     /// Handler names for LSP completion.
     pub fn handler_names(&self) -> Vec<String> {
         self.handlers.keys().cloned().collect()
+    }
+
+    /// Codegen info for all typechecked modules.
+    pub fn codegen_info(&self) -> &std::collections::HashMap<String, super::ModuleCodegenInfo> {
+        &self.modules.codegen_info
+    }
+
+    /// Cached parsed programs for typechecked modules.
+    pub fn programs(&self) -> &std::collections::HashMap<String, crate::ast::Program> {
+        &self.modules.programs
+    }
+
+    /// Module map (module name -> file path).
+    pub fn module_map(&self) -> Option<&super::check_module::ModuleMap> {
+        self.modules.map.as_ref()
     }
 
     /// Look up the resolved type at a span, applying the substitution.

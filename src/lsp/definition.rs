@@ -226,9 +226,7 @@ fn find_module_file(
             if last == module_name {
                 let full_name = module_path.join(".");
                 let file_path = result
-                    .modules
-                    .map
-                    .as_ref()
+                    .module_map()
                     .and_then(|m| m.get(&full_name))
                     .cloned()?;
                 // Jump to the top of the file
@@ -275,16 +273,14 @@ fn find_cross_module(
 
             // Look up the module's AST and file path
             let Some(file_path) = result
-                .modules
-                .map
-                .as_ref()
+                .module_map()
                 .and_then(|m| m.get(&module_name))
                 .cloned()
             else {
                 continue;
             };
 
-            let Some(module_program) = result.modules.programs.get(&module_name) else {
+            let Some(module_program) = result.programs().get(&module_name) else {
                 continue;
             };
 

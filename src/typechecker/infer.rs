@@ -179,65 +179,7 @@ impl Checker {
 
             Expr::Block { stmts, .. } => self.infer_block(stmts),
 
-            Expr::Lambda { params, body, .. } => {
-                let saved_env = self.env.clone();
-                let saved_effect_cache = self.effect_type_param_cache.clone();
-                let saved_effects = self.current_effects.clone();
-                let mut param_types = Vec::new();
-                for pat in params {
-                    let ty = self.fresh_var();
-                    self.bind_pattern(pat, &ty)?;
-                    param_types.push(ty);
-                }
-                // Lambda body effects propagate up to the enclosing context.
-                let body_ty = self.infer_expr(body)?;
-                self.env = saved_env;
-
-                // Collect effects the lambda body introduced
-                let lambda_effects: Vec<String> = self
-                    .current_effects
-                    .difference(&saved_effects)
-                    .cloned()
-                    .collect();
-
-                // Build the effect type args from the lambda's own effect cache,
-                // not the outer scope's (which may have different type params).
-                let eff_refs: Vec<(String, Vec<Type>)> = lambda_effects
-                    .iter()
-                    .map(|name| {
-                        let args = if let Some(cache) = self.effect_type_param_cache.get(name) {
-                            if let Some(info) = self.effects.get(name) {
-                                info.type_params
-                                    .iter()
-                                    .filter_map(|pid| cache.get(pid).cloned())
-                                    .collect()
-                            } else {
-                                vec![]
-                            }
-                        } else {
-                            vec![]
-                        };
-                        (name.clone(), args)
-                    })
-                    .collect();
-
-                self.effect_type_param_cache = saved_effect_cache;
-
-                // Build curried arrow: a -> b -> c -> ret
-                let mut result = body_ty;
-                for param_ty in param_types.into_iter().rev() {
-                    result = Type::Arrow(Box::new(param_ty), Box::new(result));
-                }
-
-                // If the lambda has effects, wrap the outermost arrow as EffArrow
-                if !eff_refs.is_empty()
-                    && let Type::Arrow(a, b) = result
-                {
-                    result = Type::EffArrow(a, b, eff_refs);
-                }
-
-                Ok(result)
-            }
+            Expr::Lambda { params, body, .. } => self.infer_lambda(params, body),
 
             Expr::Case {
                 scrutinee,
@@ -470,6 +412,66 @@ impl Checker {
         }
         let guard_ty = self.infer_expr(guard)?;
         self.unify_at(&guard_ty, &Type::bool(), guard.span())
+    }
+
+    fn infer_lambda(&mut self, params: &[Pat], body: &Expr) -> Result<Type, Diagnostic> {
+        let saved_env = self.env.clone();
+        let saved_effect_cache = self.effect_type_param_cache.clone();
+        let saved_effects = self.current_effects.clone();
+
+        let mut param_types = Vec::new();
+        for pat in params {
+            let ty = self.fresh_var();
+            self.bind_pattern(pat, &ty)?;
+            param_types.push(ty);
+        }
+
+        let body_ty = self.infer_expr(body)?;
+        self.env = saved_env;
+
+        // Collect effects the lambda body introduced
+        let lambda_effects: Vec<String> = self
+            .current_effects
+            .difference(&saved_effects)
+            .cloned()
+            .collect();
+
+        // Build effect type args from the lambda's own cache
+        let eff_refs: Vec<(String, Vec<Type>)> = lambda_effects
+            .iter()
+            .map(|name| {
+                let args = if let Some(cache) = self.effect_type_param_cache.get(name) {
+                    if let Some(info) = self.effects.get(name) {
+                        info.type_params
+                            .iter()
+                            .filter_map(|pid| cache.get(pid).cloned())
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                };
+                (name.clone(), args)
+            })
+            .collect();
+
+        self.effect_type_param_cache = saved_effect_cache;
+
+        // Build curried arrow: a -> b -> c -> ret
+        let mut result = body_ty;
+        for param_ty in param_types.into_iter().rev() {
+            result = Type::Arrow(Box::new(param_ty), Box::new(result));
+        }
+
+        // If the lambda has effects, wrap the outermost arrow as EffArrow
+        if !eff_refs.is_empty()
+            && let Type::Arrow(a, b) = result
+        {
+            result = Type::EffArrow(a, b, eff_refs);
+        }
+
+        Ok(result)
     }
 
     fn infer_field_access(
