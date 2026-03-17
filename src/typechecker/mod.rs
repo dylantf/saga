@@ -827,7 +827,7 @@ impl Checker {
             .expect("prelude parse");
         crate::derive::expand_derives(&mut prelude_program);
         checker
-            .check_program(&prelude_program)
+            .check_program_inner(&prelude_program)
             .map_err(|errs| errs.into_iter().next().unwrap())?;
         checker.modules.prelude_snapshot = Some(Box::new(checker.clone()));
         Ok(checker)

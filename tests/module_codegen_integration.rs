@@ -35,7 +35,8 @@ fn typecheck_source(source: &str, checker: &mut typechecker::Checker) {
     let program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
-    checker.check_program(&program).expect("typecheck error");
+    let result = checker.check_program(&program);
+    assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());
 }
 
 /// Create a project-mode checker pointed at the test fixtures directory,
@@ -52,9 +53,8 @@ fn make_project_checker() -> typechecker::Checker {
     let prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
-    checker
-        .check_program(&prelude_program)
-        .expect("prelude typecheck error");
+    let result = checker.check_program(&prelude_program);
+    assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
     checker
 }
 

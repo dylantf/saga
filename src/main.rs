@@ -86,7 +86,7 @@ fn parse_and_typecheck(
     source: &str,
     source_path: &str,
     checker: &mut typechecker::Checker,
-) -> ast::Program {
+) -> (ast::Program, typechecker::CheckResult) {
     let tokens = match lexer::Lexer::new(source).lex() {
         Ok(t) => t,
         Err(e) => {
@@ -110,16 +110,17 @@ fn parse_and_typecheck(
         }
     };
     derive::expand_derives(&mut program);
-    if let Err(errors) = checker.check_program(&program) {
-        for e in &errors {
+    let result = checker.check_program(&program);
+    for w in result.warnings() {
+        print_tc_diagnostic(source, source_path, w);
+    }
+    if result.has_errors() {
+        for e in result.errors() {
             print_tc_diagnostic(source, source_path, e);
         }
         std::process::exit(1);
     }
-    for w in checker.to_result().warnings() {
-        print_tc_diagnostic(source, source_path, w);
-    }
-    program
+    (program, result)
 }
 
 fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
@@ -183,13 +184,13 @@ fn compile_std_modules(checker: &mut typechecker::Checker, build_dir: &std::path
         derive::expand_derives(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(None, true);
-        if let Err(errors) = mod_checker.check_program(&program) {
-            for e in &errors {
+        let mod_result = mod_checker.check_program(&program);
+        if mod_result.has_errors() {
+            for e in mod_result.errors() {
                 eprintln!("Std module {} type error: {}", module_name, e);
             }
             std::process::exit(1);
         }
-        let mod_result = mod_checker.to_result();
 
         elaborate_and_emit(
             module_name,
@@ -274,7 +275,7 @@ fn build_project(profile: &str) -> PathBuf {
     });
 
     let mut checker = make_checker(Some(project_root.clone()));
-    let main_program = parse_and_typecheck(&main_source, "Main.dy", &mut checker);
+    let (main_program, _) = parse_and_typecheck(&main_source, "Main.dy", &mut checker);
 
     let build_dir = project_root.join("_build").join(profile);
     // Clean and recreate build dir to remove stale artifacts
@@ -324,15 +325,15 @@ fn build_project(profile: &str) -> PathBuf {
         derive::expand_derives(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
-        if let Err(errors) = mod_checker.check_program(&program) {
-            for e in &errors {
+        let mod_result = mod_checker.check_program(&program);
+        for w in mod_result.warnings() {
+            eprintln!("Warning in module {}: {}", module_name, w);
+        }
+        if mod_result.has_errors() {
+            for e in mod_result.errors() {
                 eprintln!("Type error in module {}: {}", module_name, e);
             }
             std::process::exit(1);
-        }
-        let mod_result = mod_checker.to_result();
-        for w in mod_result.warnings() {
-            eprintln!("Warning in module {}: {}", module_name, w);
         }
 
         elaborate_and_emit(
@@ -369,7 +370,7 @@ fn build_script(file: &str, profile: &str) -> PathBuf {
         std::process::exit(1);
     });
     let mut checker = make_checker(None);
-    let program = parse_and_typecheck(&source, file, &mut checker);
+    let (program, _) = parse_and_typecheck(&source, file, &mut checker);
 
     let build_dir = std::path::Path::new(file)
         .parent()
@@ -469,7 +470,7 @@ fn cmd_check(file: Option<&str>) {
                 std::process::exit(1);
             });
             let mut checker = make_checker(None);
-            parse_and_typecheck(&source, f, &mut checker);
+            let _ = parse_and_typecheck(&source, f, &mut checker);
             eprintln!("OK");
         }
         None => {
@@ -483,7 +484,7 @@ fn cmd_check(file: Option<&str>) {
                 std::process::exit(1);
             });
             let mut checker = make_checker(Some(project_root));
-            parse_and_typecheck(&source, "Main.dy", &mut checker);
+            let _ = parse_and_typecheck(&source, "Main.dy", &mut checker);
             eprintln!("OK");
         }
     }
@@ -495,9 +496,8 @@ fn cmd_emit(file: &str) {
         std::process::exit(1);
     });
     let mut checker = make_checker(None);
-    let program = parse_and_typecheck(&source, file, &mut checker);
+    let (program, result) = parse_and_typecheck(&source, file, &mut checker);
 
-    let result = checker.to_result();
     let elaborated = elaborate::elaborate(&program, &result);
     let core_src =
         codegen::emit_module_with_imports("_script", &elaborated, &result.modules.codegen_info);

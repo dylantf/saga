@@ -78,19 +78,10 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckSnapshot {
 
     derive::expand_derives(&mut program);
 
-    // check_program returns Err for errors, but warnings are only in collected_diagnostics.
-    // Collect errors from the return value, then grab everything from to_result().
-    let mut diagnostics: Vec<Diagnostic> = Vec::new();
-    if let Err(errors) = checker.check_program(&program) {
-        for e in &errors {
-            diagnostics.push(tc_to_lsp_diagnostic(&line_index, e));
-        }
-    }
-
-    let tc_result = checker.to_result();
-    for d in &tc_result.diagnostics {
-        diagnostics.push(tc_to_lsp_diagnostic(&line_index, d));
-    }
+    let tc_result = checker.check_program(&program);
+    let diagnostics = tc_result.diagnostics.iter()
+        .map(|d| tc_to_lsp_diagnostic(&line_index, d))
+        .collect();
 
     CheckSnapshot {
         diagnostics,

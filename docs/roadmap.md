@@ -48,6 +48,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
       substitution, creating phantom dependencies that blocked generalization of polymorphic
       functions like `run_state`. Fixed by starting module checkers at the parent's `next_var`.
 - [ ] Traits don't seem to propagate through all cases, or maybe function arms. Try to implement Result.unwrap and `panic (show err)` on the error case.
+- [ ] Dangling fun annotations should be an error/warning. This might break stdlib, do we need a @builtin annotation?
 
 ## Traits / Impls
 

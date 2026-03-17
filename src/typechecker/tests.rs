@@ -16,8 +16,12 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
         .parse_program()
         .expect("prelude parse error");
     crate::derive::expand_derives(&mut prelude_program);
-    checker.check_program(&prelude_program).map_err(|e| e.into_iter().next().unwrap())?;
-    checker.check_program(&program).map_err(|e| e.into_iter().next().unwrap())?;
+    checker
+        .check_program_inner(&prelude_program)
+        .map_err(|e| e.into_iter().next().unwrap())?;
+    checker
+        .check_program_inner(&program)
+        .map_err(|e| e.into_iter().next().unwrap())?;
     Ok(checker)
 }
 
@@ -2918,7 +2922,9 @@ handle_msg () = receive {
 #[test]
 fn error_messages_show_resolved_types() {
     // Type mismatch should show concrete type names, not ?-variables
-    let err = check("fun f (x: Int) -> String\nf x = x").err().expect("expected type error");
+    let err = check("fun f (x: Int) -> String\nf x = x")
+        .err()
+        .expect("expected type error");
     assert!(
         err.message.contains("Int") && err.message.contains("String"),
         "error should show concrete types, got: {}",
@@ -2942,7 +2948,8 @@ add a b = a + b
 main () = add "hello" 1
 "#,
     )
-    .err().expect("expected type error");
+    .err()
+    .expect("expected type error");
     assert!(
         err.message.contains("String") || err.message.contains("Int"),
         "error should show concrete types, got: {}",
@@ -2960,12 +2967,12 @@ main () = add "hello" 1
 #[test]
 fn type_at_span_records_function_params() {
     // Function params go through bind_pattern which records the type
-    let checker = check(
-        "fun foo (x: Int) -> Int\nfoo x = x"
-    ).unwrap();
+    let checker = check("fun foo (x: Int) -> Int\nfoo x = x").unwrap();
     let result = checker.to_result();
-    let types: Vec<_> = result.type_at_span.iter()
-        .map(|(_, ty)| format!("{}", result.sub.apply(ty)))
+    let types: Vec<_> = result
+        .type_at_span
+        .values()
+        .map(|ty| format!("{}", result.sub.apply(ty)))
         .collect();
     assert!(
         types.iter().any(|ty| ty == "Int"),
@@ -2977,12 +2984,12 @@ fn type_at_span_records_function_params() {
 #[test]
 fn type_at_span_records_locals_in_body() {
     // Let bindings inside function bodies are the main LSP hover use case
-    let checker = check(
-        "main () = {\n  let x = 42\n  let y = x\n  y\n}"
-    ).unwrap();
+    let checker = check("main () = {\n  let x = 42\n  let y = x\n  y\n}").unwrap();
     let result = checker.to_result();
-    let types: Vec<_> = result.type_at_span.iter()
-        .map(|(_, ty)| format!("{}", result.sub.apply(ty)))
+    let types: Vec<_> = result
+        .type_at_span
+        .values()
+        .map(|ty| format!("{}", result.sub.apply(ty)))
         .collect();
     // x binding, y binding, x usage ref, y usage ref
     let int_count = types.iter().filter(|ty| *ty == "Int").count();
@@ -2996,16 +3003,21 @@ fn type_at_span_records_locals_in_body() {
 
 #[test]
 fn type_at_span_records_case_bindings() {
-    let checker = check(r#"
+    let checker = check(
+        r#"
 type Maybe a { Just(a) | Nothing }
 main () = case Just 42 {
   Just(x) -> x
   Nothing -> 0
 }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let result = checker.to_result();
-    let types: Vec<_> = result.type_at_span.iter()
-        .map(|(_, ty)| format!("{}", result.sub.apply(ty)))
+    let types: Vec<_> = result
+        .type_at_span
+        .values()
+        .map(|ty| format!("{}", result.sub.apply(ty)))
         .collect();
     assert!(
         types.iter().any(|ty| ty == "Int"),

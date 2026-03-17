@@ -3,11 +3,26 @@ use std::collections::HashMap;
 use crate::ast::{self, Decl};
 
 use super::{Checker, Diagnostic, EffectDefInfo, EffectOpSig, HandlerInfo, Scheme, Span, Type};
+use super::result::CheckResult;
 
 impl Checker {
     // --- Top-level declarations ---
 
-    pub fn check_program(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
+    /// Typecheck a program and return the public result.
+    /// This is the main entry point for external callers.
+    pub fn check_program(&mut self, program: &[Decl]) -> CheckResult {
+        if let Err(errors) = self.check_program_inner(program) {
+            for e in errors {
+                self.collected_diagnostics.push(e);
+            }
+        }
+        self.to_result()
+    }
+
+    /// Internal implementation of check_program.
+    /// Returns Err for fatal errors that prevent further checking.
+    /// Non-fatal diagnostics are accumulated in collected_diagnostics.
+    pub(crate) fn check_program_inner(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
         // First pass: register type definitions and record definitions
         for decl in program {
             match decl {

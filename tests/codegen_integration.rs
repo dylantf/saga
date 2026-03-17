@@ -10,9 +10,8 @@ fn bootstrap() -> typechecker::Checker {
         .parse_program()
         .expect("prelude parse error");
     let mut checker = typechecker::Checker::new();
-    checker
-        .check_program(&prelude_program)
-        .expect("prelude typecheck error");
+    let result = checker.check_program(&prelude_program);
+    assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
     checker
 }
 
@@ -32,8 +31,8 @@ fn emit_elaborated(src: &str) -> String {
         .parse_program()
         .expect("parse error");
     let mut checker = bootstrap();
-    checker.check_program(&program).expect("typecheck error");
-    let result = checker.to_result();
+    let result = checker.check_program(&program);
+    assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());
     let elaborated = elaborate::elaborate(&program, &result);
     codegen::emit_module_with_imports("_script", &elaborated, &result.modules.codegen_info)
 }
