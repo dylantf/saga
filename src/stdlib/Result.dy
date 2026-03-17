@@ -24,10 +24,10 @@ map_err f r = case r {
   Err(e) -> Err(f e)
 }
 
-pub fun unwrap (r: Result a b) -> a where {b: Show}
+pub fun unwrap (r: Result a b) -> a where {a: Show, b: Show}
 unwrap r = case r {
   Ok(a) -> a
-  Err(b) -> panic "Trying to unwrap an error result: " <> show b
+  err -> panic ("Trying to unwrap an error result: " <> show err)
 }
 
 pub fun unwrap_or (default: a) (r: Result a b) -> a

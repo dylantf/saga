@@ -40,6 +40,9 @@ struct Elaborator {
     current_fun: Option<String>,
     /// Current function's dict param names: trait_name -> param_name
     current_dict_params: HashMap<String, String>,
+    /// Current function's dict params keyed by (trait_name, type_var_suffix):
+    /// e.g. ("Show", "v42") -> "__dict_Show_v42"
+    current_dict_params_by_var: HashMap<(String, String), String>,
     /// Erlang module name for this module (e.g. "animals"), used for dict name qualification
     erlang_module: String,
 }
@@ -104,6 +107,7 @@ impl Elaborator {
             evidence_by_span,
             current_fun: None,
             current_dict_params: HashMap::new(),
+            current_dict_params_by_var: HashMap::new(),
             erlang_module,
         }
     }
@@ -203,11 +207,17 @@ impl Elaborator {
 
                     // Set up current dict params for elaborating method bodies
                     let saved_dict_params = std::mem::take(&mut self.current_dict_params);
+                    let saved_dict_params_by_var =
+                        std::mem::take(&mut self.current_dict_params_by_var);
                     for bound in where_clause {
                         for req_trait in &bound.traits {
-                            self.current_dict_params.insert(
-                                req_trait.clone(),
-                                format!("__dict_{}_{}", req_trait, bound.type_var),
+                            let param_name =
+                                format!("__dict_{}_{}", req_trait, bound.type_var);
+                            self.current_dict_params
+                                .insert(req_trait.clone(), param_name.clone());
+                            self.current_dict_params_by_var.insert(
+                                (req_trait.clone(), bound.type_var.clone()),
+                                param_name,
                             );
                         }
                     }
@@ -230,6 +240,7 @@ impl Elaborator {
                     }
 
                     self.current_dict_params = saved_dict_params;
+                    self.current_dict_params_by_var = saved_dict_params_by_var;
 
                     // For parameterized types, if there are type_params but no where_clause,
                     // no dict params are needed. The dict is still nullary.
@@ -262,6 +273,8 @@ impl Elaborator {
 
                     // Set up dict params for this function
                     let saved_dict_params = std::mem::take(&mut self.current_dict_params);
+                    let saved_dict_params_by_var =
+                        std::mem::take(&mut self.current_dict_params_by_var);
                     let mut extra_params = Vec::new();
 
                     if let Some(dict_param_info) = self.fun_dict_params.get(name) {
@@ -269,6 +282,8 @@ impl Elaborator {
                             let param_name = format!("__dict_{}_{}", trait_name, type_var);
                             self.current_dict_params
                                 .insert(trait_name.clone(), param_name.clone());
+                            self.current_dict_params_by_var
+                                .insert((trait_name.clone(), type_var.clone()), param_name.clone());
                             extra_params.push(Pat::Var {
                                 name: param_name,
                                 span: *span,
@@ -284,6 +299,7 @@ impl Elaborator {
                     full_params.extend(params.clone());
 
                     self.current_dict_params = saved_dict_params;
+                    self.current_dict_params_by_var = saved_dict_params_by_var;
                     self.current_fun = None;
 
                     output.push(Decl::FunBinding {
@@ -906,6 +922,27 @@ impl Elaborator {
                     };
                 }
                 Some(dict_expr)
+            }
+            Type::Var(id) => {
+                // Polymorphic type var: look up the current function's dict param
+                // for this trait + var combination.
+                let var_key = format!("v{}", id);
+                if let Some(param_name) = self
+                    .current_dict_params_by_var
+                    .get(&(trait_name.into(), var_key))
+                {
+                    return Some(Expr::Var {
+                        name: param_name.clone(),
+                        span,
+                    });
+                }
+                // Fall back to single-trait lookup
+                self.current_dict_params
+                    .get(trait_name)
+                    .map(|name| Expr::Var {
+                        name: name.clone(),
+                        span,
+                    })
             }
             _ => None,
         }

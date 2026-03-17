@@ -1,5 +1,5 @@
 main () = {
-  let x: Result String String = Ok("foo")
-  x |> Result.unwrap |> print
-  Err("bar") |> Result.unwrap |> print
+  # (Ok("foo") : Result String String) |> Result.unwrap |> print
+  let err: Result String String = Err("bar")
+  err |> Result.unwrap |> print
 }

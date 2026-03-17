@@ -602,7 +602,7 @@ impl Checker {
         where_constraints: &[(String, u32)],
     ) -> Result<Scheme, Diagnostic> {
         let new_constraints = self.pending_constraints.split_off(constraints_before);
-        let mut scheme_constraints: Vec<(String, u32)> = Vec::new();
+        let mut scheme_constraints: Vec<(String, u32, Span)> = Vec::new();
         for (trait_name, ty, span) in new_constraints {
             let resolved = self.sub.apply(&ty);
             match resolved {
@@ -628,7 +628,7 @@ impl Checker {
                             ),
                         ));
                     }
-                    scheme_constraints.push((trait_name, id));
+                    scheme_constraints.push((trait_name, id, span));
                 }
                 _ => {
                     self.pending_constraints.push((trait_name, ty, span));
@@ -649,7 +649,20 @@ impl Checker {
             }
         }
 
-        for (trait_name, var_id) in scheme_constraints {
+        // Collect type vars that actually appear in the function's type
+        let mut type_vars = Vec::new();
+        super::collect_free_vars(&self.sub.apply(&fun_ty), &mut type_vars);
+
+        for (trait_name, var_id, span) in scheme_constraints {
+            if !type_vars.contains(&var_id) {
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "ambiguous type variable requires {} but has no concrete type in '{}'",
+                        trait_name, name
+                    ),
+                ));
+            }
             if scheme.forall.contains(&var_id)
                 && !scheme
                     .constraints

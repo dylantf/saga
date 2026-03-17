@@ -896,6 +896,62 @@ show_it x = describe x",
 }
 
 #[test]
+fn ambiguous_type_var_from_where_clause() {
+    // Calling a function with a where clause on a type variable that is never
+    // bound to a concrete type should be an error, not silently ignored.
+    // e.g. Ok("foo") |> unwrap where unwrap requires {b: Show} but b is never resolved.
+    let result = check(
+        "trait Show a {
+  fun show (x: a) -> String
+}
+impl Show for String {
+  show s = s
+}
+type MyResult a b {
+  Ok(a)
+  Err(b)
+}
+fun unwrap (r: MyResult a b) -> a where {b: Show}
+unwrap r = case r {
+  Ok(a) -> a
+  Err(_) -> panic \"error\"
+}
+main () = unwrap (Ok(\"hello\"))",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("ambiguous type variable requires Show"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn no_ambiguity_when_type_var_is_concrete() {
+    // When the type variable IS resolved to a concrete type, no error.
+    check(
+        "trait Describe a {
+  fun describe (x: a) -> String
+}
+impl Describe for String {
+  describe s = s
+}
+type Result a b {
+  Ok(a)
+  Err(b)
+}
+fun unwrap (r: Result a b) -> a where {b: Describe}
+unwrap r = case r {
+  Ok(a) -> a
+  Err(b) -> describe b
+}
+main () = unwrap (Err(\"oops\"))",
+    )
+    .unwrap();
+}
+
+#[test]
 fn inferred_constraint_propagation() {
     // Function without where clause infers constraint; caller with impl succeeds
     check(
