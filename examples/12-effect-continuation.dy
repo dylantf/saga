@@ -9,7 +9,7 @@ effect Log {
 
 # Handler that prints each message with a prefix
 handler console_log for Log {
-  log msg -> {
+  log msg = {
     print ("[LOG] " <> msg)
     resume ()
   }
@@ -17,7 +17,7 @@ handler console_log for Log {
 
 # Handler that silently discards all log messages
 handler silent_log for Log {
-  log msg -> resume ()
+  log msg = resume ()
 }
 
 # A computation that uses logging

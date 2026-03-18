@@ -454,7 +454,7 @@ fn effect_call_with_wrong_needs() {
 fn effect_handled_with_named_handler() {
     // Effect is handled inline, so the enclosing function doesn't need it
     check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nhandler catch_fail for Fail {\n  fail msg -> 0\n}\nmain x = (fail! \"oops\") with catch_fail",
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nhandler catch_fail for Fail {\n  fail msg = 0\n}\nmain x = (fail! \"oops\") with catch_fail",
     )
     .unwrap();
 }
@@ -462,7 +462,7 @@ fn effect_handled_with_named_handler() {
 #[test]
 fn effect_handled_with_inline_handler() {
     check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nmain x = (fail! \"oops\") with {\n  fail msg -> 0\n}",
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nmain x = (fail! \"oops\") with {\n  fail msg = 0\n}",
     )
     .unwrap();
 }
@@ -494,7 +494,7 @@ fn effect_propagation_with_needs_declared() {
 fn effect_propagation_handled_by_caller() {
     // Caller handles the effect, so doesn't need to declare it
     check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun bar (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfoo x = (bar x) with {\n  fail msg -> 0\n}",
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun bar (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfoo x = (bar x) with {\n  fail msg = 0\n}",
     )
     .unwrap();
 }
@@ -506,10 +506,10 @@ fn handler_arm_body_effect_handled_by_sibling() {
     check(
         "effect Log {\n  fun log (msg: String) -> Unit\n}\n\
          effect Fail {\n  fun fail (msg: String) -> a\n}\n\
-         handler silent for Log {\n  log msg -> resume ()\n}\n\
+         handler silent for Log {\n  log msg = resume ()\n}\n\
          fun risky () -> Int needs {Fail, Log}\n\
          risky () = fail! \"oops\"\n\
-         main () = risky () with {\n  silent,\n  fail msg -> {\n    log! (\"caught: \" <> msg)\n    0\n  }\n}",
+         main () = risky () with {\n  silent,\n  fail msg = {\n    log! (\"caught: \" <> msg)\n    0\n  }\n}",
     )
     .unwrap();
 }
@@ -523,7 +523,7 @@ fn handler_arm_body_unhandled_effect_propagates() {
          effect Fail {\n  fun fail (msg: String) -> a\n}\n\
          fun risky () -> Int needs {Fail}\n\
          risky () = fail! \"oops\"\n\
-         foo () = risky () with {\n  fail msg -> {\n    log! \"caught\"\n    0\n  }\n}",
+         foo () = risky () with {\n  fail msg = {\n    log! \"caught\"\n    0\n  }\n}",
     );
     assert!(result.is_err());
     let err = result.err().expect("expected error");
@@ -561,7 +561,7 @@ fn lambda_effects_covered_by_enclosing_needs() {
 fn lambda_effects_absorbed_by_hof_annotation() {
     // HOF parameter annotated with `needs {Fail}` absorbs the effect from the lambda
     check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun run (f: () -> Int needs {Fail}) -> Int\nrun f = f () with { fail msg -> 0 }\nfoo x = run (fun () -> fail! \"oops\")",
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun run (f: () -> Int needs {Fail}) -> Int\nrun f = f () with { fail msg = 0 }\nfoo x = run (fun () -> fail! \"oops\")",
     )
     .unwrap();
 }
@@ -592,7 +592,7 @@ fn multiple_effects_all_declared() {
 fn with_subtracts_only_handled_effect() {
     // Handler handles Log but not Fail, so Fail still needs declaration
     let result = check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\neffect Log {\n  fun log (msg: String) -> Unit\n}\nhandler console for Log {\n  log msg -> print msg\n}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n} with console",
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\neffect Log {\n  fun log (msg: String) -> Unit\n}\nhandler console for Log {\n  log msg = print msg\n}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n} with console",
     );
     assert!(result.is_err());
     let err = result.err().expect("expected error");
@@ -1500,7 +1500,7 @@ fn handler_uses_effect_without_needs_is_error() {
         "effect Log { fun log (msg: String) -> Unit }
 effect Http { fun get (url: String) -> String }
 handler my_http for Http {
-  get url -> {
+  get url = {
     log! \"fetching\"
     resume \"ok\"
   }
@@ -1522,10 +1522,10 @@ fn handler_uses_effect_with_correct_needs_ok() {
         "effect Log { fun log (msg: String) -> Unit }
 effect Http { fun get (url: String) -> String }
 handler console for Log {
-  log msg -> resume ()
+  log msg = resume ()
 }
 handler my_http for Http needs {Log} {
-  get url -> {
+  get url = {
     log! \"fetching\"
     resume \"ok\"
   }
@@ -1540,7 +1540,7 @@ fn pure_handler_no_needs_ok() {
     let result = check(
         "effect Http { fun get (url: String) -> String }
 handler mock_http for Http {
-  get url -> resume \"mocked\"
+  get url = resume \"mocked\"
 }",
     );
     assert!(result.is_ok(), "got: {}", result.err().unwrap().message);
@@ -1553,9 +1553,9 @@ fn handler_needs_missing_one_effect_is_error() {
         "effect Log { fun log (msg: String) -> Unit }
 effect Http { fun get (url: String) -> String }
 effect Db { fun query (sql: String) -> String }
-handler log_impl for Log { log msg -> resume () }
+handler log_impl for Log { log msg = resume () }
 handler my_db for Db needs {Log} {
-  query sql -> {
+  query sql = {
     log! \"querying\"
     get! \"/check\"
     resume \"row\"
@@ -1575,7 +1575,7 @@ handler my_db for Db needs {Log} {
 fn handler_missing_operation() {
     // Handler for an effect with two ops but only handles one
     let result = check(
-        "effect State {\n  fun get () -> Int\n  fun put (n: Int) -> Unit\n}\nhandler partial for State {\n  get () -> resume 0\n}",
+        "effect State {\n  fun get () -> Int\n  fun put (n: Int) -> Unit\n}\nhandler partial for State {\n  get () = resume 0\n}",
     );
     assert!(result.is_err());
 }
@@ -2274,8 +2274,8 @@ fn generic_effect_basic() {
 }
 
 handler counter for State Int {
-  get () -> resume 0
-  put val -> resume ()
+  get () = resume 0
+  put val = resume ()
 }
 
 fun use_state () -> Unit needs {State}
@@ -2300,8 +2300,8 @@ fn generic_effect_type_shared_across_ops() {
 }
 
 handler string_state for State String {
-  get () -> resume \"hello\"
-  put val -> resume ()
+  get () = resume \"hello\"
+  put val = resume ()
 }
 
 fun use_string_state () -> Unit needs {State}
@@ -2324,7 +2324,7 @@ fn non_parameterized_effects_still_work() {
 }
 
 handler console for Log {
-  log msg -> resume ()
+  log msg = resume ()
 }
 
 fun work () -> Unit needs {Log}
@@ -2344,8 +2344,8 @@ fn generic_effect_handler_type_mismatch() {
 }
 
 handler bad for State Int {
-  get () -> resume \"not an int\"
-  put val -> resume ()
+  get () = resume \"not an int\"
+  put val = resume ()
 }",
     );
     assert!(result.is_err());
@@ -2401,8 +2401,8 @@ fn generic_effect_multiple_type_params() {
 }
 
 handler dict_store for Store String Int {
-  read key -> resume 0
-  write key val -> resume ()
+  read key = resume 0
+  write key val = resume ()
 }"
         )
         .is_ok()
@@ -2512,8 +2512,8 @@ fn generic_effect_complex_type_param() {
 type List a { Nil | Cons(a, List a) }
 
 handler list_state for State (List Int) {
-  get () -> resume Nil
-  put val -> resume ()
+  get () = resume Nil
+  put val = resume ()
 }"
         )
         .is_ok()
@@ -2533,9 +2533,9 @@ fn generic_effect_handler_return_clause() {
 type Result a { Ok(a) | Err(String) }
 
 handler safe_state for State Int {
-  get () -> resume 0
-  put val -> resume ()
-  return value -> Ok(value)
+  get () = resume 0
+  put val = resume ()
+  return value = Ok(value)
 }"
         )
         .is_ok()
@@ -2554,9 +2554,9 @@ fn generic_effect_op_with_function_param() {
 }
 
 handler counter for State Int {
-  get () -> resume 0
-  put val -> resume ()
-  modify f -> resume ()
+  get () = resume 0
+  put val = resume ()
+  modify f = resume ()
 }
 
 fun use_modify () -> Unit needs {State}
@@ -2618,13 +2618,13 @@ fn generic_effect_with_scopes_independent() {
 }
 
 handler int_state for State Int {
-  get () -> resume 0
-  put val -> resume ()
+  get () = resume 0
+  put val = resume ()
 }
 
 handler string_state for State String {
-  get () -> resume \"\"
-  put val -> resume ()
+  get () = resume \"\"
+  put val = resume ()
 }
 
 fun use_int () -> Unit needs {State}
@@ -3175,7 +3175,7 @@ effect B {
   fun ping () -> String
 }
 handler h for A, B {
-  ping () -> resume 0
+  ping () = resume 0
 }",
     );
     assert!(result.is_err());
@@ -3198,8 +3198,8 @@ effect Counter {
   fun inc () -> Unit
 }
 handler h for Logger, Counter {
-  log msg -> resume ()
-  inc () -> resume ()
+  log msg = resume ()
+  inc () = resume ()
 }",
     )
     .unwrap();
@@ -3214,9 +3214,9 @@ fn duplicate_handler_arm_is_error() {
   fun b () -> Int
 }
 handler foo for Foo {
-  a () -> 1
-  b () -> 2
-  b () -> 3
+  a () = 1
+  b () = 2
+  b () = 3
 }",
     );
     assert!(result.is_err());

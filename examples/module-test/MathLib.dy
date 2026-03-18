@@ -11,5 +11,5 @@ pub effect EffectfulMath {
 }
 
 pub handler math_handler for EffectfulMath {
-  multiply a b -> resume a * b
+  multiply a b = resume a * b
 }

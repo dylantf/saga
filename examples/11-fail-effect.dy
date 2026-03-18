@@ -3,7 +3,7 @@ effect Fail {
 }
 
 handler log_failure for Fail {
-  fail msg -> print ("Error: " <> msg)
+  fail msg = print ("Error: " <> msg)
 }
 
 fun safe_div (x: Int) (y: Int) -> Int needs {Fail}

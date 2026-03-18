@@ -91,7 +91,7 @@ pub enum Decl {
         effects: Vec<EffectRef>,
         needs: Vec<EffectRef>,
         arms: Vec<HandlerArm>,
-        /// `return value -> Ok(value)` clause
+        /// `return value = Ok(value)` clause
         return_clause: Option<Box<HandlerArm>>,
         span: Span,
     },
@@ -557,13 +557,13 @@ pub struct TraitBound {
 pub enum Handler {
     /// `expr with handler_name`
     Named(String, Span),
-    /// `expr with { h1, h2, op args -> body }`
+    /// `expr with { h1, h2, op args = body }`
     Inline {
         /// Named handler references (e.g. `h1, h2`)
         named: Vec<String>,
-        /// Inline handler arms (e.g. `op args -> body`)
+        /// Inline handler arms (e.g. `op args = body`)
         arms: Vec<HandlerArm>,
-        /// `return value -> Ok(value)` clause
+        /// `return value = Ok(value)` clause
         return_clause: Option<Box<HandlerArm>>,
     },
 }

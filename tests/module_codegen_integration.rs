@@ -412,7 +412,7 @@ effect Log {
 }
 
 handler console_log for Log {
-  log msg -> print msg
+  log msg = print msg
 }
 
 pub fun main () -> String
@@ -440,7 +440,7 @@ effect Log {
 }
 
 handler console_log for Log {
-  log msg -> print msg
+  log msg = print msg
 }
 
 pub fun main () -> String
@@ -478,7 +478,7 @@ effect Log {
 }
 
 handler console_log for Log {
-  log msg -> print msg
+  log msg = print msg
 }
 
 pub fun main () -> String

@@ -1310,7 +1310,7 @@ fn effect_def_multiple_ops() {
 
 #[test]
 fn handler_def_simple() {
-    let decls = parse("handler console_log for Log {\n  log level msg -> print! (level <> msg)\n}");
+    let decls = parse("handler console_log for Log {\n  log level msg = print! (level <> msg)\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::HandlerDef {
@@ -1334,7 +1334,7 @@ fn handler_def_simple() {
 #[test]
 fn handler_def_with_return_clause() {
     let decls = parse(
-        "handler to_result for Fail {\n  fail reason -> Err(reason)\n  return value -> Ok(value)\n}",
+        "handler to_result for Fail {\n  fail reason = Err(reason)\n  return value = Ok(value)\n}",
     );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
@@ -1358,7 +1358,7 @@ fn handler_def_with_return_clause() {
 #[test]
 fn handler_def_multi_effect() {
     let decls = parse(
-        "handler dev_env for Log, Http {\n  log level msg -> resume ()\n  get url -> resume \"ok\"\n}",
+        "handler dev_env for Log, Http {\n  log level msg = resume ()\n  get url = resume \"ok\"\n}",
     );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
@@ -1373,7 +1373,7 @@ fn handler_def_multi_effect() {
 #[test]
 fn handler_def_with_needs() {
     let decls = parse(
-        "handler stripe for Billing needs {Log, Http} {\n  charge account amount -> resume (fake_receipt ())\n}",
+        "handler stripe for Billing needs {Log, Http} {\n  charge account amount = resume (fake_receipt ())\n}",
     );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
@@ -1397,7 +1397,7 @@ fn handler_def_with_needs() {
 #[test]
 fn handler_def_without_needs() {
     let decls =
-        parse("handler mock for Billing {\n  charge account amount -> resume (fake_receipt ())\n}");
+        parse("handler mock for Billing {\n  charge account amount = resume (fake_receipt ())\n}");
     match &decls[0] {
         Decl::HandlerDef { needs, .. } => {
             assert!(needs.is_empty());
@@ -1409,7 +1409,7 @@ fn handler_def_without_needs() {
 #[test]
 fn handler_def_needs_trailing_comma() {
     let decls =
-        parse("handler stripe for Billing needs {Log, Http,} {\n  charge a b -> resume ()\n}");
+        parse("handler stripe for Billing needs {Log, Http,} {\n  charge a b = resume ()\n}");
     match &decls[0] {
         Decl::HandlerDef { needs, .. } => {
             assert_eq!(effect_names(needs), vec!["Log", "Http"]);
@@ -1524,7 +1524,7 @@ fn with_named_handler() {
 
 #[test]
 fn with_inline_handler() {
-    let expr = parse_expr("run_server () with {\n  log level msg -> print! msg\n}");
+    let expr = parse_expr("run_server () with {\n  log level msg = print! msg\n}");
     match &expr {
         Expr::With { handler, .. } => match handler.as_ref() {
             Handler::Inline {
@@ -1546,7 +1546,7 @@ fn with_inline_handler() {
 
 #[test]
 fn with_mixed_handlers() {
-    let expr = parse_expr("run () with {\n  console_log,\n  get url -> resume \"ok\"\n}");
+    let expr = parse_expr("run () with {\n  console_log,\n  get url = resume \"ok\"\n}");
     match &expr {
         Expr::With { handler, .. } => match handler.as_ref() {
             Handler::Inline { named, arms, .. } => {
@@ -1776,7 +1776,7 @@ fn private_effect_def() {
 
 #[test]
 fn pub_handler_def() {
-    let decls = parse("pub handler console_log for Log {\n  log msg -> resume ()\n}");
+    let decls = parse("pub handler console_log for Log {\n  log msg = resume ()\n}");
     match &decls[0] {
         Decl::HandlerDef { public, name, .. } => {
             assert!(public);
@@ -1788,7 +1788,7 @@ fn pub_handler_def() {
 
 #[test]
 fn private_handler_def() {
-    let decls = parse("handler console_log for Log {\n  log msg -> resume ()\n}");
+    let decls = parse("handler console_log for Log {\n  log msg = resume ()\n}");
     match &decls[0] {
         Decl::HandlerDef { public, .. } => {
             assert!(!public);
@@ -2101,7 +2101,7 @@ fn effect_def_with_type_params() {
 
 #[test]
 fn handler_for_parameterized_effect() {
-    let decls = parse("handler counter for State Int {\n  get () -> resume 0\n  put val -> resume ()\n}");
+    let decls = parse("handler counter for State Int {\n  get () = resume 0\n  put val = resume ()\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::HandlerDef {

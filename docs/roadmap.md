@@ -255,7 +255,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ## Tooling
 
-- [ ] Error messages with file:line:column and source context (currently byte offsets only)
+- [x] Error messages with file:line:column and source context (currently byte offsets only)
 - [ ] REPL (interactive expression evaluation, type display, effect handling)
 - [ ] Library compilation mode (`dylang build --lib`): compile modules to `.beam` without
       an entry point, serialize type info (types, effects, handlers, trait impls) alongside
@@ -263,13 +263,13 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [ ] Dependency management (`project.toml` dependencies, git deps first, Hex registry later)
 - [ ] Hex package integration: package format (`.beam` files + type info sidecar), publish/install
       commands. Prerequisite: library compilation mode
-- [ ] LSP (go-to-definition, hover types, error squiggles, autocomplete for constructors/effects)
+- [x] LSP (go-to-definition, hover types, error squiggles, autocomplete for constructors/effects). See separate LSP roadmap
 - [ ] Testing framework (assert_eq, test runner, test discovery)
 - [ ] Formatter
 - [ ] Docstrings/generated docs
 - [ ] Language documentation/website
 
-## Out of Scope
+## Out of Scope (?)
 
 - Effect inference (explicit `needs` annotations required)
 - Effect tunneling (unhandled effects are errors)

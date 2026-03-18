@@ -16,6 +16,7 @@ lock-free hover/goto/completion.
 - [x] Go-to-definition -- local (same file)
 - [x] Go-to-definition -- cross-module (user modules, not stdlib)
 - [x] Go-to-definition -- module name click opens module file
+- [x] Go-to-definition -- effect calls (two-hop: `op!` → handler arm, handler arm → effect op definition)
 - [x] Completion -- variables, functions, constructors, effects, handlers, keywords
 - [x] Completion -- type info in detail field with constraints
 - [x] Module support -- imports resolve, module map per project root
@@ -25,11 +26,11 @@ lock-free hover/goto/completion.
 
 ## Phase 2: Type information gaps
 
-- [ ] Hover on local variables (let bindings inside function bodies)
-- [ ] Hover on function parameters
-- [ ] Hover on pattern-bound variables (case arms, lambda params)
-- [ ] Per-expression type storage (`HashMap<Span, Type>`) in typechecker
-- [ ] Resolved types at usage site (show `Int -> Unit` not `a -> Unit` for `print 42`)
+- [x] Hover on local variables (let bindings inside function bodies)
+- [x] Hover on function parameters
+- [x] Hover on pattern-bound variables (case arms, lambda params)
+- [x] Per-expression type storage (`HashMap<Span, Type>`) in typechecker
+- [ ] Resolved types at usage site (show `Int -> Int` not `a -> a` when hovering a call site of a polymorphic function; currently `type_at_name` checks FunAnnotation first and returns the generic type)
 
 ## Phase 3: Navigation
 
@@ -55,6 +56,5 @@ lock-free hover/goto/completion.
 
 ## Known issues
 
-- Hover doesn't work on local variables inside function bodies (env is restored after checking)
 - Completion is not context-aware: shows functions when typing a type name and vice versa. Currently we just filter out qualified names (`String.contains` etc.) from the default list, but ideally completion should know if you're in type position (after `:`, `->`) vs expression position (after `=`, inside blocks) and show only relevant items.
 - No dot-completion for module-qualified names yet (`MathLib.` should show exports)

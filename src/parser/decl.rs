@@ -482,10 +482,10 @@ impl Parser {
             let arm_start = self.tokens[self.pos].span;
 
             if matches!(self.peek(), Token::Return) {
-                // return clause: `return value -> body`
+                // return clause: `return value = body`
                 self.advance();
                 let param = self.expect_ident()?;
-                self.expect(Token::Arrow)?;
+                self.expect(Token::Eq)?;
                 let body = self.parse_expr(0)?;
                 let arm_end = body.span();
                 return_clause = Some(Box::new(HandlerArm {
@@ -497,7 +497,7 @@ impl Parser {
             } else {
                 let op_name = self.expect_ident()?;
                 let mut params = Vec::new();
-                while !matches!(self.peek(), Token::Arrow | Token::Eof) {
+                while !matches!(self.peek(), Token::Eq | Token::Eof) {
                     // Skip `()` unit params (zero-param effect ops)
                     if matches!(self.peek(), Token::LParen)
                         && matches!(self.peek_at(1), Token::RParen)
@@ -508,7 +508,7 @@ impl Parser {
                     }
                     params.push(self.expect_ident()?);
                 }
-                self.expect(Token::Arrow)?;
+                self.expect(Token::Eq)?;
                 let body = self.parse_expr(0)?;
                 let arm_end = body.span();
                 arms.push(HandlerArm {

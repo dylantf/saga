@@ -4,8 +4,8 @@ effect Foo {
 }
 
 handler foo for Foo {
-  a () -> resume 1
-  b () -> resume 2
+  a () = resume 1
+  b () = resume 2
 }
 
 main () = {
