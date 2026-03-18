@@ -694,9 +694,11 @@ pub struct Checker {
     pub(crate) evidence: Vec<TraitEvidence>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
-    /// Per-span type information for LSP hover, go-to-def, etc.
+    /// Per-node type information for Expr nodes (LSP hover, go-to-def, etc.).
     /// Types are stored unresolved (may contain type variables); apply `sub`
     /// at lookup time to get the final resolved type.
+    pub(crate) type_at_node: HashMap<crate::ast::NodeId, Type>,
+    /// Per-span type information for Pat bindings (which don't have NodeIds).
     pub(crate) type_at_span: HashMap<Span, Type>,
     /// When true, function annotations without matching bodies are allowed
     /// (used for builtin stdlib modules where implementations are in Rust).
@@ -774,6 +776,7 @@ impl Checker {
             adt_variants: HashMap::new(),
             evidence: Vec::new(),
             collected_diagnostics: Vec::new(),
+            type_at_node: HashMap::new(),
             type_at_span: HashMap::new(),
             allow_bodyless_annotations: false,
             current_module: None,
@@ -832,8 +835,13 @@ impl Checker {
         errors
     }
 
-    /// Record the type of an expression or binding at a given span.
-    pub(crate) fn record_type(&mut self, span: Span, ty: &Type) {
+    /// Record the type of an expression node (by NodeId).
+    pub(crate) fn record_type(&mut self, node_id: crate::ast::NodeId, ty: &Type) {
+        self.type_at_node.entry(node_id).or_insert_with(|| ty.clone());
+    }
+
+    /// Record the type of a pattern binding (by Span, since Pat has no NodeId).
+    pub(crate) fn record_type_at_span(&mut self, span: Span, ty: &Type) {
         self.type_at_span.entry(span).or_insert_with(|| ty.clone());
     }
 

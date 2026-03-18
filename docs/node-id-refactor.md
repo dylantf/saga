@@ -33,11 +33,12 @@ The elaborator keys on `NodeId` instead of `Span`. All "use the Var's span not t
 - `resolve_dict` and `try_inline_tuple_show` take `NodeId` instead of `Span` for lookup.
 - All call sites pass `expr.id` or `func.id` -- the "use the Var's span not the App's span" heuristic is now "use the Var's node ID", which is unambiguous.
 
-### Phase 3: Migrate type_at_span to NodeId
+### Phase 3: Migrate type_at to NodeId [DONE]
 
-- `type_at_span: HashMap<Span, Type>` becomes `type_at: HashMap<NodeId, Type>`.
-- LSP lookups go through a `NodeId` -> `Type` table (resolve span to node via a reverse map or AST walk).
-- Improves LSP accuracy for overlapping spans.
+- Split into two maps: `type_at_node: HashMap<NodeId, Type>` for Expr nodes, `type_at_span: HashMap<Span, Type>` for Pat bindings (which don't have NodeIds).
+- `record_type(node_id, ty)` for expressions, `record_type_at_span(span, ty)` for patterns.
+- LSP `find_name_at_offset` returns `Option<NodeId>` alongside name/span; `type_at_name` tries node ID first, falls back to span.
+- `CheckResult` exposes `type_at_node()` and `type_at_span()` lookup methods.
 
 ### Phase 4: Decouple spans from Expr [DONE - merged into Phase 1]
 
