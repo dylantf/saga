@@ -1,0 +1,26 @@
+effect Foo {
+  fun a () -> Int
+  fun b () -> Int
+}
+
+handler foo for Foo {
+  a () -> resume 1
+  b () -> resume 2
+  # b () -> resume 3
+}
+
+trait Foo a {
+  fun a (x: a) -> Int
+}
+
+impl Foo for String {
+  a (_) = 42
+}
+
+impl Foo for String {
+  a (_) = 43
+}
+
+main () = {
+  let _ = print (show (a! ())) with foo
+}

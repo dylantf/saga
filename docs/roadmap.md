@@ -169,7 +169,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Module-qualified dict names (`__dict_Show_Graphics_Color` not `__dict_Show_Color`)
 - [x] Entry point validation (`main` cannot have `needs`, effects handled via `with`)
 - [x] Opaque types (constructors visible inside defining module, hidden to importers)
-- [ ] Reserve the Std.\* namespace
+- [x] Reserve the Std.\* namespace
 
 ### Data structures
 
@@ -188,7 +188,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Integer division: `/` on `Int` emits `erlang:'/'` (float division) instead of `erlang:'div'`
 - [x] Polymorphic type class dicts used as bare function refs without applying dict arguments (e.g. `'__dict_Show_Result'/2` not called with sub-dicts)
 - [x] Builtin modules don't have access to `print` (undefined variable: `print`)
-- [ ] Effect op name collisions: multi-effect handlers (`handler x for A, B {}`) and unqualified `op!` calls silently resolve to the first match when multiple effects define the same op name. Should emit a compile error on ambiguity. (`register_handler` takes first match and breaks; `effect_for_op` iterates HashMap nondeterministically.)
+- [x] Effect op name collisions: multi-effect handlers (`handler x for A, B {}`) and unqualified `op!` calls silently resolve to the first match when multiple effects define the same op name. Should emit a compile error on ambiguity. (`register_handler` takes first match and breaks; `effect_for_op` iterates HashMap nondeterministically.)
 
 ### Effects (CPS transform)
 
@@ -218,7 +218,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Monitor effect (`monitor`, `demonitor`, system `Down` messages)
 - [x] Link effect (`link`, `unlink`, bidirectional crash propagation)
 - [x] Async effect (higher-level wrapper around Actor for request/response patterns)
-- [ ] "Handler bundling"? I.e. group together all the beam handlers as "beam" so we don't need to pass in multiple at every callsite?
+- [x] "Handler bundling"? I.e. group together all the beam handlers as "beam" so we don't need to pass in multiple at every callsite? (already exists lol)
 
 ### Stdlib / prelude
 

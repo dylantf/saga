@@ -929,13 +929,29 @@ impl Checker {
         }
 
         // Validate that each arm's operation belongs to the handler's declared effects
+        let mut seen_ops: std::collections::HashSet<String> = std::collections::HashSet::new();
         for arm in arms {
+            if !seen_ops.insert(arm.op_name.clone()) {
+                return Err(Diagnostic::error_at(
+                    arm.span,
+                    format!("duplicate handler arm for operation '{}'", arm.op_name),
+                ));
+            }
             let mut belongs_to_declared = false;
             let mut matched_op: Option<EffectOpSig> = None;
             for effect_ref in effect_names {
                 if let Some(info) = self.effects.get(&effect_ref.name)
                     && let Some(op) = info.ops.iter().find(|o| o.name == arm.op_name)
                 {
+                    if belongs_to_declared {
+                        return Err(Diagnostic::error_at(
+                            arm.span,
+                            format!(
+                                "ambiguous handler arm '{}': operation exists in multiple effects",
+                                arm.op_name
+                            ),
+                        ));
+                    }
                     belongs_to_declared = true;
                     // Apply handler type bindings to specialize the op signature
                     let specialized = EffectOpSig {
@@ -948,7 +964,6 @@ impl Checker {
                         return_type: self.replace_vars(&op.return_type, &handler_type_mapping),
                     };
                     matched_op = Some(specialized);
-                    break;
                 }
             }
             if !belongs_to_declared {

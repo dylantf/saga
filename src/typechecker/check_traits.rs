@@ -153,6 +153,20 @@ impl Checker {
             }
         }
 
+        // Check for duplicate methods
+        let mut seen_methods: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for name in &provided {
+            if !seen_methods.insert(name) {
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "impl {} for {} has duplicate method '{}'",
+                        trait_name, target_type, name
+                    ),
+                ));
+            }
+        }
+
         // Check for extra methods not in the trait
         for name in &provided {
             if !trait_info.methods.iter().any(|(n, _, _)| n == name) {
@@ -296,8 +310,18 @@ impl Checker {
             }
         }
 
+        let key = (trait_name.to_string(), target_type.to_string());
+        if self.trait_impls.contains_key(&key) {
+            return Err(Diagnostic::error_at(
+                span,
+                format!(
+                    "duplicate impl: {} is already implemented for {}",
+                    trait_name, target_type
+                ),
+            ));
+        }
         self.trait_impls.insert(
-            (trait_name.into(), target_type.into()),
+            key,
             ImplInfo {
                 param_constraints,
                 span: Some(span),

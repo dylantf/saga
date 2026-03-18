@@ -907,13 +907,7 @@ fn ambiguous_type_var_from_where_clause() {
     // bound to a concrete type should be an error, not silently ignored.
     // e.g. Ok("foo") |> unwrap where unwrap requires {b: Show} but b is never resolved.
     let result = check(
-        "trait Show a {
-  fun show (x: a) -> String
-}
-impl Show for String {
-  show s = s
-}
-type MyResult a b {
+        "type MyResult a b {
   Ok(a)
   Err(b)
 }
@@ -3128,5 +3122,150 @@ main () = case Just 42 {
         types.iter().any(|ty| ty == "Int"),
         "expected Int for case-bound x, got: {:?}",
         types
+    );
+}
+
+// --- Effect op name collision tests ---
+
+#[test]
+fn ambiguous_unqualified_effect_op_is_error() {
+    // Two effects define the same op name; unqualified call should error
+    let result = check(
+        "effect A {
+  fun ping () -> Int
+}
+effect B {
+  fun ping () -> Int
+}
+main x = ping!",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("ambiguous"),
+        "expected ambiguity error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn qualified_effect_op_resolves_ambiguity() {
+    // Two effects with same op name; qualified call should work
+    check(
+        "effect A {
+  fun ping () -> Int
+}
+effect B {
+  fun ping () -> String
+}
+fun foo (x: Int) -> Int needs {A}
+foo x = A.ping! ()",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_effect_handler_op_name_collision_is_error() {
+    // Handler for two effects that share an op name should error on ambiguity
+    let result = check(
+        "effect A {
+  fun ping () -> Int
+}
+effect B {
+  fun ping () -> String
+}
+handler h for A, B {
+  ping () -> resume 0
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("ambiguous"),
+        "expected ambiguity error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn multi_effect_handler_no_collision_works() {
+    // Handler for two effects with distinct op names should work fine
+    check(
+        "effect Logger {
+  fun log (msg: String) -> Unit
+}
+effect Counter {
+  fun inc () -> Unit
+}
+handler h for Logger, Counter {
+  log msg -> resume ()
+  inc () -> resume ()
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn duplicate_handler_arm_is_error() {
+    // Same op name twice in one handler should error
+    let result = check(
+        "effect Foo {
+  fun a () -> Int
+  fun b () -> Int
+}
+handler foo for Foo {
+  a () -> 1
+  b () -> 2
+  b () -> 3
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("duplicate"),
+        "expected duplicate error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn duplicate_impl_method_is_error() {
+    let result = check(
+        "trait Foo a {
+  fun a (x: a) -> Int
+}
+impl Foo for String {
+  a _ = 42
+  a _ = 43
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("duplicate"),
+        "expected duplicate method error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn duplicate_impl_for_same_type_is_error() {
+    let result = check(
+        "trait Foo a {
+  fun a (x: a) -> Int
+}
+impl Foo for String {
+  a _ = 42
+}
+impl Foo for String {
+  a _ = 43
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("duplicate impl") || err.message.contains("already implemented"),
+        "expected duplicate impl error, got: {}",
+        err.message
     );
 }
