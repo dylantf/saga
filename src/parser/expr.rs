@@ -335,8 +335,9 @@ impl Parser {
             })
         } else {
             // Single named handler: `with console_log`
+            let handler_span = self.tokens[self.pos].span;
             let name = self.expect_ident()?;
-            Ok(Handler::Named(name))
+            Ok(Handler::Named(name, handler_span))
         }
     }
 

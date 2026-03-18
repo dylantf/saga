@@ -18,8 +18,8 @@ struct Backend {
     client: Client,
     /// Cached base checker per project root. Key is the project root path (or empty for no project).
     base_checkers: Mutex<std::collections::HashMap<String, typechecker::Checker>>,
-    /// Last check result, for hover/goto queries.
-    last_check: Mutex<Option<(Url, CheckSnapshot)>>,
+    /// Last check result per file, for hover/goto queries.
+    last_check: Mutex<std::collections::HashMap<Url, CheckSnapshot>>,
 }
 
 impl Backend {
@@ -54,7 +54,7 @@ impl Backend {
             Ok(result) => {
                 let diagnostics = result.diagnostics.clone();
                 let mut last = self.last_check.lock().unwrap_or_else(|e| e.into_inner());
-                *last = Some((uri, result));
+                last.insert(uri, result);
                 diagnostics
             }
             Err(e) => {
@@ -64,19 +64,38 @@ impl Backend {
         }
     }
 
-    /// Clone the last check result out of the lock to avoid holding it
+    /// Clone the check result for a specific URI out of the lock to avoid holding it
     /// across async boundaries (which would deadlock with did_open).
-    fn snapshot(&self) -> Option<(Url, typechecker::CheckResult, Vec<dylang::ast::Decl>, line_index::LineIndex, String)> {
+    fn snapshot(&self, uri: &Url) -> Option<(typechecker::CheckResult, Vec<dylang::ast::Decl>, line_index::LineIndex, String)> {
         let last = self.last_check.lock().ok()?;
-        let (uri, result) = last.as_ref()?;
+        let result = last.get(uri)?;
         Some((
-            uri.clone(),
             result.tc_result.clone(),
             result.program.clone()?,
             result.line_index.clone(),
             result.source.clone(),
         ))
     }
+}
+
+/// Resolve a span's location: returns (URI, LineIndex) for a span that lives in `module_name`
+/// (None = same file as `current_uri`).
+fn resolve_span_location(
+    current_uri: &Url,
+    current_li: &line_index::LineIndex,
+    module_name: Option<&str>,
+    tc_result: &dylang::typechecker::CheckResult,
+) -> tower_lsp::jsonrpc::Result<(Url, line_index::LineIndex)> {
+    if let Some(module) = module_name
+        && let Some(file_path) = tc_result.module_map().and_then(|m| m.get(module))
+    {
+        let target_uri = Url::from_file_path(file_path)
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
+        let source = std::fs::read_to_string(file_path)
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
+        return Ok((target_uri, line_index::LineIndex::new(&source)));
+    }
+    Ok((current_uri.clone(), current_li.clone()))
 }
 
 #[tower_lsp::async_trait]
@@ -140,7 +159,8 @@ impl LanguageServer for Backend {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let Some((_uri, tc_result, program, line_index, _source)) = self.snapshot() else {
+        let uri = params.text_document_position_params.text_document.uri.clone();
+        let Some((tc_result, program, line_index, _source)) = self.snapshot(&uri) else {
             return Ok(None);
         };
 
@@ -168,7 +188,8 @@ impl LanguageServer for Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let Some((uri, tc_result, program, line_index, _source)) = self.snapshot() else {
+        let uri = params.text_document_position_params.text_document.uri.clone();
+        let Some((tc_result, program, line_index, _source)) = self.snapshot(&uri) else {
             return Ok(None);
         };
 
@@ -176,9 +197,63 @@ impl LanguageServer for Backend {
         let offset =
             line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
-        let Some((name, _span)) = hover::find_name_at_offset(&program, offset) else {
+        let Some((name, span)) = hover::find_name_at_offset(&program, offset) else {
             return Ok(None);
         };
+
+        // Level 1: effect call -> handler arm (op! -> the arm that handles it)
+        if let Some((arm_span, arm_module)) = tc_result.effect_call_targets.get(&span) {
+            let (target_uri, target_li) = resolve_span_location(&uri, &line_index, arm_module.as_deref(), &tc_result)?;
+            let (start_line, start_col) = target_li.offset_to_line_col(arm_span.start);
+            let (end_line, end_col) = target_li.offset_to_line_col(arm_span.end);
+            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                uri: target_uri,
+                range: Range {
+                    start: Position::new(start_line as u32, start_col as u32),
+                    end: Position::new(end_line as u32, end_col as u32),
+                },
+            })));
+        }
+
+        // Level 2: handler arm -> effect op definition
+        if let Some((op_def_span, op_module)) = tc_result.handler_arm_targets.get(&span) {
+            let (target_uri, target_li) = resolve_span_location(&uri, &line_index, op_module.as_deref(), &tc_result)?;
+            let (start_line, start_col) = target_li.offset_to_line_col(op_def_span.start);
+            let (end_line, end_col) = target_li.offset_to_line_col(op_def_span.end);
+            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                uri: target_uri,
+                range: Range {
+                    start: Position::new(start_line as u32, start_col as u32),
+                    end: Position::new(end_line as u32, end_col as u32),
+                },
+            })));
+        }
+
+        // Handler name in `with handler_name`: look it up via the typechecker's handler table,
+        // which knows the source module even if the handler isn't in the explicit exposing list.
+        if let Some(handler_info) = tc_result.handlers.get(&name) {
+            let source_module = handler_info.source_module.as_deref();
+            let (target_uri, target_li) = resolve_span_location(&uri, &line_index, source_module, &tc_result)?;
+            // Find the HandlerDef span in the target program
+            let target_program = if let Some(m) = source_module {
+                tc_result.programs().get(m).map(|p| p.as_slice())
+            } else {
+                Some(program.as_slice())
+            };
+            if let Some(prog) = target_program
+                && let Some(def) = definition::find_definition(prog, &name, &tc_result)
+            {
+                let (start_line, start_col) = target_li.offset_to_line_col(def.span.start);
+                let (end_line, end_col) = target_li.offset_to_line_col(def.span.end);
+                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: target_uri,
+                    range: Range {
+                        start: Position::new(start_line as u32, start_col as u32),
+                        end: Position::new(end_line as u32, end_col as u32),
+                    },
+                })));
+            }
+        }
 
         let Some(def_result) = definition::find_definition(&program, &name, &tc_result) else {
             return Ok(None);
@@ -214,7 +289,8 @@ impl LanguageServer for Backend {
         &self,
         params: CompletionParams,
     ) -> Result<Option<CompletionResponse>> {
-        let Some((_uri, tc_result, program, line_index, source)) = self.snapshot() else {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let Some((tc_result, program, line_index, source)) = self.snapshot(&uri) else {
             return Ok(None);
         };
 
@@ -237,7 +313,7 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         base_checkers: Mutex::new(std::collections::HashMap::new()),
-        last_check: Mutex::new(None),
+        last_check: Mutex::new(std::collections::HashMap::new()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

@@ -5,3 +5,11 @@ add a b = a + b
 
 pub fun double (x: Int) -> Int
 double x = add x x
+
+pub effect EffectfulMath {
+  fun multiply (a: Int) (b:Int) -> Int
+}
+
+pub handler math_handler for EffectfulMath {
+  multiply a b -> resume a * b
+}

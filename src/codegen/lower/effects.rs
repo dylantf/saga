@@ -352,7 +352,7 @@ impl<'a> Lowerer<'a> {
     pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
         // Collect effects from BEAM-native handlers in this `with` block.
         let beam_native_effects: std::collections::HashSet<String> = match handler {
-            Handler::Named(name) if self.is_beam_native_handler(name) => {
+            Handler::Named(name, _) if self.is_beam_native_handler(name) => {
                 self.handler_defs[name].effects.iter().cloned().collect()
             }
             Handler::Inline { named, .. } => named
@@ -573,7 +573,7 @@ impl<'a> Lowerer<'a> {
         handler: &Handler,
     ) -> (Vec<HandlerArm>, Option<Box<HandlerArm>>, Vec<String>) {
         match handler {
-            Handler::Named(name) => {
+            Handler::Named(name, _) => {
                 let info = self
                     .handler_defs
                     .get(name)

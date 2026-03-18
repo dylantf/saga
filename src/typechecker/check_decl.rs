@@ -897,6 +897,7 @@ impl Checker {
                 type_params: type_param_ids,
                 ops,
                 op_spans,
+                source_module: self.current_module.clone(),
             },
         );
         Ok(())
@@ -958,9 +959,9 @@ impl Checker {
                         ));
                     }
                     belongs_to_declared = true;
-                    // Record arm span -> op definition span for LSP go-to-def (level 2)
+                    // Record arm span -> (op definition span, source module) for LSP go-to-def (level 2)
                     if let Some(&op_span) = info.op_spans.get(&arm.op_name) {
-                        self.handler_arm_targets.insert(arm.span, op_span);
+                        self.handler_arm_targets.insert(arm.span, (op_span, info.source_module.clone()));
                     }
                     arm_spans.insert(arm.op_name.clone(), arm.span);
                     // Apply handler type bindings to specialize the op signature
@@ -1088,6 +1089,7 @@ impl Checker {
                 effects: effect_names.iter().map(|e| e.name.clone()).collect(),
                 return_type: handler_return_type,
                 arm_spans,
+                source_module: self.current_module.clone(),
             },
         );
 

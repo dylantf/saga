@@ -293,10 +293,10 @@ impl Checker {
 
                 // Record call site -> handler arm for LSP go-to-def (level 1).
                 // Scan the with-stack innermost-first; first match wins (innermost shadows outer).
-                if let Some(&arm_span) =
+                if let Some((arm_span, arm_module)) =
                     self.with_arm_stacks.iter().rev().find_map(|map| map.get(name.as_str()))
                 {
-                    self.effect_call_targets.insert(*span, arm_span);
+                    self.effect_call_targets.insert(*span, (*arm_span, arm_module.clone()));
                 }
 
                 // Build curried function type: param1 -> param2 -> ... -> return_type
@@ -1144,24 +1144,29 @@ impl Checker {
     ) -> Result<Type, Diagnostic> {
         let handled = self.handler_handled_effects(handler);
 
-        // Build op_name -> arm_span map for this handler and push onto the stack.
+        // Build op_name -> (arm_span, source_module) map for this handler and push onto the stack.
         // This lets EffectCall inference record which arm handles each call (for LSP go-to-def).
-        let arm_stack_entry: std::collections::HashMap<String, Span> = match handler {
-            ast::Handler::Named(name) => self
+        let arm_stack_entry: std::collections::HashMap<String, (Span, Option<String>)> = match handler {
+            ast::Handler::Named(name, _) => self
                 .handlers
                 .get(name)
-                .map(|h| h.arm_spans.clone())
+                .map(|h| {
+                    let src = h.source_module.clone();
+                    h.arm_spans.iter().map(|(op, &span)| (op.clone(), (span, src.clone()))).collect()
+                })
                 .unwrap_or_default(),
             ast::Handler::Inline { named, arms, .. } => {
                 let mut map = std::collections::HashMap::new();
                 // Merge in named handlers first (inline arms override)
                 for n in named {
                     if let Some(h) = self.handlers.get(n) {
-                        map.extend(h.arm_spans.clone());
+                        let src = h.source_module.clone();
+                        map.extend(h.arm_spans.iter().map(|(op, &span)| (op.clone(), (span, src.clone()))));
                     }
                 }
+                // Inline arms are in the current (main) file: source_module = None
                 for arm in arms {
-                    map.insert(arm.op_name.clone(), arm.span);
+                    map.insert(arm.op_name.clone(), (arm.span, None));
                 }
                 map
             }
@@ -1193,7 +1198,7 @@ impl Checker {
 
         let with_span = expr.span();
         match handler {
-            ast::Handler::Named(name) => {
+            ast::Handler::Named(name, _) => {
                 if !self.handlers.contains_key(name) && self.env.get(name).is_none() {
                     return Err(Diagnostic::error_at(
                         with_span,
@@ -1332,7 +1337,7 @@ impl Checker {
     pub(crate) fn handler_handled_effects(&self, handler: &ast::Handler) -> HashSet<String> {
         let mut handled = HashSet::new();
         match handler {
-            ast::Handler::Named(name) => {
+            ast::Handler::Named(name, _) => {
                 if let Some(info) = self.handlers.get(name) {
                     handled.extend(info.effects.iter().cloned());
                 }

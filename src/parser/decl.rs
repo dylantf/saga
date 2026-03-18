@@ -447,6 +447,7 @@ impl Parser {
     fn parse_handler_def(&mut self, public: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'handler'
+        let name_span = self.tokens[self.pos].span;
         let name = self.expect_ident()?;
         self.expect(Token::For)?;
 
@@ -527,6 +528,7 @@ impl Parser {
         Ok(Decl::HandlerDef {
             public,
             name,
+            name_span,
             effects,
             needs,
             arms,

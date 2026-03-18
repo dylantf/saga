@@ -1516,7 +1516,7 @@ fn with_named_handler() {
             ..
         } => {
             assert!(matches!(inner.as_ref(), Expr::App { .. }));
-            assert!(matches!(handler.as_ref(), Handler::Named(n) if n == "console_log"));
+            assert!(matches!(handler.as_ref(), Handler::Named(n, _) if n == "console_log"));
         }
         _ => panic!("expected With, got {:?}", expr),
     }

@@ -87,6 +87,7 @@ pub enum Decl {
     HandlerDef {
         public: bool,
         name: String,
+        name_span: Span,
         effects: Vec<EffectRef>,
         needs: Vec<EffectRef>,
         arms: Vec<HandlerArm>,
@@ -507,7 +508,7 @@ pub struct TraitBound {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Handler {
     /// `expr with handler_name`
-    Named(String),
+    Named(String, Span),
     /// `expr with { h1, h2, op args -> body }`
     Inline {
         /// Named handler references (e.g. `h1, h2`)
