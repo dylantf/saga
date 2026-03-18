@@ -394,10 +394,10 @@ impl Elaborator {
         match &expr.kind {
             // Trait method reference: look up evidence to determine dispatch
             ExprKind::Var { name } => {
-                if let Some((trait_name, method_index)) = self.trait_methods.get(name).cloned() {
-                    // This is a trait method name used as a bare value (not
-                    // directly applied). Extract the method from the dict so
-                    // it can be passed around as a first-class function.
+                // Evidence-first: only treat as a trait method if the typechecker
+                // recorded evidence at this node. This correctly handles shadowing
+                // (a user function named `compare` won't be mistaken for Ord.compare).
+                if let Some((trait_name, method_index)) = self.resolve_trait_method(name, node_id) {
                     if let Some(dict_expr) = self.resolve_dict(&trait_name, node_id, span) {
                         return Expr::synth(
                             span,
@@ -413,9 +413,6 @@ impl Elaborator {
                     {
                         return show_lambda;
                     }
-                    // No evidence found -- this is likely a user-defined function
-                    // that shadows the trait method name. Fall through to normal
-                    // variable handling.
                 }
 
                 // Dict-parameterized function used as a bare value (not directly applied).
@@ -444,12 +441,10 @@ impl Elaborator {
             ExprKind::App { func, arg } => {
                 // Check if this is a direct call to a function with where clauses
                 if let ExprKind::Var { name, .. } = &func.kind {
-                    // If calling a trait method directly with an argument,
-                    // extract method from dict then apply normally.
-                    if let Some((trait_name, method_index)) = self.trait_methods.get(name).cloned()
+                    // Evidence-first: check if the typechecker identified this as
+                    // a trait method call before attempting dict dispatch.
+                    if let Some((trait_name, method_index)) = self.resolve_trait_method(name, func.id)
                     {
-                        // Use the Var's node ID for evidence lookup (that's where
-                        // the typechecker recorded it), not the App's node ID.
                         if let Some(dict_expr) = self.resolve_dict(&trait_name, func.id, func.span)
                         {
                             let elab_arg = self.elaborate_expr(arg);
@@ -518,9 +513,9 @@ impl Elaborator {
                 if let ExprKind::QualifiedName { module, name, .. } = &func.kind {
                     let qualified = format!("{}.{}", module, name);
 
-                    // Trait method via qualified name
+                    // Evidence-first: trait method via qualified name
                     if let Some((trait_name, method_index)) =
-                        self.trait_methods.get(&qualified).cloned()
+                        self.resolve_trait_method(&qualified, func.id)
                         && let Some(dict_expr) = self.resolve_dict(&trait_name, func.id, func.span)
                     {
                         let elab_arg = self.elaborate_expr(arg);
@@ -889,6 +884,22 @@ impl Elaborator {
                 }),
             },
         }
+    }
+
+    /// Check if a node has trait evidence that matches a known trait method name.
+    /// Returns (trait_name, method_index) if this is a trait method call.
+    /// This is the evidence-first approach: the typechecker is the authority on
+    /// whether a name refers to a trait method or a user-defined function.
+    fn resolve_trait_method(&self, name: &str, node_id: crate::ast::NodeId) -> Option<(String, usize)> {
+        let evidence_list = self.evidence_by_node.get(&node_id)?;
+        for ev in evidence_list {
+            if let Some((trait_name, method_index)) = self.trait_methods.get(name) {
+                if *trait_name == ev.trait_name {
+                    return Some((trait_name.clone(), *method_index));
+                }
+            }
+        }
+        None
     }
 
     /// Rewrite `a < b` (etc.) into `compare a b == Lt` (etc.) using the Ord dict.
