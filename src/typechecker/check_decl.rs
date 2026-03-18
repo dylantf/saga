@@ -874,6 +874,7 @@ impl Checker {
         }
 
         let mut ops = Vec::new();
+        let mut op_spans = std::collections::HashMap::new();
         for op in operations {
             // Start with the shared effect type params, then add op-local type vars
             let mut params_list = shared_params.clone();
@@ -883,6 +884,7 @@ impl Checker {
                 .map(|(_, texpr)| self.convert_type_expr(texpr, &mut params_list))
                 .collect();
             let return_type = self.convert_type_expr(&op.return_type, &mut params_list);
+            op_spans.insert(op.name.clone(), op.span);
             ops.push(EffectOpSig {
                 name: op.name.clone(),
                 params: param_types,
@@ -894,6 +896,7 @@ impl Checker {
             EffectDefInfo {
                 type_params: type_param_ids,
                 ops,
+                op_spans,
             },
         );
         Ok(())
@@ -930,6 +933,8 @@ impl Checker {
 
         // Validate that each arm's operation belongs to the handler's declared effects
         let mut seen_ops: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut arm_spans: std::collections::HashMap<String, Span> =
+            std::collections::HashMap::new();
         for arm in arms {
             if !seen_ops.insert(arm.op_name.clone()) {
                 return Err(Diagnostic::error_at(
@@ -953,6 +958,11 @@ impl Checker {
                         ));
                     }
                     belongs_to_declared = true;
+                    // Record arm span -> op definition span for LSP go-to-def (level 2)
+                    if let Some(&op_span) = info.op_spans.get(&arm.op_name) {
+                        self.handler_arm_targets.insert(arm.span, op_span);
+                    }
+                    arm_spans.insert(arm.op_name.clone(), arm.span);
                     // Apply handler type bindings to specialize the op signature
                     let specialized = EffectOpSig {
                         name: op.name.clone(),
@@ -1077,6 +1087,7 @@ impl Checker {
             HandlerInfo {
                 effects: effect_names.iter().map(|e| e.name.clone()).collect(),
                 return_type: handler_return_type,
+                arm_spans,
             },
         );
 

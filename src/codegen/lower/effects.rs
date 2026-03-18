@@ -6,11 +6,205 @@
 /// - `build_op_handler_fun`: building per-op CPS handler functions
 /// - `build_beam_native_op_fun`: synthesizing handlers for BEAM-native ops
 /// - `resolve_handler`: resolving named/inline handlers to arms
+use std::collections::HashSet;
+
 use crate::ast::{Expr, Handler, HandlerArm};
 use crate::codegen::cerl::{CExpr, CLit};
 
-use super::util::{collect_fun_call, core_var};
 use super::Lowerer;
+use super::util::{collect_fun_call, collect_qualified_call, core_var};
+
+impl<'a> Lowerer<'a> {
+    /// Recursively collect the set of effect op names that are "reachable" from `expr`.
+    /// This includes:
+    ///   - Direct `op!` calls (EffectCall nodes)
+    ///   - All ops of any effects required by effectful function calls in the expression
+    ///     (because those functions will receive handler params at their call sites)
+    ///
+    /// Returns `(reachable_ops, found_unknown_call)`.
+    /// `found_unknown_call` is true when the body calls a variable whose effects can't
+    /// be determined (unannotated HOF parameter) -- in that case the caller should be
+    /// conservative and emit ALL handler arm closures.
+    fn collect_reachable_ops(&self, expr: &Expr) -> (HashSet<String>, bool) {
+        let mut out = HashSet::new();
+        let mut unknown = false;
+        self.collect_reachable_ops_into(expr, &mut out, &mut unknown);
+        (out, unknown)
+    }
+
+    fn collect_reachable_ops_into(
+        &self,
+        expr: &Expr,
+        out: &mut HashSet<String>,
+        unknown: &mut bool,
+    ) {
+        use crate::ast::{Expr::*, Stmt};
+        match expr {
+            EffectCall { name, args, .. } => {
+                out.insert(name.clone());
+                for a in args {
+                    self.collect_reachable_ops_into(a, out, unknown);
+                }
+            }
+            // For App nodes, check if the callee is an effectful function and add all
+            // of its required ops. The `collect_fun_call` / `collect_qualified_call`
+            // utilities unwrap curried Apps.
+            App { .. } => {
+                if let Some((func_name, args)) = collect_fun_call(expr) {
+                    // Look up effects from top-level fun_info AND effectful HOF params.
+                    let named_effects = self.fun_effects(func_name).cloned().unwrap_or_default();
+                    let hof_effects = self
+                        .current_effectful_vars
+                        .get(func_name)
+                        .cloned()
+                        .unwrap_or_default();
+                    for eff_name in named_effects.iter().chain(hof_effects.iter()) {
+                        if let Some(info) = self.effect_defs.get(eff_name) {
+                            for op_name in info.ops.keys() {
+                                out.insert(op_name.clone());
+                            }
+                        }
+                    }
+                    // If the callee is not a known top-level function and not an annotated
+                    // effectful HOF param, we can't know what effects it may use at runtime.
+                    // Flag as unknown so the caller emits all arms conservatively.
+                    if !self.fun_info.contains_key(func_name)
+                        && !self.current_effectful_vars.contains_key(func_name)
+                    {
+                        *unknown = true;
+                    }
+                    for a in args {
+                        self.collect_reachable_ops_into(a, out, unknown);
+                    }
+                } else if let Some((module, func_name, args)) = collect_qualified_call(expr) {
+                    let qualified = format!("{}.{}", module, func_name);
+                    if let Some(effects) = self.fun_effects(&qualified).cloned() {
+                        for eff_name in &effects {
+                            if let Some(info) = self.effect_defs.get(eff_name) {
+                                for op_name in info.ops.keys() {
+                                    out.insert(op_name.clone());
+                                }
+                            }
+                        }
+                    }
+                    for a in args {
+                        self.collect_reachable_ops_into(a, out, unknown);
+                    }
+                } else if let App { func, arg, .. } = expr {
+                    // Lambda or other non-named callee - recurse into sub-expressions.
+                    self.collect_reachable_ops_into(func, out, unknown);
+                    self.collect_reachable_ops_into(arg, out, unknown);
+                }
+            }
+            Block { stmts, .. } => {
+                for s in stmts {
+                    match s {
+                        Stmt::Let { value, .. } => {
+                            self.collect_reachable_ops_into(value, out, unknown)
+                        }
+                        Stmt::LetFun { body, guard, .. } => {
+                            if let Some(g) = guard {
+                                self.collect_reachable_ops_into(g, out, unknown);
+                            }
+                            self.collect_reachable_ops_into(body, out, unknown);
+                        }
+                        Stmt::Expr(e) => self.collect_reachable_ops_into(e, out, unknown),
+                    }
+                }
+            }
+            Lambda { body, .. } => self.collect_reachable_ops_into(body, out, unknown),
+            If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.collect_reachable_ops_into(cond, out, unknown);
+                self.collect_reachable_ops_into(then_branch, out, unknown);
+                self.collect_reachable_ops_into(else_branch, out, unknown);
+            }
+            Case {
+                scrutinee, arms, ..
+            } => {
+                self.collect_reachable_ops_into(scrutinee, out, unknown);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.collect_reachable_ops_into(guard, out, unknown);
+                    }
+                    self.collect_reachable_ops_into(&arm.body, out, unknown);
+                }
+            }
+            With { expr, .. } => self.collect_reachable_ops_into(expr, out, unknown),
+            BinOp { left, right, .. } => {
+                self.collect_reachable_ops_into(left, out, unknown);
+                self.collect_reachable_ops_into(right, out, unknown);
+            }
+            UnaryMinus { expr, .. } => self.collect_reachable_ops_into(expr, out, unknown),
+            FieldAccess { expr, .. } => self.collect_reachable_ops_into(expr, out, unknown),
+            RecordUpdate { record, fields, .. } => {
+                self.collect_reachable_ops_into(record, out, unknown);
+                for (_, v) in fields {
+                    self.collect_reachable_ops_into(v, out, unknown);
+                }
+            }
+            RecordCreate { fields, .. } => {
+                for (_, v) in fields {
+                    self.collect_reachable_ops_into(v, out, unknown);
+                }
+            }
+            Tuple { elements, .. } => {
+                for e in elements {
+                    self.collect_reachable_ops_into(e, out, unknown);
+                }
+            }
+            Do {
+                bindings,
+                success,
+                else_arms,
+                ..
+            } => {
+                for (_, e) in bindings {
+                    self.collect_reachable_ops_into(e, out, unknown);
+                }
+                self.collect_reachable_ops_into(success, out, unknown);
+                for arm in else_arms {
+                    if let Some(guard) = &arm.guard {
+                        self.collect_reachable_ops_into(guard, out, unknown);
+                    }
+                    self.collect_reachable_ops_into(&arm.body, out, unknown);
+                }
+            }
+            Receive {
+                arms, after_clause, ..
+            } => {
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.collect_reachable_ops_into(guard, out, unknown);
+                    }
+                    self.collect_reachable_ops_into(&arm.body, out, unknown);
+                }
+                if let Some((timeout, body)) = after_clause {
+                    self.collect_reachable_ops_into(timeout, out, unknown);
+                    self.collect_reachable_ops_into(body, out, unknown);
+                }
+            }
+            Ascription { expr, .. } => self.collect_reachable_ops_into(expr, out, unknown),
+            DictMethodAccess { dict, .. } => self.collect_reachable_ops_into(dict, out, unknown),
+            ForeignCall { args, .. } => {
+                for a in args {
+                    self.collect_reachable_ops_into(a, out, unknown);
+                }
+            }
+            Resume { value, .. } => self.collect_reachable_ops_into(value, out, unknown),
+            // Leaves
+            Lit { .. }
+            | Var { .. }
+            | Constructor { .. }
+            | QualifiedName { .. }
+            | DictRef { .. } => {}
+        }
+    }
+}
 
 impl<'a> Lowerer<'a> {
     /// Lower an effect call: `op! args`.
@@ -111,9 +305,7 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|| panic!("unknown BEAM-native op: {}", op_name));
 
         let k_var = self.fresh();
-        let param_vars: Vec<String> = (0..param_count)
-            .map(|i| format!("_HArg{}", i))
-            .collect();
+        let param_vars: Vec<String> = (0..param_count).map(|i| format!("_HArg{}", i)).collect();
 
         let mut fun_params: Vec<String> = param_vars.clone();
         fun_params.push(k_var.clone());
@@ -195,9 +387,46 @@ impl<'a> Lowerer<'a> {
         for (eff, op) in &handler_ops {
             let var_name = Self::handler_param_name(eff, op);
             let key = format!("{}.{}", eff, op);
-            self.current_handler_params
-                .insert(key, var_name.clone());
+            self.current_handler_params.insert(key, var_name.clone());
             op_vars.push((eff.clone(), op.clone(), var_name));
+        }
+
+        // Compute the set of op_names reachable from this `with` body.
+        // Seed from the body, then extend transitively through user-written arm bodies
+        // (arm A calls or invokes functions that need B -> B is reachable).
+        // This lets us skip building closures for arms provably never reachable.
+        let (mut reachable_ops, has_unknown) = self.collect_reachable_ops(expr);
+        if has_unknown {
+            // Body calls something whose effects we can't determine (unannotated HOF) --
+            // emit all arms conservatively to avoid silently dropping needed handlers.
+            for op in handler_ops.iter().map(|(_, op)| op) {
+                reachable_ops.insert(op.clone());
+            }
+        }
+        // BFS: for each reachable user arm, find ops reachable from its body and add them.
+        let mut worklist: Vec<String> = reachable_ops
+            .iter()
+            .filter(|op| arms_by_op.contains_key(op.as_str()))
+            .cloned()
+            .collect();
+        while let Some(op_name) = worklist.pop() {
+            if let Some(arm) = arms_by_op.get(op_name.as_str()) {
+                let (arm_ops, arm_unknown) = self.collect_reachable_ops(&arm.body);
+                if arm_unknown {
+                    for op in handler_ops.iter().map(|(_, op)| op) {
+                        reachable_ops.insert(op.clone());
+                    }
+                    // No point continuing BFS -- everything is reachable.
+                    break;
+                }
+                for called_op in arm_ops {
+                    if reachable_ops.insert(called_op.clone())
+                        && arms_by_op.contains_key(called_op.as_str())
+                    {
+                        worklist.push(called_op);
+                    }
+                }
+            }
         }
 
         // Pass 2: build handler functions.
@@ -213,20 +442,32 @@ impl<'a> Lowerer<'a> {
         }
         for (eff, op, var_name) in &op_vars {
             if !beam_native_effects.contains(eff) {
-                let handler_fun = if let Some(arm) = arms_by_op.get(op.as_str()) {
-                    self.build_op_handler_fun(arm)
+                if let Some(arm) = arms_by_op.get(op.as_str()) {
+                    // User-written arm: only emit if reachable from the body.
+                    if reachable_ops.contains(op.as_str()) {
+                        let handler_fun = self.build_op_handler_fun(arm);
+                        handler_bindings.push((var_name.clone(), handler_fun));
+                    }
+                    // If not reachable: skip the let-binding entirely.
+                    // The var is still registered in current_handler_params (pass 1)
+                    // so any accidental reference won't panic, but no code paths reach it.
                 } else {
-                    // No handler arm for this op -- passthrough (call K with unit)
-                    let k_param = self.fresh();
-                    CExpr::Fun(
-                        vec![k_param.clone()],
-                        Box::new(CExpr::Apply(
-                            Box::new(CExpr::Var(k_param)),
-                            vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
-                        )),
-                    )
-                };
-                handler_bindings.push((var_name.clone(), handler_fun));
+                    // No handler arm for this op -- passthrough (call K with unit).
+                    // Only emit if the op is actually called from the body or reachable arms.
+                    if reachable_ops.contains(op.as_str()) {
+                        let k_param = self.fresh();
+                        handler_bindings.push((
+                            var_name.clone(),
+                            CExpr::Fun(
+                                vec![k_param.clone()],
+                                Box::new(CExpr::Apply(
+                                    Box::new(CExpr::Var(k_param)),
+                                    vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
+                                )),
+                            ),
+                        ));
+                    }
+                }
             }
         }
 

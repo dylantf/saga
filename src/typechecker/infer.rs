@@ -291,6 +291,14 @@ impl Checker {
                     self.current_effects.insert(effect_name);
                 }
 
+                // Record call site -> handler arm for LSP go-to-def (level 1).
+                // Scan the with-stack innermost-first; first match wins (innermost shadows outer).
+                if let Some(&arm_span) =
+                    self.with_arm_stacks.iter().rev().find_map(|map| map.get(name.as_str()))
+                {
+                    self.effect_call_targets.insert(*span, arm_span);
+                }
+
                 // Build curried function type: param1 -> param2 -> ... -> return_type
                 let mut ty = op_sig.return_type.clone();
                 if op_sig.params.is_empty() {
@@ -1136,6 +1144,41 @@ impl Checker {
     ) -> Result<Type, Diagnostic> {
         let handled = self.handler_handled_effects(handler);
 
+        // Build op_name -> arm_span map for this handler and push onto the stack.
+        // This lets EffectCall inference record which arm handles each call (for LSP go-to-def).
+        let arm_stack_entry: std::collections::HashMap<String, Span> = match handler {
+            ast::Handler::Named(name) => self
+                .handlers
+                .get(name)
+                .map(|h| h.arm_spans.clone())
+                .unwrap_or_default(),
+            ast::Handler::Inline { named, arms, .. } => {
+                let mut map = std::collections::HashMap::new();
+                // Merge in named handlers first (inline arms override)
+                for n in named {
+                    if let Some(h) = self.handlers.get(n) {
+                        map.extend(h.arm_spans.clone());
+                    }
+                }
+                for arm in arms {
+                    map.insert(arm.op_name.clone(), arm.span);
+                }
+                map
+            }
+        };
+        self.with_arm_stacks.push(arm_stack_entry);
+
+        let result = self.infer_with_inner(expr, handler, handled);
+        self.with_arm_stacks.pop();
+        result
+    }
+
+    fn infer_with_inner(
+        &mut self,
+        expr: &Expr,
+        handler: &ast::Handler,
+        handled: HashSet<String>,
+    ) -> Result<Type, Diagnostic> {
         // Infer the inner expression, tracking its effects separately
         let saved_effects = std::mem::take(&mut self.current_effects);
         let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
