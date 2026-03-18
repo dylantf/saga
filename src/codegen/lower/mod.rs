@@ -5,7 +5,7 @@ mod init;
 mod pats;
 mod util;
 
-use crate::ast::{self, Decl, Expr, HandlerArm, Pat};
+use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use crate::typechecker::ModuleCodegenInfo;
 use std::collections::HashMap;
@@ -410,7 +410,7 @@ impl<'a> Lowerer<'a> {
                 // For non-block bodies, lower_block didn't run, so apply return_k.
                 // Special case: if the body is a terminal effect call, pass _ReturnK
                 // directly as K so abort-style handlers skip the rest (proper CPS).
-                let body_ce = if has_effects && !matches!(body, Expr::Block { .. }) {
+                let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
                     if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
                         let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                         self.lower_effect_call(
@@ -496,7 +496,7 @@ impl<'a> Lowerer<'a> {
                             )
                         };
                         let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
-                        let body_ce = if has_effects && !matches!(body, Expr::Block { .. }) {
+                        let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
                             if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
                                 let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                                 self.lower_effect_call(
@@ -577,10 +577,10 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(super) fn lower_expr(&mut self, expr: &Expr) -> CExpr {
-        match expr {
-            Expr::Lit { value, .. } => CExpr::Lit(lower_lit(value)),
+        match &expr.kind {
+            ExprKind::Lit { value, .. } => CExpr::Lit(lower_lit(value)),
 
-            Expr::Var { name, .. } => {
+            ExprKind::Var { name, .. } => {
                 // If it's an imported name used bare, emit an external fun ref.
                 if let Some((erl_mod, erl_name)) = self.import_origin(name).cloned() {
                     if let Some(arity) = self.fun_arity(name) {
@@ -605,7 +605,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
 
-            Expr::App { .. } => {
+            ExprKind::App { .. } => {
                 if let Some((ctor_name, args)) = collect_ctor_call(expr) {
                     return self.lower_ctor(ctor_name, args);
                 }
@@ -666,8 +666,8 @@ impl<'a> Lowerer<'a> {
                         .into_iter()
                         .filter(|a| {
                             !matches!(
-                                a,
-                                Expr::Lit {
+                                a.kind,
+                                ExprKind::Lit {
                                     value: ast::Lit::Unit,
                                     ..
                                 }
@@ -770,8 +770,8 @@ impl<'a> Lowerer<'a> {
                         .into_iter()
                         .filter(|a| {
                             !matches!(
-                                a,
-                                Expr::Lit {
+                                a.kind,
+                                ExprKind::Lit {
                                     value: ast::Lit::Unit,
                                     ..
                                 }
@@ -820,7 +820,7 @@ impl<'a> Lowerer<'a> {
                 // e.g. `f acc h` = App(App(f, acc), h) -> apply F(Acc, H)
                 let mut callee = expr;
                 let mut args_rev = Vec::new();
-                while let Expr::App { func, arg, .. } = callee {
+                while let ExprKind::App { func, arg, .. } = &callee.kind {
                     args_rev.push(arg.as_ref());
                     callee = func.as_ref();
                 }
@@ -835,8 +835,8 @@ impl<'a> Lowerer<'a> {
                 for arg in &args_rev {
                     // Skip unit literal args (they don't exist at the BEAM level)
                     if matches!(
-                        arg,
-                        Expr::Lit {
+                        arg.kind,
+                        ExprKind::Lit {
                             value: ast::Lit::Unit,
                             ..
                         }
@@ -858,7 +858,7 @@ impl<'a> Lowerer<'a> {
                 })
             }
 
-            Expr::Constructor { name, .. } => match name.as_str() {
+            ExprKind::Constructor { name, .. } => match name.as_str() {
                 "Nil" => CExpr::Nil,
                 // Booleans are bare atoms to match Erlang's native true/false
                 "True" => CExpr::Lit(CLit::Atom("true".to_string())),
@@ -875,11 +875,11 @@ impl<'a> Lowerer<'a> {
                 }
             },
 
-            Expr::BinOp {
+            ExprKind::BinOp {
                 op, left, right, ..
             } => self.lower_binop(op, left, right),
 
-            Expr::UnaryMinus { expr, .. } => {
+            ExprKind::UnaryMinus { expr, .. } => {
                 let v = self.fresh();
                 let ce = self.lower_expr(expr);
                 CExpr::Let(
@@ -893,7 +893,7 @@ impl<'a> Lowerer<'a> {
                 )
             }
 
-            Expr::If {
+            ExprKind::If {
                 cond,
                 then_branch,
                 else_branch,
@@ -924,9 +924,9 @@ impl<'a> Lowerer<'a> {
                 )
             }
 
-            Expr::Block { stmts, .. } => self.lower_block(stmts),
+            ExprKind::Block { stmts, .. } => self.lower_block(stmts),
 
-            Expr::Lambda { params, body, .. } => {
+            ExprKind::Lambda { params, body, .. } => {
                 let all_simple = params.iter().all(|p| {
                     matches!(
                         p,
@@ -962,7 +962,7 @@ impl<'a> Lowerer<'a> {
                     // directly (e.g. lambda defined in a block that already has
                     // handler params in scope -- those are captured, not parameterized).
                 }
-                let body_ce = if is_effectful_lambda && !matches!(**body, Expr::Block { .. }) {
+                let body_ce = if is_effectful_lambda && !matches!(body.kind, ExprKind::Block { .. }) {
                     if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
                         let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                         self.lower_effect_call(
@@ -1034,7 +1034,7 @@ impl<'a> Lowerer<'a> {
                 CExpr::Fun(param_vars, Box::new(body_ce))
             }
 
-            Expr::Case {
+            ExprKind::Case {
                 scrutinee, arms, ..
             } => {
                 let scrut_var = self.fresh();
@@ -1047,7 +1047,7 @@ impl<'a> Lowerer<'a> {
                 )
             }
 
-            Expr::Receive {
+            ExprKind::Receive {
                 arms, after_clause, ..
             } => {
                 // Lower arms: same pattern/guard/body as case, but for receive
@@ -1227,9 +1227,9 @@ impl<'a> Lowerer<'a> {
                 CExpr::Receive(lowered_arms, Box::new(timeout), Box::new(timeout_body))
             }
 
-            Expr::Tuple { elements, .. } => self.lower_tuple_elems(elements),
+            ExprKind::Tuple { elements, .. } => self.lower_tuple_elems(elements),
 
-            Expr::QualifiedName { module, name, .. } => {
+            ExprKind::QualifiedName { module, name, .. } => {
                 // Dict.empty is a value, not a function -- emit maps:new()
                 if module == "Dict" && name == "empty" {
                     return cerl_call("maps", "new", vec![]);
@@ -1260,7 +1260,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
 
-            Expr::RecordCreate { name, fields, .. } => {
+            ExprKind::RecordCreate { name, fields, .. } => {
                 let order = self.record_fields.get(name).cloned().unwrap_or_default();
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, e)| (n.as_str(), e)).collect();
@@ -1284,7 +1284,7 @@ impl<'a> Lowerer<'a> {
                 })
             }
 
-            Expr::FieldAccess { expr, field, .. } => {
+            ExprKind::FieldAccess { expr, field, .. } => {
                 let record_name =
                     field_access_record_name(expr).or_else(|| self.find_record_by_field(field));
                 let idx = record_name
@@ -1305,7 +1305,7 @@ impl<'a> Lowerer<'a> {
                 )
             }
 
-            Expr::RecordUpdate { record, fields, .. } => {
+            ExprKind::RecordUpdate { record, fields, .. } => {
                 let rec_var = self.fresh();
                 let rec_ce = self.lower_expr(record);
                 let update_field_names: Vec<String> =
@@ -1353,7 +1353,7 @@ impl<'a> Lowerer<'a> {
                 CExpr::Let(rec_var, Box::new(rec_ce), Box::new(with_tag))
             }
 
-            Expr::Do {
+            ExprKind::Do {
                 bindings,
                 success,
                 else_arms,
@@ -1361,7 +1361,7 @@ impl<'a> Lowerer<'a> {
             } => self.lower_do(bindings, success, else_arms),
 
             // --- Elaboration-only constructs ---
-            Expr::DictMethodAccess {
+            ExprKind::DictMethodAccess {
                 dict, method_index, ..
             } => {
                 // Lower to: let D = <dict> in element(idx+1, D)
@@ -1378,7 +1378,7 @@ impl<'a> Lowerer<'a> {
                 CExpr::Let(dict_var, Box::new(dict_ce), Box::new(extract_method))
             }
 
-            Expr::ForeignCall {
+            ExprKind::ForeignCall {
                 module, func, args, ..
             } => {
                 let mut vars = Vec::new();
@@ -1422,7 +1422,7 @@ impl<'a> Lowerer<'a> {
                 })
             }
 
-            Expr::DictRef { name, .. } => {
+            ExprKind::DictRef { name, .. } => {
                 if let Some((erl_mod, erl_name)) = self.import_origin(name).cloned() {
                     // Cross-module dict constructor
                     let arity = self.fun_arity(name).unwrap_or(0);
@@ -1459,7 +1459,7 @@ impl<'a> Lowerer<'a> {
             // When an effect call appears as a bare expression (not in a block where
             // we can capture the continuation), we call the handler with an identity
             // continuation that just returns the value.
-            Expr::EffectCall {
+            ExprKind::EffectCall {
                 name,
                 qualifier,
                 args,
@@ -1467,10 +1467,10 @@ impl<'a> Lowerer<'a> {
             } => self.lower_effect_call(name, qualifier.as_deref(), args, None),
 
             // `expr with handler` -- attaches handler(s) to a computation
-            Expr::With { expr, handler, .. } => self.lower_with(expr, handler),
+            ExprKind::With { expr, handler, .. } => self.lower_with(expr, handler),
 
             // `resume value` -- inside a handler arm, calls the continuation K
-            Expr::Resume { value, .. } => {
+            ExprKind::Resume { value, .. } => {
                 let k_name = self
                     .current_handler_k
                     .clone()
@@ -1537,8 +1537,8 @@ impl<'a> Lowerer<'a> {
             .iter()
             .filter(|a| {
                 !matches!(
-                    a,
-                    Expr::Lit {
+                    a.kind,
+                    ExprKind::Lit {
                         value: ast::Lit::Unit,
                         ..
                     }

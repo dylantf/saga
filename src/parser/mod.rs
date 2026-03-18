@@ -8,6 +8,7 @@ mod pat;
 pub struct Parser {
     pub(super) tokens: Vec<Spanned>,
     pub(super) pos: usize,
+    next_node_id: u32,
 }
 
 #[derive(Debug)]
@@ -20,7 +21,14 @@ impl Parser {
     // --- Helpers ---
 
     pub fn new(tokens: Vec<Spanned>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser { tokens, pos: 0, next_node_id: 1 }
+    }
+
+    /// Allocate a fresh NodeId. IDs start at 1; 0 is reserved for synthetic nodes.
+    pub(super) fn next_id(&mut self) -> NodeId {
+        let id = NodeId(self.next_node_id);
+        self.next_node_id += 1;
+        id
     }
 
     pub fn peek(&self) -> &Token {

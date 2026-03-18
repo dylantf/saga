@@ -61,24 +61,21 @@ impl Parser {
             let is_cons = matches!(desugar, Desugar::Cons);
             let right = self.parse_expr(if is_cons { bp } else { bp + 1 })?;
 
-            let span = left.span().to(right.span());
+            let span = left.span.to(right.span);
             left = match op {
                 // x :: xs  →  Cons x xs  (right-associative)
                 None if is_cons => {
-                    let cons = Expr::Constructor {
+                    let cons = Expr { id: self.next_id(), span, kind: ExprKind::Constructor {
                         name: "Cons".to_string(),
-                        span,
-                    };
-                    let app1 = Expr::App {
+                    }};
+                    let app1 = Expr { id: self.next_id(), span, kind: ExprKind::App {
                         func: Box::new(cons),
                         arg: Box::new(left),
-                        span,
-                    };
-                    Expr::App {
+                    }};
+                    Expr { id: self.next_id(), span, kind: ExprKind::App {
                         func: Box::new(app1),
                         arg: Box::new(right),
-                        span,
-                    }
+                    }}
                 }
                 // f >> g  →  fun x -> g (f x)
                 None if matches!(desugar, Desugar::ComposeForward) => {
@@ -90,22 +87,19 @@ impl Parser {
                 }
                 // |> forward pipe: `x |> f` becomes `App(f, x)`
                 // <| backward pipe: `f <| x` becomes `App(f, x)`
-                None if matches!(desugar, Desugar::PipeBack) => Expr::App {
+                None if matches!(desugar, Desugar::PipeBack) => Expr { id: self.next_id(), span, kind: ExprKind::App {
                     func: Box::new(left),
                     arg: Box::new(right),
-                    span,
-                },
-                None => Expr::App {
+                }},
+                None => Expr { id: self.next_id(), span, kind: ExprKind::App {
                     func: Box::new(right),
                     arg: Box::new(left),
-                    span,
-                },
-                Some(op) => Expr::BinOp {
+                }},
+                Some(op) => Expr { id: self.next_id(), span, kind: ExprKind::BinOp {
                     op,
                     left: Box::new(left),
                     right: Box::new(right),
-                    span,
-                },
+                }},
             };
         }
 
@@ -114,11 +108,11 @@ impl Parser {
             self.advance();
             let handler = self.parse_handler_ref()?;
             let end = self.tokens[self.pos - 1].span;
-            left = Expr::With {
-                span: left.span().to(end),
+            let span = left.span.to(end);
+            left = Expr { id: self.next_id(), span, kind: ExprKind::With {
                 expr: Box::new(left),
                 handler: Box::new(handler),
-            };
+            }};
         }
 
         // Type ascription: `expr : Type` — lowest precedence, only at top level
@@ -126,11 +120,11 @@ impl Parser {
             self.advance(); // consume ':'
             let type_expr = self.parse_type_expr()?;
             let end = self.tokens[self.pos - 1].span;
-            left = Expr::Ascription {
-                span: left.span().to(end),
+            let span = left.span.to(end);
+            left = Expr { id: self.next_id(), span, kind: ExprKind::Ascription {
                 expr: Box::new(left),
                 type_expr,
-            };
+            }};
         }
 
         Ok(left)
@@ -143,12 +137,11 @@ impl Parser {
 
         while self.can_start_primary() {
             let arg = self.parse_postfix()?;
-            let span = expr.span().to(arg.span());
-            expr = Expr::App {
+            let span = expr.span.to(arg.span);
+            expr = Expr { id: self.next_id(), span, kind: ExprKind::App {
                 func: Box::new(expr),
                 arg: Box::new(arg),
-                span,
-            };
+            }};
         }
 
         Ok(expr)
@@ -163,26 +156,26 @@ impl Parser {
 
             // Qualified effect call: `Cache.get! key`
             if let Token::EffectCall(name) = self.peek().clone()
-                && let Expr::Constructor {
+                && let ExprKind::Constructor {
                     name: qualifier, ..
-                } = &expr
+                } = &expr.kind
             {
                 let qualifier = qualifier.clone();
-                let start_span = expr.span();
+                let start_span = expr.span;
                 let effect_span = self.tokens[self.pos].span;
                 self.advance(); // consume effect call token
-                expr = Expr::EffectCall {
+                let span = start_span.to(effect_span);
+                expr = Expr { id: self.next_id(), span, kind: ExprKind::EffectCall {
                     name,
                     qualifier: Some(qualifier),
                     args: Vec::new(),
-                    span: start_span.to(effect_span),
-                };
+                }};
                 continue;
             }
 
-            let start = expr.span().start;
+            let start = expr.span.start;
             // Module access: `Math.abs` or `Shapes.Circle` -> QualifiedName (bare Constructor LHS only)
-            if let Expr::Constructor { name: module, .. } = &expr {
+            if let ExprKind::Constructor { name: module, .. } = &expr.kind {
                 let module = module.clone();
                 let name = match self.peek().clone() {
                     Token::Ident(n) => {
@@ -226,31 +219,30 @@ impl Parser {
                     }
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
-                    expr = Expr::RecordCreate {
+                    let span = qspan.to(end);
+                    expr = Expr { id: self.next_id(), span, kind: ExprKind::RecordCreate {
                         name,
                         fields,
-                        span: qspan.to(end),
-                    };
+                    }};
                     continue;
                 }
 
-                expr = Expr::QualifiedName {
+                expr = Expr { id: self.next_id(), span: qspan, kind: ExprKind::QualifiedName {
                     module,
                     name,
-                    span: qspan,
-                };
+                }};
                 continue;
             }
             let field = self.expect_ident()?;
             let end = self.tokens[self.pos - 1].span;
-            expr = Expr::FieldAccess {
+            let span = Span {
+                start,
+                end: end.end,
+            };
+            expr = Expr { id: self.next_id(), span, kind: ExprKind::FieldAccess {
                 expr: Box::new(expr),
                 field,
-                span: Span {
-                    start,
-                    end: end.end,
-                },
-            };
+            }};
         }
 
         Ok(expr)
@@ -277,7 +269,7 @@ impl Parser {
                     let param = self.expect_ident()?;
                     self.expect(Token::Eq)?;
                     let body = self.parse_expr(0)?;
-                    let arm_end = body.span();
+                    let arm_end = body.span;
                     return_clause = Some(Box::new(HandlerArm {
                         op_name: "return".to_string(),
                         params: vec![param],
@@ -311,7 +303,7 @@ impl Parser {
                         }
                         self.expect(Token::Eq)?;
                         let body = self.parse_expr(0)?;
-                        let arm_end = body.span();
+                        let arm_end = body.span;
                         arms.push(HandlerArm {
                             op_name: name,
                             params,
@@ -345,26 +337,21 @@ impl Parser {
         let span = self.tokens[self.pos].span;
 
         match self.advance() {
-            Token::True => Ok(Expr::Lit {
+            Token::True => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
                 value: Lit::Bool(true),
-                span,
-            }),
-            Token::False => Ok(Expr::Lit {
+            }}),
+            Token::False => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
                 value: Lit::Bool(false),
-                span,
-            }),
-            Token::Int(n) => Ok(Expr::Lit {
+            }}),
+            Token::Int(n) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
                 value: Lit::Int(n),
-                span,
-            }),
-            Token::Float(f) => Ok(Expr::Lit {
+            }}),
+            Token::Float(f) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
                 value: Lit::Float(f),
-                span,
-            }),
-            Token::String(s) => Ok(Expr::Lit {
+            }}),
+            Token::String(s) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
                 value: Lit::String(s),
-                span,
-            }),
+            }}),
             Token::InterpolatedString(parts) => {
                 use crate::token::InterpPart;
                 // Desugar to a chain of `<>` concatenations.
@@ -375,10 +362,9 @@ impl Parser {
                     match part {
                         InterpPart::Literal(s) => {
                             if !s.is_empty() {
-                                segments.push(Expr::Lit {
+                                segments.push(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
                                     value: Lit::String(s),
-                                    span,
-                                });
+                                }});
                             }
                         }
                         InterpPart::Hole(mut tokens) => {
@@ -407,30 +393,26 @@ impl Parser {
                             });
 
                             let hole_expr = crate::parser::Parser::new(tokens).parse_expr(0)?;
-                            segments.push(Expr::App {
-                                func: Box::new(Expr::Var {
+                            segments.push(Expr { id: self.next_id(), span: app_span, kind: ExprKind::App {
+                                func: Box::new(Expr { id: self.next_id(), span: show_span, kind: ExprKind::Var {
                                     name: "show".to_string(),
-                                    span: show_span,
-                                }),
+                                }}),
                                 arg: Box::new(hole_expr),
-                                span: app_span,
-                            });
+                            }});
                         }
                     }
                 }
                 // Fold into a left-associative `<>` chain; empty string if no parts.
-                let init = segments.into_iter().reduce(|left, right| Expr::BinOp {
+                let init = segments.into_iter().reduce(|left, right| Expr { id: self.next_id(), span, kind: ExprKind::BinOp {
                     op: BinOp::Concat,
                     left: Box::new(left),
                     right: Box::new(right),
-                    span,
-                });
-                Ok(init.unwrap_or(Expr::Lit {
+                }});
+                Ok(init.unwrap_or(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
                     value: Lit::String(String::new()),
-                    span,
-                }))
+                }}))
             }
-            Token::Ident(i) => Ok(Expr::Var { name: i, span }),
+            Token::Ident(i) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Var { name: i } }),
             Token::UpperIdent(i) => {
                 if matches!(self.peek(), Token::LBrace) {
                     // Record create: User { name: "Dylan", age: 30 }
@@ -449,11 +431,10 @@ impl Parser {
                     }
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
-                    Ok(Expr::RecordCreate {
+                    Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::RecordCreate {
                         name: i,
                         fields,
-                        span: span.to(end),
-                    })
+                    }})
                 } else if matches!(self.peek(), Token::LParen) {
                     // Constructor call: Circle(5), Rect(3, 4)
                     self.advance(); // consume '('
@@ -467,27 +448,25 @@ impl Parser {
                     }
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RParen)?;
-                    let mut expr = Expr::Constructor { name: i, span };
+                    let mut expr = Expr { id: self.next_id(), span, kind: ExprKind::Constructor { name: i } };
                     for arg in args {
-                        expr = Expr::App {
+                        expr = Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::App {
                             func: Box::new(expr),
                             arg: Box::new(arg),
-                            span: span.to(end),
-                        };
+                        }};
                     }
                     Ok(expr)
                 } else {
-                    Ok(Expr::Constructor { name: i, span })
+                    Ok(Expr { id: self.next_id(), span, kind: ExprKind::Constructor { name: i } })
                 }
             }
 
             Token::LParen => {
                 if matches!(self.peek(), Token::RParen) {
                     self.advance(); // consume ')'
-                    Ok(Expr::Lit {
+                    Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
                         value: Lit::Unit,
-                        span,
-                    })
+                    }})
                 } else {
                     let first = self.parse_expr(0)?;
                     if matches!(self.peek(), Token::Comma) {
@@ -502,10 +481,9 @@ impl Parser {
                         }
                         let end = self.tokens[self.pos].span;
                         self.expect(Token::RParen)?;
-                        Ok(Expr::Tuple {
+                        Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Tuple {
                             elements,
-                            span: span.to(end),
-                        })
+                        }})
                     } else {
                         self.expect(Token::RParen)?;
                         Ok(first)
@@ -527,10 +505,9 @@ impl Parser {
                 if matches!(self.peek(), Token::RBracket) {
                     let end = self.tokens[self.pos].span;
                     self.advance();
-                    return Ok(Expr::Constructor {
+                    return Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Constructor {
                         name: "Nil".to_string(),
-                        span: span.to(end),
-                    });
+                    }});
                 }
 
                 let first = self.parse_expr(0)?;
@@ -557,26 +534,22 @@ impl Parser {
                 self.expect(Token::RBracket)?;
 
                 // Build from right to left: Nil, then wrap each element
-                let mut result = Expr::Constructor {
+                let mut result = Expr { id: self.next_id(), span: end, kind: ExprKind::Constructor {
                     name: "Nil".to_string(),
-                    span: end,
-                };
+                }};
                 for elem in elements.into_iter().rev() {
-                    let elem_span = elem.span();
-                    let cons = Expr::Constructor {
+                    let elem_span = elem.span;
+                    let cons = Expr { id: self.next_id(), span: elem_span, kind: ExprKind::Constructor {
                         name: "Cons".to_string(),
-                        span: elem_span,
-                    };
-                    let app1 = Expr::App {
+                    }};
+                    let app1 = Expr { id: self.next_id(), span: elem_span, kind: ExprKind::App {
                         func: Box::new(cons),
                         arg: Box::new(elem),
-                        span: elem_span,
-                    };
-                    result = Expr::App {
+                    }};
+                    result = Expr { id: self.next_id(), span: elem_span.to(end), kind: ExprKind::App {
                         func: Box::new(app1),
                         arg: Box::new(result),
-                        span: elem_span.to(end),
-                    };
+                    }};
                 }
                 Ok(result)
             }
@@ -589,13 +562,12 @@ impl Parser {
                 self.expect(Token::Arrow)?;
 
                 let body = self.parse_expr(0)?;
-                let end_span = body.span();
+                let end_span = body.span;
 
-                Ok(Expr::Lambda {
+                Ok(Expr { id: self.next_id(), span: span.to(end_span), kind: ExprKind::Lambda {
                     params,
                     body: Box::new(body),
-                    span: span.to(end_span),
-                })
+                }})
             }
 
             Token::LBrace => {
@@ -626,11 +598,10 @@ impl Parser {
                         }
                         let end = self.tokens[self.pos].span;
                         self.expect(Token::RBrace)?;
-                        return Ok(Expr::RecordUpdate {
+                        return Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::RecordUpdate {
                             record: Box::new(record),
                             fields,
-                            span: span.to(end),
-                        });
+                        }});
                     }
 
                     // Not a record update — backtrack and parse as block
@@ -667,7 +638,7 @@ impl Parser {
                             };
                             self.expect(Token::Eq)?;
                             let body = self.parse_expr(0)?;
-                            let stmt_span = let_start.to(body.span());
+                            let stmt_span = let_start.to(body.span);
                             stmts.push(Stmt::LetFun {
                                 name: fun_name,
                                 params,
@@ -686,7 +657,7 @@ impl Parser {
                             };
                             self.expect(Token::Eq)?;
                             let value = self.parse_expr(0)?;
-                            let stmt_span = let_start.to(value.span());
+                            let stmt_span = let_start.to(value.span);
                             stmts.push(Stmt::Let {
                                 pattern,
                                 annotation,
@@ -702,10 +673,9 @@ impl Parser {
                 }
                 let end_span = self.tokens[self.pos].span; // the RBrace
                 self.expect(Token::RBrace)?;
-                Ok(Expr::Block {
+                Ok(Expr { id: self.next_id(), span: span.to(end_span), kind: ExprKind::Block {
                     stmts,
-                    span: span.to(end_span),
-                })
+                }})
             }
 
             Token::If => {
@@ -718,14 +688,13 @@ impl Parser {
                 self.expect(Token::Else)?;
 
                 let else_branch = self.parse_expr(0)?;
-                let end_span = else_branch.span();
+                let end_span = else_branch.span;
 
-                Ok(Expr::If {
+                Ok(Expr { id: self.next_id(), span: span.to(end_span), kind: ExprKind::If {
                     cond: Box::new(cond),
                     then_branch: Box::new(then_branch),
                     else_branch: Box::new(else_branch),
-                    span: span.to(end_span),
-                })
+                }})
             }
 
             Token::Case => {
@@ -747,7 +716,7 @@ impl Parser {
 
                     self.expect(Token::Arrow)?;
                     let body = self.parse_expr(0)?;
-                    let end_span = body.span().end;
+                    let end_span = body.span.end;
                     branches.push(CaseArm {
                         pattern,
                         guard,
@@ -763,11 +732,10 @@ impl Parser {
                 let end = self.tokens[self.pos].span; // the RBrace
                 self.expect(Token::RBrace)?;
 
-                Ok(Expr::Case {
+                Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Case {
                     scrutinee: Box::new(scrutinee),
                     arms: branches,
-                    span: span.to(end),
-                })
+                }})
             }
 
             Token::Receive => {
@@ -801,7 +769,7 @@ impl Parser {
 
                     self.expect(Token::Arrow)?;
                     let body = self.parse_expr(0)?;
-                    let end_span = body.span().end;
+                    let end_span = body.span.end;
                     branches.push(CaseArm {
                         pattern,
                         guard,
@@ -817,42 +785,39 @@ impl Parser {
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;
 
-                Ok(Expr::Receive {
+                Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Receive {
                     arms: branches,
                     after_clause,
-                    span: span.to(end),
-                })
+                }})
             }
 
             // Unary negation
             Token::Minus => {
                 let expr = self.parse_primary()?;
-                let end_span = expr.span().end;
-                Ok(Expr::UnaryMinus {
+                let end_span = expr.span.end;
+                let neg_span = Span {
+                    start: span.start,
+                    end: end_span,
+                };
+                Ok(Expr { id: self.next_id(), span: neg_span, kind: ExprKind::UnaryMinus {
                     expr: Box::new(expr),
-                    span: Span {
-                        start: span.start,
-                        end: end_span,
-                    },
-                })
+                }})
             }
 
             // Effect call: `log! "hello"` args handled by parse_application
-            Token::EffectCall(name) => Ok(Expr::EffectCall {
+            Token::EffectCall(name) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::EffectCall {
                 name,
                 qualifier: None,
                 args: Vec::new(),
-                span,
-            }),
+            }}),
 
             // Resume: `resume value`
             Token::Resume => {
                 let value = self.parse_expr(0)?;
-                let end = value.span();
-                Ok(Expr::Resume {
+                let end = value.span;
+                Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Resume {
                     value: Box::new(value),
-                    span: span.to(end),
-                })
+                }})
             }
 
             // do...else block: `do { Pat <- expr ... SuccessExpr } else { Pat -> expr ... }`
@@ -901,7 +866,7 @@ impl Parser {
                     let pattern = self.parse_pattern()?;
                     self.expect(Token::Arrow)?;
                     let body = self.parse_expr(0)?;
-                    let end_span = body.span().end;
+                    let end_span = body.span.end;
                     else_arms.push(CaseArm {
                         pattern,
                         guard: None,
@@ -916,12 +881,11 @@ impl Parser {
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;
 
-                Ok(Expr::Do {
+                Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Do {
                     bindings,
                     success: Box::new(success),
                     else_arms,
-                    span: span.to(end),
-                })
+                }})
             }
 
             tok => {
@@ -984,7 +948,7 @@ impl Parser {
     /// Recursively desugar list comprehension qualifiers into nested
     /// flat_map / if-then-else / let expressions.
     fn desugar_comprehension(
-        &self,
+        &mut self,
         body: Expr,
         qualifiers: &[ComprehensionQualifier],
         span: Span,
@@ -998,45 +962,39 @@ impl Parser {
             ComprehensionQualifier::Generator(pat, source) => {
                 // [e | p <- l, Q] ==> flat_map (fun p -> [e | Q]) l
                 let inner = self.desugar_comprehension(body, &qualifiers[1..], span);
-                let lambda = Expr::Lambda {
+                let lambda = Expr { id: self.next_id(), span, kind: ExprKind::Lambda {
                     params: vec![pat.clone()],
                     body: Box::new(inner),
-                    span,
-                };
-                let flat_map = Expr::QualifiedName {
+                }};
+                let flat_map = Expr { id: self.next_id(), span, kind: ExprKind::QualifiedName {
                     module: "List".to_string(),
                     name: "flat_map".to_string(),
-                    span,
-                };
-                let app1 = Expr::App {
+                }};
+                let app1 = Expr { id: self.next_id(), span, kind: ExprKind::App {
                     func: Box::new(flat_map),
                     arg: Box::new(lambda),
-                    span,
-                };
-                Expr::App {
+                }};
+                Expr { id: self.next_id(), span, kind: ExprKind::App {
                     func: Box::new(app1),
                     arg: Box::new(source.clone()),
-                    span,
-                }
+                }}
             }
             ComprehensionQualifier::Guard(guard) => {
                 // [e | g, Q] ==> if g then [e | Q] else []
                 let then_branch = self.desugar_comprehension(body, &qualifiers[1..], span);
-                let else_branch = Expr::Constructor {
+                let else_branch = Expr { id: self.next_id(), span, kind: ExprKind::Constructor {
                     name: "Nil".to_string(),
-                    span,
-                };
-                Expr::If {
+                }};
+                Expr { id: self.next_id(), span, kind: ExprKind::If {
                     cond: Box::new(guard.clone()),
                     then_branch: Box::new(then_branch),
                     else_branch: Box::new(else_branch),
-                    span,
-                }
+                }}
             }
             ComprehensionQualifier::Let(pat, value) => {
                 // [e | let p = v, Q] ==> { let p = v; [e | Q] }
                 let inner = self.desugar_comprehension(body, &qualifiers[1..], span);
-                Expr::Block {
+                Expr { id: self.next_id(), span, kind: ExprKind::Block {
                     stmts: vec![
                         Stmt::Let {
                             pattern: pat.clone(),
@@ -1047,60 +1005,51 @@ impl Parser {
                         },
                         Stmt::Expr(inner),
                     ],
-                    span,
-                }
+                }}
             }
         }
     }
 
     /// Desugar `first >> second` into `fun _x -> second (first _x)`.
     /// Both forward and backward compose call this with args in the right order.
-    fn desugar_compose(&self, first: Expr, second: Expr, span: Span) -> Expr {
+    fn desugar_compose(&mut self, first: Expr, second: Expr, span: Span) -> Expr {
         let param = Pat::Var {
             name: "_x".to_string(),
             span,
         };
-        let arg = Expr::Var {
+        let arg = Expr { id: self.next_id(), span, kind: ExprKind::Var {
             name: "_x".to_string(),
-            span,
-        };
-        let inner = Expr::App {
+        }};
+        let inner = Expr { id: self.next_id(), span, kind: ExprKind::App {
             func: Box::new(first),
             arg: Box::new(arg),
-            span,
-        };
-        let body = Expr::App {
+        }};
+        let body = Expr { id: self.next_id(), span, kind: ExprKind::App {
             func: Box::new(second),
             arg: Box::new(inner),
-            span,
-        };
-        Expr::Lambda {
+        }};
+        Expr { id: self.next_id(), span, kind: ExprKind::Lambda {
             params: vec![param],
             body: Box::new(body),
-            span,
-        }
+        }}
     }
 
     /// Build Cons(elem, Nil) -- a singleton list.
-    fn make_singleton_list(&self, elem: Expr, span: Span) -> Expr {
-        let nil = Expr::Constructor {
+    fn make_singleton_list(&mut self, elem: Expr, span: Span) -> Expr {
+        let nil = Expr { id: self.next_id(), span, kind: ExprKind::Constructor {
             name: "Nil".to_string(),
-            span,
-        };
-        let cons = Expr::Constructor {
+        }};
+        let cons = Expr { id: self.next_id(), span, kind: ExprKind::Constructor {
             name: "Cons".to_string(),
-            span,
-        };
-        let app1 = Expr::App {
+        }};
+        let app1 = Expr { id: self.next_id(), span, kind: ExprKind::App {
             func: Box::new(cons),
             arg: Box::new(elem),
-            span,
-        };
-        Expr::App {
+        }};
+        Expr { id: self.next_id(), span, kind: ExprKind::App {
             func: Box::new(app1),
             arg: Box::new(nil),
-            span,
-        }
+        }}
     }
 }
 

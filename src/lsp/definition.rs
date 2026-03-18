@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use dylang::ast::{Decl, Expr, Pat, Stmt};
+use dylang::ast::{Decl, Expr, ExprKind, Pat, Stmt};
 use dylang::token::Span;
 use dylang::typechecker::CheckResult;
 
@@ -119,8 +119,8 @@ fn find_in_decl(decl: &Decl, name: &str) -> Option<Span> {
 }
 
 fn find_local_def(expr: &Expr, name: &str) -> Option<Span> {
-    match expr {
-        Expr::Block { stmts, .. } => {
+    match &expr.kind {
+        ExprKind::Block { stmts, .. } => {
             for stmt in stmts {
                 if let Some(span) = find_def_in_stmt(stmt, name) {
                     return Some(span);
@@ -128,7 +128,7 @@ fn find_local_def(expr: &Expr, name: &str) -> Option<Span> {
             }
             None
         }
-        Expr::Case { arms, .. } => {
+        ExprKind::Case { arms, .. } => {
             for arm in arms {
                 if let Some(span) = find_def_in_pat(&arm.pattern, name) {
                     return Some(span);
@@ -139,7 +139,7 @@ fn find_local_def(expr: &Expr, name: &str) -> Option<Span> {
             }
             None
         }
-        Expr::Lambda { params, body, .. } => {
+        ExprKind::Lambda { params, body, .. } => {
             for pat in params {
                 if let Some(span) = find_def_in_pat(pat, name) {
                     return Some(span);
@@ -147,7 +147,7 @@ fn find_local_def(expr: &Expr, name: &str) -> Option<Span> {
             }
             find_local_def(body, name)
         }
-        Expr::If {
+        ExprKind::If {
             then_branch,
             else_branch,
             ..

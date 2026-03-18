@@ -497,11 +497,11 @@ impl Checker {
                     ));
                 }
                 let guard_ty = self.infer_expr(guard)?;
-                self.unify_at(&guard_ty, &Type::bool(), guard.span())?;
+                self.unify_at(&guard_ty, &Type::bool(), guard.span)?;
             }
 
             let body_ty = self.infer_expr(body)?;
-            self.unify_at(&result_ty, &body_ty, body.span())?;
+            self.unify_at(&result_ty, &body_ty, body.span)?;
 
             self.env = saved_env;
         }

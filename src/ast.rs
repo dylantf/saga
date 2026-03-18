@@ -2,6 +2,11 @@ use crate::token::Span;
 
 pub type Program = Vec<Decl>;
 
+/// Unique identifier for an expression node, assigned by the parser.
+/// Synthetic nodes (elaboration, derive, normalize) use `NodeId(0)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId(pub u32);
+
 /// A reference to an effect, optionally with type arguments.
 /// e.g. `Log` (no args), `State Int`, `State (MVector a)`
 #[derive(Debug, Clone, PartialEq)]
@@ -161,22 +166,45 @@ pub enum Decl {
 
 // --- Expressions ---
 
+/// An expression node with a unique identity and source location.
+#[derive(Debug, Clone)]
+pub struct Expr {
+    pub id: NodeId,
+    pub span: Span,
+    pub kind: ExprKind,
+}
+
+impl Expr {
+    /// Create a synthetic Expr with `NodeId(0)` sentinel.
+    /// Used by elaboration, derive, normalize, and codegen passes.
+    pub fn synth(span: Span, kind: ExprKind) -> Self {
+        Expr { id: NodeId(0), span, kind }
+    }
+}
+
+/// PartialEq compares kind only. Span is source metadata, NodeId is
+/// internal bookkeeping; neither contributes to semantic equality.
+impl PartialEq for Expr {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
+pub enum ExprKind {
     /// `42`, `3.14`, `"hello"`, `True`
-    Lit { value: Lit, span: Span },
+    Lit { value: Lit },
 
     /// `foo`, `x'`
-    Var { name: String, span: Span },
+    Var { name: String },
 
-    /// `Option`, `Some` — uppercase identifiers
-    Constructor { name: String, span: Span },
+    /// `Option`, `Some` -- uppercase identifiers
+    Constructor { name: String },
 
-    /// `f x y` — function application (curried)
+    /// `f x y` -- function application (curried)
     App {
         func: Box<Expr>,
         arg: Box<Expr>,
-        span: Span,
     },
 
     /// `x + y`, `a == b`, `s <> t`
@@ -184,56 +212,49 @@ pub enum Expr {
         op: BinOp,
         left: Box<Expr>,
         right: Box<Expr>,
-        span: Span,
     },
 
     /// `-x` (negation)
-    UnaryMinus { expr: Box<Expr>, span: Span },
+    UnaryMinus { expr: Box<Expr> },
 
     /// `if cond then a else b`
     If {
         cond: Box<Expr>,
         then_branch: Box<Expr>,
         else_branch: Box<Expr>,
-        span: Span,
     },
 
     /// `case expr { Pat -> Expr, ... }`
     Case {
         scrutinee: Box<Expr>,
         arms: Vec<CaseArm>,
-        span: Span,
     },
 
     /// `{ stmt1; stmt2; expr }`
-    Block { stmts: Vec<Stmt>, span: Span },
+    Block { stmts: Vec<Stmt> },
 
     /// `fun x -> x + 1`
     Lambda {
         params: Vec<Pat>,
         body: Box<Expr>,
-        span: Span,
     },
 
     /// `user.name`
     FieldAccess {
         expr: Box<Expr>,
         field: String,
-        span: Span,
     },
 
     /// `User { name: "Dylan", age: 30 }`
     RecordCreate {
         name: String,
         fields: Vec<(String, Expr)>,
-        span: Span,
     },
 
     /// `{ user | age: user.age + 1 }`
     RecordUpdate {
         record: Box<Expr>,
         fields: Vec<(String, Expr)>,
-        span: Span,
     },
 
     /// `log! "hello"`, `Cache.get! key`
@@ -242,27 +263,24 @@ pub enum Expr {
         /// Optional namespace qualifier: `Cache` in `Cache.get!`
         qualifier: Option<String>,
         args: Vec<Expr>,
-        span: Span,
     },
 
     /// `expr with handler_name` or `expr with { ... }`
     With {
         expr: Box<Expr>,
         handler: Box<Handler>,
-        span: Span,
     },
 
     /// `resume value`
-    Resume { value: Box<Expr>, span: Span },
+    Resume { value: Box<Expr> },
 
     /// `(a, b)`, `(1, "hello", True)`
-    Tuple { elements: Vec<Expr>, span: Span },
+    Tuple { elements: Vec<Expr> },
 
     /// `Math.abs` - module-qualified name lookup
     QualifiedName {
         module: String,
         name: String,
-        span: Span,
     },
 
     /// `do { Pat <- expr ... SuccessExpr } else { Pat -> expr ... }`
@@ -270,7 +288,6 @@ pub enum Expr {
         bindings: Vec<(Pat, Expr)>,
         success: Box<Expr>,
         else_arms: Vec<CaseArm>,
-        span: Span,
     },
 
     /// `receive { Pat -> body, after N -> timeout_body }`
@@ -278,14 +295,12 @@ pub enum Expr {
         arms: Vec<CaseArm>,
         /// Optional (timeout_expr, timeout_body)
         after_clause: Option<(Box<Expr>, Box<Expr>)>,
-        span: Span,
     },
 
-    /// `(expr : Type)` — inline type annotation / ascription
+    /// `(expr : Type)` -- inline type annotation / ascription
     Ascription {
         expr: Box<Expr>,
         type_expr: TypeExpr,
-        span: Span,
     },
 
     // --- Elaboration-only (never produced by the parser) ---
@@ -294,83 +309,52 @@ pub enum Expr {
     DictMethodAccess {
         dict: Box<Expr>,
         method_index: usize,
-        span: Span,
     },
     /// Reference to a dictionary value (a variable holding a dict, or a dict constructor name).
-    DictRef { name: String, span: Span },
+    DictRef { name: String },
     /// Call an Erlang BIF. Only produced by elaboration, never by the parser.
     ForeignCall {
         module: String,
         func: String,
         args: Vec<Expr>,
-        span: Span,
     },
 }
 
 impl Expr {
     /// Returns true if this expression contains a `resume` call anywhere in it.
     pub fn contains_resume(&self) -> bool {
-        match self {
-            Expr::Resume { .. } => true,
-            Expr::Block { stmts, .. } => stmts.iter().any(|s| s.contains_resume()),
-            Expr::If { cond, then_branch, else_branch, .. } =>
+        match &self.kind {
+            ExprKind::Resume { .. } => true,
+            ExprKind::Block { stmts, .. } => stmts.iter().any(|s| s.contains_resume()),
+            ExprKind::If { cond, then_branch, else_branch, .. } =>
                 cond.contains_resume() || then_branch.contains_resume() || else_branch.contains_resume(),
-            Expr::Case { scrutinee, arms, .. } =>
+            ExprKind::Case { scrutinee, arms, .. } =>
                 scrutinee.contains_resume() || arms.iter().any(|a| a.body.contains_resume()),
-            Expr::Lambda { body, .. } => body.contains_resume(),
-            Expr::App { func, arg, .. } => func.contains_resume() || arg.contains_resume(),
-            Expr::BinOp { left, right, .. } => left.contains_resume() || right.contains_resume(),
-            Expr::UnaryMinus { expr, .. } => expr.contains_resume(),
-            Expr::Tuple { elements, .. } => elements.iter().any(|e| e.contains_resume()),
-            Expr::FieldAccess { expr, .. } => expr.contains_resume(),
-            Expr::RecordCreate { fields, .. } => fields.iter().any(|(_, e)| e.contains_resume()),
-            Expr::RecordUpdate { record, fields, .. } =>
+            ExprKind::Lambda { body, .. } => body.contains_resume(),
+            ExprKind::App { func, arg, .. } => func.contains_resume() || arg.contains_resume(),
+            ExprKind::BinOp { left, right, .. } => left.contains_resume() || right.contains_resume(),
+            ExprKind::UnaryMinus { expr, .. } => expr.contains_resume(),
+            ExprKind::Tuple { elements, .. } => elements.iter().any(|e| e.contains_resume()),
+            ExprKind::FieldAccess { expr, .. } => expr.contains_resume(),
+            ExprKind::RecordCreate { fields, .. } => fields.iter().any(|(_, e)| e.contains_resume()),
+            ExprKind::RecordUpdate { record, fields, .. } =>
                 record.contains_resume() || fields.iter().any(|(_, e)| e.contains_resume()),
             // Only check the `with` body, not the handler arm bodies: `resume` inside
             // an arm body refers to *that arm's* continuation, not the outer context's.
-            Expr::With { expr, .. } => expr.contains_resume(),
-            Expr::Do { bindings, success, else_arms, .. } =>
+            ExprKind::With { expr, .. } => expr.contains_resume(),
+            ExprKind::Do { bindings, success, else_arms, .. } =>
                 bindings.iter().any(|(_, e)| e.contains_resume())
                 || success.contains_resume()
                 || else_arms.iter().any(|a| a.body.contains_resume()),
-            Expr::EffectCall { args, .. } => args.iter().any(|e| e.contains_resume()),
-            Expr::Receive { arms, after_clause, .. } =>
+            ExprKind::EffectCall { args, .. } => args.iter().any(|e| e.contains_resume()),
+            ExprKind::Receive { arms, after_clause, .. } =>
                 arms.iter().any(|a| a.body.contains_resume())
                 || after_clause.as_ref().is_some_and(|(t, b)| t.contains_resume() || b.contains_resume()),
-            Expr::Ascription { expr, .. } => expr.contains_resume(),
-            Expr::ForeignCall { args, .. } => args.iter().any(|e| e.contains_resume()),
-            Expr::DictMethodAccess { dict, .. } => dict.contains_resume(),
-            Expr::Lit { .. } | Expr::Var { .. } | Expr::Constructor { .. }
-            | Expr::QualifiedName { .. } | Expr::DictRef { .. } => false,
-        }
-    }
-
-    pub fn span(&self) -> Span {
-        match self {
-            Expr::Lit { span, .. }
-            | Expr::Var { span, .. }
-            | Expr::Constructor { span, .. }
-            | Expr::App { span, .. }
-            | Expr::BinOp { span, .. }
-            | Expr::UnaryMinus { span, .. }
-            | Expr::If { span, .. }
-            | Expr::Case { span, .. }
-            | Expr::Block { span, .. }
-            | Expr::Lambda { span, .. }
-            | Expr::FieldAccess { span, .. }
-            | Expr::RecordCreate { span, .. }
-            | Expr::RecordUpdate { span, .. }
-            | Expr::EffectCall { span, .. }
-            | Expr::With { span, .. }
-            | Expr::Resume { span, .. }
-            | Expr::Tuple { span, .. }
-            | Expr::QualifiedName { span, .. }
-            | Expr::Do { span, .. }
-            | Expr::Receive { span, .. }
-            | Expr::DictMethodAccess { span, .. }
-            | Expr::Ascription { span, .. }
-            | Expr::DictRef { span, .. }
-            | Expr::ForeignCall { span, .. } => *span,
+            ExprKind::Ascription { expr, .. } => expr.contains_resume(),
+            ExprKind::ForeignCall { args, .. } => args.iter().any(|e| e.contains_resume()),
+            ExprKind::DictMethodAccess { dict, .. } => dict.contains_resume(),
+            ExprKind::Lit { .. } | ExprKind::Var { .. } | ExprKind::Constructor { .. }
+            | ExprKind::QualifiedName { .. } | ExprKind::DictRef { .. } => false,
         }
     }
 }
