@@ -1,11 +1,21 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crate::token::Span;
 
 pub type Program = Vec<Decl>;
 
-/// Unique identifier for an expression node, assigned by the parser.
-/// Synthetic nodes (elaboration, derive, normalize) use `NodeId(0)`.
+static NEXT_NODE_ID: AtomicU32 = AtomicU32::new(1);
+
+/// Unique identifier for an expression node. Every node (parsed or synthetic)
+/// gets a globally unique ID via `NodeId::fresh()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub u32);
+
+impl NodeId {
+    pub fn fresh() -> Self {
+        NodeId(NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 /// A reference to an effect, optionally with type arguments.
 /// e.g. `Log` (no args), `State Int`, `State (MVector a)`
@@ -175,10 +185,10 @@ pub struct Expr {
 }
 
 impl Expr {
-    /// Create a synthetic Expr with `NodeId(0)` sentinel.
+    /// Create a synthetic Expr with a fresh unique NodeId.
     /// Used by elaboration, derive, normalize, and codegen passes.
     pub fn synth(span: Span, kind: ExprKind) -> Self {
-        Expr { id: NodeId(0), span, kind }
+        Expr { id: NodeId::fresh(), span, kind }
     }
 }
 

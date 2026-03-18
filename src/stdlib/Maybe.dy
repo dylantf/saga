@@ -1,5 +1,11 @@
 module Std.Maybe
 
+impl Show for Maybe a where {a: Show} {
+  show m = case m {
+    Nothing -> "Nothing"
+    Just(x) -> "Just(" <> show x <> ")"
+  }
+}
 
 pub type Maybe a {
   Nothing
@@ -22,11 +28,4 @@ pub fun and_then (f: a -> Maybe b) (m: Maybe a) -> Maybe b
 and_then f m = case m {
   Nothing -> Nothing
   Just(x) -> f x
-}
-
-impl Show for Maybe a where {a: Show} {
-  show m = case m {
-    Nothing -> "Nothing"
-    Just(x) -> "Just(" <> show x <> ")"
-  }
 }

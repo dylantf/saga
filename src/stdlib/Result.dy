@@ -41,5 +41,3 @@ and_then f r = case r {
   Ok(x) -> f x
   Err(e) -> Err(e)
 }
-
-

@@ -1,12 +1,11 @@
 module Std.Int
 
+impl Show for Int {
+  show x = to_string x
+}
 
 pub @external("erlang", "erlang", "float")
 fun to_float (n: Int) -> Float
 
 @external("erlang", "erlang", "integer_to_list")
 fun to_string (n: Int) -> String
-
-impl Show for Int {
-  show x = to_string x
-}

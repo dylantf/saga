@@ -9,7 +9,7 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
     let mut program = parser.parse_program().expect("parse error");
     crate::derive::expand_derives(&mut program);
     let mut checker = Checker::new();
-    // Load the prelude so Show, print, etc. are available
+    // Load prelude (which imports Std first, then stdlib modules)
     let prelude_src = include_str!("../stdlib/prelude.dy");
     let prelude_tokens = Lexer::new(prelude_src).lex().expect("prelude lex error");
     let mut prelude_program = Parser::new(prelude_tokens)

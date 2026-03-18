@@ -6,6 +6,7 @@ impl Show for String {
   show x = x
 }
 
+
 pub @external("erlang", "string", "length")
 fun length (s: String) -> Int
 
@@ -44,4 +45,3 @@ pub fun ends_with (s: String) (suffix: String) -> Bool
 
 pub fun split (s: String) (sep: String) -> List String
 # builtin
-

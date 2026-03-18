@@ -19,6 +19,17 @@ pub fn expand_derives(program: &mut Vec<Decl>) {
             ..
         } = decl
         {
+            // Ord requires Eq (supertrait). Automatically derive Eq if Ord
+            // is requested but Eq isn't explicitly listed.
+            let needs_eq =
+                deriving.iter().any(|t| t == "Ord") && !deriving.iter().any(|t| t == "Eq");
+
+            if needs_eq
+                && let Some(impl_def) = generate_derive("Eq", name, type_params, variants, *span)
+            {
+                extra.push(impl_def);
+            }
+
             for trait_name in deriving {
                 if let Some(impl_def) =
                     generate_derive(trait_name, name, type_params, variants, *span)
@@ -41,7 +52,9 @@ fn generate_derive(
     match trait_name {
         "Show" => Some(derive_show(type_name, type_params, variants, span)),
         "Eq" => Some(derive_marker_trait("Eq", type_name, type_params, span)),
-        other => panic!("cannot derive `{other}` (only Show and Eq are supported)"),
+        "Ord" => Some(derive_ord(type_name, type_params, variants, span)),
+        "Enum" => Some(derive_enum(type_name, variants, span)),
+        other => panic!("cannot derive `{other}` (only Show, Eq, Ord, and Enum are supported)"),
     }
 }
 
@@ -66,9 +79,12 @@ fn derive_show(
                         span,
                     },
                     guard: None,
-                    body: Expr::synth(span, ExprKind::Lit {
-                        value: Lit::String(ctor_name.clone()),
-                    }),
+                    body: Expr::synth(
+                        span,
+                        ExprKind::Lit {
+                            value: Lit::String(ctor_name.clone()),
+                        },
+                    ),
                     span,
                 }
             } else {
@@ -102,33 +118,53 @@ fn derive_show(
                         prefix.push_str(lbl);
                         prefix.push_str(": ");
                     }
-                    parts.push(Expr::synth(span, ExprKind::Lit {
-                        value: Lit::String(prefix.clone()),
-                    }));
+                    parts.push(Expr::synth(
+                        span,
+                        ExprKind::Lit {
+                            value: Lit::String(prefix.clone()),
+                        },
+                    ));
                     prefix.clear();
 
                     // `show __xi`
-                    parts.push(Expr::synth(span, ExprKind::App {
-                        func: Box::new(Expr::synth(span, ExprKind::Var {
-                            name: "show".into(),
-                        })),
-                        arg: Box::new(Expr::synth(span, ExprKind::Var {
-                            name: field_vars[i].clone(),
-                        })),
-                    }));
+                    parts.push(Expr::synth(
+                        span,
+                        ExprKind::App {
+                            func: Box::new(Expr::synth(
+                                span,
+                                ExprKind::Var {
+                                    name: "show".into(),
+                                },
+                            )),
+                            arg: Box::new(Expr::synth(
+                                span,
+                                ExprKind::Var {
+                                    name: field_vars[i].clone(),
+                                },
+                            )),
+                        },
+                    ));
                 }
 
-                parts.push(Expr::synth(span, ExprKind::Lit {
-                    value: Lit::String(")".into()),
-                }));
+                parts.push(Expr::synth(
+                    span,
+                    ExprKind::Lit {
+                        value: Lit::String(")".into()),
+                    },
+                ));
 
                 let body = parts
                     .into_iter()
-                    .reduce(|acc, part| Expr::synth(span, ExprKind::BinOp {
-                        op: BinOp::Concat,
-                        left: Box::new(acc),
-                        right: Box::new(part),
-                    }))
+                    .reduce(|acc, part| {
+                        Expr::synth(
+                            span,
+                            ExprKind::BinOp {
+                                op: BinOp::Concat,
+                                left: Box::new(acc),
+                                right: Box::new(part),
+                            },
+                        )
+                    })
                     .unwrap();
 
                 CaseArm {
@@ -142,12 +178,18 @@ fn derive_show(
         .collect();
 
     let scrutinee_name = "__val".to_string();
-    let body = Expr::synth(span, ExprKind::Case {
-        scrutinee: Box::new(Expr::synth(span, ExprKind::Var {
-            name: scrutinee_name.clone(),
-        })),
-        arms,
-    });
+    let body = Expr::synth(
+        span,
+        ExprKind::Case {
+            scrutinee: Box::new(Expr::synth(
+                span,
+                ExprKind::Var {
+                    name: scrutinee_name.clone(),
+                },
+            )),
+            arms,
+        },
+    );
 
     // Each type param needs Show
     let where_clause: Vec<TraitBound> = type_params
@@ -176,6 +218,253 @@ fn derive_show(
     }
 }
 
+/// Generate `impl Ord for T { compare x y = ... }` using declaration-order
+/// constructor indexing and left-to-right field comparison.
+fn derive_ord(
+    type_name: &str,
+    type_params: &[String],
+    variants: &[TypeConstructor],
+    span: Span,
+) -> Decl {
+    let x = "__x".to_string();
+    let y = "__y".to_string();
+
+    // Build same-constructor arms: (A(a0,a1), A(b0,b1)) -> field-by-field compare
+    let mut arms: Vec<CaseArm> = variants
+        .iter()
+        .map(|variant| {
+            let ctor = &variant.name;
+            let arity = variant.fields.len();
+
+            let a_vars: Vec<String> = (0..arity).map(|i| format!("__a{i}")).collect();
+            let b_vars: Vec<String> = (0..arity).map(|i| format!("__b{i}")).collect();
+
+            let pat_a = Pat::Constructor {
+                name: ctor.clone(),
+                args: a_vars
+                    .iter()
+                    .map(|v| Pat::Var {
+                        name: v.clone(),
+                        span,
+                    })
+                    .collect(),
+                span,
+            };
+            let pat_b = Pat::Constructor {
+                name: ctor.clone(),
+                args: b_vars
+                    .iter()
+                    .map(|v| Pat::Var {
+                        name: v.clone(),
+                        span,
+                    })
+                    .collect(),
+                span,
+            };
+            let pattern = Pat::Tuple {
+                elements: vec![pat_a, pat_b],
+                span,
+            };
+
+            let body = if arity == 0 {
+                // Same nullary constructor: always Eq
+                Expr::synth(span, ExprKind::Constructor { name: "Eq".into() })
+            } else {
+                // Compare fields left-to-right, short-circuit on non-Eq
+                build_field_compare(&a_vars, &b_vars, span)
+            };
+
+            CaseArm {
+                pattern,
+                guard: None,
+                body,
+                span,
+            }
+        })
+        .collect();
+
+    // Wildcard arm for different constructors: compare by index.
+    if variants.len() > 1 {
+        let index_case = |var: &str| -> Expr {
+            Expr::synth(
+                span,
+                ExprKind::Case {
+                    scrutinee: Box::new(Expr::synth(span, ExprKind::Var { name: var.into() })),
+                    arms: variants
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            let wildcards: Vec<Pat> = (0..v.fields.len())
+                                .map(|_| Pat::Wildcard { span })
+                                .collect();
+                            CaseArm {
+                                pattern: Pat::Constructor {
+                                    name: v.name.clone(),
+                                    args: wildcards,
+                                    span,
+                                },
+                                guard: None,
+                                body: Expr::synth(
+                                    span,
+                                    ExprKind::Lit {
+                                        value: Lit::Int(i as i64),
+                                    },
+                                ),
+                                span,
+                            }
+                        })
+                        .collect(),
+                },
+            )
+        };
+
+        // compare (case __x { ... -> 0, ... -> 1 }) (case __y { ... })
+        let compare_indices = Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(Expr::synth(
+                    span,
+                    ExprKind::App {
+                        func: Box::new(Expr::synth(
+                            span,
+                            ExprKind::Var {
+                                name: "compare".into(),
+                            },
+                        )),
+                        arg: Box::new(index_case(&x)),
+                    },
+                )),
+                arg: Box::new(index_case(&y)),
+            },
+        );
+
+        arms.push(CaseArm {
+            pattern: Pat::Wildcard { span },
+            guard: None,
+            body: compare_indices,
+            span,
+        });
+    }
+
+    let body = Expr::synth(
+        span,
+        ExprKind::Case {
+            scrutinee: Box::new(Expr::synth(
+                span,
+                ExprKind::Tuple {
+                    elements: vec![
+                        Expr::synth(span, ExprKind::Var { name: x.clone() }),
+                        Expr::synth(span, ExprKind::Var { name: y.clone() }),
+                    ],
+                },
+            )),
+            arms,
+        },
+    );
+
+    // Ord requires Eq, but Eq is BIF-dispatched (no dict), so only Ord
+    // needs to be in the where clause for dictionary passing purposes.
+    // The Eq supertrait constraint is still checked by the typechecker.
+    let where_clause: Vec<TraitBound> = type_params
+        .iter()
+        .map(|tp| TraitBound {
+            type_var: tp.clone(),
+            traits: vec!["Ord".into()],
+        })
+        .collect();
+
+    Decl::ImplDef {
+        trait_name: "Ord".into(),
+        target_type: type_name.into(),
+        type_params: type_params.to_vec(),
+        where_clause,
+        needs: vec![],
+        methods: vec![(
+            "compare".into(),
+            vec![Pat::Var { name: x, span }, Pat::Var { name: y, span }],
+            body,
+        )],
+        span,
+    }
+}
+
+/// Build a left-to-right field comparison chain:
+/// `case compare a0 b0 { Eq -> case compare a1 b1 { Eq -> ... Eq; o -> o }; o -> o }`
+fn build_field_compare(a_vars: &[String], b_vars: &[String], span: Span) -> Expr {
+    assert!(!a_vars.is_empty());
+
+    // Start from the last field and build inward
+    let mut result = Expr::synth(span, ExprKind::Constructor { name: "Eq".into() });
+
+    for i in (0..a_vars.len()).rev() {
+        let cmp_call = Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(Expr::synth(
+                    span,
+                    ExprKind::App {
+                        func: Box::new(Expr::synth(
+                            span,
+                            ExprKind::Var {
+                                name: "compare".into(),
+                            },
+                        )),
+                        arg: Box::new(Expr::synth(
+                            span,
+                            ExprKind::Var {
+                                name: a_vars[i].clone(),
+                            },
+                        )),
+                    },
+                )),
+                arg: Box::new(Expr::synth(
+                    span,
+                    ExprKind::Var {
+                        name: b_vars[i].clone(),
+                    },
+                )),
+            },
+        );
+
+        if i == a_vars.len() - 1 && a_vars.len() == 1 {
+            // Single field: just return the compare result directly
+            result = cmp_call;
+        } else {
+            // Wrap in: case compare ai bi { Eq -> <inner>; __other -> __other }
+            let other_var = format!("__ord{i}");
+            result = Expr::synth(
+                span,
+                ExprKind::Case {
+                    scrutinee: Box::new(cmp_call),
+                    arms: vec![
+                        CaseArm {
+                            pattern: Pat::Constructor {
+                                name: "Eq".into(),
+                                args: vec![],
+                                span,
+                            },
+                            guard: None,
+                            body: result,
+                            span,
+                        },
+                        CaseArm {
+                            pattern: Pat::Var {
+                                name: other_var.clone(),
+                                span,
+                            },
+                            guard: None,
+                            body: Expr::synth(span, ExprKind::Var { name: other_var }),
+                            span,
+                        },
+                    ],
+                },
+            );
+        }
+    }
+
+    result
+}
+
 /// Generate a method-less impl for an operator trait (e.g. Eq).
 /// The trait is dispatched via BEAM BIFs, so no methods are needed --
 /// we just register the impl so the typechecker accepts the constraint.
@@ -200,6 +489,85 @@ fn derive_marker_trait(
         where_clause,
         needs: vec![],
         methods: vec![],
+        span,
+    }
+}
+
+/// Generate `impl Enum for T { to_enum x = case x { ... }; from_enum n = case n { ... } }`
+/// Only valid for types with all nullary constructors.
+fn derive_enum(
+    type_name: &str,
+    variants: &[TypeConstructor],
+    span: Span,
+) -> Decl {
+    for v in variants {
+        if !v.fields.is_empty() {
+            panic!(
+                "cannot derive Enum for `{}`: constructor `{}` has fields (Enum requires all nullary constructors)",
+                type_name, v.name
+            );
+        }
+    }
+
+    // to_enum x = case x { Red -> 0 | Green -> 1 | Blue -> 2 }
+    let to_enum_param = "__val".to_string();
+    let to_enum_body = Expr::synth(span, ExprKind::Case {
+        scrutinee: Box::new(Expr::synth(span, ExprKind::Var { name: to_enum_param.clone() })),
+        arms: variants.iter().enumerate().map(|(i, v)| {
+            CaseArm {
+                pattern: Pat::Constructor { name: v.name.clone(), args: vec![], span },
+                guard: None,
+                body: Expr::synth(span, ExprKind::Lit { value: Lit::Int(i as i64) }),
+                span,
+            }
+        }).collect(),
+    });
+
+    // from_enum n = case n { 0 -> Red | 1 -> Green | 2 -> Blue | _ -> panic "invalid enum index" }
+    let from_enum_param = "__n".to_string();
+    let mut from_enum_arms: Vec<CaseArm> = variants.iter().enumerate().map(|(i, v)| {
+        CaseArm {
+            pattern: Pat::Lit { value: Lit::Int(i as i64), span },
+            guard: None,
+            body: Expr::synth(span, ExprKind::Constructor { name: v.name.clone() }),
+            span,
+        }
+    }).collect();
+    // Wildcard arm: panic on invalid index
+    from_enum_arms.push(CaseArm {
+        pattern: Pat::Wildcard { span },
+        guard: None,
+        body: Expr::synth(span, ExprKind::App {
+            func: Box::new(Expr::synth(span, ExprKind::Var { name: "panic".into() })),
+            arg: Box::new(Expr::synth(span, ExprKind::Lit {
+                value: Lit::String(format!("invalid enum index for {}", type_name)),
+            })),
+        }),
+        span,
+    });
+    let from_enum_body = Expr::synth(span, ExprKind::Case {
+        scrutinee: Box::new(Expr::synth(span, ExprKind::Var { name: from_enum_param.clone() })),
+        arms: from_enum_arms,
+    });
+
+    Decl::ImplDef {
+        trait_name: "Enum".into(),
+        target_type: type_name.into(),
+        type_params: vec![],
+        where_clause: vec![],
+        needs: vec![],
+        methods: vec![
+            (
+                "to_enum".into(),
+                vec![Pat::Var { name: to_enum_param, span }],
+                to_enum_body,
+            ),
+            (
+                "from_enum".into(),
+                vec![Pat::Var { name: from_enum_param, span }],
+                from_enum_body,
+            ),
+        ],
         span,
     }
 }

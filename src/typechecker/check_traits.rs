@@ -226,6 +226,27 @@ impl Checker {
             let saved_env = self.env.clone();
             let body_scope = self.save_body_scope();
 
+            // Re-insert the trait's method schemes so that method calls inside
+            // the impl body resolve to the trait signature, not to a user-defined
+            // function that happens to share the name. The saved_env restore at
+            // the end of this loop iteration will bring back the user's entry.
+            for (m_name, m_param_types, m_return_type) in &trait_info.methods {
+                let mut fun_ty = m_return_type.clone();
+                for pt in m_param_types.iter().rev() {
+                    fun_ty = Type::Arrow(Box::new(pt.clone()), Box::new(fun_ty));
+                }
+                let mut forall = Vec::new();
+                super::collect_free_vars(&fun_ty, &mut forall);
+                let constraints: Vec<(String, u32)> = forall
+                    .iter()
+                    .map(|&var_id| (trait_name.to_string(), var_id))
+                    .collect();
+                self.env.insert(
+                    m_name.clone(),
+                    Scheme { forall, constraints, ty: fun_ty },
+                );
+            }
+
             // Bind params with expected types
             for (i, pat) in params.iter().enumerate() {
                 if i < expected_params.len() {

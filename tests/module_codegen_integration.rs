@@ -6,7 +6,6 @@ fn fixtures_root() -> PathBuf {
 }
 
 /// Parse, typecheck, elaborate, and emit Core Erlang for a module in project mode.
-/// Returns (core_output, checker) so tests can chain module compilations.
 fn emit_project_module(
     source: &str,
     module_name: &str,
@@ -16,7 +15,15 @@ fn emit_project_module(
     let program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
-    // Extract original module name (e.g. "Animals") from ModuleDecl for elaboration
+    emit_from_program(&program, module_name, checker)
+}
+
+/// Elaborate and emit Core Erlang from an already-parsed program.
+fn emit_from_program(
+    program: &Vec<dylang::ast::Decl>,
+    module_name: &str,
+    checker: &typechecker::Checker,
+) -> String {
     let original_module_name = program.iter().find_map(|d| {
         if let dylang::ast::Decl::ModuleDecl { path, .. } = d {
             Some(path.join("."))
@@ -25,18 +32,21 @@ fn emit_project_module(
         }
     }).unwrap_or_default();
     let result = checker.to_result();
-    let elaborated = elaborate::elaborate_module(&program, &result, &original_module_name);
+    let elaborated = elaborate::elaborate_module(program, &result, &original_module_name);
     codegen::emit_module_with_imports(module_name, &elaborated, result.codegen_info(), &std::collections::HashMap::new())
 }
 
 /// Parse and typecheck a source file with the given checker (project mode).
-fn typecheck_source(source: &str, checker: &mut typechecker::Checker) {
+/// Returns the parsed program so it can be reused for elaboration/codegen
+/// without re-parsing (which would assign different NodeIds).
+fn typecheck_source(source: &str, checker: &mut typechecker::Checker) -> Vec<dylang::ast::Decl> {
     let tokens = lexer::Lexer::new(source).lex().expect("lex error");
     let program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
     let result = checker.check_program(&program);
     assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());
+    program
 }
 
 /// Create a project-mode checker pointed at the test fixtures directory,
@@ -46,13 +56,15 @@ fn make_project_checker() -> typechecker::Checker {
     let module_map = typechecker::scan_project_modules(&root).expect("scan failed");
     let mut checker = typechecker::Checker::with_project_root(root);
     checker.set_module_map(module_map);
+    // Load prelude (which imports Std first, then stdlib modules)
     let prelude_src = include_str!("../src/stdlib/prelude.dy");
     let prelude_tokens = lexer::Lexer::new(prelude_src)
         .lex()
         .expect("prelude lex error");
-    let prelude_program = parser::Parser::new(prelude_tokens)
+    let mut prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
+    dylang::derive::expand_derives(&mut prelude_program);
     let result = checker.check_program(&prelude_program);
     assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
     checker
@@ -100,8 +112,8 @@ pub fun main () -> Int
 main () = Math.add 10 20
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
 
     // Should emit call 'math':'add'(...)
     assert_contains(&out, "call 'math':'add'");
@@ -121,8 +133,8 @@ pub fun main () -> Int
 main () = M.add 1 2
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
 
     // Alias 'M' should still resolve to erlang module 'math'
     assert_contains(&out, "call 'math':'add'");
@@ -139,8 +151,8 @@ pub fun main () -> Int
 main () = add 10 20
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
 
     // Even though 'add' is unqualified, it should still emit an inter-module call
     assert_contains(&out, "call 'math':'add'");
@@ -155,8 +167,8 @@ pub fun main () -> Int
 main () = add 1 (Math.double 3)
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
 
     // Both should be inter-module calls
     assert_contains(&out, "call 'math':'add'");
@@ -169,8 +181,8 @@ main () = add 1 (Math.double 3)
 fn pub_functions_exported() {
     let math_src = std::fs::read_to_string(fixtures_root().join("Math.dy")).unwrap();
     let mut checker = make_project_checker();
-    typecheck_source(&math_src, &mut checker);
-    let out = emit_project_module(&math_src, "math", &checker);
+    let program = typecheck_source(&math_src, &mut checker);
+    let out = emit_from_program(&program, "math", &checker);
 
     // pub functions should be in the export list
     assert_contains(&out, "'add'/2");
@@ -181,8 +193,8 @@ fn pub_functions_exported() {
 fn private_functions_not_exported() {
     let math_src = std::fs::read_to_string(fixtures_root().join("Math.dy")).unwrap();
     let mut checker = make_project_checker();
-    typecheck_source(&math_src, &mut checker);
-    let out = emit_project_module(&math_src, "math", &checker);
+    let program = typecheck_source(&math_src, &mut checker);
+    let out = emit_from_program(&program, "math", &checker);
 
     // 'secret' is private -- should be defined but not exported
     // The export list is on the first line between [ ]
@@ -223,8 +235,8 @@ pub fun add (a: Int) (b: Int) -> Int
 add a b = a + b
 ";
     let mut checker = make_project_checker();
-    typecheck_source(src, &mut checker);
-    let out = emit_project_module(src, "mathlib", &checker);
+    let program = typecheck_source(src, &mut checker);
+    let out = emit_from_program(&program, "mathlib", &checker);
 
     assert!(
         out.starts_with("module 'mathlib'"),
@@ -246,11 +258,11 @@ main () = Math.add 10 20
 
     let mut checker = make_project_checker();
     // Typecheck main (which transitively typechecks Math)
-    typecheck_source(main_src, &mut checker);
+    let main_program = typecheck_source(main_src, &mut checker);
 
     // Emit both modules
     let math_core = emit_project_module(&math_src, "math", &checker);
-    let main_core = emit_project_module(main_src, "main", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
 
     // Both should compile with erlc
     let dir = assert_erlc_compiles(&math_core, "math");
@@ -281,10 +293,10 @@ main () = add 1 (double 10)
 ";
 
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
+    let main_program = typecheck_source(main_src, &mut checker);
 
     let math_core = emit_project_module(&math_src, "math", &checker);
-    let main_core = emit_project_module(main_src, "main", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
 
     let dir = assert_erlc_compiles(&math_core, "math");
     let main_core_path = dir.join("main.core");
@@ -317,8 +329,8 @@ main () = {
 }
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
 
     // Should compile without errors about unknown record fields
     // The record creates a tagged tuple with fields in correct order
@@ -340,8 +352,8 @@ main () = {
 }
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
 
     // Should have inter-module calls to both modules
     assert_contains(&out, "call 'math':'add'");
@@ -355,8 +367,8 @@ fn imported_function_calling_local() {
     // Math.double internally calls Math.add -- verify this still works
     let math_src = std::fs::read_to_string(fixtures_root().join("Math.dy")).unwrap();
     let mut checker = make_project_checker();
-    typecheck_source(&math_src, &mut checker);
-    let out = emit_project_module(&math_src, "math", &checker);
+    let program = typecheck_source(&math_src, &mut checker);
+    let out = emit_from_program(&program, "math", &checker);
 
     // double uses `a * 2`, so it should emit an erlang multiply call
     assert_contains(&out, "call 'erlang':'*'");
@@ -375,9 +387,9 @@ pub fun main () -> String
 main () = show (List.map (fun x -> x + 1) [1, 2, 3])
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
+    let program = typecheck_source(main_src, &mut checker);
     // Should not panic
-    let _out = emit_project_module(main_src, "main", &checker);
+    let _out = emit_from_program(&program, "main", &checker);
 }
 
 // ---- Exposing a type + constructors ----
@@ -394,8 +406,8 @@ main () = area (Circle 5.0) + area (Rect 3.0 4.0)
     // constructors are values (atoms/tuples), not function calls.
     // But it should not crash.
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let _out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let _out = emit_from_program(&program, "main", &checker);
 }
 
 // ---- Cross-module effectful calls ----
@@ -419,8 +431,8 @@ pub fun main () -> String
 main () = Logger.greet \"world\" with console_log
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
 
     // Should emit inter-module call with handler params
     assert_contains(&out, "call 'logger':'greet'");
@@ -447,8 +459,8 @@ pub fun main () -> String
 main () = greet \"world\" with console_log
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
 
     // Exposed effectful call should still be inter-module
     assert_contains(&out, "call 'logger':'greet'");
@@ -459,8 +471,8 @@ fn cross_module_effectful_export_arity() {
     // Logger.greet should be exported with expanded arity (1 + 1 handler + 1 ReturnK = 3)
     let logger_src = std::fs::read_to_string(fixtures_root().join("Logger.dy")).unwrap();
     let mut checker = make_project_checker();
-    typecheck_source(&logger_src, &mut checker);
-    let out = emit_project_module(&logger_src, "logger", &checker);
+    let program = typecheck_source(&logger_src, &mut checker);
+    let out = emit_from_program(&program, "logger", &checker);
 
     // greet should be exported with arity 3 (name, _HandleLog, _ReturnK)
     assert_contains(&out, "'greet'/3");
@@ -485,10 +497,10 @@ pub fun main () -> String
 main () = Logger.greet \"world\" with console_log
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
+    let main_program = typecheck_source(main_src, &mut checker);
 
     let logger_core = emit_project_module(&logger_src, "logger", &checker);
-    let main_core = emit_project_module(main_src, "main", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
 
     // Both should compile with erlc
     let dir = assert_erlc_compiles(&logger_core, "logger");
@@ -521,8 +533,8 @@ pub fun main () -> String
 main () = show (Animal { name: \"Rex\", species: \"Dog\" })
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
 
     // The dict should be referenced as a cross-module call to animals module
     assert_contains(&out, "call 'animals':'__dict_Show_animals_Animal'");
@@ -538,10 +550,10 @@ pub fun main () -> String
 main () = show (Animal { name: \"Rex\", species: \"Dog\" })
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
+    let main_program = typecheck_source(main_src, &mut checker);
 
     let animals_core = emit_project_module(&animals_src, "animals", &checker);
-    let main_core = emit_project_module(main_src, "main", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
 
     let dir = assert_erlc_compiles(&animals_core, "animals");
     let main_core_path = dir.join("main.core");
@@ -566,8 +578,8 @@ fn local_dict_names_are_module_qualified() {
     // named __dict_Show_animals_Animal (not __dict_Show_Animal)
     let animals_src = std::fs::read_to_string(fixtures_root().join("Animals.dy")).unwrap();
     let mut checker = make_project_checker();
-    typecheck_source(&animals_src, &mut checker);
-    let out = emit_project_module(&animals_src, "animals", &checker);
+    let program = typecheck_source(&animals_src, &mut checker);
+    let out = emit_from_program(&program, "animals", &checker);
 
     assert_contains(&out, "'__dict_Show_animals_Animal'");
     assert!(
@@ -582,8 +594,8 @@ fn local_dict_names_are_module_qualified() {
 fn local_adt_constructors_mangled_with_module_name() {
     let shapes_src = std::fs::read_to_string(fixtures_root().join("Shapes.dy")).unwrap();
     let mut checker = make_project_checker();
-    typecheck_source(&shapes_src, &mut checker);
-    let out = emit_project_module(&shapes_src, "shapes", &checker);
+    let program = typecheck_source(&shapes_src, &mut checker);
+    let out = emit_from_program(&program, "shapes", &checker);
 
     // Constructors should be prefixed with module name
     assert_contains(&out, "'shapes_Circle'");
@@ -602,8 +614,8 @@ pub fun main () -> Float
 main () = area (Circle 5.0) + area (Rect 3.0 4.0)
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
 
     // Imported constructors should use the source module's prefix
     assert_contains(&out, "'shapes_Circle'");
@@ -623,8 +635,8 @@ main () = {
 }
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
 
     // Record constructor should be mangled with source module prefix
     assert_contains(&out, "'animals_Animal'");
@@ -641,8 +653,8 @@ main () = case Just(42) {
 }
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
 
     // Just(v) compiles to bare value, Nothing compiles to 'undefined' (BEAM convention)
     assert_contains(&out, "'undefined'");
@@ -662,10 +674,10 @@ pub fun main () -> Float
 main () = area (Circle 5.0)
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
+    let main_program = typecheck_source(main_src, &mut checker);
 
     let shapes_out = emit_project_module(&shapes_src, "shapes", &checker);
-    let main_out = emit_project_module(main_src, "main", &checker);
+    let main_out = emit_from_program(&main_program, "main", &checker);
 
     // Both modules should use the same mangled atom
     assert_contains(&shapes_out, "'shapes_Circle'");
@@ -682,10 +694,10 @@ pub fun main () -> Float
 main () = area (Circle 5.0) + area (Rect 3.0 4.0)
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
+    let main_program = typecheck_source(main_src, &mut checker);
 
     let shapes_core = emit_project_module(&shapes_src, "shapes", &checker);
-    let main_core = emit_project_module(main_src, "main", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
 
     let dir = assert_erlc_compiles(&shapes_core, "shapes");
     let main_core_path = dir.join("main.core");
@@ -719,8 +731,8 @@ main () = {
 }
 ";
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
     assert_erlc_compiles(&out, "main");
 }
 
@@ -743,8 +755,8 @@ main () = make_token \"abc\"
     let lib_path = fixtures_root().join("OpaqueLib.dy");
     std::fs::write(&lib_path, lib_src).unwrap();
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
-    let _out = emit_project_module(main_src, "main", &checker);
+    let program = typecheck_source(main_src, &mut checker);
+    let _out = emit_from_program(&program, "main", &checker);
     let _ = std::fs::remove_file(&lib_path);
 }
 
@@ -792,10 +804,10 @@ main () = reveal (make_token \"hello\")
     let lib_path = fixtures_root().join("OpaqueLib3.dy");
     std::fs::write(&lib_path, lib_src).unwrap();
     let mut checker = make_project_checker();
-    typecheck_source(main_src, &mut checker);
+    let main_program = typecheck_source(main_src, &mut checker);
 
     let lib_core = emit_project_module(lib_src, "opaquelib3", &checker);
-    let main_core = emit_project_module(main_src, "main", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
     let _ = std::fs::remove_file(&lib_path);
 
     let dir = assert_erlc_compiles(&lib_core, "opaquelib3");

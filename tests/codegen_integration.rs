@@ -1,7 +1,8 @@
 use dylang::{codegen, elaborate, lexer, parser, typechecker};
 
-/// Load the prelude into a checker.
+/// Load prelude (which imports Std + stdlib) into a checker.
 fn bootstrap() -> typechecker::Checker {
+    let mut checker = typechecker::Checker::new();
     let prelude_src = include_str!("../src/stdlib/prelude.dy");
     let prelude_tokens = lexer::Lexer::new(prelude_src)
         .lex()
@@ -9,7 +10,6 @@ fn bootstrap() -> typechecker::Checker {
     let prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
-    let mut checker = typechecker::Checker::new();
     let result = checker.check_program(&prelude_program);
     assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
     checker
