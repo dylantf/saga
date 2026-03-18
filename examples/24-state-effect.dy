@@ -4,7 +4,7 @@
 # each handler arm's result in a closure that takes the current state.
 
 effect State s {
-  fun get () = s
+  fun get () -> s
   fun put (val: s) -> Unit
 }
 

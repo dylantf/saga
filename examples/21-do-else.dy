@@ -6,13 +6,6 @@
 
 type Result a e { Ok(a) | Err(e) }
 
-impl Show for Result a e where {a: Show, e: Show} {
-  show r = case r {
-    Ok(x)  -> $"Ok({x})"
-    Err(e) -> $"Err({e})"
-  }
-}
-
 # Simulated fallible operations
 fun find_user (id: Int) -> Result String String
 find_user id =
@@ -59,13 +52,6 @@ score_or_zero id =
 
 # Mixed bail types: each binding bails with a different constructor.
 type Maybe a { Just(a) | Nothing }
-
-impl Show for Maybe a where {a: Show} {
-  show m = case m {
-    Just(x) -> $"Just({x})"
-    Nothing -> "Nothing"
-  }
-}
 
 fun active_users () -> Maybe (List String)
 active_users () = Just(["alice", "bob"])

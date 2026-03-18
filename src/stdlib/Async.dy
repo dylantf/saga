@@ -10,7 +10,7 @@ pub effect Async {
 }
 
 pub handler async_handler for Async needs {Process, Actor a} {
-  async f -> {
+  async f = {
     let caller = self! ()
     let pid = spawn! (fun () -> {
       let result = f ()
@@ -18,7 +18,7 @@ pub handler async_handler for Async needs {Process, Actor a} {
     })
     resume (Future pid)
   }
-  await future -> {
+  await future = {
     receive {
       value -> resume value
     }

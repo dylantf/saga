@@ -28,6 +28,7 @@ handler sync_actor for Process, Actor msg {
     resume (Pid 0)
   }
   self () = resume (Pid 0)
+  send () = ()
 }
 
 fun run () -> Int needs {Process, Actor Int}
@@ -41,6 +42,8 @@ run () = {
 }
 
 main () = {
-  let result = run () with sync_actor
-  print $"5 squared = {result}"
+  # let result = run () with sync_actor
+  # print $"5 squared = {result}"
+
+  print "No-op, try to reimplement this at some point. Needs receive handling I think"
 }
