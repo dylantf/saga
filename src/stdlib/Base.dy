@@ -12,6 +12,11 @@ pub trait Ord a where {a: Eq} {
   fun compare (x: a) (y: a) -> Ordering
 }
 
+pub trait Enum a {
+  fun to_enum (x: a) -> Int
+  fun from_enum (n: Int) -> a
+}
+
 impl Ord for Int {
   compare x y = if x < y then Lt else if x > y then Gt else Eq
 }

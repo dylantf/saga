@@ -53,7 +53,8 @@ fn generate_derive(
         "Show" => Some(derive_show(type_name, type_params, variants, span)),
         "Eq" => Some(derive_marker_trait("Eq", type_name, type_params, span)),
         "Ord" => Some(derive_ord(type_name, type_params, variants, span)),
-        other => panic!("cannot derive `{other}` (only Show, Eq, and Ord are supported)"),
+        "Enum" => Some(derive_enum(type_name, variants, span)),
+        other => panic!("cannot derive `{other}` (only Show, Eq, Ord, and Enum are supported)"),
     }
 }
 
@@ -488,6 +489,85 @@ fn derive_marker_trait(
         where_clause,
         needs: vec![],
         methods: vec![],
+        span,
+    }
+}
+
+/// Generate `impl Enum for T { to_enum x = case x { ... }; from_enum n = case n { ... } }`
+/// Only valid for types with all nullary constructors.
+fn derive_enum(
+    type_name: &str,
+    variants: &[TypeConstructor],
+    span: Span,
+) -> Decl {
+    for v in variants {
+        if !v.fields.is_empty() {
+            panic!(
+                "cannot derive Enum for `{}`: constructor `{}` has fields (Enum requires all nullary constructors)",
+                type_name, v.name
+            );
+        }
+    }
+
+    // to_enum x = case x { Red -> 0 | Green -> 1 | Blue -> 2 }
+    let to_enum_param = "__val".to_string();
+    let to_enum_body = Expr::synth(span, ExprKind::Case {
+        scrutinee: Box::new(Expr::synth(span, ExprKind::Var { name: to_enum_param.clone() })),
+        arms: variants.iter().enumerate().map(|(i, v)| {
+            CaseArm {
+                pattern: Pat::Constructor { name: v.name.clone(), args: vec![], span },
+                guard: None,
+                body: Expr::synth(span, ExprKind::Lit { value: Lit::Int(i as i64) }),
+                span,
+            }
+        }).collect(),
+    });
+
+    // from_enum n = case n { 0 -> Red | 1 -> Green | 2 -> Blue | _ -> panic "invalid enum index" }
+    let from_enum_param = "__n".to_string();
+    let mut from_enum_arms: Vec<CaseArm> = variants.iter().enumerate().map(|(i, v)| {
+        CaseArm {
+            pattern: Pat::Lit { value: Lit::Int(i as i64), span },
+            guard: None,
+            body: Expr::synth(span, ExprKind::Constructor { name: v.name.clone() }),
+            span,
+        }
+    }).collect();
+    // Wildcard arm: panic on invalid index
+    from_enum_arms.push(CaseArm {
+        pattern: Pat::Wildcard { span },
+        guard: None,
+        body: Expr::synth(span, ExprKind::App {
+            func: Box::new(Expr::synth(span, ExprKind::Var { name: "panic".into() })),
+            arg: Box::new(Expr::synth(span, ExprKind::Lit {
+                value: Lit::String(format!("invalid enum index for {}", type_name)),
+            })),
+        }),
+        span,
+    });
+    let from_enum_body = Expr::synth(span, ExprKind::Case {
+        scrutinee: Box::new(Expr::synth(span, ExprKind::Var { name: from_enum_param.clone() })),
+        arms: from_enum_arms,
+    });
+
+    Decl::ImplDef {
+        trait_name: "Enum".into(),
+        target_type: type_name.into(),
+        type_params: vec![],
+        where_clause: vec![],
+        needs: vec![],
+        methods: vec![
+            (
+                "to_enum".into(),
+                vec![Pat::Var { name: to_enum_param, span }],
+                to_enum_body,
+            ),
+            (
+                "from_enum".into(),
+                vec![Pat::Var { name: from_enum_param, span }],
+                from_enum_body,
+            ),
+        ],
         span,
     }
 }
