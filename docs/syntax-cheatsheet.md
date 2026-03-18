@@ -328,7 +328,7 @@ Database.get! key
 ```
 # Named handler
 handler console for Log {
-  log msg -> {
+  log msg = {
     print msg
     resume ()
   }
@@ -336,7 +336,7 @@ handler console for Log {
 
 # Handler that uses other effects
 handler timed_log for Log needs {Clock} {
-  log msg -> {
+  log msg = {
     let t = now! ()
     print ($"{t}: {msg}")
     resume ()
@@ -345,14 +345,14 @@ handler timed_log for Log needs {Clock} {
 
 # Aborting handler (no resume)
 handler to_result for Fail {
-  fail reason -> Err(reason)
-  return value -> Ok(value)   # intercept success
+  fail reason = Err(reason)
+  return value = Ok(value)   # intercept success
 }
 
 # Inline handler
 result = compute () with {
-  log msg -> { print msg; resume () },
-  fail reason -> Err(reason),
+  log msg = { print msg; resume () },
+  fail reason = Err(reason),
 }
 
 # Named handler attachment
@@ -364,7 +364,7 @@ main () = {
 } with {
   console,
   to_result,
-  fail reason -> { print reason; resume () },
+  fail reason = { print reason; resume () },
 }
 ```
 

@@ -6,11 +6,13 @@
 /// - `build_op_handler_fun`: building per-op CPS handler functions
 /// - `build_beam_native_op_fun`: synthesizing handlers for BEAM-native ops
 /// - `resolve_handler`: resolving named/inline handlers to arms
+use std::collections::HashSet;
+
 use crate::ast::{Expr, Handler, HandlerArm};
 use crate::codegen::cerl::{CExpr, CLit};
 
-use super::util::{collect_fun_call, core_var};
 use super::Lowerer;
+use super::util::{collect_fun_call, core_var};
 
 impl<'a> Lowerer<'a> {
     /// Lower an effect call: `op! args`.
@@ -70,12 +72,17 @@ impl<'a> Lowerer<'a> {
             call_args.push(CExpr::Var(v));
         }
 
-        // Append continuation
-        let k = continuation.unwrap_or_else(|| {
-            // Identity continuation for standalone effect calls
-            let param = self.fresh();
-            CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)))
-        });
+        // Append continuation. If the handler arm never calls resume, pass a cheap atom
+        // instead of a real closure so Erlang doesn't warn about a constructed-but-unused term.
+        let k = if self.no_resume_ops.contains(key.as_str()) {
+            CExpr::Lit(CLit::Atom("no_resume".to_string()))
+        } else {
+            continuation.unwrap_or_else(|| {
+                // Identity continuation for standalone effect calls
+                let param = self.fresh();
+                CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)))
+            })
+        };
         call_args.push(k);
 
         let apply = CExpr::Apply(Box::new(CExpr::Var(handler_var)), call_args);
@@ -111,9 +118,7 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|| panic!("unknown BEAM-native op: {}", op_name));
 
         let k_var = self.fresh();
-        let param_vars: Vec<String> = (0..param_count)
-            .map(|i| format!("_HArg{}", i))
-            .collect();
+        let param_vars: Vec<String> = (0..param_count).map(|i| format!("_HArg{}", i)).collect();
 
         let mut fun_params: Vec<String> = param_vars.clone();
         fun_params.push(k_var.clone());
@@ -160,7 +165,7 @@ impl<'a> Lowerer<'a> {
     pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
         // Collect effects from BEAM-native handlers in this `with` block.
         let beam_native_effects: std::collections::HashSet<String> = match handler {
-            Handler::Named(name) if self.is_beam_native_handler(name) => {
+            Handler::Named(name, _) if self.is_beam_native_handler(name) => {
                 self.handler_defs[name].effects.iter().cloned().collect()
             }
             Handler::Inline { named, .. } => named
@@ -189,18 +194,25 @@ impl<'a> Lowerer<'a> {
         // can reference sibling handlers via closure capture),
         // then build the handler functions.
         let saved_handler_params = self.current_handler_params.clone();
+        let saved_no_resume_ops = self.no_resume_ops.clone();
 
         // Pass 1: register all handler param variables (one per op)
         let mut op_vars: Vec<(String, String, String)> = Vec::new(); // (effect, op, var_name)
         for (eff, op) in &handler_ops {
             let var_name = Self::handler_param_name(eff, op);
             let key = format!("{}.{}", eff, op);
-            self.current_handler_params
-                .insert(key, var_name.clone());
+            self.current_handler_params.insert(key.clone(), var_name.clone());
+            // Track arms that never call resume so call sites can skip building a real continuation.
+            if let Some(arm) = arms_by_op.get(op.as_str())
+                && !arm.body.contains_resume()
+            {
+                self.no_resume_ops.insert(key);
+            }
             op_vars.push((eff.clone(), op.clone(), var_name));
         }
 
-        // Pass 2: build handler functions.
+        // Pass 2: build ALL handler functions unconditionally.
+        // We'll prune unreachable ones after lowering the body.
         // BEAM-native ops are emitted first since they're self-contained
         // (direct BEAM calls, no closures). CPS handlers may reference them
         // (e.g. async_handler's body calls spawn!/send!), so they must come after.
@@ -213,20 +225,23 @@ impl<'a> Lowerer<'a> {
         }
         for (eff, op, var_name) in &op_vars {
             if !beam_native_effects.contains(eff) {
-                let handler_fun = if let Some(arm) = arms_by_op.get(op.as_str()) {
-                    self.build_op_handler_fun(arm)
+                if let Some(arm) = arms_by_op.get(op.as_str()) {
+                    let handler_fun = self.build_op_handler_fun(arm);
+                    handler_bindings.push((var_name.clone(), handler_fun));
                 } else {
-                    // No handler arm for this op -- passthrough (call K with unit)
+                    // No handler arm for this op -- passthrough (call K with unit).
                     let k_param = self.fresh();
-                    CExpr::Fun(
-                        vec![k_param.clone()],
-                        Box::new(CExpr::Apply(
-                            Box::new(CExpr::Var(k_param)),
-                            vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
-                        )),
-                    )
-                };
-                handler_bindings.push((var_name.clone(), handler_fun));
+                    handler_bindings.push((
+                        var_name.clone(),
+                        CExpr::Fun(
+                            vec![k_param.clone()],
+                            Box::new(CExpr::Apply(
+                                Box::new(CExpr::Var(k_param)),
+                                vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
+                            )),
+                        ),
+                    ));
+                }
             }
         }
 
@@ -284,9 +299,33 @@ impl<'a> Lowerer<'a> {
         };
 
         self.current_handler_params = saved_handler_params;
+        self.no_resume_ops = saved_no_resume_ops;
         self.current_return_k = saved_return_k;
 
-        // Wrap with handler bindings
+        // Post-hoc reachability: scan the lowered body for _Handle_* references,
+        // then transitively close through handler binding values.
+        let mut needed: HashSet<String> = HashSet::new();
+        result.collect_handle_refs(&mut needed);
+        // Transitive closure: handler arms can reference other handler vars
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (var, val) in &handler_bindings {
+                if needed.contains(var) {
+                    let mut refs = HashSet::new();
+                    val.collect_handle_refs(&mut refs);
+                    for r in refs {
+                        if needed.insert(r) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Only emit bindings that are actually referenced
+        handler_bindings.retain(|(var, _)| needed.contains(var));
+
         handler_bindings
             .into_iter()
             .rev()
@@ -300,7 +339,11 @@ impl<'a> Lowerer<'a> {
     /// Produces: `fun (Arg0, ..., ArgN, K) -> body`
     /// Each op gets its own function with natural arity.
     fn build_op_handler_fun(&mut self, arm: &HandlerArm) -> CExpr {
-        let k_var = self.fresh();
+        // If resume is never called, use `_` (Core Erlang wildcard) so the compiler
+        // doesn't warn about the unused continuation parameter. Safe because
+        // `contains_resume()` being false guarantees no Resume node exists in the arm
+        // body, so `current_handler_k` ("<_>") is never read during lowering.
+        let k_var = if arm.body.contains_resume() { self.fresh() } else { "_".to_string() };
         let param_vars: Vec<String> = (0..arm.params.len())
             .map(|i| format!("_HArg{}", i))
             .collect();
@@ -332,7 +375,7 @@ impl<'a> Lowerer<'a> {
         handler: &Handler,
     ) -> (Vec<HandlerArm>, Option<Box<HandlerArm>>, Vec<String>) {
         match handler {
-            Handler::Named(name) => {
+            Handler::Named(name, _) => {
                 let info = self
                     .handler_defs
                     .get(name)
@@ -380,3 +423,4 @@ impl<'a> Lowerer<'a> {
         }
     }
 }
+

@@ -11,4 +11,6 @@ main () = {
   let pair = (42, "hello")
   print (fst pair)
   print (snd pair)
+
+  print (multiply! 2 3) with math_handler
 }

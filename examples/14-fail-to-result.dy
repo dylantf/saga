@@ -12,8 +12,8 @@ effect Fail {
 fun try (computation: () -> a needs {Fail}) -> Result a String
 try computation = {
   computation () with {
-    fail msg -> Err msg
-    return value -> Ok value
+    fail msg = Err msg
+    return value = Ok value
   }
 }
 

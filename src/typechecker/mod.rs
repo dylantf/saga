@@ -595,6 +595,10 @@ pub struct EffectDefInfo {
     /// Fresh var IDs for the effect's type parameters (empty for non-parameterized effects)
     pub type_params: Vec<u32>,
     pub ops: Vec<EffectOpSig>,
+    /// op_name -> span of the op declaration in the effect block (for LSP go-to-def)
+    pub op_spans: HashMap<String, Span>,
+    /// Which module this effect is defined in (None = main file).
+    pub source_module: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -603,6 +607,10 @@ pub struct HandlerInfo {
     pub effects: Vec<std::string::String>,
     /// Return clause: (param_var_id, body_type). Used to compute the `with` expression type.
     pub return_type: Option<(u32, Type)>,
+    /// op_name -> span of the handler arm (for LSP go-to-def and with-stack)
+    pub arm_spans: HashMap<String, Span>,
+    /// Which module this handler is defined in (None = main file).
+    pub source_module: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -693,6 +701,15 @@ pub struct Checker {
     /// When true, function annotations without matching bodies are allowed
     /// (used for builtin stdlib modules where implementations are in Rust).
     pub(crate) allow_bodyless_annotations: bool,
+    /// Set to the module name when checking a module file; None for the main file.
+    pub(crate) current_module: Option<String>,
+    /// Stack of (op_name -> (arm_span, source_module)) maps for nested `with` expressions.
+    /// Innermost handler is last. Used to record which arm handles each effect call.
+    pub(crate) with_arm_stacks: Vec<HashMap<String, (Span, Option<String>)>>,
+    /// Maps effect call span -> (handler arm span, source module) (for LSP go-to-def, level 1).
+    pub(crate) effect_call_targets: HashMap<Span, (Span, Option<String>)>,
+    /// Maps handler arm span -> (effect op definition span, source module) (for LSP go-to-def, level 2).
+    pub(crate) handler_arm_targets: HashMap<Span, (Span, Option<String>)>,
 }
 
 /// Module system state: caches, project root, and import tracking.
@@ -759,6 +776,10 @@ impl Checker {
             collected_diagnostics: Vec::new(),
             type_at_span: HashMap::new(),
             allow_bodyless_annotations: false,
+            current_module: None,
+            with_arm_stacks: Vec::new(),
+            effect_call_targets: HashMap::new(),
+            handler_arm_targets: HashMap::new(),
         };
         checker.register_builtins();
         checker

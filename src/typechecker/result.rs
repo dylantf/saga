@@ -38,6 +38,10 @@ pub struct CheckResult {
     /// Per-span type information for LSP hover.
     /// Types may contain unresolved variables; use `type_at()` to get resolved types.
     pub type_at_span: HashMap<crate::token::Span, super::Type>,
+    /// Maps handler arm span -> (effect op definition span, source module) (LSP go-to-def, level 2).
+    pub handler_arm_targets: HashMap<crate::token::Span, (crate::token::Span, Option<String>)>,
+    /// Maps effect call span -> (handler arm span, source module) (LSP go-to-def, level 1).
+    pub effect_call_targets: HashMap<crate::token::Span, (crate::token::Span, Option<String>)>,
 }
 
 impl CheckResult {
@@ -108,6 +112,8 @@ impl Checker {
             handlers: self.handlers.clone(),
             fun_effects: self.fun_effects.clone(),
             type_at_span: self.type_at_span.clone(),
+            handler_arm_targets: self.handler_arm_targets.clone(),
+            effect_call_targets: self.effect_call_targets.clone(),
         }
     }
 }

@@ -4,16 +4,16 @@
 # each handler arm's result in a closure that takes the current state.
 
 effect State s {
-  fun get () -> s
+  fun get () = s
   fun put (val: s) -> Unit
 }
 
 fun run_state (init: s) (f: () -> a needs {State s}) -> (a, s)
 run_state init f = {
   let state_fn = f () with {
-    get () -> fun s -> (resume s) s
-    put new_s -> fun _ -> (resume ()) new_s
-    return value -> fun s -> (value, s)
+    get () = fun s -> (resume s) s
+    put new_s = fun _ -> (resume ()) new_s
+    return value = fun s -> (value, s)
   }
   state_fn init
 }

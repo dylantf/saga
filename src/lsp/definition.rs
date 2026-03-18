@@ -104,8 +104,8 @@ fn find_in_decl(decl: &Decl, name: &str) -> Option<Span> {
         }
 
         Decl::HandlerDef {
-            name: h_name, span, ..
-        } if h_name == name => Some(*span),
+            name: h_name, name_span, ..
+        } if h_name == name => Some(*name_span),
 
         Decl::TraitDef {
             name: t_name, span, ..
@@ -158,12 +158,7 @@ fn find_local_def(expr: &Expr, name: &str) -> Option<Span> {
 
 fn find_def_in_stmt(stmt: &Stmt, name: &str) -> Option<Span> {
     match stmt {
-        Stmt::Let { pattern, span, .. } => {
-            if pat_defines(pattern, name) {
-                return Some(*span);
-            }
-            None
-        }
+        Stmt::Let { pattern, .. } => find_def_in_pat(pattern, name),
         Stmt::LetFun {
             name: fn_name,
             span,
@@ -173,22 +168,6 @@ fn find_def_in_stmt(stmt: &Stmt, name: &str) -> Option<Span> {
     }
 }
 
-fn pat_defines(pat: &Pat, name: &str) -> bool {
-    match pat {
-        Pat::Var { name: v, .. } => v == name,
-        Pat::Constructor { args, .. } => args.iter().any(|a| pat_defines(a, name)),
-        Pat::Tuple { elements, .. } => elements.iter().any(|e| pat_defines(e, name)),
-        Pat::Record { fields, .. } => fields.iter().any(|(field_name, alias)| {
-            if let Some(pat) = alias {
-                pat_defines(pat, name)
-            } else {
-                field_name == name
-            }
-        }),
-        Pat::StringPrefix { rest, .. } => pat_defines(rest, name),
-        _ => false,
-    }
-}
 
 fn find_def_in_pat(pat: &Pat, name: &str) -> Option<Span> {
     match pat {

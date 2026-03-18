@@ -282,6 +282,7 @@ impl Checker {
         mod_checker.modules.codegen_info = self.modules.codegen_info.clone();
         mod_checker.modules.programs = self.modules.programs.clone();
         mod_checker.modules.map = self.modules.map.clone();
+        mod_checker.current_module = Some(module_name.clone());
         mod_checker.check_program_inner(&program).map_err(|errs| {
             Diagnostic::error_at(
                 span,

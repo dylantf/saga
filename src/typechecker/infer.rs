@@ -291,6 +291,14 @@ impl Checker {
                     self.current_effects.insert(effect_name);
                 }
 
+                // Record call site -> handler arm for LSP go-to-def (level 1).
+                // Scan the with-stack innermost-first; first match wins (innermost shadows outer).
+                if let Some((arm_span, arm_module)) =
+                    self.with_arm_stacks.iter().rev().find_map(|map| map.get(name.as_str()))
+                {
+                    self.effect_call_targets.insert(*span, (*arm_span, arm_module.clone()));
+                }
+
                 // Build curried function type: param1 -> param2 -> ... -> return_type
                 let mut ty = op_sig.return_type.clone();
                 if op_sig.params.is_empty() {
@@ -304,7 +312,7 @@ impl Checker {
                 Ok(ty)
             }
 
-            Expr::With { expr, handler, .. } => self.infer_with(expr, handler),
+            Expr::With { expr, handler, span } => self.infer_with(expr, handler, *span),
 
             Expr::Resume { value, span } => {
                 let val_ty = self.infer_expr(value)?;
@@ -1133,9 +1141,49 @@ impl Checker {
         &mut self,
         expr: &Expr,
         handler: &ast::Handler,
+        _with_span: Span,
     ) -> Result<Type, Diagnostic> {
         let handled = self.handler_handled_effects(handler);
 
+        // Build op_name -> (arm_span, source_module) map for this handler and push onto the stack.
+        // This lets EffectCall inference record which arm handles each call (for LSP go-to-def).
+        let arm_stack_entry: std::collections::HashMap<String, (Span, Option<String>)> = match handler {
+            ast::Handler::Named(name, _) => self
+                .handlers
+                .get(name)
+                .map(|h| {
+                    let src = h.source_module.clone();
+                    h.arm_spans.iter().map(|(op, &span)| (op.clone(), (span, src.clone()))).collect()
+                })
+                .unwrap_or_default(),
+            ast::Handler::Inline { named, arms, .. } => {
+                let mut map = std::collections::HashMap::new();
+                for n in named {
+                    if let Some(h) = self.handlers.get(n) {
+                        let src = h.source_module.clone();
+                        map.extend(h.arm_spans.iter().map(|(op, &span)| (op.clone(), (span, src.clone()))));
+                    }
+                }
+                for arm in arms {
+                    map.insert(arm.op_name.clone(), (arm.span, None));
+                }
+                map
+            }
+        };
+        self.with_arm_stacks.push(arm_stack_entry);
+
+        let ty = self.infer_with_inner(expr, handler, handled)?;
+        self.with_arm_stacks.pop();
+
+        Ok(ty)
+    }
+
+    fn infer_with_inner(
+        &mut self,
+        expr: &Expr,
+        handler: &ast::Handler,
+        handled: HashSet<String>,
+    ) -> Result<Type, Diagnostic> {
         // Infer the inner expression, tracking its effects separately
         let saved_effects = std::mem::take(&mut self.current_effects);
         let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
@@ -1150,7 +1198,7 @@ impl Checker {
 
         let with_span = expr.span();
         match handler {
-            ast::Handler::Named(name) => {
+            ast::Handler::Named(name, _) => {
                 if !self.handlers.contains_key(name) && self.env.get(name).is_none() {
                     return Err(Diagnostic::error_at(
                         with_span,
@@ -1160,8 +1208,6 @@ impl Checker {
                 if let Some((param_var_id, ret_ty)) =
                     self.handlers.get(name).and_then(|h| h.return_type.clone())
                 {
-                    // Unify the param var with the computation's result type so the
-                    // stored return type resolves correctly.
                     self.unify_at(&Type::Var(param_var_id), &expr_ty, with_span)?;
                     Ok(self.sub.apply(&ret_ty))
                 } else {
@@ -1182,10 +1228,6 @@ impl Checker {
                     }
                 }
 
-                // Infer arm bodies with effect tracking isolated, then subtract
-                // handled effects. This way, if an arm body uses an effect that
-                // is handled by a sibling handler in the same `with`, it doesn't
-                // propagate to the enclosing function.
                 let saved_effects_arms = std::mem::take(&mut self.current_effects);
 
                 for arm in arms {
@@ -1246,7 +1288,6 @@ impl Checker {
                     let ret_ty = self.infer_expr(&ret_arm.body)?;
                     self.env = saved_env;
 
-                    // Subtract handled effects from arm/return clause bodies
                     for eff in &handled {
                         self.current_effects.remove(eff);
                     }
@@ -1256,7 +1297,6 @@ impl Checker {
 
                     Ok(ret_ty)
                 } else {
-                    // Subtract handled effects from arm bodies
                     for eff in &handled {
                         self.current_effects.remove(eff);
                     }
@@ -1289,7 +1329,7 @@ impl Checker {
     pub(crate) fn handler_handled_effects(&self, handler: &ast::Handler) -> HashSet<String> {
         let mut handled = HashSet::new();
         match handler {
-            ast::Handler::Named(name) => {
+            ast::Handler::Named(name, _) => {
                 if let Some(info) = self.handlers.get(name) {
                     handled.extend(info.effects.iter().cloned());
                 }

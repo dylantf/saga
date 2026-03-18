@@ -13,12 +13,12 @@ safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 
 handler to_result for Fail String {
-  fail msg -> $"Error: {msg}"
-  return value -> show value
+  fail msg = $"Error: {msg}"
+  return value = show value
 }
 
 handler to_default for Fail String {
-  fail _ -> 0
+  fail _ = 0
 }
 
 fun test_result (x: Int) (y: Int) -> String

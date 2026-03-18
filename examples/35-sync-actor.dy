@@ -23,11 +23,11 @@ worker () = {
 # spawn just calls the function immediately and returns a dummy pid.
 # send stores the message for the next receive.
 handler sync_actor for Process, Actor msg {
-  spawn f -> {
+  spawn f = {
     f ()
     resume (Pid 0)
   }
-  self () -> resume (Pid 0)
+  self () = resume (Pid 0)
 }
 
 fun run () -> Int needs {Process, Actor Int}

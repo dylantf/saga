@@ -478,6 +478,7 @@ pub fn normalize_effects(program: &Program) -> Program {
             Decl::HandlerDef {
                 public,
                 name,
+                name_span,
                 effects,
                 needs,
                 arms,
@@ -504,6 +505,7 @@ pub fn normalize_effects(program: &Program) -> Program {
                 Decl::HandlerDef {
                     public: *public,
                     name: name.clone(),
+                    name_span: *name_span,
                     effects: effects.clone(),
                     needs: needs.clone(),
                     arms: new_arms,

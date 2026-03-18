@@ -164,7 +164,28 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
             None
         }
         Expr::FieldAccess { expr, .. } => find_in_expr(expr, offset),
-        Expr::With { expr, .. } => find_in_expr(expr, offset),
+        Expr::With { expr, handler, .. } => {
+            match handler.as_ref() {
+                dylang::ast::Handler::Named(name, span) if contains(span, offset) => {
+                    return Some((name.clone(), *span));
+                }
+                dylang::ast::Handler::Inline { arms, return_clause, .. } => {
+                    for arm in arms.iter().chain(return_clause.iter().map(|r| r.as_ref())) {
+                        if contains(&arm.span, offset) {
+                            let body_span = arm.body.span();
+                            if contains(&body_span, offset) {
+                                return find_in_expr(&arm.body, offset);
+                            }
+                            // Cursor is on the op name / params, before the arrow.
+                            // Return the arm span so goto-def can look it up in handler_arm_targets.
+                            return Some((arm.op_name.clone(), arm.span));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            find_in_expr(expr, offset)
+        }
         Expr::Resume { value, .. } => find_in_expr(value, offset),
         Expr::EffectCall {
             name, span, args, ..

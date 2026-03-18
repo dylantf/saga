@@ -315,6 +315,7 @@ impl Elaborator {
                 Decl::HandlerDef {
                     public,
                     name,
+                    name_span,
                     effects,
                     needs,
                     arms,
@@ -341,6 +342,7 @@ impl Elaborator {
                     output.push(Decl::HandlerDef {
                         public: *public,
                         name: name.clone(),
+                        name_span: *name_span,
                         effects: effects.clone(),
                         needs: needs.clone(),
                         arms: elab_arms,
@@ -787,7 +789,7 @@ impl Elaborator {
 
     fn elaborate_handler(&mut self, handler: &Handler) -> Handler {
         match handler {
-            Handler::Named(_) => handler.clone(),
+            Handler::Named(_, _) => handler.clone(),
             Handler::Inline {
                 named,
                 arms,
