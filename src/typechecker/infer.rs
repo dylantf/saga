@@ -10,6 +10,7 @@ impl Checker {
 
     pub fn infer_expr(&mut self, expr: &Expr) -> Result<Type, Diagnostic> {
         let span = expr.span;
+        let node_id = expr.id;
         match &expr.kind {
             ExprKind::Lit { value, .. } => Ok(match value {
                 Lit::Int(_) => Type::int(),
@@ -45,7 +46,7 @@ impl Checker {
                     }
                     let (mut ty, constraints) = self.instantiate(&scheme);
                     for (trait_name, trait_ty) in constraints {
-                        self.pending_constraints.push((trait_name, trait_ty, span));
+                        self.pending_constraints.push((trait_name, trait_ty, span, node_id));
                     }
                     // If this function has effect type constraints, convert the
                     // outermost Arrow to EffArrow so spawn! can link type args.
@@ -124,7 +125,7 @@ impl Checker {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::IntDiv => {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.pending_constraints
-                            .push(("Num".into(), left_ty.clone(), span));
+                            .push(("Num".into(), left_ty.clone(), span, node_id));
                         Ok(left_ty)
                     }
                     BinOp::Mod => {
@@ -135,13 +136,13 @@ impl Checker {
                     BinOp::Eq | BinOp::NotEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.pending_constraints
-                            .push(("Eq".into(), left_ty.clone(), span));
+                            .push(("Eq".into(), left_ty.clone(), span, node_id));
                         Ok(Type::bool())
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.pending_constraints
-                            .push(("Ord".into(), left_ty.clone(), span));
+                            .push(("Ord".into(), left_ty.clone(), span, node_id));
                         Ok(Type::bool())
                     }
                     BinOp::And | BinOp::Or => {
@@ -160,7 +161,7 @@ impl Checker {
             ExprKind::UnaryMinus { expr: inner, .. } => {
                 let ty = self.infer_expr(inner)?;
                 self.pending_constraints
-                    .push(("Num".into(), ty.clone(), span));
+                    .push(("Num".into(), ty.clone(), span, node_id));
                 Ok(ty)
             }
 
@@ -337,7 +338,7 @@ impl Checker {
                     Some(scheme) => {
                         let (ty, constraints) = self.instantiate(&scheme);
                         for (trait_name, trait_ty) in constraints {
-                            self.pending_constraints.push((trait_name, trait_ty, span));
+                            self.pending_constraints.push((trait_name, trait_ty, span, node_id));
                         }
                         Ok(ty)
                     }

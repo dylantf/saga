@@ -635,7 +635,7 @@ pub struct ImplInfo {
 /// Used by the elaboration pass to insert dictionary arguments.
 #[derive(Debug, Clone)]
 pub struct TraitEvidence {
-    pub span: Span,
+    pub node_id: crate::ast::NodeId,
     pub trait_name: String,
     /// The concrete type that satisfied the constraint.
     /// None if resolved via a where-bound type variable (polymorphic passthrough).
@@ -676,8 +676,8 @@ pub struct Checker {
     pub(crate) traits: HashMap<String, TraitInfo>,
     /// Impl registry: (trait_name, target_type) -> impl info
     pub(crate) trait_impls: HashMap<(String, String), ImplInfo>,
-    /// Pending trait constraints to check: (trait_name, type, span)
-    pub(crate) pending_constraints: Vec<(String, Type, Span)>,
+    /// Pending trait constraints to check: (trait_name, type, span_for_errors, node_id)
+    pub(crate) pending_constraints: Vec<(String, Type, Span, crate::ast::NodeId)>,
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
     /// Tracks which records are still candidates for an unresolved type variable based on
     /// the intersection of all fields accessed on it. Checked at end of each function body.

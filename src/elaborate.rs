@@ -34,8 +34,8 @@ struct Elaborator {
     dict_names: HashMap<(String, String), String>,
     /// trait_name -> TraitInfo
     traits: HashMap<String, TraitInfo>,
-    /// Evidence from typechecking: span -> Vec<TraitEvidence>
-    evidence_by_span: HashMap<Span, Vec<TraitEvidence>>,
+    /// Evidence from typechecking: node_id -> Vec<TraitEvidence>
+    evidence_by_node: HashMap<crate::ast::NodeId, Vec<TraitEvidence>>,
     /// The name of the function currently being elaborated (for dict param lookup)
     current_fun: Option<String>,
     /// Current function's dict param names: trait_name -> param_name
@@ -71,11 +71,11 @@ impl Elaborator {
             }
         }
 
-        // Build evidence lookup by span
-        let mut evidence_by_span: HashMap<Span, Vec<TraitEvidence>> = HashMap::new();
+        // Build evidence lookup by node ID
+        let mut evidence_by_node: HashMap<crate::ast::NodeId, Vec<TraitEvidence>> = HashMap::new();
         for ev in &result.evidence {
-            evidence_by_span
-                .entry(ev.span)
+            evidence_by_node
+                .entry(ev.node_id)
                 .or_default()
                 .push(ev.clone());
         }
@@ -104,7 +104,7 @@ impl Elaborator {
             fun_dict_params: inferred_dict_params,
             dict_names,
             traits: result.traits.clone(),
-            evidence_by_span,
+            evidence_by_node,
             current_fun: None,
             current_dict_params: HashMap::new(),
             current_dict_params_by_var: HashMap::new(),
@@ -360,6 +360,7 @@ impl Elaborator {
 
     fn elaborate_expr(&mut self, expr: &Expr) -> Expr {
         let span = expr.span;
+        let node_id = expr.id;
         match &expr.kind {
             // Trait method reference: look up evidence to determine dispatch
             ExprKind::Var { name } => {
@@ -367,14 +368,14 @@ impl Elaborator {
                     // This is a trait method name used as a bare value (not
                     // directly applied). Extract the method from the dict so
                     // it can be passed around as a first-class function.
-                    if let Some(dict_expr) = self.resolve_dict(&trait_name, span) {
+                    if let Some(dict_expr) = self.resolve_dict(&trait_name, node_id, span) {
                         return Expr::synth(span, ExprKind::DictMethodAccess {
                             dict: Box::new(dict_expr),
                             method_index,
                         });
                     }
                     // Tuple Show: inline expansion (no dict constructor for tuples)
-                    if let Some(show_lambda) = self.try_inline_tuple_show(&trait_name, span) {
+                    if let Some(show_lambda) = self.try_inline_tuple_show(&trait_name, node_id, span) {
                         return show_lambda;
                     }
                     // No evidence resolved -- this trait method will be emitted as a
@@ -393,7 +394,7 @@ impl Elaborator {
                 if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
                     let mut result: Expr = expr.clone();
                     for (trait_name, _type_var) in &dict_param_info {
-                        if let Some(dict_expr) = self.resolve_dict(trait_name, span) {
+                        if let Some(dict_expr) = self.resolve_dict(trait_name, node_id, span) {
                             result = Expr::synth(span, ExprKind::App {
                                 func: Box::new(result),
                                 arg: Box::new(dict_expr),
@@ -414,9 +415,9 @@ impl Elaborator {
                     // extract method from dict then apply normally.
                     if let Some((trait_name, method_index)) = self.trait_methods.get(name).cloned()
                     {
-                        // Use the Var's span for evidence lookup (that's where
-                        // the typechecker recorded it), not the App's span.
-                        if let Some(dict_expr) = self.resolve_dict(&trait_name, func.span) {
+                        // Use the Var's node ID for evidence lookup (that's where
+                        // the typechecker recorded it), not the App's node ID.
+                        if let Some(dict_expr) = self.resolve_dict(&trait_name, func.id, func.span) {
                             let elab_arg = self.elaborate_expr(arg);
                             let method = Expr::synth(func.span, ExprKind::DictMethodAccess {
                                 dict: Box::new(dict_expr),
@@ -429,7 +430,7 @@ impl Elaborator {
                         }
                         // Tuple Show: inline expansion directly applied to the arg
                         if let Some(show_lambda) =
-                            self.try_inline_tuple_show(&trait_name, func.span)
+                            self.try_inline_tuple_show(&trait_name, func.id, func.span)
                         {
                             let elab_arg = self.elaborate_expr(arg);
                             return Expr::synth(span, ExprKind::App {
@@ -449,7 +450,7 @@ impl Elaborator {
                         for (trait_name, _type_var) in &dict_param_info {
                             // Use the Var's span for evidence lookup (that's where
                             // the typechecker recorded it), not the App's span.
-                            if let Some(dict_expr) = self.resolve_dict(trait_name, func.span) {
+                            if let Some(dict_expr) = self.resolve_dict(trait_name, func.id, func.span) {
                                 result = Expr::synth(span, ExprKind::App {
                                     func: Box::new(result),
                                     arg: Box::new(dict_expr),
@@ -470,7 +471,7 @@ impl Elaborator {
                     // Trait method via qualified name
                     if let Some((trait_name, method_index)) =
                         self.trait_methods.get(&qualified).cloned()
-                        && let Some(dict_expr) = self.resolve_dict(&trait_name, func.span)
+                        && let Some(dict_expr) = self.resolve_dict(&trait_name, func.id, func.span)
                     {
                         let elab_arg = self.elaborate_expr(arg);
                         let method = Expr::synth(func.span, ExprKind::DictMethodAccess {
@@ -488,7 +489,7 @@ impl Elaborator {
                         let elab_arg = self.elaborate_expr(arg);
                         let mut result: Expr = func.as_ref().clone();
                         for (trait_name, _type_var) in &dict_param_info {
-                            if let Some(dict_expr) = self.resolve_dict(trait_name, func.span) {
+                            if let Some(dict_expr) = self.resolve_dict(trait_name, func.id, func.span) {
                                 result = Expr::synth(span, ExprKind::App {
                                     func: Box::new(result),
                                     arg: Box::new(dict_expr),
@@ -525,8 +526,8 @@ impl Elaborator {
                 // Rewrite Div to IntDiv when the Num constraint resolved to Int
                 let elaborated_op = if *op == BinOp::FloatDiv {
                     let is_int = self
-                        .evidence_by_span
-                        .get(&span)
+                        .evidence_by_node
+                        .get(&node_id)
                         .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Num"))
                         .and_then(|ev| ev.resolved_type.as_ref())
                         .is_some_and(|(name, _)| name == "Int");
@@ -673,7 +674,7 @@ impl Elaborator {
                 if let Some(dict_param_info) = self.fun_dict_params.get(&qualified).cloned() {
                     let mut result: Expr = expr.clone();
                     for (trait_name, _type_var) in &dict_param_info {
-                        if let Some(dict_expr) = self.resolve_dict(trait_name, span) {
+                        if let Some(dict_expr) = self.resolve_dict(trait_name, node_id, span) {
                             result = Expr::synth(span, ExprKind::App {
                                 func: Box::new(result),
                                 arg: Box::new(dict_expr),
@@ -777,11 +778,11 @@ impl Elaborator {
         }
     }
 
-    /// Resolve which dictionary to use for a given trait at a given span.
+    /// Resolve which dictionary to use for a given trait at a given node.
     /// Returns a DictRef expression or None if no evidence found.
-    fn resolve_dict(&self, trait_name: &str, span: Span) -> Option<Expr> {
-        // Check if we have evidence for this span
-        if let Some(evidence_list) = self.evidence_by_span.get(&span) {
+    fn resolve_dict(&self, trait_name: &str, node_id: crate::ast::NodeId, span: Span) -> Option<Expr> {
+        // Check if we have evidence for this node
+        if let Some(evidence_list) = self.evidence_by_node.get(&node_id) {
             for ev in evidence_list {
                 if ev.trait_name == trait_name {
                     return match &ev.resolved_type {
@@ -828,9 +829,9 @@ impl Elaborator {
             }
         }
 
-        // No evidence at this span -- fall back to current function's dict param
+        // No evidence at this node -- fall back to current function's dict param
         // (handles inferred constraints where the typechecker absorbed the constraint
-        // into the function's scheme rather than recording span-level evidence).
+        // into the function's scheme rather than recording node-level evidence).
         if let Some(name) = self.current_dict_params.get(trait_name) {
             return Some(Expr::synth(span, ExprKind::Var {
                 name: name.clone(),
@@ -900,16 +901,16 @@ impl Elaborator {
         }
     }
 
-    /// Check if the evidence at a span indicates Show for a Tuple type.
+    /// Check if the evidence at a node indicates Show for a Tuple type.
     /// If so, build an inline show expression for the tuple rather than
     /// using dictionary dispatch (since tuples are variable-arity).
     ///
     /// Returns a lambda: fun t -> "(" ++ show_T1(element(1,t)) ++ ", " ++ ... ++ ")"
-    fn try_inline_tuple_show(&self, trait_name: &str, span: Span) -> Option<Expr> {
+    fn try_inline_tuple_show(&self, trait_name: &str, node_id: crate::ast::NodeId, span: Span) -> Option<Expr> {
         if trait_name != "Show" {
             return None;
         }
-        let evidence_list = self.evidence_by_span.get(&span)?;
+        let evidence_list = self.evidence_by_node.get(&node_id)?;
         let tuple_ev = evidence_list.iter().find(|ev| {
             ev.trait_name == "Show"
                 && ev

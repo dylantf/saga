@@ -25,12 +25,13 @@ The elaborator keys on `NodeId` instead of `Span`. All "use the Var's span not t
 - `Expr::synth(span, kind)` creates synthetic nodes (elaboration, derive, normalize).
 - `PartialEq` on `Expr` compares `kind` only (span and id are metadata, not identity).
 
-### Phase 2: Switch evidence to NodeId
+### Phase 2: Switch evidence to NodeId [DONE]
 
-- `TraitEvidence` keyed by `NodeId` instead of `Span`.
-- Checker records evidence by node ID; elaborator looks up by node ID.
-- Delete all span-matching heuristics in `elaborate.rs`.
-- `pending_constraints` becomes `(String, Type, Span, NodeId)` so resolved evidence gets stored under the right node.
+- `TraitEvidence.span` replaced with `TraitEvidence.node_id`.
+- `pending_constraints` is now `(String, Type, Span, NodeId)` -- span kept for error messages, node_id for evidence keying.
+- Elaborator uses `evidence_by_node: HashMap<NodeId, Vec<TraitEvidence>>` instead of `evidence_by_span`.
+- `resolve_dict` and `try_inline_tuple_show` take `NodeId` instead of `Span` for lookup.
+- All call sites pass `expr.id` or `func.id` -- the "use the Var's span not the App's span" heuristic is now "use the Var's node ID", which is unambiguous.
 
 ### Phase 3: Migrate type_at_span to NodeId
 
