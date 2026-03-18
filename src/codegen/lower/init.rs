@@ -148,12 +148,12 @@ impl<'a> Lowerer<'a> {
         for (mod_name, info) in self.codegen_info {
             let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
             let erlang_name = util::module_name_to_erlang(&mod_path);
-            for (_trait_name, _target_type, dict_name, arity) in &info.trait_impl_dicts {
-                self.fun_info.entry(dict_name.clone()).or_insert(FunInfo {
-                    arity: *arity,
+            for d in &info.trait_impl_dicts {
+                self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
+                    arity: d.arity,
                     effects: Vec::new(),
                     param_absorbed_effects: HashMap::new(),
-                    import_origin: Some((erlang_name.clone(), dict_name.clone())),
+                    import_origin: Some((erlang_name.clone(), d.dict_name.clone())),
                 });
             }
             if mod_name.starts_with("Std.") {
@@ -318,14 +318,14 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                     // Register imported trait impl dicts for cross-module calls
-                    for (_trait_name, _target_type, dict_name, arity) in &info.trait_impl_dicts {
+                    for d in &info.trait_impl_dicts {
                         self.fun_info.insert(
-                            dict_name.clone(),
+                            d.dict_name.clone(),
                             FunInfo {
-                                arity: *arity,
+                                arity: d.arity,
                                 effects: Vec::new(),
                                 param_absorbed_effects: HashMap::new(),
-                                import_origin: Some((erlang_name.clone(), dict_name.clone())),
+                                import_origin: Some((erlang_name.clone(), d.dict_name.clone())),
                             },
                         );
                     }

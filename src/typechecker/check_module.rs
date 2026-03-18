@@ -650,12 +650,31 @@ fn collect_codegen_info(
             Decl::ImplDef {
                 trait_name,
                 target_type,
+                type_params,
                 where_clause,
                 ..
             } => {
                 let dict_name = format!("__dict_{}_{}_{}", trait_name, erlang_module, target_type);
                 let arity = where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
-                trait_impl_dicts.push((trait_name.clone(), target_type.clone(), dict_name, arity));
+                let var_to_idx: std::collections::HashMap<&str, usize> = type_params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| (name.as_str(), i))
+                    .collect();
+                let param_constraints: Vec<(String, usize)> = where_clause
+                    .iter()
+                    .flat_map(|bound| {
+                        let idx = var_to_idx.get(bound.type_var.as_str()).copied().unwrap_or(0);
+                        bound.traits.iter().map(move |t| (t.clone(), idx))
+                    })
+                    .collect();
+                trait_impl_dicts.push(super::TraitImplDict {
+                    trait_name: trait_name.clone(),
+                    target_type: target_type.clone(),
+                    dict_name,
+                    arity,
+                    param_constraints,
+                });
             }
             _ => {}
         }

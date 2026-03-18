@@ -95,9 +95,16 @@ impl Elaborator {
 
         // Pre-populate dict_names from imported modules' codegen info
         let mut dict_names = HashMap::new();
+        let mut impl_dict_params_from_imports: HashMap<(String, String), Vec<(String, usize)>> = HashMap::new();
         for info in result.codegen_info().values() {
-            for (trait_name, target_type, dict_name, _arity) in &info.trait_impl_dicts {
-                dict_names.insert((trait_name.clone(), target_type.clone()), dict_name.clone());
+            for d in &info.trait_impl_dicts {
+                dict_names.insert((d.trait_name.clone(), d.target_type.clone()), d.dict_name.clone());
+                if !d.param_constraints.is_empty() {
+                    impl_dict_params_from_imports.insert(
+                        (d.trait_name.clone(), d.target_type.clone()),
+                        d.param_constraints.clone(),
+                    );
+                }
             }
         }
 
@@ -105,7 +112,7 @@ impl Elaborator {
             trait_methods: HashMap::new(),
             fun_dict_params: inferred_dict_params,
             dict_names,
-            impl_dict_params: HashMap::new(),
+            impl_dict_params: impl_dict_params_from_imports,
             traits: result.traits.clone(),
             evidence_by_node,
             current_fun: None,

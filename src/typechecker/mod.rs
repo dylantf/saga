@@ -427,6 +427,20 @@ pub struct EffectDef {
     pub type_param_count: usize,
 }
 
+/// A trait impl dict exported by a module.
+#[derive(Debug, Clone)]
+pub struct TraitImplDict {
+    pub trait_name: String,
+    pub target_type: String,
+    /// Module-qualified dict name (e.g. `__dict_Show_animals_Animal`).
+    pub dict_name: String,
+    /// Number of dict parameters (from where clause).
+    pub arity: usize,
+    /// Where-clause constraints as (constraint_trait, param_index) pairs.
+    /// Used by the elaborator to pass correct sub-dicts for parameterized impls.
+    pub param_constraints: Vec<(String, usize)>,
+}
+
 /// Information about a module's exports needed by the lowerer/codegen.
 /// Populated during typechecking alongside `tc_modules`.
 #[derive(Debug, Clone, Default)]
@@ -443,9 +457,8 @@ pub struct ModuleCodegenInfo {
     pub fun_effects: Vec<(String, Vec<String>)>,
     /// Public type constructors: type name -> [constructor names].
     pub type_constructors: Vec<(String, Vec<String>)>,
-    /// Trait impl dicts: (trait_name, target_type, dict_name, arity).
-    /// The dict_name is module-qualified (e.g. `__dict_Show_animals_Animal`).
-    pub trait_impl_dicts: Vec<(String, String, String, usize)>,
+    /// Trait impl dicts exported by this module.
+    pub trait_impl_dicts: Vec<TraitImplDict>,
 }
 
 // --- Type environment ---
