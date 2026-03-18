@@ -368,7 +368,29 @@ impl Printer {
                 }
             }
             CLit::Atom(a) => self.push(&format!("'{}'", a)),
-            CLit::Str(s) => self.push(&format!("\"{}\"", escape_str(s))),
+            CLit::Str(s) => {
+                if s.is_ascii() {
+                    self.push(&format!("\"{}\"", escape_str(s)));
+                } else {
+                    // Non-ASCII codepoints can't reliably be represented in Core
+                    // Erlang string literals (which are Latin-1). Emit as an
+                    // explicit cons list of integer codepoints instead.
+                    self.print_unicode_str(s);
+                }
+            }
+        }
+    }
+
+    /// Emit a string as a nested cons list of integer codepoints:
+    /// `[cp1|[cp2|...[cpN|[]]...]]`
+    fn print_unicode_str(&mut self, s: &str) {
+        let codepoints: Vec<u32> = s.chars().map(|c| c as u32).collect();
+        for cp in &codepoints {
+            self.push(&format!("[{}|", cp));
+        }
+        self.push("[]");
+        for _ in &codepoints {
+            self.push("]");
         }
     }
 

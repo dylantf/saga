@@ -1,7 +1,7 @@
 type Animal {
   Dog(age: Int)
   Cat
-} deriving (Show)
+} deriving (Show, Eq)
 
 speak animal = case animal {
   Dog(age) | age > 15 -> "im tired"
@@ -9,7 +9,20 @@ speak animal = case animal {
   Cat -> "meow"
 }
 
+compare a1 a2 | a1 == a2 = "✅ Equal!"
+compare _ _ = "🚫 Not equal!"
+
 main () = {
   let hans = Dog 5
-  print $"{show hans} says {hans |> speak}"
+  print $"{hans} says {hans |> speak}"
+
+  let dylan = Dog 5
+  print $"Hans and Dylan are: {compare hans dylan}"
+
+  let hanna = Dog 7
+  print $"Hans and Hanna are {compare hans hanna}"
+
+  let oddbjorn = Cat
+  print "Oddbjørn"
+  print $"Hans and Oddbjørn are {compare hans oddbjorn}"
 }

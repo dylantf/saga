@@ -40,7 +40,8 @@ fn generate_derive(
 ) -> Option<Decl> {
     match trait_name {
         "Show" => Some(derive_show(type_name, type_params, variants, span)),
-        other => panic!("cannot derive `{other}` (only Show is supported)"),
+        "Eq" => Some(derive_marker_trait("Eq", type_name, type_params, span)),
+        other => panic!("cannot derive `{other}` (only Show and Eq are supported)"),
     }
 }
 
@@ -180,6 +181,34 @@ fn derive_show(
             }],
             body,
         )],
+        span,
+    }
+}
+
+/// Generate a method-less impl for an operator trait (e.g. Eq).
+/// The trait is dispatched via BEAM BIFs, so no methods are needed --
+/// we just register the impl so the typechecker accepts the constraint.
+fn derive_marker_trait(
+    trait_name: &str,
+    type_name: &str,
+    type_params: &[String],
+    span: Span,
+) -> Decl {
+    let where_clause: Vec<TraitBound> = type_params
+        .iter()
+        .map(|tp| TraitBound {
+            type_var: tp.clone(),
+            traits: vec![trait_name.into()],
+        })
+        .collect();
+
+    Decl::ImplDef {
+        trait_name: trait_name.into(),
+        target_type: type_name.into(),
+        type_params: type_params.to_vec(),
+        where_clause,
+        needs: vec![],
+        methods: vec![],
         span,
     }
 }

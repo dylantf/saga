@@ -633,7 +633,7 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Lower `print(dict, x)` to `let S = apply show(X) in io:format("~s~n", [S])`.
+    /// Lower `print(dict, x)` to `let S = apply show(X) in io:format("~ts~n", [S])`.
     /// After elaboration, `print x` becomes `print(__dict_Show_a, x)`.
     pub(super) fn lower_builtin_print(&mut self, args: &[&crate::ast::Expr]) -> Option<CExpr> {
         if args.len() == 1 {
@@ -644,7 +644,7 @@ impl Lowerer<'_> {
                 "io",
                 "format",
                 vec![
-                    CExpr::Lit(CLit::Str("~s~n".into())),
+                    CExpr::Lit(CLit::Str("~ts~n".into())),
                     CExpr::Cons(Box::new(CExpr::Var(v.clone())), Box::new(CExpr::Nil)),
                 ],
             );
@@ -671,12 +671,12 @@ impl Lowerer<'_> {
             Box::new(CExpr::Var(show_fn.clone())),
             vec![CExpr::Var(v.clone())],
         );
-        // io:format("~s~n", [S])
+        // io:format("~ts~n", [S])
         let format_call = cerl_call(
             "io",
             "format",
             vec![
-                CExpr::Lit(CLit::Str("~s~n".into())),
+                CExpr::Lit(CLit::Str("~ts~n".into())),
                 CExpr::Cons(Box::new(CExpr::Var(s.clone())), Box::new(CExpr::Nil)),
             ],
         );
