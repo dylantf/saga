@@ -392,7 +392,10 @@ impl Parser {
                                 span,
                             });
 
-                            let hole_expr = crate::parser::Parser::new(tokens).parse_expr(0)?;
+                            let mut sub = crate::parser::Parser::new(tokens);
+                            sub.next_node_id = self.next_node_id;
+                            let hole_expr = sub.parse_expr(0)?;
+                            self.next_node_id = sub.next_node_id;
                             segments.push(Expr { id: self.next_id(), span: app_span, kind: ExprKind::App {
                                 func: Box::new(Expr { id: self.next_id(), span: show_span, kind: ExprKind::Var {
                                     name: "show".to_string(),

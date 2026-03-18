@@ -8,7 +8,7 @@ mod pat;
 pub struct Parser {
     pub(super) tokens: Vec<Spanned>,
     pub(super) pos: usize,
-    next_node_id: u32,
+    pub(super) next_node_id: u32,
 }
 
 #[derive(Debug)]
