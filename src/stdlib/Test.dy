@@ -1,5 +1,7 @@
 module Std.Test
 
+import Std.IO (print)
+
 pub effect Assert {
   fun assert (ok: Bool) (msg: String) -> Unit
 }

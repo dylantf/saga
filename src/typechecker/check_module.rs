@@ -321,11 +321,18 @@ impl Checker {
             .insert(module_name.clone(), exports.clone());
         let result = self.inject_exports(&exports, &prefix, exposing, span);
 
-        // After loading the base Std module, snapshot trait impls so builtin
-        // module checkers inherit Std's impls (e.g. Ord for Int) without
-        // inheriting impls from other modules that haven't been loaded yet.
-        if module_name == "Std.Base" {
-            self.modules.base_trait_impls = self.trait_impls.clone();
+        // After loading any Std module, merge its exported impls into the base
+        // snapshot so later builtin module checkers inherit impls from all
+        // previously loaded Std modules (e.g. Show for String from Std.String).
+        // We merge only the module's own exports rather than cloning all of
+        // self.trait_impls, to avoid leaking user-defined impls into the snapshot.
+        if module_name.starts_with("Std.") {
+            for (key, info) in &exports.trait_impls {
+                self.modules
+                    .base_trait_impls
+                    .entry(key.clone())
+                    .or_insert_with(|| info.clone());
+            }
         }
 
         result
@@ -355,9 +362,8 @@ impl Checker {
         for (name, variants) in &self.adt_variants {
             mc.adt_variants.entry(name.clone()).or_insert_with(|| variants.clone());
         }
-        // Share base trait impls from Std.dy (e.g. Ord for Int) so stdlib modules
-        // can use comparison operators on primitives. Only base impls are shared,
-        // not ones accumulated from other module imports (which would cause duplicates).
+        // Share trait impls from all previously loaded Std modules so stdlib modules
+        // can use traits on standard types (e.g. Show for String, Ord for Int).
         for (key, info) in &self.modules.base_trait_impls {
             mc.trait_impls.entry(key.clone()).or_insert_with(|| info.clone());
         }
