@@ -151,51 +151,19 @@ fn emit_module(
 
 /// Typecheck and elaborate Std modules. Returns their elaborated programs.
 fn compile_std_modules(
-    checker: &typechecker::Checker,
     result: &typechecker::CheckResult,
 ) -> std::collections::HashMap<String, ast::Program> {
-    let std_modules: Vec<String> = result
-        .codegen_info()
-        .keys()
-        .filter(|name| name.starts_with("Std."))
-        .cloned()
-        .collect();
-
     let mut elaborated_modules = std::collections::HashMap::new();
 
-    for module_name in &std_modules {
-        let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
-
-        let program = if let Some(cached) = result.programs().get(module_name) {
-            // Cached programs already had expand_derives called during typecheck_import
-            cached.clone()
-        } else {
-            let source = typechecker::builtin_module_source(&module_path)
-                .expect("Std module missing from embedded sources");
-            let tokens = lexer::Lexer::new(source).lex().unwrap_or_else(|e| {
-                eprintln!("Std module {} lex error: {:?}", module_name, e);
-                std::process::exit(1);
-            });
-            let mut prog = parser::Parser::new(tokens)
-                .parse_program()
-                .unwrap_or_else(|e| {
-                    eprintln!("Std module {} parse error: {:?}", module_name, e);
-                    std::process::exit(1);
-                });
-            derive::expand_derives(&mut prog);
-            prog
-        };
-
-        let mut mod_checker = checker.seeded_module_checker(None, true);
-        let mod_result = mod_checker.check_program(&program);
-        if mod_result.has_errors() {
-            for e in mod_result.errors() {
-                eprintln!("Std module {} type error: {}", module_name, e);
-            }
-            std::process::exit(1);
+    for (module_name, mod_result) in result.module_check_results() {
+        if !module_name.starts_with("Std.") {
+            continue;
         }
-
-        let elaborated = elaborate::elaborate_module(&program, &mod_result, module_name);
+        let program = match result.programs().get(module_name) {
+            Some(p) => p,
+            None => continue,
+        };
+        let elaborated = elaborate::elaborate_module(program, mod_result, module_name);
         elaborated_modules.insert(module_name.clone(), elaborated);
     }
 
@@ -287,7 +255,7 @@ fn build_project(profile: &str) -> PathBuf {
     });
 
     // Phase 2: Elaborate all modules
-    let mut elaborated_modules = compile_std_modules(&checker, &result);
+    let mut elaborated_modules = compile_std_modules(&result);
 
     // Elaborate user modules
     let user_modules: Vec<String> = result
@@ -388,7 +356,7 @@ fn build_script(file: &str, profile: &str) -> PathBuf {
     });
 
     // Phase 2: Elaborate all modules
-    let mut elaborated_modules = compile_std_modules(&checker, &result);
+    let mut elaborated_modules = compile_std_modules(&result);
     let elaborated = elaborate::elaborate(&program, &result);
     elaborated_modules.insert("_script".to_string(), elaborated);
 

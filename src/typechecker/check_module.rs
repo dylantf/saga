@@ -283,6 +283,10 @@ impl Checker {
         // Collect all public exports into a single struct
         let exports = super::ModuleExports::collect(&program, &mod_checker);
 
+        // Cache the CheckResult for elaboration (avoids re-typechecking in compile_std_modules)
+        let mod_result = mod_checker.to_result();
+        self.modules.check_results.insert(module_name.clone(), mod_result);
+
         // Advance the parent's var counter past the module's to keep IDs disjoint.
         if mod_checker.next_var > self.next_var {
             self.next_var = mod_checker.next_var;
@@ -297,6 +301,9 @@ impl Checker {
         }
         for (k, v) in mod_checker.modules.codegen_info {
             self.modules.codegen_info.entry(k).or_insert(v);
+        }
+        for (k, v) in mod_checker.modules.check_results {
+            self.modules.check_results.entry(k).or_insert(v);
         }
 
         self.modules.loading.remove(&module_name);

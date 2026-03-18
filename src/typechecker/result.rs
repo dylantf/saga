@@ -82,6 +82,11 @@ impl CheckResult {
         &self.modules.programs
     }
 
+    /// Cached per-module CheckResults (from typecheck_import, avoids re-typechecking).
+    pub fn module_check_results(&self) -> &std::collections::HashMap<String, CheckResult> {
+        &self.modules.check_results
+    }
+
     /// Module map (module name -> file path).
     pub fn module_map(&self) -> Option<&super::check_module::ModuleMap> {
         self.modules.map.as_ref()

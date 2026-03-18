@@ -727,6 +727,8 @@ pub struct ModuleContext {
     pub codegen_info: HashMap<String, ModuleCodegenInfo>,
     /// Cache of parsed programs for each typechecked module.
     pub programs: HashMap<String, crate::ast::Program>,
+    /// Cache of per-module CheckResults for elaboration (avoids re-typechecking).
+    pub check_results: HashMap<String, CheckResult>,
     /// Cached checker state after prelude has been loaded.
     pub(crate) prelude_snapshot: Option<Box<Checker>>,
     /// Trait impls from Std.dy (base layer). Shared with builtin module checkers
