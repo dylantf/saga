@@ -19,6 +19,19 @@ pub fn expand_derives(program: &mut Vec<Decl>) {
             ..
         } = decl
         {
+            // Ord requires Eq (supertrait). Automatically derive Eq if Ord
+            // is requested but Eq isn't explicitly listed.
+            let needs_eq = deriving.iter().any(|t| t == "Ord")
+                && !deriving.iter().any(|t| t == "Eq");
+
+            if needs_eq {
+                if let Some(impl_def) =
+                    generate_derive("Eq", name, type_params, variants, *span)
+                {
+                    extra.push(impl_def);
+                }
+            }
+
             for trait_name in deriving {
                 if let Some(impl_def) =
                     generate_derive(trait_name, name, type_params, variants, *span)
