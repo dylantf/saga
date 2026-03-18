@@ -308,6 +308,41 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// Returns true if this expression contains a `resume` call anywhere in it.
+    pub fn contains_resume(&self) -> bool {
+        match self {
+            Expr::Resume { .. } => true,
+            Expr::Block { stmts, .. } => stmts.iter().any(|s| s.contains_resume()),
+            Expr::If { cond, then_branch, else_branch, .. } =>
+                cond.contains_resume() || then_branch.contains_resume() || else_branch.contains_resume(),
+            Expr::Case { scrutinee, arms, .. } =>
+                scrutinee.contains_resume() || arms.iter().any(|a| a.body.contains_resume()),
+            Expr::Lambda { body, .. } => body.contains_resume(),
+            Expr::App { func, arg, .. } => func.contains_resume() || arg.contains_resume(),
+            Expr::BinOp { left, right, .. } => left.contains_resume() || right.contains_resume(),
+            Expr::UnaryMinus { expr, .. } => expr.contains_resume(),
+            Expr::Tuple { elements, .. } => elements.iter().any(|e| e.contains_resume()),
+            Expr::FieldAccess { expr, .. } => expr.contains_resume(),
+            Expr::RecordCreate { fields, .. } => fields.iter().any(|(_, e)| e.contains_resume()),
+            Expr::RecordUpdate { record, fields, .. } =>
+                record.contains_resume() || fields.iter().any(|(_, e)| e.contains_resume()),
+            Expr::With { expr, .. } => expr.contains_resume(),
+            Expr::Do { bindings, success, else_arms, .. } =>
+                bindings.iter().any(|(_, e)| e.contains_resume())
+                || success.contains_resume()
+                || else_arms.iter().any(|a| a.body.contains_resume()),
+            Expr::EffectCall { args, .. } => args.iter().any(|e| e.contains_resume()),
+            Expr::Receive { arms, after_clause, .. } =>
+                arms.iter().any(|a| a.body.contains_resume())
+                || after_clause.as_ref().is_some_and(|(t, b)| t.contains_resume() || b.contains_resume()),
+            Expr::Ascription { expr, .. } => expr.contains_resume(),
+            Expr::ForeignCall { args, .. } => args.iter().any(|e| e.contains_resume()),
+            Expr::DictMethodAccess { dict, .. } => dict.contains_resume(),
+            Expr::Lit { .. } | Expr::Var { .. } | Expr::Constructor { .. }
+            | Expr::QualifiedName { .. } | Expr::DictRef { .. } => false,
+        }
+    }
+
     pub fn span(&self) -> Span {
         match self {
             Expr::Lit { span, .. }
@@ -362,6 +397,17 @@ pub enum Stmt {
 
     /// Expression used as a statement (last one is the block's value)
     Expr(Expr),
+}
+
+impl Stmt {
+    pub fn contains_resume(&self) -> bool {
+        match self {
+            Stmt::Let { value, .. } => value.contains_resume(),
+            Stmt::LetFun { body, guard, .. } =>
+                body.contains_resume() || guard.as_ref().is_some_and(|g| g.contains_resume()),
+            Stmt::Expr(e) => e.contains_resume(),
+        }
+    }
 }
 
 // --- Patterns ---

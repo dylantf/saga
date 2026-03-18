@@ -73,6 +73,10 @@ pub struct Lowerer<'a> {
     op_to_effect: HashMap<String, String>,
     /// When lowering inside an effectful function, maps effect name -> handler param var name.
     current_handler_params: HashMap<String, String>,
+    /// Set of "effect.op" keys whose current handler arm never calls resume.
+    /// Used to pass a cheap atom instead of a real continuation closure at the call site,
+    /// avoiding the Erlang "a term is constructed but never used" warning.
+    no_resume_ops: std::collections::HashSet<String>,
     /// When lowering inside a function, maps local variable name -> effects it absorbs.
     /// Set from FunInfo.param_absorbed_effects for the current function.
     current_effectful_vars: HashMap<String, Vec<String>>,
@@ -117,6 +121,7 @@ impl<'a> Lowerer<'a> {
             handler_defs: HashMap::new(),
             op_to_effect: HashMap::new(),
             current_handler_params: HashMap::new(),
+            no_resume_ops: std::collections::HashSet::new(),
             current_effectful_vars: HashMap::new(),
             lambda_effect_context: None,
             current_return_k: None,

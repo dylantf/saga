@@ -264,12 +264,17 @@ impl<'a> Lowerer<'a> {
             call_args.push(CExpr::Var(v));
         }
 
-        // Append continuation
-        let k = continuation.unwrap_or_else(|| {
-            // Identity continuation for standalone effect calls
-            let param = self.fresh();
-            CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)))
-        });
+        // Append continuation. If the handler arm never calls resume, pass a cheap atom
+        // instead of a real closure so Erlang doesn't warn about a constructed-but-unused term.
+        let k = if self.no_resume_ops.contains(key.as_str()) {
+            CExpr::Lit(CLit::Atom("no_resume".to_string()))
+        } else {
+            continuation.unwrap_or_else(|| {
+                // Identity continuation for standalone effect calls
+                let param = self.fresh();
+                CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)))
+            })
+        };
         call_args.push(k);
 
         let apply = CExpr::Apply(Box::new(CExpr::Var(handler_var)), call_args);
@@ -381,13 +386,20 @@ impl<'a> Lowerer<'a> {
         // can reference sibling handlers via closure capture),
         // then build the handler functions.
         let saved_handler_params = self.current_handler_params.clone();
+        let saved_no_resume_ops = self.no_resume_ops.clone();
 
         // Pass 1: register all handler param variables (one per op)
         let mut op_vars: Vec<(String, String, String)> = Vec::new(); // (effect, op, var_name)
         for (eff, op) in &handler_ops {
             let var_name = Self::handler_param_name(eff, op);
             let key = format!("{}.{}", eff, op);
-            self.current_handler_params.insert(key, var_name.clone());
+            self.current_handler_params.insert(key.clone(), var_name.clone());
+            // Track arms that never call resume so call sites can skip building a real continuation.
+            if let Some(arm) = arms_by_op.get(op.as_str()) {
+                if !arm.body.contains_resume() {
+                    self.no_resume_ops.insert(key);
+                }
+            }
             op_vars.push((eff.clone(), op.clone(), var_name));
         }
 
@@ -525,6 +537,7 @@ impl<'a> Lowerer<'a> {
         };
 
         self.current_handler_params = saved_handler_params;
+        self.no_resume_ops = saved_no_resume_ops;
         self.current_return_k = saved_return_k;
 
         // Wrap with handler bindings
@@ -541,7 +554,9 @@ impl<'a> Lowerer<'a> {
     /// Produces: `fun (Arg0, ..., ArgN, K) -> body`
     /// Each op gets its own function with natural arity.
     fn build_op_handler_fun(&mut self, arm: &HandlerArm) -> CExpr {
-        let k_var = self.fresh();
+        // If resume is never called, use `_` so Core Erlang doesn't warn about
+        // the unused continuation parameter.
+        let k_var = if arm.body.contains_resume() { self.fresh() } else { "_".to_string() };
         let param_vars: Vec<String> = (0..arm.params.len())
             .map(|i| format!("_HArg{}", i))
             .collect();
@@ -621,3 +636,4 @@ impl<'a> Lowerer<'a> {
         }
     }
 }
+
