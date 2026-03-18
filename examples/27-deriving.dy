@@ -12,6 +12,12 @@ speak animal = case animal {
 comp a1 a2 | a1 == a2 = "✅ Equal!"
 comp _ _ = "🚫 Not equal!"
 
+# Deriving Ord: constructors are compared by declaration order,
+# fields are compared left-to-right.
+type Color { Red | Green | Blue } deriving (Show, Eq, Ord)
+type Priority { Low | Medium | High } deriving (Show, Eq, Ord)
+type Scored a { Scored(score: Int, value: a) } deriving (Show, Eq, Ord)
+
 main () = {
   let hans = Dog 5
   print $"{hans} says {hans |> speak}"
@@ -25,4 +31,20 @@ main () = {
   let oddbjorn = Cat
   print "Oddbjørn"
   print $"Hans and Oddbjørn are {comp hans oddbjorn}"
+
+  # Ord: compare by constructor index
+  print $"Red vs Blue: {show (compare Red Blue)}"
+  print $"Green vs Green: {show (compare Green Green)}"
+  print $"Blue vs Red: {show (compare Blue Red)}"
+
+  # Comparison operators desugar to compare for ADTs
+  if High > Low then print "High > Low" else print "nope"
+  if Medium <= Medium then print "Medium <= Medium" else print "nope"
+
+  # Ord on types with fields: left-to-right field comparison
+  let a = Scored 10 "first"
+  let b = Scored 10 "second"
+  let c = Scored 20 "third"
+  print $"{a} vs {b}: {show (compare a b)}"
+  print $"{a} vs {c}: {show (compare a c)}"
 }

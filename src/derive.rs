@@ -350,12 +350,14 @@ fn derive_ord(
         },
     );
 
-    // Ord requires Eq, and both need to be propagated to type params
+    // Ord requires Eq, but Eq is BIF-dispatched (no dict), so only Ord
+    // needs to be in the where clause for dictionary passing purposes.
+    // The Eq supertrait constraint is still checked by the typechecker.
     let where_clause: Vec<TraitBound> = type_params
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec!["Ord".into(), "Eq".into()],
+            traits: vec!["Ord".into()],
         })
         .collect();
 

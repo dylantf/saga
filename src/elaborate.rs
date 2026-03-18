@@ -32,6 +32,9 @@ struct Elaborator {
     fun_dict_params: HashMap<String, Vec<(String, String)>>,
     /// (trait_name, target_type) -> dict constructor name
     dict_names: HashMap<(String, String), String>,
+    /// (trait_name, target_type) -> ordered list of (constraint_trait, param_index) for dict params.
+    /// Used to pass the correct sub-dicts when building parameterized dicts.
+    impl_dict_params: HashMap<(String, String), Vec<(String, usize)>>,
     /// trait_name -> TraitInfo
     traits: HashMap<String, TraitInfo>,
     /// Evidence from typechecking: node_id -> Vec<TraitEvidence>
@@ -102,6 +105,7 @@ impl Elaborator {
             trait_methods: HashMap::new(),
             fun_dict_params: inferred_dict_params,
             dict_names,
+            impl_dict_params: HashMap::new(),
             traits: result.traits.clone(),
             evidence_by_node,
             current_fun: None,
@@ -146,6 +150,8 @@ impl Elaborator {
                 Decl::ImplDef {
                     trait_name,
                     target_type,
+                    type_params,
+                    where_clause,
                     ..
                 } => {
                     let dict_name = if self.erlang_module.is_empty() {
@@ -158,6 +164,24 @@ impl Elaborator {
                     };
                     self.dict_names
                         .insert((trait_name.clone(), target_type.clone()), dict_name);
+                    // Capture where-clause constraints as (trait, param_index) pairs.
+                    // This tells dict_for_type which sub-dicts to pass for parameterized impls.
+                    if !where_clause.is_empty() {
+                        let var_to_idx: HashMap<&str, usize> = type_params
+                            .iter()
+                            .enumerate()
+                            .map(|(i, name)| (name.as_str(), i))
+                            .collect();
+                        let params: Vec<(String, usize)> = where_clause
+                            .iter()
+                            .flat_map(|bound| {
+                                let idx = var_to_idx.get(bound.type_var.as_str()).copied().unwrap_or(0);
+                                bound.traits.iter().map(move |t| (t.clone(), idx))
+                            })
+                            .collect();
+                        self.impl_dict_params
+                            .insert((trait_name.clone(), target_type.clone()), params);
+                    }
                 }
                 _ => {}
             }
@@ -936,30 +960,10 @@ impl Elaborator {
                 if ev.trait_name == trait_name {
                     return match &ev.resolved_type {
                         Some((type_name, args)) => {
-                            // Concrete type: reference the dict constructor
-                            let dict_name = self
-                                .dict_names
-                                .get(&(trait_name.to_string(), type_name.clone()))?;
-                            let mut dict_expr: Expr = Expr::synth(
-                                span,
-                                ExprKind::DictRef {
-                                    name: dict_name.clone(),
-                                },
-                            );
-                            // Apply sub-dictionaries for each type argument
-                            for arg_ty in args {
-                                if let Some(sub_dict) = self.dict_for_type(trait_name, arg_ty, span)
-                                {
-                                    dict_expr = Expr::synth(
-                                        span,
-                                        ExprKind::App {
-                                            func: Box::new(dict_expr),
-                                            arg: Box::new(sub_dict),
-                                        },
-                                    );
-                                }
-                            }
-                            Some(dict_expr)
+                            // Concrete type: build the dict via dict_for_type,
+                            // which handles where-clause constraints correctly.
+                            let ty = Type::Con(type_name.clone(), args.clone());
+                            self.dict_for_type(trait_name, &ty, span)
                         }
                         None => {
                             // Polymorphic: use the dict param from current function.
@@ -1027,15 +1031,35 @@ impl Elaborator {
                         name: dict_name.clone(),
                     },
                 );
-                for arg_ty in args {
-                    let sub_dict = self.dict_for_type(trait_name, arg_ty, span)?;
-                    dict_expr = Expr::synth(
-                        span,
-                        ExprKind::App {
-                            func: Box::new(dict_expr),
-                            arg: Box::new(sub_dict),
-                        },
-                    );
+                let key = (trait_name.to_string(), name.clone());
+                if let Some(constraints) = self.impl_dict_params.get(&key) {
+                    // Use explicit where-clause constraints (handles cases like
+                    // Ord where the impl needs both Ord and Eq dicts per type param).
+                    for (constraint_trait, param_idx) in constraints {
+                        if let Some(arg_ty) = args.get(*param_idx) {
+                            let sub_dict = self.dict_for_type(constraint_trait, arg_ty, span)?;
+                            dict_expr = Expr::synth(
+                                span,
+                                ExprKind::App {
+                                    func: Box::new(dict_expr),
+                                    arg: Box::new(sub_dict),
+                                },
+                            );
+                        }
+                    }
+                } else {
+                    // Fallback: one sub-dict per type arg for the main trait.
+                    // Works for simple cases like Show for List a where {a: Show}.
+                    for arg_ty in args {
+                        let sub_dict = self.dict_for_type(trait_name, arg_ty, span)?;
+                        dict_expr = Expr::synth(
+                            span,
+                            ExprKind::App {
+                                func: Box::new(dict_expr),
+                                arg: Box::new(sub_dict),
+                            },
+                        );
+                    }
                 }
                 Some(dict_expr)
             }
