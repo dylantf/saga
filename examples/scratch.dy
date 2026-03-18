@@ -1,51 +1,31 @@
-effect Assert {
-  fun assert (ok: Bool) (msg: String) -> Unit
+effect Inner {
+  fun inner_op () -> Unit
 }
 
-effect TestRunner {
-  fun pass (name: String) -> Unit
-  fun fail (name: String) (msg: String) -> Unit
+effect Outer {
+  fun outer_op () -> Unit
 }
 
-fun test (name: String) (body: () -> Unit needs {Assert}) -> Unit needs {TestRunner}
-test name body = {
-  let (_, failures) = { body () } with {
-    assert ok msg =
-      if ok then {
-        let (val, errs) = resume ()
-        (val, errs)
-      } else {
-        let (val, errs) = resume ()
-        (val, msg :: errs)
-      }
-    return val = (val, [])
+# Function that handles Inner internally and uses Outer
+fun middle (body: () -> Unit needs {Inner}) -> Unit needs {Outer}
+middle body = {
+  let result = { body () } with {
+    inner_op () = {
+      resume ()
+      "handled"
+    }
+    return _ = "ok"
   }
-  case failures {
-    [] -> pass! name
-    h :: _ -> fail! name h
-  }
+  outer_op! ()
 }
-
-fun assert_true (cond: Bool) -> Unit needs {Assert}
-assert_true cond = assert! cond "Expected True, got False"
 
 main () = {
-  let result = {
-    test "passes" {
-      assert_true True
-    }
-    test "fails" {
-      assert_true False
-    }
-  } with {
-    pass name = {
-      print ("  + " <> name)
-      resume ()
-    }
-    fail name msg = {
-      print ("  x " <> name <> ": " <> msg)
-      resume ()
-    }
+  middle (fun () -> {
+    inner_op! ()
+  })
+} with {
+  outer_op () = {
+    print "outer handled"
+    resume ()
   }
-  print "done"
 }

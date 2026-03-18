@@ -403,6 +403,59 @@ process () = {
     );
 }
 
+// --- Handler arm bodies must not leak function-level _ReturnK ---
+
+#[test]
+fn handler_arm_does_not_apply_outer_return_k() {
+    // When a function handles one effect internally (with { ... }) and also
+    // uses a different effect (needs), the handler arm body must NOT apply
+    // the function-level _ReturnK. The handler arm's result is the with-block
+    // value, which flows to the rest of the block via rest_k.
+    let src = r#"
+effect Inner {
+  fun inner_op () -> Unit
+}
+
+effect Outer {
+  fun outer_op () -> Unit
+}
+
+fun middle (body: () -> Unit needs {Inner}) -> Unit needs {Outer}
+middle body = {
+  let result = { body () } with {
+    inner_op () = { resume (); "handled" }
+    return _ = "ok"
+  }
+  outer_op! ()
+}
+"#;
+    let out = emit(src);
+    // The handler function for inner_op should NOT reference _ReturnK.
+    // If it does, the handler bypasses outer_op! and returns directly
+    // from the function, which is wrong.
+    //
+    // Find the handler function body. It's bound to _Handle_Inner_inner_op.
+    // The key check: _ReturnK must not appear inside the handler function.
+    //
+    // Strategy: split output at the handler binding, check the handler fun
+    // doesn't contain _ReturnK.
+    assert!(
+        out.contains("_Handle_Inner_inner_op"),
+        "expected Inner handler param in output\n{out}"
+    );
+    // The handler function for inner_op is between "_Handle_Inner_inner_op"
+    // and the string literal "handled". _ReturnK must not appear in that region.
+    if let Some(start) = out.find("_Handle_Inner_inner_op") {
+        if let Some(end) = out[start..].find("\"handled\"") {
+            let handler_body = &out[start..start + end];
+            assert!(
+                !handler_body.contains("_ReturnK"),
+                "handler arm body must not reference _ReturnK!\nHandler region:\n{handler_body}\n\nFull output:\n{out}"
+            );
+        }
+    }
+}
+
 // --- Short-circuit operators ---
 
 #[test]
