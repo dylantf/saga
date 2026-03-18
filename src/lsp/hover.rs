@@ -1,9 +1,10 @@
-use dylang::ast::{Decl, Expr, Pat, Stmt};
+use dylang::ast::{Decl, Expr, ExprKind, NodeId, Pat, Stmt};
 use dylang::token::Span;
 use dylang::typechecker::CheckResult;
 
-/// Find the name and span of the identifier at the given byte offset.
-pub fn find_name_at_offset(program: &[Decl], offset: usize) -> Option<(String, Span)> {
+/// Find the name, span, and optional NodeId of the identifier at the given byte offset.
+/// Returns `Some(node_id)` for Expr nodes, `None` for Pat bindings.
+pub fn find_name_at_offset(program: &[Decl], offset: usize) -> Option<(String, Span, Option<NodeId>)> {
     for decl in program {
         if let Some(result) = find_in_decl(decl, offset) {
             return Some(result);
@@ -16,7 +17,7 @@ fn contains(span: &Span, offset: usize) -> bool {
     offset >= span.start && offset < span.end
 }
 
-fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span)> {
+fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<NodeId>)> {
     match decl {
         Decl::FunBinding {
             params, body, span, ..
@@ -32,7 +33,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span)> {
             find_in_expr(body, offset)
         }
         Decl::FunAnnotation { name, span, .. } if contains(span, offset) => {
-            Some((name.clone(), *span))
+            Some((name.clone(), *span, None))
         }
         Decl::ImplDef { methods, span, .. } => {
             if !contains(span, offset) {
@@ -60,38 +61,40 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span)> {
     }
 }
 
-fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
+fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span, Option<NodeId>)> {
     // Quick span check: skip if cursor is outside this expression
-    if !contains(&expr.span(), offset) {
+    if !contains(&expr.span, offset) {
         return None;
     }
 
-    match expr {
-        Expr::Var { name, span } if contains(span, offset) => Some((name.clone(), *span)),
-        Expr::Constructor { name, span }
-            if contains(span, offset) && name != "Cons" && name != "Nil" =>
+    let span = expr.span;
+    let node_id = expr.id;
+    match &expr.kind {
+        ExprKind::Var { name } if contains(&span, offset) => Some((name.clone(), span, Some(node_id))),
+        ExprKind::Constructor { name }
+            if contains(&span, offset) && name != "Cons" && name != "Nil" =>
         {
-            Some((name.clone(), *span))
+            Some((name.clone(), span, Some(node_id)))
         }
-        Expr::QualifiedName { module, name, span } => {
+        ExprKind::QualifiedName { module, name } => {
             // The span covers "Module.name". The dot separates them.
             // module part: span.start .. span.start + module.len()
             // name part:   span.start + module.len() + 1 .. span.end
             let dot_offset = span.start + module.len();
             if offset <= dot_offset {
-                Some((format!("module:{}", module), *span))
+                Some((format!("module:{}", module), span, Some(node_id)))
             } else {
-                Some((name.clone(), *span))
+                Some((name.clone(), span, Some(node_id)))
             }
         }
-        Expr::App { func, arg, .. } => {
+        ExprKind::App { func, arg, .. } => {
             find_in_expr(func, offset).or_else(|| find_in_expr(arg, offset))
         }
-        Expr::BinOp { left, right, .. } => {
+        ExprKind::BinOp { left, right, .. } => {
             find_in_expr(left, offset).or_else(|| find_in_expr(right, offset))
         }
-        Expr::UnaryMinus { expr, .. } => find_in_expr(expr, offset),
-        Expr::Lambda { params, body, .. } => {
+        ExprKind::UnaryMinus { expr, .. } => find_in_expr(expr, offset),
+        ExprKind::Lambda { params, body, .. } => {
             for pat in params {
                 if let Some(r) = find_in_pat(pat, offset) {
                     return Some(r);
@@ -99,7 +102,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
             }
             find_in_expr(body, offset)
         }
-        Expr::Block { stmts, .. } => {
+        ExprKind::Block { stmts, .. } => {
             for stmt in stmts {
                 if let Some(r) = find_in_stmt(stmt, offset) {
                     return Some(r);
@@ -107,7 +110,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
             }
             None
         }
-        Expr::If {
+        ExprKind::If {
             cond,
             then_branch,
             else_branch,
@@ -115,7 +118,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
         } => find_in_expr(cond, offset)
             .or_else(|| find_in_expr(then_branch, offset))
             .or_else(|| find_in_expr(else_branch, offset)),
-        Expr::Case {
+        ExprKind::Case {
             scrutinee, arms, ..
         } => {
             if let Some(r) = find_in_expr(scrutinee, offset) {
@@ -136,7 +139,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
             }
             None
         }
-        Expr::Tuple { elements, .. } => {
+        ExprKind::Tuple { elements, .. } => {
             for e in elements {
                 if let Some(r) = find_in_expr(e, offset) {
                     return Some(r);
@@ -144,7 +147,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
             }
             None
         }
-        Expr::RecordCreate { fields, .. } => {
+        ExprKind::RecordCreate { fields, .. } => {
             for (_, e) in fields {
                 if let Some(r) = find_in_expr(e, offset) {
                     return Some(r);
@@ -152,7 +155,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
             }
             None
         }
-        Expr::RecordUpdate { record, fields, .. } => {
+        ExprKind::RecordUpdate { record, fields, .. } => {
             if let Some(r) = find_in_expr(record, offset) {
                 return Some(r);
             }
@@ -163,22 +166,22 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
             }
             None
         }
-        Expr::FieldAccess { expr, .. } => find_in_expr(expr, offset),
-        Expr::With { expr, handler, .. } => {
+        ExprKind::FieldAccess { expr, .. } => find_in_expr(expr, offset),
+        ExprKind::With { expr, handler, .. } => {
             match handler.as_ref() {
                 dylang::ast::Handler::Named(name, span) if contains(span, offset) => {
-                    return Some((name.clone(), *span));
+                    return Some((name.clone(), *span, None));
                 }
                 dylang::ast::Handler::Inline { arms, return_clause, .. } => {
                     for arm in arms.iter().chain(return_clause.iter().map(|r| r.as_ref())) {
                         if contains(&arm.span, offset) {
-                            let body_span = arm.body.span();
+                            let body_span = arm.body.span;
                             if contains(&body_span, offset) {
                                 return find_in_expr(&arm.body, offset);
                             }
                             // Cursor is on the op name / params, before the arrow.
                             // Return the arm span so goto-def can look it up in handler_arm_targets.
-                            return Some((arm.op_name.clone(), arm.span));
+                            return Some((arm.op_name.clone(), arm.span, None));
                         }
                     }
                 }
@@ -186,14 +189,14 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
             }
             find_in_expr(expr, offset)
         }
-        Expr::Resume { value, .. } => find_in_expr(value, offset),
-        Expr::EffectCall {
-            name, span, args, ..
+        ExprKind::Resume { value, .. } => find_in_expr(value, offset),
+        ExprKind::EffectCall {
+            name, args, ..
         } => {
-            if contains(span, offset) {
+            if contains(&span, offset) {
                 // Check if cursor is on the effect name itself
                 // Return the effect op name for lookup
-                return Some((name.clone(), *span));
+                return Some((name.clone(), span, Some(node_id)));
             }
             for arg in args {
                 if let Some(r) = find_in_expr(arg, offset) {
@@ -202,7 +205,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
             }
             None
         }
-        Expr::Do {
+        ExprKind::Do {
             bindings,
             success,
             else_arms,
@@ -229,7 +232,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
             }
             None
         }
-        Expr::Receive {
+        ExprKind::Receive {
             arms, after_clause, ..
         } => {
             for arm in arms {
@@ -259,7 +262,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span)> {
     }
 }
 
-fn find_in_stmt(stmt: &Stmt, offset: usize) -> Option<(String, Span)> {
+fn find_in_stmt(stmt: &Stmt, offset: usize) -> Option<(String, Span, Option<NodeId>)> {
     match stmt {
         Stmt::Let { pattern, value, .. } => {
             find_in_pat(pattern, offset).or_else(|| find_in_expr(value, offset))
@@ -276,9 +279,9 @@ fn find_in_stmt(stmt: &Stmt, offset: usize) -> Option<(String, Span)> {
     }
 }
 
-fn find_in_pat(pat: &Pat, offset: usize) -> Option<(String, Span)> {
+fn find_in_pat(pat: &Pat, offset: usize) -> Option<(String, Span, Option<NodeId>)> {
     match pat {
-        Pat::Var { name, span } if contains(span, offset) => Some((name.clone(), *span)),
+        Pat::Var { name, span } if contains(span, offset) => Some((name.clone(), *span, None)),
         Pat::Constructor { args, .. } => {
             for arg in args {
                 if let Some(r) = find_in_pat(arg, offset) {
@@ -316,6 +319,7 @@ pub fn type_at_name(
     result: &CheckResult,
     name: &str,
     span: Option<&Span>,
+    node_id: Option<&NodeId>,
     program: &[Decl],
 ) -> Option<String> {
     // Check for a FunAnnotation first (has labeled params)
@@ -323,9 +327,16 @@ pub fn type_at_name(
         return Some(sig);
     }
 
-    // Check span-based type map (works for locals, params, pattern bindings)
+    // Check node-based type map (Expr nodes)
+    if let Some(id) = node_id
+        && let Some(ty_str) = result.type_at_node(id)
+    {
+        return Some(ty_str);
+    }
+
+    // Check span-based type map (Pat bindings)
     if let Some(span) = span
-        && let Some(ty_str) = result.type_at(span)
+        && let Some(ty_str) = result.type_at_span(span)
     {
         return Some(ty_str);
     }

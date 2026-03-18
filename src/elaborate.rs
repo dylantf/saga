@@ -34,8 +34,8 @@ struct Elaborator {
     dict_names: HashMap<(String, String), String>,
     /// trait_name -> TraitInfo
     traits: HashMap<String, TraitInfo>,
-    /// Evidence from typechecking: span -> Vec<TraitEvidence>
-    evidence_by_span: HashMap<Span, Vec<TraitEvidence>>,
+    /// Evidence from typechecking: node_id -> Vec<TraitEvidence>
+    evidence_by_node: HashMap<crate::ast::NodeId, Vec<TraitEvidence>>,
     /// The name of the function currently being elaborated (for dict param lookup)
     current_fun: Option<String>,
     /// Current function's dict param names: trait_name -> param_name
@@ -71,11 +71,11 @@ impl Elaborator {
             }
         }
 
-        // Build evidence lookup by span
-        let mut evidence_by_span: HashMap<Span, Vec<TraitEvidence>> = HashMap::new();
+        // Build evidence lookup by node ID
+        let mut evidence_by_node: HashMap<crate::ast::NodeId, Vec<TraitEvidence>> = HashMap::new();
         for ev in &result.evidence {
-            evidence_by_span
-                .entry(ev.span)
+            evidence_by_node
+                .entry(ev.node_id)
                 .or_default()
                 .push(ev.clone());
         }
@@ -104,7 +104,7 @@ impl Elaborator {
             fun_dict_params: inferred_dict_params,
             dict_names,
             traits: result.traits.clone(),
-            evidence_by_span,
+            evidence_by_node,
             current_fun: None,
             current_dict_params: HashMap::new(),
             current_dict_params_by_var: HashMap::new(),
@@ -230,11 +230,10 @@ impl Elaborator {
                                 methods.iter().find(|(n, _, _)| n == trait_method_name)
                             {
                                 let elab_body = self.elaborate_expr(body);
-                                ordered_methods.push(Expr::Lambda {
+                                ordered_methods.push(Expr::synth(*span, ExprKind::Lambda {
                                     params: params.clone(),
                                     body: Box::new(elab_body),
-                                    span: *span,
-                                });
+                                }));
                             }
                         }
                     }
@@ -360,22 +359,23 @@ impl Elaborator {
     }
 
     fn elaborate_expr(&mut self, expr: &Expr) -> Expr {
-        match expr {
+        let span = expr.span;
+        let node_id = expr.id;
+        match &expr.kind {
             // Trait method reference: look up evidence to determine dispatch
-            Expr::Var { name, span } => {
+            ExprKind::Var { name } => {
                 if let Some((trait_name, method_index)) = self.trait_methods.get(name).cloned() {
                     // This is a trait method name used as a bare value (not
                     // directly applied). Extract the method from the dict so
                     // it can be passed around as a first-class function.
-                    if let Some(dict_expr) = self.resolve_dict(&trait_name, *span) {
-                        return Expr::DictMethodAccess {
+                    if let Some(dict_expr) = self.resolve_dict(&trait_name, node_id, span) {
+                        return Expr::synth(span, ExprKind::DictMethodAccess {
                             dict: Box::new(dict_expr),
                             method_index,
-                            span: *span,
-                        };
+                        });
                     }
                     // Tuple Show: inline expansion (no dict constructor for tuples)
-                    if let Some(show_lambda) = self.try_inline_tuple_show(&trait_name, *span) {
+                    if let Some(show_lambda) = self.try_inline_tuple_show(&trait_name, node_id, span) {
                         return show_lambda;
                     }
                     // No evidence resolved -- this trait method will be emitted as a
@@ -394,12 +394,11 @@ impl Elaborator {
                 if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
                     let mut result: Expr = expr.clone();
                     for (trait_name, _type_var) in &dict_param_info {
-                        if let Some(dict_expr) = self.resolve_dict(trait_name, *span) {
-                            result = Expr::App {
+                        if let Some(dict_expr) = self.resolve_dict(trait_name, node_id, span) {
+                            result = Expr::synth(span, ExprKind::App {
                                 func: Box::new(result),
                                 arg: Box::new(dict_expr),
-                                span: *span,
-                            };
+                            });
                         }
                     }
                     return result;
@@ -409,38 +408,35 @@ impl Elaborator {
             }
 
             // Function application: check if we need to insert dict args
-            Expr::App { func, arg, span } => {
+            ExprKind::App { func, arg } => {
                 // Check if this is a direct call to a function with where clauses
-                if let Expr::Var { name, .. } = func.as_ref() {
+                if let ExprKind::Var { name, .. } = &func.kind {
                     // If calling a trait method directly with an argument,
                     // extract method from dict then apply normally.
                     if let Some((trait_name, method_index)) = self.trait_methods.get(name).cloned()
                     {
-                        // Use the Var's span for evidence lookup (that's where
-                        // the typechecker recorded it), not the App's span.
-                        if let Some(dict_expr) = self.resolve_dict(&trait_name, func.span()) {
+                        // Use the Var's node ID for evidence lookup (that's where
+                        // the typechecker recorded it), not the App's node ID.
+                        if let Some(dict_expr) = self.resolve_dict(&trait_name, func.id, func.span) {
                             let elab_arg = self.elaborate_expr(arg);
-                            let method = Expr::DictMethodAccess {
+                            let method = Expr::synth(func.span, ExprKind::DictMethodAccess {
                                 dict: Box::new(dict_expr),
                                 method_index,
-                                span: func.span(),
-                            };
-                            return Expr::App {
+                            });
+                            return Expr::synth(span, ExprKind::App {
                                 func: Box::new(method),
                                 arg: Box::new(elab_arg),
-                                span: *span,
-                            };
+                            });
                         }
                         // Tuple Show: inline expansion directly applied to the arg
                         if let Some(show_lambda) =
-                            self.try_inline_tuple_show(&trait_name, func.span())
+                            self.try_inline_tuple_show(&trait_name, func.id, func.span)
                         {
                             let elab_arg = self.elaborate_expr(arg);
-                            return Expr::App {
+                            return Expr::synth(span, ExprKind::App {
                                 func: Box::new(show_lambda),
                                 arg: Box::new(elab_arg),
-                                span: *span,
-                            };
+                            });
                         }
                     }
 
@@ -448,49 +444,44 @@ impl Elaborator {
                     if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
                         let elab_arg = self.elaborate_expr(arg);
                         // Build the call with dict args prepended
-                        let mut result: Expr = Expr::Var {
+                        let mut result: Expr = Expr::synth(func.span, ExprKind::Var {
                             name: name.clone(),
-                            span: func.span(),
-                        };
+                        });
                         for (trait_name, _type_var) in &dict_param_info {
                             // Use the Var's span for evidence lookup (that's where
                             // the typechecker recorded it), not the App's span.
-                            if let Some(dict_expr) = self.resolve_dict(trait_name, func.span()) {
-                                result = Expr::App {
+                            if let Some(dict_expr) = self.resolve_dict(trait_name, func.id, func.span) {
+                                result = Expr::synth(span, ExprKind::App {
                                     func: Box::new(result),
                                     arg: Box::new(dict_expr),
-                                    span: *span,
-                                };
+                                });
                             }
                         }
-                        return Expr::App {
+                        return Expr::synth(span, ExprKind::App {
                             func: Box::new(result),
                             arg: Box::new(elab_arg),
-                            span: *span,
-                        };
+                        });
                     }
                 }
 
                 // Same logic for qualified module calls: Result.unwrap, etc.
-                if let Expr::QualifiedName { module, name, .. } = func.as_ref() {
+                if let ExprKind::QualifiedName { module, name, .. } = &func.kind {
                     let qualified = format!("{}.{}", module, name);
 
                     // Trait method via qualified name
                     if let Some((trait_name, method_index)) =
                         self.trait_methods.get(&qualified).cloned()
-                        && let Some(dict_expr) = self.resolve_dict(&trait_name, func.span())
+                        && let Some(dict_expr) = self.resolve_dict(&trait_name, func.id, func.span)
                     {
                         let elab_arg = self.elaborate_expr(arg);
-                        let method = Expr::DictMethodAccess {
+                        let method = Expr::synth(func.span, ExprKind::DictMethodAccess {
                             dict: Box::new(dict_expr),
                             method_index,
-                            span: func.span(),
-                        };
-                        return Expr::App {
+                        });
+                        return Expr::synth(span, ExprKind::App {
                             func: Box::new(method),
                             arg: Box::new(elab_arg),
-                            span: *span,
-                        };
+                        });
                     }
 
                     // Dict-parameterized function via qualified name
@@ -498,19 +489,17 @@ impl Elaborator {
                         let elab_arg = self.elaborate_expr(arg);
                         let mut result: Expr = func.as_ref().clone();
                         for (trait_name, _type_var) in &dict_param_info {
-                            if let Some(dict_expr) = self.resolve_dict(trait_name, func.span()) {
-                                result = Expr::App {
+                            if let Some(dict_expr) = self.resolve_dict(trait_name, func.id, func.span) {
+                                result = Expr::synth(span, ExprKind::App {
                                     func: Box::new(result),
                                     arg: Box::new(dict_expr),
-                                    span: *span,
-                                };
+                                });
                             }
                         }
-                        return Expr::App {
+                        return Expr::synth(span, ExprKind::App {
                             func: Box::new(result),
                             arg: Box::new(elab_arg),
-                            span: *span,
-                        };
+                        });
                     }
                 }
 
@@ -520,27 +509,25 @@ impl Elaborator {
                 // The single-arg case above handles most uses; multi-arg
                 // is handled by the lowerer's collect_fun_call.
 
-                Expr::App {
+                Expr::synth(span, ExprKind::App {
                     func: Box::new(self.elaborate_expr(func)),
                     arg: Box::new(self.elaborate_expr(arg)),
-                    span: *span,
-                }
+                })
             }
 
             // Recurse into all other expression forms
-            Expr::Lit { .. } | Expr::Constructor { .. } => expr.clone(),
+            ExprKind::Lit { .. } | ExprKind::Constructor { .. } => expr.clone(),
 
-            Expr::BinOp {
+            ExprKind::BinOp {
                 op,
                 left,
                 right,
-                span,
             } => {
                 // Rewrite Div to IntDiv when the Num constraint resolved to Int
                 let elaborated_op = if *op == BinOp::FloatDiv {
                     let is_int = self
-                        .evidence_by_span
-                        .get(span)
+                        .evidence_by_node
+                        .get(&node_id)
                         .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Num"))
                         .and_then(|ev| ev.resolved_type.as_ref())
                         .is_some_and(|(name, _)| name == "Int");
@@ -552,36 +539,31 @@ impl Elaborator {
                 } else {
                     op.clone()
                 };
-                Expr::BinOp {
+                Expr::synth(span, ExprKind::BinOp {
                     op: elaborated_op,
                     left: Box::new(self.elaborate_expr(left)),
                     right: Box::new(self.elaborate_expr(right)),
-                    span: *span,
-                }
+                })
             }
 
-            Expr::UnaryMinus { expr: e, span } => Expr::UnaryMinus {
+            ExprKind::UnaryMinus { expr: e } => Expr::synth(span, ExprKind::UnaryMinus {
                 expr: Box::new(self.elaborate_expr(e)),
-                span: *span,
-            },
+            }),
 
-            Expr::If {
+            ExprKind::If {
                 cond,
                 then_branch,
                 else_branch,
-                span,
-            } => Expr::If {
+            } => Expr::synth(span, ExprKind::If {
                 cond: Box::new(self.elaborate_expr(cond)),
                 then_branch: Box::new(self.elaborate_expr(then_branch)),
                 else_branch: Box::new(self.elaborate_expr(else_branch)),
-                span: *span,
-            },
+            }),
 
-            Expr::Case {
+            ExprKind::Case {
                 scrutinee,
                 arms,
-                span,
-            } => Expr::Case {
+            } => Expr::synth(span, ExprKind::Case {
                 scrutinee: Box::new(self.elaborate_expr(scrutinee)),
                 arms: arms
                     .iter()
@@ -592,10 +574,9 @@ impl Elaborator {
                         span: arm.span,
                     })
                     .collect(),
-                span: *span,
-            },
+            }),
 
-            Expr::Block { stmts, span } => Expr::Block {
+            ExprKind::Block { stmts } => Expr::synth(span, ExprKind::Block {
                 stmts: stmts
                     .iter()
                     .map(|s| match s {
@@ -628,58 +609,49 @@ impl Elaborator {
                         Stmt::Expr(e) => Stmt::Expr(self.elaborate_expr(e)),
                     })
                     .collect(),
-                span: *span,
-            },
+            }),
 
-            Expr::Lambda { params, body, span } => Expr::Lambda {
+            ExprKind::Lambda { params, body } => Expr::synth(span, ExprKind::Lambda {
                 params: params.clone(),
                 body: Box::new(self.elaborate_expr(body)),
-                span: *span,
-            },
+            }),
 
-            Expr::FieldAccess {
+            ExprKind::FieldAccess {
                 expr: e,
                 field,
-                span,
-            } => Expr::FieldAccess {
+            } => Expr::synth(span, ExprKind::FieldAccess {
                 expr: Box::new(self.elaborate_expr(e)),
                 field: field.clone(),
-                span: *span,
-            },
+            }),
 
-            Expr::RecordCreate { name, fields, span } => Expr::RecordCreate {
+            ExprKind::RecordCreate { name, fields } => Expr::synth(span, ExprKind::RecordCreate {
                 name: name.clone(),
                 fields: fields
                     .iter()
                     .map(|(n, e)| (n.clone(), self.elaborate_expr(e)))
                     .collect(),
-                span: *span,
-            },
+            }),
 
-            Expr::RecordUpdate {
+            ExprKind::RecordUpdate {
                 record,
                 fields,
-                span,
-            } => Expr::RecordUpdate {
+            } => Expr::synth(span, ExprKind::RecordUpdate {
                 record: Box::new(self.elaborate_expr(record)),
                 fields: fields
                     .iter()
                     .map(|(n, e)| (n.clone(), self.elaborate_expr(e)))
                     .collect(),
-                span: *span,
-            },
+            }),
 
-            Expr::Tuple { elements, span } => Expr::Tuple {
+            ExprKind::Tuple { elements } => Expr::synth(span, ExprKind::Tuple {
                 elements: elements.iter().map(|e| self.elaborate_expr(e)).collect(),
-                span: *span,
-            },
+            }),
 
-            Expr::Do {
+            ExprKind::Do {
                 bindings,
                 success,
                 else_arms,
-                span,
-            } => Expr::Do {
+            } => Expr::synth(span, ExprKind::Do {
                 bindings: bindings
                     .iter()
                     .map(|(p, e)| (p.clone(), self.elaborate_expr(e)))
@@ -694,21 +666,19 @@ impl Elaborator {
                         span: arm.span,
                     })
                     .collect(),
-                span: *span,
-            },
+            }),
 
-            Expr::QualifiedName { module, name, span } => {
+            ExprKind::QualifiedName { module, name } => {
                 let qualified = format!("{}.{}", module, name);
                 // Dict-parameterized function used as a bare value (not directly applied).
                 if let Some(dict_param_info) = self.fun_dict_params.get(&qualified).cloned() {
                     let mut result: Expr = expr.clone();
                     for (trait_name, _type_var) in &dict_param_info {
-                        if let Some(dict_expr) = self.resolve_dict(trait_name, *span) {
-                            result = Expr::App {
+                        if let Some(dict_expr) = self.resolve_dict(trait_name, node_id, span) {
+                            result = Expr::synth(span, ExprKind::App {
                                 func: Box::new(result),
                                 arg: Box::new(dict_expr),
-                                span: *span,
-                            };
+                            });
                         }
                     }
                     return result;
@@ -716,52 +686,44 @@ impl Elaborator {
                 expr.clone()
             }
 
-            Expr::EffectCall {
+            ExprKind::EffectCall {
                 name,
                 qualifier,
                 args,
-                span,
             } => {
-                Expr::EffectCall {
+                Expr::synth(span, ExprKind::EffectCall {
                     name: name.clone(),
                     qualifier: qualifier.clone(),
                     args: args.iter().map(|a| self.elaborate_expr(a)).collect(),
-                    span: *span,
-                }
+                })
             }
 
-            Expr::With {
+            ExprKind::With {
                 expr: e,
                 handler,
-                span,
-            } => Expr::With {
+            } => Expr::synth(span, ExprKind::With {
                 expr: Box::new(self.elaborate_expr(e)),
                 handler: Box::new(self.elaborate_handler(handler)),
-                span: *span,
-            },
+            }),
 
-            Expr::Resume { value, span } => Expr::Resume {
+            ExprKind::Resume { value } => Expr::synth(span, ExprKind::Resume {
                 value: Box::new(self.elaborate_expr(value)),
-                span: *span,
-            },
+            }),
 
-            Expr::ForeignCall {
+            ExprKind::ForeignCall {
                 module,
                 func,
                 args,
-                span,
-            } => Expr::ForeignCall {
+            } => Expr::synth(span, ExprKind::ForeignCall {
                 module: module.clone(),
                 func: func.clone(),
                 args: args.iter().map(|a| self.elaborate_expr(a)).collect(),
-                span: *span,
-            },
+            }),
 
-            Expr::Receive {
+            ExprKind::Receive {
                 arms,
                 after_clause,
-                span,
-            } => Expr::Receive {
+            } => Expr::synth(span, ExprKind::Receive {
                 arms: arms
                     .iter()
                     .map(|arm| CaseArm {
@@ -777,13 +739,12 @@ impl Elaborator {
                         Box::new(self.elaborate_expr(body)),
                     )
                 }),
-                span: *span,
-            },
+            }),
 
-            Expr::Ascription { expr, .. } => self.elaborate_expr(expr),
+            ExprKind::Ascription { expr, .. } => self.elaborate_expr(expr),
 
             // Elaboration-only variants (shouldn't appear in input)
-            Expr::DictMethodAccess { .. } | Expr::DictRef { .. } => expr.clone(),
+            ExprKind::DictMethodAccess { .. } | ExprKind::DictRef { .. } => expr.clone(),
         }
     }
 
@@ -817,11 +778,11 @@ impl Elaborator {
         }
     }
 
-    /// Resolve which dictionary to use for a given trait at a given span.
+    /// Resolve which dictionary to use for a given trait at a given node.
     /// Returns a DictRef expression or None if no evidence found.
-    fn resolve_dict(&self, trait_name: &str, span: Span) -> Option<Expr> {
-        // Check if we have evidence for this span
-        if let Some(evidence_list) = self.evidence_by_span.get(&span) {
+    fn resolve_dict(&self, trait_name: &str, node_id: crate::ast::NodeId, span: Span) -> Option<Expr> {
+        // Check if we have evidence for this node
+        if let Some(evidence_list) = self.evidence_by_node.get(&node_id) {
             for ev in evidence_list {
                 if ev.trait_name == trait_name {
                     return match &ev.resolved_type {
@@ -830,19 +791,17 @@ impl Elaborator {
                             let dict_name = self
                                 .dict_names
                                 .get(&(trait_name.to_string(), type_name.clone()))?;
-                            let mut dict_expr: Expr = Expr::DictRef {
+                            let mut dict_expr: Expr = Expr::synth(span, ExprKind::DictRef {
                                 name: dict_name.clone(),
-                                span,
-                            };
+                            });
                             // Apply sub-dictionaries for each type argument
                             for arg_ty in args {
                                 if let Some(sub_dict) = self.dict_for_type(trait_name, arg_ty, span)
                                 {
-                                    dict_expr = Expr::App {
+                                    dict_expr = Expr::synth(span, ExprKind::App {
                                         func: Box::new(dict_expr),
                                         arg: Box::new(sub_dict),
-                                        span,
-                                    };
+                                    });
                                 }
                             }
                             Some(dict_expr)
@@ -854,17 +813,15 @@ impl Elaborator {
                             // bounds for the same trait, e.g. `where {e: Show, a: Show}`).
                             if let Some(ref var_name) = ev.type_var_name {
                                 let param_name = format!("__dict_{}_{}", trait_name, var_name);
-                                Some(Expr::Var {
+                                Some(Expr::synth(span, ExprKind::Var {
                                     name: param_name,
-                                    span,
-                                })
+                                }))
                             } else {
                                 self.current_dict_params
                                     .get(trait_name)
-                                    .map(|name| Expr::Var {
+                                    .map(|name| Expr::synth(span, ExprKind::Var {
                                         name: name.clone(),
-                                        span,
-                                    })
+                                    }))
                             }
                         }
                     };
@@ -872,14 +829,13 @@ impl Elaborator {
             }
         }
 
-        // No evidence at this span -- fall back to current function's dict param
+        // No evidence at this node -- fall back to current function's dict param
         // (handles inferred constraints where the typechecker absorbed the constraint
-        // into the function's scheme rather than recording span-level evidence).
+        // into the function's scheme rather than recording node-level evidence).
         if let Some(name) = self.current_dict_params.get(trait_name) {
-            return Some(Expr::Var {
+            return Some(Expr::synth(span, ExprKind::Var {
                 name: name.clone(),
-                span,
-            });
+            }));
         }
 
         // No matching evidence for this trait. Might be a built-in trait
@@ -891,11 +847,10 @@ impl Elaborator {
     /// Returns an expression that, when applied to a value of that type, produces a string.
     fn show_fn_for_type(&self, ty: &Type, span: Span) -> Option<Expr> {
         let dict = self.dict_for_type("Show", ty, span)?;
-        Some(Expr::DictMethodAccess {
+        Some(Expr::synth(span, ExprKind::DictMethodAccess {
             dict: Box::new(dict),
             method_index: 0,
-            span,
-        })
+        }))
     }
 
     /// Build the dict expression for a concrete type (the dict itself, not the method).
@@ -905,24 +860,21 @@ impl Elaborator {
                 // Tuples don't have a dict constructor; build an inline dict
                 // containing the show lambda: {fun t -> "(" ++ ... ++ ")"}
                 let show_lambda = self.build_tuple_show_lambda(args, span)?;
-                Some(Expr::Tuple {
+                Some(Expr::synth(span, ExprKind::Tuple {
                     elements: vec![show_lambda],
-                    span,
-                })
+                }))
             }
             Type::Con(name, args) => {
                 let dict_name = self.dict_names.get(&(trait_name.into(), name.clone()))?;
-                let mut dict_expr: Expr = Expr::DictRef {
+                let mut dict_expr: Expr = Expr::synth(span, ExprKind::DictRef {
                     name: dict_name.clone(),
-                    span,
-                };
+                });
                 for arg_ty in args {
                     let sub_dict = self.dict_for_type(trait_name, arg_ty, span)?;
-                    dict_expr = Expr::App {
+                    dict_expr = Expr::synth(span, ExprKind::App {
                         func: Box::new(dict_expr),
                         arg: Box::new(sub_dict),
-                        span,
-                    };
+                    });
                 }
                 Some(dict_expr)
             }
@@ -934,33 +886,31 @@ impl Elaborator {
                     .current_dict_params_by_var
                     .get(&(trait_name.into(), var_key))
                 {
-                    return Some(Expr::Var {
+                    return Some(Expr::synth(span, ExprKind::Var {
                         name: param_name.clone(),
-                        span,
-                    });
+                    }));
                 }
                 // Fall back to single-trait lookup
                 self.current_dict_params
                     .get(trait_name)
-                    .map(|name| Expr::Var {
+                    .map(|name| Expr::synth(span, ExprKind::Var {
                         name: name.clone(),
-                        span,
-                    })
+                    }))
             }
             _ => None,
         }
     }
 
-    /// Check if the evidence at a span indicates Show for a Tuple type.
+    /// Check if the evidence at a node indicates Show for a Tuple type.
     /// If so, build an inline show expression for the tuple rather than
     /// using dictionary dispatch (since tuples are variable-arity).
     ///
     /// Returns a lambda: fun t -> "(" ++ show_T1(element(1,t)) ++ ", " ++ ... ++ ")"
-    fn try_inline_tuple_show(&self, trait_name: &str, span: Span) -> Option<Expr> {
+    fn try_inline_tuple_show(&self, trait_name: &str, node_id: crate::ast::NodeId, span: Span) -> Option<Expr> {
         if trait_name != "Show" {
             return None;
         }
-        let evidence_list = self.evidence_by_span.get(&span)?;
+        let evidence_list = self.evidence_by_node.get(&node_id)?;
         let tuple_ev = evidence_list.iter().find(|ev| {
             ev.trait_name == "Show"
                 && ev
@@ -975,92 +925,79 @@ impl Elaborator {
     /// Build a show lambda for a tuple with the given element types.
     fn build_tuple_show_lambda(&self, type_args: &[Type], span: Span) -> Option<Expr> {
         let s = span;
-        let t_var = Expr::Var {
+        let t_var = Expr::synth(s, ExprKind::Var {
             name: "__tup".into(),
-            span: s,
-        };
+        });
 
         // Build: "(" ++ show_T1(element(1, t)) ++ ", " ++ show_T2(element(2, t)) ++ ... ++ ")"
         let arity = type_args.len();
         if arity == 0 {
             // Empty tuple = unit, but this shouldn't happen (Unit is separate)
-            return Some(Expr::Lambda {
+            return Some(Expr::synth(s, ExprKind::Lambda {
                 params: vec![Pat::Var {
                     name: "__tup".into(),
                     span: s,
                 }],
-                body: Box::new(Expr::Lit {
+                body: Box::new(Expr::synth(s, ExprKind::Lit {
                     value: Lit::String("()".into()),
-                    span: s,
-                }),
-                span: s,
-            });
+                })),
+            }));
         }
 
         // Build the shown elements and join with ", "
         let mut parts: Vec<Expr> = Vec::new();
         for (i, elem_ty) in type_args.iter().enumerate() {
             let show_fn = self.show_fn_for_type(elem_ty, s)?;
-            let elem = Expr::ForeignCall {
+            let elem = Expr::synth(s, ExprKind::ForeignCall {
                 module: "erlang".into(),
                 func: "element".into(),
                 args: vec![
-                    Expr::Lit {
+                    Expr::synth(s, ExprKind::Lit {
                         value: Lit::Int((i + 1) as i64),
-                        span: s,
-                    },
+                    }),
                     t_var.clone(),
                 ],
-                span: s,
-            };
-            parts.push(Expr::App {
+            });
+            parts.push(Expr::synth(s, ExprKind::App {
                 func: Box::new(show_fn),
                 arg: Box::new(elem),
-                span: s,
-            });
+            }));
         }
 
         // Join parts with ", " separators: "(" ++ p1 ++ ", " ++ p2 ++ ... ++ ")"
-        let mut result = Expr::Lit {
+        let mut result = Expr::synth(s, ExprKind::Lit {
             value: Lit::String("(".into()),
-            span: s,
-        };
+        });
         for (i, part) in parts.into_iter().enumerate() {
             if i > 0 {
-                result = Expr::BinOp {
+                result = Expr::synth(s, ExprKind::BinOp {
                     op: BinOp::Concat,
                     left: Box::new(result),
-                    right: Box::new(Expr::Lit {
+                    right: Box::new(Expr::synth(s, ExprKind::Lit {
                         value: Lit::String(", ".into()),
-                        span: s,
-                    }),
-                    span: s,
-                };
+                    })),
+                });
             }
-            result = Expr::BinOp {
+            result = Expr::synth(s, ExprKind::BinOp {
                 op: BinOp::Concat,
                 left: Box::new(result),
                 right: Box::new(part),
-                span: s,
-            };
+            });
         }
-        result = Expr::BinOp {
+        result = Expr::synth(s, ExprKind::BinOp {
             op: BinOp::Concat,
             left: Box::new(result),
-            right: Box::new(Expr::Lit {
+            right: Box::new(Expr::synth(s, ExprKind::Lit {
                 value: Lit::String(")".into()),
-                span: s,
-            }),
-            span: s,
-        };
+            })),
+        });
 
-        Some(Expr::Lambda {
+        Some(Expr::synth(s, ExprKind::Lambda {
             params: vec![Pat::Var {
                 name: "__tup".into(),
                 span: s,
             }],
             body: Box::new(result),
-            span: s,
-        })
+        }))
     }
 }

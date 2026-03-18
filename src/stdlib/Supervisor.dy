@@ -8,13 +8,13 @@ import Std.Result (Result, Ok, Err)
 pub fun supervised (retries: Int) (f: () -> a needs {Fail e}) -> Result a e
 supervised 0 f = {
   f () with {
-    return value -> Ok value
-    fail reason -> Err reason
+    return value = Ok value
+    fail reason = Err reason
   }
 }
 supervised n f = {
   f () with {
-    return value -> Ok value
-    fail reason -> supervised (n - 1) f
+    return value = Ok value
+    fail reason = supervised (n - 1) f
   }
 }

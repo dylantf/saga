@@ -1,7 +1,7 @@
 /// Expression-lowering helper methods on Lowerer.
 /// General expression forms: case arms, constructors, binops, blocks, do-else, etc.
 /// Effect system lowering is in effects.rs.
-use crate::ast::{BinOp, CaseArm, Expr, Pat, Stmt};
+use crate::ast::{BinOp, CaseArm, Expr, ExprKind, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::token::Span;
 
@@ -16,10 +16,10 @@ use super::{FunInfo, Lowerer};
 /// comparisons, arithmetic, boolean ops, unary minus, and literals/variables.
 /// Any function application (user-defined or unknown BIF) returns false.
 fn is_guard_safe(expr: &Expr) -> bool {
-    match expr {
-        Expr::Lit { .. } | Expr::Var { .. } => true,
-        Expr::BinOp { left, right, .. } => is_guard_safe(left) && is_guard_safe(right),
-        Expr::UnaryMinus { expr, .. } => is_guard_safe(expr),
+    match &expr.kind {
+        ExprKind::Lit { .. } | ExprKind::Var { .. } => true,
+        ExprKind::BinOp { left, right, .. } => is_guard_safe(left) && is_guard_safe(right),
+        ExprKind::UnaryMinus { expr, .. } => is_guard_safe(expr),
         // No App, Constructor, Block, If, Case, etc. -- too complex for a guard
         _ => false,
     }
@@ -438,17 +438,13 @@ impl<'a> Lowerer<'a> {
                 // of the block as _ReturnK so abort-style handlers skip subsequent stmts.
                 let with_info = match first {
                     Stmt::Let {
-                        pattern,
-                        value: Expr::With { .. },
-                        ..
-                    } => Some((
-                        Some(pattern),
-                        match first {
-                            Stmt::Let { value, .. } => value,
-                            _ => unreachable!(),
-                        },
-                    )),
-                    Stmt::Expr(e @ Expr::With { .. }) => Some((None, e)),
+                        pattern, value, ..
+                    } if matches!(value.kind, ExprKind::With { .. }) => {
+                        Some((Some(pattern), value))
+                    }
+                    Stmt::Expr(e) if matches!(e.kind, ExprKind::With { .. }) => {
+                        Some((None, e))
+                    }
                     _ => None,
                 };
                 if let Some((pat_opt, with_expr)) = with_info {
@@ -568,7 +564,7 @@ impl<'a> Lowerer<'a> {
                                 span,
                                 ..
                             } => (Some(pattern), *assert, *span, self.lower_expr(value)),
-                            Stmt::Expr(e) => (None, false, e.span(), self.lower_expr(e)),
+                            Stmt::Expr(e) => (None, false, e.span, self.lower_expr(e)),
                             Stmt::LetFun { .. } => unreachable!(),
                         };
                         let rest_ce = self.lower_block(rest);
@@ -596,8 +592,8 @@ impl<'a> Lowerer<'a> {
 
     /// Lower an expression with an outer continuation K threaded through branches.
     pub(super) fn lower_expr_with_k(&mut self, expr: &Expr, k_var: &str) -> CExpr {
-        match expr {
-            Expr::If {
+        match &expr.kind {
+            ExprKind::If {
                 cond,
                 then_branch,
                 else_branch,
@@ -627,7 +623,7 @@ impl<'a> Lowerer<'a> {
                     )),
                 )
             }
-            Expr::Case {
+            ExprKind::Case {
                 scrutinee, arms, ..
             } => {
                 let scrut_var = self.fresh();
@@ -653,7 +649,7 @@ impl<'a> Lowerer<'a> {
                     Box::new(CExpr::Case(Box::new(CExpr::Var(scrut_var)), arms_ce)),
                 )
             }
-            Expr::Block { stmts, .. } => self.lower_block_with_k(stmts, k_var),
+            ExprKind::Block { stmts, .. } => self.lower_block_with_k(stmts, k_var),
             _ => {
                 // Not a branching expression: apply K to the result
                 let v = self.fresh();
@@ -695,7 +691,7 @@ impl<'a> Lowerer<'a> {
             let ce = self.lower_expr(expr);
             self.pending_callee_return_k = saved;
             ce
-        } else if has_nested_effect_call(expr) || matches!(expr, Expr::Block { .. }) {
+        } else if has_nested_effect_call(expr) || matches!(expr.kind, ExprKind::Block { .. }) {
             // Contains nested effects or is a block (which may have effectful
             // function calls not detected by has_nested_effect_call): recurse
             self.lower_expr_with_k(expr, k_var)

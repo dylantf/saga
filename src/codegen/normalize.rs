@@ -112,29 +112,27 @@ impl Normalizer {
     /// Normalize the arguments of an effect call (or App-chain around one),
     /// but keep the effect call itself in place.
     fn normalize_effect_args(&mut self, expr: &Expr, lifted: &mut Vec<Stmt>) -> Expr {
-        match expr {
-            Expr::EffectCall {
+        let span = expr.span;
+        match &expr.kind {
+            ExprKind::EffectCall {
                 name,
                 qualifier,
                 args,
-                span,
-            } => Expr::EffectCall {
+            } => Expr::synth(span, ExprKind::EffectCall {
                 name: name.clone(),
                 qualifier: qualifier.clone(),
                 args: args
                     .iter()
                     .map(|a| self.normalize_and_lift(a, lifted))
                     .collect(),
-                span: *span,
-            },
-            Expr::App { func, arg, span } => {
+            }),
+            ExprKind::App { func, arg } => {
                 let new_arg = self.normalize_and_lift(arg, lifted);
                 let new_func = self.normalize_effect_args(func, lifted);
-                Expr::App {
+                Expr::synth(span, ExprKind::App {
                     func: Box::new(new_func),
                     arg: Box::new(new_arg),
-                    span: *span,
-                }
+                })
             }
             _ => self.normalize_and_lift(expr, lifted),
         }
@@ -142,7 +140,7 @@ impl Normalizer {
 
     /// Lift an expression into a let-binding, returning a variable reference.
     fn lift_to_let(&mut self, expr: Expr, lifted: &mut Vec<Stmt>) -> Expr {
-        let span = expr.span();
+        let span = expr.span;
         let var_name = self.fresh();
         lifted.push(Stmt::Let {
             pattern: Pat::Var {
@@ -154,65 +152,59 @@ impl Normalizer {
             assert: false,
             span,
         });
-        Expr::Var {
+        Expr::synth(span, ExprKind::Var {
             name: var_name,
-            span,
-        }
+        })
     }
 
     /// Walk an expression's sub-expressions, lifting any nested effect calls.
     /// The expression itself is NOT an effect call (that's handled by the caller).
     fn walk_expr(&mut self, expr: &Expr, lifted: &mut Vec<Stmt>) -> Expr {
-        match expr {
+        let span = expr.span;
+        match &expr.kind {
             // Binary op: left-to-right normalization of operands.
-            Expr::BinOp {
+            ExprKind::BinOp {
                 op,
                 left,
                 right,
-                span,
             } => {
                 let new_left = self.normalize_and_lift(left, lifted);
                 let new_right = self.normalize_and_lift(right, lifted);
-                Expr::BinOp {
+                Expr::synth(span, ExprKind::BinOp {
                     op: op.clone(),
                     left: Box::new(new_left),
                     right: Box::new(new_right),
-                    span: *span,
-                }
+                })
             }
 
             // Function application (non-effect): normalize func and arg.
-            Expr::App { func, arg, span } => {
+            ExprKind::App { func, arg } => {
                 let new_func = self.normalize_and_lift(func, lifted);
                 let new_arg = self.normalize_and_lift(arg, lifted);
-                Expr::App {
+                Expr::synth(span, ExprKind::App {
                     func: Box::new(new_func),
                     arg: Box::new(new_arg),
-                    span: *span,
-                }
+                })
             }
 
             // If: lift effect calls from condition; branches are their own scope.
-            Expr::If {
+            ExprKind::If {
                 cond,
                 then_branch,
                 else_branch,
-                span,
             } => {
                 let new_cond = self.normalize_and_lift(cond, lifted);
-                Expr::If {
+                Expr::synth(span, ExprKind::If {
                     cond: Box::new(new_cond),
                     then_branch: Box::new(self.normalize_expr(then_branch)),
                     else_branch: Box::new(self.normalize_expr(else_branch)),
-                    span: *span,
-                }
+                })
             }
 
             // Case: lift from scrutinee; arms are their own scope.
-            Expr::Case {
+            ExprKind::Case {
                 scrutinee,
                 arms,
-                span,
             } => {
                 let new_scrut = self.normalize_and_lift(scrutinee, lifted);
                 let new_arms = arms
@@ -224,127 +216,113 @@ impl Normalizer {
                         span: arm.span,
                     })
                     .collect();
-                Expr::Case {
+                Expr::synth(span, ExprKind::Case {
                     scrutinee: Box::new(new_scrut),
                     arms: new_arms,
-                    span: *span,
-                }
+                })
             }
 
             // Block: recursively normalize the block's statements.
-            Expr::Block { stmts, span } => {
+            ExprKind::Block { stmts } => {
                 let new_stmts = self.normalize_stmts(stmts);
-                Expr::Block {
+                Expr::synth(span, ExprKind::Block {
                     stmts: new_stmts,
-                    span: *span,
-                }
+                })
             }
 
             // Tuple: normalize each element left-to-right.
-            Expr::Tuple { elements, span } => {
+            ExprKind::Tuple { elements } => {
                 let new_elems = elements
                     .iter()
                     .map(|e| self.normalize_and_lift(e, lifted))
                     .collect();
-                Expr::Tuple {
+                Expr::synth(span, ExprKind::Tuple {
                     elements: new_elems,
-                    span: *span,
-                }
+                })
             }
 
             // UnaryMinus
-            Expr::UnaryMinus { expr: inner, span } => {
+            ExprKind::UnaryMinus { expr: inner } => {
                 let new_inner = self.normalize_and_lift(inner, lifted);
-                Expr::UnaryMinus {
+                Expr::synth(span, ExprKind::UnaryMinus {
                     expr: Box::new(new_inner),
-                    span: *span,
-                }
+                })
             }
 
             // Lambda: normalize body in its own scope.
-            Expr::Lambda { params, body, span } => Expr::Lambda {
+            ExprKind::Lambda { params, body } => Expr::synth(span, ExprKind::Lambda {
                 params: params.clone(),
                 body: Box::new(self.normalize_expr(body)),
-                span: *span,
-            },
+            }),
 
             // With: normalize the inner expression in its own scope.
-            Expr::With {
+            ExprKind::With {
                 expr: inner,
                 handler,
-                span,
-            } => Expr::With {
+            } => Expr::synth(span, ExprKind::With {
                 expr: Box::new(self.normalize_expr(inner)),
                 handler: handler.clone(),
-                span: *span,
-            },
+            }),
 
             // Resume: normalize the value.
-            Expr::Resume { value, span } => {
+            ExprKind::Resume { value } => {
                 let new_val = self.normalize_and_lift(value, lifted);
-                Expr::Resume {
+                Expr::synth(span, ExprKind::Resume {
                     value: Box::new(new_val),
-                    span: *span,
-                }
+                })
             }
 
             // FieldAccess: normalize the base expression.
-            Expr::FieldAccess {
+            ExprKind::FieldAccess {
                 expr: inner,
                 field,
-                span,
             } => {
                 let new_inner = self.normalize_and_lift(inner, lifted);
-                Expr::FieldAccess {
+                Expr::synth(span, ExprKind::FieldAccess {
                     expr: Box::new(new_inner),
                     field: field.clone(),
-                    span: *span,
-                }
+                })
             }
 
             // RecordCreate: normalize field values.
-            Expr::RecordCreate { name, fields, span } => {
+            ExprKind::RecordCreate { name, fields } => {
                 let new_fields = fields
                     .iter()
                     .map(|(n, e)| (n.clone(), self.normalize_and_lift(e, lifted)))
                     .collect();
-                Expr::RecordCreate {
+                Expr::synth(span, ExprKind::RecordCreate {
                     name: name.clone(),
                     fields: new_fields,
-                    span: *span,
-                }
+                })
             }
 
             // RecordUpdate: normalize record and field values.
-            Expr::RecordUpdate {
+            ExprKind::RecordUpdate {
                 record,
                 fields,
-                span,
             } => {
                 let new_record = self.normalize_and_lift(record, lifted);
                 let new_fields = fields
                     .iter()
                     .map(|(n, e)| (n.clone(), self.normalize_and_lift(e, lifted)))
                     .collect();
-                Expr::RecordUpdate {
+                Expr::synth(span, ExprKind::RecordUpdate {
                     record: Box::new(new_record),
                     fields: new_fields,
-                    span: *span,
-                }
+                })
             }
 
             // Do: normalize binding expressions and success in their own scopes.
-            Expr::Do {
+            ExprKind::Do {
                 bindings,
                 success,
                 else_arms,
-                span,
             } => {
                 let new_bindings = bindings
                     .iter()
                     .map(|(p, e)| (p.clone(), self.normalize_expr(e)))
                     .collect();
-                Expr::Do {
+                Expr::synth(span, ExprKind::Do {
                     bindings: new_bindings,
                     success: Box::new(self.normalize_expr(success)),
                     else_arms: else_arms
@@ -356,50 +334,44 @@ impl Normalizer {
                             span: arm.span,
                         })
                         .collect(),
-                    span: *span,
-                }
+                })
             }
 
             // Elaboration-only nodes
-            Expr::DictMethodAccess {
+            ExprKind::DictMethodAccess {
                 dict,
                 method_index,
-                span,
             } => {
                 let new_dict = self.normalize_and_lift(dict, lifted);
-                Expr::DictMethodAccess {
+                Expr::synth(span, ExprKind::DictMethodAccess {
                     dict: Box::new(new_dict),
                     method_index: *method_index,
-                    span: *span,
-                }
+                })
             }
 
-            Expr::ForeignCall {
+            ExprKind::ForeignCall {
                 module,
                 func,
                 args,
-                span,
             } => {
                 let new_args = args
                     .iter()
                     .map(|a| self.normalize_and_lift(a, lifted))
                     .collect();
-                Expr::ForeignCall {
+                Expr::synth(span, ExprKind::ForeignCall {
                     module: module.clone(),
                     func: func.clone(),
                     args: new_args,
-                    span: *span,
-                }
+                })
             }
 
             // Effect calls should not reach here (handled by caller), but be safe.
-            Expr::EffectCall { .. } => unreachable!("effect call should be handled by caller"),
+            ExprKind::EffectCall { .. } => unreachable!("effect call should be handled by caller"),
 
-            Expr::Receive {
+            ExprKind::Receive {
                 arms,
                 after_clause,
-                span,
-            } => Expr::Receive {
+            } => Expr::synth(span, ExprKind::Receive {
                 arms: arms
                     .iter()
                     .map(|arm| CaseArm {
@@ -415,16 +387,15 @@ impl Normalizer {
                         Box::new(self.normalize_expr(body)),
                     )
                 }),
-                span: *span,
-            },
+            }),
 
             // Leaves: no sub-expressions to normalize.
-            Expr::Lit { .. }
-            | Expr::Var { .. }
-            | Expr::Constructor { .. }
-            | Expr::QualifiedName { .. }
-            | Expr::DictRef { .. } => expr.clone(),
-            Expr::Ascription { expr, .. } => self.walk_expr(expr, lifted),
+            ExprKind::Lit { .. }
+            | ExprKind::Var { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::QualifiedName { .. }
+            | ExprKind::DictRef { .. } => expr.clone(),
+            ExprKind::Ascription { expr: inner, .. } => self.walk_expr(inner, lifted),
         }
     }
 
@@ -438,19 +409,18 @@ impl Normalizer {
         } else {
             // Wrap in a block with the lifted bindings.
             lifted.push(Stmt::Expr(new_expr));
-            Expr::Block {
+            Expr::synth(expr.span, ExprKind::Block {
                 stmts: lifted,
-                span: expr.span(),
-            }
+            })
         }
     }
 }
 
 /// Check if an expression is an effect call (bare or wrapped in App nodes).
 fn is_effect_call(expr: &Expr) -> bool {
-    match expr {
-        Expr::EffectCall { .. } => true,
-        Expr::App { func, .. } => is_effect_call(func),
+    match &expr.kind {
+        ExprKind::EffectCall { .. } => true,
+        ExprKind::App { func, .. } => is_effect_call(func),
         _ => false,
     }
 }

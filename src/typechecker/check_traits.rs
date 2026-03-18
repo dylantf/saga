@@ -235,7 +235,7 @@ impl Checker {
 
             // Infer body and check it matches the expected return type
             let body_ty = self.infer_expr(body)?;
-            self.unify_at(&body_ty, &expected_return, body.span())
+            self.unify_at(&body_ty, &expected_return, body.span)
                 .map_err(|e| {
                     Diagnostic::error_at(
                         span,
@@ -256,7 +256,7 @@ impl Checker {
                         "impl {} for {}, method '{}'",
                         trait_name, target_type, method_name
                     ),
-                    body.span(),
+                    body.span,
                 )?;
             }
 

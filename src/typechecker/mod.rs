@@ -12,20 +12,20 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::Expr;
+use crate::ast::{Expr, ExprKind};
 use crate::token::Span;
 
 /// Returns the span of the first effect call found in `expr`, if any.
 /// Used to reject effect calls inside guard expressions.
 pub(crate) fn find_effect_call(expr: &Expr) -> Option<Span> {
-    match expr {
-        Expr::EffectCall { span, .. } => Some(*span),
-        Expr::App { func, arg, .. } => find_effect_call(func).or_else(|| find_effect_call(arg)),
-        Expr::BinOp { left, right, .. } => {
+    match &expr.kind {
+        ExprKind::EffectCall { .. } => Some(expr.span),
+        ExprKind::App { func, arg, .. } => find_effect_call(func).or_else(|| find_effect_call(arg)),
+        ExprKind::BinOp { left, right, .. } => {
             find_effect_call(left).or_else(|| find_effect_call(right))
         }
-        Expr::UnaryMinus { expr, .. } => find_effect_call(expr),
-        Expr::If {
+        ExprKind::UnaryMinus { expr: inner, .. } => find_effect_call(inner),
+        ExprKind::If {
             cond,
             then_branch,
             else_branch,
@@ -635,7 +635,7 @@ pub struct ImplInfo {
 /// Used by the elaboration pass to insert dictionary arguments.
 #[derive(Debug, Clone)]
 pub struct TraitEvidence {
-    pub span: Span,
+    pub node_id: crate::ast::NodeId,
     pub trait_name: String,
     /// The concrete type that satisfied the constraint.
     /// None if resolved via a where-bound type variable (polymorphic passthrough).
@@ -676,8 +676,8 @@ pub struct Checker {
     pub(crate) traits: HashMap<String, TraitInfo>,
     /// Impl registry: (trait_name, target_type) -> impl info
     pub(crate) trait_impls: HashMap<(String, String), ImplInfo>,
-    /// Pending trait constraints to check: (trait_name, type, span)
-    pub(crate) pending_constraints: Vec<(String, Type, Span)>,
+    /// Pending trait constraints to check: (trait_name, type, span_for_errors, node_id)
+    pub(crate) pending_constraints: Vec<(String, Type, Span, crate::ast::NodeId)>,
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
     /// Tracks which records are still candidates for an unresolved type variable based on
     /// the intersection of all fields accessed on it. Checked at end of each function body.
@@ -694,9 +694,11 @@ pub struct Checker {
     pub(crate) evidence: Vec<TraitEvidence>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
-    /// Per-span type information for LSP hover, go-to-def, etc.
+    /// Per-node type information for Expr nodes (LSP hover, go-to-def, etc.).
     /// Types are stored unresolved (may contain type variables); apply `sub`
     /// at lookup time to get the final resolved type.
+    pub(crate) type_at_node: HashMap<crate::ast::NodeId, Type>,
+    /// Per-span type information for Pat bindings (which don't have NodeIds).
     pub(crate) type_at_span: HashMap<Span, Type>,
     /// When true, function annotations without matching bodies are allowed
     /// (used for builtin stdlib modules where implementations are in Rust).
@@ -774,6 +776,7 @@ impl Checker {
             adt_variants: HashMap::new(),
             evidence: Vec::new(),
             collected_diagnostics: Vec::new(),
+            type_at_node: HashMap::new(),
             type_at_span: HashMap::new(),
             allow_bodyless_annotations: false,
             current_module: None,
@@ -832,8 +835,13 @@ impl Checker {
         errors
     }
 
-    /// Record the type of an expression or binding at a given span.
-    pub(crate) fn record_type(&mut self, span: Span, ty: &Type) {
+    /// Record the type of an expression node (by NodeId).
+    pub(crate) fn record_type(&mut self, node_id: crate::ast::NodeId, ty: &Type) {
+        self.type_at_node.entry(node_id).or_insert_with(|| ty.clone());
+    }
+
+    /// Record the type of a pattern binding (by Span, since Pat has no NodeId).
+    pub(crate) fn record_type_at_span(&mut self, span: Span, ty: &Type) {
         self.type_at_span.entry(span).or_insert_with(|| ty.clone());
     }
 

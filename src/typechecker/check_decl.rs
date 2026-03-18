@@ -497,11 +497,11 @@ impl Checker {
                     ));
                 }
                 let guard_ty = self.infer_expr(guard)?;
-                self.unify_at(&guard_ty, &Type::bool(), guard.span())?;
+                self.unify_at(&guard_ty, &Type::bool(), guard.span)?;
             }
 
             let body_ty = self.infer_expr(body)?;
-            self.unify_at(&result_ty, &body_ty, body.span())?;
+            self.unify_at(&result_ty, &body_ty, body.span)?;
 
             self.env = saved_env;
         }
@@ -622,7 +622,7 @@ impl Checker {
     ) -> Result<Scheme, Diagnostic> {
         let new_constraints = self.pending_constraints.split_off(constraints_before);
         let mut scheme_constraints: Vec<(String, u32, Span)> = Vec::new();
-        for (trait_name, ty, span) in new_constraints {
+        for (trait_name, ty, span, node_id) in new_constraints {
             let resolved = self.sub.apply(&ty);
             match resolved {
                 Type::Var(id) => {
@@ -650,7 +650,7 @@ impl Checker {
                     scheme_constraints.push((trait_name, id, span));
                 }
                 _ => {
-                    self.pending_constraints.push((trait_name, ty, span));
+                    self.pending_constraints.push((trait_name, ty, span, node_id));
                 }
             }
         }
@@ -1133,7 +1133,7 @@ impl Checker {
             if constraints.is_empty() {
                 break;
             }
-            for (trait_name, ty, span) in constraints {
+            for (trait_name, ty, span, node_id) in constraints {
                 let resolved = self.sub.apply(&ty);
                 if matches!(resolved, Type::Error) {
                     continue;
@@ -1154,7 +1154,7 @@ impl Checker {
                             Some(info) => {
                                 // Record evidence for the elaboration pass
                                 self.evidence.push(super::TraitEvidence {
-                                    span,
+                                    node_id,
                                     trait_name: trait_name.clone(),
                                     resolved_type: Some((type_name.clone(), args.clone())),
                                     type_var_name: None,
@@ -1167,6 +1167,7 @@ impl Checker {
                                             trait_name.clone(),
                                             arg_ty.clone(),
                                             span,
+                                            node_id,
                                         ));
                                     }
                                 } else {
@@ -1176,6 +1177,7 @@ impl Checker {
                                                 req_trait.clone(),
                                                 arg_ty.clone(),
                                                 span,
+                                                node_id,
                                             ));
                                         }
                                     }
@@ -1200,7 +1202,7 @@ impl Checker {
                         // Record evidence for polymorphic passthrough
                         let var_name = resolved_var_names.get(id).cloned();
                         self.evidence.push(super::TraitEvidence {
-                            span,
+                            node_id,
                             trait_name: trait_name.clone(),
                             resolved_type: None,
                             type_var_name: var_name,
