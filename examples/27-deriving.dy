@@ -9,20 +9,20 @@ speak animal = case animal {
   Cat -> "meow"
 }
 
-compare a1 a2 | a1 == a2 = "✅ Equal!"
-compare _ _ = "🚫 Not equal!"
+comp a1 a2 | a1 == a2 = "✅ Equal!"
+comp _ _ = "🚫 Not equal!"
 
 main () = {
   let hans = Dog 5
   print $"{hans} says {hans |> speak}"
 
   let dylan = Dog 5
-  print $"Hans and Dylan are: {compare hans dylan}"
+  print $"Hans and Dylan are: {comp hans dylan}"
 
   let hanna = Dog 7
-  print $"Hans and Hanna are {compare hans hanna}"
+  print $"Hans and Hanna are {comp hans hanna}"
 
   let oddbjorn = Cat
   print "Oddbjørn"
-  print $"Hans and Oddbjørn are {compare hans oddbjorn}"
+  print $"Hans and Oddbjørn are {comp hans oddbjorn}"
 }

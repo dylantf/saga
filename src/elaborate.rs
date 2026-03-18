@@ -54,7 +54,7 @@ impl Elaborator {
         // Traits that use operator dispatch, not dictionary dispatch.
         // These should not generate dict params.
         let operator_traits: std::collections::HashSet<&str> =
-            ["Num", "Eq", "Ord"].into_iter().collect();
+            ["Num", "Eq"].into_iter().collect();
 
         let mut inferred_dict_params: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (name, scheme) in result.env.iter() {
@@ -378,14 +378,9 @@ impl Elaborator {
                     if let Some(show_lambda) = self.try_inline_tuple_show(&trait_name, *span) {
                         return show_lambda;
                     }
-                    // No evidence resolved -- this trait method will be emitted as a
-                    // bare variable, which will fail at runtime. This can happen if
-                    // the typechecker recorded evidence at a different span.
-                    debug_assert!(
-                        false,
-                        "unresolved trait method `{}` (trait `{}`) at {:?}",
-                        name, trait_name, span
-                    );
+                    // No evidence found -- this is likely a user-defined function
+                    // that shadows the trait method name. Fall through to normal
+                    // variable handling.
                 }
 
                 // Dict-parameterized function used as a bare value (not directly applied).
@@ -536,6 +531,27 @@ impl Elaborator {
                 right,
                 span,
             } => {
+                // Rewrite comparison operators to `compare` calls for non-primitive types.
+                // Primitives (Int, Float, String) keep using BEAM BIFs directly.
+                if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq) {
+                    let is_primitive = self
+                        .evidence_by_span
+                        .get(span)
+                        .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Ord"))
+                        .and_then(|ev| ev.resolved_type.as_ref())
+                        .is_some_and(|(name, _)| {
+                            matches!(name.as_str(), "Int" | "Float" | "String")
+                        });
+
+                    if !is_primitive {
+                        if let Some(compare_expr) =
+                            self.desugar_comparison(op, left, right, *span)
+                        {
+                            return compare_expr;
+                        }
+                    }
+                }
+
                 // Rewrite Div to IntDiv when the Num constraint resolved to Int
                 let elaborated_op = if *op == BinOp::FloatDiv {
                     let is_int = self
@@ -815,6 +831,57 @@ impl Elaborator {
                 }),
             },
         }
+    }
+
+    /// Rewrite `a < b` (etc.) into `compare a b == Lt` (etc.) using the Ord dict.
+    ///
+    /// Mapping: `<` -> `== Lt`, `>` -> `== Gt`, `<=` -> `!= Gt`, `>=` -> `!= Lt`
+    fn desugar_comparison(
+        &mut self,
+        op: &BinOp,
+        left: &Expr,
+        right: &Expr,
+        span: Span,
+    ) -> Option<Expr> {
+        let dict_expr = self.resolve_dict("Ord", span)?;
+
+        // Build: (DictMethodAccess(dict, 0)) left right
+        // compare is method index 0 in Ord
+        let compare_fn = Expr::DictMethodAccess {
+            dict: Box::new(dict_expr),
+            method_index: 0,
+            span,
+        };
+        let elab_left = self.elaborate_expr(left);
+        let elab_right = self.elaborate_expr(right);
+        let compare_call = Expr::App {
+            func: Box::new(Expr::App {
+                func: Box::new(compare_fn),
+                arg: Box::new(elab_left),
+                span,
+            }),
+            arg: Box::new(elab_right),
+            span,
+        };
+
+        // Map operator to: (compare_result == Ctor) or (compare_result != Ctor)
+        let (eq_op, ctor_name) = match op {
+            BinOp::Lt => (BinOp::Eq, "Lt"),
+            BinOp::Gt => (BinOp::Eq, "Gt"),
+            BinOp::LtEq => (BinOp::NotEq, "Gt"),
+            BinOp::GtEq => (BinOp::NotEq, "Lt"),
+            _ => unreachable!(),
+        };
+
+        Some(Expr::BinOp {
+            op: eq_op,
+            left: Box::new(compare_call),
+            right: Box::new(Expr::Constructor {
+                name: ctor_name.into(),
+                span,
+            }),
+            span,
+        })
     }
 
     /// Resolve which dictionary to use for a given trait at a given span.

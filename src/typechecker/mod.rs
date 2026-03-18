@@ -956,15 +956,10 @@ impl Checker {
             );
         }
 
-        // Built-in Ord trait (<, >, <=, >=)
-        self.traits.insert(
-            "Ord".into(),
-            TraitInfo {
-                type_param: "a".into(),
-                supertraits: vec![],
-                methods: vec![],
-            },
-        );
+        // Built-in Ord impls for primitives (<, >, <=, >=).
+        // The Ord trait definition (with `compare` method) comes from the prelude,
+        // but impls must be pre-registered so stdlib modules can use comparison
+        // operators on primitives without import ordering issues.
         for prim in &["Int", "Float", "String"] {
             self.trait_impls.insert(
                 ("Ord".into(), prim.to_string()),

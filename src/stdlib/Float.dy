@@ -1,6 +1,5 @@
 module Std.Float
 
-
 @external("erlang", "erlang", "float_to_list")
 fun to_string (x: Float) -> String
 

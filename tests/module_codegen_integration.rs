@@ -50,9 +50,10 @@ fn make_project_checker() -> typechecker::Checker {
     let prelude_tokens = lexer::Lexer::new(prelude_src)
         .lex()
         .expect("prelude lex error");
-    let prelude_program = parser::Parser::new(prelude_tokens)
+    let mut prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
+    dylang::derive::expand_derives(&mut prelude_program);
     let result = checker.check_program(&prelude_program);
     assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
     checker

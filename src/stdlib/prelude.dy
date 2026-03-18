@@ -12,3 +12,9 @@ import Std.IO (print)
 trait Show a {
   fun show (x: a) -> String
 }
+
+type Ordering { Lt | Eq | Gt } deriving (Show, Eq)
+
+trait Ord a where {a: Eq} {
+  fun compare (x: a) (y: a) -> Ordering
+}

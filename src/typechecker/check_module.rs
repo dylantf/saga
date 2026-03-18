@@ -262,19 +262,7 @@ impl Checker {
             };
             mc.next_var = self.next_var;
             mc.allow_bodyless_annotations = true;
-            // Share parent's trait definitions so builtin modules can impl traits like Show
-            for (name, info) in &self.traits {
-                if !mc.traits.contains_key(name) {
-                    mc.traits.insert(name.clone(), info.clone());
-                    for (method_name, _, _) in &info.methods {
-                        if let Some(scheme) = self.env.get(method_name)
-                            && mc.env.get(method_name).is_none()
-                        {
-                            mc.env.insert(method_name.clone(), scheme.clone());
-                        }
-                    }
-                }
-            }
+            self.seed_builtin_checker(&mut mc);
             mc
         };
         // Share the module cache so transitive imports benefit from caching
@@ -324,6 +312,32 @@ impl Checker {
         self.inject_exports(&exports, &prefix, exposing, span)
     }
 
+    /// Seed a builtin (Std.*) module checker with the parent's trait definitions,
+    /// ADT constructors, and trait impls so it can reference prelude-defined types.
+    fn seed_builtin_checker(&self, mc: &mut Checker) {
+        for (name, info) in &self.traits {
+            if !mc.traits.contains_key(name) {
+                mc.traits.insert(name.clone(), info.clone());
+                for (method_name, _, _) in &info.methods {
+                    if let Some(scheme) = self.env.get(method_name)
+                        && mc.env.get(method_name).is_none()
+                    {
+                        mc.env.insert(method_name.clone(), scheme.clone());
+                    }
+                }
+            }
+        }
+        for (name, scheme) in &self.constructors {
+            if !mc.constructors.contains_key(name) {
+                mc.constructors.insert(name.clone(), scheme.clone());
+                mc.env.insert(name.clone(), scheme.clone());
+            }
+        }
+        for (name, variants) in &self.adt_variants {
+            mc.adt_variants.entry(name.clone()).or_insert_with(|| variants.clone());
+        }
+    }
+
     /// Create a module checker seeded with this checker's caches.
     /// Import resolution will be O(1) cache hits. The caller still needs to
     /// call `check_program` to produce per-module `env` and `evidence` for elaboration.
@@ -350,19 +364,7 @@ impl Checker {
                 Some(root) => super::Checker::with_project_root(root),
                 None => super::Checker::new(),
             };
-            // Share parent's trait definitions so builtin modules can impl traits like Show
-            for (name, info) in &self.traits {
-                if !mc.traits.contains_key(name) {
-                    mc.traits.insert(name.clone(), info.clone());
-                    for (method_name, _, _) in &info.methods {
-                        if let Some(scheme) = self.env.get(method_name)
-                            && mc.env.get(method_name).is_none()
-                        {
-                            mc.env.insert(method_name.clone(), scheme.clone());
-                        }
-                    }
-                }
-            }
+            self.seed_builtin_checker(&mut mc);
             mc
         };
         mc.allow_bodyless_annotations = is_builtin;
