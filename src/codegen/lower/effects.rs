@@ -134,7 +134,29 @@ impl<'a> Lowerer<'a> {
                     self.collect_reachable_ops_into(&arm.body, out, unknown);
                 }
             }
-            With { expr, .. } => self.collect_reachable_ops_into(expr, out, unknown),
+            With { expr, handler, .. } => {
+                // Ops handled by the inner `with` are intercepted -- they don't reach
+                // the outer handler. Collect from the inner body, then subtract.
+                let (all_arms, return_clause, _) = self.resolve_handler(handler);
+                let inner_handled: HashSet<String> =
+                    all_arms.iter().map(|a| a.op_name.clone()).collect();
+
+                let mut inner_out = HashSet::new();
+                let mut inner_unknown = false;
+                self.collect_reachable_ops_into(expr, &mut inner_out, &mut inner_unknown);
+                out.extend(inner_out.into_iter().filter(|op| !inner_handled.contains(op)));
+                if inner_unknown {
+                    *unknown = true;
+                }
+
+                // Arm bodies run in the outer scope and may call outer-handled ops.
+                for arm in &all_arms {
+                    self.collect_reachable_ops_into(&arm.body, out, unknown);
+                }
+                if let Some(rc) = &return_clause {
+                    self.collect_reachable_ops_into(&rc.body, out, unknown);
+                }
+            }
             BinOp { left, right, .. } => {
                 self.collect_reachable_ops_into(left, out, unknown);
                 self.collect_reachable_ops_into(right, out, unknown);

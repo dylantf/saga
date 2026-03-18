@@ -1,13 +1,15 @@
 effect Foo {
   fun a () -> Int
-  fun b () -> Int
+  # fun b () -> Int
 }
 
 handler foo for Foo {
   a () = resume 1
-  b () = resume 2
+  # b () = resume 2
 }
 
 main () = {
-  let _ = print (show (a! ())) with foo
-}
+  let _ = print (show (a! ())) with {
+    a () = resume 2
+  }
+} with foo
