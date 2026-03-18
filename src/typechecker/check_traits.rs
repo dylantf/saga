@@ -312,13 +312,18 @@ impl Checker {
 
         let key = (trait_name.to_string(), target_type.to_string());
         if self.trait_impls.contains_key(&key) {
-            return Err(Diagnostic::error_at(
-                span,
-                format!(
-                    "duplicate impl: {} is already implemented for {}",
-                    trait_name, target_type
-                ),
-            ));
+            // Allow re-registration if the impl was inherited from the base layer
+            // (Std.Base). This happens when stdlib modules are re-typechecked for
+            // elaboration in compile_std_modules.
+            if !self.modules.base_trait_impls.contains_key(&key) {
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "duplicate impl: {} is already implemented for {}",
+                        trait_name, target_type
+                    ),
+                ));
+            }
         }
         self.trait_impls.insert(
             key,

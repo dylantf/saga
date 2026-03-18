@@ -1,0 +1,25 @@
+module Std.Base
+
+# Base traits and primitive impls. Loaded before all other modules.
+
+pub trait Show a {
+  fun show (x: a) -> String
+}
+
+pub type Ordering { Lt | Eq | Gt } deriving (Show, Eq)
+
+pub trait Ord a where {a: Eq} {
+  fun compare (x: a) (y: a) -> Ordering
+}
+
+impl Ord for Int {
+  compare x y = if x < y then Lt else if x > y then Gt else Eq
+}
+
+impl Ord for Float {
+  compare x y = if x < y then Lt else if x > y then Gt else Eq
+}
+
+impl Ord for String {
+  compare x y = if x < y then Lt else if x > y then Gt else Eq
+}

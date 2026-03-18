@@ -166,7 +166,8 @@ fn compile_std_modules(
     for module_name in &std_modules {
         let module_path: Vec<String> = module_name.split('.').map(String::from).collect();
 
-        let mut program = if let Some(cached) = result.programs().get(module_name) {
+        let program = if let Some(cached) = result.programs().get(module_name) {
+            // Cached programs already had expand_derives called during typecheck_import
             cached.clone()
         } else {
             let source = typechecker::builtin_module_source(&module_path)
@@ -175,14 +176,15 @@ fn compile_std_modules(
                 eprintln!("Std module {} lex error: {:?}", module_name, e);
                 std::process::exit(1);
             });
-            parser::Parser::new(tokens)
+            let mut prog = parser::Parser::new(tokens)
                 .parse_program()
                 .unwrap_or_else(|e| {
                     eprintln!("Std module {} parse error: {:?}", module_name, e);
                     std::process::exit(1);
-                })
+                });
+            derive::expand_derives(&mut prog);
+            prog
         };
-        derive::expand_derives(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(None, true);
         let mod_result = mod_checker.check_program(&program);

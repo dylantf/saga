@@ -1,5 +1,9 @@
 module Std.List
 
+impl Show for List a where {a: Show} {
+  show xs = "[" <> flatten (join ", " (map show xs)) <> "]"
+}
+
 pub fun head (xs: List a) -> a
 head xs = case xs {
   h :: _ -> h
@@ -81,6 +85,3 @@ all pred xs = case xs {
 pub fun range (start: Int) (end: Int) -> List Int
 range start end = if start > end then [] else start :: range (start + 1) end
 
-impl Show for List a where {a: Show} {
-  show xs = "[" <> flatten (join ", " (map show xs)) <> "]"
-}

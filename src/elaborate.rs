@@ -567,12 +567,11 @@ impl Elaborator {
                             matches!(name.as_str(), "Int" | "Float" | "String")
                         });
 
-                    if !is_primitive {
-                        if let Some(compare_expr) =
+                    if !is_primitive
+                        && let Some(compare_expr) =
                             self.desugar_comparison(op, left, right, node_id, span)
-                        {
-                            return compare_expr;
-                        }
+                    {
+                        return compare_expr;
                     }
                 }
 

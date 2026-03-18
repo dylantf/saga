@@ -1,3 +1,4 @@
+import Std.Base (Ordering, show, compare)
 import Std.Bool (not)
 import Std.Maybe (Maybe)
 import Std.Result (Result)
@@ -9,12 +10,4 @@ import Std.String
 import Std.Tuple (fst, snd)
 import Std.IO (print)
 
-trait Show a {
-  fun show (x: a) -> String
-}
 
-type Ordering { Lt | Eq | Gt } deriving (Show, Eq)
-
-trait Ord a where {a: Eq} {
-  fun compare (x: a) (y: a) -> Ordering
-}

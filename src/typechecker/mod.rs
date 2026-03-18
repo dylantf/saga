@@ -729,6 +729,9 @@ pub struct ModuleContext {
     pub programs: HashMap<String, crate::ast::Program>,
     /// Cached checker state after prelude has been loaded.
     pub(crate) prelude_snapshot: Option<Box<Checker>>,
+    /// Trait impls from Std.dy (base layer). Shared with builtin module checkers
+    /// so they can resolve constraints on primitives (e.g. Ord for Int).
+    pub(crate) base_trait_impls: HashMap<(String, String), ImplInfo>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) loading: HashSet<String>,
 }
@@ -794,6 +797,12 @@ impl Checker {
         checker
     }
 
+    /// Snapshot current trait impls as the base layer (from Std.dy).
+    /// Called after loading Std.dy so builtin module checkers inherit these impls.
+    pub fn snapshot_base_trait_impls(&mut self) {
+        self.modules.base_trait_impls = self.trait_impls.clone();
+    }
+
     /// Create a checker with the prelude loaded and (optionally) a project
     /// root with its module map. This is the standard entry point for both
     /// the CLI and the LSP.
@@ -811,6 +820,9 @@ impl Checker {
             checker.set_module_map(module_map);
         }
 
+        // Load prelude (which imports Std first, then stdlib modules).
+        // Std.dy defines base traits (Show, Ord) and is loaded as a real module
+        // via `import Std` in the prelude.
         let prelude_src = include_str!("../stdlib/prelude.dy");
         let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
             .lex()
@@ -822,6 +834,7 @@ impl Checker {
         checker
             .check_program_inner(&prelude_program)
             .map_err(|errs| errs.into_iter().next().unwrap())?;
+
         checker.modules.prelude_snapshot = Some(Box::new(checker.clone()));
         Ok(checker)
     }
@@ -923,8 +936,8 @@ impl Checker {
     }
 
     fn register_builtins(&mut self) {
-        // Note: Show trait is defined in prelude.dy and propagated to module
-        // checkers via typecheck_import.
+        // Note: Show and Ord traits are defined in Std.dy (loaded before
+        // stdlib modules). Eq is built-in (BEAM BIF dispatch).
 
         // Built-in Num trait (arithmetic: +, -, *, /, %, unary -)
         self.traits.insert(
@@ -964,19 +977,8 @@ impl Checker {
             );
         }
 
-        // Built-in Ord impls for primitives (<, >, <=, >=).
-        // The Ord trait definition (with `compare` method) comes from the prelude,
-        // but impls must be pre-registered so stdlib modules can use comparison
-        // operators on primitives without import ordering issues.
-        for prim in &["Int", "Float", "String"] {
-            self.trait_impls.insert(
-                ("Ord".into(), prim.to_string()),
-                ImplInfo {
-                    param_constraints: vec![],
-                    span: None,
-                },
-            );
-        }
+        // Ord impls for primitives are defined in Std.Int, Std.Float, Std.String
+        // (they provide real dict constructors for `compare`).
 
         // panic : String -> a (crashes at runtime, polymorphic return type)
         let a = self.fresh_var();

@@ -121,6 +121,7 @@ fn extract_module_name(path: &Path) -> Result<Option<String>, String> {
 pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
     if module_path.len() == 2 && module_path[0] == "Std" {
         match module_path[1].as_str() {
+            "Base" => Some(include_str!("../stdlib/Base.dy")),
             "Maybe" => Some(include_str!("../stdlib/Maybe.dy")),
             "Result" => Some(include_str!("../stdlib/Result.dy")),
             "List" => Some(include_str!("../stdlib/List.dy")),
@@ -239,6 +240,7 @@ impl Checker {
                     None => super::Checker::new(),
                 };
                 snapshot.modules.map = self.modules.map.clone();
+                // Load prelude (which imports Std first, then stdlib modules)
                 let prelude_src = include_str!("../stdlib/prelude.dy");
                 let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
                     .lex()
@@ -309,7 +311,16 @@ impl Checker {
         self.modules
             .exports
             .insert(module_name.clone(), exports.clone());
-        self.inject_exports(&exports, &prefix, exposing, span)
+        let result = self.inject_exports(&exports, &prefix, exposing, span);
+
+        // After loading the base Std module, snapshot trait impls so builtin
+        // module checkers inherit Std's impls (e.g. Ord for Int) without
+        // inheriting impls from other modules that haven't been loaded yet.
+        if module_name == "Std.Base" {
+            self.modules.base_trait_impls = self.trait_impls.clone();
+        }
+
+        result
     }
 
     /// Seed a builtin (Std.*) module checker with the parent's trait definitions,
@@ -335,6 +346,12 @@ impl Checker {
         }
         for (name, variants) in &self.adt_variants {
             mc.adt_variants.entry(name.clone()).or_insert_with(|| variants.clone());
+        }
+        // Share base trait impls from Std.dy (e.g. Ord for Int) so stdlib modules
+        // can use comparison operators on primitives. Only base impls are shared,
+        // not ones accumulated from other module imports (which would cause duplicates).
+        for (key, info) in &self.modules.base_trait_impls {
+            mc.trait_impls.entry(key.clone()).or_insert_with(|| info.clone());
         }
     }
 
@@ -373,6 +390,7 @@ impl Checker {
         mc.modules.codegen_info = self.modules.codegen_info.clone();
         mc.modules.programs = self.modules.programs.clone();
         mc.modules.map = self.modules.map.clone();
+        mc.modules.base_trait_impls = self.modules.base_trait_impls.clone();
         mc
     }
 
