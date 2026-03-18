@@ -326,6 +326,8 @@ impl Expr {
             Expr::RecordCreate { fields, .. } => fields.iter().any(|(_, e)| e.contains_resume()),
             Expr::RecordUpdate { record, fields, .. } =>
                 record.contains_resume() || fields.iter().any(|(_, e)| e.contains_resume()),
+            // Only check the `with` body, not the handler arm bodies: `resume` inside
+            // an arm body refers to *that arm's* continuation, not the outer context's.
             Expr::With { expr, .. } => expr.contains_resume(),
             Expr::Do { bindings, success, else_arms, .. } =>
                 bindings.iter().any(|(_, e)| e.contains_resume())

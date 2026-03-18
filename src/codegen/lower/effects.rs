@@ -415,7 +415,8 @@ impl<'a> Lowerer<'a> {
                 reachable_ops.insert(op.clone());
             }
         }
-        // BFS: for each reachable user arm, find ops reachable from its body and add them.
+        // Worklist traversal (DFS order; order doesn't affect the reachable set):
+        // for each reachable user arm, find ops reachable from its body and add them.
         let mut worklist: Vec<String> = reachable_ops
             .iter()
             .filter(|op| arms_by_op.contains_key(op.as_str()))
@@ -428,7 +429,7 @@ impl<'a> Lowerer<'a> {
                     for op in handler_ops.iter().map(|(_, op)| op) {
                         reachable_ops.insert(op.clone());
                     }
-                    // No point continuing BFS -- everything is reachable.
+                    // No point continuing -- everything is reachable.
                     break;
                 }
                 for called_op in arm_ops {
@@ -554,8 +555,10 @@ impl<'a> Lowerer<'a> {
     /// Produces: `fun (Arg0, ..., ArgN, K) -> body`
     /// Each op gets its own function with natural arity.
     fn build_op_handler_fun(&mut self, arm: &HandlerArm) -> CExpr {
-        // If resume is never called, use `_` so Core Erlang doesn't warn about
-        // the unused continuation parameter.
+        // If resume is never called, use `_` (Core Erlang wildcard) so the compiler
+        // doesn't warn about the unused continuation parameter. Safe because
+        // `contains_resume()` being false guarantees no Resume node exists in the arm
+        // body, so `current_handler_k` ("<_>") is never read during lowering.
         let k_var = if arm.body.contains_resume() { self.fresh() } else { "_".to_string() };
         let param_vars: Vec<String> = (0..arm.params.len())
             .map(|i| format!("_HArg{}", i))

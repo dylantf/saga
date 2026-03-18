@@ -1016,15 +1016,6 @@ impl Checker {
             }
 
             self.infer_expr(&arm.body)?;
-            if !arm.body.contains_resume() {
-                self.collected_diagnostics.push(Diagnostic::warning_at(
-                    arm.span,
-                    format!(
-                        "handler arm '{}' never calls resume; the continuation will be dropped",
-                        arm.op_name
-                    ),
-                ));
-            }
             self.resume_type = saved_resume;
             self.env = saved_env;
         }
