@@ -95,10 +95,14 @@ impl Elaborator {
 
         // Pre-populate dict_names from imported modules' codegen info
         let mut dict_names = HashMap::new();
-        let mut impl_dict_params_from_imports: HashMap<(String, String), Vec<(String, usize)>> = HashMap::new();
+        let mut impl_dict_params_from_imports: HashMap<(String, String), Vec<(String, usize)>> =
+            HashMap::new();
         for info in result.codegen_info().values() {
             for d in &info.trait_impl_dicts {
-                dict_names.insert((d.trait_name.clone(), d.target_type.clone()), d.dict_name.clone());
+                dict_names.insert(
+                    (d.trait_name.clone(), d.target_type.clone()),
+                    d.dict_name.clone(),
+                );
                 if !d.param_constraints.is_empty() {
                     impl_dict_params_from_imports.insert(
                         (d.trait_name.clone(), d.target_type.clone()),
@@ -182,7 +186,10 @@ impl Elaborator {
                         let params: Vec<(String, usize)> = where_clause
                             .iter()
                             .flat_map(|bound| {
-                                let idx = var_to_idx.get(bound.type_var.as_str()).copied().unwrap_or(0);
+                                let idx = var_to_idx
+                                    .get(bound.type_var.as_str())
+                                    .copied()
+                                    .unwrap_or(0);
                                 bound.traits.iter().map(move |t| (t.clone(), idx))
                             })
                             .collect();
@@ -443,7 +450,8 @@ impl Elaborator {
                 if let ExprKind::Var { name, .. } = &func.kind {
                     // Evidence-first: check if the typechecker identified this as
                     // a trait method call before attempting dict dispatch.
-                    if let Some((trait_name, method_index)) = self.resolve_trait_method(name, func.id)
+                    if let Some((trait_name, method_index)) =
+                        self.resolve_trait_method(name, func.id)
                     {
                         if let Some(dict_expr) = self.resolve_dict(&trait_name, func.id, func.span)
                         {
@@ -890,13 +898,17 @@ impl Elaborator {
     /// Returns (trait_name, method_index) if this is a trait method call.
     /// This is the evidence-first approach: the typechecker is the authority on
     /// whether a name refers to a trait method or a user-defined function.
-    fn resolve_trait_method(&self, name: &str, node_id: crate::ast::NodeId) -> Option<(String, usize)> {
+    fn resolve_trait_method(
+        &self,
+        name: &str,
+        node_id: crate::ast::NodeId,
+    ) -> Option<(String, usize)> {
         let evidence_list = self.evidence_by_node.get(&node_id)?;
         for ev in evidence_list {
-            if let Some((trait_name, method_index)) = self.trait_methods.get(name) {
-                if *trait_name == ev.trait_name {
-                    return Some((trait_name.clone(), *method_index));
-                }
+            if let Some((trait_name, method_index)) = self.trait_methods.get(name)
+                && *trait_name == ev.trait_name
+            {
+                return Some((trait_name.clone(), *method_index));
             }
         }
         None
