@@ -30,8 +30,8 @@ fn scan_dir(dir: &Path, root: &Path, map: &mut ModuleMap) -> Result<(), String> 
         let entry = entry.map_err(|e| format!("read_dir error: {}", e))?;
         let path = entry.path();
         if path.is_dir() {
-            // Skip _build directories
-            if path.file_name().is_some_and(|n| n == "_build") {
+            // Skip _build and tests directories
+            if path.file_name().is_some_and(|n| n == "_build" || n == "tests") {
                 continue;
             }
             scan_dir(&path, root, map)?;
@@ -137,6 +137,7 @@ pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
             "Supervisor" => Some(include_str!("../stdlib/Supervisor.dy")),
             "Async" => Some(include_str!("../stdlib/Async.dy")),
             "IO" => Some(include_str!("../stdlib/IO.dy")),
+            "Test" => Some(include_str!("../stdlib/Test.dy")),
             _ => None,
         }
     } else {

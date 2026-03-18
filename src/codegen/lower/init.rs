@@ -164,6 +164,20 @@ impl<'a> Lowerer<'a> {
                     .entry(alias)
                     .or_insert_with(|| erlang_name.clone());
 
+                // Register Std effect definitions so expanded_arity can look up op counts.
+                for eff_def in &info.effect_defs {
+                    let mut ops_map = HashMap::new();
+                    for op in &eff_def.ops {
+                        ops_map.insert(op.name.clone(), op.param_count);
+                        self.op_to_effect
+                            .entry(op.name.clone())
+                            .or_insert_with(|| eff_def.name.clone());
+                    }
+                    self.effect_defs
+                        .entry(eff_def.name.clone())
+                        .or_insert(EffectInfo { ops: ops_map });
+                }
+
                 // Register Std exports so prelude-imported functions (e.g. fst, snd)
                 // resolve to cross-module calls without an explicit import in user code.
                 for (name, scheme) in &info.exports {
@@ -180,7 +194,10 @@ impl<'a> Lowerer<'a> {
                         }
                         effects.sort();
                     }
-                    let expanded_arity = self.expanded_arity(base_arity, &effects);
+                    // Count dict params from trait constraints (excluding operator-dispatched traits)
+                    let dict_param_count = util::dict_param_count(&scheme.constraints);
+                    let expanded_arity =
+                        self.expanded_arity(base_arity, &effects) + dict_param_count;
                     let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
                     // Register unqualified form
                     self.fun_info.entry(name.clone()).or_insert(FunInfo {
@@ -265,7 +282,9 @@ impl<'a> Lowerer<'a> {
                             }
                             effects.sort();
                         }
-                        let expanded_arity = self.expanded_arity(base_arity, &effects);
+                        let dict_param_count = util::dict_param_count(&scheme.constraints);
+                        let expanded_arity =
+                            self.expanded_arity(base_arity, &effects) + dict_param_count;
                         let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
                         let qualified = format!("{}.{}", prefix, name);
                         self.fun_info.insert(

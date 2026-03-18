@@ -15,7 +15,6 @@ pub enum Token {
     True,
     False,
     Let,
-    Assert,
     Type,
     Case,
     If,

@@ -16,3 +16,5 @@ path = "src/lsp/main.rs"
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }

@@ -576,6 +576,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+
     pub(super) fn lower_expr(&mut self, expr: &Expr) -> CExpr {
         match &expr.kind {
             ExprKind::Lit { value, .. } => CExpr::Lit(lower_lit(value)),

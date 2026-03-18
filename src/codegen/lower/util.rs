@@ -249,6 +249,15 @@ pub(super) fn module_name_to_erlang(path: &[String]) -> String {
         .join("_")
 }
 
+/// Count dictionary parameters from trait constraints.
+/// Excludes operator-dispatched traits (Num, Eq) which use BIF dispatch instead.
+pub(super) fn dict_param_count(constraints: &[(String, u32)]) -> usize {
+    constraints
+        .iter()
+        .filter(|(trait_name, _)| trait_name != "Num" && trait_name != "Eq")
+        .count()
+}
+
 /// Derive base arity and effect names from a typechecker `Type`.
 /// Returns `(base_param_count, sorted_effect_names)`.
 /// The expanded arity (for codegen) is: base + effects.len() + if effects is non-empty { 1 } else { 0 }.

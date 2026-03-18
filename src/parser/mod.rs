@@ -69,6 +69,16 @@ impl Parser {
         }
     }
 
+    pub(super) fn expect_string(&mut self) -> Result<String, ParseError> {
+        match self.advance() {
+            Token::String(s) => Ok(s),
+            tok => Err(ParseError {
+                message: format!("expected string literal, got {:?}", tok),
+                span: self.tokens[self.pos - 1].span,
+            }),
+        }
+    }
+
     pub(super) fn expect_upper_ident(&mut self) -> Result<String, ParseError> {
         match self.advance() {
             Token::UpperIdent(s) => Ok(s),

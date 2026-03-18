@@ -1,4 +1,5 @@
 use dylang::{ast, codegen, derive, elaborate, lexer, parser, token, typechecker};
+use serde::Deserialize;
 
 use std::env;
 use std::fs;
@@ -69,6 +70,39 @@ fn print_tc_diagnostic(source: &str, source_path: &str, d: &typechecker::Diagnos
     print_diagnostic(source, source_path, label, d.span, &d.message);
 }
 
+/// Parsed project.toml configuration.
+#[derive(Debug, Deserialize, Default)]
+struct ProjectConfig {
+    #[serde(default)]
+    project: ProjectSection,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[allow(dead_code)]
+struct ProjectSection {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    tests_dir: Option<String>,
+}
+
+impl ProjectConfig {
+    fn load(project_root: &std::path::Path) -> Self {
+        let path = project_root.join("project.toml");
+        match fs::read_to_string(&path) {
+            Ok(contents) => toml::from_str(&contents).unwrap_or_else(|e| {
+                eprintln!("Warning: failed to parse project.toml: {}", e);
+                ProjectConfig::default()
+            }),
+            Err(_) => ProjectConfig::default(),
+        }
+    }
+
+    fn tests_dir(&self) -> &str {
+        self.project.tests_dir.as_deref().unwrap_or("tests")
+    }
+}
+
 fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  dylang run              Build and run project (requires project.toml)");
@@ -80,6 +114,8 @@ fn print_usage() {
     eprintln!("  dylang check            Typecheck project without building");
     eprintln!("  dylang check <file.dy>  Typecheck a single file");
     eprintln!("  dylang emit <file.dy>   Print generated Core Erlang to stdout");
+    eprintln!("  dylang test             Run tests (requires project.toml)");
+    eprintln!("  dylang test <pattern>   Run tests matching pattern");
 }
 
 fn parse_and_typecheck(
@@ -483,6 +519,102 @@ fn cmd_emit(file: &str) {
     print!("{}", core_src);
 }
 
+fn cmd_test(_args: &[String]) {
+    let project_root = find_project_root().unwrap_or_else(|| {
+        eprintln!("No project.toml found. Tests require a project.");
+        std::process::exit(1);
+    });
+
+    let config = ProjectConfig::load(&project_root);
+    let tests_dir = project_root.join(config.tests_dir());
+
+    if !tests_dir.exists() {
+        eprintln!("No tests directory found at {}", tests_dir.display());
+        std::process::exit(1);
+    }
+
+    // Discover test files
+    let test_files: Vec<PathBuf> = discover_test_files(&tests_dir);
+    if test_files.is_empty() {
+        eprintln!("No test files found in {}", tests_dir.display());
+        std::process::exit(1);
+    }
+
+    // Build the main project first (compiles all non-test modules)
+    let build_dir = build_project("test");
+
+    // Build and run each test file.
+    // Each test file has a main() that runs tests with a handler.
+    for test_file in &test_files {
+        let source = fs::read_to_string(test_file).unwrap_or_else(|e| {
+            eprintln!("Error reading {}: {}", test_file.display(), e);
+            std::process::exit(1);
+        });
+        let source_path = test_file.to_string_lossy().to_string();
+
+        let mut checker = make_checker(Some(project_root.clone()));
+        let (program, _) = parse_and_typecheck(&source, &source_path, &mut checker);
+        let result = checker.to_result();
+
+        let test_build_dir = build_dir.clone();
+
+        // Elaborate
+        let mut elaborated_modules = compile_std_modules(&result);
+        let elaborated = elaborate::elaborate(&program, &result);
+        elaborated_modules.insert("_test".to_string(), elaborated.clone());
+
+        // Emit std modules
+        for (module_name, elab) in &elaborated_modules {
+            if module_name == "_test" {
+                continue;
+            }
+            let erlang_name = module_name.to_lowercase().replace('.', "_");
+            let beam_path = test_build_dir.join(format!("{}.beam", erlang_name));
+            if !beam_path.exists() {
+                emit_module(
+                    &erlang_name,
+                    elab,
+                    result.codegen_info(),
+                    &elaborated_modules,
+                    &test_build_dir,
+                );
+            }
+        }
+
+        // Emit the test module
+        let core_src = codegen::emit_module_with_imports(
+            "_test",
+            &elaborated,
+            result.codegen_info(),
+            &elaborated_modules,
+        );
+        let core_path = test_build_dir.join("_test.core");
+        fs::write(&core_path, &core_src).unwrap_or_else(|e| {
+            eprintln!("Error writing {}: {}", core_path.display(), e);
+            std::process::exit(1);
+        });
+
+        run_erlc(&test_build_dir);
+        exec_erl(&test_build_dir, "_test");
+    }
+}
+
+fn discover_test_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(discover_test_files(&path));
+            } else if path.extension().is_some_and(|ext| ext == "dy") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
 /// Walk up from cwd looking for project.toml.
 fn find_project_root() -> Option<PathBuf> {
     let mut dir = env::current_dir().ok()?;
@@ -503,6 +635,7 @@ fn main() {
         Some("run") => cmd_run(&args[2..]),
         Some("build") => cmd_build(&args[2..]),
         Some("check") => cmd_check(args.get(2).map(|s| s.as_str())),
+        Some("test") => cmd_test(&args[2..]),
         Some("emit") => match args.get(2).map(|s| s.as_str()) {
             Some(file) => cmd_emit(file),
             None => {
