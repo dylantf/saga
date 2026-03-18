@@ -1,53 +1,32 @@
 import Std.Test (describe, test, assert_eq, assert_true)
 import MathLib (add, double)
 
-handler test_handler for TestRunner {
-  pass name = {
-    print ("  + " <> name)
-    let (p, f) = resume ()
-    (p + 1, f)
+describe "MathLib" {
+  describe "add" {
+    test "adds two positive numbers" {
+      assert_eq (add 2 3) 5
+    }
+
+    test "adds negative numbers" {
+      assert_eq (add (-1) (-2)) (-3)
+    }
   }
-  fail name msg = {
-    print ("  x " <> name)
-    print ("      " <> msg)
-    let (p, f) = resume ()
-    (p, f + 1)
+
+  describe "double" {
+    test "doubles a number" {
+      assert_eq (double 5) 10
+    }
+
+    test "doubles zero" {
+      assert_eq (double 0) 0
+    }
   }
-  return _ = (0, 0)
 }
 
-main () = {
-  let (passed, failed) = {
-    describe "MathLib" {
-      describe "add" {
-        test "adds two positive numbers" {
-          assert_eq (add 2 3) 5
-        }
+test "a simple assertion" {
+  assert_true True
+}
 
-        test "adds negative numbers" {
-          assert_eq (add (-1) (-2)) (-3)
-        }
-      }
-
-      describe "double" {
-        test "doubles a number" {
-          assert_eq (double 5) 10
-        }
-
-        test "doubles zero" {
-          assert_eq (double 0) 0
-        }
-      }
-    }
-
-    test "a simple assertion" {
-      assert_true True
-    }
-
-    test "a failing test" {
-      assert_true False
-    }
-  } with test_handler
-
-  print ($"{passed} passed, {failed} failed")
+test "a failing test" {
+  assert_true False
 }

@@ -34,7 +34,36 @@ test name body = {
 
 #@ Groups tests under a label.
 pub fun describe (name: String) (body: () -> Unit needs {TestRunner}) -> Unit needs {TestRunner}
-describe name body = body ()
+describe name body = {
+  print name
+  body ()
+}
+
+#@ Default test handler. Prints pass/fail and threads (passed, failed)
+#@ counts through continuations.
+pub handler test_handler for TestRunner {
+  pass name = {
+    print ("  + " <> name)
+    let (p, f) = resume ()
+    (p + 1, f)
+  }
+  fail name msg = {
+    print ("  x " <> name)
+    print ("      " <> msg)
+    let (p, f) = resume ()
+    (p, f + 1)
+  }
+  return _ = (0, 0)
+}
+
+#@ Run a test suite. Attaches test_handler, prints summary, exits with
+#@ appropriate code.
+pub fun run (body: () -> Unit needs {TestRunner}) -> Unit
+run body = {
+  let (passed, failed) = { body () } with test_handler
+  print ""
+  print (show passed <> " passed, " <> show failed <> " failed")
+}
 
 # --- Assertion helpers ---
 

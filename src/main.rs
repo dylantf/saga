@@ -553,6 +553,11 @@ fn cmd_test(_args: &[String]) {
         let source_path = test_file.to_string_lossy().to_string();
 
         let mut checker = make_checker(Some(project_root.clone()));
+
+        // If test file has no main, synthesize one:
+        // imports stay at top, everything else goes into main () = run (fun () -> { ... })
+        let source = inject_test_main(&source);
+
         let (program, _) = parse_and_typecheck(&source, &source_path, &mut checker);
         let result = checker.to_result();
 
@@ -597,6 +602,61 @@ fn cmd_test(_args: &[String]) {
         run_erlc(&test_build_dir);
         exec_erl(&test_build_dir, "_test");
     }
+}
+
+/// If a test file has no `main` function, synthesize one by wrapping all
+/// non-import declarations in `main () = Std.Test.run (fun () -> { ... })`.
+/// Also auto-imports Std.Test if not already imported.
+fn inject_test_main(source: &str) -> String {
+    // Check if there's already a main
+    if source.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("main ")
+            || trimmed.starts_with("pub fun main")
+            || trimmed.starts_with("fun main")
+    }) {
+        return source.to_string();
+    }
+
+    let mut imports = Vec::new();
+    let mut body = Vec::new();
+    let mut has_test_import = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("import ") || trimmed.starts_with("module ") {
+            if trimmed.contains("Std.Test") {
+                has_test_import = true;
+            }
+            imports.push(line.to_string());
+        } else {
+            body.push(line.to_string());
+        }
+    }
+
+    let mut result = String::new();
+
+    // Auto-import Std.Test.run if not already imported
+    if !has_test_import {
+        result.push_str("import Std.Test (run)\n");
+    } else {
+        // Ensure run is available even if user imported specific items
+        result.push_str("import Std.Test (run)\n");
+    }
+
+    for line in &imports {
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    result.push_str("\nmain () = run (fun () -> {\n");
+    for line in &body {
+        result.push_str(line);
+        result.push('\n');
+    }
+    result.push_str("})\n");
+
+    result
 }
 
 fn discover_test_files(dir: &std::path::Path) -> Vec<PathBuf> {
