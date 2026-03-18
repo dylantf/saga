@@ -73,6 +73,68 @@ pub enum CLit {
     Str(String),
 }
 
+impl CExpr {
+    /// Collect all `Var` references whose name starts with `_Handle_` into `out`.
+    pub fn collect_handle_refs(&self, out: &mut std::collections::HashSet<String>) {
+        match self {
+            CExpr::Var(v) if v.starts_with("_Handle_") => {
+                out.insert(v.clone());
+            }
+            CExpr::Var(_) | CExpr::Lit(_) | CExpr::Nil | CExpr::FunRef(_, _) => {}
+            CExpr::Fun(_, body) => body.collect_handle_refs(out),
+            CExpr::Let(_, val, body) => {
+                val.collect_handle_refs(out);
+                body.collect_handle_refs(out);
+            }
+            CExpr::Apply(func, args) => {
+                func.collect_handle_refs(out);
+                for a in args {
+                    a.collect_handle_refs(out);
+                }
+            }
+            CExpr::Call(_, _, args) => {
+                for a in args {
+                    a.collect_handle_refs(out);
+                }
+            }
+            CExpr::Case(scrut, arms) => {
+                scrut.collect_handle_refs(out);
+                for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        g.collect_handle_refs(out);
+                    }
+                    arm.body.collect_handle_refs(out);
+                }
+            }
+            CExpr::Tuple(elems) | CExpr::Values(elems) => {
+                for e in elems {
+                    e.collect_handle_refs(out);
+                }
+            }
+            CExpr::Cons(h, t) => {
+                h.collect_handle_refs(out);
+                t.collect_handle_refs(out);
+            }
+            CExpr::LetRec(defs, body) => {
+                for (_, _, e) in defs {
+                    e.collect_handle_refs(out);
+                }
+                body.collect_handle_refs(out);
+            }
+            CExpr::Receive(arms, timeout, timeout_body) => {
+                for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        g.collect_handle_refs(out);
+                    }
+                    arm.body.collect_handle_refs(out);
+                }
+                timeout.collect_handle_refs(out);
+                timeout_body.collect_handle_refs(out);
+            }
+        }
+    }
+}
+
 // --- Printer ---
 
 pub fn print_module(m: &CModule) -> String {

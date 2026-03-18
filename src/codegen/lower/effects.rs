@@ -162,7 +162,7 @@ impl<'a> Lowerer<'a> {
     ///
     /// Builds handler function(s) from the handler definition and passes them
     /// as extra parameters to the effectful computation.
-    pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler, with_span: crate::token::Span) -> CExpr {
+    pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
         // Collect effects from BEAM-native handlers in this `with` block.
         let beam_native_effects: std::collections::HashSet<String> = match handler {
             Handler::Named(name, _) if self.is_beam_native_handler(name) => {
@@ -211,20 +211,8 @@ impl<'a> Lowerer<'a> {
             op_vars.push((eff.clone(), op.clone(), var_name));
         }
 
-        // Look up typechecker-computed reachable ops for this `with` body.
-        let (tc_reachable, tc_emit_all) = self.with_reachable_ops
-            .get(&with_span)
-            .cloned()
-            .unwrap_or_else(|| (HashSet::new(), true));
-
-        let mut reachable_ops = tc_reachable;
-        if tc_emit_all {
-            for op in handler_ops.iter().map(|(_, op)| op) {
-                reachable_ops.insert(op.clone());
-            }
-        }
-
-        // Pass 2: build handler functions.
+        // Pass 2: build ALL handler functions unconditionally.
+        // We'll prune unreachable ones after lowering the body.
         // BEAM-native ops are emitted first since they're self-contained
         // (direct BEAM calls, no closures). CPS handlers may reference them
         // (e.g. async_handler's body calls spawn!/send!), so they must come after.
@@ -238,30 +226,21 @@ impl<'a> Lowerer<'a> {
         for (eff, op, var_name) in &op_vars {
             if !beam_native_effects.contains(eff) {
                 if let Some(arm) = arms_by_op.get(op.as_str()) {
-                    // User-written arm: only emit if reachable from the body.
-                    if reachable_ops.contains(op.as_str()) {
-                        let handler_fun = self.build_op_handler_fun(arm);
-                        handler_bindings.push((var_name.clone(), handler_fun));
-                    }
-                    // If not reachable: skip the let-binding entirely.
-                    // The var is still registered in current_handler_params (pass 1)
-                    // so any accidental reference won't panic, but no code paths reach it.
+                    let handler_fun = self.build_op_handler_fun(arm);
+                    handler_bindings.push((var_name.clone(), handler_fun));
                 } else {
                     // No handler arm for this op -- passthrough (call K with unit).
-                    // Only emit if the op is actually called from the body or reachable arms.
-                    if reachable_ops.contains(op.as_str()) {
-                        let k_param = self.fresh();
-                        handler_bindings.push((
-                            var_name.clone(),
-                            CExpr::Fun(
-                                vec![k_param.clone()],
-                                Box::new(CExpr::Apply(
-                                    Box::new(CExpr::Var(k_param)),
-                                    vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
-                                )),
-                            ),
-                        ));
-                    }
+                    let k_param = self.fresh();
+                    handler_bindings.push((
+                        var_name.clone(),
+                        CExpr::Fun(
+                            vec![k_param.clone()],
+                            Box::new(CExpr::Apply(
+                                Box::new(CExpr::Var(k_param)),
+                                vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
+                            )),
+                        ),
+                    ));
                 }
             }
         }
@@ -323,7 +302,30 @@ impl<'a> Lowerer<'a> {
         self.no_resume_ops = saved_no_resume_ops;
         self.current_return_k = saved_return_k;
 
-        // Wrap with handler bindings
+        // Post-hoc reachability: scan the lowered body for _Handle_* references,
+        // then transitively close through handler binding values.
+        let mut needed: HashSet<String> = HashSet::new();
+        result.collect_handle_refs(&mut needed);
+        // Transitive closure: handler arms can reference other handler vars
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (var, val) in &handler_bindings {
+                if needed.contains(var) {
+                    let mut refs = HashSet::new();
+                    val.collect_handle_refs(&mut refs);
+                    for r in refs {
+                        if needed.insert(r) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Only emit bindings that are actually referenced
+        handler_bindings.retain(|(var, _)| needed.contains(var));
+
         handler_bindings
             .into_iter()
             .rev()

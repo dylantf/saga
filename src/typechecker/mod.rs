@@ -301,8 +301,6 @@ pub struct ModuleExports {
     pub(crate) effects: HashMap<String, EffectDefInfo>,
     /// Handler name -> handler info.
     pub(crate) handlers: HashMap<String, HandlerInfo>,
-    /// Function effect annotations: name -> set of effect names.
-    pub(crate) fun_effects: HashMap<String, HashSet<String>>,
 }
 
 impl ModuleExports {
@@ -400,14 +398,6 @@ impl ModuleExports {
             }
         }
 
-        // Collect fun_effects for public functions
-        let mut fun_effects_map: HashMap<String, HashSet<String>> = HashMap::new();
-        for name in &pub_names {
-            if let Some(effs) = checker.fun_effects.get(name) {
-                fun_effects_map.insert(name.clone(), effs.clone());
-            }
-        }
-
         ModuleExports {
             bindings,
             type_constructors,
@@ -416,7 +406,6 @@ impl ModuleExports {
             trait_impls,
             effects,
             handlers,
-            fun_effects: fun_effects_map,
         }
     }
 }
@@ -721,15 +710,6 @@ pub struct Checker {
     pub(crate) effect_call_targets: HashMap<Span, (Span, Option<String>)>,
     /// Maps handler arm span -> (effect op definition span, source module) (for LSP go-to-def, level 2).
     pub(crate) handler_arm_targets: HashMap<Span, (Span, Option<String>)>,
-    /// Stack of directly-called op name sets, parallel to `with_arm_stacks`.
-    /// Each entry accumulates ops called via `op!` within the corresponding `with` body.
-    /// The bool tracks whether the body contains calls to functions whose effects
-    /// can't be statically determined (untracked HOF params).
-    pub(crate) with_called_ops: Vec<(HashSet<String>, bool)>,
-    /// For each `with` body span: the set of op names reachable within it.
-    /// `bool` = true when the body calls a function that uses a handled effect
-    /// indirectly (we can't determine which specific ops, so codegen must emit all arms).
-    pub(crate) with_reachable_ops: HashMap<Span, (HashSet<String>, bool)>,
 }
 
 /// Module system state: caches, project root, and import tracking.
@@ -800,8 +780,6 @@ impl Checker {
             with_arm_stacks: Vec::new(),
             effect_call_targets: HashMap::new(),
             handler_arm_targets: HashMap::new(),
-            with_called_ops: Vec::new(),
-            with_reachable_ops: HashMap::new(),
         };
         checker.register_builtins();
         checker

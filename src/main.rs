@@ -137,12 +137,11 @@ fn emit_module(
     elaborated: &ast::Program,
     codegen_info: &std::collections::HashMap<String, typechecker::ModuleCodegenInfo>,
     elaborated_modules: &std::collections::HashMap<String, ast::Program>,
-    with_reachable_ops: &std::collections::HashMap<crate::token::Span, (std::collections::HashSet<String>, bool)>,
     build_dir: &std::path::Path,
 ) {
     let erlang_name = module_name.to_lowercase().replace('.', "_");
     let core_src =
-        codegen::emit_module_with_imports(&erlang_name, elaborated, codegen_info, elaborated_modules, with_reachable_ops);
+        codegen::emit_module_with_imports(&erlang_name, elaborated, codegen_info, elaborated_modules);
     let core_path = build_dir.join(format!("{}.core", erlang_name));
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
@@ -356,7 +355,6 @@ fn build_project(profile: &str) -> PathBuf {
             elaborated,
             result.codegen_info(),
             &elaborated_modules,
-            &result.with_reachable_ops,
             &build_dir,
         );
     }
@@ -400,7 +398,6 @@ fn build_script(file: &str, profile: &str) -> PathBuf {
             elaborated,
             result.codegen_info(),
             &elaborated_modules,
-            &result.with_reachable_ops,
             &build_dir,
         );
     }
@@ -512,7 +509,6 @@ fn cmd_emit(file: &str) {
         &elaborated,
         result.codegen_info(),
         &elaborated_modules,
-        &result.with_reachable_ops,
     );
     print!("{}", core_src);
 }
