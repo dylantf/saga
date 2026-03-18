@@ -12,221 +12,7 @@ use crate::ast::{Expr, Handler, HandlerArm};
 use crate::codegen::cerl::{CExpr, CLit};
 
 use super::Lowerer;
-use super::util::{collect_fun_call, collect_qualified_call, core_var};
-
-impl<'a> Lowerer<'a> {
-    /// Recursively collect the set of effect op names that are "reachable" from `expr`.
-    /// This includes:
-    ///   - Direct `op!` calls (EffectCall nodes)
-    ///   - All ops of any effects required by effectful function calls in the expression
-    ///     (because those functions will receive handler params at their call sites)
-    ///
-    /// Returns `(reachable_ops, found_unknown_call)`.
-    /// `found_unknown_call` is true when the body calls a variable whose effects can't
-    /// be determined (unannotated HOF parameter) -- in that case the caller should be
-    /// conservative and emit ALL handler arm closures.
-    fn collect_reachable_ops(&self, expr: &Expr) -> (HashSet<String>, bool) {
-        let mut out = HashSet::new();
-        let mut unknown = false;
-        self.collect_reachable_ops_into(expr, &mut out, &mut unknown);
-        (out, unknown)
-    }
-
-    fn collect_reachable_ops_into(
-        &self,
-        expr: &Expr,
-        out: &mut HashSet<String>,
-        unknown: &mut bool,
-    ) {
-        use crate::ast::{Expr::*, Stmt};
-        match expr {
-            EffectCall { name, args, .. } => {
-                out.insert(name.clone());
-                for a in args {
-                    self.collect_reachable_ops_into(a, out, unknown);
-                }
-            }
-            // For App nodes, check if the callee is an effectful function and add all
-            // of its required ops. The `collect_fun_call` / `collect_qualified_call`
-            // utilities unwrap curried Apps.
-            App { .. } => {
-                if let Some((func_name, args)) = collect_fun_call(expr) {
-                    // Look up effects from top-level fun_info AND effectful HOF params.
-                    let named_effects = self.fun_effects(func_name).cloned().unwrap_or_default();
-                    let hof_effects = self
-                        .current_effectful_vars
-                        .get(func_name)
-                        .cloned()
-                        .unwrap_or_default();
-                    for eff_name in named_effects.iter().chain(hof_effects.iter()) {
-                        if let Some(info) = self.effect_defs.get(eff_name) {
-                            for op_name in info.ops.keys() {
-                                out.insert(op_name.clone());
-                            }
-                        }
-                    }
-                    // If the callee is not a known top-level function and not an annotated
-                    // effectful HOF param, we can't know what effects it may use at runtime.
-                    // Flag as unknown so the caller emits all arms conservatively.
-                    if !self.fun_info.contains_key(func_name)
-                        && !self.current_effectful_vars.contains_key(func_name)
-                    {
-                        *unknown = true;
-                    }
-                    for a in args {
-                        self.collect_reachable_ops_into(a, out, unknown);
-                    }
-                } else if let Some((module, func_name, args)) = collect_qualified_call(expr) {
-                    let qualified = format!("{}.{}", module, func_name);
-                    if let Some(effects) = self.fun_effects(&qualified).cloned() {
-                        for eff_name in &effects {
-                            if let Some(info) = self.effect_defs.get(eff_name) {
-                                for op_name in info.ops.keys() {
-                                    out.insert(op_name.clone());
-                                }
-                            }
-                        }
-                    }
-                    for a in args {
-                        self.collect_reachable_ops_into(a, out, unknown);
-                    }
-                } else if let App { func, arg, .. } = expr {
-                    // Lambda or other non-named callee - recurse into sub-expressions.
-                    self.collect_reachable_ops_into(func, out, unknown);
-                    self.collect_reachable_ops_into(arg, out, unknown);
-                }
-            }
-            Block { stmts, .. } => {
-                for s in stmts {
-                    match s {
-                        Stmt::Let { value, .. } => {
-                            self.collect_reachable_ops_into(value, out, unknown)
-                        }
-                        Stmt::LetFun { body, guard, .. } => {
-                            if let Some(g) = guard {
-                                self.collect_reachable_ops_into(g, out, unknown);
-                            }
-                            self.collect_reachable_ops_into(body, out, unknown);
-                        }
-                        Stmt::Expr(e) => self.collect_reachable_ops_into(e, out, unknown),
-                    }
-                }
-            }
-            Lambda { body, .. } => self.collect_reachable_ops_into(body, out, unknown),
-            If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.collect_reachable_ops_into(cond, out, unknown);
-                self.collect_reachable_ops_into(then_branch, out, unknown);
-                self.collect_reachable_ops_into(else_branch, out, unknown);
-            }
-            Case {
-                scrutinee, arms, ..
-            } => {
-                self.collect_reachable_ops_into(scrutinee, out, unknown);
-                for arm in arms {
-                    if let Some(guard) = &arm.guard {
-                        self.collect_reachable_ops_into(guard, out, unknown);
-                    }
-                    self.collect_reachable_ops_into(&arm.body, out, unknown);
-                }
-            }
-            With { expr, handler, .. } => {
-                // Ops handled by the inner `with` are intercepted -- they don't reach
-                // the outer handler. Collect from the inner body, then subtract.
-                let (all_arms, return_clause, _) = self.resolve_handler(handler);
-                let inner_handled: HashSet<String> =
-                    all_arms.iter().map(|a| a.op_name.clone()).collect();
-
-                let mut inner_out = HashSet::new();
-                let mut inner_unknown = false;
-                self.collect_reachable_ops_into(expr, &mut inner_out, &mut inner_unknown);
-                out.extend(inner_out.into_iter().filter(|op| !inner_handled.contains(op)));
-                if inner_unknown {
-                    *unknown = true;
-                }
-
-                // Arm bodies run in the outer scope and may call outer-handled ops.
-                for arm in &all_arms {
-                    self.collect_reachable_ops_into(&arm.body, out, unknown);
-                }
-                if let Some(rc) = &return_clause {
-                    self.collect_reachable_ops_into(&rc.body, out, unknown);
-                }
-            }
-            BinOp { left, right, .. } => {
-                self.collect_reachable_ops_into(left, out, unknown);
-                self.collect_reachable_ops_into(right, out, unknown);
-            }
-            UnaryMinus { expr, .. } => self.collect_reachable_ops_into(expr, out, unknown),
-            FieldAccess { expr, .. } => self.collect_reachable_ops_into(expr, out, unknown),
-            RecordUpdate { record, fields, .. } => {
-                self.collect_reachable_ops_into(record, out, unknown);
-                for (_, v) in fields {
-                    self.collect_reachable_ops_into(v, out, unknown);
-                }
-            }
-            RecordCreate { fields, .. } => {
-                for (_, v) in fields {
-                    self.collect_reachable_ops_into(v, out, unknown);
-                }
-            }
-            Tuple { elements, .. } => {
-                for e in elements {
-                    self.collect_reachable_ops_into(e, out, unknown);
-                }
-            }
-            Do {
-                bindings,
-                success,
-                else_arms,
-                ..
-            } => {
-                for (_, e) in bindings {
-                    self.collect_reachable_ops_into(e, out, unknown);
-                }
-                self.collect_reachable_ops_into(success, out, unknown);
-                for arm in else_arms {
-                    if let Some(guard) = &arm.guard {
-                        self.collect_reachable_ops_into(guard, out, unknown);
-                    }
-                    self.collect_reachable_ops_into(&arm.body, out, unknown);
-                }
-            }
-            Receive {
-                arms, after_clause, ..
-            } => {
-                for arm in arms {
-                    if let Some(guard) = &arm.guard {
-                        self.collect_reachable_ops_into(guard, out, unknown);
-                    }
-                    self.collect_reachable_ops_into(&arm.body, out, unknown);
-                }
-                if let Some((timeout, body)) = after_clause {
-                    self.collect_reachable_ops_into(timeout, out, unknown);
-                    self.collect_reachable_ops_into(body, out, unknown);
-                }
-            }
-            Ascription { expr, .. } => self.collect_reachable_ops_into(expr, out, unknown),
-            DictMethodAccess { dict, .. } => self.collect_reachable_ops_into(dict, out, unknown),
-            ForeignCall { args, .. } => {
-                for a in args {
-                    self.collect_reachable_ops_into(a, out, unknown);
-                }
-            }
-            Resume { value, .. } => self.collect_reachable_ops_into(value, out, unknown),
-            // Leaves
-            Lit { .. }
-            | Var { .. }
-            | Constructor { .. }
-            | QualifiedName { .. }
-            | DictRef { .. } => {}
-        }
-    }
-}
+use super::util::{collect_fun_call, core_var};
 
 impl<'a> Lowerer<'a> {
     /// Lower an effect call: `op! args`.
@@ -376,7 +162,7 @@ impl<'a> Lowerer<'a> {
     ///
     /// Builds handler function(s) from the handler definition and passes them
     /// as extra parameters to the effectful computation.
-    pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
+    pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler, with_span: crate::token::Span) -> CExpr {
         // Collect effects from BEAM-native handlers in this `with` block.
         let beam_native_effects: std::collections::HashSet<String> = match handler {
             Handler::Named(name, _) if self.is_beam_native_handler(name) => {
@@ -417,50 +203,24 @@ impl<'a> Lowerer<'a> {
             let key = format!("{}.{}", eff, op);
             self.current_handler_params.insert(key.clone(), var_name.clone());
             // Track arms that never call resume so call sites can skip building a real continuation.
-            if let Some(arm) = arms_by_op.get(op.as_str()) {
-                if !arm.body.contains_resume() {
-                    self.no_resume_ops.insert(key);
-                }
+            if let Some(arm) = arms_by_op.get(op.as_str())
+                && !arm.body.contains_resume()
+            {
+                self.no_resume_ops.insert(key);
             }
             op_vars.push((eff.clone(), op.clone(), var_name));
         }
 
-        // Compute the set of op_names reachable from this `with` body.
-        // Seed from the body, then extend transitively through user-written arm bodies
-        // (arm A calls or invokes functions that need B -> B is reachable).
-        // This lets us skip building closures for arms provably never reachable.
-        let (mut reachable_ops, has_unknown) = self.collect_reachable_ops(expr);
-        if has_unknown {
-            // Body calls something whose effects we can't determine (unannotated HOF) --
-            // emit all arms conservatively to avoid silently dropping needed handlers.
+        // Look up typechecker-computed reachable ops for this `with` body.
+        let (tc_reachable, tc_emit_all) = self.with_reachable_ops
+            .get(&with_span)
+            .cloned()
+            .unwrap_or_else(|| (HashSet::new(), true));
+
+        let mut reachable_ops = tc_reachable;
+        if tc_emit_all {
             for op in handler_ops.iter().map(|(_, op)| op) {
                 reachable_ops.insert(op.clone());
-            }
-        }
-        // Worklist traversal (DFS order; order doesn't affect the reachable set):
-        // for each reachable user arm, find ops reachable from its body and add them.
-        let mut worklist: Vec<String> = reachable_ops
-            .iter()
-            .filter(|op| arms_by_op.contains_key(op.as_str()))
-            .cloned()
-            .collect();
-        while let Some(op_name) = worklist.pop() {
-            if let Some(arm) = arms_by_op.get(op_name.as_str()) {
-                let (arm_ops, arm_unknown) = self.collect_reachable_ops(&arm.body);
-                if arm_unknown {
-                    for op in handler_ops.iter().map(|(_, op)| op) {
-                        reachable_ops.insert(op.clone());
-                    }
-                    // No point continuing -- everything is reachable.
-                    break;
-                }
-                for called_op in arm_ops {
-                    if reachable_ops.insert(called_op.clone())
-                        && arms_by_op.contains_key(called_op.as_str())
-                    {
-                        worklist.push(called_op);
-                    }
-                }
             }
         }
 

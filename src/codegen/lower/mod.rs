@@ -102,12 +102,15 @@ pub struct Lowerer<'a> {
     /// Maps external function name -> (erlang_module, erlang_func, arity).
     /// Populated from `Decl::ExternalFun` declarations.
     external_funs: HashMap<String, (String, String, usize)>,
+    /// Typechecker-computed reachable ops per `with` body span.
+    with_reachable_ops: &'a HashMap<crate::token::Span, (std::collections::HashSet<String>, bool)>,
 }
 
 impl<'a> Lowerer<'a> {
     pub fn new(
         codegen_info: &'a HashMap<String, ModuleCodegenInfo>,
         elaborated_modules: &'a HashMap<String, ast::Program>,
+        with_reachable_ops: &'a HashMap<crate::token::Span, (std::collections::HashSet<String>, bool)>,
     ) -> Self {
         Lowerer {
             counter: 0,
@@ -129,6 +132,7 @@ impl<'a> Lowerer<'a> {
             constructor_modules: HashMap::new(),
             current_handler_k: None,
             external_funs: HashMap::new(),
+            with_reachable_ops,
         }
     }
 
@@ -1467,7 +1471,7 @@ impl<'a> Lowerer<'a> {
             } => self.lower_effect_call(name, qualifier.as_deref(), args, None),
 
             // `expr with handler` -- attaches handler(s) to a computation
-            Expr::With { expr, handler, .. } => self.lower_with(expr, handler),
+            Expr::With { expr, handler, span } => self.lower_with(expr, handler, *span),
 
             // `resume value` -- inside a handler arm, calls the continuation K
             Expr::Resume { value, .. } => {

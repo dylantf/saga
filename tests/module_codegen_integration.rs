@@ -26,7 +26,7 @@ fn emit_project_module(
     }).unwrap_or_default();
     let result = checker.to_result();
     let elaborated = elaborate::elaborate_module(&program, &result, &original_module_name);
-    codegen::emit_module_with_imports(module_name, &elaborated, result.codegen_info(), &std::collections::HashMap::new())
+    codegen::emit_module_with_imports(module_name, &elaborated, result.codegen_info(), &std::collections::HashMap::new(), &result.with_reachable_ops)
 }
 
 /// Parse and typecheck a source file with the given checker (project mode).

@@ -34,7 +34,7 @@ fn emit_elaborated(src: &str) -> String {
     let result = checker.check_program(&program);
     assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());
     let elaborated = elaborate::elaborate(&program, &result);
-    codegen::emit_module_with_imports("_script", &elaborated, result.codegen_info(), &std::collections::HashMap::new())
+    codegen::emit_module_with_imports("_script", &elaborated, result.codegen_info(), &std::collections::HashMap::new(), &result.with_reachable_ops)
 }
 
 /// Emit Core Erlang and compile it with erlc, asserting no compilation errors.

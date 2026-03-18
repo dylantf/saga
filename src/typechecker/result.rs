@@ -42,6 +42,9 @@ pub struct CheckResult {
     pub handler_arm_targets: HashMap<crate::token::Span, (crate::token::Span, Option<String>)>,
     /// Maps effect call span -> (handler arm span, source module) (LSP go-to-def, level 1).
     pub effect_call_targets: HashMap<crate::token::Span, (crate::token::Span, Option<String>)>,
+    /// For each `with` body span: the set of op names reachable within it, plus
+    /// a bool indicating whether codegen should conservatively emit all arms.
+    pub with_reachable_ops: HashMap<crate::token::Span, (HashSet<String>, bool)>,
 }
 
 impl CheckResult {
@@ -114,6 +117,7 @@ impl Checker {
             type_at_span: self.type_at_span.clone(),
             handler_arm_targets: self.handler_arm_targets.clone(),
             effect_call_targets: self.effect_call_targets.clone(),
+            with_reachable_ops: self.with_reachable_ops.clone(),
         }
     }
 }

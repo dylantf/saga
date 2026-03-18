@@ -391,6 +391,7 @@ impl Checker {
             trait_impls,
             effects,
             handlers,
+            fun_effects: _,
         } = exports;
 
         // Traits and their methods (unqualified, so impl bodies can reference them)
@@ -428,6 +429,12 @@ impl Checker {
             self.handlers
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
+        }
+
+        // Function effects (qualified names for effect propagation during inference)
+        for (name, effs) in &exports.fun_effects {
+            let qualified = format!("{}.{}", prefix, name);
+            self.fun_effects.insert(qualified, effs.clone());
         }
 
         // Bindings, type constructors, records (qualified + exposing)

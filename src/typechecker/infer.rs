@@ -82,6 +82,33 @@ impl Checker {
 
             Expr::App { func, arg, span } => {
                 let func_ty = self.infer_expr(func)?;
+
+                // Track if this call is to an effectful function whose effects
+                // aren't tracked in current_effects (for reachability analysis).
+                // If the callee's resolved type is EffArrow, it has declared effects
+                // that may not have been recorded in fun_effects.
+                if !self.with_called_ops.is_empty() {
+                    let resolved = self.sub.apply(&func_ty);
+                    if let Type::EffArrow(_, _, ref needs) = resolved
+                        && !needs.is_empty()
+                    {
+                        // Check if these effects are already tracked via fun_effects.
+                        // Walk through curried Apps to find the innermost callee name.
+                        let mut callee = func.as_ref();
+                        while let Expr::App { func: inner, .. } = callee {
+                            callee = inner.as_ref();
+                        }
+                        let tracked = match callee {
+                            Expr::Var { name, .. } => self.fun_effects.contains_key(name.as_str()),
+                            _ => false,
+                        };
+                        if !tracked
+                            && let Some((_, untracked)) = self.with_called_ops.last_mut()
+                        {
+                            *untracked = true;
+                        }
+                    }
+                }
                 let effects_before_arg = self.current_effects.clone();
                 let arg_ty = self.infer_expr(arg)?;
                 let ret_ty = self.fresh_var();
@@ -299,6 +326,11 @@ impl Checker {
                     self.effect_call_targets.insert(*span, (*arm_span, arm_module.clone()));
                 }
 
+                // Record direct op call for reachability analysis.
+                if let Some((called, _)) = self.with_called_ops.last_mut() {
+                    called.insert(name.clone());
+                }
+
                 // Build curried function type: param1 -> param2 -> ... -> return_type
                 let mut ty = op_sig.return_type.clone();
                 if op_sig.params.is_empty() {
@@ -312,7 +344,7 @@ impl Checker {
                 Ok(ty)
             }
 
-            Expr::With { expr, handler, .. } => self.infer_with(expr, handler),
+            Expr::With { expr, handler, span } => self.infer_with(expr, handler, *span),
 
             Expr::Resume { value, span } => {
                 let val_ty = self.infer_expr(value)?;
@@ -335,6 +367,10 @@ impl Checker {
                 let key = format!("{}.{}", module, name);
                 match self.env.get(&key).cloned() {
                     Some(scheme) => {
+                        // Propagate effects from qualified functions with known needs
+                        if let Some(effects) = self.fun_effects.get(&key).cloned() {
+                            self.current_effects.extend(effects);
+                        }
                         let (ty, constraints) = self.instantiate(&scheme);
                         for (trait_name, trait_ty) in constraints {
                             self.pending_constraints.push((trait_name, trait_ty, *span));
@@ -1141,6 +1177,7 @@ impl Checker {
         &mut self,
         expr: &Expr,
         handler: &ast::Handler,
+        with_span: Span,
     ) -> Result<Type, Diagnostic> {
         let handled = self.handler_handled_effects(handler);
 
@@ -1172,22 +1209,77 @@ impl Checker {
             }
         };
         self.with_arm_stacks.push(arm_stack_entry);
+        self.with_called_ops.push((HashSet::new(), false));
 
-        let result = self.infer_with_inner(expr, handler, handled);
+        let (ty, body_effects) = self.infer_with_inner(expr, handler, handled.clone())?;
+        let (direct_ops, has_untracked_calls) = self.with_called_ops.pop().unwrap();
         self.with_arm_stacks.pop();
-        result
+
+        // Collect the set of op names handled by this `with`.
+        let handled_ops: HashSet<String> = handled.iter()
+            .filter_map(|eff_name| self.effects.get(eff_name))
+            .flat_map(|info| info.ops.iter().map(|o| o.name.clone()))
+            .collect();
+
+        // Bubble up ops that aren't handled by this `with` to the parent frame.
+        // E.g., if an inner `with` handles `a!` but not `b!`, the outer handler
+        // needs to know that `b!` is reachable.
+        if let Some(parent) = self.with_called_ops.last_mut() {
+            for op in &direct_ops {
+                if !handled_ops.contains(op) {
+                    parent.0.insert(op.clone());
+                }
+            }
+            // Bubble up untracked calls too -- if the inner body had unknown callees,
+            // the outer handler should be conservative as well.
+            if has_untracked_calls {
+                parent.1 = true;
+            }
+        }
+
+        // Compute reachable ops for this `with` body.
+        // For each handled effect, check if the body actually needed it and whether
+        // all its ops were directly called (EffectCall nodes).
+        let mut reachable_ops = direct_ops.clone();
+        let mut emit_all = false;
+
+        for eff_name in &handled {
+            // Effect is needed if:
+            // - current_effects tracked it (from top-level function calls), OR
+            // - the body contains calls to untracked functions (HOF params)
+            let effect_needed = body_effects.contains(eff_name) || has_untracked_calls;
+            if !effect_needed {
+                continue;
+            }
+            if let Some(eff_info) = self.effects.get(eff_name) {
+                let eff_ops: HashSet<String> = eff_info.ops.iter().map(|o| o.name.clone()).collect();
+                let direct_coverage: HashSet<_> = direct_ops.intersection(&eff_ops).cloned().collect();
+                if direct_coverage != eff_ops {
+                    // At least one op wasn't a direct call -- conservative: emit all ops.
+                    reachable_ops.extend(eff_ops);
+                    emit_all = true;
+                }
+            }
+        }
+
+        self.with_reachable_ops.insert(with_span, (reachable_ops, emit_all));
+
+        Ok(ty)
     }
 
+    /// Returns `(type, body_effects_before_subtraction)`.
     fn infer_with_inner(
         &mut self,
         expr: &Expr,
         handler: &ast::Handler,
         handled: HashSet<String>,
-    ) -> Result<Type, Diagnostic> {
+    ) -> Result<(Type, HashSet<String>), Diagnostic> {
         // Infer the inner expression, tracking its effects separately
         let saved_effects = std::mem::take(&mut self.current_effects);
         let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
         let expr_ty = self.infer_expr(expr)?;
+        // Snapshot body effects before subtraction (for reachability analysis).
+        let body_effects = self.current_effects.clone();
         // Subtract handled effects from the inner expression's effects
         for eff in &handled {
             self.current_effects.remove(eff);
@@ -1211,9 +1303,9 @@ impl Checker {
                     // Unify the param var with the computation's result type so the
                     // stored return type resolves correctly.
                     self.unify_at(&Type::Var(param_var_id), &expr_ty, with_span)?;
-                    Ok(self.sub.apply(&ret_ty))
+                    Ok((self.sub.apply(&ret_ty), body_effects))
                 } else {
-                    Ok(expr_ty)
+                    Ok((expr_ty, body_effects))
                 }
             }
             ast::Handler::Inline {
@@ -1302,7 +1394,7 @@ impl Checker {
                         std::mem::replace(&mut self.current_effects, saved_effects_arms);
                     self.current_effects.extend(arm_effects);
 
-                    Ok(ret_ty)
+                    Ok((ret_ty, body_effects))
                 } else {
                     // Subtract handled effects from arm bodies
                     for eff in &handled {
@@ -1312,7 +1404,7 @@ impl Checker {
                         std::mem::replace(&mut self.current_effects, saved_effects_arms);
                     self.current_effects.extend(arm_effects);
 
-                    Ok(expr_ty)
+                    Ok((expr_ty, body_effects))
                 }
             }
         }
