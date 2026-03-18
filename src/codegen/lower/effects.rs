@@ -8,7 +8,7 @@
 /// - `resolve_handler`: resolving named/inline handlers to arms
 use std::collections::HashSet;
 
-use crate::ast::{Expr, Handler, HandlerArm};
+use crate::ast::{Expr, ExprKind, Handler, HandlerArm};
 use crate::codegen::cerl::{CExpr, CLit};
 
 use super::Lowerer;
@@ -58,8 +58,8 @@ impl<'a> Lowerer<'a> {
         for arg in args {
             // Skip unit literal args (they don't exist at the BEAM level)
             if matches!(
-                arg,
-                Expr::Lit {
+                arg.kind,
+                ExprKind::Lit {
                     value: crate::ast::Lit::Unit,
                     ..
                 }
@@ -291,7 +291,7 @@ impl<'a> Lowerer<'a> {
             let inner_ce = self.lower_expr(expr);
             // Block expressions apply current_return_k internally (at the terminal
             // statement), so don't apply it again here to avoid double-wrapping.
-            if matches!(expr, Expr::Block { .. }) {
+            if matches!(expr.kind, ExprKind::Block { .. }) {
                 inner_ce
             } else {
                 self.apply_return_k(inner_ce)

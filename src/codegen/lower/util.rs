@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, Expr, Lit, Pat, Stmt, TypeExpr};
+use crate::ast::{BinOp, Expr, ExprKind, Lit, Pat, Stmt, TypeExpr};
 use crate::codegen::cerl::{CExpr, CLit};
 use crate::typechecker::Type;
 use std::collections::{BTreeSet, HashMap};
@@ -104,12 +104,12 @@ pub(super) fn collect_fun_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
-        match current {
-            Expr::App { func, arg, .. } => {
+        match &current.kind {
+            ExprKind::App { func, arg, .. } => {
                 args.push(arg);
                 current = func;
             }
-            Expr::Var { name, .. } => {
+            ExprKind::Var { name, .. } => {
                 args.reverse();
                 return Some((name.as_str(), args));
             }
@@ -124,12 +124,12 @@ pub(super) fn collect_qualified_call(expr: &Expr) -> Option<(&str, &str, Vec<&Ex
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
-        match current {
-            Expr::App { func, arg, .. } => {
+        match &current.kind {
+            ExprKind::App { func, arg, .. } => {
                 args.push(arg);
                 current = func;
             }
-            Expr::QualifiedName { module, name, .. } => {
+            ExprKind::QualifiedName { module, name, .. } => {
                 args.reverse();
                 return Some((module.as_str(), name.as_str(), args));
             }
@@ -143,12 +143,12 @@ pub(super) fn collect_ctor_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
-        match current {
-            Expr::App { func, arg, .. } => {
+        match &current.kind {
+            ExprKind::App { func, arg, .. } => {
                 args.push(arg);
                 current = func;
             }
-            Expr::Constructor { name, .. } => {
+            ExprKind::Constructor { name, .. } => {
                 args.reverse();
                 return Some((name.as_str(), args));
             }
@@ -163,12 +163,12 @@ pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Ve
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
-        match current {
-            Expr::App { func, arg, .. } => {
+        match &current.kind {
+            ExprKind::App { func, arg, .. } => {
                 args.push(arg);
                 current = func;
             }
-            Expr::EffectCall {
+            ExprKind::EffectCall {
                 name,
                 qualifier,
                 args: direct_args,
@@ -190,7 +190,7 @@ pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Ve
 /// resolving field positions. Only works when the expression is a literal
 /// RecordCreate; otherwise the typechecker would need to be consulted.
 pub(super) fn field_access_record_name(expr: &Expr) -> Option<&str> {
-    if let Expr::RecordCreate { name, .. } = expr {
+    if let ExprKind::RecordCreate { name, .. } = &expr.kind {
         return Some(name.as_str());
     }
     None
@@ -201,14 +201,14 @@ pub(super) fn field_access_record_name(expr: &Expr) -> Option<&str> {
 /// direct effect calls at the expression root) and need special CPS handling
 /// so that abort-style handlers can skip the outer continuation.
 pub(super) fn has_nested_effect_call(expr: &Expr) -> bool {
-    match expr {
-        Expr::If {
+    match &expr.kind {
+        ExprKind::If {
             then_branch,
             else_branch,
             ..
         } => branch_has_effect(then_branch) || branch_has_effect(else_branch),
-        Expr::Case { arms, .. } => arms.iter().any(|arm| branch_has_effect(&arm.body)),
-        Expr::Block { stmts, .. } => stmts.iter().any(|s| match s {
+        ExprKind::Case { arms, .. } => arms.iter().any(|arm| branch_has_effect(&arm.body)),
+        ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match s {
             Stmt::Expr(e) => branch_has_effect(e),
             Stmt::Let { value, .. } => branch_has_effect(value),
             Stmt::LetFun { body, .. } => branch_has_effect(body),

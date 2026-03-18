@@ -57,7 +57,7 @@ impl Parser {
                 self.expect(Token::Eq)?;
                 let value = self.parse_expr(0)?;
                 Ok(Decl::Let {
-                    span: start.to(value.span()),
+                    span: start.to(value.span),
                     name,
                     annotation,
                     value,
@@ -487,7 +487,7 @@ impl Parser {
                 let param = self.expect_ident()?;
                 self.expect(Token::Eq)?;
                 let body = self.parse_expr(0)?;
-                let arm_end = body.span();
+                let arm_end = body.span;
                 return_clause = Some(Box::new(HandlerArm {
                     op_name: "return".to_string(),
                     params: vec![param],
@@ -510,7 +510,7 @@ impl Parser {
                 }
                 self.expect(Token::Eq)?;
                 let body = self.parse_expr(0)?;
-                let arm_end = body.span();
+                let arm_end = body.span;
                 arms.push(HandlerArm {
                     op_name,
                     params,

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::ast::{self, BinOp, CaseArm, Expr, Lit, Pat, Stmt};
+use crate::ast::{self, BinOp, CaseArm, Expr, ExprKind, Lit, Pat, Stmt};
 
 use super::{Checker, Diagnostic, EffectOpSig, Scheme, Type};
 use crate::token::Span;
@@ -9,8 +9,10 @@ impl Checker {
     // --- Expression inference ---
 
     pub fn infer_expr(&mut self, expr: &Expr) -> Result<Type, Diagnostic> {
-        match expr {
-            Expr::Lit { value, .. } => Ok(match value {
+        let span = expr.span;
+        let node_id = expr.id;
+        match &expr.kind {
+            ExprKind::Lit { value, .. } => Ok(match value {
                 Lit::Int(_) => Type::int(),
                 Lit::Float(_) => Type::float(),
                 Lit::String(_) => Type::string(),
@@ -18,7 +20,7 @@ impl Checker {
                 Lit::Unit => Type::unit(),
             }),
 
-            Expr::Var { name, span } => {
+            ExprKind::Var { name, .. } => {
                 if let Some(scheme) = self.env.get(name) {
                     let scheme = scheme.clone();
                     // Propagate effects from functions with known needs
@@ -44,7 +46,7 @@ impl Checker {
                     }
                     let (mut ty, constraints) = self.instantiate(&scheme);
                     for (trait_name, trait_ty) in constraints {
-                        self.pending_constraints.push((trait_name, trait_ty, *span));
+                        self.pending_constraints.push((trait_name, trait_ty, span, node_id));
                     }
                     // If this function has effect type constraints, convert the
                     // outermost Arrow to EffArrow so spawn! can link type args.
@@ -56,31 +58,31 @@ impl Checker {
                             eff_constraints.into_iter().collect();
                         ty = Type::EffArrow(a, b, eff_refs);
                     }
-                    self.record_type(*span, &ty);
+                    self.record_type(node_id, &ty);
                     Ok(ty)
                 } else {
                     Err(Diagnostic::error_at(
-                        *span,
+                        span,
                         format!("undefined variable: {}", name),
                     ))
                 }
             }
 
-            Expr::Constructor { name, span } => {
+            ExprKind::Constructor { name, .. } => {
                 if let Some(scheme) = self.constructors.get(name) {
                     let scheme = scheme.clone();
                     let (ty, _) = self.instantiate(&scheme);
-                    self.record_type(*span, &ty);
+                    self.record_type(node_id, &ty);
                     Ok(ty)
                 } else {
                     Err(Diagnostic::error_at(
-                        *span,
+                        span,
                         format!("undefined constructor: {}", name),
                     ))
                 }
             }
 
-            Expr::App { func, arg, span } => {
+            ExprKind::App { func, arg, .. } => {
                 let func_ty = self.infer_expr(func)?;
                 let effects_before_arg = self.current_effects.clone();
                 let arg_ty = self.infer_expr(arg)?;
@@ -88,7 +90,7 @@ impl Checker {
                 self.unify_at(
                     &func_ty,
                     &Type::Arrow(Box::new(arg_ty), Box::new(ret_ty.clone())),
-                    *span,
+                    span,
                 )?;
                 // If the function declares its argument absorbs specific effects
                 // (via EffArrow on the parameter type), subtract those from current_effects.
@@ -107,84 +109,84 @@ impl Checker {
                         }
                     }
                 }
-                self.record_type(*span, &ret_ty);
+                self.record_type(node_id, &ret_ty);
                 Ok(ret_ty)
             }
 
-            Expr::BinOp {
+            ExprKind::BinOp {
                 op,
                 left,
                 right,
-                span,
+                ..
             } => {
                 let left_ty = self.infer_expr(left)?;
                 let right_ty = self.infer_expr(right)?;
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::IntDiv => {
-                        self.unify_at(&left_ty, &right_ty, *span)?;
+                        self.unify_at(&left_ty, &right_ty, span)?;
                         self.pending_constraints
-                            .push(("Num".into(), left_ty.clone(), *span));
+                            .push(("Num".into(), left_ty.clone(), span, node_id));
                         Ok(left_ty)
                     }
                     BinOp::Mod => {
-                        self.unify_at(&left_ty, &Type::int(), *span)?;
-                        self.unify_at(&right_ty, &Type::int(), *span)?;
+                        self.unify_at(&left_ty, &Type::int(), span)?;
+                        self.unify_at(&right_ty, &Type::int(), span)?;
                         Ok(Type::int())
                     }
                     BinOp::Eq | BinOp::NotEq => {
-                        self.unify_at(&left_ty, &right_ty, *span)?;
+                        self.unify_at(&left_ty, &right_ty, span)?;
                         self.pending_constraints
-                            .push(("Eq".into(), left_ty.clone(), *span));
+                            .push(("Eq".into(), left_ty.clone(), span, node_id));
                         Ok(Type::bool())
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
-                        self.unify_at(&left_ty, &right_ty, *span)?;
+                        self.unify_at(&left_ty, &right_ty, span)?;
                         self.pending_constraints
-                            .push(("Ord".into(), left_ty.clone(), *span));
+                            .push(("Ord".into(), left_ty.clone(), span, node_id));
                         Ok(Type::bool())
                     }
                     BinOp::And | BinOp::Or => {
-                        self.unify_at(&left_ty, &Type::bool(), *span)?;
-                        self.unify_at(&right_ty, &Type::bool(), *span)?;
+                        self.unify_at(&left_ty, &Type::bool(), span)?;
+                        self.unify_at(&right_ty, &Type::bool(), span)?;
                         Ok(Type::bool())
                     }
                     BinOp::Concat => {
-                        self.unify_at(&left_ty, &Type::string(), *span)?;
-                        self.unify_at(&right_ty, &Type::string(), *span)?;
+                        self.unify_at(&left_ty, &Type::string(), span)?;
+                        self.unify_at(&right_ty, &Type::string(), span)?;
                         Ok(Type::string())
                     }
                 }
             }
 
-            Expr::UnaryMinus { expr, span } => {
-                let ty = self.infer_expr(expr)?;
+            ExprKind::UnaryMinus { expr: inner, .. } => {
+                let ty = self.infer_expr(inner)?;
                 self.pending_constraints
-                    .push(("Num".into(), ty.clone(), *span));
+                    .push(("Num".into(), ty.clone(), span, node_id));
                 Ok(ty)
             }
 
-            Expr::If {
+            ExprKind::If {
                 cond,
                 then_branch,
                 else_branch,
-                span,
+                ..
             } => {
                 let cond_ty = self.infer_expr(cond)?;
-                self.unify_at(&cond_ty, &Type::bool(), cond.span())?;
+                self.unify_at(&cond_ty, &Type::bool(), cond.span)?;
                 let then_ty = self.infer_expr(then_branch)?;
                 let else_ty = self.infer_expr(else_branch)?;
-                self.unify_at(&then_ty, &else_ty, *span)?;
+                self.unify_at(&then_ty, &else_ty, span)?;
                 Ok(then_ty)
             }
 
-            Expr::Block { stmts, .. } => self.infer_block(stmts),
+            ExprKind::Block { stmts, .. } => self.infer_block(stmts),
 
-            Expr::Lambda { params, body, .. } => self.infer_lambda(params, body),
+            ExprKind::Lambda { params, body, .. } => self.infer_lambda(params, body),
 
-            Expr::Case {
+            ExprKind::Case {
                 scrutinee,
                 arms,
-                span,
+                ..
             } => {
                 let scrut_ty = self.infer_expr(scrutinee)?;
                 let result_ty = self.fresh_var();
@@ -199,41 +201,41 @@ impl Checker {
                     }
 
                     let body_ty = self.infer_expr(&arm.body)?;
-                    self.unify_at(&result_ty, &body_ty, arm.body.span())?;
+                    self.unify_at(&result_ty, &body_ty, arm.body.span)?;
 
                     self.env = saved_env;
                 }
 
-                self.check_exhaustiveness(arms, &scrut_ty, *span)?;
+                self.check_exhaustiveness(arms, &scrut_ty, span)?;
 
                 Ok(result_ty)
             }
 
-            Expr::RecordCreate { name, fields, span } => {
+            ExprKind::RecordCreate { name, fields, .. } => {
                 let def = self.records.get(name).cloned().ok_or_else(|| {
-                    Diagnostic::error_at(*span, format!("undefined record type: {}", name))
+                    Diagnostic::error_at(span, format!("undefined record type: {}", name))
                 })?;
 
                 for (fname, fexpr) in fields {
                     let expected = def.iter().find(|(n, _)| n == fname).ok_or_else(|| {
                         Diagnostic::error_at(
-                            fexpr.span(),
+                            fexpr.span,
                             format!("unknown field '{}' on record {}", fname, name),
                         )
                     })?;
                     let actual = self.infer_expr(fexpr)?;
-                    self.unify_at(&expected.1, &actual, fexpr.span())?;
+                    self.unify_at(&expected.1, &actual, fexpr.span)?;
                 }
 
                 Ok(Type::Con(name.clone(), vec![]))
             }
 
-            Expr::FieldAccess { expr, field, span } => self.infer_field_access(expr, field, *span),
+            ExprKind::FieldAccess { expr: inner, field, .. } => self.infer_field_access(inner, field, span),
 
-            Expr::RecordUpdate {
+            ExprKind::RecordUpdate {
                 record,
                 fields,
-                span,
+                ..
             } => {
                 let rec_ty = self.infer_expr(record)?;
                 let mut resolved = self.sub.apply(&rec_ty);
@@ -256,35 +258,34 @@ impl Checker {
                 match &resolved {
                     Type::Con(name, _) => {
                         let def = self.records.get(name).cloned().ok_or_else(|| {
-                            Diagnostic::error_at(*span, format!("type {} is not a record", name))
+                            Diagnostic::error_at(span, format!("type {} is not a record", name))
                         })?;
                         for (fname, fexpr) in fields {
                             let expected =
                                 def.iter().find(|(n, _)| n == fname).ok_or_else(|| {
                                     Diagnostic::error_at(
-                                        fexpr.span(),
+                                        fexpr.span,
                                         format!("unknown field '{}' on record {}", fname, name),
                                     )
                                 })?;
                             let actual = self.infer_expr(fexpr)?;
-                            self.unify_at(&expected.1, &actual, fexpr.span())?;
+                            self.unify_at(&expected.1, &actual, fexpr.span)?;
                         }
                         Ok(resolved.clone())
                     }
                     _ => Err(Diagnostic::error_at(
-                        *span,
+                        span,
                         format!("cannot update non-record type {}", resolved),
                     )),
                 }
             }
 
-            Expr::EffectCall {
+            ExprKind::EffectCall {
                 name,
                 qualifier,
-                span,
                 ..
             } => {
-                let op_sig = self.lookup_effect_op(name, qualifier.as_deref(), *span)?;
+                let op_sig = self.lookup_effect_op(name, qualifier.as_deref(), span)?;
 
                 // Track which effect this op belongs to
                 if let Some(effect_name) = self.effect_for_op(name, qualifier.as_deref()) {
@@ -296,7 +297,7 @@ impl Checker {
                 if let Some((arm_span, arm_module)) =
                     self.with_arm_stacks.iter().rev().find_map(|map| map.get(name.as_str()))
                 {
-                    self.effect_call_targets.insert(*span, (*arm_span, arm_module.clone()));
+                    self.effect_call_targets.insert(span, (*arm_span, arm_module.clone()));
                 }
 
                 // Build curried function type: param1 -> param2 -> ... -> return_type
@@ -312,18 +313,18 @@ impl Checker {
                 Ok(ty)
             }
 
-            Expr::With { expr, handler, span } => self.infer_with(expr, handler, *span),
+            ExprKind::With { expr: inner, handler, .. } => self.infer_with(inner, handler, span),
 
-            Expr::Resume { value, span } => {
+            ExprKind::Resume { value, .. } => {
                 let val_ty = self.infer_expr(value)?;
                 if let Some(expected) = &self.resume_type.clone() {
-                    self.unify_at(&val_ty, expected, *span)?;
+                    self.unify_at(&val_ty, expected, span)?;
                 }
                 let ty = self.fresh_var();
                 Ok(ty)
             }
 
-            Expr::Tuple { elements, .. } => {
+            ExprKind::Tuple { elements, .. } => {
                 let tys: Vec<Type> = elements
                     .iter()
                     .map(|e| self.infer_expr(e))
@@ -331,28 +332,28 @@ impl Checker {
                 Ok(Type::Con("Tuple".into(), tys))
             }
 
-            Expr::QualifiedName { module, name, span } => {
+            ExprKind::QualifiedName { module, name, .. } => {
                 let key = format!("{}.{}", module, name);
                 match self.env.get(&key).cloned() {
                     Some(scheme) => {
                         let (ty, constraints) = self.instantiate(&scheme);
                         for (trait_name, trait_ty) in constraints {
-                            self.pending_constraints.push((trait_name, trait_ty, *span));
+                            self.pending_constraints.push((trait_name, trait_ty, span, node_id));
                         }
                         Ok(ty)
                     }
                     None => Err(Diagnostic::error_at(
-                        *span,
+                        span,
                         format!("unknown qualified name '{}.{}'", module, name),
                     )),
                 }
             }
 
-            Expr::Do {
+            ExprKind::Do {
                 bindings,
                 success,
                 else_arms,
-                span,
+                ..
             } => {
                 let result_ty = self.fresh_var();
                 let saved_env = self.env.clone();
@@ -369,7 +370,7 @@ impl Checker {
                 // Success expression runs in do-block scope; its type is the
                 // success-path return type.
                 let success_ty = self.infer_expr(success)?;
-                self.unify_at(&result_ty, &success_ty, success.span())?;
+                self.unify_at(&result_ty, &success_ty, success.span)?;
 
                 // Restore env so else arms only see the outer scope
                 self.env = saved_env.clone();
@@ -381,38 +382,38 @@ impl Checker {
                     let scrutinee_ty = self.fresh_var();
                     self.bind_pattern(&arm.pattern, &scrutinee_ty)?;
                     let body_ty = self.infer_expr(&arm.body)?;
-                    self.unify_at(&result_ty, &body_ty, arm.body.span())?;
+                    self.unify_at(&result_ty, &body_ty, arm.body.span)?;
                     self.env = arm_saved;
                 }
 
                 // Exhaustiveness: collect bail constructors from all bindings
                 // and check that else arms cover them all.
-                self.check_do_exhaustiveness(bindings, &binding_types, else_arms, *span)?;
+                self.check_do_exhaustiveness(bindings, &binding_types, else_arms, span)?;
 
                 // do-block bindings must not leak into the surrounding scope
                 self.env = saved_env;
                 Ok(result_ty)
             }
 
-            Expr::Receive {
+            ExprKind::Receive {
                 arms,
                 after_clause,
-                span,
+                ..
             } => self.infer_receive(
                 arms,
                 after_clause.as_ref().map(|(t, b)| (t.as_ref(), b.as_ref())),
-                *span,
+                span,
             ),
 
-            Expr::Ascription { expr, type_expr, span } => {
-                let inferred = self.infer_expr(expr)?;
+            ExprKind::Ascription { expr: inner, type_expr, .. } => {
+                let inferred = self.infer_expr(inner)?;
                 let ann_ty = self.convert_type_expr(type_expr, &mut vec![]);
-                self.unify_at(&inferred, &ann_ty, *span)?;
-                self.record_type(*span, &ann_ty);
+                self.unify_at(&inferred, &ann_ty, span)?;
+                self.record_type(node_id, &ann_ty);
                 Ok(ann_ty)
             }
 
-            Expr::DictMethodAccess { .. } | Expr::DictRef { .. } | Expr::ForeignCall { .. } => {
+            ExprKind::DictMethodAccess { .. } | ExprKind::DictRef { .. } | ExprKind::ForeignCall { .. } => {
                 unreachable!("elaboration-only construct in typechecker")
             }
         }
@@ -427,7 +428,7 @@ impl Checker {
             ));
         }
         let guard_ty = self.infer_expr(guard)?;
-        self.unify_at(&guard_ty, &Type::bool(), guard.span())
+        self.unify_at(&guard_ty, &Type::bool(), guard.span)
     }
 
     fn infer_lambda(&mut self, params: &[Pat], body: &Expr) -> Result<Type, Diagnostic> {
@@ -652,15 +653,15 @@ impl Checker {
             }
 
             let body_ty = self.infer_expr(&arm.body)?;
-            self.unify_at(&result_ty, &body_ty, arm.body.span())?;
+            self.unify_at(&result_ty, &body_ty, arm.body.span)?;
             self.env = saved_env;
         }
 
         if let Some((timeout, body)) = after_clause {
             let timeout_ty = self.infer_expr(timeout)?;
-            self.unify_at(&timeout_ty, &Type::int(), timeout.span())?;
+            self.unify_at(&timeout_ty, &Type::int(), timeout.span)?;
             let body_ty = self.infer_expr(body)?;
-            self.unify_at(&result_ty, &body_ty, body.span())?;
+            self.unify_at(&result_ty, &body_ty, body.span)?;
         }
 
         self.current_effects.insert("Actor".to_string());
@@ -702,7 +703,7 @@ impl Checker {
                     if let Pat::Var { name, span: var_span } = pattern {
                         let scheme = self.generalize(&ty);
                         self.env.insert(name.clone(), scheme);
-                        self.record_type(*var_span, &ty);
+                        self.record_type_at_span(*var_span, &ty);
                     } else if let Err(e) = self.bind_pattern(pattern, &ty) {
                         errors.push(e);
                     }
@@ -769,7 +770,7 @@ impl Checker {
                         }
                         if let Some(g) = guard {
                             let guard_ty = self.infer_expr(g)?;
-                            self.unify_at(&guard_ty, &Type::bool(), g.span())?;
+                            self.unify_at(&guard_ty, &Type::bool(), g.span)?;
                         }
                         let body_ty = self.infer_expr(body)?;
                         // Build curried arrow type
@@ -796,7 +797,7 @@ impl Checker {
                                 if !is_unit && !matches!(resolved, Type::Error) {
                                     let display_ty = self.prettify_type(&ty);
                                     self.collected_diagnostics.push(Diagnostic::warning_at(
-                                        expr.span(),
+                                        expr.span,
                                         format!(
                                             "value of type `{}` is discarded; use `let _ = ...` to suppress",
                                             display_ty,
@@ -840,7 +841,7 @@ impl Checker {
                         ty: ty.clone(),
                     },
                 );
-                self.record_type(*span, ty);
+                self.record_type_at_span(*span, ty);
                 Ok(())
             }
             Pat::Lit { value, span } => {
@@ -905,7 +906,7 @@ impl Checker {
                                     ty: field_ty.clone(),
                                 },
                             );
-                            self.record_type(*span, field_ty);
+                            self.record_type_at_span(*span, field_ty);
                         }
                     }
                 }
@@ -1196,7 +1197,7 @@ impl Checker {
         self.effect_type_param_cache = saved_effect_cache;
         self.current_effects.extend(inner_effects);
 
-        let with_span = expr.span();
+        let with_span = expr.span;
         match handler {
             ast::Handler::Named(name, _) => {
                 if !self.handlers.contains_key(name) && self.env.get(name).is_none() {

@@ -67,10 +67,9 @@ fn derive_show(
                         span,
                     },
                     guard: None,
-                    body: Expr::Lit {
+                    body: Expr::synth(span, ExprKind::Lit {
                         value: Lit::String(ctor_name.clone()),
-                        span,
-                    },
+                    }),
                     span,
                 }
             } else {
@@ -104,39 +103,33 @@ fn derive_show(
                         prefix.push_str(lbl);
                         prefix.push_str(": ");
                     }
-                    parts.push(Expr::Lit {
+                    parts.push(Expr::synth(span, ExprKind::Lit {
                         value: Lit::String(prefix.clone()),
-                        span,
-                    });
+                    }));
                     prefix.clear();
 
                     // `show __xi`
-                    parts.push(Expr::App {
-                        func: Box::new(Expr::Var {
+                    parts.push(Expr::synth(span, ExprKind::App {
+                        func: Box::new(Expr::synth(span, ExprKind::Var {
                             name: "show".into(),
-                            span,
-                        }),
-                        arg: Box::new(Expr::Var {
+                        })),
+                        arg: Box::new(Expr::synth(span, ExprKind::Var {
                             name: field_vars[i].clone(),
-                            span,
-                        }),
-                        span,
-                    });
+                        })),
+                    }));
                 }
 
-                parts.push(Expr::Lit {
+                parts.push(Expr::synth(span, ExprKind::Lit {
                     value: Lit::String(")".into()),
-                    span,
-                });
+                }));
 
                 let body = parts
                     .into_iter()
-                    .reduce(|acc, part| Expr::BinOp {
+                    .reduce(|acc, part| Expr::synth(span, ExprKind::BinOp {
                         op: BinOp::Concat,
                         left: Box::new(acc),
                         right: Box::new(part),
-                        span,
-                    })
+                    }))
                     .unwrap();
 
                 CaseArm {
@@ -150,14 +143,12 @@ fn derive_show(
         .collect();
 
     let scrutinee_name = "__val".to_string();
-    let body = Expr::Case {
-        scrutinee: Box::new(Expr::Var {
+    let body = Expr::synth(span, ExprKind::Case {
+        scrutinee: Box::new(Expr::synth(span, ExprKind::Var {
             name: scrutinee_name.clone(),
-            span,
-        }),
+        })),
         arms,
-        span,
-    };
+    });
 
     // Each type param needs Show
     let where_clause: Vec<TraitBound> = type_params

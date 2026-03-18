@@ -3065,7 +3065,7 @@ main () = add "hello" 1
 
 #[test]
 fn type_at_span_records_function_params() {
-    // Function params go through bind_pattern which records the type
+    // Function params go through bind_pattern which records the type (Pat -> type_at_span)
     let checker = check("fun foo (x: Int) -> Int\nfoo x = x").unwrap();
     let result = checker.to_result();
     let types: Vec<_> = result
@@ -3081,22 +3081,28 @@ fn type_at_span_records_function_params() {
 }
 
 #[test]
-fn type_at_span_records_locals_in_body() {
-    // Let bindings inside function bodies are the main LSP hover use case
+fn type_at_node_records_locals_in_body() {
+    // Let bindings inside function bodies are the main LSP hover use case.
+    // Pat bindings go to type_at_span, Expr usage refs go to type_at_node.
     let checker = check("main () = {\n  let x = 42\n  let y = x\n  y\n}").unwrap();
     let result = checker.to_result();
-    let types: Vec<_> = result
+    let pat_types: Vec<_> = result
         .type_at_span
         .values()
         .map(|ty| format!("{}", result.sub.apply(ty)))
         .collect();
-    // x binding, y binding, x usage ref, y usage ref
-    let int_count = types.iter().filter(|ty| *ty == "Int").count();
+    let expr_types: Vec<_> = result
+        .type_at_node
+        .values()
+        .map(|ty| format!("{}", result.sub.apply(ty)))
+        .collect();
+    let all_types: Vec<_> = pat_types.iter().chain(expr_types.iter()).collect();
+    let int_count = all_types.iter().filter(|ty| **ty == "Int").count();
     assert!(
         int_count >= 3,
         "expected at least 3 Int entries (x bind, x use, y bind), got {} in {:?}",
         int_count,
-        types
+        all_types
     );
 }
 

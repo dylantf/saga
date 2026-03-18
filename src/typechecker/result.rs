@@ -35,8 +35,10 @@ pub struct CheckResult {
     pub handlers: HashMap<String, HandlerInfo>,
     /// Effect requirements per function.
     pub fun_effects: HashMap<String, HashSet<String>>,
-    /// Per-span type information for LSP hover.
-    /// Types may contain unresolved variables; use `type_at()` to get resolved types.
+    /// Per-node type information for Expr nodes (LSP hover).
+    /// Types may contain unresolved variables; use `type_at_node()` to get resolved types.
+    pub type_at_node: HashMap<crate::ast::NodeId, super::Type>,
+    /// Per-span type information for Pat bindings (LSP hover).
     pub type_at_span: HashMap<crate::token::Span, super::Type>,
     /// Maps handler arm span -> (effect op definition span, source module) (LSP go-to-def, level 2).
     pub handler_arm_targets: HashMap<crate::token::Span, (crate::token::Span, Option<String>)>,
@@ -85,8 +87,15 @@ impl CheckResult {
         self.modules.map.as_ref()
     }
 
-    /// Look up the resolved type at a span, applying the substitution.
-    pub fn type_at(&self, span: &crate::token::Span) -> Option<String> {
+    /// Look up the resolved type at a node ID, applying the substitution.
+    pub fn type_at_node(&self, node_id: &crate::ast::NodeId) -> Option<String> {
+        let ty = self.type_at_node.get(node_id)?;
+        let resolved = self.sub.apply(ty);
+        Some(format!("{}", resolved))
+    }
+
+    /// Look up the resolved type at a span (for Pat bindings), applying the substitution.
+    pub fn type_at_span(&self, span: &crate::token::Span) -> Option<String> {
         let ty = self.type_at_span.get(span)?;
         let resolved = self.sub.apply(ty);
         Some(format!("{}", resolved))
@@ -111,6 +120,7 @@ impl Checker {
             effects: self.effects.clone(),
             handlers: self.handlers.clone(),
             fun_effects: self.fun_effects.clone(),
+            type_at_node: self.type_at_node.clone(),
             type_at_span: self.type_at_span.clone(),
             handler_arm_targets: self.handler_arm_targets.clone(),
             effect_call_targets: self.effect_call_targets.clone(),
