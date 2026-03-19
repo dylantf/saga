@@ -2,6 +2,10 @@ module Std.Dict
 
 import Std.List as List
 
+impl Show for Dict k v where {k: Show, v: Show} {
+  show d = "{" <> List.flatten (List.join ", " (List.map (fun (k, v) -> show k <> ": " <> show v) (to_list d))) <> "}"
+}
+
 pub @external("erlang", "maps", "put")
 fun put (key: k) (value: v) (dict: Dict k v) -> Dict k v where {k: Eq}
 
@@ -26,6 +30,4 @@ fun to_list (dict: Dict k v) -> List (k, v)
 pub @external("erlang", "maps", "is_key")
 fun member (key: k) (dict: Dict k v) -> Bool where {k: Eq}
 
-impl Show for Dict k v where {k: Show, v: Show} {
-  show d = "{" <> List.flatten (List.join ", " (List.map (fun (k, v) -> show k <> ": " <> show v) (to_list d))) <> "}"
-}
+

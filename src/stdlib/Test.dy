@@ -1,5 +1,6 @@
 module Std.Test
 
+import Std.Base
 import Std.IO (print)
 
 pub effect Assert {
@@ -72,7 +73,7 @@ pub handler test_handler for TestRunner {
       let indent = make_indent state.depth
       print (indent <> "\x1b[31m✗\x1b[0m " <> name)
       print (indent <> "    " <> msg)
-      k{ state | failed: state.failed + 1 }
+      k { state | failed: state.failed + 1 }
     }
   }
   enter_group name = {
@@ -86,8 +87,7 @@ pub handler test_handler for TestRunner {
   leave_group () = {
     let k = resume ()
     fun state -> {
-      let s = { state | depth: state.depth - 1 }
-      k s
+      k { state | depth: state.depth - 1 }
     }
   }
   return _ = fun state -> state
@@ -103,7 +103,7 @@ run body = {
   print (show final.passed <> " passed, " <> show final.failed <> " failed")
 }
 
-# --- Assertion helpers ---
+# Assertion helpers
 
 pub fun assert_eq (a: x) (b: x) -> Unit needs {Assert} where {x: Show + Eq}
 assert_eq a b =

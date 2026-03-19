@@ -8,6 +8,9 @@ mod pat;
 pub struct Parser {
     pub(super) tokens: Vec<Spanned>,
     pub(super) pos: usize,
+    /// When true, `{` is not treated as starting a function argument.
+    /// Used when parsing case scrutinees where `{` begins the branch block.
+    pub(super) no_brace_app: bool,
 }
 
 #[derive(Debug)]
@@ -20,7 +23,7 @@ impl Parser {
     // --- Helpers ---
 
     pub fn new(tokens: Vec<Spanned>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser { tokens, pos: 0, no_brace_app: false }
     }
 
     /// Allocate a fresh NodeId from the global counter.
@@ -113,7 +116,7 @@ impl Parser {
                 | Token::EffectCall(_)
                 | Token::Resume
                 | Token::Do
-        )
+        ) || (!self.no_brace_app && matches!(self.peek(), Token::LBrace))
     }
 
     pub(super) fn can_start_type_atom(&self) -> bool {

@@ -752,7 +752,9 @@ impl Parser {
             }
 
             Token::Case => {
+                self.no_brace_app = true;
                 let scrutinee = self.parse_expr(0)?;
+                self.no_brace_app = false;
                 self.expect(Token::LBrace)?;
                 self.skip_terminators();
 

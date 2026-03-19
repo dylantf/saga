@@ -1,4 +1,4 @@
-import Std.Test (describe, test, assert_eq, assert_true)
+import Std.Test (describe, test, assert_eq)
 import MathLib (add, double)
 
 describe "MathLib" {
@@ -24,9 +24,9 @@ describe "MathLib" {
 }
 
 test "a simple assertion" {
-  assert_true True
+  assert_eq True True
 }
 
 test "a failing test" {
-  assert_true False
+  assert_eq True False
 }

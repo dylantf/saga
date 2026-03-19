@@ -726,6 +726,15 @@ impl Checker {
                             }
                     });
                     if in_where {
+                        // Record polymorphic passthrough evidence so the elaborator
+                        // knows this is a trait method call (needs DictMethodAccess).
+                        let var_name = self.where_bound_var_names.get(&id).cloned();
+                        self.evidence.push(super::TraitEvidence {
+                            node_id,
+                            trait_name: trait_name.clone(),
+                            resolved_type: None,
+                            type_var_name: var_name,
+                        });
                         continue;
                     }
                     if has_annotation {
