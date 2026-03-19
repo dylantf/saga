@@ -38,4 +38,6 @@ main () = {
   println <| describe alice
   println <| describe origin
   println <| verbose alice
+
+  verbose 
 }

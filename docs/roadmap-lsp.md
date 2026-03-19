@@ -35,7 +35,7 @@ lock-free hover/goto/completion.
 ## Phase 3: Navigation
 
 - [ ] Find all references
-- [ ] Signature help (show param names/types while typing function arguments)
+- [x] Signature help (show param names/types while typing function arguments)
 - [x] Document symbols (outline view)
 
 ## Phase 4: Editing support

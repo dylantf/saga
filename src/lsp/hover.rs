@@ -327,6 +327,10 @@ pub fn type_at_name(
     if let Some(id) = node_id
         && let Some(ty_str) = result.type_at_node(id)
     {
+        // Graft annotation labels onto the resolved type if available
+        if let Some(labels) = annotation_labels(program, name) {
+            return Some(labeled_type(&labels, &ty_str));
+        }
         return Some(ty_str);
     }
 
@@ -355,8 +359,40 @@ pub fn type_at_name(
     None
 }
 
+/// Get just the parameter labels from a FunAnnotation.
+pub(crate) fn annotation_labels(program: &[Decl], name: &str) -> Option<Vec<String>> {
+    for decl in program {
+        if let Decl::FunAnnotation {
+            name: fn_name,
+            params,
+            ..
+        } = decl
+            && fn_name == name
+        {
+            return Some(params.iter().map(|(label, _)| label.clone()).collect());
+        }
+    }
+    None
+}
+
+/// Graft parameter labels onto a resolved type string.
+/// E.g., labels=["a", "b"], type_str="Int -> Int -> String" => "(a: Int) (b: Int) -> String"
+fn labeled_type(labels: &[String], type_str: &str) -> String {
+    let parts: Vec<&str> = type_str.splitn(labels.len() + 1, " -> ").collect();
+    if parts.len() <= labels.len() {
+        return type_str.to_string();
+    }
+    let labeled: Vec<String> = labels
+        .iter()
+        .zip(parts.iter())
+        .map(|(label, ty)| format!("({}: {})", label, ty))
+        .collect();
+    let rest = parts[labels.len()..].join(" -> ");
+    format!("{} -> {}", labeled.join(" "), rest)
+}
+
 /// Find a FunAnnotation for the given name and format it with labels.
-fn find_annotation(program: &[Decl], name: &str) -> Option<String> {
+pub(crate) fn find_annotation(program: &[Decl], name: &str) -> Option<String> {
     for decl in program {
         if let Decl::FunAnnotation {
             name: fn_name,
@@ -397,7 +433,7 @@ fn find_annotation(program: &[Decl], name: &str) -> Option<String> {
     None
 }
 
-fn format_type_expr(ty: &dylang::ast::TypeExpr) -> String {
+pub(crate) fn format_type_expr(ty: &dylang::ast::TypeExpr) -> String {
     use dylang::ast::TypeExpr;
     match ty {
         TypeExpr::Named(n) => n.clone(),

@@ -12,6 +12,7 @@ mod diagnostics;
 mod document_symbol;
 mod hover;
 mod line_index;
+mod signature_help;
 
 use diagnostics::CheckSnapshot;
 
@@ -114,6 +115,11 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec![" ".to_string()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: Default::default(),
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -322,6 +328,60 @@ impl LanguageServer for Backend {
         }
 
         Ok(Some(DocumentSymbolResponse::Flat(symbols)))
+    }
+
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> Result<Option<SignatureHelp>> {
+        let uri = params.text_document_position_params.text_document.uri.clone();
+        let Some((tc_result, program, line_index, source)) = self.snapshot(&uri) else {
+            return Ok(None);
+        };
+
+        let position = params.text_document_position_params.position;
+        let offset =
+            line_index.line_col_to_offset(position.line as usize, position.character as usize);
+
+        // Only proceed if there's an identifier-like token before the cursor.
+        // When triggered by space, cursor is after the space, so skip whitespace backwards.
+        if offset > 0 {
+            let bytes = source.as_bytes();
+            let mut check_pos = offset - 1;
+            while check_pos > 0 && bytes[check_pos] == b' ' {
+                check_pos -= 1;
+            }
+            let prev = bytes[check_pos];
+            if !prev.is_ascii_alphanumeric() && prev != b'_' && prev != b'\'' && prev != b')' {
+                return Ok(None);
+            }
+        }
+
+        let (func_name, active_param) =
+            if let Some(found) = signature_help::find_active_call(&program, offset) {
+                found
+            } else if let Some(found) = signature_help::find_call_near(&program, &source, offset) {
+                found
+            } else {
+                // No App chain found -- check if cursor is after `<name> ` (no arg yet).
+                match signature_help::ident_before_spaces(&source, offset) {
+                    Some(name) => (name, 0),
+                    None => return Ok(None),
+                }
+            };
+
+        let Some(mut sig_info) = signature_help::build_signature(&func_name, &program, &tc_result)
+        else {
+            return Ok(None);
+        };
+
+        sig_info.active_parameter = Some(active_param as u32);
+
+        Ok(Some(SignatureHelp {
+            signatures: vec![sig_info],
+            active_signature: Some(0),
+            active_parameter: None, // set per-signature above
+        }))
     }
 }
 

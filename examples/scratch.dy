@@ -1,54 +1,10 @@
-effect Assert {
-  fun assert (ok: Bool) (msg: String) -> Unit
+fun foo (a: Int) (b: Int) -> String
+foo a b = case a + b {
+  n | n > 50 -> "Wow, a big number"
+  _ -> "its a number"
 }
-
-effect TestRunner {
-  fun pass (name: String) -> Unit
-  fun fail (name: String) (msg: String) -> Unit
-}
-
-fun test (name: String) (body: () -> Unit needs {Assert}) -> Unit needs {TestRunner}
-test name body = {
-  let (_, failures) = { body () } with {
-    assert ok msg =
-      if ok then {
-        let (val, errs) = resume ()
-        (val, errs)
-      } else {
-        let (val, errs) = resume ()
-        (val, msg :: errs)
-      }
-    return val = (val, [])
-  }
-  case failures {
-    [] -> pass! name
-    h :: _ -> fail! name h
-  }
-}
-
-fun assert_true (cond: Bool) -> Unit needs {Assert}
-assert_true cond = assert! cond "Expected True, got False"
 
 main () = {
-  let (passed, failed) = {
-    test "passes" {
-      assert_true True
-    }
-    test "fails" {
-      assert_true False
-    }
-  } with {
-    pass name = {
-      println ("  + " <> name)
-      let (p, f) = resume ()
-      (p + 1, f)
-    }
-    fail name msg = {
-      println ("  x " <> name <> ": " <> msg)
-      let (p, f) = resume ()
-      (p, f + 1)
-    }
-    return _ = (0, 0)
-  }
-  println ($"{passed} passed, {failed} failed")
+  let description = foo 123 4
+  println description
 }
