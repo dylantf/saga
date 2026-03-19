@@ -6,7 +6,7 @@ Design document for the printing/stringification story in dylang.
 
 ## Current State
 
-- `print` and `print_error` are builtins in `Std.IO`, both constrained by `Show`
+- `print` and `eprint` are builtins in `Std.IO`, both constrained by `Show`
 - `Show` is a trait in `Std.Base`, loaded via the prelude
 - Show is implemented for: Int, Float, String, Bool, Unit, List, Maybe, Result, Dict, tuples, and types that `deriving (Show)`
 - String interpolation (`$"hello {x}"`) desugars to `"hello " <> show x` in the parser
@@ -23,6 +23,7 @@ Show is doing double duty. The auto-derived/structural representations (e.g. `Ju
 ### Two Traits
 
 **Debug** - structural/developer representation.
+
 - Not auto-derived. Opt in with `deriving (Debug)` or a manual `impl`.
 - The compiler knows how to generate structural impls for ADTs, records, and tuples via `deriving`.
 - Shows constructor names, field names, nesting: `Just(42)`, `User { name: "Dylan", age: 30 }`
@@ -31,6 +32,7 @@ Show is doing double duty. The auto-derived/structural representations (e.g. `Ju
 - Lives in prelude (`Std.Base`)
 
 **Show** - user-facing representation.
+
 - Auto-derived only for primitives: Int, Float, String, Bool
 - NOT auto-derived for records, ADTs, tuples, Maybe, Result, Dict, etc.
 - Must be manually implemented to opt in
@@ -39,24 +41,25 @@ Show is doing double duty. The auto-derived/structural representations (e.g. `Ju
 
 ### Implicit Usage
 
-| Context | Trait used | Rationale |
-|---------|-----------|-----------|
-| String interpolation `$"{x}"` | Show | User-facing output, should be intentional |
-| `print x` / `print_error x` | Show | Same as interpolation |
-| `dbg x` | Debug | Developer tool, always available |
-| `panic` / `todo` messages | Debug | Developer context, structural is fine |
-| Test failure output | Debug | Developer context |
-| Error messages / stack traces | Debug | Developer context |
+| Context                       | Trait used | Rationale                                 |
+| ----------------------------- | ---------- | ----------------------------------------- |
+| String interpolation `$"{x}"` | Show       | User-facing output, should be intentional |
+| `print x` / `eprint x`        | Show       | Same as interpolation                     |
+| `dbg x`                       | Debug      | Developer tool, always available          |
+| `panic` / `todo` messages     | Debug      | Developer context, structural is fine     |
+| Test failure output           | Debug      | Developer context                         |
+| Error messages / stack traces | Debug      | Developer context                         |
 
 ### Builtin Functions
 
-| Function | Trait | Output | Returns | Purpose |
-|----------|-------|--------|---------|---------|
-| `print x` | Show | stdout | Unit | User-facing output |
-| `print_error x` | Show | stderr | Unit | User-facing error output |
-| `dbg x` | Debug | stderr | `x` (passthrough) | Developer inspection, like Rust's `dbg!` |
+| Function   | Trait | Output | Returns           | Purpose                                  |
+| ---------- | ----- | ------ | ----------------- | ---------------------------------------- |
+| `print x`  | Show  | stdout | Unit              | User-facing output                       |
+| `eprint x` | Show  | stderr | Unit              | User-facing error output                 |
+| `dbg x`    | Debug | stderr | `x` (passthrough) | Developer inspection, like Rust's `dbg!` |
 
 `dbg` returns its argument so it can be inserted anywhere without changing program behavior:
+
 ```
 let result = dbg (compute something)
 ```
@@ -64,11 +67,13 @@ let result = dbg (compute something)
 ### String Interpolation
 
 Desugaring stays the same mechanically, but now calls `show` which requires the Show trait:
+
 ```
 $"Hello {name}" -> "Hello " <> show name <> ""
 ```
 
 If `name`'s type doesn't implement Show, you get a compile error. To dump a debug representation, be explicit:
+
 ```
 $"Debug: {debug x}"
 ```
@@ -101,7 +106,7 @@ Debug is opt-in via `deriving (Debug)` or manual impl, just like any other trait
 
 ### Future: Effects-Based IO
 
-The builtins (`print`, `print_error`, `dbg`) are escape hatches for convenience and debugging. Production code should use effects:
+The builtins (`print`, `eprint`, `dbg`) are escape hatches for convenience and debugging. Production code should use effects:
 
 ```
 effect Console {

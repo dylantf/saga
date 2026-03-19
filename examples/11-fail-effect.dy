@@ -3,7 +3,7 @@ effect Fail {
 }
 
 handler log_failure for Fail {
-  fail msg = print ("Error: " <> msg)
+  fail msg = println ("Error: " <> msg)
 }
 
 fun safe_div (x: Int) (y: Int) -> Int needs {Fail}
@@ -12,7 +12,7 @@ safe_div x y = x / y
 
 main () = {
   let a = (safe_div 10 2) with log_failure
-  print a
+  println (show a)
   let b = (safe_div 10 0) with log_failure
-  print b
+  println (show b)
 }

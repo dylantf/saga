@@ -2,8 +2,18 @@ module Std.IO
 
 import Std.String
 
-pub fun print (x: a) -> () where {a: Show}
+#@ prints to stdout
+pub fun print (x: String) -> Unit
 # builtin
 
-pub fun print_error (x: a) -> () where {a: Show}
+#@ prints to stdout with a trailing newline
+pub fun println (x: String) -> Unit
+# builtin
+
+#@ prints to stderr
+pub fun eprint (x: String) -> Unit
+# builtin
+
+#@ prints to stderr with a trailing newline
+pub fun eprintln (x: String) -> Unit
 # builtin

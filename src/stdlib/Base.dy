@@ -6,6 +6,10 @@ pub trait Show a {
   fun show (x: a) -> String
 }
 
+pub trait Debug a {
+  fun dbg (x: a) -> String
+}
+
 pub type Ordering { Lt | Eq | Gt } deriving (Show, Eq)
 
 pub trait Ord a where {a: Eq} {

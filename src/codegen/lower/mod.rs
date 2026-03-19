@@ -627,20 +627,18 @@ impl<'a> Lowerer<'a> {
                     return self.lower_qualified_call(module, func_name, &args);
                 }
 
-                // Lower `print(dict, x)` to io:format("~s~n", [show(x)])
-                if let Some((func_name, args)) = collect_fun_call(expr)
-                    && func_name == "print"
-                    && let Some(ce) = self.lower_builtin_print(&args, false)
-                {
-                    return ce;
-                }
-
-                // Lower `print_error(dict, x)` to io:format(standard_error, "~ts~n", [show(x)])
-                if let Some((func_name, args)) = collect_fun_call(expr)
-                    && func_name == "print_error"
-                    && let Some(ce) = self.lower_builtin_print(&args, true)
-                {
-                    return ce;
+                // Lower print/println/eprint/eprintln to io:format
+                if let Some((func_name, args)) = collect_fun_call(expr) {
+                    let lowered = match func_name {
+                        "print" => self.lower_builtin_print(&args, false, false),
+                        "println" => self.lower_builtin_print(&args, false, true),
+                        "eprint" => self.lower_builtin_print(&args, true, false),
+                        "eprintln" => self.lower_builtin_print(&args, true, true),
+                        _ => None,
+                    };
+                    if let Some(ce) = lowered {
+                        return ce;
+                    }
                 }
 
                 // Lower `panic msg` / `todo msg` to stderr print + erlang:halt(1)

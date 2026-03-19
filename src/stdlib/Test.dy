@@ -71,7 +71,7 @@ pub handler test_handler for TestRunner {
     let k = resume ()
     fun state -> {
       let indent = make_indent state.depth
-      print (indent <> "\x1b[32m✓\x1b[0m " <> name)
+      println (indent <> "\x1b[32m✓\x1b[0m " <> name)
       k { state | passed: state.passed + 1 }
     }
   }
@@ -79,8 +79,8 @@ pub handler test_handler for TestRunner {
     let k = resume ()
     fun state -> {
       let indent = make_indent state.depth
-      print (indent <> "\x1b[31m✗\x1b[0m " <> name)
-      print (indent <> "    " <> msg)
+      println (indent <> "\x1b[31m✗\x1b[0m " <> name)
+      println (indent <> "    " <> msg)
       k { state | failed: state.failed + 1 }
     }
   }
@@ -88,7 +88,7 @@ pub handler test_handler for TestRunner {
     let k = resume ()
     fun state -> {
       let indent = make_indent state.depth
-      print (indent <> "\x1b[33m○\x1b[0m " <> name <> " (skipped)")
+      println (indent <> "\x1b[33m○\x1b[0m " <> name <> " (skipped)")
       k { state | skipped: state.skipped + 1 }
     }
   }
@@ -96,7 +96,7 @@ pub handler test_handler for TestRunner {
     let k = resume ()
     fun state -> {
       let indent = make_indent state.depth
-      print (indent <> name)
+      println (indent <> name)
       k { state | depth: state.depth + 1 }
     }
   }
@@ -115,11 +115,11 @@ pub fun run (body: () -> Unit needs {TestRunner}) -> Unit
 run body = {
   let state_fn = { body () } with test_handler
   let final = state_fn (TestState { passed: 0, failed: 0, skipped: 0, depth: 0 })
-  print ""
+  println ""
   let summary = show final.passed <> " passed, " <> show final.failed <> " failed"
   let summary = if final.skipped > 0 then summary <> ", " <> show final.skipped <> " skipped"
                 else summary
-  print summary
+  println summary
   if final.failed > 0 then Process.exit 1 else ()
 }
 

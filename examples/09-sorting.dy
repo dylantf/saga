@@ -69,8 +69,8 @@ mergesort xs = case xs {
 main () = {
   let nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
 
-  show (insertion_sort nums) |> print
-  show (bubblesort nums) |> print
-  show (quicksort nums) |> print
-  show (mergesort nums) |> print
+  show (insertion_sort nums) |> println
+  show (bubblesort nums) |> println
+  show (quicksort nums) |> println
+  show (mergesort nums) |> println
 }

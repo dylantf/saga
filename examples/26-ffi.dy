@@ -13,7 +13,7 @@ fun main () -> Unit
 main () = {
   let nums = [5, 3, 1, 4, 2]
 
-  print (reverse nums)
-  print (sort nums)
-  print (len nums)
+  println (show (reverse nums))
+  println (show (sort nums))
+  println (show (len nums))
 }

@@ -1,4 +1,4 @@
-print_bool b = show b |> print
+print_bool b = show b |> println
 
 main () = {
   print_bool <| True && False

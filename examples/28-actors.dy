@@ -25,7 +25,7 @@ run_counter () = {
   send! pid (Increment 3)
   send! pid (GetCount (self! ()))
   let result = receive { n -> n }
-  print (show result)
+  println (show result)
 }
 
 main () = {

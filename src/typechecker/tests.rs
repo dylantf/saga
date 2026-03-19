@@ -592,7 +592,7 @@ fn multiple_effects_all_declared() {
 fn with_subtracts_only_handled_effect() {
     // Handler handles Log but not Fail, so Fail still needs declaration
     let result = check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\neffect Log {\n  fun log (msg: String) -> Unit\n}\nhandler console for Log {\n  log msg = print msg\n}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n} with console",
+        "effect Fail {\n  fun fail (msg: String) -> a\n}\neffect Log {\n  fun log (msg: String) -> Unit\n}\nhandler console for Log {\n  log msg = println msg\n}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n} with console",
     );
     assert!(result.is_err());
     let err = result.err().expect("expected error");
@@ -1122,19 +1122,19 @@ main () = special (Bar { val: 1 })",
 
 #[test]
 fn show_works_for_primitives() {
-    check("main () = print 42").unwrap();
-    check("main () = print 3.14").unwrap();
-    check("main () = print \"hello\"").unwrap();
-    check("main () = print True").unwrap();
-    check("main () = print ()").unwrap();
-    check("let x = show 42\nmain () = print x").unwrap();
+    check("main () = println (show 42)").unwrap();
+    check("main () = println (show 1.5)").unwrap();
+    check("main () = println \"hello\"").unwrap();
+    check("main () = println (show True)").unwrap();
+    check("main () = println (show ())").unwrap();
+    check("let x = show 42\nmain () = println x").unwrap();
 }
 
 #[test]
 fn show_fails_for_custom_type_without_impl() {
     let result = check(
         "record Foo { x: Int }
-main () = print (Foo { x: 1 })",
+main () = println (show (Foo { x: 1 }))",
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
@@ -1149,13 +1149,10 @@ main () = print (Foo { x: 1 })",
 fn show_works_for_custom_type_with_impl() {
     check(
         "record Foo { x: Int }
-trait Describe a {
-  fun describe (x: a) -> String
-}
 impl Show for Foo {
   show f = \"Foo\"
 }
-main () = print (Foo { x: 1 })",
+main () = println (show (Foo { x: 1 }))",
     )
     .unwrap();
 }

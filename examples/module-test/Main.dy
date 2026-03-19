@@ -4,13 +4,13 @@ import MathLib (add, double)
 
 pub fun main () -> Unit
 main () = {
-  print (add 10 20)
-  print (double 7) 
-  print (MathLib.add 100 200) 
-  
-  let pair = (42, "hello")
-  print (fst pair)
-  print (snd pair)
+  println (show (add 10 20))
+  println (show (double 7))
+  println (show (MathLib.add 100 200))
 
-  print (multiply! 2 3) with math_handler
+  let pair = (42, "hello")
+  println (show (fst pair))
+  println (snd pair)
+
+  println (show (multiply! 2 3)) with math_handler
 }

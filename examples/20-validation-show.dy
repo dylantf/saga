@@ -54,8 +54,8 @@ validate_user input = {
 }
 
 main () = {
-  validate_user UserInput { name: "Alice", age: 25 } |> print
-  validate_user UserInput { name: "", age: 25 } |> print
-  validate_user UserInput { name: "Bob", age: 15 } |> print
-  validate_user UserInput { name: "", age: 15 } |> print
+  validate_user UserInput { name: "Alice", age: 25 } |> println
+  validate_user UserInput { name: "", age: 25 } |> println
+  validate_user UserInput { name: "Bob", age: 15 } |> println
+  validate_user UserInput { name: "", age: 15 } |> println
 }

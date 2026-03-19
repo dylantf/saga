@@ -43,7 +43,7 @@ run () = {
 
 main () = {
   # let result = run () with sync_actor
-  # print $"5 squared = {result}"
+  # println $"5 squared = {result}"
 
-  print "No-op, try to reimplement this at some point. Needs receive handling I think"
+  println "No-op, try to reimplement this at some point. Needs receive handling I think"
 }

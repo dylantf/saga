@@ -51,10 +51,10 @@ sort xs = {
 
 main () = {
   let xs = [3, 6, 1, 8, 2, 9, 4, 7, 5]
-  print ("input:  " <> xs)
-  print ("sorted: " <> (sort xs))
+  println ("input:  " <> xs)
+  println ("sorted: " <> (sort xs))
 
   let ys = [42, 17, 99, 3, 55, 1]
-  print ("input:  " <> ys)
-  print ("sorted: " <> (sort ys))
+  println ("input:  " <> ys)
+  println ("sorted: " <> (sort ys))
 }

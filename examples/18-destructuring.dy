@@ -28,30 +28,30 @@ area Rect(w, h) = w * h
 main () = {
   # Let with tuples
   let (name, age) = ("Alice", 30)
-  print $"{name} is {age}"
+  println $"{name} is {age}"
 
   # Let with records
   let origin = Point { x: 0, y: 0 }
   let Point { x, y } = origin
-  print $"origin: ({x}, {y})"
+  println $"origin: ({x}, {y})"
 
   # Let with constructors
   let Circle(r) = Circle(5.0)
-  print $"radius: {r}"
+  println $"radius: {r}"
 
   # Let with list cons
   let h :: t = [1, 2, 3, 4, 5]
-  print $"head: {h}"
-  print $"tail: {t}"
+  println $"head: {h}"
+  println $"tail: {t}"
 
   # Nested destructuring
   let ((a, b), (c, d)) = ((1, 2), (3, 4))
-  print $"sum: {a + b + c + d}"
+  println $"sum: {a + b + c + d}"
 
   # Shape Show impl
   let c = Circle 10.0
   let rect = Rect 3.0 4.0
-  print $"{c} has area {area c}"
-  print $"{rect} has area {area rect}"
+  println $"{c} has area {area c}"
+  println $"{rect} has area {area rect}"
 }
 
