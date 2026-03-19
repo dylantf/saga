@@ -711,6 +711,8 @@ pub struct Checker {
     pub(crate) adt_variants: HashMap<std::string::String, Vec<(std::string::String, usize)>>,
     /// Evidence collected during constraint solving for the elaboration pass.
     pub(crate) evidence: Vec<TraitEvidence>,
+    /// Dict params for let bindings with trait constraints: name -> (params, value_arity).
+    pub(crate) let_dict_params: HashMap<String, (Vec<(String, String)>, usize)>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Per-node type information for Expr nodes (LSP hover, go-to-def, etc.).
@@ -799,6 +801,7 @@ impl Checker {
             modules: ModuleContext::default(),
             adt_variants: HashMap::new(),
             evidence: Vec::new(),
+            let_dict_params: HashMap::new(),
             collected_diagnostics: Vec::new(),
             type_at_node: HashMap::new(),
             type_at_span: HashMap::new(),

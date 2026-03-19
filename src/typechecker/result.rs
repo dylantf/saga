@@ -44,6 +44,8 @@ pub struct CheckResult {
     pub handler_arm_targets: HashMap<crate::token::Span, (crate::token::Span, Option<String>)>,
     /// Maps effect call span -> (handler arm span, source module) (LSP go-to-def, level 1).
     pub effect_call_targets: HashMap<crate::token::Span, (crate::token::Span, Option<String>)>,
+    /// Dict params for let bindings with trait constraints: name -> (params, value_arity).
+    pub let_dict_params: HashMap<String, (Vec<(String, String)>, usize)>,
 }
 
 impl CheckResult {
@@ -129,6 +131,7 @@ impl Checker {
             type_at_span: self.type_at_span.clone(),
             handler_arm_targets: self.handler_arm_targets.clone(),
             effect_call_targets: self.effect_call_targets.clone(),
+            let_dict_params: self.let_dict_params.clone(),
         }
     }
 }

@@ -48,6 +48,8 @@ struct Elaborator {
     current_dict_params_by_var: HashMap<(String, String), String>,
     /// Erlang module name for this module (e.g. "animals"), used for dict name qualification
     erlang_module: String,
+    /// Arity of let-bound values with trait constraints (for eta-expansion)
+    let_binding_arities: HashMap<String, usize>,
 }
 
 impl Elaborator {
@@ -71,6 +73,13 @@ impl Elaborator {
                     inferred_dict_params.insert(name.to_string(), dict_params);
                 }
             }
+        }
+
+        // Merge let-binding dict params (from local let bindings with trait constraints)
+        let mut let_binding_arities: HashMap<String, usize> = HashMap::new();
+        for (name, (params, arity)) in &result.let_dict_params {
+            inferred_dict_params.entry(name.clone()).or_insert_with(|| params.clone());
+            let_binding_arities.insert(name.clone(), *arity);
         }
 
         // Build evidence lookup by node ID
@@ -123,6 +132,7 @@ impl Elaborator {
             current_dict_params: HashMap::new(),
             current_dict_params_by_var: HashMap::new(),
             erlang_module,
+            let_binding_arities,
         }
     }
 
@@ -688,12 +698,91 @@ impl Elaborator {
                                 value,
                                 assert,
                                 span,
-                            } => Stmt::Let {
-                                pattern: pattern.clone(),
-                                annotation: annotation.clone(),
-                                value: self.elaborate_expr(value),
-                                assert: *assert,
-                                span: *span,
+                            } => {
+                                // Check if this let binding has trait constraints
+                                let dict_info = if let Pat::Var { name, .. } = pattern {
+                                    self.fun_dict_params.get(name).cloned()
+                                } else {
+                                    None
+                                };
+
+                                if let Some(dict_param_info) = dict_info {
+                                    // Set up dict params for elaborating the value.
+                                    // Eta-expand: `let f = val` becomes
+                                    // `let f = fun (dict, __arg) -> (elaborated_val)(__arg)`
+                                    // so the lowerer sees a single function of arity N+1.
+                                    let saved_dict_params = std::mem::take(&mut self.current_dict_params);
+                                    let saved_dict_params_by_var =
+                                        std::mem::take(&mut self.current_dict_params_by_var);
+                                    let mut lambda_params = Vec::new();
+
+                                    for (trait_name, type_var) in &dict_param_info {
+                                        let param_name = format!("__dict_{}_{}", trait_name, type_var);
+                                        self.current_dict_params
+                                            .insert(trait_name.clone(), param_name.clone());
+                                        self.current_dict_params_by_var
+                                            .insert((trait_name.clone(), type_var.clone()), param_name.clone());
+                                        lambda_params.push(Pat::Var {
+                                            name: param_name,
+                                            span: *span,
+                                        });
+                                    }
+
+                                    let elab_value = self.elaborate_expr(value);
+
+                                    self.current_dict_params = saved_dict_params;
+                                    self.current_dict_params_by_var = saved_dict_params_by_var;
+
+                                    // Eta-expand with the correct arity
+                                    let let_name = if let Pat::Var { name: n, .. } = pattern { n } else { "" };
+                                    let arity = self.let_binding_arities.get(let_name).copied().unwrap_or(1);
+                                    let eta_params: Vec<String> = (0..arity)
+                                        .map(|i| format!("__let_arg{}", i))
+                                        .collect();
+                                    for p in &eta_params {
+                                        lambda_params.push(Pat::Var {
+                                            name: p.clone(),
+                                            span: *span,
+                                        });
+                                    }
+                                    // Apply the elaborated value to each eta param
+                                    let mut body = elab_value;
+                                    for p in &eta_params {
+                                        body = Expr::synth(
+                                            *span,
+                                            ExprKind::App {
+                                                func: Box::new(body),
+                                                arg: Box::new(Expr::synth(
+                                                    *span,
+                                                    ExprKind::Var { name: p.clone() },
+                                                )),
+                                            },
+                                        );
+                                    }
+                                    let wrapped = Expr::synth(
+                                        *span,
+                                        ExprKind::Lambda {
+                                            params: lambda_params,
+                                            body: Box::new(body),
+                                        },
+                                    );
+
+                                    Stmt::Let {
+                                        pattern: pattern.clone(),
+                                        annotation: annotation.clone(),
+                                        value: wrapped,
+                                        assert: *assert,
+                                        span: *span,
+                                    }
+                                } else {
+                                    Stmt::Let {
+                                        pattern: pattern.clone(),
+                                        annotation: annotation.clone(),
+                                        value: self.elaborate_expr(value),
+                                        assert: *assert,
+                                        span: *span,
+                                    }
+                                }
                             },
                             Stmt::LetFun {
                                 name,
