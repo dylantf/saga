@@ -9,7 +9,20 @@ pub effect Assert {
 pub effect TestRunner {
   fun pass (name: String) -> Unit
   fun fail (name: String) (msg: String) -> Unit
+  fun enter_group (name: String) -> Unit
+  fun leave_group () -> Unit
 }
+
+record TestState {
+  passed: Int,
+  failed: Int,
+  depth: Int,
+}
+
+fun make_indent (n: Int) -> String
+make_indent n =
+  if n <= 0 then ""
+  else "  " <> make_indent (n - 1)
 
 #@ Runs a named test. Collects all assertion failures via multi-shot
 #@ continuations, then reports pass/fail through the TestRunner effect.
@@ -32,37 +45,62 @@ test name body = {
   }
 }
 
-#@ Groups tests under a label.
+#@ Groups tests under a label. Nesting is tracked via enter_group/leave_group
+#@ effects so the handler can control indentation.
 pub fun describe (name: String) (body: () -> Unit needs {TestRunner}) -> Unit needs {TestRunner}
 describe name body = {
-  print name
+  enter_group! name
   body ()
+  leave_group! ()
 }
 
-#@ Default test handler. Prints pass/fail and threads (passed, failed)
-#@ counts through continuations.
+#@ Default test handler. Uses state-threading via closures (like the State
+#@ effect pattern) to pass depth top-down through the computation.
+#@ Each handler arm returns a (TestState -> TestState) function.
 pub handler test_handler for TestRunner {
   pass name = {
-    print ("  + " <> name)
-    let (p, f) = resume ()
-    (p + 1, f)
+    let k = resume ()
+    fun state -> {
+      let indent = make_indent state.depth
+      print (indent <> "\x1b[32m✓\x1b[0m " <> name)
+      k { state | passed: state.passed + 1 }
+    }
   }
   fail name msg = {
-    print ("  x " <> name)
-    print ("      " <> msg)
-    let (p, f) = resume ()
-    (p, f + 1)
+    let k = resume ()
+    fun state -> {
+      let indent = make_indent state.depth
+      print (indent <> "\x1b[31m✗\x1b[0m " <> name)
+      print (indent <> "    " <> msg)
+      k{ state | failed: state.failed + 1 }
+    }
   }
-  return _ = (0, 0)
+  enter_group name = {
+    let k = resume ()
+    fun state -> {
+      let indent = make_indent state.depth
+      print (indent <> name)
+      k { state | depth: state.depth + 1 }
+    }
+  }
+  leave_group () = {
+    let k = resume ()
+    fun state -> {
+      let s = { state | depth: state.depth - 1 }
+      k s
+    }
+  }
+  return _ = fun state -> state
 }
 
-#@ Run a test suite. Attaches test_handler, prints summary, exits with
-#@ appropriate code.
+#@ Run a test suite. Attaches test_handler, threads initial state through,
+#@ then prints the summary.
 pub fun run (body: () -> Unit needs {TestRunner}) -> Unit
 run body = {
-  let (passed, failed) = { body () } with test_handler
+  let state_fn = { body () } with test_handler
+  let final = state_fn (TestState { passed: 0, failed: 0, depth: 0 })
   print ""
-  print (show passed <> " passed, " <> show failed <> " failed")
+  print (show final.passed <> " passed, " <> show final.failed <> " failed")
 }
 
 # --- Assertion helpers ---
@@ -76,14 +114,6 @@ pub fun assert_neq (a: x) (b: x) -> Unit needs {Assert} where {x: Show + Eq}
 assert_neq a b =
   if a != b then assert! True ""
   else assert! False ("Expected " <> show a <> " to not equal " <> show b)
-
-pub fun assert_true (cond: Bool) -> Unit needs {Assert}
-assert_true cond = assert! cond "Expected True, got False"
-
-pub fun assert_false (cond: Bool) -> Unit needs {Assert}
-assert_false cond =
-  if cond then assert! False "Expected False, got True"
-  else assert! True ""
 
 pub fun assert_gt (a: x) (b: x) -> Unit needs {Assert} where {x: Show + Ord}
 assert_gt a b =

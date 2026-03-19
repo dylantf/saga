@@ -320,6 +320,17 @@ impl Lexer {
                         Some('t') => s.push('\t'),
                         Some('\\') => s.push('\\'),
                         Some('"') => s.push('"'),
+                        Some('x') => {
+                            let hi = self.advance().and_then(|c| c.to_digit(16));
+                            let lo = self.advance().and_then(|c| c.to_digit(16));
+                            match (hi, lo) {
+                                (Some(h), Some(l)) => s.push((h * 16 + l) as u8 as char),
+                                _ => return Err(LexError {
+                                    message: "invalid \\x escape: expected two hex digits".to_string(),
+                                    pos: start,
+                                }),
+                            }
+                        }
                         Some(ch) => s.push(ch),
                         None => {
                             return Err(LexError {
@@ -365,6 +376,17 @@ impl Lexer {
                         Some('t') => literal.push('\t'),
                         Some('\\') => literal.push('\\'),
                         Some('"') => literal.push('"'),
+                        Some('x') => {
+                            let hi = self.advance().and_then(|c| c.to_digit(16));
+                            let lo = self.advance().and_then(|c| c.to_digit(16));
+                            match (hi, lo) {
+                                (Some(h), Some(l)) => literal.push((h * 16 + l) as u8 as char),
+                                _ => return Err(LexError {
+                                    message: "invalid \\x escape: expected two hex digits".to_string(),
+                                    pos: start,
+                                }),
+                            }
+                        }
                         Some(ch) => literal.push(ch),
                         None => {
                             return Err(LexError {
@@ -516,6 +538,17 @@ impl Lexer {
                         Some('t') => s.push('\t'),
                         Some('\\') => s.push('\\'),
                         Some('"') => s.push('"'),
+                        Some('x') => {
+                            let hi = self.advance().and_then(|c| c.to_digit(16));
+                            let lo = self.advance().and_then(|c| c.to_digit(16));
+                            match (hi, lo) {
+                                (Some(h), Some(l)) => s.push((h * 16 + l) as u8 as char),
+                                _ => return Err(LexError {
+                                    message: "invalid \\x escape: expected two hex digits".to_string(),
+                                    pos: start,
+                                }),
+                            }
+                        }
                         Some(ch) => s.push(ch),
                         None => {
                             return Err(LexError {
@@ -566,6 +599,17 @@ impl Lexer {
                         Some('t') => literal.push('\t'),
                         Some('\\') => literal.push('\\'),
                         Some('"') => literal.push('"'),
+                        Some('x') => {
+                            let hi = self.advance().and_then(|c| c.to_digit(16));
+                            let lo = self.advance().and_then(|c| c.to_digit(16));
+                            match (hi, lo) {
+                                (Some(h), Some(l)) => literal.push((h * 16 + l) as u8 as char),
+                                _ => return Err(LexError {
+                                    message: "invalid \\x escape: expected two hex digits".to_string(),
+                                    pos: start,
+                                }),
+                            }
+                        }
                         Some(ch) => literal.push(ch),
                         None => {
                             return Err(LexError {
