@@ -30,7 +30,7 @@ lock-free hover/goto/completion.
 - [x] Hover on function parameters
 - [x] Hover on pattern-bound variables (case arms, lambda params)
 - [x] Per-expression type storage (`HashMap<Span, Type>`) in typechecker
-- [ ] Resolved types at usage site (show `Int -> Int` not `a -> a` when hovering a call site of a polymorphic function; currently `type_at_name` checks FunAnnotation first and returns the generic type)
+- [x] Resolved types at usage site (show `Int -> Int` not `a -> a` when hovering a call site of a polymorphic function; currently `type_at_name` checks FunAnnotation first and returns the generic type)
 
 ## Phase 3: Navigation
 

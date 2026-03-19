@@ -1,9 +1,7 @@
 record Point {
   x: Int,
   y: Int,
-}
-
-show_point p = "(" <> show p.x <> ", " <> show p.y <> ")"
+} deriving (Show)
 
 translate dx dy p = { p | x: p.x + dx, y: p.y + dy }
 
@@ -26,17 +24,18 @@ unwrap b = case b {
 
 main () = {
   let p = Point { x: 3, y: 4 }
-  show_point p |> println
+  println (show p)
 
   let p2 = translate 1 (-5) p  # negative args need parens, like Elm/Haskell
-  show_point p2 |> println
+  println (show p2)
 
-  quadrant p |> println
-  quadrant p2 |> println
+  println (quadrant p)
+  println (quadrant p2)
 
   # polymorphic records
   let b1 = Box { value: 42 }
   let b2 = Box { value: "hello" }
+  
   println (show (unwrap b1))
   println (unwrap b2)
 

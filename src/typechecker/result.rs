@@ -95,17 +95,33 @@ impl CheckResult {
     }
 
     /// Look up the resolved type at a node ID, applying the substitution.
+    /// Remaining free type variables are prettified (a, b, c, ...).
     pub fn type_at_node(&self, node_id: &crate::ast::NodeId) -> Option<String> {
         let ty = self.type_at_node.get(node_id)?;
-        let resolved = self.sub.apply(ty);
-        Some(format!("{}", resolved))
+        Some(format!("{}", self.prettify(ty)))
     }
 
     /// Look up the resolved type at a span (for Pat bindings), applying the substitution.
+    /// Remaining free type variables are prettified (a, b, c, ...).
     pub fn type_at_span(&self, span: &crate::token::Span) -> Option<String> {
         let ty = self.type_at_span.get(span)?;
+        Some(format!("{}", self.prettify(ty)))
+    }
+
+    /// Apply substitution and rename any remaining free vars to a, b, c, ...
+    fn prettify(&self, ty: &super::Type) -> super::Type {
         let resolved = self.sub.apply(ty);
-        Some(format!("{}", resolved))
+        let mut vars = Vec::new();
+        super::collect_free_vars(&resolved, &mut vars);
+        if vars.is_empty() {
+            return resolved;
+        }
+        let names: std::collections::HashMap<u32, String> = vars
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, ((b'a' + i as u8) as char).to_string()))
+            .collect();
+        super::rename_vars(&resolved, &names)
     }
 }
 

@@ -314,7 +314,8 @@ fn find_in_pat(pat: &Pat, offset: usize) -> Option<(String, Span, Option<NodeId>
 }
 
 /// Look up the type of a name in the checker's environment.
-/// If a FunAnnotation exists for the name, prefer it (includes labels).
+/// At usage sites (node_id present), prefer the resolved/instantiated type.
+/// At definition sites (no node_id), prefer the annotation (includes labels).
 pub fn type_at_name(
     result: &CheckResult,
     name: &str,
@@ -322,12 +323,7 @@ pub fn type_at_name(
     node_id: Option<&NodeId>,
     program: &[Decl],
 ) -> Option<String> {
-    // Check for a FunAnnotation first (has labeled params)
-    if let Some(sig) = find_annotation(program, name) {
-        return Some(sig);
-    }
-
-    // Check node-based type map (Expr nodes)
+    // Check node-based type map first (Expr nodes at usage sites get resolved types)
     if let Some(id) = node_id
         && let Some(ty_str) = result.type_at_node(id)
     {
@@ -339,6 +335,11 @@ pub fn type_at_name(
         && let Some(ty_str) = result.type_at_span(span)
     {
         return Some(ty_str);
+    }
+
+    // Check for a FunAnnotation (has labeled params, good for definitions)
+    if let Some(sig) = find_annotation(program, name) {
+        return Some(sig);
     }
 
     // Check env (functions, variables)
