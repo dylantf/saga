@@ -636,7 +636,65 @@ up after N failures - all in userspace, no language support needed.
 
 ---
 
-## 13. Settled Decisions & Notes
+## 13. Testing
+
+Tests use the effect system. `Std.Test` defines two effects: `Assert` (for
+assertions within a test) and `TestRunner` (for reporting pass/fail/skip).
+The `test`, `describe`, and `skip` functions are ordinary effect-performing
+functions, not language primitives.
+
+The parser provides syntactic sugar in test mode: `test "name" { body }`
+desugars to `test "name" (fun () -> { body })`, and likewise for `describe`
+and `skip`. This is purely cosmetic -- the curly-brace form is more readable
+but means the same thing.
+
+```
+import Std.Test (describe, test, skip, assert_eq)
+import MathLib (add, double)
+
+describe "MathLib" {
+  describe "add" {
+    test "adds positive numbers" {
+      assert_eq (add 2 3) 5
+    }
+
+    test "adds negative numbers" {
+      assert_eq (add (-1) (-2)) (-3)
+    }
+  }
+
+  describe "double" {
+    test "doubles a number" {
+      assert_eq (double 5) 10
+    }
+  }
+}
+
+skip "not implemented yet" {
+  assert_eq 1 2
+}
+```
+
+Test files live in a `tests/` directory (configurable via `project.toml`).
+Running `dylang test` discovers all `.dy` files in that directory. If a test
+file has no explicit `main` function, the runner wraps its body in
+`main () = run (fun () -> { ... })`, which attaches the default
+`test_handler` and prints a summary.
+
+Under the hood:
+- `test` runs the body with an `Assert` handler that collects failures via
+  multi-shot continuations, then reports pass/fail through `TestRunner`
+- `describe` calls `enter_group!` / `leave_group!` for indentation tracking
+- `skip` calls `skip_test!` without executing the body
+- `run` attaches `test_handler` (a named handler for `TestRunner`), threads
+  state through the computation, prints the summary, and calls `Process.exit 1`
+  if any test failed
+
+The exit code behavior means `dylang test` works directly in CI pipelines.
+
+---
+
+## 14. Settled Decisions & Notes
 
 1. **Effect polymorphism** - higher-order functions explicitly propagate
    effects from callbacks using an effect variable `e`:
@@ -720,12 +778,22 @@ print <| show <| add 1 2
     it requires. The handler can be attached at any level - the direct
     caller, or further up.
 
-12. **`panic` and `todo` builtins** - `panic "msg"` and `todo "msg"` are
-    language builtins, not effects. They halt the program immediately
-    with no handler, no propagation, no `!`. Return type is `Never` so
-    they work in any position. `panic` is for unreachable code / logic
-    errors. `todo` is for unfinished code - the type checker can treat
-    it as a type hole and warn about remaining `todo`s in release builds.
+12. **`panic`, `todo`, and process control** - `panic "msg"` and `todo "msg"`
+    are language builtins, not effects. They print to stderr and halt with
+    exit code 1 -- no handler, no propagation, no `!`. Return type is
+    `Never` so they work in any position. `panic` is for unreachable code /
+    logic errors. `todo` is for unfinished code.
+
+    For explicit exit codes, `Std.Process` provides `exit : Int -> Never`
+    (immediate halt) and `shutdown : Int -> Never` (graceful VM shutdown).
+
+    ```
+    import Std.Process
+
+    Process.exit 0        # success
+    Process.exit 1        # failure
+    panic "unreachable"   # prints "panic: unreachable" to stderr, exits 1
+    ```
 
 13. **Negative literals as arguments** - require parentheses, same as Elm/Haskell.
     `-` is always binary minus in application position; wrap negatives in parens.

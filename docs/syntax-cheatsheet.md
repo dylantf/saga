@@ -524,17 +524,67 @@ Dict.empty
 
 ---
 
+## Testing
+
+```
+import Std.Test (describe, test, skip, assert_eq, assert_neq)
+
+# describe/test/skip are sugar: the block becomes a lambda argument
+# test "name" { body }  ->  test "name" (fun () -> { body })
+# describe "name" { body }  ->  describe "name" (fun () -> { body })
+
+describe "Math" {
+  test "addition" {
+    assert_eq (1 + 2) 3
+  }
+
+  test "subtraction" {
+    assert_eq (5 - 3) 2
+  }
+
+  skip "not ready yet" {
+    assert_eq 1 2
+  }
+}
+
+# Run with: dylang test
+# Exit code 1 on any failure (CI-friendly)
+```
+
+---
+
+## Process Control
+
+```
+import Std.Process
+
+# Immediate termination with exit code
+Process.exit 0
+Process.exit 1
+
+# Graceful VM shutdown (flushes IO, runs shutdown hooks)
+Process.shutdown 0
+
+# panic / todo print to stderr and exit 1
+panic "something went wrong"    # prints "panic: something went wrong" to stderr
+todo "implement this"           # prints "todo: implement this" to stderr
+
+# All three return Never -- usable in any expression position
+```
+
+---
+
 ## Builtins
 
 ```
-# Halt immediately, type Never (works anywhere)
-panic "unreachable"
-todo "implement this"
-
 # Built-in traits: Show, Eq, Ord, Num
 # Built-in types: Int, Float, String, Bool, Unit, Never, Dict k v
 # Literals: 42, 3.14, "hello", True, False, ()
 # Unit value: ()
+
+# IO
+print "hello"               # stdout
+print_error "oops"           # stderr
 ```
 
 ---
