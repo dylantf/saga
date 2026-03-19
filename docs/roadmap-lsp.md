@@ -34,10 +34,9 @@ lock-free hover/goto/completion.
 
 ## Phase 3: Navigation
 
-- [ ] Go-to-definition for stdlib types/functions (show source or signature)
 - [ ] Find all references
 - [ ] Signature help (show param names/types while typing function arguments)
-- [ ] Document symbols (outline view)
+- [x] Document symbols (outline view)
 
 ## Phase 4: Editing support
 
@@ -58,3 +57,8 @@ lock-free hover/goto/completion.
 
 - Completion is not context-aware: shows functions when typing a type name and vice versa. Currently we just filter out qualified names (`String.contains` etc.) from the default list, but ideally completion should know if you're in type position (after `:`, `->`) vs expression position (after `=`, inside blocks) and show only relevant items.
 - No dot-completion for module-qualified names yet (`MathLib.` should show exports)
+
+## Maybe:
+
+- [ ] Go-to-definition for stdlib types/functions (show source or signature)
+      Not sure if we'll ship the stdlib in a readable format. We have hover types already + docs.

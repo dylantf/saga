@@ -9,6 +9,7 @@ mod checker;
 mod completion;
 mod definition;
 mod diagnostics;
+mod document_symbol;
 mod hover;
 mod line_index;
 
@@ -112,6 +113,7 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string()]),
                     ..Default::default()
                 }),
+                document_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -302,6 +304,24 @@ impl LanguageServer for Backend {
         let items = completion::collect_completions(&tc_result, prefix, &program);
 
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri.clone();
+        let Some((_tc_result, program, line_index, _source)) = self.snapshot(&uri) else {
+            return Ok(None);
+        };
+
+        let mut symbols = document_symbol::collect_symbols(&program, &line_index);
+        // Fill in the real URI (collect_symbols uses a placeholder)
+        for sym in &mut symbols {
+            sym.location.uri = uri.clone();
+        }
+
+        Ok(Some(DocumentSymbolResponse::Flat(symbols)))
     }
 }
 
