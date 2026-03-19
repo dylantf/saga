@@ -129,6 +129,7 @@ fn derive_record_stringify(
         .collect();
 
     Decl::ImplDef {
+        id: NodeId::fresh(),
         trait_name: trait_name.into(),
         target_type: record_name.into(),
         type_params: type_params.to_vec(),
@@ -136,7 +137,7 @@ fn derive_record_stringify(
         needs: vec![],
         methods: vec![(
             method_name.into(),
-            vec![Pat::Var { name: param_name, span }],
+            vec![Pat::Var { id: NodeId::fresh(), name: param_name, span }],
             body,
         )],
         span,
@@ -178,6 +179,7 @@ fn derive_stringify(
                 // `Ctor -> "Ctor"`
                 CaseArm {
                     pattern: Pat::Constructor {
+                        id: NodeId::fresh(),
                         name: ctor_name.clone(),
                         args: vec![],
                         span,
@@ -198,10 +200,12 @@ fn derive_stringify(
                     .collect();
 
                 let pattern = Pat::Constructor {
+                    id: NodeId::fresh(),
                     name: ctor_name.clone(),
                     args: field_vars
                         .iter()
                         .map(|v| Pat::Var {
+                            id: NodeId::fresh(),
                             name: v.clone(),
                             span,
                         })
@@ -305,6 +309,7 @@ fn derive_stringify(
         .collect();
 
     Decl::ImplDef {
+        id: NodeId::fresh(),
         trait_name: trait_name.into(),
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
@@ -313,6 +318,7 @@ fn derive_stringify(
         methods: vec![(
             method_name.into(),
             vec![Pat::Var {
+                id: NodeId::fresh(),
                 name: scrutinee_name,
                 span,
             }],
@@ -344,10 +350,12 @@ fn derive_ord(
             let b_vars: Vec<String> = (0..arity).map(|i| format!("__b{i}")).collect();
 
             let pat_a = Pat::Constructor {
+                id: NodeId::fresh(),
                 name: ctor.clone(),
                 args: a_vars
                     .iter()
                     .map(|v| Pat::Var {
+                        id: NodeId::fresh(),
                         name: v.clone(),
                         span,
                     })
@@ -355,10 +363,12 @@ fn derive_ord(
                 span,
             };
             let pat_b = Pat::Constructor {
+                id: NodeId::fresh(),
                 name: ctor.clone(),
                 args: b_vars
                     .iter()
                     .map(|v| Pat::Var {
+                        id: NodeId::fresh(),
                         name: v.clone(),
                         span,
                     })
@@ -366,6 +376,7 @@ fn derive_ord(
                 span,
             };
             let pattern = Pat::Tuple {
+                id: NodeId::fresh(),
                 elements: vec![pat_a, pat_b],
                 span,
             };
@@ -399,10 +410,11 @@ fn derive_ord(
                         .enumerate()
                         .map(|(i, v)| {
                             let wildcards: Vec<Pat> = (0..v.fields.len())
-                                .map(|_| Pat::Wildcard { span })
+                                .map(|_| Pat::Wildcard { id: NodeId::fresh(), span })
                                 .collect();
                             CaseArm {
                                 pattern: Pat::Constructor {
+                                    id: NodeId::fresh(),
                                     name: v.name.clone(),
                                     args: wildcards,
                                     span,
@@ -443,7 +455,7 @@ fn derive_ord(
         );
 
         arms.push(CaseArm {
-            pattern: Pat::Wildcard { span },
+            pattern: Pat::Wildcard { id: NodeId::fresh(), span },
             guard: None,
             body: compare_indices,
             span,
@@ -478,6 +490,7 @@ fn derive_ord(
         .collect();
 
     Decl::ImplDef {
+        id: NodeId::fresh(),
         trait_name: "Ord".into(),
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
@@ -485,7 +498,7 @@ fn derive_ord(
         needs: vec![],
         methods: vec![(
             "compare".into(),
-            vec![Pat::Var { name: x, span }, Pat::Var { name: y, span }],
+            vec![Pat::Var { id: NodeId::fresh(), name: x, span }, Pat::Var { id: NodeId::fresh(), name: y, span }],
             body,
         )],
         span,
@@ -543,6 +556,7 @@ fn build_field_compare(a_vars: &[String], b_vars: &[String], span: Span) -> Expr
                     arms: vec![
                         CaseArm {
                             pattern: Pat::Constructor {
+                                id: NodeId::fresh(),
                                 name: "Eq".into(),
                                 args: vec![],
                                 span,
@@ -553,6 +567,7 @@ fn build_field_compare(a_vars: &[String], b_vars: &[String], span: Span) -> Expr
                         },
                         CaseArm {
                             pattern: Pat::Var {
+                                id: NodeId::fresh(),
                                 name: other_var.clone(),
                                 span,
                             },
@@ -587,6 +602,7 @@ fn derive_marker_trait(
         .collect();
 
     Decl::ImplDef {
+        id: NodeId::fresh(),
         trait_name: trait_name.into(),
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
@@ -619,7 +635,7 @@ fn derive_enum(
         scrutinee: Box::new(Expr::synth(span, ExprKind::Var { name: to_enum_param.clone() })),
         arms: variants.iter().enumerate().map(|(i, v)| {
             CaseArm {
-                pattern: Pat::Constructor { name: v.name.clone(), args: vec![], span },
+                pattern: Pat::Constructor { id: NodeId::fresh(), name: v.name.clone(), args: vec![], span },
                 guard: None,
                 body: Expr::synth(span, ExprKind::Lit { value: Lit::Int(i as i64) }),
                 span,
@@ -631,7 +647,7 @@ fn derive_enum(
     let from_enum_param = "__n".to_string();
     let mut from_enum_arms: Vec<CaseArm> = variants.iter().enumerate().map(|(i, v)| {
         CaseArm {
-            pattern: Pat::Lit { value: Lit::Int(i as i64), span },
+            pattern: Pat::Lit { id: NodeId::fresh(), value: Lit::Int(i as i64), span },
             guard: None,
             body: Expr::synth(span, ExprKind::Constructor { name: v.name.clone() }),
             span,
@@ -639,7 +655,7 @@ fn derive_enum(
     }).collect();
     // Wildcard arm: panic on invalid index
     from_enum_arms.push(CaseArm {
-        pattern: Pat::Wildcard { span },
+        pattern: Pat::Wildcard { id: NodeId::fresh(), span },
         guard: None,
         body: Expr::synth(span, ExprKind::App {
             func: Box::new(Expr::synth(span, ExprKind::Var { name: "panic".into() })),
@@ -655,6 +671,7 @@ fn derive_enum(
     });
 
     Decl::ImplDef {
+        id: NodeId::fresh(),
         trait_name: "Enum".into(),
         target_type: type_name.into(),
         type_params: vec![],
@@ -663,12 +680,12 @@ fn derive_enum(
         methods: vec![
             (
                 "to_enum".into(),
-                vec![Pat::Var { name: to_enum_param, span }],
+                vec![Pat::Var { id: NodeId::fresh(), name: to_enum_param, span }],
                 to_enum_body,
             ),
             (
                 "from_enum".into(),
-                vec![Pat::Var { name: from_enum_param, span }],
+                vec![Pat::Var { id: NodeId::fresh(), name: from_enum_param, span }],
                 from_enum_body,
             ),
         ],

@@ -431,6 +431,7 @@ impl Parser {
                     span: body_span,
                     kind: ExprKind::Lambda {
                         params: vec![Pat::Lit {
+                            id: NodeId::fresh(),
                             value: Lit::Unit,
                             span: body_span,
                         }],
@@ -677,10 +678,11 @@ impl Parser {
                         // Check for local function definition: `let f x y = body`
                         // If the first pattern is a variable and next token is NOT
                         // `=` or `:`, we have parameter patterns following the name.
-                        if let Pat::Var { name, .. } = &pattern
+                        if let Pat::Var { name, span: fn_name_span, .. } = &pattern
                             && !matches!(self.peek(), Token::Eq | Token::Colon)
                         {
                             let fun_name = name.clone();
+                            let fn_name_span = *fn_name_span;
                             let mut params = Vec::new();
                             while !matches!(self.peek(), Token::Eq | Token::Bar | Token::Eof) {
                                 params.push(self.parse_pattern()?);
@@ -695,7 +697,9 @@ impl Parser {
                             let body = self.parse_expr(0)?;
                             let stmt_span = let_start.to(body.span);
                             stmts.push(Stmt::LetFun {
+                                id: NodeId::fresh(),
                                 name: fun_name,
+                                name_span: fn_name_span,
                                 params,
                                 guard,
                                 body,
@@ -1071,6 +1075,7 @@ impl Parser {
     /// Both forward and backward compose call this with args in the right order.
     fn desugar_compose(&mut self, first: Expr, second: Expr, span: Span) -> Expr {
         let param = Pat::Var {
+            id: NodeId::fresh(),
             name: "_x".to_string(),
             span,
         };

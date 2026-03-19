@@ -3423,3 +3423,25 @@ fn type_arity_too_many_args_maybe() {
         err.message
     );
 }
+
+#[test]
+fn references_map_populated() {
+    let checker = check("id x = x\nmain () = id 42").unwrap();
+    let result = checker.to_result();
+
+    // env tracks definition NodeIds for top-level functions
+    let id_def = result.env.def_id("id");
+    assert!(id_def.is_some(), "env should have def_id for 'id'");
+
+    // The resolution map has entries (usage -> definition)
+    assert!(result.references.len() >= 2,
+        "expected at least 2 references (x in body + id in main), got {}",
+        result.references.len());
+
+    // At least one reference points to the 'id' definition
+    let id_def_id = id_def.unwrap();
+    let id_refs: Vec<_> = result.references.values()
+        .filter(|&&def_id| def_id == id_def_id)
+        .collect();
+    assert!(!id_refs.is_empty(), "should have at least one reference to 'id'");
+}

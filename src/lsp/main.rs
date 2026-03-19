@@ -114,6 +114,7 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string()]),
                     ..Default::default()
                 }),
+                references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 signature_help_provider: Some(SignatureHelpOptions {
                     trigger_characters: Some(vec![" ".to_string()]),
@@ -382,6 +383,85 @@ impl LanguageServer for Backend {
             active_signature: Some(0),
             active_parameter: None, // set per-signature above
         }))
+    }
+
+    async fn references(
+        &self,
+        params: ReferenceParams,
+    ) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let Some((tc_result, program, line_index, _source)) = self.snapshot(&uri) else {
+            return Ok(None);
+        };
+
+        let position = params.text_document_position.position;
+        let offset =
+            line_index.line_col_to_offset(position.line as usize, position.character as usize);
+
+        let Some((_name, _span, node_id)) = hover::find_name_at_offset(&program, offset) else {
+            return Ok(None);
+        };
+
+        // Determine the definition NodeId.
+        // If cursor is on a usage expression, look up the resolution map.
+        // If cursor is on a definition, the node_id itself is the definition.
+        let def_id = if let Some(expr_id) = node_id {
+            if let Some(&did) = tc_result.references.get(&expr_id) {
+                // Cursor is on a usage -> follow to definition
+                did
+            } else {
+                // Cursor might be on a definition itself (e.g., clicking the function name
+                // in a FunAnnotation). Check if anything references this node.
+                expr_id
+            }
+        } else {
+            // No expr NodeId (Pat binding). Find the definition by looking up the
+            // env's def_id for this name.
+            if let Some(did) = tc_result.env.def_id(&_name) {
+                did
+            } else {
+                return Ok(None);
+            }
+        };
+
+        // Collect all usage spans that resolve to this definition.
+        let mut locations = Vec::new();
+        for (usage_id, &ref_def_id) in &tc_result.references {
+            if ref_def_id == def_id {
+                if let Some(&usage_span) = tc_result.node_spans.get(usage_id) {
+                    let (start_line, start_col) = line_index.offset_to_line_col(usage_span.start);
+                    let (end_line, end_col) = line_index.offset_to_line_col(usage_span.end);
+                    locations.push(Location {
+                        uri: uri.clone(),
+                        range: Range {
+                            start: Position::new(start_line as u32, start_col as u32),
+                            end: Position::new(end_line as u32, end_col as u32),
+                        },
+                    });
+                }
+            }
+        }
+
+        // Include the definition site itself if requested.
+        if params.context.include_declaration {
+            if let Some(&def_span) = tc_result.node_spans.get(&def_id) {
+                let (start_line, start_col) = line_index.offset_to_line_col(def_span.start);
+                let (end_line, end_col) = line_index.offset_to_line_col(def_span.end);
+                locations.push(Location {
+                    uri: uri.clone(),
+                    range: Range {
+                        start: Position::new(start_line as u32, start_col as u32),
+                        end: Position::new(end_line as u32, end_col as u32),
+                    },
+                });
+            }
+        }
+
+        if locations.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(locations))
+        }
     }
 }
 

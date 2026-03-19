@@ -13,6 +13,7 @@ impl Parser {
             let tail = self.parse_pattern()?;
             let end = self.tokens[self.pos - 1].span;
             return Ok(Pat::Constructor {
+                id: NodeId::fresh(),
                 name: "Cons".to_string(),
                 args: vec![pat, tail],
                 span: start.to(end),
@@ -30,6 +31,7 @@ impl Parser {
                     let rest = self.parse_pattern()?;
                     let end = self.tokens[self.pos - 1].span;
                     return Ok(Pat::StringPrefix {
+                        id: NodeId::fresh(),
                         prefix,
                         rest: Box::new(rest),
                         span: start.to(end),
@@ -90,6 +92,7 @@ impl Parser {
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RParen)?;
                     Ok(Pat::Constructor {
+                        id: NodeId::fresh(),
                         name,
                         args,
                         span: span.to(end),
@@ -116,6 +119,7 @@ impl Parser {
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
                     Ok(Pat::Record {
+                        id: NodeId::fresh(),
                         name,
                         fields,
                         span: span.to(end),
@@ -133,20 +137,23 @@ impl Parser {
                         self.tokens[self.pos - 1].span
                     };
                     Ok(Pat::Constructor {
+                        id: NodeId::fresh(),
                         name,
                         args,
                         span: span.to(end),
                     })
                 }
             }
-            Token::Ident(s) if s.starts_with('_') => Ok(Pat::Wildcard { span }),
-            Token::Ident(s) => Ok(Pat::Var { name: s, span }),
+            Token::Ident(s) if s.starts_with('_') => Ok(Pat::Wildcard { id: NodeId::fresh(), span }),
+            Token::Ident(s) => Ok(Pat::Var { id: NodeId::fresh(), name: s, span }),
             Token::Minus => match self.advance() {
                 Token::Int(n) => Ok(Pat::Lit {
+                    id: NodeId::fresh(),
                     value: Lit::Int(-n),
                     span: span.to(self.tokens[self.pos - 1].span),
                 }),
                 Token::Float(f) => Ok(Pat::Lit {
+                    id: NodeId::fresh(),
                     value: Lit::Float(-f),
                     span: span.to(self.tokens[self.pos - 1].span),
                 }),
@@ -159,22 +166,27 @@ impl Parser {
                 }
             },
             Token::String(s) => Ok(Pat::Lit {
+                id: NodeId::fresh(),
                 value: Lit::String(s),
                 span,
             }),
             Token::Int(n) => Ok(Pat::Lit {
+                id: NodeId::fresh(),
                 value: Lit::Int(n),
                 span,
             }),
             Token::Float(f) => Ok(Pat::Lit {
+                id: NodeId::fresh(),
                 value: Lit::Float(f),
                 span,
             }),
             Token::True => Ok(Pat::Lit {
+                id: NodeId::fresh(),
                 value: Lit::Bool(true),
                 span,
             }),
             Token::False => Ok(Pat::Lit {
+                id: NodeId::fresh(),
                 value: Lit::Bool(false),
                 span,
             }),
@@ -182,6 +194,7 @@ impl Parser {
                 if matches!(self.peek(), Token::RParen) {
                     self.advance();
                     Ok(Pat::Lit {
+                        id: NodeId::fresh(),
                         value: Lit::Unit,
                         span,
                     })
@@ -200,6 +213,7 @@ impl Parser {
                         let end = self.tokens[self.pos].span;
                         self.expect(Token::RParen)?;
                         Ok(Pat::Tuple {
+                            id: NodeId::fresh(),
                             elements,
                             span: span.to(end),
                         })
@@ -222,12 +236,14 @@ impl Parser {
 
                 // Build from right to left: Nil, then wrap each element in Cons
                 let mut result = Pat::Constructor {
+                    id: NodeId::fresh(),
                     name: "Nil".to_string(),
                     args: vec![],
                     span: end,
                 };
                 for elem in elements.into_iter().rev() {
                     result = Pat::Constructor {
+                        id: NodeId::fresh(),
                         name: "Cons".to_string(),
                         args: vec![elem, result],
                         span: span.to(end),

@@ -298,6 +298,7 @@ impl Elaborator {
                     let _ = type_params; // acknowledge but don't use for now
 
                     output.push(Decl::DictConstructor {
+                        id: NodeId::fresh(),
                         name: dict_name,
                         dict_params,
                         methods: ordered_methods,
@@ -319,6 +320,7 @@ impl Elaborator {
                     guard,
                     body,
                     span,
+                    ..
                 } => {
                     self.current_fun = Some(name.clone());
 
@@ -336,6 +338,7 @@ impl Elaborator {
                             self.current_dict_params_by_var
                                 .insert((trait_name.clone(), type_var.clone()), param_name.clone());
                             extra_params.push(Pat::Var {
+                                id: NodeId::fresh(),
                                 name: param_name,
                                 span: *span,
                             });
@@ -354,7 +357,9 @@ impl Elaborator {
                     self.current_fun = None;
 
                     output.push(Decl::FunBinding {
+                        id: NodeId::fresh(),
                         name: name.clone(),
+                        name_span: *span, // elaborated binding, reuse span
                         params: full_params,
                         guard: elab_guard,
                         body: elab_body,
@@ -372,6 +377,7 @@ impl Elaborator {
                     arms,
                     return_clause,
                     span,
+                    ..
                 } => {
                     let elab_arms: Vec<HandlerArm> = arms
                         .iter()
@@ -391,6 +397,7 @@ impl Elaborator {
                         })
                     });
                     output.push(Decl::HandlerDef {
+                        id: NodeId::fresh(),
                         public: *public,
                         name: name.clone(),
                         name_span: *name_span,
@@ -723,6 +730,7 @@ impl Elaborator {
                                         self.current_dict_params_by_var
                                             .insert((trait_name.clone(), type_var.clone()), param_name.clone());
                                         lambda_params.push(Pat::Var {
+                                            id: NodeId::fresh(),
                                             name: param_name,
                                             span: *span,
                                         });
@@ -741,6 +749,7 @@ impl Elaborator {
                                         .collect();
                                     for p in &eta_params {
                                         lambda_params.push(Pat::Var {
+                                            id: NodeId::fresh(),
                                             name: p.clone(),
                                             span: *span,
                                         });
@@ -785,13 +794,17 @@ impl Elaborator {
                                 }
                             },
                             Stmt::LetFun {
+                                id,
                                 name,
+                                name_span,
                                 params,
                                 guard,
                                 body,
                                 span,
                             } => Stmt::LetFun {
+                                id: *id,
                                 name: name.clone(),
+                                name_span: *name_span,
                                 params: params.clone(),
                                 guard: guard.as_ref().map(|g| Box::new(self.elaborate_expr(g))),
                                 body: self.elaborate_expr(body),
@@ -1255,6 +1268,7 @@ impl Elaborator {
                 s,
                 ExprKind::Lambda {
                     params: vec![Pat::Var {
+                        id: NodeId::fresh(),
                         name: "__tup".into(),
                         span: s,
                     }],
@@ -1347,6 +1361,7 @@ impl Elaborator {
             s,
             ExprKind::Lambda {
                 params: vec![Pat::Var {
+                    id: NodeId::fresh(),
                     name: "__tup".into(),
                     span: s,
                 }],

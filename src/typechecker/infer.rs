@@ -59,6 +59,10 @@ impl Checker {
                         ty = Type::EffArrow(a, b, eff_refs);
                     }
                     self.record_type(node_id, &ty);
+                    // Record reference: this usage resolves to the definition
+                    if let Some(def_id) = self.env.def_id(name) {
+                        self.record_reference(node_id, span, def_id);
+                    }
                     Ok(ty)
                 } else {
                     Err(Diagnostic::error_at(
@@ -73,6 +77,9 @@ impl Checker {
                     let scheme = scheme.clone();
                     let (ty, _) = self.instantiate(&scheme);
                     self.record_type(node_id, &ty);
+                    if let Some(def_id) = self.constructor_def_ids.get(name).copied() {
+                        self.record_reference(node_id, span, def_id);
+                    }
                     Ok(ty)
                 } else {
                     Err(Diagnostic::error_at(
@@ -345,6 +352,9 @@ impl Checker {
                         let (ty, constraints) = self.instantiate(&scheme);
                         for (trait_name, trait_ty) in constraints {
                             self.pending_constraints.push((trait_name, trait_ty, span, node_id));
+                        }
+                        if let Some(def_id) = self.env.def_id(&key) {
+                            self.record_reference(node_id, span, def_id);
                         }
                         Ok(ty)
                     }
@@ -663,6 +673,7 @@ impl Checker {
                 name,
                 args,
                 span: pat_span,
+                ..
             } = &arm.pattern
                 && matches!(name.as_str(), "Down" | "Exit")
             {
@@ -735,7 +746,7 @@ impl Checker {
                             Type::Error
                         }
                     };
-                    if let Pat::Var { name, span: var_span } = pattern {
+                    if let Pat::Var { id: pat_id, name, span: var_span, .. } = pattern {
                         let mut scheme = self.generalize(&ty);
                         // Absorb pending trait constraints for generalized vars
                         // so let-bound values can be polymorphic over traits.
@@ -778,7 +789,8 @@ impl Checker {
                             }
                             self.let_dict_params.insert(name.clone(), (dict_params, arity));
                         }
-                        self.env.insert(name.clone(), scheme);
+                        self.env.insert_with_def(name.clone(), scheme, *pat_id);
+                        self.node_spans.insert(*pat_id, *var_span);
                         self.record_type_at_span(*var_span, &ty);
                     } else if let Err(e) = self.bind_pattern(pattern, &ty) {
                         errors.push(e);
@@ -786,9 +798,11 @@ impl Checker {
                     last_ty = Type::unit();
                     i += 1;
                 }
-                Stmt::LetFun { name, span, .. } => {
+                Stmt::LetFun { id, name, name_span, span, .. } => {
                     // Group consecutive LetFun clauses with the same name
                     let fun_name = name.clone();
+                    let fun_id = *id;
+                    let fun_name_span = *name_span;
                     let fun_span = *span;
                     type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
                     let mut clauses: Vec<Clause> = Vec::new();
@@ -814,14 +828,16 @@ impl Checker {
                     // Create a fresh type var for the function and insert it
                     // into env before checking clauses (enables recursion)
                     let fun_ty = self.fresh_var();
-                    self.env.insert(
+                    self.env.insert_with_def(
                         fun_name.clone(),
                         Scheme {
                             forall: vec![],
                             constraints: vec![],
                             ty: fun_ty.clone(),
                         },
+                        fun_id,
                     );
+                    self.node_spans.insert(fun_id, fun_name_span);
 
                     // Check each clause like a lambda, unifying with fun_ty
                     let arity = clauses[0].0.len();
@@ -908,19 +924,21 @@ impl Checker {
     pub(crate) fn bind_pattern(&mut self, pat: &Pat, ty: &Type) -> Result<(), Diagnostic> {
         match pat {
             Pat::Wildcard { .. } => Ok(()),
-            Pat::Var { name, span } => {
-                self.env.insert(
+            Pat::Var { id, name, span, .. } => {
+                self.env.insert_with_def(
                     name.clone(),
                     Scheme {
                         forall: vec![],
                         constraints: vec![],
                         ty: ty.clone(),
                     },
+                    *id,
                 );
                 self.record_type_at_span(*span, ty);
+                self.node_spans.insert(*id, *span);
                 Ok(())
             }
-            Pat::Lit { value, span } => {
+            Pat::Lit { value, span, .. } => {
                 let lit_ty = match value {
                     Lit::Int(_) => Type::int(),
                     Lit::Float(_) => Type::float(),
@@ -930,7 +948,7 @@ impl Checker {
                 };
                 self.unify_at(ty, &lit_ty, *span)
             }
-            Pat::Constructor { name, args, span } => {
+            Pat::Constructor { name, args, span, .. } => {
                 let ctor_scheme = self.constructors.get(name).cloned().ok_or_else(|| {
                     Diagnostic::error_at(
                         *span,
@@ -955,7 +973,7 @@ impl Checker {
                 }
                 self.unify_at(ty, &current, *span)
             }
-            Pat::Record { name, fields, span } => {
+            Pat::Record { name, fields, span, .. } => {
                 let info = self.records.get(name).cloned().ok_or_else(|| {
                     Diagnostic::error_at(
                         *span,
@@ -992,7 +1010,7 @@ impl Checker {
                 Ok(())
             }
 
-            Pat::Tuple { elements, span } => {
+            Pat::Tuple { elements, span, .. } => {
                 let elem_tys: Vec<Type> = elements.iter().map(|_| self.fresh_var()).collect();
                 let tuple_ty = Type::Con("Tuple".into(), elem_tys.clone());
                 self.unify_at(ty, &tuple_ty, *span)?;
@@ -1228,17 +1246,28 @@ impl Checker {
         // Build op_name -> (arm_span, source_module) map for this handler and push onto the stack.
         // This lets EffectCall inference record which arm handles each call (for LSP go-to-def).
         let arm_stack_entry: std::collections::HashMap<String, (Span, Option<String>)> = match handler {
-            ast::Handler::Named(name, _) => self
-                .handlers
-                .get(name)
-                .map(|h| {
-                    let src = h.source_module.clone();
-                    h.arm_spans.iter().map(|(op, &span)| (op.clone(), (span, src.clone()))).collect()
-                })
-                .unwrap_or_default(),
+            ast::Handler::Named(name, handler_span) => {
+                // Record reference to the handler definition
+                if let Some(def_id) = self.env.def_id(name) {
+                    let usage_id = crate::ast::NodeId::fresh();
+                    self.record_reference(usage_id, *handler_span, def_id);
+                }
+                self.handlers
+                    .get(name)
+                    .map(|h| {
+                        let src = h.source_module.clone();
+                        h.arm_spans.iter().map(|(op, &span)| (op.clone(), (span, src.clone()))).collect()
+                    })
+                    .unwrap_or_default()
+            }
             ast::Handler::Inline { named, arms, .. } => {
                 let mut map = std::collections::HashMap::new();
                 for n in named {
+                    // Record reference to each named handler
+                    if let Some(def_id) = self.env.def_id(n) {
+                        let usage_id = crate::ast::NodeId::fresh();
+                        self.record_reference(usage_id, _with_span, def_id);
+                    }
                     if let Some(h) = self.handlers.get(n) {
                         let src = h.source_module.clone();
                         map.extend(h.arm_spans.iter().map(|(op, &span)| (op.clone(), (span, src.clone()))));

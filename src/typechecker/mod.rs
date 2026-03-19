@@ -490,6 +490,8 @@ pub struct ModuleCodegenInfo {
 #[derive(Debug, Clone, Default)]
 pub struct TypeEnv {
     bindings: HashMap<std::string::String, Scheme>,
+    /// Tracks the definition-site NodeId for each binding (for find-all-references).
+    def_ids: HashMap<std::string::String, crate::ast::NodeId>,
 }
 
 impl TypeEnv {
@@ -501,12 +503,27 @@ impl TypeEnv {
         self.bindings.insert(name, scheme);
     }
 
+    /// Insert a binding along with its definition-site NodeId.
+    pub fn insert_with_def(&mut self, name: std::string::String, scheme: Scheme, def_id: crate::ast::NodeId) {
+        self.bindings.insert(name.clone(), scheme);
+        self.def_ids.insert(name, def_id);
+    }
+
     pub fn get(&self, name: &str) -> Option<&Scheme> {
         self.bindings.get(name)
     }
 
+    /// Look up the definition-site NodeId for a binding.
+    pub fn def_id(&self, name: &str) -> Option<crate::ast::NodeId> {
+        self.def_ids.get(name).copied()
+    }
+
+
     pub fn remove(&mut self, name: &str) {
         self.bindings.remove(name);
+        // Note: we intentionally keep def_ids entries. The definition identity
+        // persists even when the binding is temporarily removed (e.g., for
+        // generalization in build_fun_scheme).
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Scheme)> {
@@ -747,8 +764,14 @@ pub struct Checker {
     /// Types are stored unresolved (may contain type variables); apply `sub`
     /// at lookup time to get the final resolved type.
     pub(crate) type_at_node: HashMap<crate::ast::NodeId, Type>,
-    /// Per-span type information for Pat bindings (which don't have NodeIds).
+    /// Per-span type information for Pat bindings.
     pub(crate) type_at_span: HashMap<Span, Type>,
+    /// Resolution map: usage NodeId -> definition NodeId (for find-all-references).
+    pub(crate) references: HashMap<crate::ast::NodeId, crate::ast::NodeId>,
+    /// NodeId -> Span map for all recorded expression nodes (for resolving NodeIds to locations).
+    pub(crate) node_spans: HashMap<crate::ast::NodeId, Span>,
+    /// Constructor definition NodeIds: constructor name -> NodeId of the TypeConstructor/RecordDef.
+    pub(crate) constructor_def_ids: HashMap<String, crate::ast::NodeId>,
     /// When true, function annotations without matching bodies are allowed
     /// (used for builtin stdlib modules where implementations are in Rust).
     pub(crate) allow_bodyless_annotations: bool,
@@ -834,6 +857,9 @@ impl Checker {
             collected_diagnostics: Vec::new(),
             type_at_node: HashMap::new(),
             type_at_span: HashMap::new(),
+            references: HashMap::new(),
+            node_spans: HashMap::new(),
+            constructor_def_ids: HashMap::new(),
             allow_bodyless_annotations: false,
             current_module: None,
             with_arm_stacks: Vec::new(),
@@ -908,9 +934,15 @@ impl Checker {
             .or_insert_with(|| ty.clone());
     }
 
-    /// Record the type of a pattern binding (by Span, since Pat has no NodeId).
+    /// Record the type of a pattern binding (by Span).
     pub(crate) fn record_type_at_span(&mut self, span: Span, ty: &Type) {
         self.type_at_span.entry(span).or_insert_with(|| ty.clone());
+    }
+
+    /// Record a name resolution: usage_id references def_id.
+    pub(crate) fn record_reference(&mut self, usage_id: crate::ast::NodeId, usage_span: Span, def_id: crate::ast::NodeId) {
+        self.references.insert(usage_id, def_id);
+        self.node_spans.insert(usage_id, usage_span);
     }
 
     pub fn effect_names(&self) -> Vec<String> {

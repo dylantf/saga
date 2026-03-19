@@ -6,13 +6,18 @@ handler log_failure for Fail {
   fail msg = println ("Error: " <> msg)
 }
 
+handler resume_failure for Fail {
+  fail _ = resume ()
+}
+
 fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail}
 safe_div x 0 = fail! "division by zero"
 safe_div x y = x / y
 
 main () = {
-  let a = (safe_div 10 2) with log_failure
-  println (show a)
-  let b = (safe_div 10 0) with log_failure
-  println (show b)
+  let alpha = (safe_div 10 2) with log_failure
+  println (show alpha)
+  println (show alpha)
+  let b = (safe_div 10 0) with resume_failure
+  println (debug b)
 }

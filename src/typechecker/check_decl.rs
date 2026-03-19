@@ -157,6 +157,7 @@ impl Checker {
     pub(crate) fn check_decl(&mut self, decl: &Decl) -> Result<(), Diagnostic> {
         match decl {
             Decl::Let {
+                id,
                 name,
                 annotation,
                 value,
@@ -169,7 +170,8 @@ impl Checker {
                     self.unify_at(&ty, &ann_ty, *span)?;
                 }
                 let scheme = self.generalize(&ty);
-                self.env.insert(name.clone(), scheme);
+                self.env.insert_with_def(name.clone(), scheme, *id);
+                self.node_spans.insert(*id, *span);
                 Ok(())
             }
 
@@ -179,6 +181,7 @@ impl Checker {
             }
 
             Decl::HandlerDef {
+                id,
                 name,
                 effects: effect_names,
                 needs,
@@ -194,6 +197,7 @@ impl Checker {
                     arms,
                     return_clause.as_deref(),
                     *span,
+                    *id,
                 )?;
                 Ok(())
             }
@@ -226,12 +230,13 @@ impl Checker {
                         .map_err(|e| vec![e])?;
                 }
                 Decl::RecordDef {
+                    id,
                     name,
                     type_params,
                     fields,
                     ..
                 } => {
-                    self.register_record_def(name, type_params, fields)
+                    self.register_record_def(name, type_params, fields, *id)
                         .map_err(|e| vec![e])?;
                 }
                 Decl::EffectDef {
@@ -347,6 +352,7 @@ impl Checker {
 
         for decl in program {
             if let Decl::FunAnnotation {
+                id,
                 name,
                 params,
                 return_type,
@@ -414,7 +420,8 @@ impl Checker {
                 if let Some(c) = annotation_constraints.get(name) {
                     scheme.constraints = c.clone();
                 }
-                self.env.insert(name.clone(), scheme);
+                self.env.insert_with_def(name.clone(), scheme, *id);
+                self.node_spans.insert(*id, *span);
             }
         }
 
@@ -429,7 +436,7 @@ impl Checker {
     ) -> HashMap<String, Type> {
         let mut fun_vars: HashMap<String, Type> = HashMap::new();
         for decl in program {
-            if let Decl::FunBinding { name, .. } = decl
+            if let Decl::FunBinding { id, name, span, .. } = decl
                 && !fun_vars.contains_key(name)
             {
                 if annotations.contains_key(name) {
@@ -439,14 +446,16 @@ impl Checker {
                 }
                 let var = self.fresh_var();
                 fun_vars.insert(name.clone(), var.clone());
-                self.env.insert(
+                self.env.insert_with_def(
                     name.clone(),
                     Scheme {
                         forall: vec![],
                         constraints: vec![],
                         ty: var,
                     },
+                    *id,
                 );
+                self.node_spans.insert(*id, *span);
             }
         }
         fun_vars
@@ -463,6 +472,7 @@ impl Checker {
                 needs,
                 methods,
                 span,
+                ..
             } = decl
             {
                 self.register_impl(
@@ -939,6 +949,8 @@ impl Checker {
                     ty: ctor_ty,
                 },
             );
+            self.constructor_def_ids.insert(variant.name.clone(), variant.id);
+            self.node_spans.insert(variant.id, variant.span);
         }
 
         self.adt_variants.insert(
@@ -959,6 +971,7 @@ impl Checker {
         name: &str,
         type_params: &[String],
         fields: &[(String, ast::TypeExpr)],
+        def_id: crate::ast::NodeId,
     ) -> Result<(), Diagnostic> {
         // Create fresh type variables for declared type parameters (same as register_type_def)
         let mut param_vars: Vec<(String, u32)> = type_params
@@ -997,6 +1010,7 @@ impl Checker {
                 ty: ctor_ty,
             },
         );
+        self.constructor_def_ids.insert(name.into(), def_id);
 
         self.records.insert(
             name.into(),
@@ -1070,6 +1084,7 @@ impl Checker {
         arms: &[ast::HandlerArm],
         return_clause: Option<&ast::HandlerArm>,
         span: crate::token::Span,
+        def_id: crate::ast::NodeId,
     ) -> Result<(), Diagnostic> {
         // Save and clear effect/field tracking for this handler body
         let body_scope = self.save_body_scope();
@@ -1254,14 +1269,16 @@ impl Checker {
         );
 
         // Put the handler name in the env so it can be referenced
-        self.env.insert(
+        self.env.insert_with_def(
             name.into(),
             Scheme {
                 forall: vec![],
                 constraints: vec![],
                 ty: Type::unit(), // handlers don't have a meaningful standalone type
             },
+            def_id,
         );
+        self.node_spans.insert(def_id, span);
 
         Ok(())
     }

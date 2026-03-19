@@ -57,6 +57,7 @@ impl Parser {
                 self.expect(Token::Eq)?;
                 let value = self.parse_expr(0)?;
                 Ok(Decl::Let {
+                    id: NodeId::fresh(),
                     span: start.to(value.span),
                     name,
                     annotation,
@@ -110,6 +111,7 @@ impl Parser {
                 let start = self.tokens[self.pos].span;
                 let value = self.parse_expr(0)?;
                 Ok(Decl::Let {
+                    id: NodeId::fresh(),
                     name: "_".to_string(),
                     annotation: None,
                     span: start.to(value.span),
@@ -168,6 +170,7 @@ impl Parser {
         }
 
         Ok(Decl::RecordDef {
+            id: NodeId::fresh(),
             public,
             name,
             type_params,
@@ -215,6 +218,7 @@ impl Parser {
         }
 
         Ok(Decl::TypeDef {
+            id: NodeId::fresh(),
             public,
             opaque,
             name,
@@ -243,6 +247,7 @@ impl Parser {
 
         let end = self.tokens[self.pos - 1].span;
         Ok(TypeConstructor {
+            id: NodeId::fresh(),
             name,
             fields,
             span: start.to(end),
@@ -281,6 +286,7 @@ impl Parser {
 
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::FunAnnotation {
+            id: NodeId::fresh(),
             public,
             name,
             params,
@@ -355,6 +361,7 @@ impl Parser {
 
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::ExternalFun {
+            id: NodeId::fresh(),
             public,
             name,
             runtime,
@@ -403,6 +410,7 @@ impl Parser {
         self.expect(Token::RBrace)?;
 
         Ok(Decl::EffectDef {
+            id: NodeId::fresh(),
             public,
             name,
             type_params,
@@ -494,6 +502,7 @@ impl Parser {
         self.expect(Token::RBrace)?;
 
         Ok(Decl::HandlerDef {
+            id: NodeId::fresh(),
             public,
             name,
             name_span,
@@ -564,6 +573,7 @@ impl Parser {
         self.expect(Token::RBrace)?;
 
         Ok(Decl::TraitDef {
+            id: NodeId::fresh(),
             public,
             name,
             type_param,
@@ -653,6 +663,7 @@ impl Parser {
         self.expect(Token::RBrace)?;
 
         Ok(Decl::ImplDef {
+            id: NodeId::fresh(),
             trait_name,
             target_type,
             type_params,
@@ -665,7 +676,7 @@ impl Parser {
 
     // Parses: <name> <pat> ... [| <guard>] = <body>
     fn parse_fun_binding(&mut self) -> Result<Decl, ParseError> {
-        let start = self.tokens[self.pos].span;
+        let name_span = self.tokens[self.pos].span;
         let name = self.expect_ident()?;
 
         let mut params = Vec::new();
@@ -685,11 +696,13 @@ impl Parser {
 
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::FunBinding {
+            id: NodeId::fresh(),
             name,
+            name_span,
             params,
             guard,
             body,
-            span: start.to(end),
+            span: name_span.to(end),
         })
     }
 
@@ -875,6 +888,7 @@ impl Parser {
         }
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::ModuleDecl {
+            id: NodeId::fresh(),
             path,
             span: start.to(end),
         })
@@ -940,6 +954,7 @@ impl Parser {
 
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::Import {
+            id: NodeId::fresh(),
             module_path,
             alias,
             exposing: exposing.map(|(items, _)| items),

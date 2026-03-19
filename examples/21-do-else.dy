@@ -4,8 +4,6 @@
 # The last line (no `<-`) is the success return value.
 # All paths -- success and else arms -- must unify to the same type.
 
-type Result a e { Ok(a) | Err(e) }
-
 # Simulated fallible operations
 fun find_user : (id: Int) -> Result String String
 find_user id =
@@ -30,9 +28,9 @@ grade score =
 fun lookup_grade : (id: Int) -> Result String String
 lookup_grade id =
   do {
-    Ok(name)  <- find_user id
+    Ok(name) <- find_user id
     Ok(score) <- find_score name
-    Ok(g)     <- grade score
+    Ok(g) <- grade score
     Ok(g)
   } else {
     Err(e) -> Err(e)
@@ -43,15 +41,12 @@ lookup_grade id =
 fun score_or_zero : (id: Int) -> Int
 score_or_zero id =
   do {
-    Ok(name)  <- find_user id
+    Ok(name) <- find_user id
     Ok(score) <- find_score name
     score
   } else {
     Err(_) -> 0
   }
-
-# Mixed bail types: each binding bails with a different constructor.
-type Maybe a { Just(a) | Nothing }
 
 fun active_users : Unit -> Maybe (List String)
 active_users () = Just(["alice", "bob"])
@@ -67,9 +62,9 @@ fun first_active_grade : Unit -> Result String String
 first_active_grade () =
   do {
     Just(users) <- active_users ()
-    Just(name)  <- first users
-    Ok(score)   <- find_score name
-    Ok(g)       <- grade score
+    Just(name) <- first users
+    Ok(score) <- find_score name
+    Ok(g) <- grade score
     Ok(g)
   } else {
     Nothing -> Err("nothing found")
@@ -77,9 +72,11 @@ first_active_grade () =
   }
 
 main () = {
-  lookup_grade 1 |> println
-  lookup_grade 2 |> println
-  score_or_zero 1 |> println
-  score_or_zero 99 |> println
-  first_active_grade () |> println
+  let debug_print = debug >> println
+  
+  lookup_grade 1 |> debug_print
+  lookup_grade 2 |> debug_print
+  score_or_zero 1 |> debug_print
+  score_or_zero 99 |> debug_print
+  first_active_grade () |> debug_print
 }

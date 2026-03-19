@@ -42,6 +42,7 @@ pub type ExposedItem = String;
 pub enum Decl {
     /// `pub fun add (a: Int) (b: Int) -> Int needs {Log} where {a: Show + Eq}`
     FunAnnotation {
+        id: NodeId,
         public: bool,
         name: String,
         params: Vec<(String, TypeExpr)>,
@@ -54,7 +55,9 @@ pub enum Decl {
 
     /// `add x y = x + y` or `main () = { ... }`
     FunBinding {
+        id: NodeId,
         name: String,
+        name_span: Span,
         params: Vec<Pat>,
         guard: Option<Box<Expr>>,
         body: Expr,
@@ -62,6 +65,7 @@ pub enum Decl {
     },
 
     Let {
+        id: NodeId,
         name: String,
         annotation: Option<TypeExpr>,
         value: Expr,
@@ -70,6 +74,7 @@ pub enum Decl {
 
     /// `type Option a { Some(a), None }`
     TypeDef {
+        id: NodeId,
         public: bool,
         opaque: bool,
         name: String,
@@ -82,6 +87,7 @@ pub enum Decl {
     /// `record User { name: String, age: Int }`
     /// `record Box a { value: a }`
     RecordDef {
+        id: NodeId,
         public: bool,
         name: String,
         type_params: Vec<String>,
@@ -93,6 +99,7 @@ pub enum Decl {
     /// `effect Console { fun print (msg: String) -> Unit }`
     /// `effect State s { fun get () -> s; fun put (val: s) -> Unit }`
     EffectDef {
+        id: NodeId,
         public: bool,
         name: String,
         type_params: Vec<String>,
@@ -103,6 +110,7 @@ pub enum Decl {
     /// `handler console_log for Log needs {Http} { ... }`
     /// `handler counter for State Int { ... }`
     HandlerDef {
+        id: NodeId,
         public: bool,
         name: String,
         name_span: Span,
@@ -116,6 +124,7 @@ pub enum Decl {
 
     /// `trait Show a { fun show (x: a) -> String }`
     TraitDef {
+        id: NodeId,
         public: bool,
         name: String,
         type_param: String,
@@ -127,6 +136,7 @@ pub enum Decl {
     /// `impl Show for User { show user = ... }`
     /// `impl Store for Redis needs {Http, Fail} { ... }`
     ImplDef {
+        id: NodeId,
         trait_name: String,
         target_type: String,
         type_params: Vec<String>,
@@ -138,6 +148,7 @@ pub enum Decl {
 
     /// `@external("erlang", "lists", "reverse") pub fun reverse (list: List a) -> List a`
     ExternalFun {
+        id: NodeId,
         public: bool,
         name: String,
         /// Target runtime, e.g. "erlang"
@@ -155,6 +166,7 @@ pub enum Decl {
 
     /// `import Math exposing { abs, max }`
     Import {
+        id: NodeId,
         module_path: Vec<String>,
         alias: Option<String>,
         exposing: Option<Vec<ExposedItem>>,
@@ -162,12 +174,13 @@ pub enum Decl {
     },
 
     /// `module Foo.Bar`
-    ModuleDecl { path: Vec<String>, span: Span },
+    ModuleDecl { id: NodeId, path: Vec<String>, span: Span },
 
     // --- Elaboration-only (never produced by the parser) ---
     /// Synthesized dictionary constructor function for a trait impl.
     /// e.g. `__dict_Describe_User` returns a tuple of method functions.
     DictConstructor {
+        id: NodeId,
         name: String,
         /// Parameters for sub-dictionaries (conditional impls like `Show for List a where {a: Show}`)
         dict_params: Vec<String>,
@@ -387,7 +400,9 @@ pub enum Stmt {
 
     /// `let f x y = body` -- local function definition (may be multi-clause)
     LetFun {
+        id: NodeId,
         name: String,
+        name_span: Span,
         params: Vec<Pat>,
         guard: Option<Box<Expr>>,
         body: Expr,
@@ -414,16 +429,17 @@ impl Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pat {
     /// `_`
-    Wildcard { span: Span },
+    Wildcard { id: NodeId, span: Span },
 
     /// `x`, `name`
-    Var { name: String, span: Span },
+    Var { id: NodeId, name: String, span: Span },
 
     /// `42`, `"hello"`, `True`
-    Lit { value: Lit, span: Span },
+    Lit { id: NodeId, value: Lit, span: Span },
 
     /// `Some(x)`, `Cons(a, b)`
     Constructor {
+        id: NodeId,
         name: String,
         args: Vec<Pat>,
         span: Span,
@@ -431,16 +447,18 @@ pub enum Pat {
 
     /// `Success { status, body }` or `ApiError { code: c }`
     Record {
+        id: NodeId,
         name: String,
         fields: Vec<(String, Option<Pat>)>, // (field_name, optional alias pattern)
         span: Span,
     },
 
     /// `(a, b)`, `(x, y, z)`
-    Tuple { elements: Vec<Pat>, span: Span },
+    Tuple { id: NodeId, elements: Vec<Pat>, span: Span },
 
     /// `"prefix" <> rest` -- string prefix pattern
     StringPrefix {
+        id: NodeId,
         prefix: String,
         rest: Box<Pat>,
         span: Span,
@@ -448,9 +466,21 @@ pub enum Pat {
 }
 
 impl Pat {
+    pub fn id(&self) -> NodeId {
+        match self {
+            Pat::Wildcard { id, .. }
+            | Pat::Var { id, .. }
+            | Pat::Lit { id, .. }
+            | Pat::Constructor { id, .. }
+            | Pat::Record { id, .. }
+            | Pat::Tuple { id, .. }
+            | Pat::StringPrefix { id, .. } => *id,
+        }
+    }
+
     pub fn span(&self) -> Span {
         match self {
-            Pat::Wildcard { span }
+            Pat::Wildcard { span, .. }
             | Pat::Var { span, .. }
             | Pat::Lit { span, .. }
             | Pat::Constructor { span, .. }
@@ -511,6 +541,7 @@ pub enum BinOp {
 /// A constructor in a type definition, e.g. Some(a) or None
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeConstructor {
+    pub id: NodeId,
     pub name: String,
     pub fields: Vec<(Option<String>, TypeExpr)>, // (optional label, type)
     pub span: Span,

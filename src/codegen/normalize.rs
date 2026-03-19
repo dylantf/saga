@@ -54,7 +54,9 @@ impl Normalizer {
                     });
                 }
                 Stmt::LetFun {
+                    id,
                     name,
+                    name_span,
                     params,
                     guard,
                     body,
@@ -63,7 +65,9 @@ impl Normalizer {
                     let new_body = self.normalize_expr(body);
                     let new_guard = guard.as_ref().map(|g| Box::new(self.normalize_expr(g)));
                     result.push(Stmt::LetFun {
+                        id: *id,
                         name: name.clone(),
+                        name_span: *name_span,
                         params: params.clone(),
                         guard: new_guard,
                         body: new_body,
@@ -144,6 +148,7 @@ impl Normalizer {
         let var_name = self.fresh();
         lifted.push(Stmt::Let {
             pattern: Pat::Var {
+                id: NodeId::fresh(),
                 name: var_name.clone(),
                 span,
             },
@@ -433,19 +438,24 @@ pub fn normalize_effects(program: &Program) -> Program {
         .iter()
         .map(|decl| match decl {
             Decl::FunBinding {
+                id,
                 name,
+                name_span,
                 params,
                 guard,
                 body,
                 span,
             } => Decl::FunBinding {
+                id: *id,
                 name: name.clone(),
+                name_span: *name_span,
                 params: params.clone(),
                 guard: guard.clone(),
                 body: normalizer.normalize_expr(body),
                 span: *span,
             },
             Decl::HandlerDef {
+                id,
                 public,
                 name,
                 name_span,
@@ -473,6 +483,7 @@ pub fn normalize_effects(program: &Program) -> Program {
                     })
                 });
                 Decl::HandlerDef {
+                    id: *id,
                     public: *public,
                     name: name.clone(),
                     name_span: *name_span,

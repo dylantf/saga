@@ -17,10 +17,16 @@ fn contains(span: &Span, offset: usize) -> bool {
     offset >= span.start && offset < span.end
 }
 
+/// Like `contains` but inclusive of the end position. Used for leaf identifiers
+/// where the cursor right after the last character is still "on" the name.
+fn contains_ident(span: &Span, offset: usize) -> bool {
+    offset >= span.start && offset <= span.end
+}
+
 fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<NodeId>)> {
     match decl {
         Decl::FunBinding {
-            params, body, span, ..
+            name, name_span, params, body, span, ..
         } => {
             if !contains(span, offset) {
                 return None;
@@ -30,10 +36,38 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<Node
                     return Some(r);
                 }
             }
-            find_in_expr(body, offset)
+            if let Some(r) = find_in_expr(body, offset) {
+                return Some(r);
+            }
+            if contains_ident(name_span, offset) {
+                return Some((name.clone(), *name_span, None));
+            }
+            None
         }
         Decl::FunAnnotation { name, span, .. } if contains(span, offset) => {
             Some((name.clone(), *span, None))
+        }
+        Decl::HandlerDef {
+            name, name_span, arms, return_clause, span, ..
+        } => {
+            if !contains(span, offset) {
+                return None;
+            }
+            for arm in arms {
+                if let Some(r) = find_in_expr(&arm.body, offset) {
+                    return Some(r);
+                }
+            }
+            if let Some(rc) = return_clause {
+                if let Some(r) = find_in_expr(&rc.body, offset) {
+                    return Some(r);
+                }
+            }
+            // Check if cursor is on the handler name
+            if offset >= name_span.start && offset <= name_span.end {
+                return Some((name.clone(), *name_span, None));
+            }
+            None
         }
         Decl::ImplDef { methods, span, .. } => {
             if !contains(span, offset) {
@@ -51,11 +85,19 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<Node
             }
             None
         }
-        Decl::Let { value, span, .. } => {
+        Decl::Let { name, value, span, .. } => {
             if !contains(span, offset) {
                 return None;
             }
-            find_in_expr(value, offset)
+            if let Some(r) = find_in_expr(value, offset) {
+                return Some(r);
+            }
+            // Only return the name if cursor is in the name region (after "let ")
+            let name_start = span.start + 4; // "let "
+            if offset >= name_start && offset <= name_start + name.len() {
+                return Some((name.clone(), *span, None));
+            }
+            None
         }
         _ => None,
     }
@@ -70,9 +112,9 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span, Option<Node
     let span = expr.span;
     let node_id = expr.id;
     match &expr.kind {
-        ExprKind::Var { name } if contains(&span, offset) => Some((name.clone(), span, Some(node_id))),
+        ExprKind::Var { name } if contains_ident(&span, offset) => Some((name.clone(), span, Some(node_id))),
         ExprKind::Constructor { name }
-            if contains(&span, offset) && name != "Cons" && name != "Nil" =>
+            if contains_ident(&span, offset) && name != "Cons" && name != "Nil" =>
         {
             Some((name.clone(), span, Some(node_id)))
         }
@@ -267,13 +309,19 @@ fn find_in_stmt(stmt: &Stmt, offset: usize) -> Option<(String, Span, Option<Node
         Stmt::Let { pattern, value, .. } => {
             find_in_pat(pattern, offset).or_else(|| find_in_expr(value, offset))
         }
-        Stmt::LetFun { params, body, .. } => {
+        Stmt::LetFun { id, name, name_span, params, body, .. } => {
             for pat in params {
                 if let Some(r) = find_in_pat(pat, offset) {
                     return Some(r);
                 }
             }
-            find_in_expr(body, offset)
+            if let Some(r) = find_in_expr(body, offset) {
+                return Some(r);
+            }
+            if contains_ident(name_span, offset) {
+                return Some((name.clone(), *name_span, Some(*id)));
+            }
+            None
         }
         Stmt::Expr(expr) => find_in_expr(expr, offset),
     }
@@ -281,7 +329,7 @@ fn find_in_stmt(stmt: &Stmt, offset: usize) -> Option<(String, Span, Option<Node
 
 fn find_in_pat(pat: &Pat, offset: usize) -> Option<(String, Span, Option<NodeId>)> {
     match pat {
-        Pat::Var { name, span } if contains(span, offset) => Some((name.clone(), *span, None)),
+        Pat::Var { id, name, span } if contains_ident(span, offset) => Some((name.clone(), *span, Some(*id))),
         Pat::Constructor { args, .. } => {
             for arg in args {
                 if let Some(r) = find_in_pat(arg, offset) {
