@@ -17,11 +17,11 @@ quadrant p = case p {
 
 main () = {
   let p = Point { x: 3, y: 4 }
-  show_point p |> print
+  show_point p |> println
 
   let p2 = translate 1 (-5) p  # negative args need parens, like Elm/Haskell
-  show_point p2 |> print
+  show_point p2 |> println
 
-  quadrant p |> print
-  quadrant p2 |> print
+  quadrant p |> println
+  quadrant p2 |> println
 }

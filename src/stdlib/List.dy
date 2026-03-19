@@ -1,7 +1,7 @@
 module Std.List
 
-impl Show for List a where {a: Show} {
-  show xs = "[" <> flatten (join ", " (map show xs)) <> "]"
+impl Debug for List a where {a: Debug} {
+  debug xs = "[" <> flatten (join ", " (map debug xs)) <> "]"
 }
 
 pub fun head (xs: List a) -> a

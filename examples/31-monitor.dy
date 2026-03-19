@@ -8,10 +8,10 @@ type WorkerMsg {
 fun worker () -> Unit needs {Process, Actor WorkerMsg}
 worker () = receive {
   Work(n) -> {
-    print $"Working on {n}"
+    println $"Working on {n}"
     worker ()
   }
-  Die -> print "Worker shutting down"
+  Die -> println "Worker shutting down"
 }
 
 fun watcher () -> Unit needs {Process, Actor WorkerMsg, Monitor}
@@ -23,8 +23,8 @@ watcher () = {
   send! pid Die
 
   receive {
-    Down(dead_pid, reason) -> print $"Worker died: {reason}"
-    after 5000 -> print "Timed out waiting for Down"
+    Down(dead_pid, reason) -> println $"Worker died: {reason}"
+    after 5000 -> println "Timed out waiting for Down"
   }
 }
 

@@ -10,7 +10,7 @@ effect Log {
 # Handler that prints each message with a prefix
 handler console_log for Log {
   log msg = {
-    print ("[LOG] " <> msg)
+    println ("[LOG] " <> msg)
     resume ()
   }
 }
@@ -33,12 +33,12 @@ do_work () = {
 
 main () = {
   # Run with console logging
-  print "--- with console_log ---"
+  println "--- with console_log ---"
   let result = do_work () with console_log
-  print ("result: " <> show result)
+  println ("result: " <> show result)
 
   # Run the same computation, but discard logs
-  print "--- with silent_log ---"
+  println "--- with silent_log ---"
   let result2 = do_work () with silent_log
-  print ("result: " <> show result2)
+  println ("result: " <> show result2)
 }

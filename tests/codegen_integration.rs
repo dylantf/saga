@@ -230,14 +230,14 @@ fn show_bool_uses_case() {
 
 #[test]
 fn print_uses_show_dict() {
-    let src = "main () = print 42";
+    let src = "main () = println (show 42)";
     let out = emit_elaborated(src);
-    // print is lowered inline as io:format("~s~n", [show(x)])
+    // println is lowered inline as io:format("~ts~n", [x])
     assert!(
         out.contains("'io':'format'"),
         "expected io:format call in print\n{out}"
     );
-    // Should reference the Show/Int dict for the argument
+    // show 42 should reference the Show/Int dict
     assert!(
         out.contains("__dict_Show_std_int_Int"),
         "expected Show/Int dict reference\n{out}"
@@ -382,15 +382,15 @@ impl Show for Color {
   }
 }
 
-main () = print Red
+main () = println (show Red)
 ";
     let out = emit_elaborated(src);
-    // print should receive the user's Show dict
+    // show should use the user's Show dict
     assert!(
         out.contains("'__dict_Show_Color'"),
-        "expected Show/Color dict passed to print\n{out}"
+        "expected Show/Color dict passed to show\n{out}"
     );
-    // print should call io:format
+    // println should call io:format
     assert!(
         out.contains("'io':'format'"),
         "expected io:format in print\n{out}"
@@ -812,7 +812,7 @@ main () = risky_work () with {
 
 #[test]
 fn handler_arm_body_gets_show_dict() {
-    // print inside a named handler body should get the Show dict inserted
+    // println inside a named handler body should work with String arg directly
     let src = r#"
 effect Log {
   fun log (msg: String) -> Unit
@@ -820,7 +820,7 @@ effect Log {
 
 handler console_log for Log {
   log msg = {
-    print msg
+    println msg
     resume ()
   }
 }
@@ -834,9 +834,8 @@ do_work () = {
 main () = do_work () with console_log
 "#;
     let out = emit_elaborated(src);
-    // The handler arm body should call io:format (print is lowered inline)
+    // The handler arm body should call io:format (println is lowered inline)
     assert_contains(&out, "'io':'format'");
-    assert_contains(&out, "__dict_Show_std_string_String");
 }
 
 #[test]
@@ -1130,9 +1129,9 @@ try_it computation = computation () with {
 
 main () = {
   let a = try_it (fun () -> "hello")
-  print a
+  println a
   let b = try_it (fun () -> fail! "boom")
-  print b
+  println b
 }
 "#;
     assert_compiles(src);
@@ -1180,9 +1179,9 @@ try_it computation = computation () with {
 
 main () = {
   let a = try_it (fun () -> 42)
-  print "ok"
+  println "ok"
   let b = try_it (fun () -> fail! "boom")
-  print "ok"
+  println "ok"
 }
 "#;
     assert_compiles(src);

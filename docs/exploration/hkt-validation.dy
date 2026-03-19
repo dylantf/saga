@@ -76,8 +76,8 @@ show_result r = case r {
 # --- Main ---
 
 main () = {
-  validate_user UserInput { name: "Alice", age: 25 } |> show_result |> print
-  validate_user UserInput { name: "", age: 25 } |> show_result |> print
-  validate_user UserInput { name: "Bob", age: 15 } |> show_result |> print
-  validate_user UserInput { name: "", age: 15 } |> show_result |> print
+  validate_user UserInput { name: "Alice", age: 25 } |> show_result |> println
+  validate_user UserInput { name: "", age: 25 } |> show_result |> println
+  validate_user UserInput { name: "Bob", age: 15 } |> show_result |> println
+  validate_user UserInput { name: "", age: 15 } |> show_result |> println
 }

@@ -4,6 +4,10 @@ impl Show for Int {
   show x = to_string x
 }
 
+impl Debug for Int {
+  debug x = to_string x
+}
+
 pub @external("erlang", "erlang", "float")
 fun to_float (n: Int) -> Float
 

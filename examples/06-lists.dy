@@ -1,34 +1,34 @@
 main () = {
   let nums = [1, 2, 3, 4, 5]
-  show nums |> print
+  debug nums |> println
 
   let doubled = List.map (fun x -> x * 2) nums
-  show doubled |> print
+  debug doubled |> println
 
   let evens = List.filter (fun x -> x % 2 == 0) nums
-  show evens |> print
+  debug evens |> println
 
   let total = List.foldl (fun acc x -> acc + x) 0 nums
-  show total |> print
+  show total |> println
 
   let summed = List.foldr (fun x acc -> acc + x) 0 nums
-  show summed |> print
+  show summed |> println
 
   let rev = List.reverse nums
-  show rev |> print
+  debug rev |> println
 
   let appended = List.append [1, 2] [3, 4]
-  show appended |> print
+  debug appended |> println
 
   let h = List.head nums
-  show h |> print
+  show h |> println
 
   let t = List.tail nums
-  show t |> print
+  debug t |> println
 
   let len = List.length nums
-  show len |> print
+  show len |> println
 
   let words = ["hello", "world"]
-  show words |> print
+  debug words |> println
 }

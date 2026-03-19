@@ -2,8 +2,8 @@ module Std.Dict
 
 import Std.List as List
 
-impl Show for Dict k v where {k: Show, v: Show} {
-  show d = "{" <> List.flatten (List.join ", " (List.map (fun (k, v) -> show k <> ": " <> show v) (to_list d))) <> "}"
+impl Debug for Dict k v where {k: Debug, v: Debug} {
+  debug d = "{" <> List.flatten (List.join ", " (List.map (fun (k, v) -> debug k <> ": " <> debug v) (to_list d))) <> "}"
 }
 
 pub @external("erlang", "maps", "put")

@@ -77,9 +77,9 @@ first_active_grade () =
   }
 
 main () = {
-  lookup_grade 1 |> print
-  lookup_grade 2 |> print
-  score_or_zero 1 |> print
-  score_or_zero 99 |> print
-  first_active_grade () |> print
+  lookup_grade 1 |> println
+  lookup_grade 2 |> println
+  score_or_zero 1 |> println
+  score_or_zero 99 |> println
+  first_active_grade () |> println
 }

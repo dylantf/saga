@@ -32,10 +32,14 @@ impl Show for ValidUser {
   show u = $"{u.name}, age {u.age}"
 }
 
-impl Show for Validation e a where {e: Show, a: Show} {
-  show v = case v {
-    Valid(x) -> $"Valid: {x}"
-    Invalid(e) -> $"Invalid: {e}"
+impl Debug for ValidUser {
+  debug u = $"ValidUser(name: {u.name}, age: {u.age})"
+}
+
+impl Debug for Validation e a where {e: Debug, a: Debug} {
+  debug v = case v {
+    Valid(x) -> $"Valid: {debug x}"
+    Invalid(e) -> $"Invalid: {debug e}"
   }
 }
 
@@ -54,8 +58,8 @@ validate_user input = {
 }
 
 main () = {
-  validate_user UserInput { name: "Alice", age: 25 } |> print
-  validate_user UserInput { name: "", age: 25 } |> print
-  validate_user UserInput { name: "Bob", age: 15 } |> print
-  validate_user UserInput { name: "", age: 15 } |> print
+  validate_user UserInput { name: "Alice", age: 25 } |> debug |> println
+  validate_user UserInput { name: "", age: 25 } |> debug |> println
+  validate_user UserInput { name: "Bob", age: 15 } |> debug |> println
+  validate_user UserInput { name: "", age: 15 } |> debug |> println
 }

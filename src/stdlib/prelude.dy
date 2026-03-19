@@ -1,4 +1,4 @@
-import Std.Base (Ordering, show, compare, to_enum, from_enum)
+import Std.Base (Ordering, show, debug, compare, to_enum, from_enum)
 import Std.Bool (not)
 import Std.Maybe (Maybe)
 import Std.Result (Result)
@@ -8,6 +8,4 @@ import Std.Int
 import Std.Float
 import Std.String
 import Std.Tuple (fst, snd)
-import Std.IO (print, print_error)
-
-
+import Std.IO (print, println, eprint, eprintln, dbg)

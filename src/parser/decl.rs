@@ -147,10 +147,27 @@ impl Parser {
         let end = self.tokens[self.pos].span;
         self.expect(Token::RBrace)?;
 
+        // Parse optional `deriving (Debug, Show, ...)`
+        let mut deriving = Vec::new();
+        if matches!(self.peek(), Token::Deriving) {
+            self.advance();
+            self.expect(Token::LParen)?;
+            loop {
+                deriving.push(self.expect_upper_ident()?);
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.expect(Token::RParen)?;
+        }
+
         Ok(Decl::RecordDef {
             public,
             name,
             fields,
+            deriving,
             span: start.to(end),
         })
     }

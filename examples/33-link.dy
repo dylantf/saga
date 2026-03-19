@@ -5,7 +5,7 @@ type WorkerMsg { Go | Crash }
 fun worker () -> Unit needs {Process, Actor WorkerMsg}
 worker () = receive {
   Go -> {
-    print "Worker doing work..."
+    println "Worker doing work..."
     worker ()
   }
   Crash -> panic "something broke!"
@@ -20,8 +20,8 @@ supervisor () = {
   send! pid Crash
 
   receive {
-    Down(dead_pid, reason) -> print $"Child exited: {reason}"
-    after 3000 -> print "No exit received"
+    Down(dead_pid, reason) -> println $"Child exited: {reason}"
+    after 3000 -> println "No exit received"
   }
 }
 

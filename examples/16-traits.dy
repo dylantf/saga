@@ -35,7 +35,7 @@ main () = {
   let alice = User { name: "Alice", age: 30 }
   let origin = Point { x: 0, y: 0 }
 
-  print <| describe alice
-  print <| describe origin
-  print <| verbose alice
+  println <| describe alice
+  println <| describe origin
+  println <| verbose alice
 }

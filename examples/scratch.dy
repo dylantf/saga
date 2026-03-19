@@ -39,16 +39,16 @@ main () = {
     }
   } with {
     pass name = {
-      print ("  + " <> name)
+      println ("  + " <> name)
       let (p, f) = resume ()
       (p + 1, f)
     }
     fail name msg = {
-      print ("  x " <> name <> ": " <> msg)
+      println ("  x " <> name <> ": " <> msg)
       let (p, f) = resume ()
       (p, f + 1)
     }
     return _ = (0, 0)
   }
-  print ($"{passed} passed, {failed} failed")
+  println ($"{passed} passed, {failed} failed")
 }

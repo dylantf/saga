@@ -1,7 +1,7 @@
 module Std.Tuple
 
-impl Show for Unit {
-  show _ = "()"
+impl Debug for Unit {
+  debug _ = "()"
 }
 
 pub fun fst (t: (a, b)) -> a

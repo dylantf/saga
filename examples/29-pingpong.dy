@@ -23,15 +23,15 @@ run () = {
   let server = spawn! (fun () -> pong_server 0)
   send! server <| Ping (self! ())
   receive {
-    Pong(n) -> print $"got pong #{show n}"
+    Pong(n) -> println $"got pong #{show n}"
   }
   send! server <| Ping (self! ())
   receive {
-    Pong(n) -> print $"got pong #{show n}"
+    Pong(n) -> println $"got pong #{show n}"
   }
   send! server <| Ping (self! ())
   receive {
-    Pong(n) -> print $"got pong #{show n}"
+    Pong(n) -> println $"got pong #{show n}"
   }
 }
 

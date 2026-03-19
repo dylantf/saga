@@ -15,14 +15,14 @@ main () = {
   let bob = User { name: "Bob", age: 25 }
 
   # Basic interpolation -- Show for User gives us the name
-  print $"Hello, {alice}!"
-  print $"Hello, {bob}!"
+  println $"Hello, {alice}!"
+  println $"Hello, {bob}!"
 
   # Mixing record fields of different types in one string
-  print $"{alice} is {alice.age} years old."
+  println $"{alice} is {alice.age} years old."
 
   # Expressions inside holes
   let nums = [1, 2, 3, 4, 5]
-  print $"List has {List.length nums} elements."
-  print $"Sum: {List.foldl (fun acc x -> acc + x) 0 nums}"
+  println $"List has {List.length nums} elements."
+  println $"Sum: {List.foldl (fun acc x -> acc + x) 0 nums}"
 }

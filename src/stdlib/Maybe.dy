@@ -1,9 +1,9 @@
 module Std.Maybe
 
-impl Show for Maybe a where {a: Show} {
-  show m = case m {
+impl Debug for Maybe a where {a: Debug} {
+  debug m = case m {
     Nothing -> "Nothing"
-    Just(x) -> "Just(" <> show x <> ")"
+    Just(x) -> "Just(" <> debug x <> ")"
   }
 }
 
