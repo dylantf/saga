@@ -3272,3 +3272,63 @@ impl Foo for String {
         err.message
     );
 }
+
+// --- Type arity checking ---
+
+#[test]
+fn type_arity_too_many_args_builtin_list() {
+    let result = check("fun foo (x: List Int String) -> Int\nfoo x = 1");
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("expects 1 type argument") && err.message.contains("given 2"),
+        "expected arity error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn type_arity_too_many_args_user_type() {
+    let result = check(
+        "type Box a { Box(a) }\nfun foo (x: Box Int String) -> Int\nfoo x = 1",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("expects 1 type argument") && err.message.contains("given 2"),
+        "expected arity error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn type_arity_nullary_with_args() {
+    let result = check("fun foo (x: Int String) -> Int\nfoo x = 1");
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("expects 0 type arguments") && err.message.contains("given 1"),
+        "expected arity error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn type_arity_correct_usage() {
+    // These should all pass without error
+    check("fun foo (x: List Int) -> Int\nfoo x = 1").unwrap();
+    check("fun foo (x: Maybe Int) -> Int\nfoo _ = 1").unwrap();
+    check("fun foo (x: Result String Int) -> Int\nfoo _ = 1").unwrap();
+}
+
+#[test]
+fn type_arity_too_many_args_maybe() {
+    let result = check("fun foo (x: Maybe Int Float) -> Int\nfoo _ = 1");
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Maybe") && err.message.contains("expects 1 type argument"),
+        "expected arity error for Maybe, got: {}",
+        err.message
+    );
+}

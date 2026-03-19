@@ -426,6 +426,7 @@ impl Checker {
             trait_impls,
             effects,
             handlers,
+            type_arity,
         } = exports;
 
         // Traits and their methods (unqualified, so impl bodies can reference them)
@@ -463,6 +464,11 @@ impl Checker {
             self.handlers
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
+        }
+
+        // Type arities
+        for (name, arity) in type_arity {
+            self.type_arity.entry(name.clone()).or_insert(*arity);
         }
 
         // Bindings, type constructors, records (qualified + exposing)

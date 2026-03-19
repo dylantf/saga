@@ -308,6 +308,8 @@ pub struct ModuleExports {
     pub(crate) effects: HashMap<String, EffectDefInfo>,
     /// Handler name -> handler info.
     pub(crate) handlers: HashMap<String, HandlerInfo>,
+    /// Type name -> declared parameter count (for arity checking across modules).
+    pub type_arity: HashMap<String, usize>,
 }
 
 impl ModuleExports {
@@ -405,6 +407,19 @@ impl ModuleExports {
             }
         }
 
+        // Collect type arities for all exported types
+        let mut type_arity: HashMap<String, usize> = HashMap::new();
+        for name in type_constructors.keys() {
+            if let Some(&arity) = checker.type_arity.get(name) {
+                type_arity.insert(name.clone(), arity);
+            }
+        }
+        for name in record_defs.keys() {
+            if let Some(&arity) = checker.type_arity.get(name) {
+                type_arity.insert(name.clone(), arity);
+            }
+        }
+
         ModuleExports {
             bindings,
             type_constructors,
@@ -413,6 +428,7 @@ impl ModuleExports {
             trait_impls,
             effects,
             handlers,
+            type_arity,
         }
     }
 }
@@ -635,8 +651,6 @@ pub struct HandlerInfo {
 
 #[derive(Debug, Clone)]
 pub struct TraitInfo {
-    // TODO: type_param will be used for kind checking (maybe, if we implement it :P )
-    #[allow(dead_code)]
     pub type_param: String,
     pub supertraits: Vec<String>,
     /// Method signatures: name -> (param_types, return_type, trait_param_var_id)
@@ -710,6 +724,9 @@ pub struct Checker {
     pub(crate) modules: ModuleContext,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
     pub(crate) adt_variants: HashMap<std::string::String, Vec<(std::string::String, usize)>>,
+    /// Type name -> number of declared type parameters (for arity checking).
+    /// Absent entries (e.g. Tuple) are unchecked.
+    pub(crate) type_arity: HashMap<String, usize>,
     /// Evidence collected during constraint solving for the elaboration pass.
     pub(crate) evidence: Vec<TraitEvidence>,
     /// Dict params for let bindings with trait constraints: name -> (params, value_arity).
@@ -801,6 +818,7 @@ impl Checker {
             where_bound_var_names: HashMap::new(),
             modules: ModuleContext::default(),
             adt_variants: HashMap::new(),
+            type_arity: HashMap::new(),
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
             collected_diagnostics: Vec::new(),
@@ -1083,6 +1101,12 @@ impl Checker {
             .insert("List".into(), vec![("Nil".into(), 0), ("Cons".into(), 2)]);
         self.adt_variants
             .insert("Bool".into(), vec![("True".into(), 0), ("False".into(), 0)]);
+
+        // Built-in type arities
+        for name in &["Int", "Float", "String", "Bool", "Unit"] {
+            self.type_arity.insert(name.to_string(), 0);
+        }
+        self.type_arity.insert("List".into(), 1);
 
         // Show, Debug, and Eq for Tuple (any arity -- all params must satisfy the trait)
         // We use "Tuple" as the type name; param_constraints are checked dynamically
@@ -1388,6 +1412,21 @@ impl Checker {
                 match func_ty {
                     Type::Con(name, mut args) => {
                         args.push(arg_ty);
+                        if let Some(&expected) = self.type_arity.get(&name)
+                            && args.len() > expected
+                        {
+                            self.collected_diagnostics.push(Diagnostic {
+                                severity: Severity::Error,
+                                message: format!(
+                                    "Type '{}' expects {} type argument{} but was given {}",
+                                    name,
+                                    expected,
+                                    if expected == 1 { "" } else { "s" },
+                                    args.len(),
+                                ),
+                                span: None,
+                            });
+                        }
                         Type::Con(name, args)
                     }
                     _ => {

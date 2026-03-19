@@ -944,6 +944,8 @@ impl Checker {
                 .collect(),
         );
 
+        self.type_arity.insert(name.into(), type_params.len());
+
         Ok(())
     }
 
@@ -958,6 +960,7 @@ impl Checker {
             .map(|(fname, texpr)| (fname.clone(), self.convert_type_expr(texpr, &mut params)))
             .collect();
         self.records.insert(name.into(), field_types);
+        self.type_arity.insert(name.into(), params.len());
         Ok(())
     }
 
@@ -1009,6 +1012,8 @@ impl Checker {
                 source_module: self.current_module.clone(),
             },
         );
+        self.type_arity
+            .insert(name.into(), effect_type_params.len());
         Ok(())
     }
 
