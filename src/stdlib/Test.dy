@@ -10,6 +10,7 @@ pub effect Assert {
 pub effect TestRunner {
   fun pass (name: String) -> Unit
   fun fail (name: String) (msg: String) -> Unit
+  fun skip_test (name: String) -> Unit
   fun enter_group (name: String) -> Unit
   fun leave_group () -> Unit
 }
@@ -17,6 +18,7 @@ pub effect TestRunner {
 record TestState {
   passed: Int,
   failed: Int,
+  skipped: Int,
   depth: Int,
 }
 
@@ -45,6 +47,11 @@ test name body = {
     h :: _ -> fail! name h
   }
 }
+
+#@ Groups tests under a label. Nesting is tracked via enter_group/leave_group
+#@ Skips a named test. The body is never executed.
+pub fun skip (name: String) (body: () -> Unit needs {Assert}) -> Unit needs {TestRunner}
+skip name body = skip_test! name
 
 #@ Groups tests under a label. Nesting is tracked via enter_group/leave_group
 #@ effects so the handler can control indentation.
@@ -76,6 +83,14 @@ pub handler test_handler for TestRunner {
       k { state | failed: state.failed + 1 }
     }
   }
+  skip_test name = {
+    let k = resume ()
+    fun state -> {
+      let indent = make_indent state.depth
+      print (indent <> "\x1b[33m○\x1b[0m " <> name <> " (skipped)")
+      k { state | skipped: state.skipped + 1 }
+    }
+  }
   enter_group name = {
     let k = resume ()
     fun state -> {
@@ -98,9 +113,12 @@ pub handler test_handler for TestRunner {
 pub fun run (body: () -> Unit needs {TestRunner}) -> Unit
 run body = {
   let state_fn = { body () } with test_handler
-  let final = state_fn (TestState { passed: 0, failed: 0, depth: 0 })
+  let final = state_fn (TestState { passed: 0, failed: 0, skipped: 0, depth: 0 })
   print ""
-  print (show final.passed <> " passed, " <> show final.failed <> " failed")
+  let summary = show final.passed <> " passed, " <> show final.failed <> " failed"
+  let summary = if final.skipped > 0 then summary <> ", " <> show final.skipped <> " skipped"
+                else summary
+  print summary
 }
 
 # Assertion helpers
