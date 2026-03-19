@@ -34,8 +34,8 @@ quadrant p = case p {
 
 # --- List patterns ---
 
-fun describe_list (xs: List a) -> String
-describe_list items = case items {
+fun describe (xs: List a) -> String
+describe items = case items {
   [] -> "empty"
   [x] -> "one element"
   [x, y] -> "two elements"
@@ -80,10 +80,10 @@ main () = {
   quadrant p2 |> print
 
   # List patterns
-  describe_list [] |> print
-  describe_list [42] |> print
-  describe_list [1, 2] |> print
-  describe_list [1, 2, 3] |> print
+  describe [] |> print
+  describe [42] |> print
+  describe [1, 2] |> print
+  describe [1, 2, 3] |> print
 
   show (sum_two [3, 4]) |> print
 

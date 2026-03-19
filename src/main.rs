@@ -123,6 +123,15 @@ fn parse_and_typecheck(
     source_path: &str,
     checker: &mut typechecker::Checker,
 ) -> (ast::Program, typechecker::CheckResult) {
+    parse_and_typecheck_inner(source, source_path, checker, false)
+}
+
+fn parse_and_typecheck_inner(
+    source: &str,
+    source_path: &str,
+    checker: &mut typechecker::Checker,
+    test_mode: bool,
+) -> (ast::Program, typechecker::CheckResult) {
     let tokens = match lexer::Lexer::new(source).lex() {
         Ok(t) => t,
         Err(e) => {
@@ -134,7 +143,9 @@ fn parse_and_typecheck(
             std::process::exit(1);
         }
     };
-    let mut program = match parser::Parser::new(tokens).parse_program() {
+    let mut parser = parser::Parser::new(tokens);
+    parser.test_mode = test_mode;
+    let mut program = match parser.parse_program() {
         Ok(p) => p,
         Err(e) => {
             let (line, col) = byte_offset_to_line_col(source, e.span.start);
@@ -568,7 +579,7 @@ fn cmd_test(_args: &[String]) {
         // imports stay at top, everything else goes into main () = run (fun () -> { ... })
         let source = inject_test_main(&source);
 
-        let (program, _) = parse_and_typecheck(&source, &source_path, &mut checker);
+        let (program, _) = parse_and_typecheck_inner(&source, &source_path, &mut checker, true);
         let result = checker.to_result();
 
         // Compile any std modules the test file needs that weren't in the project build

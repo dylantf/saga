@@ -414,7 +414,8 @@ impl Parser {
                 }}))
             }
             Token::Ident(ref i)
-                if (i == "test" || i == "describe" || i == "skip")
+                if self.test_mode
+                    && (i == "test" || i == "describe" || i == "skip")
                     && matches!(self.peek(), Token::String(_)) =>
             {
                 // Desugar: test "name" { body } -> test "name" (fun () -> { body })
