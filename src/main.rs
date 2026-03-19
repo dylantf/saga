@@ -207,6 +207,23 @@ fn compile_std_modules(
 }
 
 /// Compile all .core files in a directory with erlc.
+fn run_erlc_file(core_file: &std::path::Path, build_dir: &std::path::Path) {
+    let status = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(build_dir)
+        .arg(core_file)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to run erlc: {}", e);
+            std::process::exit(1);
+        });
+
+    if !status.success() {
+        eprintln!("erlc failed on {}", core_file.display());
+        std::process::exit(1);
+    }
+}
+
 fn run_erlc(build_dir: &std::path::Path) {
     let core_files: Vec<_> = fs::read_dir(build_dir)
         .unwrap()
@@ -216,20 +233,7 @@ fn run_erlc(build_dir: &std::path::Path) {
         .collect();
 
     for core_file in &core_files {
-        let status = std::process::Command::new("erlc")
-            .arg("-o")
-            .arg(build_dir)
-            .arg(core_file)
-            .status()
-            .unwrap_or_else(|e| {
-                eprintln!("Failed to run erlc: {}", e);
-                std::process::exit(1);
-            });
-
-        if !status.success() {
-            eprintln!("erlc failed on {}", core_file.display());
-            std::process::exit(1);
-        }
+        run_erlc_file(core_file, build_dir);
     }
 
     eprintln!(
@@ -265,8 +269,14 @@ fn exec_erl(build_dir: &std::path::Path, entry_module: &str) {
 // --- Build functions ---
 
 /// Build a project (with project.toml) into the given build directory.
-/// Returns the build directory path.
-fn build_project(profile: &str) -> PathBuf {
+/// Returns the build directory path, elaborated modules, and codegen info.
+fn build_project(
+    profile: &str,
+) -> (
+    PathBuf,
+    std::collections::HashMap<String, ast::Program>,
+    std::collections::HashMap<String, typechecker::ModuleCodegenInfo>,
+) {
     let project_root = find_project_root().unwrap_or_else(|| {
         eprintln!("No project.toml found. Use `dylang build <file.dy>` for single files.");
         std::process::exit(1);
@@ -366,7 +376,8 @@ fn build_project(profile: &str) -> PathBuf {
     }
 
     run_erlc(&build_dir);
-    build_dir
+    let codegen_info = result.codegen_info().clone();
+    (build_dir, elaborated_modules, codegen_info)
 }
 
 /// Build a single script file into the given build directory.
@@ -452,7 +463,7 @@ fn cmd_run(args: &[String]) {
             let build_dir = build_script(f, "dev");
             exec_erl(&build_dir, "_script");
         } else {
-            let build_dir = build_project("dev");
+            let (build_dir, _, _) = build_project("dev");
             exec_erl(&build_dir, "main");
         }
     }
@@ -541,10 +552,9 @@ fn cmd_test(_args: &[String]) {
     }
 
     // Build the main project first (compiles all non-test modules)
-    let build_dir = build_project("test");
+    let (build_dir, elaborated_modules, codegen_info) = build_project("test");
 
-    // Build and run each test file.
-    // Each test file has a main() that runs tests with a handler.
+    // Build and run each test file, reusing the project's compiled modules.
     for test_file in &test_files {
         let source = fs::read_to_string(test_file).unwrap_or_else(|e| {
             eprintln!("Error reading {}: {}", test_file.display(), e);
@@ -561,46 +571,39 @@ fn cmd_test(_args: &[String]) {
         let (program, _) = parse_and_typecheck(&source, &source_path, &mut checker);
         let result = checker.to_result();
 
-        let test_build_dir = build_dir.clone();
-
-        // Elaborate
-        let mut elaborated_modules = compile_std_modules(&result);
-        let elaborated = elaborate::elaborate(&program, &result);
-        elaborated_modules.insert("_test".to_string(), elaborated.clone());
-
-        // Emit std modules
-        for (module_name, elab) in &elaborated_modules {
-            if module_name == "_test" {
-                continue;
-            }
-            let erlang_name = module_name.to_lowercase().replace('.', "_");
-            let beam_path = test_build_dir.join(format!("{}.beam", erlang_name));
-            if !beam_path.exists() {
-                emit_module(
-                    &erlang_name,
-                    elab,
-                    result.codegen_info(),
-                    &elaborated_modules,
-                    &test_build_dir,
-                );
+        // Compile any std modules the test file needs that weren't in the project build
+        let test_std_modules = compile_std_modules(&result);
+        let mut all_modules = elaborated_modules.clone();
+        let mut all_codegen = codegen_info.clone();
+        all_codegen.extend(result.codegen_info().clone());
+        for (name, elab) in &test_std_modules {
+            if !all_modules.contains_key(name) {
+                let erlang_name = name.to_lowercase().replace('.', "_");
+                emit_module(&erlang_name, elab, &all_codegen, &test_std_modules, &build_dir);
+                run_erlc_file(&build_dir.join(format!("{}.core", erlang_name)), &build_dir);
+                all_modules.insert(name.clone(), elab.clone());
             }
         }
 
-        // Emit the test module
+        // Elaborate only the test file
+        let elaborated = elaborate::elaborate(&program, &result);
+        all_modules.insert("_test".to_string(), elaborated.clone());
+
+        // Emit only the test module
         let core_src = codegen::emit_module_with_imports(
             "_test",
             &elaborated,
-            result.codegen_info(),
-            &elaborated_modules,
+            &all_codegen,
+            &all_modules,
         );
-        let core_path = test_build_dir.join("_test.core");
+        let core_path = build_dir.join("_test.core");
         fs::write(&core_path, &core_src).unwrap_or_else(|e| {
             eprintln!("Error writing {}: {}", core_path.display(), e);
             std::process::exit(1);
         });
 
-        run_erlc(&test_build_dir);
-        exec_erl(&test_build_dir, "_test");
+        run_erlc_file(&core_path, &build_dir);
+        exec_erl(&build_dir, "_test");
     }
 }
 

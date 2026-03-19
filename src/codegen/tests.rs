@@ -445,14 +445,14 @@ middle body = {
     );
     // The handler function for inner_op is between "_Handle_Inner_inner_op"
     // and the string literal "handled". _ReturnK must not appear in that region.
-    if let Some(start) = out.find("_Handle_Inner_inner_op") {
-        if let Some(end) = out[start..].find("\"handled\"") {
-            let handler_body = &out[start..start + end];
-            assert!(
-                !handler_body.contains("_ReturnK"),
-                "handler arm body must not reference _ReturnK!\nHandler region:\n{handler_body}\n\nFull output:\n{out}"
-            );
-        }
+    if let Some(start) = out.find("_Handle_Inner_inner_op")
+        && let Some(end) = out[start..].find("\"handled\"")
+    {
+        let handler_body = &out[start..start + end];
+        assert!(
+            !handler_body.contains("_ReturnK"),
+            "handler arm body must not reference _ReturnK!\nHandler region:\n{handler_body}\n\nFull output:\n{out}"
+        );
     }
 }
 
