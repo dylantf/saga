@@ -15,18 +15,22 @@ Annotations are optional for private functions -- the type checker infers everyt
 # Function definitions - three levels:
 
 # Public, annotated (required for public API)
-pub fun add (a: Int) (b: Int) -> Int
+pub fun add : Int -> Int -> Int
+add x y = x + y
+
+# With optional parameter labels (documentation only)
+pub fun add : (a: Int) -> (b: Int) -> Int
 add x y = x + y
 
 # Private, annotated (optional, for documentation)
-fun double (x: Int) -> Int
+fun double : Int -> Int
 double x = x * 2
 
 # Private, inferred (no annotation at all)
 triple x = x * 3
 
 # Zero-arg functions take Unit
-pub fun main () -> Unit
+pub fun main : Unit -> Unit
 main () = {
   let x = add 3 4
   let y = double x
@@ -34,7 +38,7 @@ main () = {
 }
 
 # Pipe operator
-pub fun main () -> Unit
+pub fun main : Unit -> Unit
 main () = {
   5
   |> add 3
@@ -43,7 +47,7 @@ main () = {
 }
 
 # Lambdas
-pub fun apply (f: a -> b) (x: a) -> b
+pub fun apply : (a -> b) -> a -> b
 apply f x = f x
 
 # Currying / partial application
@@ -75,7 +79,7 @@ type List a {
 }
 
 # Exhaustive pattern matching
-pub fun unwrap (opt: Option a) (default: a) -> a
+pub fun unwrap : Option a -> a -> a
 unwrap opt default = case opt {
   Just x -> x
   Nothing -> default
@@ -88,7 +92,7 @@ type Expr {
   Mul(Expr, Expr)
 }
 
-pub fun eval (expr: Expr) -> Int
+pub fun eval : Expr -> Int
 eval expr = case expr {
   Lit(n) -> n
   Add(a, b) -> eval a + eval b
@@ -97,7 +101,7 @@ eval expr = case expr {
 
 # Guards use `|` in both case arms and function definitions
 # Any pure function (no effects) can be used in guards
-pub fun clamp (n: Int) -> Int
+pub fun clamp : Int -> Int
 clamp n = case n {
   n | n < 0 -> 0
   n | n > 100 -> 100
@@ -107,14 +111,14 @@ clamp n = case n {
 # Arbitrary pure functions in guards
 is_valid s = String.length s > 0 && String.length s < 100
 
-pub fun describe (s: String) -> String
+pub fun describe : String -> String
 describe s = case s {
   s | is_valid s -> "valid: " <> s
   _ -> "invalid"
 }
 
 # Guards on function definitions use `|`
-pub fun abs (n: Int) -> Int
+pub fun abs : Int -> Int
 abs n | n < 0 = -n
 abs n = n
 ```
@@ -153,11 +157,11 @@ record User {
 let u = User { name: "Dylan", age: 30, email: "d@d.com" }
 
 # Dot access
-pub fun greet (user: User) -> String
+pub fun greet : User -> String
 greet user = "Hello, " <> user.name
 
 # Record update syntax
-pub fun birthday (user: User) -> User
+pub fun birthday : User -> User
 birthday user = { user | age: user.age + 1 }
 
 # ADTs can reference records as variants
@@ -177,7 +181,7 @@ type ApiResponse {
 }
 
 # Pattern matching on record variants
-pub fun describe (resp: ApiResponse) -> String
+pub fun describe : ApiResponse -> String
 describe resp = case resp {
   Success { status, body } -> "OK " <> show status
   ApiError { code, message } -> "Error " <> show code <> ": " <> message
@@ -203,7 +207,7 @@ header_only resp = case resp {
 #   case resp { Success { status } -> status, _ -> 0 }
 
 # `_` for positional ADT discards
-fun has_value (opt: Option a) -> Bool
+fun has_value : Option a -> Bool
 has_value opt = case opt {
   Just _ -> True
   None -> False
@@ -228,21 +232,21 @@ See `docs/effects-guide.md` for the full deep-dive with rationale and examples.
 ```
 # Effects are declared like traits/interfaces
 effect Console {
-  fun print (msg: String) -> Unit
-  fun read_line () -> String
+  fun print : String -> Unit
+  fun read_line : Unit -> String
 }
 
 effect FileSystem {
-  fun read_file (path: String) -> String
-  fun write_file (path: String) (data: String) -> Unit
+  fun read_file : String -> String
+  fun write_file : String -> String -> Unit
 }
 
 effect Fail {
-  fun fail (reason: String) -> Never
+  fun fail : String -> Never
 }
 
 # Functions declare which effects they use
-pub fun greet (name: String) -> String needs {Console}
+pub fun greet : String -> String needs {Console}
 greet name = {
   print! ("Hello, " <> name)
   "greeted"
@@ -250,7 +254,7 @@ greet name = {
 
 # Effect operations use ! to mark the perform site
 # Pure function calls don't get it
-pub fun process_file (path: String) -> Unit needs {Console, FileSystem, Fail}
+pub fun process_file : String -> Unit needs {Console, FileSystem, Fail}
 process_file path = {
   let contents = read_file! path
   if contents == "" then
@@ -302,7 +306,7 @@ main () = {
 }
 
 # Attach a named handler
-pub fun main () -> Unit
+pub fun main : Unit -> Unit
 main () = {
   greet "Dylan"
 } with std_io
@@ -336,7 +340,7 @@ main () = {
 # Think of it like async/await - but for everything
 
 effect Ask {
-  fun ask (question: String) -> String
+  fun ask : String -> String
 }
 
 # A handler that intercepts and continues
@@ -384,7 +388,7 @@ handler with_retry for Http needs {Net, Timer, Fail} {
 ```
 # No exceptions, no special syntax - errors are just effects
 
-fun safe_divide (x: Int) (y: Int) -> Int needs {Fail}
+fun safe_divide : Int -> Int -> Int needs {Fail}
 safe_divide x y =
   if y == 0 then fail! "division by zero"
   else x / y
@@ -412,11 +416,11 @@ main () = {
 module Foo.Bar.SomeModule
 
 # pub fun = public, fun = private annotation, bare = private inferred
-pub fun abs (n: Int) -> Int
+pub fun abs : Int -> Int
 abs n | n < 0 = -n
 abs n = n
 
-pub fun max (a: Int) (b: Int) -> Int
+pub fun max : Int -> Int -> Int
 max a b = if a > b then a else b
 
 # Private - not visible outside module
@@ -427,7 +431,7 @@ import Math
 import Math (abs, max)
 import Math as M
 
-pub fun main () -> Unit
+pub fun main : Unit -> Unit
 main () = {
   M.abs (-5) |> print
 }
@@ -444,16 +448,16 @@ main () = {
 # the implementation via handlers.
 
 trait Show a {
-  fun show (x: a) -> String
+  fun show : a -> String
 }
 
 trait Eq a {
-  fun eq (x: a) (y: a) -> Bool
+  fun eq : a -> a -> Bool
 }
 
 # Trait inheritance - Ord requires Eq
 trait Ord a where {a: Eq} {
-  fun compare (x: a) (y: a) -> Ordering
+  fun compare : a -> a -> Ordering
 }
 
 # Implementing for a type
@@ -468,22 +472,22 @@ impl Eq for User {
 # --- Trait bounds on functions ---
 
 # Single bound
-pub fun to_string (x: a) -> String where {a: Show}
+pub fun to_string : a -> String where {a: Show}
 to_string x = show x
 
 # Multiple bounds on one type variable - use `+`
-pub fun print_if_equal (x: a) (y: a) -> Unit needs {Console} where {a: Show + Eq}
+pub fun print_if_equal : a -> a -> Unit needs {Console} where {a: Show + Eq}
 print_if_equal x y =
   if eq x y then print! (show x)
   else print! "not equal"
 
 # Bounds on multiple type variables
-pub fun convert (x: a) (y: b) -> String where {a: Show, b: Show + Eq}
+pub fun convert : a -> b -> String where {a: Show, b: Show + Eq}
 convert x y = show x <> " -> " <> show y
 
 # `needs` and `where` are independent - effects and traits together
 # `needs` comes first (what the function does), `where` second (what the types must support)
-pub fun print_all (items: List a) -> Unit needs {Console} where {a: Show}
+pub fun print_all : List a -> Unit needs {Console} where {a: Show}
 print_all items = case items {
   Cons(x, rest) -> {
     print! (show x)
@@ -527,10 +531,10 @@ type ApiError {
 }
 
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : String -> Unit
 }
 
-pub fun fetch_user (id: Int) -> User needs {Http, Fail, Log}
+pub fun fetch_user : Int -> User needs {Http, Fail, Log}
 fetch_user id = {
   log! ("Fetching user " <> show id)
   let response = get! ("/api/users/" <> show id)
@@ -540,7 +544,7 @@ fetch_user id = {
   }
 }
 
-pub fun save_user (user: User) -> Unit needs {Db, Fail, Log}
+pub fun save_user : User -> Unit needs {Db, Fail, Log}
 save_user user = {
   log! ("Saving user " <> user.name)
   db_execute! "INSERT INTO users VALUES (?, ?, ?)"
@@ -561,7 +565,7 @@ handler collect_logs for Log {
   log msg -> resume ()
 }
 
-pub fun main () -> Unit
+pub fun main : Unit -> Unit
 main () = {
   let user = fetch_user 42
   let updated = { user | name: "New Name" }
@@ -579,9 +583,9 @@ rather than being a separate language primitive. Actors are just an effect:
 
 ```
 effect Actor {
-  fun spawn (f: () -> Unit needs e) -> Pid
-  fun send (pid: Pid) (msg: Msg) -> Unit
-  fun receive () -> Msg
+  fun spawn : (() -> Unit needs e) -> Pid
+  fun send : Pid -> Msg -> Unit
+  fun receive : Unit -> Msg
 }
 ```
 
@@ -700,7 +704,7 @@ The exit code behavior means `dylang test` works directly in CI pipelines.
    effects from callbacks using an effect variable `e`:
 
    ```
-   pub fun map (f: a -> b needs e) (xs: List a) -> List b needs e
+   pub fun map : (a -> b needs e) -> List a -> List b needs e
    ```
 
    If `f` is pure, `e` is empty and `map` is pure.
@@ -721,8 +725,8 @@ The exit code behavior means `dylang test` works directly in CI pipelines.
 
    ```
    effect Async {
-     fun spawn (f: () -> a needs e) -> Future a
-     fun await (future: Future a) -> a
+     fun spawn : (() -> a needs e) -> Future a
+     fun await : Future a -> a
    }
    ```
 
@@ -742,7 +746,7 @@ The exit code behavior means `dylang test` works directly in CI pipelines.
    effects is a normal call.
 
 7. **Effect annotation syntax** - functions declare effects with `needs`
-   after the return type: `fun f () -> T needs {Log, Http}`. Handlers use
+   after the return type: `fun f : Unit -> T needs {Log, Http}`. Handlers use
    `for`: `handler foo for Log { ... }`. This aligns with `impl Show for User`.
    `with` is reserved exclusively for handler attachment (`expr with handler`).
    Handlers that use effects in their body also declare `needs`:

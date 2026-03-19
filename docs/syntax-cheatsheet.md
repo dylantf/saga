@@ -21,18 +21,22 @@ let x = 42
 let name = "Dylan"
 
 # Function - annotated (required for pub)
-pub fun add (a: Int) (b: Int) -> Int
+pub fun add : Int -> Int -> Int
+add a b = a + b
+
+# With optional parameter labels (documentation only)
+pub fun add : (a: Int) -> (b: Int) -> Int
 add a b = a + b
 
 # Function - private annotated (optional)
-fun double (x: Int) -> Int
+fun double : Int -> Int
 double x = x * 2
 
 # Function - unannotated (fully inferred)
 triple x = x * 3
 
 # Zero-arg function
-pub fun main () -> Unit
+pub fun main : Unit -> Unit
 main () = print "hello"
 
 # Lambda
@@ -157,7 +161,7 @@ let pair = (1, "hello")
 let triple = (1, 2, 3)
 
 # Type annotation
-fun swap (p: (a, b)) -> (b, a)
+fun swap : (a, b) -> (b, a)
 swap (x, y) = (y, x)
 ```
 
@@ -303,21 +307,21 @@ let report = $"""
 ```
 # Declare an effect
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : String -> Unit
 }
 
 effect Fail {
-  fun fail (reason: String) -> Never
+  fun fail : String -> Never
 }
 
 # Zero-arg op called with ()
 effect State {
-  fun get () -> Int
-  fun put (n: Int) -> Unit
+  fun get : Unit -> Int
+  fun put : Int -> Unit
 }
 
 # Use effects -- ! marks the call site
-fun process (path: String) -> Unit needs {Log, Fail}
+fun process : String -> Unit needs {Log, Fail}
 process path = {
   log! ("processing " <> path)
   if path == "" then fail! "empty path"
@@ -383,12 +387,12 @@ main () = {
 ```
 # Define a trait
 trait Show a {
-  fun show (x: a) -> String
+  fun show : a -> String
 }
 
 # Trait with supertraits
 trait Ord a where {a: Eq} {
-  fun compare (x: a) (y: a) -> Ordering
+  fun compare : a -> a -> Ordering
 }
 
 # Implement a trait
@@ -402,21 +406,21 @@ impl Show for List a where {a: Show} {
 }
 
 # Trait bounds on functions
-fun to_string (x: a) -> String where {a: Show}
+fun to_string : a -> String where {a: Show}
 to_string x = show x
 
 # Multiple bounds: +
-fun print_if_equal (x: a) (y: a) -> Unit needs {Log} where {a: Show + Eq}
+fun print_if_equal : a -> a -> Unit needs {Log} where {a: Show + Eq}
 print_if_equal x y =
   if x == y then log! (show x)
   else log! "not equal"
 
 # Bounds on multiple type vars
-fun convert (x: a) -> b where {a: Show, b: Read}
+fun convert : a -> b where {a: Show, b: Read}
 convert x = read (show x)
 
 # needs comes before where
-pub fun run (items: List a) -> Unit needs {Log} where {a: Show}
+pub fun run : List a -> Unit needs {Log} where {a: Show}
 run items = case items {
   [] -> ()
   h :: t -> { log! (show h); run t }
@@ -442,8 +446,8 @@ import Math as M (abs, max)
 M.abs (-5)
 
 # Visibility
-pub fun exported () -> Int   # visible to importers
-fun private () -> Int        # module-internal only
+pub fun exported : Unit -> Int   # visible to importers
+fun private : Unit -> Int        # module-internal only
 pub type Shape { ... }
 pub record User { ... }
 pub handler console for Log { ... }
@@ -600,20 +604,24 @@ print_error "oops"           # stderr
 ## Type Annotations
 
 ```
-# Basic
-(x: Int)
-(xs: List Int)
-(f: a -> b)
+# Annotations use `:` followed by an arrow chain
+fun add : Int -> Int -> Int
+
+# Labels are optional (purely documentation)
+fun add : (a: Int) -> (b: Int) -> Int
 
 # With needs on a parameter type (HOF effect absorption)
-(computation: () -> a needs {Fail})
+fun try : (() -> a needs {Fail}) -> Result a String
 
 # Unit param
-fun main () -> Unit
+fun main : Unit -> Unit
 
 # Needs and where together
-fun f (x: a) -> b needs {Log} where {a: Show}
+fun f : a -> b needs {Log} where {a: Show}
 
-# Arrow type
-fun apply (f: a -> b) (x: a) -> b
+# Arrow type parameter
+fun apply : (a -> b) -> a -> b
+
+# Mix labeled and unlabeled freely
+fun foldl : (f: b -> a -> b) -> b -> List a -> b
 ```

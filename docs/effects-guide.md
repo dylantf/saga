@@ -12,16 +12,16 @@ An effect declares a set of operations - what can be done, not how.
 
 ```
 effect Log {
-  fun log (level: String) (msg: String) -> Unit
+  fun log : String -> String -> Unit
 }
 
 effect Fail {
-  fun fail (reason: String) -> Never
+  fun fail : String -> Never
 }
 
 effect Http {
-  fun get (url: String) -> String
-  fun post (url: String) (body: String) -> String
+  fun get : String -> String
+  fun post : String -> String -> String
 }
 ```
 
@@ -35,7 +35,7 @@ provides no implementation. The implementation comes from handlers.
 Effect operations are called with `!` to distinguish them from pure functions:
 
 ```
-fun run_server () -> Unit needs {Log, Http, Fail}
+fun run_server : Unit -> Unit needs {Log, Http, Fail}
 run_server () = {
   log! "info" "server starting"
   let data = get! "/api/health"
@@ -141,7 +141,7 @@ the call site of the effect operation and continues the computation.
 
 ```
 effect Ask {
-  fun ask (prompt: String) -> String
+  fun ask : String -> String
 }
 
 handler interactive for Ask needs {Console} {
@@ -212,7 +212,7 @@ Effects act as namespaces for their operations. When there's no ambiguity, use
 bare names:
 
 ```
-fun process () -> Unit needs {Log}
+fun process : Unit -> Unit needs {Log}
 process () = {
   log! "info" "working"    # unambiguous - only Log has `log`
 }
@@ -223,14 +223,14 @@ name:
 
 ```
 effect Database {
-  fun get (key: String) -> String
+  fun get : String -> String
 }
 
 effect Cache {
-  fun get (key: String) -> String
+  fun get : String -> String
 }
 
-fun fetch (key: String) -> String needs {Database, Cache}
+fun fetch : String -> String needs {Database, Cache}
 fetch key = {
   let cached = Cache.get! key
   let fresh = Database.get! key
@@ -386,7 +386,7 @@ scope).
 Functions declare which effects they require with `needs` in the type signature:
 
 ```
-fun run_server () -> Unit needs {Log, Http}
+fun run_server : Unit -> Unit needs {Log, Http}
 run_server () = {
   log! "info" "starting"
   let data = get! "/api/health"
@@ -403,7 +403,7 @@ another function that needs an effect, it must either handle it (with `with`)
 or declare it in its own `needs`:
 
 ```
-fun get_user (id: Int) -> User needs {Database}
+fun get_user : Int -> User needs {Database}
 get_user id = {
   query! "SELECT * FROM users WHERE id = ?"
   |> head
@@ -413,7 +413,7 @@ get_user id = {
 # get_user_route calls get_user (needs Database)
 # and calls send_response! (needs Http)
 # it doesn't handle either, so both propagate
-fun get_user_route (request: Request) -> Unit needs {Database, Http}
+fun get_user_route : Request -> Unit needs {Database, Http}
 get_user_route request = {
   request.params.id
   |> get_user_with_posts
@@ -429,7 +429,7 @@ and doesn't propagate:
 # start_app calls run_server (which needs Log, Http)
 # and also uses Database directly
 # it handles Log itself, so only Http and Database bubble up
-fun start_app () -> Unit needs {Http, Database}
+fun start_app : Unit -> Unit needs {Http, Database}
 start_app () = {
   init_db! ()
   run_server () with console_log   # handles Log here
@@ -449,7 +449,7 @@ up to the nearest named function boundary, which must handle or declare them:
 foo x = fun y -> fail! "oops"
 
 # OK: outer function declares it
-fun foo (x: Int) -> Int needs {Fail}
+fun foo : Int -> Int needs {Fail}
 foo x = (fun y -> fail! "oops") x
 
 # OK: handled at the expression level
@@ -467,7 +467,7 @@ pass through transparently:
 
 ```
 # Log propagates through map to the enclosing function
-fun process (xs: List String) -> List Unit needs {Log}
+fun process : List String -> List Unit needs {Log}
 process xs = map (fun x -> log! x) xs
 ```
 
@@ -478,7 +478,7 @@ don't propagate further:
 
 ```
 # `try` absorbs Fail: it declares needs {Fail} on the callback parameter
-fun try (computation: () -> a needs {Fail}) -> Result a String
+fun try : (() -> a needs {Fail}) -> Result a String
 try computation = computation () with {
   fail msg -> Err msg
   return value -> Ok value
@@ -539,7 +539,7 @@ handler postgres_handler for Database {
   execute sql -> todo "connect to postgres and run execute"
 }
 
-fun impossible (x: Int) -> String
+fun impossible : Int -> String
 impossible x = panic "this case should never happen"
 ```
 
@@ -559,7 +559,7 @@ handlers are for.
 
 | Concept               | Syntax                                             |
 | --------------------- | -------------------------------------------------- |
-| Define an effect      | `effect Log { fun log (msg: String) -> Unit }`     |
+| Define an effect      | `effect Log { fun log : String -> Unit }`           |
 | Perform an effect     | `log! "hello"`                                     |
 | Named handler         | `handler h for Log { log msg -> ... }`              |
 | Handler with effects  | `handler h for Log needs {X} { ... }`               |
@@ -570,5 +570,5 @@ handlers are for.
 | Abort computation     | (just don't call `resume`)                         |
 | Intercept success     | `return value -> Ok(value)`                        |
 | Qualify ambiguous ops | `Cache.get! key`                                   |
-| Declare effects on fn | `fun f () -> T needs {Log, Http}`                  |
-| HOF absorbs callback's effects | `fun run (f: () -> a needs {Fail}) -> a` |
+| Declare effects on fn | `fun f : Unit -> T needs {Log, Http}`              |
+| HOF absorbs callback's effects | `fun run : (() -> a needs {Fail}) -> a`  |
