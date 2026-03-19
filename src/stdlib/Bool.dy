@@ -7,6 +7,13 @@ impl Show for Bool {
   }
 }
 
+impl Debug for Bool {
+  debug b = case b {
+    True -> "True"
+    False -> "False"
+  }
+}
+
 pub fun not (x: Bool) -> Bool
 not True = False
 not False = True

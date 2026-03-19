@@ -125,20 +125,20 @@ run body = {
 
 # Assertion helpers
 
-pub fun assert_eq (a: x) (b: x) -> Unit needs {Assert} where {x: Show + Eq}
+pub fun assert_eq (a: x) (b: x) -> Unit needs {Assert} where {x: Debug + Eq}
 assert_eq a b =
   if a == b then assert! True ""
-  else assert! False ("Expected " <> show b <> ", got " <> show a)
+  else assert! False ("Expected " <> debug b <> ", got " <> debug a)
 
-pub fun assert_neq (a: x) (b: x) -> Unit needs {Assert} where {x: Show + Eq}
+pub fun assert_neq (a: x) (b: x) -> Unit needs {Assert} where {x: Debug + Eq}
 assert_neq a b =
   if a != b then assert! True ""
-  else assert! False ("Expected " <> show a <> " to not equal " <> show b)
+  else assert! False ("Expected " <> debug a <> " to not equal " <> debug b)
 
-pub fun assert_gt (a: x) (b: x) -> Unit needs {Assert} where {x: Show + Ord}
+pub fun assert_gt (a: x) (b: x) -> Unit needs {Assert} where {x: Debug + Ord}
 assert_gt a b =
-  assert! (a > b) ("Expected " <> show a <> " > " <> show b)
+  assert! (a > b) ("Expected " <> debug a <> " > " <> debug b)
 
-pub fun assert_lt (a: x) (b: x) -> Unit needs {Assert} where {x: Show + Ord}
+pub fun assert_lt (a: x) (b: x) -> Unit needs {Assert} where {x: Debug + Ord}
 assert_lt a b =
-  assert! (a < b) ("Expected " <> show a <> " < " <> show b)
+  assert! (a < b) ("Expected " <> debug a <> " < " <> debug b)

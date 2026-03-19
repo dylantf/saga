@@ -1078,11 +1078,18 @@ impl Checker {
         self.adt_variants
             .insert("Bool".into(), vec![("True".into(), 0), ("False".into(), 0)]);
 
-        // Show and Eq for Tuple (any arity -- all params must satisfy the trait)
+        // Show, Debug, and Eq for Tuple (any arity -- all params must satisfy the trait)
         // We use "Tuple" as the type name; param_constraints are checked dynamically
         // based on actual type args at constraint resolution time
         self.trait_impls.insert(
             ("Show".into(), "Tuple".into()),
+            ImplInfo {
+                param_constraints: vec![],
+                span: None,
+            }, // handled specially in check_pending_constraints
+        );
+        self.trait_impls.insert(
+            ("Debug".into(), "Tuple".into()),
             ImplInfo {
                 param_constraints: vec![],
                 span: None,

@@ -6,6 +6,10 @@ impl Show for String {
   show x = x
 }
 
+impl Debug for String {
+  debug x = "\"" <> x <> "\""
+}
+
 pub @external("erlang", "string", "length")
 fun length (s: String) -> Int
 

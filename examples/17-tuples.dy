@@ -15,16 +15,16 @@ snd (_, y) = y
 main () = {
   # Pair
   let point = (3.0, 4.0)
-  println ("point: " <> show point)
+  println ("point: " <> debug point)
   println ("distance squared: " <> show (distance point))
 
   # Swap
   let flipped = swap point
-  println ("swapped: " <> show flipped)
+  println ("swapped: " <> debug flipped)
 
   # Triple
   let rgb = (255, 128, 0)
-  println ("color: " <> show rgb)
+  println ("color: " <> debug rgb)
 
   # Accessors
   let pair = ("hello", 42)
@@ -32,11 +32,11 @@ main () = {
   println ("snd: " <> show (snd pair))
 
   # 5-tuple (no size limit)
-  println (show (1, 2, 3, 4, 5))
+  println (debug (1, 2, 3, 4, 5))
 
   # Nested
   let nested = ((1, 2), (3, 4))
-  println ("nested: " <> show nested)
+  println ("nested: " <> debug nested)
 
   # Pattern matching in case
   case nested {

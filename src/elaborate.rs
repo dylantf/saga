@@ -1033,8 +1033,8 @@ impl Elaborator {
 
     /// Build the show function expression for a concrete type.
     /// Returns an expression that, when applied to a value of that type, produces a string.
-    fn show_fn_for_type(&self, ty: &Type, span: Span) -> Option<Expr> {
-        let dict = self.dict_for_type("Show", ty, span)?;
+    fn show_fn_for_type(&self, trait_name: &str, ty: &Type, span: Span) -> Option<Expr> {
+        let dict = self.dict_for_type(trait_name, ty, span)?;
         Some(Expr::synth(
             span,
             ExprKind::DictMethodAccess {
@@ -1047,10 +1047,10 @@ impl Elaborator {
     /// Build the dict expression for a concrete type (the dict itself, not the method).
     fn dict_for_type(&self, trait_name: &str, ty: &Type, span: Span) -> Option<Expr> {
         match ty {
-            Type::Con(name, args) if name == "Tuple" && trait_name == "Show" => {
+            Type::Con(name, args) if name == "Tuple" && (trait_name == "Show" || trait_name == "Debug") => {
                 // Tuples don't have a dict constructor; build an inline dict
                 // containing the show lambda: {fun t -> "(" ++ ... ++ ")"}
-                let show_lambda = self.build_tuple_show_lambda(args, span)?;
+                let show_lambda = self.build_tuple_show_lambda(trait_name, args, span)?;
                 Some(Expr::synth(
                     span,
                     ExprKind::Tuple {
@@ -1133,23 +1133,23 @@ impl Elaborator {
         node_id: crate::ast::NodeId,
         span: Span,
     ) -> Option<Expr> {
-        if trait_name != "Show" {
+        if trait_name != "Show" && trait_name != "Debug" {
             return None;
         }
         let evidence_list = self.evidence_by_node.get(&node_id)?;
         let tuple_ev = evidence_list.iter().find(|ev| {
-            ev.trait_name == "Show"
+            ev.trait_name == trait_name
                 && ev
                     .resolved_type
                     .as_ref()
                     .is_some_and(|(name, _)| name == "Tuple")
         })?;
         let (_type_name, type_args) = tuple_ev.resolved_type.as_ref()?;
-        self.build_tuple_show_lambda(type_args, span)
+        self.build_tuple_show_lambda(trait_name, type_args, span)
     }
 
-    /// Build a show lambda for a tuple with the given element types.
-    fn build_tuple_show_lambda(&self, type_args: &[Type], span: Span) -> Option<Expr> {
+    /// Build a show/debug lambda for a tuple with the given element types.
+    fn build_tuple_show_lambda(&self, trait_name: &str, type_args: &[Type], span: Span) -> Option<Expr> {
         let s = span;
         let t_var = Expr::synth(
             s,
@@ -1182,7 +1182,7 @@ impl Elaborator {
         // Build the shown elements and join with ", "
         let mut parts: Vec<Expr> = Vec::new();
         for (i, elem_ty) in type_args.iter().enumerate() {
-            let show_fn = self.show_fn_for_type(elem_ty, s)?;
+            let show_fn = self.show_fn_for_type(trait_name, elem_ty, s)?;
             let elem = Expr::synth(
                 s,
                 ExprKind::ForeignCall {

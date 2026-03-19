@@ -5,21 +5,21 @@ main () = {
 
   # Simple map: double each element
   let doubled = [x * 2 | x <- xs]
-  println (show doubled)
+  println (debug doubled)
 
   # Filter: keep only even numbers
   let evens = [x | x <- xs, x % 2 == 0]
-  println (show evens)
+  println (debug evens)
 
   # Nested generators: cartesian product
   let pairs = [x * 10 + y | x <- [1, 2, 3], y <- [4, 5]]
-  println (show pairs)
+  println (debug pairs)
 
   # Guard with transform
   let big_doubled = [x * 2 | x <- xs, x > 3]
-  println (show big_doubled)
+  println (debug big_doubled)
 
   # Let binding in comprehension
   let results = [y | x <- xs, let y = x + 10, y > 13]
-  println (show results)
+  println (debug results)
 }

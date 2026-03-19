@@ -1,12 +1,12 @@
 main () = {
   let nums = [1, 2, 3, 4, 5]
-  show nums |> println
+  debug nums |> println
 
   let doubled = List.map (fun x -> x * 2) nums
-  show doubled |> println
+  debug doubled |> println
 
   let evens = List.filter (fun x -> x % 2 == 0) nums
-  show evens |> println
+  debug evens |> println
 
   let total = List.foldl (fun acc x -> acc + x) 0 nums
   show total |> println
@@ -15,20 +15,20 @@ main () = {
   show summed |> println
 
   let rev = List.reverse nums
-  show rev |> println
+  debug rev |> println
 
   let appended = List.append [1, 2] [3, 4]
-  show appended |> println
+  debug appended |> println
 
   let h = List.head nums
   show h |> println
 
   let t = List.tail nums
-  show t |> println
+  debug t |> println
 
   let len = List.length nums
   show len |> println
 
   let words = ["hello", "world"]
-  show words |> println
+  debug words |> println
 }

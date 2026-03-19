@@ -1126,7 +1126,7 @@ fn show_works_for_primitives() {
     check("main () = println (show 1.5)").unwrap();
     check("main () = println \"hello\"").unwrap();
     check("main () = println (show True)").unwrap();
-    check("main () = println (show ())").unwrap();
+    check("main () = println (debug ())").unwrap();
     check("let x = show 42\nmain () = println x").unwrap();
 }
 
@@ -1345,34 +1345,34 @@ main () = smaller (Foo { x: 1 }) (Foo { x: 2 })",
 // --- Conditional impl tests ---
 
 #[test]
-fn show_list_of_ints() {
-    assert!(check("main () = show [1, 2, 3]").is_ok());
+fn debug_list_of_ints() {
+    assert!(check("main () = debug [1, 2, 3]").is_ok());
 }
 
 #[test]
-fn show_list_of_strings() {
-    assert!(check("main () = show [\"a\", \"b\"]").is_ok());
+fn debug_list_of_strings() {
+    assert!(check("main () = debug [\"a\", \"b\"]").is_ok());
 }
 
 #[test]
-fn show_list_of_custom_type_fails() {
+fn debug_list_of_custom_type_fails() {
     let result = check(
         "record Foo { x: Int }
-main () = show [Foo { x: 1 }]",
+main () = debug [Foo { x: 1 }]",
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(
-        err.message.contains("Show") && err.message.contains("Foo"),
+        err.message.contains("Debug") && err.message.contains("Foo"),
         "got: {}",
         err.message
     );
 }
 
 #[test]
-fn show_nested_list() {
-    // List (List Int) -- Show propagates through both layers
-    assert!(check("main () = show [[1, 2], [3]]").is_ok());
+fn debug_nested_list() {
+    // List (List Int) -- Debug propagates through both layers
+    assert!(check("main () = debug [[1, 2], [3]]").is_ok());
 }
 
 // --- User-defined conditional impl tests ---

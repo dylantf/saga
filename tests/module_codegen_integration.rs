@@ -384,7 +384,7 @@ fn stdlib_import_does_not_crash_lowerer() {
 module Main
 import Std.List as List
 pub fun main () -> String
-main () = show (List.map (fun x -> x + 1) [1, 2, 3])
+main () = debug (List.map (fun x -> x + 1) [1, 2, 3])
 ";
     let mut checker = make_project_checker();
     let program = typecheck_source(main_src, &mut checker);

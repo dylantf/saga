@@ -37,29 +37,29 @@ main () = {
     let y = parse_positive x
     y * 2
   })
-  println ("success: " <> show a)
+  println ("success: " <> debug a)
 
   # Failing computation -- div by zero
   let b = try (fun () -> {
     let x = safe_div 100 0
     x * 2
   })
-  println ("div by zero: " <> show b)
+  println ("div by zero: " <> debug b)
 
   # Failing computation -- negative number
   let c = try (fun () -> {
     let x = safe_div 100 4
     parse_positive (0 - x)
   })
-  println ("negative: " <> show c)
+  println ("negative: " <> debug c)
 
   # Pipe results through transformations
   let d = try (fun () -> safe_div 42 6)
     |> Result.map (fun x -> x * 10)
-  println ("piped ok: " <> show d)
+  println ("piped ok: " <> debug d)
 
   let e = try (fun () -> safe_div 42 0)
     |> Result.map (fun x -> x * 10)
     |> Result.map_err (fun msg -> "FAILED: " <> msg)
-  println ("piped err: " <> show e)
+  println ("piped err: " <> debug e)
 }

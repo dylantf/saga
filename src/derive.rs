@@ -50,16 +50,19 @@ fn generate_derive(
     span: Span,
 ) -> Option<Decl> {
     match trait_name {
-        "Show" => Some(derive_show(type_name, type_params, variants, span)),
+        "Show" => Some(derive_stringify("Show", "show", type_name, type_params, variants, span)),
+        "Debug" => Some(derive_stringify("Debug", "debug", type_name, type_params, variants, span)),
         "Eq" => Some(derive_marker_trait("Eq", type_name, type_params, span)),
         "Ord" => Some(derive_ord(type_name, type_params, variants, span)),
         "Enum" => Some(derive_enum(type_name, variants, span)),
-        other => panic!("cannot derive `{other}` (only Show, Eq, Ord, and Enum are supported)"),
+        other => panic!("cannot derive `{other}` (only Show, Debug, Eq, Ord, and Enum are supported)"),
     }
 }
 
-/// Generate `impl Show for T { show x = case x { ... } }`
-fn derive_show(
+/// Generate `impl Show/Debug for T { show/debug x = case x { ... } }`
+fn derive_stringify(
+    trait_name: &str,
+    method_name: &str,
     type_name: &str,
     type_params: &[String],
     variants: &[TypeConstructor],
@@ -105,8 +108,8 @@ fn derive_show(
                     span,
                 };
 
-                // Build: "Ctor(" <> show __x0 <> ", " <> show __x1 <> ")"
-                // With labels: "Ctor(label: " <> show __x0 <> ", label2: " <> show __x1 <> ")"
+                // Build: "Ctor(" <> show/debug __x0 <> ", " <> show/debug __x1 <> ")"
+                // With labels: "Ctor(label: " <> show/debug __x0 <> ... <> ")"
                 let mut parts: Vec<Expr> = Vec::new();
                 let mut prefix = format!("{ctor_name}(");
 
@@ -126,14 +129,14 @@ fn derive_show(
                     ));
                     prefix.clear();
 
-                    // `show __xi`
+                    // `show/debug __xi`
                     parts.push(Expr::synth(
                         span,
                         ExprKind::App {
                             func: Box::new(Expr::synth(
                                 span,
                                 ExprKind::Var {
-                                    name: "show".into(),
+                                    name: method_name.into(),
                                 },
                             )),
                             arg: Box::new(Expr::synth(
@@ -191,23 +194,23 @@ fn derive_show(
         },
     );
 
-    // Each type param needs Show
+    // Each type param needs the same trait
     let where_clause: Vec<TraitBound> = type_params
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec!["Show".into()],
+            traits: vec![trait_name.into()],
         })
         .collect();
 
     Decl::ImplDef {
-        trait_name: "Show".into(),
+        trait_name: trait_name.into(),
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
         where_clause,
         needs: vec![],
         methods: vec![(
-            "show".into(),
+            method_name.into(),
             vec![Pat::Var {
                 name: scrutinee_name,
                 span,
