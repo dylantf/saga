@@ -746,6 +746,15 @@ impl Checker {
                             ),
                         ));
                     }
+                    // Record evidence for inferred constraints too, so the
+                    // elaborator can resolve trait method calls (DictMethodAccess).
+                    let var_name = self.where_bound_var_names.get(&id).cloned();
+                    self.evidence.push(super::TraitEvidence {
+                        node_id,
+                        trait_name: trait_name.clone(),
+                        resolved_type: None,
+                        type_var_name: var_name,
+                    });
                     scheme_constraints.push((trait_name, id, span));
                 }
                 _ => {

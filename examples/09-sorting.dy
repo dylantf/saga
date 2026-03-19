@@ -71,8 +71,8 @@ debug_print = debug >> println
 main () = {
   let nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
 
-  insertion_sort nums |> debug |> println
-  bubblesort nums |> debug |> println
-  quicksort nums |> debug |> println
-  mergesort nums |> debug |> println
+  insertion_sort nums |> debug_print
+  bubblesort nums |> debug_print
+  quicksort nums |> debug_print
+  mergesort nums |> debug_print
 }

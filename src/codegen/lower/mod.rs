@@ -19,6 +19,15 @@ use util::{
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
 
+/// Count how many lambda params can be absorbed from the body of a top-level
+/// function definition. Peels nested lambdas so `fun x -> fun y -> body` counts 2.
+fn count_lambda_params(body: &Expr) -> usize {
+    match &body.kind {
+        ExprKind::Lambda { params, body, .. } => params.len() + count_lambda_params(body),
+        _ => 0,
+    }
+}
+
 /// Stored handler definition for CPS inlining at `with` sites.
 struct HandlerInfo {
     effects: Vec<String>,
@@ -270,7 +279,8 @@ impl<'a> Lowerer<'a> {
                             effects: Vec::new(),
                             param_absorbed_effects: HashMap::new(),
                         });
-                    let base_arity = lower_params(params).len();
+                    let base_arity =
+                        lower_params(params).len() + count_lambda_params(body);
                     let arity = self.expanded_arity(base_arity, &effects);
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _)| n == name) {
                         // Additional clause: just add to existing group
@@ -403,6 +413,18 @@ impl<'a> Lowerer<'a> {
                 // Single clause, no guard: emit directly without a case wrapper.
                 let (params, _, body) = clauses[0];
                 let mut params_ce = lower_params(params);
+                // Absorb nested lambda params into the function's param list.
+                // e.g. `f dict = fun x -> body` becomes `f(dict, x) = body`
+                let mut body = body;
+                while let ExprKind::Lambda {
+                    params: lam_params,
+                    body: lam_body,
+                    ..
+                } = &body.kind
+                {
+                    params_ce.extend(lower_params(lam_params));
+                    body = lam_body;
+                }
                 params_ce.extend(handler_params.iter().cloned());
                 if has_effects {
                     params_ce.push("_ReturnK".to_string());
@@ -627,13 +649,14 @@ impl<'a> Lowerer<'a> {
                     return self.lower_qualified_call(module, func_name, &args);
                 }
 
-                // Lower print/println/eprint/eprintln to io:format
+                // Lower print/println/eprint/eprintln to io:format, dbg to stderr+passthrough
                 if let Some((func_name, args)) = collect_fun_call(expr) {
                     let lowered = match func_name {
                         "print" => self.lower_builtin_print(&args, false, false),
                         "println" => self.lower_builtin_print(&args, false, true),
                         "eprint" => self.lower_builtin_print(&args, true, false),
                         "eprintln" => self.lower_builtin_print(&args, true, true),
+                        "dbg" => self.lower_builtin_dbg(&args),
                         _ => None,
                     };
                     if let Some(ce) = lowered {
