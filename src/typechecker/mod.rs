@@ -298,8 +298,8 @@ pub struct ModuleExports {
     pub bindings: Vec<(String, Scheme)>,
     /// Type name -> constructor names (empty vec for opaque types).
     pub type_constructors: HashMap<String, Vec<String>>,
-    /// Record name -> ordered field types.
-    pub record_defs: HashMap<String, Vec<(String, Type)>>,
+    /// Record name -> record info (type params + field types).
+    pub record_defs: HashMap<String, RecordInfo>,
     /// Trait name -> trait info.
     pub traits: HashMap<String, TraitInfo>,
     /// (trait_name, target_type) -> impl info.
@@ -357,7 +357,7 @@ impl ModuleExports {
         }
 
         // Records, traits, trait impls, effects, handlers: all from AST + checker state
-        let mut record_defs: HashMap<String, Vec<(String, Type)>> = HashMap::new();
+        let mut record_defs: HashMap<String, RecordInfo> = HashMap::new();
         let mut traits: HashMap<String, TraitInfo> = HashMap::new();
         let mut trait_impls: HashMap<(String, String), ImplInfo> = HashMap::new();
         let mut effects: HashMap<String, EffectDefInfo> = HashMap::new();
@@ -626,6 +626,16 @@ pub struct EffectOpSig {
     pub return_type: Type,
 }
 
+/// Record definition info: type parameter var IDs + field types (with those vars).
+/// Instantiate the type_params to fresh vars before using the field types.
+#[derive(Debug, Clone)]
+pub struct RecordInfo {
+    /// Fresh var IDs for the record's type parameters (empty for monomorphic records)
+    pub type_params: Vec<u32>,
+    /// Field name -> field type (may reference vars from type_params)
+    pub fields: Vec<(String, Type)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct EffectDefInfo {
     /// Fresh var IDs for the effect's type parameters (empty for non-parameterized effects)
@@ -689,8 +699,8 @@ pub struct Checker {
     pub(crate) env: TypeEnv,
     /// Constructor types from type definitions: name -> (arity, type scheme)
     pub(crate) constructors: HashMap<std::string::String, Scheme>,
-    /// Record definitions: record name -> vec of (field_name, field_type)
-    pub(crate) records: HashMap<std::string::String, Vec<(std::string::String, Type)>>,
+    /// Record definitions: record name -> info (type params + field types)
+    pub(crate) records: HashMap<std::string::String, RecordInfo>,
     /// Effect definitions: effect name -> definition info (type params + operations)
     pub(crate) effects: HashMap<std::string::String, EffectDefInfo>,
     /// Named handler definitions: handler name -> info
@@ -919,6 +929,33 @@ impl Checker {
         let id = self.next_var;
         self.next_var += 1;
         Type::Var(id)
+    }
+
+    /// Instantiate a record's type parameters to fresh variables.
+    /// Returns (instantiated field types, result Type::Con with fresh args).
+    pub(crate) fn instantiate_record(
+        &mut self,
+        name: &str,
+        info: &RecordInfo,
+    ) -> (Vec<(String, Type)>, Type) {
+        let mapping: HashMap<u32, Type> = info
+            .type_params
+            .iter()
+            .map(|&id| (id, self.fresh_var()))
+            .collect();
+        let fields = info
+            .fields
+            .iter()
+            .map(|(fname, ty)| (fname.clone(), self.replace_vars(ty, &mapping)))
+            .collect();
+        let result_ty = Type::Con(
+            name.into(),
+            info.type_params
+                .iter()
+                .map(|id| mapping[id].clone())
+                .collect(),
+        );
+        (fields, result_ty)
     }
 
     /// Save and clear the per-body inference state (effects, effect cache, field candidates).

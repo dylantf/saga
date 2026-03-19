@@ -66,8 +66,8 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ## Type System
 
-- [ ] Type arity checking (reject `List Int String`, `Maybe Int Float`, etc. based on declared param count)
-- [ ] Parametric records (`record Box a { value: a }` with type params, instantiation on create/access/update/pattern)
+- [x] Type arity checking (reject `List Int String`, `Maybe Int Float`, etc. based on declared param count)
+- [x] Parametric records (`record Box a { value: a }` with type params, instantiation on create/access/update/pattern)
 - [x] Exhaustiveness checking for case expressions
   - [x] Top-level constructor coverage (missing constructors = error)
   - [x] Wildcard / variable patterns short-circuit as total

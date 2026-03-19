@@ -348,6 +348,97 @@ fn record_pattern_with_alias() {
 }
 
 #[test]
+fn polymorphic_record_create() {
+    let checker = check("record Box a { value: a }\nlet b = Box { value: 42 }").unwrap();
+    let ty = checker.sub.apply(&checker.env.get("b").unwrap().ty);
+    assert_eq!(ty, Type::Con("Box".into(), vec![Type::int()]));
+}
+
+#[test]
+fn polymorphic_record_field_access() {
+    let checker =
+        check("record Box a { value: a }\nlet b = Box { value: 42 }\nlet v = b.value").unwrap();
+    let ty = checker.sub.apply(&checker.env.get("v").unwrap().ty);
+    assert_eq!(ty, Type::int());
+}
+
+#[test]
+fn polymorphic_record_different_instantiations() {
+    let checker = check(
+        "record Box a { value: a }\nlet b1 = Box { value: 42 }\nlet b2 = Box { value: \"hello\" }",
+    )
+    .unwrap();
+    let ty1 = checker.sub.apply(&checker.env.get("b1").unwrap().ty);
+    let ty2 = checker.sub.apply(&checker.env.get("b2").unwrap().ty);
+    assert_eq!(ty1, Type::Con("Box".into(), vec![Type::int()]));
+    assert_eq!(ty2, Type::Con("Box".into(), vec![Type::string()]));
+}
+
+#[test]
+fn polymorphic_record_update() {
+    let checker = check(
+        "record Box a { value: a }\nlet b = Box { value: 42 }\nlet b2 = { b | value: 99 }",
+    )
+    .unwrap();
+    let ty = checker.sub.apply(&checker.env.get("b2").unwrap().ty);
+    assert_eq!(ty, Type::Con("Box".into(), vec![Type::int()]));
+}
+
+#[test]
+fn polymorphic_record_pattern() {
+    let checker = check(
+        "record Box a { value: a }\nunwrap b = case b {\n  Box { value: v } -> v\n}",
+    )
+    .unwrap();
+    let scheme = checker.env.get("unwrap").unwrap();
+    // unwrap : Box a -> a (polymorphic)
+    let ty = checker.sub.apply(&scheme.ty);
+    match &ty {
+        Type::Arrow(arg, ret) => {
+            match arg.as_ref() {
+                Type::Con(name, params) => {
+                    assert_eq!(name, "Box");
+                    assert_eq!(params.len(), 1);
+                    // The param and return type should be the same variable
+                    assert_eq!(params[0], **ret);
+                }
+                _ => panic!("expected Box type, got {:?}", arg),
+            }
+        }
+        _ => panic!("expected arrow type, got {:?}", ty),
+    }
+}
+
+#[test]
+fn polymorphic_record_two_params() {
+    let checker =
+        check("record Pair a b { fst: a, snd: b }\nlet p = Pair { fst: 1, snd: \"hi\" }").unwrap();
+    let ty = checker.sub.apply(&checker.env.get("p").unwrap().ty);
+    assert_eq!(
+        ty,
+        Type::Con("Pair".into(), vec![Type::int(), Type::string()])
+    );
+}
+
+#[test]
+fn polymorphic_record_field_access_infers_param() {
+    let checker = check(
+        "record Box a { value: a }\nget_value b = b.value\nlet x = get_value (Box { value: 42 })",
+    )
+    .unwrap();
+    let ty = checker.sub.apply(&checker.env.get("x").unwrap().ty);
+    assert_eq!(ty, Type::int());
+}
+
+#[test]
+fn polymorphic_record_constructor_as_function() {
+    // Record constructor should be usable as a function: Box : a -> Box a
+    let checker = check("record Box a { value: a }\nlet b = Box { value: 42 }").unwrap();
+    let scheme = checker.constructors.get("Box").unwrap();
+    assert_eq!(scheme.forall.len(), 1);
+}
+
+#[test]
 fn annotation_correct() {
     let checker =
         check("fun fib (n: Int) -> Int\nfib 0 = 0\nfib 1 = 1\nfib n = fib (n - 1) + fib (n - 2)")

@@ -1567,6 +1567,46 @@ fn record_def_with_type_app() {
     }
 }
 
+#[test]
+fn record_def_with_type_params() {
+    let decls = parse("record Box a { value: a }");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::RecordDef {
+            name,
+            type_params,
+            fields,
+            ..
+        } => {
+            assert_eq!(name, "Box");
+            assert_eq!(type_params, &["a"]);
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].0, "value");
+            assert!(matches!(&fields[0].1, TypeExpr::Var(v) if v == "a"));
+        }
+        _ => panic!("expected RecordDef, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn record_def_with_multiple_type_params() {
+    let decls = parse("record Pair a b {\n  fst: a,\n  snd: b,\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::RecordDef {
+            name,
+            type_params,
+            fields,
+            ..
+        } => {
+            assert_eq!(name, "Pair");
+            assert_eq!(type_params, &["a", "b"]);
+            assert_eq!(fields.len(), 2);
+        }
+        _ => panic!("expected RecordDef, got {:?}", decls[0]),
+    }
+}
+
 // --- Effect definitions ---
 
 #[test]

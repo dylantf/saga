@@ -486,7 +486,7 @@ impl Checker {
         &mut self,
         bindings: &[(String, Scheme)],
         ctors_map: &std::collections::HashMap<String, Vec<String>>,
-        record_defs: &std::collections::HashMap<String, Vec<(String, super::Type)>>,
+        record_defs: &std::collections::HashMap<String, super::RecordInfo>,
         prefix: &str,
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,

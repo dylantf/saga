@@ -130,14 +130,22 @@ record User {
   age  : Int,
 }
 
+# Polymorphic records
+record Box a {
+  value : a,
+}
+
 # Create
 let u = User { name: "Dylan", age: 30 }
+let b = Box { value: 42 }        # Box Int
 
 # Field access
 u.name
+b.value                           # 42
 
 # Update
 { u | age: u.age + 1 }
+{ b | value: "hello" }           # Box String
 ```
 
 ---

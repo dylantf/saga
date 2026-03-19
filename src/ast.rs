@@ -80,9 +80,11 @@ pub enum Decl {
     },
 
     /// `record User { name: String, age: Int }`
+    /// `record Box a { value: a }`
     RecordDef {
         public: bool,
         name: String,
+        type_params: Vec<String>,
         fields: Vec<(String, TypeExpr)>,
         deriving: Vec<String>,
         span: Span,

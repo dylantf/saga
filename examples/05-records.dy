@@ -15,6 +15,15 @@ quadrant p = case p {
   _ -> "origin or axis"
 }
 
+# Polymorphic records
+record Box a {
+  value: a,
+}
+
+unwrap b = case b {
+  Box { value: v } -> v
+}
+
 main () = {
   let p = Point { x: 3, y: 4 }
   show_point p |> println
@@ -24,4 +33,13 @@ main () = {
 
   quadrant p |> println
   quadrant p2 |> println
+
+  # polymorphic records
+  let b1 = Box { value: 42 }
+  let b2 = Box { value: "hello" }
+  println (show (unwrap b1))
+  println (unwrap b2)
+
+  let b3 = { b1 | value: 99 }
+  println (show (unwrap b3))
 }

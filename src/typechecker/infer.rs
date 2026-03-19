@@ -212,22 +212,24 @@ impl Checker {
             }
 
             ExprKind::RecordCreate { name, fields, .. } => {
-                let def = self.records.get(name).cloned().ok_or_else(|| {
+                let info = self.records.get(name).cloned().ok_or_else(|| {
                     Diagnostic::error_at(span, format!("undefined record type: {}", name))
                 })?;
+                let (inst_fields, result_ty) = self.instantiate_record(name, &info);
 
                 for (fname, fexpr) in fields {
-                    let expected = def.iter().find(|(n, _)| n == fname).ok_or_else(|| {
-                        Diagnostic::error_at(
-                            fexpr.span,
-                            format!("unknown field '{}' on record {}", fname, name),
-                        )
-                    })?;
+                    let expected =
+                        inst_fields.iter().find(|(n, _)| n == fname).ok_or_else(|| {
+                            Diagnostic::error_at(
+                                fexpr.span,
+                                format!("unknown field '{}' on record {}", fname, name),
+                            )
+                        })?;
                     let actual = self.infer_expr(fexpr)?;
                     self.unify_at(&expected.1, &actual, fexpr.span)?;
                 }
 
-                Ok(Type::Con(name.clone(), vec![]))
+                Ok(result_ty)
             }
 
             ExprKind::FieldAccess { expr: inner, field, .. } => self.infer_field_access(inner, field, span),
@@ -246,7 +248,7 @@ impl Checker {
                     let candidates: Vec<_> = self
                         .records
                         .iter()
-                        .filter(|(_, flds)| flds.iter().any(|(n, _)| n == fname))
+                        .filter(|(_, info)| info.fields.iter().any(|(n, _)| n == fname))
                         .map(|(rname, _)| rname.clone())
                         .collect();
                     if candidates.len() == 1 {
@@ -257,12 +259,16 @@ impl Checker {
 
                 match &resolved {
                     Type::Con(name, _) => {
-                        let def = self.records.get(name).cloned().ok_or_else(|| {
+                        let info = self.records.get(name).cloned().ok_or_else(|| {
                             Diagnostic::error_at(span, format!("type {} is not a record", name))
                         })?;
+                        let (inst_fields, result_ty) = self.instantiate_record(name, &info);
+                        // Unify the record expression type with the instantiated result type
+                        // so that type params flow from the input record to the field types.
+                        self.unify_at(&resolved, &result_ty, span)?;
                         for (fname, fexpr) in fields {
                             let expected =
-                                def.iter().find(|(n, _)| n == fname).ok_or_else(|| {
+                                inst_fields.iter().find(|(n, _)| n == fname).ok_or_else(|| {
                                     Diagnostic::error_at(
                                         fexpr.span,
                                         format!("unknown field '{}' on record {}", fname, name),
@@ -271,7 +277,7 @@ impl Checker {
                             let actual = self.infer_expr(fexpr)?;
                             self.unify_at(&expected.1, &actual, fexpr.span)?;
                         }
-                        Ok(resolved.clone())
+                        Ok(self.sub.apply(&result_ty))
                     }
                     _ => Err(Diagnostic::error_at(
                         span,
@@ -502,25 +508,33 @@ impl Checker {
 
         match &resolved {
             Type::Con(name, _) => {
-                let def = self.records.get(name).cloned().ok_or_else(|| {
+                let info = self.records.get(name).cloned().ok_or_else(|| {
                     Diagnostic::error_at(span, format!("type {} is not a record", name))
                 })?;
-                let (_, field_ty) = def.iter().find(|(n, _)| n == field).ok_or_else(|| {
-                    Diagnostic::error_at(span, format!("no field '{}' on record {}", field, name))
-                })?;
-                Ok(field_ty.clone())
+                let (inst_fields, result_ty) = self.instantiate_record(name, &info);
+                // Unify so that the record's concrete type args flow into field types
+                self.unify_at(&resolved, &result_ty, span)?;
+                let (_, field_ty) = inst_fields
+                    .iter()
+                    .find(|(n, _)| n == field)
+                    .ok_or_else(|| {
+                        Diagnostic::error_at(
+                            span,
+                            format!("no field '{}' on record {}", field, name),
+                        )
+                    })?;
+                Ok(self.sub.apply(field_ty))
             }
             Type::Var(id) => {
                 let id = *id;
+                // Collect candidates: for each record that has this field,
+                // instantiate its type params to fresh vars and return both the
+                // record result type and the field type.
                 let candidates: Vec<_> = self
                     .records
                     .iter()
-                    .filter_map(|(rname, fields)| {
-                        fields
-                            .iter()
-                            .find(|(n, _)| n == field)
-                            .map(|(_, ty)| (rname.clone(), ty.clone()))
-                    })
+                    .filter(|(_, info)| info.fields.iter().any(|(n, _)| n == field))
+                    .map(|(rname, _)| rname.clone())
                     .collect();
                 match candidates.len() {
                     0 => Err(Diagnostic::error_at(
@@ -528,21 +542,25 @@ impl Checker {
                         format!("no record has field '{}'", field),
                     )),
                     1 => {
-                        let (rname, field_ty) = &candidates[0];
-                        self.unify(&resolved, &Type::Con(rname.clone(), vec![]))?;
-                        Ok(field_ty.clone())
+                        let rname = &candidates[0];
+                        let info = self.records.get(rname).cloned().unwrap();
+                        let (inst_fields, result_ty) =
+                            self.instantiate_record(rname, &info);
+                        self.unify(&resolved, &result_ty)?;
+                        let (_, field_ty) =
+                            inst_fields.iter().find(|(n, _)| n == field).unwrap();
+                        Ok(self.sub.apply(field_ty))
                     }
                     _ => {
                         // Multiple records have this field. Narrow by intersecting
                         // with candidates already observed for this variable.
-                        let narrowed: Vec<(String, Type)> =
-                            match self.field_candidates.get(&id) {
-                                Some((existing, _)) => candidates
-                                    .into_iter()
-                                    .filter(|(n, _)| existing.contains(n))
-                                    .collect(),
-                                None => candidates,
-                            };
+                        let narrowed: Vec<String> = match self.field_candidates.get(&id) {
+                            Some((existing, _)) => candidates
+                                .into_iter()
+                                .filter(|n| existing.contains(n))
+                                .collect(),
+                            None => candidates,
+                        };
                         match narrowed.len() {
                             0 => Err(Diagnostic::error_at(
                                 span,
@@ -552,28 +570,45 @@ impl Checker {
                                 ),
                             )),
                             1 => {
-                                let (rname, field_ty) = narrowed.into_iter().next().unwrap();
-                                self.unify(&resolved, &Type::Con(rname, vec![]))?;
+                                let rname = &narrowed[0];
+                                let info = self.records.get(rname).cloned().unwrap();
+                                let (inst_fields, result_ty) =
+                                    self.instantiate_record(rname, &info);
+                                self.unify(&resolved, &result_ty)?;
                                 self.field_candidates.remove(&id);
-                                Ok(field_ty)
+                                let (_, field_ty) =
+                                    inst_fields.iter().find(|(n, _)| n == field).unwrap();
+                                Ok(self.sub.apply(field_ty))
                             }
                             _ => {
-                                let names: Vec<String> =
-                                    narrowed.iter().map(|(n, _)| n.clone()).collect();
-                                let first_ty = self.sub.apply(&narrowed[0].1);
-                                let all_agree = narrowed
-                                    .iter()
-                                    .all(|(_, ty)| self.sub.apply(ty) == first_ty);
+                                // For ambiguity checking, instantiate each candidate
+                                // and compare the resolved field types structurally.
+                                let mut inst_results: Vec<(String, Type)> = Vec::new();
+                                for rname in &narrowed {
+                                    let info = self.records.get(rname).cloned().unwrap();
+                                    let (inst_fields, _) =
+                                        self.instantiate_record(rname, &info);
+                                    let (_, field_ty) = inst_fields
+                                        .iter()
+                                        .find(|(n, _)| n == field)
+                                        .unwrap();
+                                    inst_results
+                                        .push((rname.clone(), self.sub.apply(field_ty)));
+                                }
+                                let first_ty = &inst_results[0].1;
+                                let all_agree =
+                                    inst_results.iter().all(|(_, ty)| ty == first_ty);
                                 if all_agree {
-                                    self.field_candidates.insert(id, (names, span));
-                                    Ok(first_ty)
+                                    self.field_candidates
+                                        .insert(id, (narrowed, span));
+                                    Ok(first_ty.clone())
                                 } else {
                                     Err(Diagnostic::error_at(
                                         span,
                                         format!(
                                             "ambiguous field '{}': found in [{}] with different types; add a type annotation",
                                             field,
-                                            names.join(", ")
+                                            narrowed.join(", ")
                                         ),
                                     ))
                                 }
@@ -921,33 +956,36 @@ impl Checker {
                 self.unify_at(ty, &current, *span)
             }
             Pat::Record { name, fields, span } => {
-                let def = self.records.get(name).cloned().ok_or_else(|| {
+                let info = self.records.get(name).cloned().ok_or_else(|| {
                     Diagnostic::error_at(
                         *span,
                         format!("undefined record type in pattern: {}", name),
                     )
                 })?;
-                self.unify_at(ty, &Type::Con(name.clone(), vec![]), *span)?;
+                let (inst_fields, result_ty) = self.instantiate_record(name, &info);
+                self.unify_at(ty, &result_ty, *span)?;
 
                 for (fname, alias_pat) in fields {
-                    let (_, field_ty) = def.iter().find(|(n, _)| n == fname).ok_or_else(|| {
-                        Diagnostic::error_at(
-                            *span,
-                            format!("unknown field '{}' on record {}", fname, name),
-                        )
-                    })?;
+                    let (_, field_ty) =
+                        inst_fields.iter().find(|(n, _)| n == fname).ok_or_else(|| {
+                            Diagnostic::error_at(
+                                *span,
+                                format!("unknown field '{}' on record {}", fname, name),
+                            )
+                        })?;
+                    let resolved_field_ty = self.sub.apply(field_ty);
                     match alias_pat {
-                        Some(pat) => self.bind_pattern(pat, field_ty)?,
+                        Some(pat) => self.bind_pattern(pat, &resolved_field_ty)?,
                         None => {
                             self.env.insert(
                                 fname.clone(),
                                 Scheme {
                                     forall: vec![],
                                     constraints: vec![],
-                                    ty: field_ty.clone(),
+                                    ty: resolved_field_ty.clone(),
                                 },
                             );
-                            self.record_type_at_span(*span, field_ty);
+                            self.record_type_at_span(*span, &resolved_field_ty);
                         }
                     }
                 }

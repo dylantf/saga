@@ -41,13 +41,14 @@ pub fn expand_derives(program: &mut Vec<Decl>) {
             }
             Decl::RecordDef {
                 name,
+                type_params,
                 fields,
                 deriving,
                 span,
                 ..
             } => {
                 for trait_name in deriving {
-                    extra.push(generate_record_derive(trait_name, name, fields, *span));
+                    extra.push(generate_record_derive(trait_name, name, type_params, fields, *span));
                 }
             }
             _ => {}
@@ -59,11 +60,12 @@ pub fn expand_derives(program: &mut Vec<Decl>) {
 fn generate_record_derive(
     trait_name: &str,
     record_name: &str,
+    type_params: &[String],
     fields: &[(String, TypeExpr)],
     span: Span,
 ) -> Decl {
     match trait_name {
-        "Show" | "Debug" => derive_record_stringify(trait_name, if trait_name == "Show" { "show" } else { "debug" }, record_name, fields, span),
+        "Show" | "Debug" => derive_record_stringify(trait_name, if trait_name == "Show" { "show" } else { "debug" }, record_name, type_params, fields, span),
         other => panic!("cannot derive `{other}` for record `{record_name}` (only Show and Debug are supported for records)"),
     }
 }
@@ -73,6 +75,7 @@ fn derive_record_stringify(
     trait_name: &str,
     method_name: &str,
     record_name: &str,
+    type_params: &[String],
     fields: &[(String, TypeExpr)],
     span: Span,
 ) -> Decl {
@@ -116,11 +119,20 @@ fn derive_record_stringify(
         })
         .unwrap();
 
+    // Each type param needs the same trait (same as ADT derive)
+    let where_clause: Vec<TraitBound> = type_params
+        .iter()
+        .map(|tp| TraitBound {
+            type_var: tp.clone(),
+            traits: vec![trait_name.into()],
+        })
+        .collect();
+
     Decl::ImplDef {
         trait_name: trait_name.into(),
         target_type: record_name.into(),
-        type_params: vec![],
-        where_clause: vec![],
+        type_params: type_params.to_vec(),
+        where_clause,
         needs: vec![],
         methods: vec![(
             method_name.into(),

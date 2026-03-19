@@ -124,11 +124,15 @@ impl Parser {
         }
     }
 
-    // Parses: record <Name> { <field>: <Type>, ... }
+    // Parses: record <Name> [type_params...] { <field>: <Type>, ... }
     fn parse_record_def(&mut self, public: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'record'
         let name = self.expect_upper_ident()?;
+        let mut type_params = Vec::new();
+        while !matches!(self.peek(), Token::LBrace | Token::Eof) {
+            type_params.push(self.expect_ident()?);
+        }
         self.expect(Token::LBrace)?;
         self.skip_terminators();
 
@@ -166,6 +170,7 @@ impl Parser {
         Ok(Decl::RecordDef {
             public,
             name,
+            type_params,
             fields,
             deriving,
             span: start.to(end),

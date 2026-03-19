@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::ast::{self, Decl};
 
 use super::result::CheckResult;
-use super::{Checker, Diagnostic, EffectDefInfo, EffectOpSig, HandlerInfo, Scheme, Span, Type};
+use super::{Checker, Diagnostic, EffectDefInfo, EffectOpSig, HandlerInfo, RecordInfo, Scheme, Span, Type};
 
 /// Annotations collected from FunAnnotation declarations:
 /// (name -> (type, span)) and (name -> where clause constraints).
@@ -225,8 +225,13 @@ impl Checker {
                     self.register_type_def(name, type_params, variants)
                         .map_err(|e| vec![e])?;
                 }
-                Decl::RecordDef { name, fields, .. } => {
-                    self.register_record_def(name, fields)
+                Decl::RecordDef {
+                    name,
+                    type_params,
+                    fields,
+                    ..
+                } => {
+                    self.register_record_def(name, type_params, fields)
                         .map_err(|e| vec![e])?;
                 }
                 Decl::EffectDef {
@@ -952,15 +957,55 @@ impl Checker {
     pub(crate) fn register_record_def(
         &mut self,
         name: &str,
+        type_params: &[String],
         fields: &[(String, ast::TypeExpr)],
     ) -> Result<(), Diagnostic> {
-        let mut params: Vec<(String, u32)> = vec![];
-        let field_types: Vec<(std::string::String, Type)> = fields
+        // Create fresh type variables for declared type parameters (same as register_type_def)
+        let mut param_vars: Vec<(String, u32)> = type_params
             .iter()
-            .map(|(fname, texpr)| (fname.clone(), self.convert_type_expr(texpr, &mut params)))
+            .map(|p| {
+                let var = self.next_var;
+                self.next_var += 1;
+                (p.clone(), var)
+            })
             .collect();
-        self.records.insert(name.into(), field_types);
-        self.type_arity.insert(name.into(), params.len());
+
+        let field_types: Vec<(String, Type)> = fields
+            .iter()
+            .map(|(fname, texpr)| (fname.clone(), self.convert_type_expr(texpr, &mut param_vars)))
+            .collect();
+
+        let forall: Vec<u32> = param_vars.iter().map(|(_, id)| *id).collect();
+
+        // Build result type: e.g. Box a -> Con("Box", [Var(a_id)])
+        let result_type = Type::Con(
+            name.into(),
+            forall.iter().map(|&id| Type::Var(id)).collect(),
+        );
+
+        // Register record constructor scheme: e.g. Box : forall a. a -> Box a
+        // Constructor takes fields in order, returns the record type.
+        let mut ctor_ty = result_type;
+        for (_, field_ty) in field_types.iter().rev() {
+            ctor_ty = Type::Arrow(Box::new(field_ty.clone()), Box::new(ctor_ty));
+        }
+        self.constructors.insert(
+            name.into(),
+            Scheme {
+                forall: forall.clone(),
+                constraints: vec![],
+                ty: ctor_ty,
+            },
+        );
+
+        self.records.insert(
+            name.into(),
+            RecordInfo {
+                type_params: forall,
+                fields: field_types,
+            },
+        );
+        self.type_arity.insert(name.into(), type_params.len());
         Ok(())
     }
 
