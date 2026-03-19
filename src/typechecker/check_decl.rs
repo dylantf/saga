@@ -1172,6 +1172,7 @@ impl Checker {
             // Bind op params and set resume context, then check body
             let saved_env = self.env.clone();
             let saved_resume = self.resume_type.take();
+            let saved_resume_ret = self.resume_return_type.take();
             self.resume_type = Some(op_sig.return_type.clone());
 
             for (i, param_name) in arm.params.iter().enumerate() {
@@ -1192,6 +1193,7 @@ impl Checker {
 
             self.infer_expr(&arm.body)?;
             self.resume_type = saved_resume;
+            self.resume_return_type = saved_resume_ret;
             self.env = saved_env;
         }
 

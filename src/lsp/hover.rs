@@ -52,8 +52,11 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<Node
             }
             None
         }
-        Decl::FunAnnotation { name, span, .. } if contains(span, offset) => {
-            Some((name.clone(), *span, None))
+        Decl::FunAnnotation { name, name_span, span, .. } if contains(span, offset) => {
+            if contains_ident(name_span, offset) {
+                return Some((name.clone(), *name_span, None));
+            }
+            None
         }
         Decl::HandlerDef {
             name,

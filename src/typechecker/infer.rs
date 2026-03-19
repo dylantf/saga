@@ -333,8 +333,13 @@ impl Checker {
                 if let Some(expected) = &self.resume_type.clone() {
                     self.unify_at(&val_ty, expected, span)?;
                 }
-                let ty = self.fresh_var();
-                Ok(ty)
+                // resume's return type is the answer type (what the with-expression produces)
+                if let Some(ret_ty) = &self.resume_return_type.clone() {
+                    Ok(ret_ty.clone())
+                } else {
+                    let ty = self.fresh_var();
+                    Ok(ty)
+                }
             }
 
             ExprKind::Tuple { elements, .. } => {
@@ -1297,6 +1302,9 @@ impl Checker {
         let saved_effects = std::mem::take(&mut self.current_effects);
         let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
         let expr_ty = self.infer_expr(expr)?;
+        // Capture the inner expression's effect type param cache before restoring.
+        // Inline handler arms need these bindings to properly type resume arguments.
+        let inner_effect_cache = self.effect_type_param_cache.clone();
         // Subtract handled effects from the inner expression's effects
         for eff in &handled {
             self.current_effects.remove(eff);
@@ -1339,14 +1347,44 @@ impl Checker {
 
                 let saved_effects_arms = std::mem::take(&mut self.current_effects);
 
+                // Compute answer_ty: infer return clause first if present,
+                // since arms need it for resume return type and body unification.
+                let answer_ty = if let Some(ret_arm) = return_clause {
+                    let saved_env = self.env.clone();
+                    if let Some(param_name) = ret_arm.params.first() {
+                        self.env.insert(
+                            param_name.clone(),
+                            Scheme {
+                                forall: vec![],
+                                constraints: vec![],
+                                ty: expr_ty.clone(),
+                            },
+                        );
+                    }
+                    let ret_ty = self.infer_expr(&ret_arm.body)?;
+                    self.env = saved_env;
+                    ret_ty
+                } else {
+                    expr_ty.clone()
+                };
+
+                // Use inner expression's effect cache so inline handler arms
+                // see the same type param bindings as the inner expression.
+                let outer_effect_cache = std::mem::replace(
+                    &mut self.effect_type_param_cache,
+                    inner_effect_cache,
+                );
+
                 for arm in arms {
                     let op_sig = self.lookup_effect_op(&arm.op_name, None, arm.span).ok();
 
                     let saved_env = self.env.clone();
                     let saved_resume = self.resume_type.take();
+                    let saved_resume_ret = self.resume_return_type.take();
 
                     if let Some(ref sig) = op_sig {
                         self.resume_type = Some(sig.return_type.clone());
+                        self.resume_return_type = Some(answer_ty.clone());
                         for (i, param_name) in arm.params.iter().enumerate() {
                             let param_ty = if i < sig.params.len() {
                                 sig.params[i].clone()
@@ -1376,45 +1414,26 @@ impl Checker {
                         }
                     }
 
-                    self.infer_expr(&arm.body)?;
+                    let arm_ty = self.infer_expr(&arm.body)?;
+                    // Each arm must produce the answer type
+                    self.unify_at(&arm_ty, &answer_ty, arm.span)?;
 
                     self.resume_type = saved_resume;
+                    self.resume_return_type = saved_resume_ret;
                     self.env = saved_env;
                 }
 
-                if let Some(ret_arm) = return_clause {
-                    let saved_env = self.env.clone();
-                    if let Some(param_name) = ret_arm.params.first() {
-                        self.env.insert(
-                            param_name.clone(),
-                            Scheme {
-                                forall: vec![],
-                                constraints: vec![],
-                                ty: expr_ty.clone(),
-                            },
-                        );
-                    }
-                    let ret_ty = self.infer_expr(&ret_arm.body)?;
-                    self.env = saved_env;
+                // Restore the outer effect cache
+                self.effect_type_param_cache = outer_effect_cache;
 
-                    for eff in &handled {
-                        self.current_effects.remove(eff);
-                    }
-                    let arm_effects =
-                        std::mem::replace(&mut self.current_effects, saved_effects_arms);
-                    self.current_effects.extend(arm_effects);
-
-                    Ok(ret_ty)
-                } else {
-                    for eff in &handled {
-                        self.current_effects.remove(eff);
-                    }
-                    let arm_effects =
-                        std::mem::replace(&mut self.current_effects, saved_effects_arms);
-                    self.current_effects.extend(arm_effects);
-
-                    Ok(expr_ty)
+                for eff in &handled {
+                    self.current_effects.remove(eff);
                 }
+                let arm_effects =
+                    std::mem::replace(&mut self.current_effects, saved_effects_arms);
+                self.current_effects.extend(arm_effects);
+
+                Ok(answer_ty)
             }
         }
     }

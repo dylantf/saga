@@ -724,6 +724,8 @@ pub struct Checker {
     pub(crate) handlers: HashMap<std::string::String, HandlerInfo>,
     /// Context for resume typing: when inside a handler arm, the return type of the op being handled
     pub(crate) resume_type: Option<Type>,
+    /// Context for resume return typing: when inside a handler arm, the answer type of the with-expression
+    pub(crate) resume_return_type: Option<Type>,
     /// Effects used in the current function body (accumulated during inference)
     pub(crate) current_effects: HashSet<String>,
     /// Per-scope cache of instantiated effect type params: effect name -> mapping from original var IDs to fresh vars.
@@ -839,6 +841,7 @@ impl Checker {
             effects: HashMap::new(),
             handlers: HashMap::new(),
             resume_type: None,
+            resume_return_type: None,
             current_effects: HashSet::new(),
             effect_type_param_cache: HashMap::new(),
             fun_effects: HashMap::new(),

@@ -277,6 +277,7 @@ impl Parser {
     fn parse_fun_annotation(&mut self, public: bool, start: Span) -> Result<Decl, ParseError> {
         self.advance(); // consume 'fun'
         let name = self.expect_ident()?;
+        let name_span = self.tokens[self.pos - 1].span;
 
         self.expect(Token::Colon)?;
         let (params, return_type, effects) = self.parse_annotated_signature()?;
@@ -289,6 +290,7 @@ impl Parser {
             id: NodeId::fresh(),
             public,
             name,
+            name_span,
             params,
             return_type,
             effects,

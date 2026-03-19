@@ -45,6 +45,7 @@ pub enum Decl {
         id: NodeId,
         public: bool,
         name: String,
+        name_span: Span,
         params: Vec<(String, TypeExpr)>,
         return_type: TypeExpr,
         effects: Vec<EffectRef>,

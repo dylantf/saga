@@ -1,23 +1,25 @@
-effect Fail {
+effect Fail a {
   fun fail : (msg: String) -> a
 }
 
-handler log_failure for Fail {
+handler log_failure for Fail Never {
   fail msg = println ("Error: " <> msg)
 }
 
-handler resume_failure for Fail {
-  fail _ = resume ()
+handler try_catch for Fail Int {
+  fail _ = resume 0
 }
 
-fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail}
+fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail Int}
 safe_div x 0 = fail! "division by zero"
 safe_div x y = x / y
 
 main () = {
-  let alpha = (safe_div 10 2) with log_failure
-  println (show alpha)
-  println (show alpha)
-  let b = (safe_div 10 0) with resume_failure
+  let a = (safe_div 10 2) with log_failure
+  println (show a)
+
+  let b = (safe_div 10 0) with {
+    fail _ = resume 0
+  }
   println (debug b)
 }

@@ -11,8 +11,8 @@ reliable () = 42
 
 main () = {
   let r1 = supervised 3 (fun () -> unreliable ())
-  println $"unreliable: {r1}"
+  println $"unreliable: {debug r1}"
 
   let r2 = supervised 3 (fun () -> reliable ())
-  println $"reliable: {r2}"
+  println $"reliable: {debug r2}"
 }
