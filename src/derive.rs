@@ -10,36 +10,125 @@ use crate::token::Span;
 pub fn expand_derives(program: &mut Vec<Decl>) {
     let mut extra = Vec::new();
     for decl in program.iter() {
-        if let Decl::TypeDef {
-            name,
-            type_params,
-            variants,
-            deriving,
-            span,
-            ..
-        } = decl
-        {
-            // Ord requires Eq (supertrait). Automatically derive Eq if Ord
-            // is requested but Eq isn't explicitly listed.
-            let needs_eq =
-                deriving.iter().any(|t| t == "Ord") && !deriving.iter().any(|t| t == "Eq");
+        match decl {
+            Decl::TypeDef {
+                name,
+                type_params,
+                variants,
+                deriving,
+                span,
+                ..
+            } => {
+                // Ord requires Eq (supertrait). Automatically derive Eq if Ord
+                // is requested but Eq isn't explicitly listed.
+                let needs_eq =
+                    deriving.iter().any(|t| t == "Ord") && !deriving.iter().any(|t| t == "Eq");
 
-            if needs_eq
-                && let Some(impl_def) = generate_derive("Eq", name, type_params, variants, *span)
-            {
-                extra.push(impl_def);
-            }
-
-            for trait_name in deriving {
-                if let Some(impl_def) =
-                    generate_derive(trait_name, name, type_params, variants, *span)
+                if needs_eq
+                    && let Some(impl_def) =
+                        generate_derive("Eq", name, type_params, variants, *span)
                 {
                     extra.push(impl_def);
                 }
+
+                for trait_name in deriving {
+                    if let Some(impl_def) =
+                        generate_derive(trait_name, name, type_params, variants, *span)
+                    {
+                        extra.push(impl_def);
+                    }
+                }
             }
+            Decl::RecordDef {
+                name,
+                fields,
+                deriving,
+                span,
+                ..
+            } => {
+                for trait_name in deriving {
+                    extra.push(generate_record_derive(trait_name, name, fields, *span));
+                }
+            }
+            _ => {}
         }
     }
     program.extend(extra);
+}
+
+fn generate_record_derive(
+    trait_name: &str,
+    record_name: &str,
+    fields: &[(String, TypeExpr)],
+    span: Span,
+) -> Decl {
+    match trait_name {
+        "Show" | "Debug" => derive_record_stringify(trait_name, if trait_name == "Show" { "show" } else { "debug" }, record_name, fields, span),
+        other => panic!("cannot derive `{other}` for record `{record_name}` (only Show and Debug are supported for records)"),
+    }
+}
+
+/// Generate `impl Show/Debug for R { show/debug r = "R { field: " <> show/debug r.field <> ... <> "}" }`
+fn derive_record_stringify(
+    trait_name: &str,
+    method_name: &str,
+    record_name: &str,
+    fields: &[(String, TypeExpr)],
+    span: Span,
+) -> Decl {
+    let param_name = "__val".to_string();
+    let param_var = Expr::synth(span, ExprKind::Var { name: param_name.clone() });
+
+    // Build: "RecordName { field1: " <> method r.field1 <> ", field2: " <> method r.field2 <> " }"
+    let mut parts: Vec<Expr> = Vec::new();
+    let mut prefix = format!("{record_name} {{ ");
+
+    for (i, (field_name, _ty)) in fields.iter().enumerate() {
+        if i > 0 {
+            prefix.push_str(", ");
+        }
+        prefix.push_str(field_name);
+        prefix.push_str(": ");
+        parts.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(prefix.clone()) }));
+        prefix.clear();
+
+        // method_name (param_var.field_name)
+        let field_access = Expr::synth(span, ExprKind::FieldAccess {
+            expr: Box::new(param_var.clone()),
+            field: field_name.clone(),
+        });
+        parts.push(Expr::synth(span, ExprKind::App {
+            func: Box::new(Expr::synth(span, ExprKind::Var { name: method_name.into() })),
+            arg: Box::new(field_access),
+        }));
+    }
+
+    parts.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(" }".into()) }));
+
+    let body = parts
+        .into_iter()
+        .reduce(|acc, part| {
+            Expr::synth(span, ExprKind::BinOp {
+                op: BinOp::Concat,
+                left: Box::new(acc),
+                right: Box::new(part),
+            })
+        })
+        .unwrap();
+
+    Decl::ImplDef {
+        trait_name: trait_name.into(),
+        target_type: record_name.into(),
+        type_params: vec![],
+        where_clause: vec![],
+        needs: vec![],
+        methods: vec![(
+            method_name.into(),
+            vec![Pat::Var { name: param_name, span }],
+            body,
+        )],
+        span,
+    }
 }
 
 fn generate_derive(

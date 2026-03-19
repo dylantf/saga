@@ -84,6 +84,7 @@ pub enum Decl {
         public: bool,
         name: String,
         fields: Vec<(String, TypeExpr)>,
+        deriving: Vec<String>,
         span: Span,
     },
 
