@@ -273,36 +273,8 @@ impl Parser {
         self.advance(); // consume 'fun'
         let name = self.expect_ident()?;
 
-        let mut params = Vec::new();
-        while matches!(self.peek(), Token::LParen) {
-            self.advance(); // consume '('
-            if matches!(self.peek(), Token::RParen) {
-                // `()` -- unit parameter
-                self.advance(); // consume ')'
-                params.push(("_".into(), TypeExpr::Named("Unit".into())));
-            } else {
-                let param_name = self.expect_ident()?;
-                self.expect(Token::Colon)?;
-                let param_type = self.parse_type_expr()?;
-                self.expect(Token::RParen)?;
-                params.push((param_name, param_type));
-            }
-        }
-
-        self.expect(Token::Arrow)?;
-        let return_type = self.parse_type_expr()?;
-
-        let mut effects = Vec::new();
-        if matches!(self.peek(), Token::Needs) {
-            self.advance(); // consume 'needs'
-            self.expect(Token::LBrace)?;
-            effects.push(self.parse_effect_ref()?);
-            while matches!(self.peek(), Token::Comma) {
-                self.advance();
-                effects.push(self.parse_effect_ref()?);
-            }
-            self.expect(Token::RBrace)?;
-        }
+        self.expect(Token::Colon)?;
+        let (params, return_type, effects) = self.parse_annotated_signature()?;
 
         // Parse optional `where {a: Show + Eq, b: Ord}`
         let where_clause = self.parse_where_clause()?;
@@ -376,36 +348,8 @@ impl Parser {
         self.expect(Token::Fun)?;
         let name = self.expect_ident()?;
 
-        let mut params = Vec::new();
-        while matches!(self.peek(), Token::LParen) {
-            self.advance(); // consume '('
-            if matches!(self.peek(), Token::RParen) {
-                // `()` -- unit parameter
-                self.advance(); // consume ')'
-                params.push(("_".into(), TypeExpr::Named("Unit".into())));
-            } else {
-                let param_name = self.expect_ident()?;
-                self.expect(Token::Colon)?;
-                let param_type = self.parse_type_expr()?;
-                self.expect(Token::RParen)?;
-                params.push((param_name, param_type));
-            }
-        }
-
-        self.expect(Token::Arrow)?;
-        let return_type = self.parse_type_expr()?;
-
-        let mut effects = Vec::new();
-        if matches!(self.peek(), Token::Needs) {
-            self.advance();
-            self.expect(Token::LBrace)?;
-            effects.push(self.parse_effect_ref()?);
-            while matches!(self.peek(), Token::Comma) {
-                self.advance();
-                effects.push(self.parse_effect_ref()?);
-            }
-            self.expect(Token::RBrace)?;
-        }
+        self.expect(Token::Colon)?;
+        let (params, return_type, effects) = self.parse_annotated_signature()?;
 
         let where_clause = self.parse_where_clause()?;
 
@@ -442,24 +386,8 @@ impl Parser {
             self.expect(Token::Fun)?;
             let op_name = self.expect_ident()?;
 
-            let mut params = Vec::new();
-            // Allow zero-param ops: `fun get () -> Int`
-            if matches!(self.peek(), Token::LParen) && matches!(self.peek_at(1), Token::RParen) {
-                self.advance(); // consume '('
-                self.advance(); // consume ')'
-            } else {
-                while matches!(self.peek(), Token::LParen) {
-                    self.advance();
-                    let param_name = self.expect_ident()?;
-                    self.expect(Token::Colon)?;
-                    let param_type = self.parse_type_expr()?;
-                    self.expect(Token::RParen)?;
-                    params.push((param_name, param_type));
-                }
-            }
-
-            self.expect(Token::Arrow)?;
-            let return_type = self.parse_type_expr()?;
+            self.expect(Token::Colon)?;
+            let (params, return_type, _effects) = self.parse_annotated_signature()?;
             let op_end = self.tokens[self.pos - 1].span;
 
             operations.push(EffectOp {
@@ -619,23 +547,8 @@ impl Parser {
             self.expect(Token::Fun)?;
             let method_name = self.expect_ident()?;
 
-            let mut params = Vec::new();
-            while matches!(self.peek(), Token::LParen) {
-                self.advance();
-                if matches!(self.peek(), Token::RParen) {
-                    self.advance();
-                    params.push(("_".into(), TypeExpr::Named("Unit".into())));
-                } else {
-                    let param_name = self.expect_ident()?;
-                    self.expect(Token::Colon)?;
-                    let param_type = self.parse_type_expr()?;
-                    self.expect(Token::RParen)?;
-                    params.push((param_name, param_type));
-                }
-            }
-
-            self.expect(Token::Arrow)?;
-            let return_type = self.parse_type_expr()?;
+            self.expect(Token::Colon)?;
+            let (params, return_type, _effects) = self.parse_annotated_signature()?;
             let method_end = self.tokens[self.pos - 1].span;
 
             methods.push(TraitMethod {
@@ -778,6 +691,92 @@ impl Parser {
             body,
             span: start.to(end),
         })
+    }
+
+    // --- Annotated signatures ---
+
+    /// Parse an annotated type signature after the `:`.
+    /// Each arrow segment can optionally have a label: `(label: Type) -> Type -> RetType`
+    /// Returns (params, return_type, effects).
+    fn parse_annotated_signature(
+        &mut self,
+    ) -> Result<(Vec<(String, TypeExpr)>, TypeExpr, Vec<EffectRef>), ParseError> {
+        // Collect all arrow segments: parse "A -> B -> C -> D" as [A, B, C, D]
+        // Each segment is either (Some(label), type) or (None, type)
+        let mut segments: Vec<(Option<String>, TypeExpr)> = Vec::new();
+        segments.push(self.parse_labeled_type_segment()?);
+
+        while matches!(self.peek(), Token::Arrow) {
+            self.advance(); // consume '->'
+            segments.push(self.parse_labeled_type_segment()?);
+        }
+
+        // Parse trailing `needs {...}` if present
+        let mut effects = Vec::new();
+        if matches!(self.peek(), Token::Needs) {
+            self.advance();
+            self.expect(Token::LBrace)?;
+            effects.push(self.parse_effect_ref()?);
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                effects.push(self.parse_effect_ref()?);
+            }
+            self.expect(Token::RBrace)?;
+        }
+
+        if segments.len() < 2 {
+            // No arrow at all, e.g. `fun x : Int` -- just a constant annotation
+            let (_label, ty) = segments.pop().unwrap();
+            return Ok((vec![], ty, effects));
+        }
+
+        // Last segment is the return type, rest are params
+        let (_, return_type) = segments.pop().unwrap();
+        let params: Vec<(String, TypeExpr)> = segments
+            .into_iter()
+            .enumerate()
+            .map(|(i, (label, ty))| {
+                let name = label.unwrap_or_else(|| format!("_{}", i));
+                (name, ty)
+            })
+            .collect();
+
+        Ok((params, return_type, effects))
+    }
+
+    /// Parse a single type segment that may have an optional label: `(label: Type)` or just `Type`.
+    fn parse_labeled_type_segment(&mut self) -> Result<(Option<String>, TypeExpr), ParseError> {
+        // Check for `(label: Type)` pattern
+        if matches!(self.peek(), Token::LParen) {
+            // Peek ahead to see if this is `(ident : ...` (labeled) or just a parenthesized/tuple type
+            if self.is_labeled_param() {
+                self.advance(); // consume '('
+                let label = self.expect_ident()?;
+                self.expect(Token::Colon)?;
+                let ty = self.parse_type_expr()?;
+                self.expect(Token::RParen)?;
+                return Ok((Some(label), ty));
+            }
+        }
+
+        // Regular type (may include application: `Option a`, `Result String Int`)
+        let mut left = self.parse_type_atom()?;
+        while self.can_start_type_atom() {
+            let arg = self.parse_type_atom()?;
+            left = TypeExpr::App(Box::new(left), Box::new(arg));
+        }
+        Ok((None, left))
+    }
+
+    /// Look ahead to check if we have `(ident :` which signals a labeled parameter.
+    fn is_labeled_param(&self) -> bool {
+        // Current token is '('. Check pos+1 is an ident and pos+2 is ':'
+        let base = self.pos + 1;
+        if base + 1 >= self.tokens.len() {
+            return false;
+        }
+        matches!(self.tokens[base].token, Token::Ident(_))
+            && matches!(self.tokens[base + 1].token, Token::Colon)
     }
 
     // --- Type expressions ---

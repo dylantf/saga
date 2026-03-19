@@ -16,7 +16,7 @@ id x = x
 const x _ = x
 
 # Annotated function: type checker verifies body matches signature
-fun add (a: Int) (b: Int) -> Int
+fun add : (a: Int) -> (b: Int) -> Int
 add a b = a + b
 
 # Record with typed fields
@@ -29,7 +29,7 @@ distance p = {
 }
 
 # Pattern matching: all branches must return the same type
-fun describe (m: Maybe Int) -> String
+fun describe : (m: Maybe Int) -> String
 describe m = case m {
   Just(x) -> $"got: {x}"
   Nothing -> "nothing"
@@ -37,10 +37,10 @@ describe m = case m {
 
 # Effect ops get proper types through the handler
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
-fun safe_div (x: Int) (y: Int) -> Int needs {Fail}
+fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail}
 safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 

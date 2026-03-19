@@ -1,12 +1,12 @@
 ## This is not implmented! Just a sketch...
 
 trait Functor (f: * -> *) {
-  fun map (func: a -> b) (fa: f a) -> f b
+  fun map : (func: a -> b) -> (fa: f a) -> f b
 }
 
 trait Applicative (f: * -> *) where {f: Functor} {
-  fun pure (x: a) -> f a
-  fun ap (ff: f (a -> b)) (fa: f a) -> f b
+  fun pure : (x: a) -> f a
+  fun ap : (ff: f (a -> b)) -> (fa: f a) -> f b
 }
 
 type Validation e a {
@@ -57,7 +57,7 @@ record ValidUser {
   age: Int,
 }
 
-fun validate_user (input: UserInput) -> Validation (List String) ValidUser
+fun validate_user : (input: UserInput) -> Validation (List String) ValidUser
 validate_user input =
   map (fun n -> fun a -> ValidUser { name: n, age: a })
       (require_non_empty "name" input.name)
@@ -67,7 +67,7 @@ validate_user input =
 
 show_errors errs = foldl (fun acc e -> acc <> $"\n  - {e}") "" errs
 
-fun show_result (r: Validation (List String) ValidUser) -> String
+fun show_result : (r: Validation (List String) ValidUser) -> String
 show_result r = case r {
   Valid(user)   -> $"Valid: {user.name}, age {user.age}"
   Invalid(errs) -> $"Invalid: {show_errors errs}"

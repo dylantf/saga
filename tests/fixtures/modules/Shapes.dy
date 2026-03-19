@@ -9,7 +9,7 @@ type InternalConfig {
   Config(Int) 
 }
 
-pub fun area (s: Shape) -> Float
+pub fun area : (s: Shape) -> Float
 area s = case s {
   Circle(r) -> r * r
   Rect(w, h) -> w * h

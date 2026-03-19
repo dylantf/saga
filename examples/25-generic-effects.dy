@@ -5,10 +5,10 @@
 # into a result value.
 
 effect Fail e {
-  fun fail (err: e) -> a
+  fun fail : (err: e) -> a
 }
 
-fun safe_div (x: Int) (y: Int) -> Int needs {Fail String}
+fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail String}
 safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 
@@ -21,10 +21,10 @@ handler to_default for Fail String {
   fail _ = 0
 }
 
-fun test_result (x: Int) (y: Int) -> String
+fun test_result : (x: Int) -> (y: Int) -> String
 test_result x y = safe_div x y with to_result
 
-fun test_default (x: Int) (y: Int) -> Int
+fun test_default : (x: Int) -> (y: Int) -> Int
 test_default x y = safe_div x y with to_default
 
 main () = {

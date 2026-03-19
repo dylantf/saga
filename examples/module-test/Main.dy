@@ -2,7 +2,7 @@ module Main
 
 import MathLib (add, double)
 
-pub fun main () -> Unit
+pub fun main : Unit -> Unit
 main () = {
   println (show (add 10 20))
   println (show (double 7))

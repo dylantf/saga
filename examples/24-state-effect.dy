@@ -4,11 +4,11 @@
 # each handler arm's result in a closure that takes the current state.
 
 effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun run_state (init: s) (f: () -> a needs {State s}) -> (a, s)
+fun run_state : (init: s) -> (f: () -> a needs {State s}) -> (a, s)
 run_state init f = {
   let state_fn = f () with {
     get () = fun s -> (resume s) s
@@ -19,7 +19,7 @@ run_state init f = {
 }
 
 # Modify state with a function
-fun modify (f: s -> s) -> Unit needs {State s}
+fun modify : (f: s -> s) -> Unit needs {State s}
 modify f = {
   let x = get! ()
   put! (f x)
@@ -28,7 +28,7 @@ modify f = {
 ###
 
 # Simple counter: increment 5 times
-fun count_up (n: Int) -> Int needs {State Int}
+fun count_up : (n: Int) -> Int needs {State Int}
 count_up n =
   if n == 0 then get! ()
   else {
@@ -37,7 +37,7 @@ count_up n =
   }
 
 # String accumulator
-fun build_msg () -> String needs {State String}
+fun build_msg : Unit -> String needs {State String}
 build_msg () = {
   modify (fun s -> s <> "hello ")
   modify (fun s -> s <> "world")

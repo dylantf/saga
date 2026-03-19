@@ -441,7 +441,7 @@ fn polymorphic_record_constructor_as_function() {
 #[test]
 fn annotation_correct() {
     let checker =
-        check("fun fib (n: Int) -> Int\nfib 0 = 0\nfib 1 = 1\nfib n = fib (n - 1) + fib (n - 2)")
+        check("fun fib : (n: Int) -> Int\nfib 0 = 0\nfib 1 = 1\nfib n = fib (n - 1) + fib (n - 2)")
             .unwrap();
     let ty = checker.sub.apply(&checker.env.get("fib").unwrap().ty);
     assert_eq!(
@@ -452,19 +452,19 @@ fn annotation_correct() {
 
 #[test]
 fn annotation_mismatch() {
-    let result = check("fun add (a: Int) (b: Int) -> String\nadd a b = a + b");
+    let result = check("fun add : (a: Int) -> (b: Int) -> String\nadd a b = a + b");
     assert!(result.is_err());
 }
 
 #[test]
 fn annotation_without_body() {
-    let result = check("fun foo (x: Int) -> Int");
+    let result = check("fun foo : (x: Int) -> Int");
     assert!(result.is_err());
 }
 
 #[test]
 fn annotation_multi_param() {
-    let checker = check("fun add (a: Int) (b: Int) -> Int\nadd a b = a + b").unwrap();
+    let checker = check("fun add : (a: Int) -> (b: Int) -> Int\nadd a b = a + b").unwrap();
     let ty = checker.sub.apply(&checker.env.get("add").unwrap().ty);
     assert_eq!(
         ty,
@@ -478,7 +478,7 @@ fn annotation_multi_param() {
 #[test]
 fn annotation_constrains_polymorphism() {
     // id without annotation is polymorphic; with annotation it's constrained to Int -> Int
-    let checker = check("fun myid (x: Int) -> Int\nmyid x = x").unwrap();
+    let checker = check("fun myid : (x: Int) -> Int\nmyid x = x").unwrap();
     let ty = checker.sub.apply(&checker.env.get("myid").unwrap().ty);
     assert_eq!(
         ty,
@@ -488,8 +488,8 @@ fn annotation_constrains_polymorphism() {
 
 #[test]
 fn annotation_polymorphic() {
-    // fun id (x: a) -> a should work with the polymorphic identity
-    let checker = check("fun id (x: a) -> a\nid x = x").unwrap();
+    // fun id : (x: a) -> a should work with the polymorphic identity
+    let checker = check("fun id : (x: a) -> a\nid x = x").unwrap();
     let scheme = checker.env.get("id").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
     match ty {
@@ -509,7 +509,7 @@ fn pipe_operator() {
 
 #[test]
 fn effect_call_without_needs_is_error() {
-    let result = check("effect Fail {\n  fun fail (msg: String) -> a\n}\nfoo x = fail! \"oops\"");
+    let result = check("effect Fail {\n  fun fail : (msg: String) -> a\n}\nfoo x = fail! \"oops\"");
     assert!(result.is_err());
     let err = result.err().expect("expected error");
     assert!(
@@ -522,7 +522,7 @@ fn effect_call_without_needs_is_error() {
 #[test]
 fn effect_call_with_correct_needs() {
     check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun foo (x: Int) -> Int needs {Fail}\nfoo x = fail! \"oops\"",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\nfun foo : (x: Int) -> Int needs {Fail}\nfoo x = fail! \"oops\"",
     )
     .unwrap();
 }
@@ -530,7 +530,7 @@ fn effect_call_with_correct_needs() {
 #[test]
 fn effect_call_with_wrong_needs() {
     let result = check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\neffect Log {\n  fun log (msg: String) -> Unit\n}\nfun foo (x: Int) -> Int needs {Log}\nfoo x = fail! \"oops\"",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun foo : (x: Int) -> Int needs {Log}\nfoo x = fail! \"oops\"",
     );
     assert!(result.is_err());
     let err = result.err().expect("expected error");
@@ -545,7 +545,7 @@ fn effect_call_with_wrong_needs() {
 fn effect_handled_with_named_handler() {
     // Effect is handled inline, so the enclosing function doesn't need it
     check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nhandler catch_fail for Fail {\n  fail msg = 0\n}\nmain x = (fail! \"oops\") with catch_fail",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\nhandler catch_fail for Fail {\n  fail msg = 0\n}\nmain x = (fail! \"oops\") with catch_fail",
     )
     .unwrap();
 }
@@ -553,7 +553,7 @@ fn effect_handled_with_named_handler() {
 #[test]
 fn effect_handled_with_inline_handler() {
     check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nmain x = (fail! \"oops\") with {\n  fail msg = 0\n}",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\nmain x = (fail! \"oops\") with {\n  fail msg = 0\n}",
     )
     .unwrap();
 }
@@ -562,7 +562,7 @@ fn effect_handled_with_inline_handler() {
 fn effect_propagates_through_function_call() {
     // Calling a function that needs {Fail} requires the caller to also declare needs {Fail}
     let result = check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun bar (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfoo x = bar x",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\nfun bar : (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfoo x = bar x",
     );
     assert!(result.is_err());
     let err = result.err().expect("expected error");
@@ -576,7 +576,7 @@ fn effect_propagates_through_function_call() {
 #[test]
 fn effect_propagation_with_needs_declared() {
     check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun bar (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfun foo (x: Int) -> Int needs {Fail}\nfoo x = bar x",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\nfun bar : (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfun foo : (x: Int) -> Int needs {Fail}\nfoo x = bar x",
     )
     .unwrap();
 }
@@ -585,7 +585,7 @@ fn effect_propagation_with_needs_declared() {
 fn effect_propagation_handled_by_caller() {
     // Caller handles the effect, so doesn't need to declare it
     check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun bar (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfoo x = (bar x) with {\n  fail msg = 0\n}",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\nfun bar : (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfoo x = (bar x) with {\n  fail msg = 0\n}",
     )
     .unwrap();
 }
@@ -595,10 +595,10 @@ fn handler_arm_body_effect_handled_by_sibling() {
     // An inline handler arm body uses Log, which is handled by a sibling
     // named handler in the same `with`. Should not require `needs` on caller.
     check(
-        "effect Log {\n  fun log (msg: String) -> Unit\n}\n\
-         effect Fail {\n  fun fail (msg: String) -> a\n}\n\
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
          handler silent for Log {\n  log msg = resume ()\n}\n\
-         fun risky () -> Int needs {Fail, Log}\n\
+         fun risky : Unit -> Int needs {Fail, Log}\n\
          risky () = fail! \"oops\"\n\
          main () = risky () with {\n  silent,\n  fail msg = {\n    log! (\"caught: \" <> msg)\n    0\n  }\n}",
     )
@@ -610,9 +610,9 @@ fn handler_arm_body_unhandled_effect_propagates() {
     // An inline handler arm body uses Log, but Log is NOT handled by the `with`.
     // Should require `needs {Log}` on the enclosing function.
     let result = check(
-        "effect Log {\n  fun log (msg: String) -> Unit\n}\n\
-         effect Fail {\n  fun fail (msg: String) -> a\n}\n\
-         fun risky () -> Int needs {Fail}\n\
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun risky : Unit -> Int needs {Fail}\n\
          risky () = fail! \"oops\"\n\
          foo () = risky () with {\n  fail msg = {\n    log! \"caught\"\n    0\n  }\n}",
     );
@@ -629,7 +629,7 @@ fn handler_arm_body_unhandled_effect_propagates() {
 fn lambda_effects_propagate_to_enclosing_function() {
     // Effects inside a lambda propagate up to the enclosing function boundary
     let result =
-        check("effect Fail {\n  fun fail (msg: String) -> a\n}\nfoo x = fun y -> fail! \"oops\"");
+        check("effect Fail {\n  fun fail : (msg: String) -> a\n}\nfoo x = fun y -> fail! \"oops\"");
     assert!(result.is_err());
     let err = result.err().expect("expected error");
     assert!(
@@ -643,7 +643,7 @@ fn lambda_effects_propagate_to_enclosing_function() {
 fn lambda_effects_covered_by_enclosing_needs() {
     // Lambda effects are fine when the enclosing function declares them
     check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun foo (x: Int) -> Int needs {Fail}\nfoo x = (fun y -> fail! \"oops\") x",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\nfun foo : (x: Int) -> Int needs {Fail}\nfoo x = (fun y -> fail! \"oops\") x",
     )
     .unwrap();
 }
@@ -652,7 +652,7 @@ fn lambda_effects_covered_by_enclosing_needs() {
 fn lambda_effects_absorbed_by_hof_annotation() {
     // HOF parameter annotated with `needs {Fail}` absorbs the effect from the lambda
     check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\nfun run (f: () -> Int needs {Fail}) -> Int\nrun f = f () with { fail msg = 0 }\nfoo x = run (fun () -> fail! \"oops\")",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\nfun run : (f: () -> Int needs {Fail}) -> Int\nrun f = f () with { fail msg = 0 }\nfoo x = run (fun () -> fail! \"oops\")",
     )
     .unwrap();
 }
@@ -660,7 +660,7 @@ fn lambda_effects_absorbed_by_hof_annotation() {
 #[test]
 fn multiple_effects_needs_all() {
     let result = check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\neffect Log {\n  fun log (msg: String) -> Unit\n}\nfun foo (x: Int) -> Int needs {Fail}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n}",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun foo : (x: Int) -> Int needs {Fail}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n}",
     );
     assert!(result.is_err());
     let err = result.err().expect("expected error");
@@ -674,7 +674,7 @@ fn multiple_effects_needs_all() {
 #[test]
 fn multiple_effects_all_declared() {
     check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\neffect Log {\n  fun log (msg: String) -> Unit\n}\nfun foo (x: Int) -> Unit needs {Fail, Log}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n}",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun foo : (x: Int) -> Unit needs {Fail, Log}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n}",
     )
     .unwrap();
 }
@@ -683,7 +683,7 @@ fn multiple_effects_all_declared() {
 fn with_subtracts_only_handled_effect() {
     // Handler handles Log but not Fail, so Fail still needs declaration
     let result = check(
-        "effect Fail {\n  fun fail (msg: String) -> a\n}\neffect Log {\n  fun log (msg: String) -> Unit\n}\nhandler console for Log {\n  log msg = println msg\n}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n} with console",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nhandler console for Log {\n  log msg = println msg\n}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n} with console",
     );
     assert!(result.is_err());
     let err = result.err().expect("expected error");
@@ -704,7 +704,7 @@ fn pure_function_no_needs_ok() {
 
 #[test]
 fn trait_method_in_env() {
-    let checker = check("trait Greet a {\n  fun greet (x: a) -> String\n}").unwrap();
+    let checker = check("trait Greet a {\n  fun greet : (x: a) -> String\n}").unwrap();
     let scheme = checker.env.get("greet").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
     match ty {
@@ -716,7 +716,7 @@ fn trait_method_in_env() {
 #[test]
 fn impl_missing_method() {
     let result = check(
-        "record User { name: String }\ntrait Greet a {\n  fun greet (x: a) -> String\n}\nimpl Greet for User {\n}",
+        "record User { name: String }\ntrait Greet a {\n  fun greet : (x: a) -> String\n}\nimpl Greet for User {\n}",
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
@@ -730,7 +730,7 @@ fn impl_missing_method() {
 #[test]
 fn impl_extra_method() {
     let result = check(
-        "record User { name: String }\ntrait Greet a {\n  fun greet (x: a) -> String\n}\nimpl Greet for User {\n  greet u = u.name\n  bogus u = u.name\n}",
+        "record User { name: String }\ntrait Greet a {\n  fun greet : (x: a) -> String\n}\nimpl Greet for User {\n  greet u = u.name\n  bogus u = u.name\n}",
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
@@ -744,7 +744,7 @@ fn impl_extra_method() {
 #[test]
 fn impl_wrong_return_type() {
     let result = check(
-        "record User { name: String }\ntrait Greet a {\n  fun greet (x: a) -> String\n}\nimpl Greet for User {\n  greet u = 42\n}",
+        "record User { name: String }\ntrait Greet a {\n  fun greet : (x: a) -> String\n}\nimpl Greet for User {\n  greet u = 42\n}",
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
@@ -758,7 +758,7 @@ fn impl_wrong_return_type() {
 #[test]
 fn impl_correct() {
     check(
-        "record User { name: String }\ntrait Greet a {\n  fun greet (x: a) -> String\n}\nimpl Greet for User {\n  greet u = u.name\n}",
+        "record User { name: String }\ntrait Greet a {\n  fun greet : (x: a) -> String\n}\nimpl Greet for User {\n  greet u = u.name\n}",
     )
     .unwrap();
 }
@@ -769,7 +769,7 @@ fn impl_pure_no_needs_ok() {
     check(
         "record InMemory { store: String }
 trait Store a {
-  fun get (x: a) -> String
+  fun get : (x: a) -> String
 }
 impl Store for InMemory {
   get s = s.store
@@ -782,10 +782,10 @@ impl Store for InMemory {
 fn impl_uses_effect_without_needs_is_error() {
     // Impl method uses an effect but the impl has no 'needs' declaration
     let result = check(
-        "effect Fail { fun fail (msg: String) -> a }
+        "effect Fail { fun fail : (msg: String) -> a }
 record Redis { url: String }
 trait Store a {
-  fun get (x: a) -> String
+  fun get : (x: a) -> String
 }
 impl Store for Redis {
   get s = fail! \"oops\"
@@ -804,10 +804,10 @@ impl Store for Redis {
 fn impl_uses_effect_with_correct_needs_ok() {
     // Impl method uses an effect and declares it in 'needs'
     check(
-        "effect Fail { fun fail (msg: String) -> a }
+        "effect Fail { fun fail : (msg: String) -> a }
 record Redis { url: String }
 trait Store a {
-  fun get (x: a) -> String
+  fun get : (x: a) -> String
 }
 impl Store for Redis needs {Fail} {
   get s = fail! \"oops\"
@@ -820,11 +820,11 @@ impl Store for Redis needs {Fail} {
 fn impl_needs_missing_one_effect_is_error() {
     // Impl method uses Fail and Log but only declares Fail in needs
     let result = check(
-        "effect Fail { fun fail (msg: String) -> a }
-effect Log { fun log (msg: String) -> Unit }
+        "effect Fail { fun fail : (msg: String) -> a }
+effect Log { fun log : (msg: String) -> Unit }
 record Redis { url: String }
 trait Store a {
-  fun get (x: a) -> String
+  fun get : (x: a) -> String
 }
 impl Store for Redis needs {Fail} {
   get s = {
@@ -860,7 +860,7 @@ fn trait_constraint_no_impl() {
     let result = check(
         "record User { name: String }
 trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
 main () = describe (User { name: \"Alice\" })",
     );
@@ -879,7 +879,7 @@ fn trait_constraint_with_impl_ok() {
     check(
         "record User { name: String }
 trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
 impl Describe for User {
   describe u = u.name
@@ -895,9 +895,9 @@ main () = describe (User { name: \"Alice\" })",
 fn where_clause_satisfies_constraint() {
     check(
         "trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
-fun show_it (x: a) -> String where {a: Describe}
+fun show_it : (x: a) -> String where {a: Describe}
 show_it x = describe x",
     )
     .unwrap();
@@ -907,9 +907,9 @@ show_it x = describe x",
 fn where_clause_missing_bound_fails() {
     let result = check(
         "trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
-fun show_it (x: a) -> String
+fun show_it : (x: a) -> String
 show_it x = describe x",
     );
     assert!(result.is_err());
@@ -927,12 +927,12 @@ fn where_clause_propagates_to_callers() {
     check(
         "record User { name: String }
 trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
 impl Describe for User {
   describe u = u.name
 }
-fun show_it (x: a) -> String where {a: Describe}
+fun show_it : (x: a) -> String where {a: Describe}
 show_it x = describe x
 main () = show_it (User { name: \"Alice\" })",
     )
@@ -944,9 +944,9 @@ fn where_clause_propagates_missing_impl() {
     let result = check(
         "record User { name: String }
 trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
-fun show_it (x: a) -> String where {a: Describe}
+fun show_it : (x: a) -> String where {a: Describe}
 show_it x = describe x
 main () = show_it (User { name: \"Alice\" })",
     );
@@ -963,12 +963,12 @@ main () = show_it (User { name: \"Alice\" })",
 fn where_clause_multiple_bounds() {
     check(
         "trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
 trait Greet a {
-  fun greet (x: a) -> String
+  fun greet : (x: a) -> String
 }
-fun both (x: a) -> String where {a: Describe + Greet}
+fun both : (x: a) -> String where {a: Describe + Greet}
 both x = describe x",
     )
     .unwrap();
@@ -978,9 +978,9 @@ both x = describe x",
 fn where_clause_unknown_type_var() {
     let result = check(
         "trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
-fun show_it (x: a) -> String where {b: Describe}
+fun show_it : (x: a) -> String where {b: Describe}
 show_it x = describe x",
     );
     assert!(result.is_err());
@@ -1002,7 +1002,7 @@ fn ambiguous_type_var_from_where_clause() {
   Ok(a)
   Err(b)
 }
-fun unwrap (r: MyResult a b) -> a where {b: Show}
+fun unwrap : (r: MyResult a b) -> a where {b: Show}
 unwrap r = case r {
   Ok(a) -> a
   Err(_) -> panic \"error\"
@@ -1023,7 +1023,7 @@ fn no_ambiguity_when_type_var_is_concrete() {
     // When the type variable IS resolved to a concrete type, no error.
     check(
         "trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
 impl Describe for String {
   describe s = s
@@ -1032,7 +1032,7 @@ type Result a b {
   Ok(a)
   Err(b)
 }
-fun unwrap (r: Result a b) -> a where {b: Describe}
+fun unwrap : (r: Result a b) -> a where {b: Describe}
 unwrap r = case r {
   Ok(a) -> a
   Err(b) -> describe b
@@ -1074,7 +1074,7 @@ fn inferred_constraint_propagation() {
     check(
         "record User { name: String }
 trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
 impl Describe for User {
   describe u = u.name
@@ -1091,7 +1091,7 @@ fn inferred_constraint_no_impl() {
     let result = check(
         "record User { name: String }
 trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
 wrapper x = describe x
 main () = wrapper (User { name: \"Alice\" })",
@@ -1111,10 +1111,10 @@ main () = wrapper (User { name: \"Alice\" })",
 fn supertrait_satisfied() {
     let result = check(
         "trait Eq a {
-  fun eq (x: a) (y: a) -> Bool
+  fun eq : (x: a) -> (y: a) -> Bool
 }
 trait Ord a where {a: Eq} {
-  fun compare (x: a) (y: a) -> Int
+  fun compare : (x: a) -> (y: a) -> Int
 }
 record Foo { x: Int }
 impl Eq for Foo {
@@ -1132,10 +1132,10 @@ main () = compare (Foo { x: 1 }) (Foo { x: 2 })",
 fn supertrait_missing_impl_fails() {
     let result = check(
         "trait Eq a {
-  fun eq (x: a) (y: a) -> Bool
+  fun eq : (x: a) -> (y: a) -> Bool
 }
 trait Ord a where {a: Eq} {
-  fun compare (x: a) (y: a) -> Int
+  fun compare : (x: a) -> (y: a) -> Int
 }
 record Foo { x: Int }
 impl Ord for Foo {
@@ -1156,13 +1156,13 @@ main () = compare (Foo { x: 1 }) (Foo { x: 2 })",
 fn supertrait_multiple_supertraits() {
     let result = check(
         "trait Show a {
-  fun show (x: a) -> String
+  fun show : (x: a) -> String
 }
 trait Eq a {
-  fun eq (x: a) (y: a) -> Bool
+  fun eq : (x: a) -> (y: a) -> Bool
 }
 trait Special a where {a: Show + Eq} {
-  fun special (x: a) -> String
+  fun special : (x: a) -> String
 }
 record Bar { val: Int }
 impl Show for Bar {
@@ -1183,13 +1183,13 @@ main () = special (Bar { val: 1 })",
 fn supertrait_one_of_multiple_missing() {
     let result = check(
         "trait Show a {
-  fun show (x: a) -> String
+  fun show : (x: a) -> String
 }
 trait Eq a {
-  fun eq (x: a) (y: a) -> Bool
+  fun eq : (x: a) -> (y: a) -> Bool
 }
 trait Special a where {a: Show + Eq} {
-  fun special (x: a) -> String
+  fun special : (x: a) -> String
 }
 record Bar { val: Int }
 impl Show for Bar {
@@ -1572,7 +1572,7 @@ fn tuple_any_arity() {
 #[test]
 fn tuple_type_annotation() {
     let result = check(
-        "fun fst (p: (Int, String)) -> Int
+        "fun fst : (p: (Int, String)) -> Int
 fst p = case p { (x, _) -> x }
 main () = fst (1, \"hello\")",
     );
@@ -1585,8 +1585,8 @@ main () = fst (1, \"hello\")",
 fn handler_uses_effect_without_needs_is_error() {
     // Handler body uses an effect but declares no needs
     let result = check(
-        "effect Log { fun log (msg: String) -> Unit }
-effect Http { fun get (url: String) -> String }
+        "effect Log { fun log : (msg: String) -> Unit }
+effect Http { fun get : (url: String) -> String }
 handler my_http for Http {
   get url = {
     log! \"fetching\"
@@ -1607,8 +1607,8 @@ handler my_http for Http {
 fn handler_uses_effect_with_correct_needs_ok() {
     // Handler body uses Log and declares needs {Log}
     let result = check(
-        "effect Log { fun log (msg: String) -> Unit }
-effect Http { fun get (url: String) -> String }
+        "effect Log { fun log : (msg: String) -> Unit }
+effect Http { fun get : (url: String) -> String }
 handler console for Log {
   log msg = resume ()
 }
@@ -1626,7 +1626,7 @@ handler my_http for Http needs {Log} {
 fn pure_handler_no_needs_ok() {
     // Handler body has no effects -- no needs clause needed
     let result = check(
-        "effect Http { fun get (url: String) -> String }
+        "effect Http { fun get : (url: String) -> String }
 handler mock_http for Http {
   get url = resume \"mocked\"
 }",
@@ -1638,9 +1638,9 @@ handler mock_http for Http {
 fn handler_needs_missing_one_effect_is_error() {
     // Handler uses Log and Http but only declares needs {Log}
     let result = check(
-        "effect Log { fun log (msg: String) -> Unit }
-effect Http { fun get (url: String) -> String }
-effect Db { fun query (sql: String) -> String }
+        "effect Log { fun log : (msg: String) -> Unit }
+effect Http { fun get : (url: String) -> String }
+effect Db { fun query : (sql: String) -> String }
 handler log_impl for Log { log msg = resume () }
 handler my_db for Db needs {Log} {
   query sql = {
@@ -1663,7 +1663,7 @@ handler my_db for Db needs {Log} {
 fn handler_missing_operation() {
     // Handler for an effect with two ops but only handles one
     let result = check(
-        "effect State {\n  fun get () -> Int\n  fun put (n: Int) -> Unit\n}\nhandler partial for State {\n  get () = resume 0\n}",
+        "effect State {\n  fun get : Unit -> Int\n  fun put : (n: Int) -> Unit\n}\nhandler partial for State {\n  get () = resume 0\n}",
     );
     assert!(result.is_err());
 }
@@ -1671,7 +1671,7 @@ fn handler_missing_operation() {
 #[test]
 fn handler_empty_body() {
     let result = check(
-        "effect Log {\n  fun log (msg: String) -> Unit\n}\nhandler noop for Log {}",
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\nhandler noop for Log {}",
     );
     assert!(result.is_err());
 }
@@ -1693,7 +1693,7 @@ fn let_annotation_mismatch() {
 fn let_annotation_guides_inference() {
     // Annotation constrains the binding's type for subsequent use
     check(
-        "fun add (x: Int) -> Int
+        "fun add : (x: Int) -> Int
 add x = x + 1
 main () = { let n: Int = 10\n add n }",
     )
@@ -1787,7 +1787,7 @@ let x = case Just 42 {
 fn non_exhaustive_case_three_variants() {
     let result = check(
         "type Color { Red | Green | Blue }
-fun f (c: Color) -> Int
+fun f : (c: Color) -> Int
 f c = case c {
   Red -> 1
 }",
@@ -1865,7 +1865,7 @@ fn case_int_with_wildcard() {
 fn do_else_exhaustive() {
     check(
         "type Result a e { Ok(a) | Err(e) }
-fun get () -> Result Int String
+fun get : Unit -> Result Int String
 get () = Ok(42)
 let x = do {
   Ok(n) <- get ()
@@ -1881,7 +1881,7 @@ let x = do {
 fn do_else_non_exhaustive() {
     let result = check(
         "type Shape { Circle | Rect | Point }
-fun get_shape () -> Shape
+fun get_shape : Unit -> Shape
 get_shape () = Circle
 let x = do {
   Circle <- get_shape ()
@@ -1899,7 +1899,7 @@ let x = do {
 fn do_else_wildcard_covers_all() {
     check(
         "type Result a e { Ok(a) | Err(e) }
-fun get () -> Result Int String
+fun get : Unit -> Result Int String
 get () = Ok(42)
 let x = do {
   Ok(n) <- get ()
@@ -2016,7 +2016,7 @@ fn nested_exhaustive_all_combinations() {
     // All 4 combinations of (Bool, Bool) inside a constructor
     check(
         "type Pair { MkPair(Bool, Bool) }
-fun f (p: Pair) -> Int
+fun f : (p: Pair) -> Int
 f p = case p {
   MkPair(True, True) -> 1
   MkPair(True, False) -> 2
@@ -2032,7 +2032,7 @@ fn nested_non_exhaustive_missing_combination() {
     // Missing MkPair(False, False)
     let result = check(
         "type Pair { MkPair(Bool, Bool) }
-fun f (p: Pair) -> Int
+fun f : (p: Pair) -> Int
 f p = case p {
   MkPair(True, True) -> 1
   MkPair(True, False) -> 2
@@ -2050,7 +2050,7 @@ fn nested_exhaustive_with_wildcard_in_subpattern() {
     // Wildcard in second position covers both True and False
     check(
         "type Pair { MkPair(Bool, Bool) }
-fun f (p: Pair) -> Int
+fun f : (p: Pair) -> Int
 f p = case p {
   MkPair(True, _) -> 1
   MkPair(False, _) -> 2
@@ -2064,7 +2064,7 @@ fn nested_exhaustive_with_top_level_wildcard() {
     // A top-level wildcard covers everything
     check(
         "type Pair { MkPair(Bool, Bool) }
-fun f (p: Pair) -> Int
+fun f : (p: Pair) -> Int
 f p = case p {
   MkPair(True, True) -> 1
   _ -> 0
@@ -2078,7 +2078,7 @@ fn nested_redundant_after_wildcards() {
     // MkPair(True, True) is already covered by the two wildcard arms
     let result = check(
         "type Pair { MkPair(Bool, Bool) }
-fun f (p: Pair) -> Int
+fun f : (p: Pair) -> Int
 f p = case p {
   MkPair(True, _) -> 1
   MkPair(False, _) -> 2
@@ -2094,7 +2094,7 @@ fn nested_maybe_of_bool_exhaustive() {
     // Maybe(Bool) fully covered
     check(
         "type Maybe a { Just(a) | Nothing }
-fun f (m: Maybe Bool) -> Int
+fun f : (m: Maybe Bool) -> Int
 f m = case m {
   Just(True) -> 1
   Just(False) -> 2
@@ -2109,7 +2109,7 @@ fn nested_maybe_of_bool_missing() {
     // Missing Just(False)
     let result = check(
         "type Maybe a { Just(a) | Nothing }
-fun f (m: Maybe Bool) -> Int
+fun f : (m: Maybe Bool) -> Int
 f m = case m {
   Just(True) -> 1
   Nothing -> 0
@@ -2125,7 +2125,7 @@ fn nested_list_cons_exhaustive() {
     // List with nested pattern on head
     check(
         "type Maybe a { Just(a) | Nothing }
-fun f (xs: List (Maybe Int)) -> Int
+fun f : (xs: List (Maybe Int)) -> Int
 f xs = case xs {
   Just(_) :: _ -> 1
   Nothing :: _ -> 2
@@ -2138,7 +2138,7 @@ f xs = case xs {
 #[test]
 fn tuple_exhaustive_bool_pair() {
     check(
-        "fun f (p: (Bool, Bool)) -> Int
+        "fun f : (p: (Bool, Bool)) -> Int
 f p = case p {
   (True, True) -> 1
   (True, False) -> 2
@@ -2152,7 +2152,7 @@ f p = case p {
 #[test]
 fn tuple_non_exhaustive_missing() {
     let result = check(
-        "fun f (p: (Bool, Bool)) -> Int
+        "fun f : (p: (Bool, Bool)) -> Int
 f p = case p {
   (True, True) -> 1
   (True, False) -> 2
@@ -2166,7 +2166,7 @@ f p = case p {
 #[test]
 fn tuple_exhaustive_with_wildcard() {
     check(
-        "fun f (p: (Bool, Bool)) -> Int
+        "fun f : (p: (Bool, Bool)) -> Int
 f p = case p {
   (True, _) -> 1
   (False, _) -> 2
@@ -2180,7 +2180,7 @@ f p = case p {
 #[test]
 fn fun_clauses_exhaustive_bool() {
     check(
-        "fun f (x: Bool) -> Int
+        "fun f : (x: Bool) -> Int
 f True = 1
 f False = 0",
     )
@@ -2190,7 +2190,7 @@ f False = 0",
 #[test]
 fn fun_clauses_non_exhaustive_bool() {
     let result = check(
-        "fun f (x: Bool) -> Int
+        "fun f : (x: Bool) -> Int
 f True = 1",
     );
     let err = result.err().expect("expected type error");
@@ -2202,7 +2202,7 @@ f True = 1",
 fn fun_clauses_exhaustive_adt() {
     check(
         "type Maybe a { Just(a) | Nothing }
-fun f (m: Maybe Int) -> Int
+fun f : (m: Maybe Int) -> Int
 f (Just(x)) = x
 f Nothing = 0",
     )
@@ -2213,7 +2213,7 @@ f Nothing = 0",
 fn fun_clauses_non_exhaustive_adt() {
     let result = check(
         "type Maybe a { Just(a) | Nothing }
-fun f (m: Maybe Int) -> Int
+fun f : (m: Maybe Int) -> Int
 f (Just(x)) = x",
     );
     let err = result.err().expect("expected type error");
@@ -2224,7 +2224,7 @@ f (Just(x)) = x",
 #[test]
 fn fun_clauses_redundant() {
     let result = check(
-        "fun f (x: Bool) -> Int
+        "fun f : (x: Bool) -> Int
 f True = 1
 f False = 0
 f True = 2",
@@ -2237,7 +2237,7 @@ f True = 2",
 fn fun_clauses_with_wildcard_exhaustive() {
     check(
         "type Color { Red | Green | Blue }
-fun f (c: Color) -> Int
+fun f : (c: Color) -> Int
 f Red = 1
 f _ = 0",
     )
@@ -2248,7 +2248,7 @@ f _ = 0",
 fn fun_clauses_single_var_param_skips_check() {
     // Single clause with variable param should not trigger exhaustiveness
     check(
-        "fun f (x: Int) -> Int
+        "fun f : (x: Int) -> Int
 f x = x + 1",
     )
     .unwrap();
@@ -2269,7 +2269,7 @@ fn dict_empty_typechecks() {
 fn string_literal_pattern() {
     assert!(
         check(
-            "fun f (s: String) -> Int
+            "fun f : (s: String) -> Int
 f s = case s {
   \"hello\" -> 1
   _ -> 0
@@ -2283,7 +2283,7 @@ f s = case s {
 fn string_prefix_pattern() {
     assert!(
         check(
-            "fun f (s: String) -> String
+            "fun f : (s: String) -> String
 f s = case s {
   \"prefix\" <> rest -> rest
   _ -> s
@@ -2297,10 +2297,10 @@ f s = case s {
 fn effect_call_in_case_guard_rejected() {
     let result = check(
         "effect Check {
-  fun check (n: Int) -> Bool
+  fun check : (n: Int) -> Bool
 }
 
-fun filter (x: Int) -> Int needs {Check}
+fun filter : (x: Int) -> Int needs {Check}
 filter x = case x {
   n | check! n -> n
   _ -> 0
@@ -2319,10 +2319,10 @@ filter x = case x {
 fn effect_call_in_multi_clause_guard_rejected() {
     let result = check(
         "effect Check {
-  fun check (n: Int) -> Bool
+  fun check : (n: Int) -> Bool
 }
 
-fun filter (x: Int) -> Int needs {Check}
+fun filter : (x: Int) -> Int needs {Check}
 filter x | check! x = x
 filter _ = 0",
     );
@@ -2357,8 +2357,8 @@ fn generic_effect_basic() {
     assert!(
         check(
             "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
 handler counter for State Int {
@@ -2366,7 +2366,7 @@ handler counter for State Int {
   put val = resume ()
 }
 
-fun use_state () -> Unit needs {State}
+fun use_state : Unit -> Unit needs {State}
 use_state () = {
   let x = get! ()
   put! (x + 1)
@@ -2383,8 +2383,8 @@ fn generic_effect_type_shared_across_ops() {
     assert!(
         check(
             "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
 handler string_state for State String {
@@ -2392,7 +2392,7 @@ handler string_state for State String {
   put val = resume ()
 }
 
-fun use_string_state () -> Unit needs {State}
+fun use_string_state : Unit -> Unit needs {State}
 use_string_state () = {
   let s = get! ()
   put! (s <> \" world\")
@@ -2408,14 +2408,14 @@ fn non_parameterized_effects_still_work() {
     assert!(
         check(
             "effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler console for Log {
   log msg = resume ()
 }
 
-fun work () -> Unit needs {Log}
+fun work : Unit -> Unit needs {Log}
 work () = log! \"hello\""
         )
         .is_ok()
@@ -2427,8 +2427,8 @@ fn generic_effect_handler_type_mismatch() {
     // Handler declares State Int but resumes with a String -- should fail
     let result = check(
         "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
 handler bad for State Int {
@@ -2445,11 +2445,11 @@ fn generic_effect_get_infers_type() {
     assert!(
         check(
             "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun inc () -> Unit needs {State}
+fun inc : Unit -> Unit needs {State}
 inc () = {
   let x = get! ()
   put! (x + 1)
@@ -2464,11 +2464,11 @@ fn generic_effect_put_get_type_mismatch() {
     // get returns s, put takes s -- using get as Int then putting a String should fail
     let result = check(
         "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun bad () -> Unit needs {State}
+fun bad : Unit -> Unit needs {State}
 bad () = {
   let x = get! ()
   let _ = x + 1
@@ -2484,8 +2484,8 @@ fn generic_effect_multiple_type_params() {
     assert!(
         check(
             "effect Store k v {
-  fun read (key: k) -> v
-  fun write (key: k) (val: v) -> Unit
+  fun read : (key: k) -> v
+  fun write : (key: k) -> (val: v) -> Unit
 }
 
 handler dict_store for Store String Int {
@@ -2503,15 +2503,15 @@ fn generic_effect_with_existing_effects() {
     assert!(
         check(
             "effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun work () -> Unit needs {Log, State}
+fun work : Unit -> Unit needs {Log, State}
 work () = {
   log! \"starting\"
   let x = get! ()
@@ -2529,17 +2529,17 @@ fn generic_effect_independent_across_functions() {
     assert!(
         check(
             "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun use_int () -> Unit needs {State}
+fun use_int : Unit -> Unit needs {State}
 use_int () = {
   let x = get! ()
   put! (x + 1)
 }
 
-fun use_string () -> Unit needs {State}
+fun use_string : Unit -> Unit needs {State}
 use_string () = {
   let s = get! ()
   put! (s <> \"!\")
@@ -2555,11 +2555,11 @@ fn generic_effect_put_then_get() {
     assert!(
         check(
             "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun put_then_get () -> Int needs {State}
+fun put_then_get : Unit -> Int needs {State}
 put_then_get () = {
   put! 42
   get! ()
@@ -2574,11 +2574,11 @@ fn generic_effect_put_then_get_mismatch() {
     // put constrains s to Int, but return type is String -- should fail
     let result = check(
         "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun bad () -> String needs {State}
+fun bad : Unit -> String needs {State}
 bad () = {
   put! 42
   get! ()
@@ -2593,8 +2593,8 @@ fn generic_effect_complex_type_param() {
     assert!(
         check(
             "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
 type List a { Nil | Cons(a, List a) }
@@ -2614,8 +2614,8 @@ fn generic_effect_handler_return_clause() {
     assert!(
         check(
             "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
 type Result a { Ok(a) | Err(String) }
@@ -2636,9 +2636,9 @@ fn generic_effect_op_with_function_param() {
     assert!(
         check(
             "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
-  fun modify (f: s -> s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
+  fun modify : (f: s -> s) -> Unit
 }
 
 handler counter for State Int {
@@ -2647,7 +2647,7 @@ handler counter for State Int {
   modify f = resume ()
 }
 
-fun use_modify () -> Unit needs {State}
+fun use_modify : Unit -> Unit needs {State}
 use_modify () = {
   put! 10
   modify! (fun x -> x + x)
@@ -2662,12 +2662,12 @@ fn generic_effect_op_with_function_param_mismatch() {
     // modify takes (s -> s) but lambda has wrong type
     let result = check(
         "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
-  fun modify (f: s -> s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
+  fun modify : (f: s -> s) -> Unit
 }
 
-fun bad () -> Unit needs {State}
+fun bad : Unit -> Unit needs {State}
 bad () = {
   put! 42
   modify! (fun x -> \"not an int\")
@@ -2681,11 +2681,11 @@ fn generic_effect_multi_param_partial_mismatch() {
     // Store k v: read constrains v to Int, write uses String for v -- should fail
     let result = check(
         "effect Store k v {
-  fun read (key: k) -> v
-  fun write (key: k) (val: v) -> Unit
+  fun read : (key: k) -> v
+  fun write : (key: k) -> (val: v) -> Unit
 }
 
-fun bad () -> Unit needs {Store}
+fun bad : Unit -> Unit needs {Store}
 bad () = {
   let x = read! \"key\"
   let _ = x + 1
@@ -2701,8 +2701,8 @@ fn generic_effect_with_scopes_independent() {
     assert!(
         check(
             "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
 handler int_state for State Int {
@@ -2715,19 +2715,19 @@ handler string_state for State String {
   put val = resume ()
 }
 
-fun use_int () -> Unit needs {State}
+fun use_int : Unit -> Unit needs {State}
 use_int () = {
   let x = get! ()
   put! (x + 1)
 }
 
-fun use_string () -> Unit needs {State}
+fun use_string : Unit -> Unit needs {State}
 use_string () = {
   let s = get! ()
   put! (s <> \"!\")
 }
 
-fun main () -> Unit
+fun main : Unit -> Unit
 main () = {
   use_int () with int_state
   use_string () with string_state
@@ -2742,11 +2742,11 @@ fn generic_effect_needs_type_arg_constrains_body() {
     // needs {State Int} should constrain s=Int, so put! "hello" should fail
     let result = check(
         "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun bad () -> Unit needs {State Int}
+fun bad : Unit -> Unit needs {State Int}
 bad () = put! \"hello\"",
     );
     assert!(result.is_err());
@@ -2758,11 +2758,11 @@ fn generic_effect_needs_type_arg_allows_matching_usage() {
     assert!(
         check(
             "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun good () -> Unit needs {State Int}
+fun good : Unit -> Unit needs {State Int}
 good () = {
   let x = get! ()
   put! (x + 1)
@@ -2777,11 +2777,11 @@ fn generic_effect_needs_type_arg_get_returns_correct_type() {
     // needs {State String} means get! returns String, so adding 1 should fail
     let result = check(
         "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun bad () -> Int needs {State String}
+fun bad : Unit -> Int needs {State String}
 bad () = {
   let x = get! ()
   x + 1
@@ -2796,11 +2796,11 @@ fn generic_effect_needs_type_var_from_annotation() {
     // should link the effect's type param to the function's type param
     let result = check(
         "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun transform (f: a -> a) -> a needs {State a}
+fun transform : (f: a -> a) -> a needs {State a}
 transform f = {
   let x = get! ()
   let y = f x
@@ -2819,11 +2819,11 @@ fn generic_effect_needs_type_var_mismatch() {
     // needs {State a} but body treats a as both Int (s+1) and String (put! "hello")
     let result = check(
         "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun bad (x: a) -> Int needs {State a}
+fun bad : (x: a) -> Int needs {State a}
 bad x = {
   let s = get! ()
   put! \"hello\"
@@ -2841,14 +2841,14 @@ fn generic_effect_effarrow_polymorphic_hof() {
     assert!(
         check(
             "effect State s {
-  fun get () -> s
-  fun put (val: s) -> Unit
+  fun get : Unit -> s
+  fun put : (val: s) -> Unit
 }
 
-fun run_state (init: s) (f: () -> a needs {State s}) -> (a, s)
+fun run_state : (init: s) -> (f: () -> a needs {State s}) -> (a, s)
 run_state init f = (f (), init)
 
-fun use_it () -> Int
+fun use_it : Unit -> Int
 use_it () = {
   let (a, _) = run_state 0 (fun () -> get! ())
   let (b, _) = run_state \"\" (fun () -> get! ())
@@ -2863,10 +2863,10 @@ use_it () = {
 fn main_cannot_have_effects() {
     let result = check(
         "effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
-fun main () -> Unit needs {Log}
+fun main : Unit -> Unit needs {Log}
 main () = log! \"hello\"",
     );
     assert!(result.is_err());
@@ -2883,7 +2883,7 @@ fn external_fun_cannot_have_effects() {
     let result = check(
         r#"
         @external("erlang", "file", "read_file")
-        fun read_file (path: String) -> String needs {IO}
+        fun read_file : (path: String) -> String needs {IO}
         "#,
     );
     let err = result.err().expect("expected error");
@@ -2901,10 +2901,10 @@ fn impl_body_calls_helper_function() {
     check(
         r#"
 trait Display a {
-    fun display (x: a) -> String
+    fun display : (x: a) -> String
 }
 
-fun helper (n: Int) -> String
+fun helper : (n: Int) -> String
 helper n = show n
 
 type Wrapper { Wrapper(Int) }
@@ -2922,7 +2922,7 @@ fn impl_body_calls_unannotated_helper() {
     check(
         r#"
 trait Display a {
-    fun display (x: a) -> String
+    fun display : (x: a) -> String
 }
 
 helper n = show n
@@ -3060,7 +3060,7 @@ import Std.Actor
 
 type Msg { Ping | Stop }
 
-fun handle_msg (x: Int) -> Int needs {Actor Msg}
+fun handle_msg : (x: Int) -> Int needs {Actor Msg}
 handle_msg x = receive {
   Ping -> 1
   Stop -> 0
@@ -3078,7 +3078,7 @@ import Std.Actor
 
 type Msg { Ping }
 
-fun handle_msg () -> Int needs {Actor Msg}
+fun handle_msg : Unit -> Int needs {Actor Msg}
 handle_msg () = receive {
   Ping -> 1
   after "not an int" -> 0
@@ -3097,7 +3097,7 @@ import Std.Actor
 
 type Msg { A | B | C }
 
-fun handle_msg () -> Int needs {Actor Msg}
+fun handle_msg : Unit -> Int needs {Actor Msg}
 handle_msg () = receive {
   A -> 1
 }
@@ -3109,7 +3109,7 @@ handle_msg () = receive {
 #[test]
 fn error_messages_show_resolved_types() {
     // Type mismatch should show concrete type names, not ?-variables
-    let err = check("fun f (x: Int) -> String\nf x = x")
+    let err = check("fun f : (x: Int) -> String\nf x = x")
         .err()
         .expect("expected type error");
     assert!(
@@ -3129,7 +3129,7 @@ fn error_messages_show_resolved_types_with_constructors() {
     // Passing wrong type to a function should show the actual types
     let err = check(
         r#"
-fun add (a: Int) (b: Int) -> Int
+fun add : (a: Int) -> (b: Int) -> Int
 add a b = a + b
 
 main () = add "hello" 1
@@ -3154,7 +3154,7 @@ main () = add "hello" 1
 #[test]
 fn type_at_span_records_function_params() {
     // Function params go through bind_pattern which records the type (Pat -> type_at_span)
-    let checker = check("fun foo (x: Int) -> Int\nfoo x = x").unwrap();
+    let checker = check("fun foo : (x: Int) -> Int\nfoo x = x").unwrap();
     let result = checker.to_result();
     let types: Vec<_> = result
         .type_at_span
@@ -3226,10 +3226,10 @@ fn ambiguous_unqualified_effect_op_is_error() {
     // Two effects define the same op name; unqualified call should error
     let result = check(
         "effect A {
-  fun ping () -> Int
+  fun ping : Unit -> Int
 }
 effect B {
-  fun ping () -> Int
+  fun ping : Unit -> Int
 }
 main x = ping!",
     );
@@ -3247,12 +3247,12 @@ fn qualified_effect_op_resolves_ambiguity() {
     // Two effects with same op name; qualified call should work
     check(
         "effect A {
-  fun ping () -> Int
+  fun ping : Unit -> Int
 }
 effect B {
-  fun ping () -> String
+  fun ping : Unit -> String
 }
-fun foo (x: Int) -> Int needs {A}
+fun foo : (x: Int) -> Int needs {A}
 foo x = A.ping! ()",
     )
     .unwrap();
@@ -3263,10 +3263,10 @@ fn multi_effect_handler_op_name_collision_is_error() {
     // Handler for two effects that share an op name should error on ambiguity
     let result = check(
         "effect A {
-  fun ping () -> Int
+  fun ping : Unit -> Int
 }
 effect B {
-  fun ping () -> String
+  fun ping : Unit -> String
 }
 handler h for A, B {
   ping () = resume 0
@@ -3286,10 +3286,10 @@ fn multi_effect_handler_no_collision_works() {
     // Handler for two effects with distinct op names should work fine
     check(
         "effect Logger {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 effect Counter {
-  fun inc () -> Unit
+  fun inc : Unit -> Unit
 }
 handler h for Logger, Counter {
   log msg = resume ()
@@ -3304,8 +3304,8 @@ fn duplicate_handler_arm_is_error() {
     // Same op name twice in one handler should error
     let result = check(
         "effect Foo {
-  fun a () -> Int
-  fun b () -> Int
+  fun a : Unit -> Int
+  fun b : Unit -> Int
 }
 handler foo for Foo {
   a () = 1
@@ -3326,7 +3326,7 @@ handler foo for Foo {
 fn duplicate_impl_method_is_error() {
     let result = check(
         "trait Foo a {
-  fun a (x: a) -> Int
+  fun a : (x: a) -> Int
 }
 impl Foo for String {
   a _ = 42
@@ -3346,7 +3346,7 @@ impl Foo for String {
 fn duplicate_impl_for_same_type_is_error() {
     let result = check(
         "trait Foo a {
-  fun a (x: a) -> Int
+  fun a : (x: a) -> Int
 }
 impl Foo for String {
   a _ = 42
@@ -3368,7 +3368,7 @@ impl Foo for String {
 
 #[test]
 fn type_arity_too_many_args_builtin_list() {
-    let result = check("fun foo (x: List Int String) -> Int\nfoo x = 1");
+    let result = check("fun foo : (x: List Int String) -> Int\nfoo x = 1");
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(
@@ -3381,7 +3381,7 @@ fn type_arity_too_many_args_builtin_list() {
 #[test]
 fn type_arity_too_many_args_user_type() {
     let result = check(
-        "type Box a { Box(a) }\nfun foo (x: Box Int String) -> Int\nfoo x = 1",
+        "type Box a { Box(a) }\nfun foo : (x: Box Int String) -> Int\nfoo x = 1",
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
@@ -3394,7 +3394,7 @@ fn type_arity_too_many_args_user_type() {
 
 #[test]
 fn type_arity_nullary_with_args() {
-    let result = check("fun foo (x: Int String) -> Int\nfoo x = 1");
+    let result = check("fun foo : (x: Int String) -> Int\nfoo x = 1");
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(
@@ -3407,14 +3407,14 @@ fn type_arity_nullary_with_args() {
 #[test]
 fn type_arity_correct_usage() {
     // These should all pass without error
-    check("fun foo (x: List Int) -> Int\nfoo x = 1").unwrap();
-    check("fun foo (x: Maybe Int) -> Int\nfoo _ = 1").unwrap();
-    check("fun foo (x: Result String Int) -> Int\nfoo _ = 1").unwrap();
+    check("fun foo : (x: List Int) -> Int\nfoo x = 1").unwrap();
+    check("fun foo : (x: Maybe Int) -> Int\nfoo _ = 1").unwrap();
+    check("fun foo : (x: Result String Int) -> Int\nfoo _ = 1").unwrap();
 }
 
 #[test]
 fn type_arity_too_many_args_maybe() {
-    let result = check("fun foo (x: Maybe Int Float) -> Int\nfoo _ = 1");
+    let result = check("fun foo : (x: Maybe Int Float) -> Int\nfoo _ = 1");
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(

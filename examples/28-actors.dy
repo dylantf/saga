@@ -6,7 +6,7 @@ type CounterMsg {
   Stop
 }
 
-fun counter (count: Int) -> Unit needs {Process, Actor CounterMsg}
+fun counter : (count: Int) -> Unit needs {Process, Actor CounterMsg}
 counter count = {
   receive {
     Increment(n) -> counter (count + n)
@@ -18,7 +18,7 @@ counter count = {
   }
 }
 
-fun run_counter () -> Unit needs {Process, Actor Int}
+fun run_counter : Unit -> Unit needs {Process, Actor Int}
 run_counter () = {
   let pid = spawn! (fun () -> counter 0)
   send! pid (Increment 5)

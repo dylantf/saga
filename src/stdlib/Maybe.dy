@@ -12,19 +12,19 @@ pub type Maybe a {
   Just(a)
 }
 
-pub fun map (f: a -> b) (m: Maybe a) -> Maybe b
+pub fun map : (f: a -> b) -> (m: Maybe a) -> Maybe b
 map f m = case m {
   Nothing -> Nothing
   Just(x) -> Just(f x)
 }
 
-pub fun unwrap_or (default: a) (m: Maybe a) -> a
+pub fun unwrap_or : (default: a) -> (m: Maybe a) -> a
 unwrap_or default m = case m {
   Nothing -> default
   Just(x) -> x
 }
 
-pub fun and_then (f: a -> Maybe b) (m: Maybe a) -> Maybe b
+pub fun and_then : (f: a -> Maybe b) -> (m: Maybe a) -> Maybe b
 and_then f m = case m {
   Nothing -> Nothing
   Just(x) -> f x

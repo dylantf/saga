@@ -5,7 +5,7 @@ type WorkerMsg {
   Die
 }
 
-fun worker () -> Unit needs {Process, Actor WorkerMsg}
+fun worker : Unit -> Unit needs {Process, Actor WorkerMsg}
 worker () = receive {
   Work(n) -> {
     println $"Working on {n}"
@@ -14,7 +14,7 @@ worker () = receive {
   Die -> println "Worker shutting down"
 }
 
-fun watcher () -> Unit needs {Process, Actor WorkerMsg, Monitor}
+fun watcher : Unit -> Unit needs {Process, Actor WorkerMsg, Monitor}
 watcher () = {
   let pid = spawn! (fun () -> worker ())
   let _ref = monitor! pid

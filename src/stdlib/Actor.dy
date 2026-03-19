@@ -12,14 +12,14 @@ pub type Test {
 #@ Process effect: spawn and send
 #@ Type variable `msg` is free per call site, inferred from the pid / spawned function.
 pub effect Process {
-  fun spawn (f: () -> Unit needs {Actor msg}) -> Pid msg
-  fun send (pid: Pid msg) (msg: msg) -> Unit
+  fun spawn : (f: () -> Unit needs {Actor msg}) -> Pid msg
+  fun send : (pid: Pid msg) -> (msg: msg) -> Unit
 }
 
 #@ Actor effect: parameterized by the current process's message type.
 #@ Only self and receive use this (scoped to this process's mailbox).
 pub effect Actor msg {
-  fun self () -> Pid msg
+  fun self : Unit -> Pid msg
 }
 
 #@ Exit reasons for monitored processes
@@ -54,23 +54,23 @@ impl Show for ExitReason {
 pub opaque type MonitorRef { MonitorRef }
 
 pub effect Monitor {
-  fun monitor (pid: Pid msg) -> MonitorRef
-  fun demonitor (ref: MonitorRef) -> Unit
+  fun monitor : (pid: Pid msg) -> MonitorRef
+  fun demonitor : (ref: MonitorRef) -> Unit
 }
 
 #@ Link effect: bidirectional crash propagation between processes.
 pub effect Link {
-  fun link (pid: Pid msg) -> Unit
-  fun unlink (pid: Pid msg) -> Unit
+  fun link : (pid: Pid msg) -> Unit
+  fun unlink : (pid: Pid msg) -> Unit
 }
 
 #@ Timer effect: delays and scheduled messages.
 pub opaque type TimerRef { TimerRef }
 
 pub effect Timer {
-  fun sleep (ms: Int) -> Unit
-  fun send_after (pid: Pid msg) (ms: Int) (msg: msg) -> TimerRef
-  fun cancel_timer (ref: TimerRef) -> Unit
+  fun sleep : (ms: Int) -> Unit
+  fun send_after : (pid: Pid msg) -> (ms: Int) -> (msg: msg) -> TimerRef
+  fun cancel_timer : (ref: TimerRef) -> Unit
 }
 
 #@ beam_actor: handles Process, Actor, Monitor, Link, and Timer.

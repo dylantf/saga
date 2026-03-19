@@ -12,7 +12,7 @@ type WorkerMsg {
   Compute(Int, Pid Int)
 }
 
-fun worker () -> Unit needs {Process, Actor WorkerMsg}
+fun worker : Unit -> Unit needs {Process, Actor WorkerMsg}
 worker () = {
   receive {
     Compute(n, reply_to) -> send! reply_to (n * n)
@@ -31,7 +31,7 @@ handler sync_actor for Process, Actor msg {
   send () = ()
 }
 
-fun run () -> Int needs {Process, Actor Int}
+fun run : Unit -> Int needs {Process, Actor Int}
 run () = {
   let me = self! ()
   let w = spawn! (fun () -> worker ())

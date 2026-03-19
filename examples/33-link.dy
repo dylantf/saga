@@ -2,7 +2,7 @@ import Std.Actor
 
 type WorkerMsg { Go | Crash }
 
-fun worker () -> Unit needs {Process, Actor WorkerMsg}
+fun worker : Unit -> Unit needs {Process, Actor WorkerMsg}
 worker () = receive {
   Go -> {
     println "Worker doing work..."
@@ -11,7 +11,7 @@ worker () = receive {
   Crash -> panic "something broke!"
 }
 
-fun supervisor () -> Unit needs {Process, Actor WorkerMsg, Monitor}
+fun supervisor : Unit -> Unit needs {Process, Actor WorkerMsg, Monitor}
 supervisor () = {
   let pid = spawn! (fun () -> worker ())
   let _ref = monitor! pid

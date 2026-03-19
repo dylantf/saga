@@ -1,7 +1,7 @@
 import Std.Actor
 import Std.Async
 
-fun run () -> List Int needs {Async}
+fun run : Unit -> List Int needs {Async}
 run () = {
   let f1 = async! (fun () -> 1)
   let f2 = async! (fun () -> 2)

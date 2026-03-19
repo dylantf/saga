@@ -1,5 +1,5 @@
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler console_log for Log {

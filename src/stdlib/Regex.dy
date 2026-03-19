@@ -2,17 +2,17 @@ module Std.Regex
 
 import Std.Maybe as Maybe (Maybe)
 
-pub fun match (pattern: String) (s: String) -> Bool
+pub fun match : (pattern: String) -> (s: String) -> Bool
 # builtin
 
-pub fun find (pattern: String) (s: String) -> Maybe String
+pub fun find : (pattern: String) -> (s: String) -> Maybe String
 # builtin
 
-pub fun find_all (pattern: String) (s: String) -> List String
+pub fun find_all : (pattern: String) -> (s: String) -> List String
 # builtin
 
-pub fun replace (pattern: String) (s: String) (replacement: String) -> String
+pub fun replace : (pattern: String) -> (s: String) -> (replacement: String) -> String
 # builtin
 
-pub fun replace_all (pattern: String) (s: String) (replacement: String) -> String
+pub fun replace_all : (pattern: String) -> (s: String) -> (replacement: String) -> String
 # builtin

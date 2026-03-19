@@ -3,10 +3,10 @@ module Std.Process
 #@ Immediately terminates the VM with the given exit code.
 #@ This is equivalent to erlang:halt/1.
 pub @external("erlang", "erlang", "halt")
-fun exit (code: Int) -> Never
+fun exit : (code: Int) -> Never
 
 #@ Gracefully shuts down the VM with the given exit code.
 #@ Flushes IO, runs shutdown procedures, then terminates.
 #@ This is equivalent to init:stop/1.
 pub @external("erlang", "init", "stop")
-fun shutdown (code: Int) -> Never
+fun shutdown : (code: Int) -> Never

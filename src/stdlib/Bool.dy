@@ -14,7 +14,7 @@ impl Debug for Bool {
   }
 }
 
-pub fun not (x: Bool) -> Bool
+pub fun not : Bool -> Bool
 not True = False
 not False = True
 

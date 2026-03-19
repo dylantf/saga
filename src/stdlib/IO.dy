@@ -3,21 +3,21 @@ module Std.IO
 import Std.String
 
 #@ prints to stdout
-pub fun print (x: String) -> Unit
+pub fun print : String -> Unit
 # builtin
 
 #@ prints to stdout with a trailing newline
-pub fun println (x: String) -> Unit
+pub fun println : String -> Unit
 # builtin
 
 #@ prints to stderr
-pub fun eprint (x: String) -> Unit
+pub fun eprint : String -> Unit
 # builtin
 
 #@ prints to stderr with a trailing newline
-pub fun eprintln (x: String) -> Unit
+pub fun eprintln : String -> Unit
 # builtin
 
 #@ prints debug representation to stderr and returns the value
-pub fun dbg (x: a) -> a where {a: Debug}
+pub fun dbg : a -> a where {a: Debug}
 # builtin

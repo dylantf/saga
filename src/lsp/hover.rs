@@ -360,6 +360,7 @@ pub fn type_at_name(
 }
 
 /// Get just the parameter labels from a FunAnnotation.
+/// Returns None if no annotation exists or if no params have real labels.
 pub(crate) fn annotation_labels(program: &[Decl], name: &str) -> Option<Vec<String>> {
     for decl in program {
         if let Decl::FunAnnotation {
@@ -369,7 +370,12 @@ pub(crate) fn annotation_labels(program: &[Decl], name: &str) -> Option<Vec<Stri
         } = decl
             && fn_name == name
         {
-            return Some(params.iter().map(|(label, _)| label.clone()).collect());
+            let labels: Vec<String> = params.iter().map(|(label, _)| label.clone()).collect();
+            // Only return labels if at least one is a real (non-synthetic) label
+            if labels.iter().any(|l| !l.starts_with('_')) {
+                return Some(labels);
+            }
+            return None;
         }
     }
     None
@@ -385,10 +391,16 @@ fn labeled_type(labels: &[String], type_str: &str) -> String {
     let labeled: Vec<String> = labels
         .iter()
         .zip(parts.iter())
-        .map(|(label, ty)| format!("({}: {})", label, ty))
+        .map(|(label, ty)| {
+            if label.starts_with('_') {
+                ty.to_string()
+            } else {
+                format!("({}: {})", label, ty)
+            }
+        })
         .collect();
     let rest = parts[labels.len()..].join(" -> ");
-    format!("{} -> {}", labeled.join(" "), rest)
+    format!("{} -> {}", labeled.join(" -> "), rest)
 }
 
 /// Find a FunAnnotation for the given name and format it with labels.
@@ -405,13 +417,23 @@ pub(crate) fn find_annotation(program: &[Decl], name: &str) -> Option<String> {
         {
             let params_str: Vec<String> = params
                 .iter()
-                .map(|(label, ty)| format!("({}: {})", label, format_type_expr(ty)))
+                .map(|(label, ty)| {
+                    if label.starts_with('_') {
+                        format_type_expr(ty)
+                    } else {
+                        format!("({}: {})", label, format_type_expr(ty))
+                    }
+                })
                 .collect();
-            let mut sig = format!(
-                "{} -> {}",
-                params_str.join(" -> "),
+            let mut sig = if params_str.is_empty() {
                 format_type_expr(return_type)
-            );
+            } else {
+                format!(
+                    "{} -> {}",
+                    params_str.join(" -> "),
+                    format_type_expr(return_type)
+                )
+            };
             if !effects.is_empty() {
                 let effs: Vec<String> = effects
                     .iter()

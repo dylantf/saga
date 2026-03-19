@@ -1,12 +1,12 @@
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
 handler log_failure for Fail {
   fail msg = println ("Error: " <> msg)
 }
 
-fun safe_div (x: Int) (y: Int) -> Int needs {Fail}
+fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail}
 safe_div x 0 = fail! "division by zero"
 safe_div x y = x / y
 

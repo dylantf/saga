@@ -5,11 +5,11 @@
 # of try/catch, but composable and explicit.
 
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
 # Run a computation that might fail, returning a Result
-fun try (computation: () -> a needs {Fail}) -> Result a String
+fun try : (computation: () -> a needs {Fail}) -> Result a String
 try computation = {
   computation () with {
     fail msg = Err msg
@@ -19,11 +19,11 @@ try computation = {
 
 # --- Some functions that can fail ---
 
-fun safe_div (x: Int) (y: Int) -> Int needs {Fail}
+fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail}
 safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 
-fun parse_positive (x: Int) -> Int needs {Fail}
+fun parse_positive : (x: Int) -> Int needs {Fail}
 parse_positive x =
   if x > 0 then x
   else fail! ("expected positive number, got " <> show x)

@@ -7,27 +7,27 @@ impl Debug for Dict k v where {k: Debug, v: Debug} {
 }
 
 pub @external("erlang", "maps", "put")
-fun put (key: k) (value: v) (dict: Dict k v) -> Dict k v where {k: Eq}
+fun put : (key: k) -> (value: v) -> (dict: Dict k v) -> Dict k v where {k: Eq}
 
 pub @external("erlang", "maps", "remove")
-fun remove (key: k) (dict: Dict k v) -> Dict k v where {k: Eq}
+fun remove : (key: k) -> (dict: Dict k v) -> Dict k v where {k: Eq}
 
 pub @external("erlang", "maps", "keys")
-fun keys (dict: Dict k v) -> List k
+fun keys : (dict: Dict k v) -> List k
 
 pub @external("erlang", "maps", "values")
-fun values (dict: Dict k v) -> List v
+fun values : (dict: Dict k v) -> List v
 
 pub @external("erlang", "maps", "size")
-fun size (dict: Dict k v) -> Int
+fun size : (dict: Dict k v) -> Int
 
 pub @external("erlang", "maps", "from_list")
-fun from_list (pairs: List (k, v)) -> Dict k v where {k: Eq}
+fun from_list : (pairs: List (k, v)) -> Dict k v where {k: Eq}
 
 pub @external("erlang", "maps", "to_list")
-fun to_list (dict: Dict k v) -> List (k, v)
+fun to_list : (dict: Dict k v) -> List (k, v)
 
 pub @external("erlang", "maps", "is_key")
-fun member (key: k) (dict: Dict k v) -> Bool where {k: Eq}
+fun member : (key: k) -> (dict: Dict k v) -> Bool where {k: Eq}
 
 

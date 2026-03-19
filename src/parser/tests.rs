@@ -1000,7 +1000,7 @@ fn pattern_list_two_elements() {
 
 #[test]
 fn fun_annotation_simple() {
-    let decls = parse("fun add (a: Int) (b: Int) -> Int");
+    let decls = parse("fun add : (a: Int) -> (b: Int) -> Int");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::FunAnnotation {
@@ -1025,7 +1025,7 @@ fn fun_annotation_simple() {
 
 #[test]
 fn fun_annotation_public_with_effects() {
-    let decls = parse("pub fun print (msg: String) -> Unit needs { Console }");
+    let decls = parse("pub fun print : (msg: String) -> Unit needs { Console }");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::FunAnnotation {
@@ -1040,7 +1040,7 @@ fn fun_annotation_public_with_effects() {
 
 #[test]
 fn fun_annotation_unit_param() {
-    let decls = parse("fun do_work () -> Int needs { Log }");
+    let decls = parse("fun do_work : Unit -> Int needs { Log }");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::FunAnnotation {
@@ -1051,7 +1051,7 @@ fn fun_annotation_unit_param() {
         } => {
             assert_eq!(name, "do_work");
             assert_eq!(params.len(), 1);
-            assert_eq!(params[0].0, "_");
+            assert_eq!(params[0].0, "_0");
             assert_eq!(params[0].1, TypeExpr::Named("Unit".into()));
             assert_eq!(effect_names(effects), vec!["Log"]);
         }
@@ -1164,7 +1164,7 @@ fn case_with_guard() {
 
 #[test]
 fn type_expr_named() {
-    let decls = parse("fun id (x: Int) -> Int");
+    let decls = parse("fun id : (x: Int) -> Int");
     match &decls[0] {
         Decl::FunAnnotation {
             params,
@@ -1180,7 +1180,7 @@ fn type_expr_named() {
 
 #[test]
 fn type_expr_application() {
-    let decls = parse("fun unwrap (x: Option a) -> a");
+    let decls = parse("fun unwrap : (x: Option a) -> a");
     match &decls[0] {
         Decl::FunAnnotation {
             params,
@@ -1196,7 +1196,7 @@ fn type_expr_application() {
 
 #[test]
 fn type_expr_arrow() {
-    let decls = parse("fun apply (f: a -> b) (x: a) -> b");
+    let decls = parse("fun apply : (f: a -> b) -> (x: a) -> b");
     match &decls[0] {
         Decl::FunAnnotation { params, .. } => {
             assert!(matches!(&params[0].1, TypeExpr::Arrow(_, _, _)));
@@ -1209,7 +1209,7 @@ fn type_expr_arrow() {
 
 #[test]
 fn annotation_and_binding() {
-    let decls = parse("fun add (a: Int) (b: Int) -> Int\nadd x y = x + y");
+    let decls = parse("fun add : (a: Int) -> (b: Int) -> Int\nadd x y = x + y");
     assert_eq!(decls.len(), 2);
     assert!(matches!(&decls[0], Decl::FunAnnotation { .. }));
     assert!(matches!(&decls[1], Decl::FunBinding { .. }));
@@ -1611,7 +1611,7 @@ fn record_def_with_multiple_type_params() {
 
 #[test]
 fn effect_def_single_op() {
-    let decls = parse("effect Log {\n  fun log (level: String) (msg: String) -> Unit\n}");
+    let decls = parse("effect Log {\n  fun log : (level: String) -> (msg: String) -> Unit\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::EffectDef {
@@ -1631,7 +1631,7 @@ fn effect_def_single_op() {
 #[test]
 fn effect_def_multiple_ops() {
     let decls = parse(
-        "effect Http {\n  fun get (url: String) -> String\n  fun post (url: String) (body: String) -> String\n}",
+        "effect Http {\n  fun get : (url: String) -> String\n  fun post : (url: String) -> (body: String) -> String\n}",
     );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
@@ -1950,7 +1950,7 @@ fn with_mixed_handlers() {
 
 #[test]
 fn fun_annotation_with_where_clause() {
-    let decls = parse("fun show (x: a) -> String where {a: Show}");
+    let decls = parse("fun show : (x: a) -> String where {a: Show}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::FunAnnotation { where_clause, .. } => {
@@ -1964,7 +1964,7 @@ fn fun_annotation_with_where_clause() {
 
 #[test]
 fn fun_annotation_where_multiple_bounds() {
-    let decls = parse("fun compare (x: a) (y: b) -> Int where {a: Show + Eq, b: Ord}");
+    let decls = parse("fun compare : (x: a) -> (y: b) -> Int where {a: Show + Eq, b: Ord}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::FunAnnotation { where_clause, .. } => {
@@ -1980,7 +1980,7 @@ fn fun_annotation_where_multiple_bounds() {
 
 #[test]
 fn fun_annotation_needs_and_where() {
-    let decls = parse("fun f (x: a) -> Unit needs {Log} where {a: Show}");
+    let decls = parse("fun f : (x: a) -> Unit needs {Log} where {a: Show}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::FunAnnotation {
@@ -2000,7 +2000,7 @@ fn fun_annotation_needs_and_where() {
 
 #[test]
 fn trait_def_simple() {
-    let decls = parse("trait Show a {\n  fun show (x: a) -> String\n}");
+    let decls = parse("trait Show a {\n  fun show : (x: a) -> String\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::TraitDef {
@@ -2023,7 +2023,7 @@ fn trait_def_simple() {
 
 #[test]
 fn trait_def_with_supertraits() {
-    let decls = parse("trait Ord a where {a: Eq} {\n  fun compare (x: a) (y: a) -> Ordering\n}");
+    let decls = parse("trait Ord a where {a: Eq} {\n  fun compare : (x: a) -> (y: a) -> Ordering\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::TraitDef {
@@ -2139,7 +2139,7 @@ fn private_record_def() {
 
 #[test]
 fn pub_effect_def() {
-    let decls = parse("pub effect Log {\n  fun log (msg: String) -> Unit\n}");
+    let decls = parse("pub effect Log {\n  fun log : (msg: String) -> Unit\n}");
     match &decls[0] {
         Decl::EffectDef { public, name, .. } => {
             assert!(public);
@@ -2151,7 +2151,7 @@ fn pub_effect_def() {
 
 #[test]
 fn private_effect_def() {
-    let decls = parse("effect Log {\n  fun log (msg: String) -> Unit\n}");
+    let decls = parse("effect Log {\n  fun log : (msg: String) -> Unit\n}");
     match &decls[0] {
         Decl::EffectDef { public, .. } => {
             assert!(!public);
@@ -2185,7 +2185,7 @@ fn private_handler_def() {
 
 #[test]
 fn pub_trait_def() {
-    let decls = parse("pub trait Show a {\n  fun show (x: a) -> String\n}");
+    let decls = parse("pub trait Show a {\n  fun show : (x: a) -> String\n}");
     match &decls[0] {
         Decl::TraitDef { public, name, .. } => {
             assert!(public);
@@ -2197,7 +2197,7 @@ fn pub_trait_def() {
 
 #[test]
 fn private_trait_def() {
-    let decls = parse("trait Show a {\n  fun show (x: a) -> String\n}");
+    let decls = parse("trait Show a {\n  fun show : (x: a) -> String\n}");
     match &decls[0] {
         Decl::TraitDef { public, .. } => {
             assert!(!public);
@@ -2208,7 +2208,7 @@ fn private_trait_def() {
 
 #[test]
 fn pub_fun_annotation() {
-    let decls = parse("pub fun add (a: Int) (b: Int) -> Int");
+    let decls = parse("pub fun add : (a: Int) -> (b: Int) -> Int");
     match &decls[0] {
         Decl::FunAnnotation { public, name, .. } => {
             assert!(public);
@@ -2220,7 +2220,7 @@ fn pub_fun_annotation() {
 
 #[test]
 fn private_fun_annotation() {
-    let decls = parse("fun add (a: Int) (b: Int) -> Int");
+    let decls = parse("fun add : (a: Int) -> (b: Int) -> Int");
     match &decls[0] {
         Decl::FunAnnotation { public, .. } => {
             assert!(!public);
@@ -2575,7 +2575,7 @@ fn compose_chain() {
 
 #[test]
 fn effect_def_with_type_params() {
-    let decls = parse("effect State s {\n  fun get () -> s\n  fun put (val: s) -> Unit\n}");
+    let decls = parse("effect State s {\n  fun get : Unit -> s\n  fun put : (val: s) -> Unit\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::EffectDef {
@@ -2619,7 +2619,7 @@ fn handler_for_parameterized_effect() {
 
 #[test]
 fn fun_annotation_needs_parameterized_effect() {
-    let decls = parse("fun foo () -> Int needs {State Int}");
+    let decls = parse("fun foo : Unit -> Int needs {State Int}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::FunAnnotation { effects, .. } => {
@@ -2634,7 +2634,7 @@ fn fun_annotation_needs_parameterized_effect() {
 
 #[test]
 fn needs_mixed_parameterized_and_plain() {
-    let decls = parse("fun foo () -> Int needs {State Int, Log}");
+    let decls = parse("fun foo : Unit -> Int needs {State Int, Log}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::FunAnnotation { effects, .. } => {
@@ -2653,7 +2653,7 @@ fn needs_mixed_parameterized_and_plain() {
 #[test]
 fn external_fun_basic() {
     let decls =
-        parse(r#"@external("erlang", "lists", "reverse") fun reverse (list: List a) -> List a"#);
+        parse(r#"@external("erlang", "lists", "reverse") fun reverse : (list: List a) -> List a"#);
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::ExternalFun {
@@ -2679,7 +2679,7 @@ fn external_fun_basic() {
 
 #[test]
 fn external_fun_pub() {
-    let decls = parse(r#"pub @external("erlang", "maps", "new") fun empty () -> Dict a b"#);
+    let decls = parse(r#"pub @external("erlang", "maps", "new") fun empty : Unit -> Dict a b"#);
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::ExternalFun {
@@ -2705,7 +2705,7 @@ fn external_fun_multiline() {
     let decls = parse(
         r#"
 @external("erlang", "lists", "foldl")
-fun foldl (f: a -> b -> a) (acc: a) (list: List b) -> a
+fun foldl : (f: a -> b -> a) -> (acc: a) -> (list: List b) -> a
 "#,
     );
     assert_eq!(decls.len(), 1);
@@ -2721,7 +2721,7 @@ fun foldl (f: a -> b -> a) (acc: a) (list: List b) -> a
 #[test]
 fn external_fun_with_where_clause() {
     let decls = parse(
-        r#"@external("erlang", "my_mod", "do_thing") fun do_thing (x: a) -> String where {a: Show}"#,
+        r#"@external("erlang", "my_mod", "do_thing") fun do_thing : (x: a) -> String where {a: Show}"#,
     );
     assert_eq!(decls.len(), 1);
     match &decls[0] {

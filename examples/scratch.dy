@@ -1,8 +1,11 @@
-fun foo (a: Int) (b: Int) -> String
+fun foo : (first_number: Int) -> (second_number: Int) -> String
 foo a b = case a + b {
   n | n > 50 -> "Wow, a big number"
   _ -> "its a number"
 }
+
+fun bar : Int -> Int -> String
+bar = foo
 
 main () = {
   let description = foo 123 4

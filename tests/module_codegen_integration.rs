@@ -108,7 +108,7 @@ fn qualified_call_emits_inter_module_call() {
     let main_src = "
 module Main
 import Math
-pub fun main () -> Int
+pub fun main : Unit -> Int
 main () = Math.add 10 20
 ";
     let mut checker = make_project_checker();
@@ -129,7 +129,7 @@ fn qualified_call_with_alias() {
     let main_src = "
 module Main
 import Math as M
-pub fun main () -> Int
+pub fun main : Unit -> Int
 main () = M.add 1 2
 ";
     let mut checker = make_project_checker();
@@ -147,7 +147,7 @@ fn exposed_import_emits_inter_module_call() {
     let main_src = "
 module Main
 import Math (add)
-pub fun main () -> Int
+pub fun main : Unit -> Int
 main () = add 10 20
 ";
     let mut checker = make_project_checker();
@@ -163,7 +163,7 @@ fn exposed_and_qualified_same_module() {
     let main_src = "
 module Main
 import Math (add)
-pub fun main () -> Int
+pub fun main : Unit -> Int
 main () = add 1 (Math.double 3)
 ";
     let mut checker = make_project_checker();
@@ -231,7 +231,7 @@ main () = add 1 2
 fn module_name_lowercased_in_output() {
     let src = "
 module MathLib
-pub fun add (a: Int) (b: Int) -> Int
+pub fun add : (a: Int) -> (b: Int) -> Int
 add a b = a + b
 ";
     let mut checker = make_project_checker();
@@ -252,7 +252,7 @@ fn two_module_qualified_call_compiles() {
     let main_src = "
 module Main
 import Math
-pub fun main () -> Int
+pub fun main : Unit -> Int
 main () = Math.add 10 20
 ";
 
@@ -288,7 +288,7 @@ fn two_module_exposed_import_compiles() {
     let main_src = "
 module Main
 import Math (add, double)
-pub fun main () -> Int
+pub fun main : Unit -> Int
 main () = add 1 (double 10)
 ";
 
@@ -322,7 +322,7 @@ fn imported_record_fields_available() {
     let main_src = "
 module Main
 import Animals (Animal)
-pub fun main () -> String
+pub fun main : Unit -> String
 main () = {
   let a = Animal { name: \"Rex\", species: \"Dog\" }
   a.name
@@ -345,7 +345,7 @@ fn imports_from_multiple_modules() {
 module Main
 import Math
 import Shapes (area, Circle)
-pub fun main () -> Int
+pub fun main : Unit -> Int
 main () = {
   let _ = area (Circle 5.0)
   Math.add 1 2
@@ -383,7 +383,7 @@ fn stdlib_import_does_not_crash_lowerer() {
     let main_src = "
 module Main
 import Std.List as List
-pub fun main () -> String
+pub fun main : Unit -> String
 main () = debug (List.map (fun x -> x + 1) [1, 2, 3])
 ";
     let mut checker = make_project_checker();
@@ -399,7 +399,7 @@ fn exposed_constructor_emits_correctly() {
     let main_src = "
 module Main
 import Shapes (Circle, Rect, area)
-pub fun main () -> Float
+pub fun main : Unit -> Float
 main () = area (Circle 5.0) + area (Rect 3.0 4.0)
 ";
     // Note: this won't emit inter-module calls for constructors since
@@ -420,14 +420,14 @@ module Main
 import Logger
 
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler console_log for Log {
   log msg = print msg
 }
 
-pub fun main () -> String
+pub fun main : Unit -> String
 main () = Logger.greet \"world\" with console_log
 ";
     let mut checker = make_project_checker();
@@ -448,14 +448,14 @@ module Main
 import Logger (greet)
 
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler console_log for Log {
   log msg = print msg
 }
 
-pub fun main () -> String
+pub fun main : Unit -> String
 main () = greet \"world\" with console_log
 ";
     let mut checker = make_project_checker();
@@ -486,14 +486,14 @@ module Main
 import Logger
 
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler console_log for Log {
   log msg = print msg
 }
 
-pub fun main () -> String
+pub fun main : Unit -> String
 main () = Logger.greet \"world\" with console_log
 ";
     let mut checker = make_project_checker();
@@ -529,7 +529,7 @@ fn cross_module_trait_dict_show_animal() {
     let main_src = "
 module Main
 import Animals (Animal)
-pub fun main () -> String
+pub fun main : Unit -> String
 main () = show (Animal { name: \"Rex\", species: \"Dog\" })
 ";
     let mut checker = make_project_checker();
@@ -546,7 +546,7 @@ fn cross_module_trait_dict_compiles_with_erlc() {
     let main_src = "
 module Main
 import Animals (Animal)
-pub fun main () -> String
+pub fun main : Unit -> String
 main () = show (Animal { name: \"Rex\", species: \"Dog\" })
 ";
     let mut checker = make_project_checker();
@@ -610,7 +610,7 @@ fn imported_constructors_mangled_with_source_module() {
     let main_src = "
 module Main
 import Shapes (Circle, Rect, area)
-pub fun main () -> Float
+pub fun main : Unit -> Float
 main () = area (Circle 5.0) + area (Rect 3.0 4.0)
 ";
     let mut checker = make_project_checker();
@@ -628,7 +628,7 @@ fn record_constructors_mangled() {
     let main_src = "
 module Main
 import Animals (Animal)
-pub fun main () -> String
+pub fun main : Unit -> String
 main () = {
   let a = Animal { name: \"Rex\", species: \"Dog\" }
   a.name
@@ -646,7 +646,7 @@ main () = {
 fn prelude_constructors_mangled_with_std_prefix() {
     let main_src = "
 module Main
-pub fun main () -> Int
+pub fun main : Unit -> Int
 main () = case Just(42) {
   Just(x) -> x
   Nothing -> 0
@@ -670,7 +670,7 @@ fn cross_module_constructor_consistency() {
     let main_src = "
 module Main
 import Shapes (Circle, area)
-pub fun main () -> Float
+pub fun main : Unit -> Float
 main () = area (Circle 5.0)
 ";
     let mut checker = make_project_checker();
@@ -690,7 +690,7 @@ fn mangled_constructors_compile_with_erlc() {
     let main_src = "
 module Main
 import Shapes (Circle, Rect, area)
-pub fun main () -> Float
+pub fun main : Unit -> Float
 main () = area (Circle 5.0) + area (Rect 3.0 4.0)
 ";
     let mut checker = make_project_checker();
@@ -722,7 +722,7 @@ main () = area (Circle 5.0) + area (Rect 3.0 4.0)
 fn prelude_fst_snd_compile_in_project_mode() {
     let main_src = "
 module Main
-pub fun main () -> Int
+pub fun main : Unit -> Int
 main () = {
   let pair = (10, 20)
   let x = fst pair
@@ -743,13 +743,13 @@ fn opaque_type_exports_name_but_not_constructors() {
     let lib_src = "
 module OpaqueLib
 opaque type Token { Secret(String) }
-pub fun make_token (s: String) -> Token
+pub fun make_token : (s: String) -> Token
 make_token s = Secret s
 ";
     let main_src = "
 module Main
 import OpaqueLib (Token, make_token)
-pub fun main () -> Token
+pub fun main : Unit -> Token
 main () = make_token \"abc\"
 ";
     let lib_path = fixtures_root().join("OpaqueLib.dy");
@@ -765,13 +765,13 @@ fn opaque_type_constructor_rejected_by_importer() {
     let lib_src = "
 module OpaqueLib2
 opaque type Token { Secret(String) }
-pub fun make_token (s: String) -> Token
+pub fun make_token : (s: String) -> Token
 make_token s = Secret s
 ";
     let main_src = "
 module Main
 import OpaqueLib2 (Token, Secret)
-pub fun main () -> Token
+pub fun main : Unit -> Token
 main () = Secret \"abc\"
 ";
     let lib_path = fixtures_root().join("OpaqueLib2.dy");
@@ -789,16 +789,16 @@ fn opaque_type_compiles_and_runs_on_beam() {
     let lib_src = "
 module OpaqueLib3
 opaque type Token { Secret(String) }
-pub fun make_token (s: String) -> Token
+pub fun make_token : (s: String) -> Token
 make_token s = Secret s
 
-pub fun reveal (t: Token) -> String
+pub fun reveal : (t: Token) -> String
 reveal t = case t { Secret(s) -> s }
 ";
     let main_src = "
 module Main
 import OpaqueLib3 (Token, make_token, reveal)
-pub fun main () -> String
+pub fun main : Unit -> String
 main () = reveal (make_token \"hello\")
 ";
     let lib_path = fixtures_root().join("OpaqueLib3.dy");

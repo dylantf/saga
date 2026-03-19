@@ -4,64 +4,64 @@ impl Debug for List a where {a: Debug} {
   debug xs = "[" <> flatten (join ", " (map debug xs)) <> "]"
 }
 
-pub fun head (xs: List a) -> a
+pub fun head : List a -> a
 head xs = case xs {
   h :: _ -> h
   Nil -> panic "head: empty list"
 }
 
-pub fun tail (xs: List a) -> List a
+pub fun tail : List a -> List a
 tail xs = case xs {
   _ :: t -> t
   Nil -> panic "tail: empty list"
 }
 
 pub @external("erlang", "erlang", "length")
-fun length (xs: List a) -> Int
+fun length : (xs: List a) -> Int
 
 pub @external("erlang", "lists", "map")
-fun map (f: a -> b) (xs: List a) -> List b
+fun map : (f: a -> b) -> (xs: List a) -> List b
 
 pub @external("erlang", "lists", "filter")
-fun filter (pred: a -> Bool) (xs: List a) -> List a
+fun filter : (pred: a -> Bool) -> (xs: List a) -> List a
 
-pub fun foldl (f: b -> a -> b) (acc: b) (xs: List a) -> b
+pub fun foldl : (f: b -> a -> b) -> (acc: b) -> (xs: List a) -> b
 foldl f acc xs = case xs {
   Nil -> acc
   h :: t -> foldl f (f acc h) t
 }
 
 pub @external("erlang", "lists", "foldr")
-fun foldr (f: a -> b -> b) (acc: b) (xs: List a) -> b
+fun foldr : (f: a -> b -> b) -> (acc: b) -> (xs: List a) -> b
 
 pub @external("erlang", "lists", "reverse")
-fun reverse (xs: List a) -> List a
+fun reverse : (xs: List a) -> List a
 
 pub @external("erlang", "lists", "append")
-fun append (xs: List a) (ys: List a) -> List a
+fun append : (xs: List a) -> (ys: List a) -> List a
 
 pub @external("erlang", "lists", "flatmap")
-fun flat_map (f: a -> List b) (xs: List a) -> List b
+fun flat_map : (f: a -> List b) -> (xs: List a) -> List b
 
 pub @external("erlang", "lists", "join")
-fun join (sep: String) (xs: List String) -> List String
+fun join : (separator: String) -> (xs: List String) -> List String
 
 pub @external("erlang", "lists", "flatten")
-fun flatten (xs: List String) -> String
+fun flatten : (xs: List String) -> String
 
-pub fun take (n: Int) (xs: List a) -> List a
+pub fun take : (n: Int) -> (xs: List a) -> List a
 take n xs = if n <= 0 then [] else case xs {
   Nil -> []
   h :: t -> h :: take (n - 1) t
 }
 
-pub fun drop (n: Int) (xs: List a) -> List a
+pub fun drop : (n: Int) -> (xs: List a) -> List a
 drop n xs = if n <= 0 then xs else case xs {
   Nil -> []
   _ :: t -> drop (n - 1) t
 }
 
-pub fun zip (xs: List a) (ys: List b) -> List (a, b)
+pub fun zip : (xs: List a) -> (ys: List b) -> List (a, b)
 zip xs ys = case xs {
   Nil -> []
   x :: xt -> case ys {
@@ -70,18 +70,18 @@ zip xs ys = case xs {
   }
 }
 
-pub fun any (pred: a -> Bool) (xs: List a) -> Bool
+pub fun any : (pred: a -> Bool) -> (xs: List a) -> Bool
 any pred xs = case xs {
   Nil -> False
   h :: t -> if pred h then True else any pred t
 }
 
-pub fun all (pred: a -> Bool) (xs: List a) -> Bool
+pub fun all : (pred: a -> Bool) -> (xs: List a) -> Bool
 all pred xs = case xs {
   Nil -> True
   h :: t -> if pred h then all pred t else False
 }
 
-pub fun range (start: Int) (end: Int) -> List Int
+pub fun range : (start: Int) -> (end: Int) -> List Int
 range start end = if start > end then [] else start :: range (start + 1) end
 

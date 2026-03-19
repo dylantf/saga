@@ -295,10 +295,10 @@ fn effect_in_if_branch_threads_outer_k() {
     // NOT an identity function.
     let src = "
 effect Fail {
-  fun fail (msg: String) -> Never
+  fun fail : (msg: String) -> Never
 }
 
-fun process () -> Unit needs {Fail}
+fun process : Unit -> Unit needs {Fail}
 process () = {
   let x = if True then fail! \"oops\" else 42
   x
@@ -322,10 +322,10 @@ fn effect_in_case_branch_threads_outer_k() {
     // Same issue but with case expressions instead of if.
     let src = "
 effect Fail {
-  fun fail (msg: String) -> Never
+  fun fail : (msg: String) -> Never
 }
 
-fun dispatch (n: Int) -> Int needs {Fail}
+fun dispatch : (n: Int) -> Int needs {Fail}
 dispatch n = {
   let x = case n {
     0 -> fail! \"zero\"
@@ -348,10 +348,10 @@ fn nested_if_effect_threads_k_recursively() {
     // Nested if/case: K should be threaded through multiple levels.
     let src = "
 effect Fail {
-  fun fail (msg: String) -> Never
+  fun fail : (msg: String) -> Never
 }
 
-fun deep (a: Bool) (b: Bool) -> Int needs {Fail}
+fun deep : (a: Bool) -> (b: Bool) -> Int needs {Fail}
 deep a b = {
   let x = if a then (if b then fail! \"inner\" else 1) else 2
   x + 10
@@ -371,10 +371,10 @@ fn effect_in_if_branch_k_not_identity() {
     // the rest of the block.
     let src = "
 effect Fail {
-  fun fail (msg: String) -> Never
+  fun fail : (msg: String) -> Never
 }
 
-fun process () -> Int needs {Fail}
+fun process : Unit -> Int needs {Fail}
 process () = {
   let x = if True then fail! \"oops\" else 42
   x + 1
@@ -413,14 +413,14 @@ fn handler_arm_does_not_apply_outer_return_k() {
     // value, which flows to the rest of the block via rest_k.
     let src = r#"
 effect Inner {
-  fun inner_op () -> Unit
+  fun inner_op : Unit -> Unit
 }
 
 effect Outer {
-  fun outer_op () -> Unit
+  fun outer_op : Unit -> Unit
 }
 
-fun middle (body: () -> Unit needs {Inner}) -> Unit needs {Outer}
+fun middle : (body: () -> Unit needs {Inner}) -> Unit needs {Outer}
 middle body = {
   let result = { body () } with {
     inner_op () = { resume (); "handled" }
@@ -545,7 +545,7 @@ fn dict_empty() {
 #[test]
 fn dict_get() {
     let src = r#"
-fun main () -> Maybe Int
+fun main : Unit -> Maybe Int
 main () = Dict.get "a" Dict.empty
 "#;
     let out = emit(src);
@@ -569,7 +569,7 @@ main () = Dict.get "a" Dict.empty
 fn external_fun_generates_wrapper() {
     let src = r#"
 @external("erlang", "lists", "reverse")
-fun reverse (list: List a) -> List a
+fun reverse : (list: List a) -> List a
 main () = 42
 "#;
     let out = emit(src);
@@ -589,7 +589,7 @@ main () = 42
 fn external_fun_direct_call() {
     let src = r#"
 @external("erlang", "lists", "reverse")
-fun reverse (list: List a) -> List a
+fun reverse : (list: List a) -> List a
 
 main () = reverse [1, 2, 3]
 "#;
@@ -604,7 +604,7 @@ main () = reverse [1, 2, 3]
 fn external_fun_multi_param() {
     let src = r#"
 @external("erlang", "maps", "get")
-fun get (key: a) (map: Dict a b) -> b
+fun get : (key: a) -> (map: Dict a b) -> b
 
 main () = get "x" Dict.empty
 "#;
@@ -621,7 +621,7 @@ fn external_fun_returning_maybe() {
     // Some(v) is a bare value and None is 'undefined', matching Erlang conventions.
     let src = r#"
 @external("erlang", "os", "getenv")
-fun getenv (name: String) -> Maybe String
+fun getenv : (name: String) -> Maybe String
 
 main () = case getenv "HOME" {
   Just(dir) -> dir
@@ -652,7 +652,7 @@ fn external_fun_returning_result() {
     // Ok(v) is {ok, v} and Err(e) is {error, e}, matching Erlang conventions.
     let src = r#"
 @external("erlang", "file", "read_file")
-fun read_file (path: String) -> Result String String
+fun read_file : (path: String) -> Result String String
 
 main () = case read_file "/etc/hostname" {
   Ok(contents) -> contents

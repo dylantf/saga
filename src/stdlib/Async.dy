@@ -5,8 +5,8 @@ import Std.Actor
 pub opaque type Future a { Future(Pid a) }
 
 pub effect Async {
-  fun async (f: () -> a) -> Future a
-  fun await (future: Future a) -> a
+  fun async : (f: () -> a) -> Future a
+  fun await : (future: Future a) -> a
 }
 
 pub handler async_handler for Async needs {Process, Actor a} {
@@ -25,7 +25,7 @@ pub handler async_handler for Async needs {Process, Actor a} {
   }
 }
 
-pub fun all (futures: List (Future a)) -> List a needs {Async}
+pub fun all : (futures: List (Future a)) -> List a needs {Async}
 all futures = case futures {
   [] -> []
   f :: rest -> await! f :: all rest

@@ -3,22 +3,22 @@ module Std.Base
 # Base traits and primitive impls. Loaded before all other modules.
 
 pub trait Show a {
-  fun show (x: a) -> String
+  fun show : a -> String
 }
 
 pub trait Debug a {
-  fun debug (x: a) -> String
+  fun debug : a -> String
 }
 
 pub type Ordering { Lt | Eq | Gt } deriving (Show, Debug, Eq)
 
 pub trait Ord a where {a: Eq} {
-  fun compare (x: a) (y: a) -> Ordering
+  fun compare : a -> a -> Ordering
 }
 
 pub trait Enum a {
-  fun to_enum (x: a) -> Int
-  fun from_enum (n: Int) -> a
+  fun to_enum : a -> Int
+  fun from_enum : Int -> a
 }
 
 impl Ord for Int {

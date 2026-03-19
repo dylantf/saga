@@ -1,10 +1,10 @@
 module Logger
 
 pub effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
-pub fun greet (name: String) -> String needs {Log}
+pub fun greet : (name: String) -> String needs {Log}
 greet name = {
   log! ("Hello, " <> name)
   "greeted " <> name

@@ -2,15 +2,15 @@
 # through a Validate effect with continuations holding an accumulator
 
 effect Validate {
-  fun invalid (err: String) -> Unit
+  fun invalid : (err: String) -> Unit
 }
 
-fun require_non_empty (label: String) (s: String) -> Unit needs {Validate}
+fun require_non_empty : (label: String) -> (s: String) -> Unit needs {Validate}
 require_non_empty label s =
   if s == "" then invalid! $"{label} is required"
   else ()
 
-fun require_min_age (min: Int) (age: Int) -> Unit needs {Validate}
+fun require_min_age : (min: Int) -> (age: Int) -> Unit needs {Validate}
 require_min_age min age =
   if age < min then invalid! $"age must be at least {min}"
   else ()
@@ -43,7 +43,7 @@ impl Debug for Validation e a where {e: Debug, a: Debug} {
   }
 }
 
-fun validate_user (input: UserInput) -> Validation (List String) ValidUser
+fun validate_user : (input: UserInput) -> Validation (List String) ValidUser
 validate_user input = {
   let (v, errs) = {
     require_non_empty "name" input.name

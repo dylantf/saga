@@ -146,7 +146,7 @@ fn trait_dict_constructor_emitted() {
 type Color { Red | Green | Blue }
 
 trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
 
 impl Describe for Color {
@@ -178,7 +178,7 @@ fn trait_method_call_uses_dict() {
 type Color { Red | Green | Blue }
 
 trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
 
 impl Describe for Color {
@@ -431,10 +431,10 @@ fn effect_fun_gets_handler_param() {
     // An effectful function should have an extra handler parameter in its arity
     let src = "
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
-fun do_work () -> Int needs {Log}
+fun do_work : Unit -> Int needs {Log}
 do_work () = 42
 ";
     let out = emit_elaborated(src);
@@ -448,10 +448,10 @@ fn effect_call_becomes_handler_apply() {
     // `log! "hello"` should become `apply _HandleLog('log', "hello", K)`
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
-fun do_work () -> Unit needs {Log}
+fun do_work : Unit -> Unit needs {Log}
 do_work () = log! "hello"
 "#;
     let out = emit_elaborated(src);
@@ -464,10 +464,10 @@ fn effect_call_in_block_captures_continuation() {
     // When an effect call is in a block, everything after it becomes the continuation
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
-fun do_work () -> Int needs {Log}
+fun do_work : Unit -> Int needs {Log}
 do_work () = {
   log! "starting"
   42
@@ -486,10 +486,10 @@ fn effect_call_let_binding_captures_value() {
     // `let x = get! ()` should make x the continuation parameter
     let src = "
 effect State {
-  fun get () -> Int
+  fun get : Unit -> Int
 }
 
-fun use_state () -> Int needs {State}
+fun use_state : Unit -> Int needs {State}
 use_state () = {
   let x = get! ()
   x + 1
@@ -503,14 +503,14 @@ use_state () = {
 fn with_named_handler_binds_handler() {
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler silent for Log {
   log msg = resume ()
 }
 
-fun do_work () -> Int needs {Log}
+fun do_work : Unit -> Int needs {Log}
 do_work () = {
   log! "hello"
   42
@@ -528,10 +528,10 @@ main () = do_work () with silent
 fn with_inline_handler() {
     let src = r#"
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
-fun risky () -> Int needs {Fail}
+fun risky : Unit -> Int needs {Fail}
 risky () = fail! "oops"
 
 main () = risky () with {
@@ -549,14 +549,14 @@ fn handler_resume_calls_k() {
     // resume () in a handler should emit apply _K('unit')
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler silent for Log {
   log msg = resume ()
 }
 
-fun do_work () -> Int needs {Log}
+fun do_work : Unit -> Int needs {Log}
 do_work () = {
   log! "hello"
   42
@@ -575,10 +575,10 @@ fn non_resumable_handler_no_k() {
     // A handler that doesn't use resume should NOT call _K
     let src = r#"
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
-fun risky () -> Int needs {Fail}
+fun risky : Unit -> Int needs {Fail}
 risky () = fail! "oops"
 
 main () = risky () with {
@@ -597,10 +597,10 @@ fn with_return_clause() {
 type Result a b { Ok(a) | Err(b) }
 
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
-fun risky () -> Int needs {Fail}
+fun risky : Unit -> Int needs {Fail}
 risky () = 42
 
 main () = risky () with {
@@ -620,13 +620,13 @@ fn effect_propagation_threads_handler() {
     // the handler param should be threaded through
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
-fun inner () -> Unit needs {Log}
+fun inner : Unit -> Unit needs {Log}
 inner () = log! "from inner"
 
-fun outer () -> Unit needs {Log}
+fun outer : Unit -> Unit needs {Log}
 outer () = inner ()
 
 handler silent for Log {
@@ -647,10 +647,10 @@ main () = outer () with silent
 fn multiple_effect_calls_chain_continuations() {
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
-fun do_work () -> Int needs {Log}
+fun do_work : Unit -> Int needs {Log}
 do_work () = {
   log! "first"
   log! "second"
@@ -678,14 +678,14 @@ fn effect_cps_log_with_let_bindings() {
     // Full CPS: log calls interleaved with let bindings and arithmetic
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler silent for Log {
   log msg = resume ()
 }
 
-fun do_work () -> Int needs {Log}
+fun do_work : Unit -> Int needs {Log}
 do_work () = {
   log! "starting"
   let x = 10 + 20
@@ -709,10 +709,10 @@ fn effect_fail_non_resumable_with_return() {
     // Fail handler doesn't call K; return clause wraps success path
     let src = r#"
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
-fun checked_double (x: Int) -> Int needs {Fail}
+fun checked_double : (x: Int) -> Int needs {Fail}
 checked_double x = if x > 100 then fail! "too big" else x * 2
 
 main () = {
@@ -739,16 +739,16 @@ fn effect_propagation_inner_outer() {
     // outer calls inner, both need Log; handler param threads through
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
-fun inner () -> Int needs {Log}
+fun inner : Unit -> Int needs {Log}
 inner () = {
   log! "from inner"
   42
 }
 
-fun outer () -> Int needs {Log}
+fun outer : Unit -> Int needs {Log}
 outer () = {
   log! "from outer"
   let x = inner ()
@@ -774,18 +774,18 @@ fn effect_multi_handler_stacking() {
     // Function needs both Fail and Log; with provides both handlers
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
 handler silent for Log {
   log msg = resume ()
 }
 
-fun risky_work () -> Int needs {Fail, Log}
+fun risky_work : Unit -> Int needs {Fail, Log}
 risky_work () = {
   log! "starting risky work"
   let x = 10 * 5
@@ -815,7 +815,7 @@ fn handler_arm_body_gets_show_dict() {
     // println inside a named handler body should work with String arg directly
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler console_log for Log {
@@ -825,7 +825,7 @@ handler console_log for Log {
   }
 }
 
-fun do_work () -> Int needs {Log}
+fun do_work : Unit -> Int needs {Log}
 do_work () = {
   log! "hello"
   42
@@ -844,11 +844,11 @@ fn handler_needs_effect_from_sibling_handler() {
     // Both handlers provided in the same `with`.
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
 handler silent for Log {
@@ -862,7 +862,7 @@ handler logging_fail for Fail needs {Log} {
   }
 }
 
-fun risky () -> Int needs {Fail, Log}
+fun risky : Unit -> Int needs {Fail, Log}
 risky () = {
   log! "about to fail"
   fail! "oops"
@@ -884,11 +884,11 @@ fn handler_needs_effect_from_outer_scope() {
     // Log comes from the enclosing function's handler param.
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
 handler logging_fail for Fail needs {Log} {
@@ -902,7 +902,7 @@ handler silent for Log {
   log msg = resume ()
 }
 
-fun do_work () -> Int needs {Fail, Log}
+fun do_work : Unit -> Int needs {Fail, Log}
 do_work () = {
   log! "starting"
   fail! "boom"
@@ -921,10 +921,10 @@ fn effect_multi_clause_function() {
     // Effectful function with pattern-matched clauses
     let src = r#"
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
-fun safe_div (x: Int) (y: Int) -> Int needs {Fail}
+fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail}
 safe_div _ 0 = fail! "division by zero"
 safe_div x y = x * y
 
@@ -946,10 +946,10 @@ fn effect_call_in_binop() {
     // Effect call nested in a binary operation should be lifted to a let binding
     let src = r#"
 effect Ask {
-  fun ask () -> Int
+  fun ask : Unit -> Int
 }
 
-fun compute () -> Int needs {Ask}
+fun compute : Unit -> Int needs {Ask}
 compute () = {
   let x = 1 + ask! ()
   x
@@ -971,12 +971,12 @@ fn effect_call_in_function_arg() {
     // Effect call as an argument to a function call
     let src = r#"
 effect Ask {
-  fun ask () -> Int
+  fun ask : Unit -> Int
 }
 
 double x = x * 2
 
-fun compute () -> Int needs {Ask}
+fun compute : Unit -> Int needs {Ask}
 compute () = {
   let x = double (ask! ())
   x
@@ -996,10 +996,10 @@ fn effect_call_in_if_condition() {
     // Effect call in an if condition
     let src = r#"
 effect Ask {
-  fun ask () -> Bool
+  fun ask : Unit -> Bool
 }
 
-fun decide () -> Int needs {Ask}
+fun decide : Unit -> Int needs {Ask}
 decide () = {
   if ask! () then 1 else 0
 }
@@ -1017,10 +1017,10 @@ fn multiple_effect_calls_in_binop() {
     // Two effect calls in the same binary expression
     let src = r#"
 effect Ask {
-  fun ask () -> Int
+  fun ask : Unit -> Int
 }
 
-fun compute () -> Int needs {Ask}
+fun compute : Unit -> Int needs {Ask}
 compute () = {
   let x = ask! () + ask! ()
   x
@@ -1043,10 +1043,10 @@ main () = compute () with {
 fn effect_call_in_binop_compiles() {
     let src = r#"
 effect Ask {
-  fun ask () -> Int
+  fun ask : Unit -> Int
 }
 
-fun compute () -> Int needs {Ask}
+fun compute : Unit -> Int needs {Ask}
 compute () = {
   let x = 1 + ask! ()
   x
@@ -1070,10 +1070,10 @@ fn hof_effect_absorption_try_pattern() {
 type Result a e { Ok(a) | Err(e) }
 
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
-fun try_it (computation: () -> a needs {Fail}) -> Result a String
+fun try_it : (computation: () -> a needs {Fail}) -> Result a String
 try_it computation = computation () with {
   fail msg = Err(msg)
   return value = Ok(value)
@@ -1095,10 +1095,10 @@ fn hof_effect_absorption_lambda_with_block() {
 type Result a e { Ok(a) | Err(e) }
 
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
-fun try_it (computation: () -> a needs {Fail}) -> Result a String
+fun try_it : (computation: () -> a needs {Fail}) -> Result a String
 try_it computation = computation () with {
   fail msg = Err(msg)
   return value = Ok(value)
@@ -1119,10 +1119,10 @@ fn hof_effect_absorption_compiles() {
     // End-to-end: HOF effect absorption compiles to valid Core Erlang
     let src = r#"
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
-fun try_it (computation: () -> a needs {Fail}) -> String
+fun try_it : (computation: () -> a needs {Fail}) -> String
 try_it computation = computation () with {
   fail msg = "err: " <> msg
 }
@@ -1145,7 +1145,7 @@ fn return_clause_inside_cps_chain() {
 type Result a e { Ok(a) | Err(e) }
 
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
 try_it computation = computation () with {
@@ -1168,10 +1168,10 @@ fn return_clause_with_handler_compiles() {
 type Result a e { Ok(a) | Err(e) }
 
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
-fun try_it (computation: () -> a needs {Fail}) -> Result a String
+fun try_it : (computation: () -> a needs {Fail}) -> Result a String
 try_it computation = computation () with {
   fail msg = Err(msg)
   return value = Ok(value)
@@ -1194,14 +1194,14 @@ fn effect_in_tail_position() {
     // Effect call as the last statement in a block.
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler silent for Log {
   log msg = resume ()
 }
 
-fun greet () -> Unit needs {Log}
+fun greet : Unit -> Unit needs {Log}
 greet () = {
   log! "hello"
 }
@@ -1216,14 +1216,14 @@ fn sequential_effects_interleaved_with_lets() {
     // Multiple effect calls interleaved with non-effect let bindings.
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler silent for Log {
   log msg = resume ()
 }
 
-fun work () -> Int needs {Log}
+fun work : Unit -> Int needs {Log}
 work () = {
   log! "start"
   let x = 1
@@ -1252,14 +1252,14 @@ fn resume_with_non_unit_value() {
     // Handler resumes with a computed value, not just ().
     let src = r#"
 effect Ask {
-  fun ask () -> Int
+  fun ask : Unit -> Int
 }
 
 handler answer_42 for Ask {
   ask = resume 42
 }
 
-fun use_ask () -> Int needs {Ask}
+fun use_ask : Unit -> Int needs {Ask}
 use_ask () = {
   let x = ask! ()
   x + 1
@@ -1279,14 +1279,14 @@ fn effect_in_record_constructor_arg() {
 record Point { x: Int, y: Int }
 
 effect Ask {
-  fun ask () -> Int
+  fun ask : Unit -> Int
 }
 
 handler answer_42 for Ask {
   ask = resume 42
 }
 
-fun make_point () -> Point needs {Ask}
+fun make_point : Unit -> Point needs {Ask}
 make_point () = {
   let a = ask! ()
   Point { x: a, y: 10 }
@@ -1302,14 +1302,14 @@ fn effect_in_tuple_constructor_arg() {
     // Effect call as a tuple element.
     let src = r#"
 effect Ask {
-  fun ask () -> Int
+  fun ask : Unit -> Int
 }
 
 handler answer_42 for Ask {
   ask = resume 42
 }
 
-fun make_pair () -> (Int, Int) needs {Ask}
+fun make_pair : Unit -> (Int, Int) needs {Ask}
 make_pair () = {
   let a = ask! ()
   (a, 10)
@@ -1327,14 +1327,14 @@ fn effect_in_adt_constructor_arg() {
 type Maybe a { Some(a) | None }
 
 effect Ask {
-  fun ask () -> Int
+  fun ask : Unit -> Int
 }
 
 handler answer_42 for Ask {
   ask = resume 42
 }
 
-fun maybe_ask () -> Maybe Int needs {Ask}
+fun maybe_ask : Unit -> Maybe Int needs {Ask}
 maybe_ask () = {
   let x = ask! ()
   Some(x)
@@ -1350,15 +1350,15 @@ fn multiple_effects_three_handlers() {
     // Function needing three effects, each with a separate handler.
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 effect Ask {
-  fun ask () -> Int
+  fun ask : Unit -> Int
 }
 
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
 handler silent for Log {
@@ -1369,7 +1369,7 @@ handler answer_42 for Ask {
   ask = resume 42
 }
 
-fun complex () -> Int needs {Log, Ask, Fail}
+fun complex : Unit -> Int needs {Log, Ask, Fail}
 complex () = {
   log! "start"
   let x = ask! ()
@@ -1393,14 +1393,14 @@ fn effect_result_ignored_three_in_a_row() {
     // Three consecutive effect calls whose return values are unused.
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler silent for Log {
   log msg = resume ()
 }
 
-fun work () -> Int needs {Log}
+fun work : Unit -> Int needs {Log}
 work () = {
   log! "a"
   log! "b"
@@ -1418,14 +1418,14 @@ fn effect_returned_directly_no_block() {
     // Effect call as the entire function body (no block).
     let src = r#"
 effect Ask {
-  fun ask () -> Int
+  fun ask : Unit -> Int
 }
 
 handler answer_42 for Ask {
   ask = resume 42
 }
 
-fun get_value () -> Int needs {Ask}
+fun get_value : Unit -> Int needs {Ask}
 get_value () = ask! ()
 
 main () = get_value () with answer_42
@@ -1438,27 +1438,27 @@ fn nested_effectful_function_calls() {
     // Chain of effectful function calls: outer calls middle calls inner.
     let src = r#"
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 handler silent for Log {
   log msg = resume ()
 }
 
-fun inner () -> Int needs {Log}
+fun inner : Unit -> Int needs {Log}
 inner () = {
   log! "inner"
   1
 }
 
-fun middle () -> Int needs {Log}
+fun middle : Unit -> Int needs {Log}
 middle () = {
   let x = inner ()
   log! "middle"
   x + 1
 }
 
-fun outer () -> Int needs {Log}
+fun outer : Unit -> Int needs {Log}
 outer () = {
   let y = middle ()
   log! "outer"
@@ -1477,22 +1477,22 @@ fn abort_skips_remaining_in_nested_calls() {
 type Result a e { Ok(a) | Err(e) }
 
 effect Fail {
-  fun fail (msg: String) -> a
+  fun fail : (msg: String) -> a
 }
 
-fun inner () -> Int needs {Fail}
+fun inner : Unit -> Int needs {Fail}
 inner () = {
   fail! "boom"
   999
 }
 
-fun outer () -> Int needs {Fail}
+fun outer : Unit -> Int needs {Fail}
 outer () = {
   let x = inner ()
   x + 1
 }
 
-fun try_it (computation: () -> a needs {Fail}) -> Result a String
+fun try_it : (computation: () -> a needs {Fail}) -> Result a String
 try_it computation = computation () with {
   fail msg = Err(msg)
   return value = Ok(value)
@@ -1508,8 +1508,8 @@ fn mixed_resume_and_abort_in_handler() {
     // Handler where some ops resume and others abort.
     let src = r#"
 effect IO {
-  fun read () -> Int
-  fun crash (msg: String) -> a
+  fun read : Unit -> Int
+  fun crash : (msg: String) -> a
 }
 
 handler test_io for IO {
@@ -1517,7 +1517,7 @@ handler test_io for IO {
   crash msg = 0
 }
 
-fun process () -> Int needs {IO}
+fun process : Unit -> Int needs {IO}
 process () = {
   let x = read! ()
   if x > 100 then crash! "too big" else x + 1
@@ -1533,14 +1533,14 @@ fn tuple_destructure_with_effect_result() {
     // Tuple pattern destructuring where the RHS is an effect call.
     let src = r#"
 effect Ask {
-  fun ask () -> (Int, Int)
+  fun ask : Unit -> (Int, Int)
 }
 
 handler answer for Ask {
   ask = resume (1, 2)
 }
 
-fun use_pair () -> Int needs {Ask}
+fun use_pair : Unit -> Int needs {Ask}
 use_pair () = {
   let (a, b) = ask! ()
   a + b
@@ -1563,14 +1563,14 @@ fn constructor_destructure_after_effect() {
 type Maybe a { Just(a) | Nothing }
 
 effect Ask {
-  fun ask () -> Maybe Int
+  fun ask : Unit -> Maybe Int
 }
 
 handler answer for Ask {
   ask = resume Just(42)
 }
 
-fun extract () -> Int needs {Ask}
+fun extract : Unit -> Int needs {Ask}
 extract () = {
   let result = ask! ()
   case result {

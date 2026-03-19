@@ -22,7 +22,11 @@ pub fn ident_before_spaces(source: &str, offset: usize) -> Option<String> {
     }
     // Now pos is at the last char of the identifier
     let end = pos + 1;
-    while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_' || bytes[pos - 1] == b'\'') {
+    while pos > 0
+        && (bytes[pos - 1].is_ascii_alphanumeric()
+            || bytes[pos - 1] == b'_'
+            || bytes[pos - 1] == b'\'')
+    {
         pos -= 1;
     }
     let name = &source[pos..end];
@@ -132,10 +136,10 @@ fn find_call_in_expr(expr: &Expr, offset: usize) -> Option<(String, usize)> {
             // e.g., in `foo (bar 1) 2` with cursor on `1`, we want `bar` not `foo`
             let (func_name, args) = unwrap_app_chain(expr);
             for arg in &args {
-                if contains(&arg.span, offset) {
-                    if let Some(inner) = find_call_in_expr(arg, offset) {
-                        return Some(inner);
-                    }
+                if contains(&arg.span, offset)
+                    && let Some(inner) = find_call_in_expr(arg, offset)
+                {
+                    return Some(inner);
                 }
             }
 
@@ -175,10 +179,10 @@ fn find_call_in_expr(expr: &Expr, offset: usize) -> Option<(String, usize)> {
                 return Some(r);
             }
             for arm in arms {
-                if let Some(guard) = &arm.guard {
-                    if let Some(r) = find_call_in_expr(guard, offset) {
-                        return Some(r);
-                    }
+                if let Some(guard) = &arm.guard
+                    && let Some(r) = find_call_in_expr(guard, offset)
+                {
+                    return Some(r);
                 }
                 if let Some(r) = find_call_in_expr(&arm.body, offset) {
                     return Some(r);
@@ -291,7 +295,11 @@ fn build_from_annotation(name: &str, program: &[Decl]) -> Option<SignatureInform
             let param_infos: Vec<ParameterInformation> = params
                 .iter()
                 .map(|(label, ty)| {
-                    let label_str = format!("{}: {}", label, format_type_expr(ty));
+                    let label_str = if label.starts_with('_') {
+                        format_type_expr(ty)
+                    } else {
+                        format!("{}: {}", label, format_type_expr(ty))
+                    };
                     ParameterInformation {
                         label: ParameterLabel::Simple(label_str),
                         documentation: None,
@@ -301,13 +309,23 @@ fn build_from_annotation(name: &str, program: &[Decl]) -> Option<SignatureInform
 
             let params_display: Vec<String> = params
                 .iter()
-                .map(|(label, ty)| format!("({}: {})", label, format_type_expr(ty)))
+                .map(|(label, ty)| {
+                    if label.starts_with('_') {
+                        format_type_expr(ty)
+                    } else {
+                        format!("({}: {})", label, format_type_expr(ty))
+                    }
+                })
                 .collect();
-            let mut sig_label = format!(
-                "{} -> {}",
-                params_display.join(" -> "),
+            let mut sig_label = if params_display.is_empty() {
                 format_type_expr(return_type)
-            );
+            } else {
+                format!(
+                    "{} -> {}",
+                    params_display.join(" -> "),
+                    format_type_expr(return_type)
+                )
+            };
             if !effects.is_empty() {
                 let effs: Vec<String> = effects
                     .iter()

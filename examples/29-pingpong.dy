@@ -8,7 +8,7 @@ type PongMsg {
   Pong(Int)
 }
 
-fun pong_server (count: Int) -> Unit needs {Process, Actor PingMsg}
+fun pong_server : (count: Int) -> Unit needs {Process, Actor PingMsg}
 pong_server count = {
   receive {
     Ping(sender) -> {
@@ -18,7 +18,7 @@ pong_server count = {
   }
 }
 
-fun run () -> Unit needs {Process, Actor PongMsg}
+fun run : Unit -> Unit needs {Process, Actor PongMsg}
 run () = {
   let server = spawn! (fun () -> pong_server 0)
   send! server <| Ping (self! ())

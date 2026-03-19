@@ -1,15 +1,15 @@
 # Tuples -- any arity, no predefinition needed
 
-fun distance (p: (Float, Float)) -> Float
+fun distance : (p: (Float, Float)) -> Float
 distance (x, y) = x * x + y * y
 
-fun swap (p: (a, b)) -> (b, a)
+fun swap : (p: (a, b)) -> (b, a)
 swap (x, y) = (y, x)
 
-fun fst (p: (a, b)) -> a
+fun fst : (p: (a, b)) -> a
 fst (x, _) = x
 
-fun snd (p: (a, b)) -> b
+fun snd : (p: (a, b)) -> b
 snd (_, y) = y
 
 main () = {

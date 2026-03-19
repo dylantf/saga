@@ -18,7 +18,7 @@
 #   MVector.swap      : MVector a -> Int -> Int -> Unit needs {State (MVector a)}
 #   MVector.length    : MVector a -> Int
 
-fun partition (v: MVector Int) (lo: Int) (hi: Int) -> Int needs {State (MVector Int)}
+fun partition : (v: MVector Int) -> (lo: Int) -> (hi: Int) -> Int needs {State (MVector Int)}
 partition v lo hi = {
   let pivot = MVector.read! v hi
   let loop i j =
@@ -30,7 +30,7 @@ partition v lo hi = {
   loop lo lo
 }
 
-fun quicksort (v: MVector Int) (lo: Int) (hi: Int) -> Unit needs {State (MVector Int)}
+fun quicksort : (v: MVector Int) -> (lo: Int) -> (hi: Int) -> Unit needs {State (MVector Int)}
 quicksort v lo hi =
   if lo >= hi then ()
   else {
@@ -39,7 +39,7 @@ quicksort v lo hi =
     quicksort (pivot_idx + 1) hi
   }
 
-fun sort (xs: List Int) -> List Int
+fun sort : (xs: List Int) -> List Int
 sort xs = {
   let v = MVector.from_list xs
   let (result, _) = run_state v (fun () -> {

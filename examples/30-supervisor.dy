@@ -2,11 +2,11 @@ import Std.Fail
 import Std.Supervisor (supervised)
 
 # A computation that always fails
-fun unreliable () -> Int needs {Fail String}
+fun unreliable : Unit -> Int needs {Fail String}
 unreliable () = fail! "something went wrong"
 
 # A computation that succeeds
-fun reliable () -> Int needs {Fail String}
+fun reliable : Unit -> Int needs {Fail String}
 reliable () = 42
 
 main () = {

@@ -4,7 +4,7 @@
 # one that prints to console, one that silently discards.
 
 effect Log {
-  fun log (msg: String) -> Unit
+  fun log : (msg: String) -> Unit
 }
 
 # Handler that prints each message with a prefix
@@ -21,7 +21,7 @@ handler silent_log for Log {
 }
 
 # A computation that uses logging
-fun do_work () -> Int needs {Log}
+fun do_work : Unit -> Int needs {Log}
 do_work () = {
   log! "starting"
   let x = 10 + 20

@@ -11,7 +11,7 @@ record Point {
 }
 
 trait Describe a {
-  fun describe (x: a) -> String
+  fun describe : (x: a) -> String
 }
 
 impl Describe for User {
@@ -24,7 +24,7 @@ impl Describe for Point {
 
 # Supertrait: Verbose requires Describe
 trait Verbose a where {a: Describe} {
-  fun verbose (x: a) -> String
+  fun verbose : (x: a) -> String
 }
 
 impl Verbose for User {
