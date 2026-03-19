@@ -1,15 +1,54 @@
-effect Foo {
-  fun a () -> Int
-  # fun b () -> Int
+effect Assert {
+  fun assert (ok: Bool) (msg: String) -> Unit
 }
 
-handler foo for Foo {
-  a () = resume 1
-  # b () = resume 2
+effect TestRunner {
+  fun pass (name: String) -> Unit
+  fun fail (name: String) (msg: String) -> Unit
 }
+
+fun test (name: String) (body: () -> Unit needs {Assert}) -> Unit needs {TestRunner}
+test name body = {
+  let (_, failures) = { body () } with {
+    assert ok msg =
+      if ok then {
+        let (val, errs) = resume ()
+        (val, errs)
+      } else {
+        let (val, errs) = resume ()
+        (val, msg :: errs)
+      }
+    return val = (val, [])
+  }
+  case failures {
+    [] -> pass! name
+    h :: _ -> fail! name h
+  }
+}
+
+fun assert_true (cond: Bool) -> Unit needs {Assert}
+assert_true cond = assert! cond "Expected True, got False"
 
 main () = {
-  let _ = print (show (a! ())) with {
-    a () = resume 2
+  let (passed, failed) = {
+    test "passes" {
+      assert_true True
+    }
+    test "fails" {
+      assert_true False
+    }
+  } with {
+    pass name = {
+      print ("  + " <> name)
+      let (p, f) = resume ()
+      (p + 1, f)
+    }
+    fail name msg = {
+      print ("  x " <> name <> ": " <> msg)
+      let (p, f) = resume ()
+      (p, f + 1)
+    }
+    return _ = (0, 0)
   }
-} with foo
+  print ($"{passed} passed, {failed} failed")
+}

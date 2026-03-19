@@ -413,6 +413,60 @@ impl Parser {
                     value: Lit::String(String::new()),
                 }}))
             }
+            Token::Ident(ref i)
+                if self.test_mode
+                    && (i == "test" || i == "describe" || i == "skip")
+                    && matches!(self.peek(), Token::String(_)) =>
+            {
+                // Desugar: test "name" { body } -> test "name" (fun () -> { body })
+                //          describe "name" { body } -> describe "name" (fun () -> { body })
+                let func_name = i.clone();
+                let name_str = self.expect_string()?;
+                let name_span = self.tokens[self.pos - 1].span;
+                let body = self.parse_expr(0)?;
+                let body_span = body.span;
+
+                let lambda = Expr {
+                    id: self.next_id(),
+                    span: body_span,
+                    kind: ExprKind::Lambda {
+                        params: vec![Pat::Lit {
+                            value: Lit::Unit,
+                            span: body_span,
+                        }],
+                        body: Box::new(body),
+                    },
+                };
+
+                let func = Expr {
+                    id: self.next_id(),
+                    span,
+                    kind: ExprKind::Var { name: func_name },
+                };
+                let name_lit = Expr {
+                    id: self.next_id(),
+                    span: name_span,
+                    kind: ExprKind::Lit {
+                        value: Lit::String(name_str),
+                    },
+                };
+                let app1 = Expr {
+                    id: self.next_id(),
+                    span: span.to(name_span),
+                    kind: ExprKind::App {
+                        func: Box::new(func),
+                        arg: Box::new(name_lit),
+                    },
+                };
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: span.to(body_span),
+                    kind: ExprKind::App {
+                        func: Box::new(app1),
+                        arg: Box::new(lambda),
+                    },
+                })
+            }
             Token::Ident(i) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Var { name: i } }),
             Token::UpperIdent(i) => {
                 if matches!(self.peek(), Token::LBrace) {
@@ -614,7 +668,7 @@ impl Parser {
                     if matches!(self.peek(), Token::Let) {
                         let let_start = self.tokens[self.pos].span;
                         self.advance(); // consume 'let'
-                        let is_assert = matches!(self.peek(), Token::Assert);
+                        let is_assert = matches!(self.peek(), Token::Ident(s) if s == "assert");
                         if is_assert {
                             self.advance(); // consume 'assert'
                         }
@@ -699,7 +753,9 @@ impl Parser {
             }
 
             Token::Case => {
+                self.no_brace_app = true;
                 let scrutinee = self.parse_expr(0)?;
+                self.no_brace_app = false;
                 self.expect(Token::LBrace)?;
                 self.skip_terminators();
 

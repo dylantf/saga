@@ -8,6 +8,12 @@ mod pat;
 pub struct Parser {
     pub(super) tokens: Vec<Spanned>,
     pub(super) pos: usize,
+    /// When true, `{` is not treated as starting a function argument.
+    /// Used when parsing case scrutinees where `{` begins the branch block.
+    pub(super) no_brace_app: bool,
+    /// When true, `test`, `describe`, and `skip` followed by a string literal
+    /// are desugared into function calls. Only enabled for test files.
+    pub test_mode: bool,
 }
 
 #[derive(Debug)]
@@ -20,7 +26,7 @@ impl Parser {
     // --- Helpers ---
 
     pub fn new(tokens: Vec<Spanned>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser { tokens, pos: 0, no_brace_app: false, test_mode: false }
     }
 
     /// Allocate a fresh NodeId from the global counter.
@@ -69,6 +75,16 @@ impl Parser {
         }
     }
 
+    pub(super) fn expect_string(&mut self) -> Result<String, ParseError> {
+        match self.advance() {
+            Token::String(s) => Ok(s),
+            tok => Err(ParseError {
+                message: format!("expected string literal, got {:?}", tok),
+                span: self.tokens[self.pos - 1].span,
+            }),
+        }
+    }
+
     pub(super) fn expect_upper_ident(&mut self) -> Result<String, ParseError> {
         match self.advance() {
             Token::UpperIdent(s) => Ok(s),
@@ -103,7 +119,7 @@ impl Parser {
                 | Token::EffectCall(_)
                 | Token::Resume
                 | Token::Do
-        )
+        ) || (!self.no_brace_app && matches!(self.peek(), Token::LBrace))
     }
 
     pub(super) fn can_start_type_atom(&self) -> bool {

@@ -1,0 +1,142 @@
+module Std.Test
+
+import Std.Base
+import Std.IO (print)
+
+pub effect Assert {
+  fun assert (ok: Bool) (msg: String) -> Unit
+}
+
+pub effect TestRunner {
+  fun pass (name: String) -> Unit
+  fun fail (name: String) (msg: String) -> Unit
+  fun skip_test (name: String) -> Unit
+  fun enter_group (name: String) -> Unit
+  fun leave_group () -> Unit
+}
+
+record TestState {
+  passed: Int,
+  failed: Int,
+  skipped: Int,
+  depth: Int,
+}
+
+fun make_indent (n: Int) -> String
+make_indent n =
+  if n <= 0 then ""
+  else "  " <> make_indent (n - 1)
+
+#@ Runs a named test. Collects all assertion failures via multi-shot
+#@ continuations, then reports pass/fail through the TestRunner effect.
+pub fun test (name: String) (body: () -> Unit needs {Assert}) -> Unit needs {TestRunner}
+test name body = {
+  let (_, failures) = { body () } with {
+    assert ok msg =
+      if ok then {
+        let (val, errs) = resume ()
+        (val, errs)
+      } else {
+        let (val, errs) = resume ()
+        (val, msg :: errs)
+      }
+    return val = (val, [])
+  }
+  case failures {
+    [] -> pass! name
+    h :: _ -> fail! name h
+  }
+}
+
+#@ Groups tests under a label. Nesting is tracked via enter_group/leave_group
+#@ Skips a named test. The body is never executed.
+pub fun skip (name: String) (body: () -> Unit needs {Assert}) -> Unit needs {TestRunner}
+skip name body = skip_test! name
+
+#@ Groups tests under a label. Nesting is tracked via enter_group/leave_group
+#@ effects so the handler can control indentation.
+pub fun describe (name: String) (body: () -> Unit needs {TestRunner}) -> Unit needs {TestRunner}
+describe name body = {
+  enter_group! name
+  body ()
+  leave_group! ()
+}
+
+#@ Default test handler. Uses state-threading via closures (like the State
+#@ effect pattern) to pass depth top-down through the computation.
+#@ Each handler arm returns a (TestState -> TestState) function.
+pub handler test_handler for TestRunner {
+  pass name = {
+    let k = resume ()
+    fun state -> {
+      let indent = make_indent state.depth
+      print (indent <> "\x1b[32m✓\x1b[0m " <> name)
+      k { state | passed: state.passed + 1 }
+    }
+  }
+  fail name msg = {
+    let k = resume ()
+    fun state -> {
+      let indent = make_indent state.depth
+      print (indent <> "\x1b[31m✗\x1b[0m " <> name)
+      print (indent <> "    " <> msg)
+      k { state | failed: state.failed + 1 }
+    }
+  }
+  skip_test name = {
+    let k = resume ()
+    fun state -> {
+      let indent = make_indent state.depth
+      print (indent <> "\x1b[33m○\x1b[0m " <> name <> " (skipped)")
+      k { state | skipped: state.skipped + 1 }
+    }
+  }
+  enter_group name = {
+    let k = resume ()
+    fun state -> {
+      let indent = make_indent state.depth
+      print (indent <> name)
+      k { state | depth: state.depth + 1 }
+    }
+  }
+  leave_group () = {
+    let k = resume ()
+    fun state -> {
+      k { state | depth: state.depth - 1 }
+    }
+  }
+  return _ = fun state -> state
+}
+
+#@ Run a test suite. Attaches test_handler, threads initial state through,
+#@ then prints the summary.
+pub fun run (body: () -> Unit needs {TestRunner}) -> Unit
+run body = {
+  let state_fn = { body () } with test_handler
+  let final = state_fn (TestState { passed: 0, failed: 0, skipped: 0, depth: 0 })
+  print ""
+  let summary = show final.passed <> " passed, " <> show final.failed <> " failed"
+  let summary = if final.skipped > 0 then summary <> ", " <> show final.skipped <> " skipped"
+                else summary
+  print summary
+}
+
+# Assertion helpers
+
+pub fun assert_eq (a: x) (b: x) -> Unit needs {Assert} where {x: Show + Eq}
+assert_eq a b =
+  if a == b then assert! True ""
+  else assert! False ("Expected " <> show b <> ", got " <> show a)
+
+pub fun assert_neq (a: x) (b: x) -> Unit needs {Assert} where {x: Show + Eq}
+assert_neq a b =
+  if a != b then assert! True ""
+  else assert! False ("Expected " <> show a <> " to not equal " <> show b)
+
+pub fun assert_gt (a: x) (b: x) -> Unit needs {Assert} where {x: Show + Ord}
+assert_gt a b =
+  assert! (a > b) ("Expected " <> show a <> " > " <> show b)
+
+pub fun assert_lt (a: x) (b: x) -> Unit needs {Assert} where {x: Show + Ord}
+assert_lt a b =
+  assert! (a < b) ("Expected " <> show a <> " < " <> show b)

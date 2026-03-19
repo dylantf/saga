@@ -1,0 +1,32 @@
+import Std.Test (describe, test, skip, assert_eq)
+import MathLib (add, double)
+
+describe "MathLib" {
+  describe "add" {
+    test "adds two positive numbers" {
+      assert_eq (add 2 3) 5
+    }
+
+    test "adds negative numbers" {
+      assert_eq (add (-1) (-2)) (-3)
+    }
+  }
+
+  describe "double" {
+    test "doubles a number" {
+      assert_eq (double 5) 10
+    }
+
+    test "doubles zero" {
+      assert_eq (double 0) 0
+    }
+  }
+}
+
+test "a simple assertion" {
+  assert_eq True True
+}
+
+skip "a failing test" {
+  assert_eq True False
+}

@@ -34,8 +34,8 @@ quadrant p = case p {
 
 # --- List patterns ---
 
-fun describe (xs: List Int) -> String
-describe xs = case xs {
+fun describe (xs: List a) -> String
+describe items = case items {
   [] -> "empty"
   [x] -> "one element"
   [x, y] -> "two elements"

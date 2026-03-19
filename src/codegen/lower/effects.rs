@@ -351,9 +351,17 @@ impl<'a> Lowerer<'a> {
         let mut fun_params: Vec<String> = param_vars.clone();
         fun_params.push(k_var.clone());
 
-        // Set up K for resume references in the body
+        // Set up K for resume references in the body.
+        // Clear current_return_k so the handler arm body doesn't leak the
+        // function-level _ReturnK. The handler's result is the with-block
+        // value, which flows to the rest of the block via rest_k, not through
+        // the function's own return continuation.
         let prev_handler_k = self.current_handler_k.replace(k_var);
+        let saved_return_k = self.current_return_k.take();
+        let saved_pending_k = self.pending_callee_return_k.take();
         let mut body_ce = self.lower_expr(&arm.body);
+        self.current_return_k = saved_return_k;
+        self.pending_callee_return_k = saved_pending_k;
 
         // Bind arm's named params to the positional handler args
         for (i, param_name) in arm.params.iter().enumerate().rev() {

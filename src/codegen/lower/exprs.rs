@@ -331,6 +331,15 @@ impl<'a> Lowerer<'a> {
                         self.pending_callee_return_k = saved;
                         return result;
                     }
+                    // Terminal expression with nested effect calls (e.g. case with
+                    // effect calls in arms): thread _ReturnK through branches so each
+                    // arm's effect call gets the right continuation.
+                    if has_nested_effect_call(e) {
+                        let k_var = self.fresh();
+                        let k_ce = self.current_return_k.clone().unwrap();
+                        let body_ce = self.lower_expr_with_k(e, &k_var);
+                        return CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce));
+                    }
                 }
                 let val = self.lower_expr(e);
                 self.apply_return_k(val)

@@ -152,10 +152,15 @@ impl Elaborator {
                         let mut dict_params = Vec::new();
                         for bound in where_clause {
                             for trait_name in &bound.traits {
-                                dict_params.push((trait_name.clone(), bound.type_var.clone()));
+                                if trait_name != "Num" && trait_name != "Eq" {
+                                    dict_params
+                                        .push((trait_name.clone(), bound.type_var.clone()));
+                                }
                             }
                         }
-                        self.fun_dict_params.insert(name.clone(), dict_params);
+                        if !dict_params.is_empty() {
+                            self.fun_dict_params.insert(name.clone(), dict_params);
+                        }
                     }
                 }
                 Decl::ImplDef {
