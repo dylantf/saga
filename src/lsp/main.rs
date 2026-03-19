@@ -68,7 +68,15 @@ impl Backend {
 
     /// Clone the check result for a specific URI out of the lock to avoid holding it
     /// across async boundaries (which would deadlock with did_open).
-    fn snapshot(&self, uri: &Url) -> Option<(typechecker::CheckResult, Vec<dylang::ast::Decl>, line_index::LineIndex, String)> {
+    fn snapshot(
+        &self,
+        uri: &Url,
+    ) -> Option<(
+        typechecker::CheckResult,
+        Vec<dylang::ast::Decl>,
+        line_index::LineIndex,
+        String,
+    )> {
         let last = self.last_check.lock().ok()?;
         let result = last.get(uri)?;
         Some((
@@ -168,19 +176,38 @@ impl LanguageServer for Backend {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let uri = params.text_document_position_params.text_document.uri.clone();
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
         let Some((tc_result, program, line_index, _source)) = self.snapshot(&uri) else {
             return Ok(None);
         };
 
         let position = params.text_document_position_params.position;
-        let offset = line_index.line_col_to_offset(position.line as usize, position.character as usize);
+        let offset =
+            line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
         let Some((name, span, node_id)) = hover::find_name_at_offset(&program, offset) else {
             return Ok(None);
         };
 
-        let Some(type_str) = hover::type_at_name(&tc_result, &name, Some(&span), node_id.as_ref(), &program) else {
+        // Handlers get special display: "handler name for Effect1, Effect2"
+        if let Some(handler_info) = tc_result.handlers.get(&name) {
+            let effects = handler_info.effects.join(", ");
+            return Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("```dylang\nhandler {} for {}\n```", name, effects),
+                }),
+                range: None,
+            }));
+        }
+
+        let Some(type_str) =
+            hover::type_at_name(&tc_result, &name, Some(&span), node_id.as_ref(), &program)
+        else {
             return Ok(None);
         };
 
@@ -197,7 +224,11 @@ impl LanguageServer for Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let uri = params.text_document_position_params.text_document.uri.clone();
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
         let Some((tc_result, program, line_index, _source)) = self.snapshot(&uri) else {
             return Ok(None);
         };
@@ -212,7 +243,8 @@ impl LanguageServer for Backend {
 
         // Level 1: effect call -> handler arm (op! -> the arm that handles it)
         if let Some((arm_span, arm_module)) = tc_result.effect_call_targets.get(&span) {
-            let (target_uri, target_li) = resolve_span_location(&uri, &line_index, arm_module.as_deref(), &tc_result)?;
+            let (target_uri, target_li) =
+                resolve_span_location(&uri, &line_index, arm_module.as_deref(), &tc_result)?;
             let (start_line, start_col) = target_li.offset_to_line_col(arm_span.start);
             let (end_line, end_col) = target_li.offset_to_line_col(arm_span.end);
             return Ok(Some(GotoDefinitionResponse::Scalar(Location {
@@ -226,7 +258,8 @@ impl LanguageServer for Backend {
 
         // Level 2: handler arm -> effect op definition
         if let Some((op_def_span, op_module)) = tc_result.handler_arm_targets.get(&span) {
-            let (target_uri, target_li) = resolve_span_location(&uri, &line_index, op_module.as_deref(), &tc_result)?;
+            let (target_uri, target_li) =
+                resolve_span_location(&uri, &line_index, op_module.as_deref(), &tc_result)?;
             let (start_line, start_col) = target_li.offset_to_line_col(op_def_span.start);
             let (end_line, end_col) = target_li.offset_to_line_col(op_def_span.end);
             return Ok(Some(GotoDefinitionResponse::Scalar(Location {
@@ -242,7 +275,8 @@ impl LanguageServer for Backend {
         // which knows the source module even if the handler isn't in the explicit exposing list.
         if let Some(handler_info) = tc_result.handlers.get(&name) {
             let source_module = handler_info.source_module.as_deref();
-            let (target_uri, target_li) = resolve_span_location(&uri, &line_index, source_module, &tc_result)?;
+            let (target_uri, target_li) =
+                resolve_span_location(&uri, &line_index, source_module, &tc_result)?;
             // Find the HandlerDef span in the target program
             let target_program = if let Some(m) = source_module {
                 tc_result.programs().get(m).map(|p| p.as_slice())
@@ -294,10 +328,7 @@ impl LanguageServer for Backend {
         })))
     }
 
-    async fn completion(
-        &self,
-        params: CompletionParams,
-    ) -> Result<Option<CompletionResponse>> {
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri.clone();
         let Some((tc_result, program, line_index, source)) = self.snapshot(&uri) else {
             return Ok(None);
@@ -331,11 +362,12 @@ impl LanguageServer for Backend {
         Ok(Some(DocumentSymbolResponse::Flat(symbols)))
     }
 
-    async fn signature_help(
-        &self,
-        params: SignatureHelpParams,
-    ) -> Result<Option<SignatureHelp>> {
-        let uri = params.text_document_position_params.text_document.uri.clone();
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
         let Some((tc_result, program, line_index, source)) = self.snapshot(&uri) else {
             return Ok(None);
         };
@@ -385,10 +417,7 @@ impl LanguageServer for Backend {
         }))
     }
 
-    async fn references(
-        &self,
-        params: ReferenceParams,
-    ) -> Result<Option<Vec<Location>>> {
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let uri = params.text_document_position.text_document.uri.clone();
         let Some((tc_result, program, line_index, _source)) = self.snapshot(&uri) else {
             return Ok(None);
@@ -427,26 +456,11 @@ impl LanguageServer for Backend {
         // Collect all usage spans that resolve to this definition.
         let mut locations = Vec::new();
         for (usage_id, &ref_def_id) in &tc_result.references {
-            if ref_def_id == def_id {
-                if let Some(&usage_span) = tc_result.node_spans.get(usage_id) {
-                    let (start_line, start_col) = line_index.offset_to_line_col(usage_span.start);
-                    let (end_line, end_col) = line_index.offset_to_line_col(usage_span.end);
-                    locations.push(Location {
-                        uri: uri.clone(),
-                        range: Range {
-                            start: Position::new(start_line as u32, start_col as u32),
-                            end: Position::new(end_line as u32, end_col as u32),
-                        },
-                    });
-                }
-            }
-        }
-
-        // Include the definition site itself if requested.
-        if params.context.include_declaration {
-            if let Some(&def_span) = tc_result.node_spans.get(&def_id) {
-                let (start_line, start_col) = line_index.offset_to_line_col(def_span.start);
-                let (end_line, end_col) = line_index.offset_to_line_col(def_span.end);
+            if ref_def_id == def_id
+                && let Some(&usage_span) = tc_result.node_spans.get(usage_id)
+            {
+                let (start_line, start_col) = line_index.offset_to_line_col(usage_span.start);
+                let (end_line, end_col) = line_index.offset_to_line_col(usage_span.end);
                 locations.push(Location {
                     uri: uri.clone(),
                     range: Range {
@@ -455,6 +469,21 @@ impl LanguageServer for Backend {
                     },
                 });
             }
+        }
+
+        // Include the definition site itself if requested.
+        if params.context.include_declaration
+            && let Some(&def_span) = tc_result.node_spans.get(&def_id)
+        {
+            let (start_line, start_col) = line_index.offset_to_line_col(def_span.start);
+            let (end_line, end_col) = line_index.offset_to_line_col(def_span.end);
+            locations.push(Location {
+                uri: uri.clone(),
+                range: Range {
+                    start: Position::new(start_line as u32, start_col as u32),
+                    end: Position::new(end_line as u32, end_col as u32),
+                },
+            });
         }
 
         if locations.is_empty() {
