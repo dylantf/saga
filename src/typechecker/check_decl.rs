@@ -1264,7 +1264,7 @@ impl Checker {
                                         .trait_impls
                                         .contains_key(&(t_name.clone(), type_name.clone()))
                                     {
-                                        for (m_name, _, _) in &t_info.methods {
+                                        for (m_name, _, _, _) in &t_info.methods {
                                             if let Some(scheme) = self.env.get(m_name) {
                                                 // A trait method's scheme has the trait name
                                                 // in its constraints. If the env entry doesn't,

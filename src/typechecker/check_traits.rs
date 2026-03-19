@@ -6,34 +6,39 @@ use super::{Checker, ImplInfo, Scheme, Type, Diagnostic};
 impl Checker {
     // --- Trait & impl helpers ---
 
-    /// Replace occurrences of a trait's type param variable with a concrete type.
+    /// Replace occurrences of the trait's type param variable with a concrete type.
     /// Used when checking impl bodies: if the trait says `(x: a) -> String`
     /// and the impl is `for User`, we substitute a -> User to get `(x: User) -> String`.
-    pub(crate) fn substitute_trait_param(&self, replacement: &Type, ty: &Type) -> Type {
+    /// `trait_param_id` identifies which specific var to replace; other free vars are left alone.
+    pub(crate) fn substitute_trait_param(&self, trait_param_id: Option<u32>, replacement: &Type, ty: &Type) -> Type {
         match ty {
-            Type::Var(_) => {
+            Type::Var(id) => {
                 let resolved = self.sub.apply(ty);
                 if resolved == *ty {
-                    // Unresolved var -- replace all free vars (trait methods only
-                    // have the one type param).
-                    replacement.clone()
+                    // Unresolved var -- only replace if it's the trait's own type param
+                    match trait_param_id {
+                        Some(param_id) if *id == param_id => replacement.clone(),
+                        Some(_) => ty.clone(),
+                        // Fallback: no param ID tracked, replace all (legacy behavior)
+                        None => replacement.clone(),
+                    }
                 } else {
                     resolved
                 }
             }
             Type::Arrow(a, b) => Type::Arrow(
-                Box::new(self.substitute_trait_param(replacement, a)),
-                Box::new(self.substitute_trait_param(replacement, b)),
+                Box::new(self.substitute_trait_param(trait_param_id, replacement, a)),
+                Box::new(self.substitute_trait_param(trait_param_id, replacement, b)),
             ),
             Type::EffArrow(a, b, effs) => Type::EffArrow(
-                Box::new(self.substitute_trait_param(replacement, a)),
-                Box::new(self.substitute_trait_param(replacement, b)),
+                Box::new(self.substitute_trait_param(trait_param_id, replacement, a)),
+                Box::new(self.substitute_trait_param(trait_param_id, replacement, b)),
                 effs.iter()
                     .map(|(name, args)| {
                         (
                             name.clone(),
                             args.iter()
-                                .map(|t| self.substitute_trait_param(replacement, t))
+                                .map(|t| self.substitute_trait_param(trait_param_id, replacement, t))
                                 .collect(),
                         )
                     })
@@ -42,7 +47,7 @@ impl Checker {
             Type::Con(name, args) => Type::Con(
                 name.clone(),
                 args.iter()
-                    .map(|a| self.substitute_trait_param(replacement, a))
+                    .map(|a| self.substitute_trait_param(trait_param_id, replacement, a))
                     .collect(),
             ),
             Type::Error => Type::Error,
@@ -114,10 +119,7 @@ impl Checker {
             super::TraitInfo {
                 type_param: type_param.into(),
                 supertraits: supertraits.to_vec(),
-                methods: method_sigs
-                    .into_iter()
-                    .map(|(n, pts, rt, _)| (n, pts, rt))
-                    .collect(),
+                methods: method_sigs,
             },
         );
         Ok(())
@@ -142,7 +144,7 @@ impl Checker {
 
         // Check all required methods are provided
         let provided: Vec<&str> = methods.iter().map(|(n, _, _)| n.as_str()).collect();
-        for (required_name, _, _) in &trait_info.methods {
+        for (required_name, _, _, _) in &trait_info.methods {
             if !provided.contains(&required_name.as_str()) {
                 return Err(Diagnostic::error_at(
                     span,
@@ -170,7 +172,7 @@ impl Checker {
 
         // Check for extra methods not in the trait
         for name in &provided {
-            if !trait_info.methods.iter().any(|(n, _, _)| n == name) {
+            if !trait_info.methods.iter().any(|(n, _, _, _)| n == name) {
                 return Err(Diagnostic::error_at(
                     span,
                     format!(
@@ -214,15 +216,16 @@ impl Checker {
             let trait_method = trait_info
                 .methods
                 .iter()
-                .find(|(n, _, _)| n == method_name)
+                .find(|(n, _, _, _)| n == method_name)
                 .unwrap(); // already validated above
 
+            let trait_param_id = trait_method.3;
             let expected_params: Vec<Type> = trait_method
                 .1
                 .iter()
-                .map(|t| self.substitute_trait_param(&target, t))
+                .map(|t| self.substitute_trait_param(trait_param_id, &target, t))
                 .collect();
-            let expected_return = self.substitute_trait_param(&target, &trait_method.2);
+            let expected_return = self.substitute_trait_param(trait_param_id, &target, &trait_method.2);
 
             let saved_env = self.env.clone();
             let body_scope = self.save_body_scope();
@@ -231,7 +234,7 @@ impl Checker {
             // the impl body resolve to the trait signature, not to a user-defined
             // function that happens to share the name. The saved_env restore at
             // the end of this loop iteration will bring back the user's entry.
-            for (m_name, m_param_types, m_return_type) in &trait_info.methods {
+            for (m_name, m_param_types, m_return_type, _) in &trait_info.methods {
                 let mut fun_ty = m_return_type.clone();
                 for pt in m_param_types.iter().rev() {
                     fun_ty = Type::Arrow(Box::new(pt.clone()), Box::new(fun_ty));

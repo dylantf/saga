@@ -158,9 +158,10 @@ impl Substitution {
         }
 
         if self.occurs(id, ty) {
-            return Err(Diagnostic::error(
-                format!("infinite type: ?{} occurs in {}", id, ty),
-            ));
+            return Err(Diagnostic::error(format!(
+                "infinite type: ?{} occurs in {}",
+                id, ty
+            )));
         }
         self.map.insert(id, ty.clone());
         Ok(())
@@ -638,8 +639,8 @@ pub struct TraitInfo {
     #[allow(dead_code)]
     pub type_param: String,
     pub supertraits: Vec<String>,
-    /// Method signatures: name -> (param_types, return_type)
-    pub methods: Vec<(String, Vec<Type>, Type)>,
+    /// Method signatures: name -> (param_types, return_type, trait_param_var_id)
+    pub methods: Vec<(String, Vec<Type>, Type, Option<u32>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -874,7 +875,9 @@ impl Checker {
 
     /// Record the type of an expression node (by NodeId).
     pub(crate) fn record_type(&mut self, node_id: crate::ast::NodeId, ty: &Type) {
-        self.type_at_node.entry(node_id).or_insert_with(|| ty.clone());
+        self.type_at_node
+            .entry(node_id)
+            .or_insert_with(|| ty.clone());
     }
 
     /// Record the type of a pattern binding (by Span, since Pat has no NodeId).
@@ -1245,9 +1248,10 @@ impl Checker {
             _ => {
                 let a_display = self.prettify_type(&a);
                 let b_display = self.prettify_type(&b);
-                Err(Diagnostic::error(
-                    format!("type mismatch: expected {}, got {}", a_display, b_display),
-                ))
+                Err(Diagnostic::error(format!(
+                    "type mismatch: expected {}, got {}",
+                    a_display, b_display
+                )))
             }
         }
     }

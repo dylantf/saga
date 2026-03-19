@@ -219,7 +219,7 @@ impl Elaborator {
         // Register trait methods from checker's trait info (for traits not
         // defined in the current program, e.g. Show in Std modules).
         for (trait_name, info) in &self.traits {
-            for (idx, (method_name, _, _)) in info.methods.iter().enumerate() {
+            for (idx, (method_name, _, _, _)) in info.methods.iter().enumerate() {
                 self.trait_methods
                     .entry(method_name.clone())
                     .or_insert_with(|| (trait_name.clone(), idx));
@@ -274,7 +274,7 @@ impl Elaborator {
                     // Order methods by trait declaration order
                     let mut ordered_methods = Vec::new();
                     if let Some(ref info) = trait_info {
-                        for (trait_method_name, _, _) in &info.methods {
+                        for (trait_method_name, _, _, _) in &info.methods {
                             if let Some((_, params, body)) =
                                 methods.iter().find(|(n, _, _)| n == trait_method_name)
                             {

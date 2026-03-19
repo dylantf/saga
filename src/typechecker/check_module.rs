@@ -345,7 +345,7 @@ impl Checker {
         for (name, info) in &self.traits {
             if !mc.traits.contains_key(name) {
                 mc.traits.insert(name.clone(), info.clone());
-                for (method_name, _, _) in &info.methods {
+                for (method_name, _, _, _) in &info.methods {
                     if let Some(scheme) = self.env.get(method_name)
                         && mc.env.get(method_name).is_none()
                     {
@@ -435,7 +435,7 @@ impl Checker {
             self.traits
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
-            for (method_name, _, _) in &info.methods {
+            for (method_name, _, _, _) in &info.methods {
                 if let Some(&scheme) = binding_map.get(method_name.as_str())
                     && self.env.get(method_name).is_none()
                 {
