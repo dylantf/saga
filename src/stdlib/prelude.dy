@@ -8,6 +8,6 @@ import Std.Int
 import Std.Float
 import Std.String
 import Std.Tuple (fst, snd)
-import Std.IO (print)
+import Std.IO (print, print_error)
 
 

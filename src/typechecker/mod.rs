@@ -56,6 +56,9 @@ pub enum Type {
     Con(std::string::String, Vec<Type>),
     /// Error recovery type: unifies with everything, suppresses cascading errors.
     Error,
+    /// Bottom type: the type of expressions that never produce a value (panic, exit).
+    /// Unifies with any type.
+    Never,
 }
 
 /// Convenience constructors for built-in types
@@ -100,6 +103,7 @@ impl std::fmt::Display for Type {
                 }
             }
             Type::Error => write!(f, "<error>"),
+            Type::Never => write!(f, "Never"),
         }
     }
 }
@@ -141,6 +145,7 @@ impl Substitution {
                 Type::Con(name.clone(), args.iter().map(|a| self.apply(a)).collect())
             }
             Type::Error => Type::Error,
+            Type::Never => Type::Never,
         }
     }
 
@@ -183,7 +188,7 @@ impl Substitution {
                         .any(|(_, args)| args.iter().any(|t| self.occurs(id, t)))
             }
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
-            Type::Error => false,
+            Type::Error | Type::Never => false,
         }
     }
 }
@@ -279,6 +284,7 @@ fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
             args.iter().map(|a| rename_vars(a, names)).collect(),
         ),
         Type::Error => Type::Error,
+        Type::Never => Type::Never,
     }
 }
 
@@ -525,7 +531,7 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                 free_vars_in_type(arg, bound, out);
             }
         }
-        Type::Error => {}
+        Type::Error | Type::Never => {}
     }
 }
 
@@ -995,33 +1001,23 @@ impl Checker {
         // Ord impls for primitives are defined in Std.Int, Std.Float, Std.String
         // (they provide real dict constructors for `compare`).
 
-        // panic : String -> a (crashes at runtime, polymorphic return type)
-        let a = self.fresh_var();
-        let a_id = match &a {
-            Type::Var(id) => *id,
-            _ => unreachable!(),
-        };
+        // panic : String -> Never (crashes at runtime)
         self.env.insert(
             "panic".into(),
             Scheme {
-                forall: vec![a_id],
+                forall: vec![],
                 constraints: vec![],
-                ty: Type::Arrow(Box::new(Type::string()), Box::new(a)),
+                ty: Type::Arrow(Box::new(Type::string()), Box::new(Type::Never)),
             },
         );
 
-        // todo : String -> a (type hole, crashes at runtime with "not implemented")
-        let a = self.fresh_var();
-        let a_id = match &a {
-            Type::Var(id) => *id,
-            _ => unreachable!(),
-        };
+        // todo : String -> Never (type hole, crashes at runtime with "not implemented")
         self.env.insert(
             "todo".into(),
             Scheme {
-                forall: vec![a_id],
+                forall: vec![],
                 constraints: vec![],
-                ty: Type::Arrow(Box::new(Type::string()), Box::new(a)),
+                ty: Type::Arrow(Box::new(Type::string()), Box::new(Type::Never)),
             },
         );
 
@@ -1201,6 +1197,9 @@ impl Checker {
             // Error type unifies with anything (suppresses cascading errors)
             (Type::Error, _) | (_, Type::Error) => Ok(()),
 
+            // Never (bottom) unifies with anything
+            (Type::Never, _) | (_, Type::Never) => Ok(()),
+
             (Type::Var(id), _) => self.sub.bind(*id, &b),
             (_, Type::Var(id)) => self.sub.bind(*id, &a),
 
@@ -1314,6 +1313,7 @@ impl Checker {
                 args.iter().map(|a| self.replace_vars(a, mapping)).collect(),
             ),
             Type::Error => Type::Error,
+            Type::Never => Type::Never,
         }
     }
 
@@ -1354,6 +1354,7 @@ impl Checker {
         params: &mut Vec<(String, u32)>,
     ) -> Type {
         match texpr {
+            crate::ast::TypeExpr::Named(name) if name == "Never" => Type::Never,
             crate::ast::TypeExpr::Named(name) => Type::Con(name.clone(), vec![]),
             crate::ast::TypeExpr::Var(name) => {
                 if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
@@ -1430,6 +1431,6 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
                 collect_free_vars(arg, out);
             }
         }
-        Type::Error => {}
+        Type::Error | Type::Never => {}
     }
 }

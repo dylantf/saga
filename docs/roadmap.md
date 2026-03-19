@@ -265,7 +265,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
       commands. Prerequisite: library compilation mode
 - [x] LSP (go-to-definition, hover types, error squiggles, autocomplete for constructors/effects). See separate LSP roadmap
 - [x] Testing framework (assert_eq, test runner, test discovery, skip, nested describe)
-  - [ ] Exit code 1 on test failure (for CI)
+  - [x] Exit code 1 on test failure (for CI)
   - [ ] Test filtering (`dylang test --filter "name"`)
   - [ ] `only` (run a single test, ignore others)
   - [ ] `assert_throws` / `assert_fails` (test that an effect or panic is raised)

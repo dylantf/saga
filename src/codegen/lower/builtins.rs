@@ -633,21 +633,42 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Lower `print(dict, x)` to `let S = apply show(X) in io:format("~ts~n", [S])`.
+    /// Lower `print(dict, x)` / `print_error(dict, x)` to io:format.
     /// After elaboration, `print x` becomes `print(__dict_Show_a, x)`.
-    pub(super) fn lower_builtin_print(&mut self, args: &[&crate::ast::Expr]) -> Option<CExpr> {
+    /// When `stderr` is true, outputs to standard_error instead of stdout.
+    pub(super) fn lower_builtin_print(
+        &mut self,
+        args: &[&crate::ast::Expr],
+        stderr: bool,
+    ) -> Option<CExpr> {
+        let make_format_call = |s_var: CExpr| -> CExpr {
+            if stderr {
+                cerl_call(
+                    "io",
+                    "format",
+                    vec![
+                        CExpr::Lit(CLit::Atom("standard_error".into())),
+                        CExpr::Lit(CLit::Str("~ts~n".into())),
+                        CExpr::Cons(Box::new(s_var), Box::new(CExpr::Nil)),
+                    ],
+                )
+            } else {
+                cerl_call(
+                    "io",
+                    "format",
+                    vec![
+                        CExpr::Lit(CLit::Str("~ts~n".into())),
+                        CExpr::Cons(Box::new(s_var), Box::new(CExpr::Nil)),
+                    ],
+                )
+            }
+        };
+
         if args.len() == 1 {
             // Un-elaborated print (e.g. inside handler bodies): print(x) where x is a String
             let val = self.lower_expr(args[0]);
             let v = self.fresh();
-            let format_call = cerl_call(
-                "io",
-                "format",
-                vec![
-                    CExpr::Lit(CLit::Str("~ts~n".into())),
-                    CExpr::Cons(Box::new(CExpr::Var(v.clone())), Box::new(CExpr::Nil)),
-                ],
-            );
+            let format_call = make_format_call(CExpr::Var(v.clone()));
             return Some(CExpr::Let(v, Box::new(val), Box::new(format_call)));
         }
         if args.len() != 2 {
@@ -671,15 +692,7 @@ impl Lowerer<'_> {
             Box::new(CExpr::Var(show_fn.clone())),
             vec![CExpr::Var(v.clone())],
         );
-        // io:format("~ts~n", [S])
-        let format_call = cerl_call(
-            "io",
-            "format",
-            vec![
-                CExpr::Lit(CLit::Str("~ts~n".into())),
-                CExpr::Cons(Box::new(CExpr::Var(s.clone())), Box::new(CExpr::Nil)),
-            ],
-        );
+        let format_call = make_format_call(CExpr::Var(s.clone()));
 
         Some(CExpr::Let(
             d.clone(),

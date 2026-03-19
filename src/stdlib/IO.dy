@@ -4,3 +4,6 @@ import Std.String
 
 pub fun print (x: a) -> () where {a: Show}
 # builtin
+
+pub fun print_error (x: a) -> () where {a: Show}
+# builtin

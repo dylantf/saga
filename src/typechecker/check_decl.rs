@@ -1236,7 +1236,7 @@ impl Checker {
             }
             for (trait_name, ty, span, node_id) in constraints {
                 let resolved = self.sub.apply(&ty);
-                if matches!(resolved, Type::Error) {
+                if matches!(resolved, Type::Error | Type::Never) {
                     continue;
                 }
                 match &resolved {
@@ -1343,8 +1343,8 @@ impl Checker {
                             format!("no impl of {} for function type", trait_name),
                         ));
                     }
-                    // Error type: skip trait checking (already errored elsewhere)
-                    Type::Error => {}
+                    // Error/Never type: skip trait checking
+                    Type::Error | Type::Never => {}
                 }
             }
         }

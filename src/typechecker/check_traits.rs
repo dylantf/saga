@@ -46,6 +46,7 @@ impl Checker {
                     .collect(),
             ),
             Type::Error => Type::Error,
+            Type::Never => Type::Never,
         }
     }
 

@@ -2,6 +2,7 @@ module Std.Test
 
 import Std.Base
 import Std.IO (print)
+import Std.Process
 
 pub effect Assert {
   fun assert (ok: Bool) (msg: String) -> Unit
@@ -119,6 +120,7 @@ run body = {
   let summary = if final.skipped > 0 then summary <> ", " <> show final.skipped <> " skipped"
                 else summary
   print summary
+  if final.failed > 0 then Process.exit 1 else ()
 }
 
 # Assertion helpers

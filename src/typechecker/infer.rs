@@ -794,7 +794,7 @@ impl Checker {
                             if i + 1 < stmts.len() {
                                 let resolved = self.sub.apply(&ty);
                                 let is_unit = matches!(&resolved, Type::Con(n, args) if n == "Unit" && args.is_empty());
-                                if !is_unit && !matches!(resolved, Type::Error) {
+                                if !is_unit && !matches!(resolved, Type::Error | Type::Never) {
                                     let display_ty = self.prettify_type(&ty);
                                     self.collected_diagnostics.push(Diagnostic::warning_at(
                                         expr.span,
@@ -1378,7 +1378,7 @@ impl Checker {
                             collect_vars(a, vars);
                         }
                     }
-                    Type::Error => {}
+                    Type::Error | Type::Never => {}
                 }
             }
             for p in &op.params {

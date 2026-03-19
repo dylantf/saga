@@ -630,22 +630,64 @@ impl<'a> Lowerer<'a> {
                 // Lower `print(dict, x)` to io:format("~s~n", [show(x)])
                 if let Some((func_name, args)) = collect_fun_call(expr)
                     && func_name == "print"
-                    && let Some(ce) = self.lower_builtin_print(&args)
+                    && let Some(ce) = self.lower_builtin_print(&args, false)
                 {
                     return ce;
                 }
 
-                // Lower `panic msg` / `todo msg` to erlang:error(msg)
+                // Lower `print_error(dict, x)` to io:format(standard_error, "~ts~n", [show(x)])
+                if let Some((func_name, args)) = collect_fun_call(expr)
+                    && func_name == "print_error"
+                    && let Some(ce) = self.lower_builtin_print(&args, true)
+                {
+                    return ce;
+                }
+
+                // Lower `panic msg` / `todo msg` to stderr print + erlang:halt(1)
                 if let Some((func_name, args)) = collect_fun_call(expr)
                     && (func_name == "panic" || func_name == "todo")
                     && args.len() == 1
                 {
+                    let prefix = if func_name == "panic" {
+                        "panic: "
+                    } else {
+                        "todo: "
+                    };
                     let arg = self.lower_expr(args[0]);
                     let v = self.fresh();
+                    let prefixed = self.fresh();
+                    let dummy = self.fresh();
+                    // Prepend "panic: " / "todo: " to the message
+                    let prepend = cerl_call(
+                        "erlang",
+                        "++",
+                        vec![
+                            CExpr::Lit(CLit::Str(prefix.into())),
+                            CExpr::Var(v.clone()),
+                        ],
+                    );
+                    // io:format(standard_error, "~ts~n", [Msg])
+                    let print_stderr = cerl_call(
+                        "io",
+                        "format",
+                        vec![
+                            CExpr::Lit(CLit::Atom("standard_error".into())),
+                            CExpr::Lit(CLit::Str("~ts~n".into())),
+                            CExpr::Cons(
+                                Box::new(CExpr::Var(prefixed.clone())),
+                                Box::new(CExpr::Nil),
+                            ),
+                        ],
+                    );
+                    let halt = cerl_call("erlang", "halt", vec![CExpr::Lit(CLit::Int(1))]);
                     return CExpr::Let(
-                        v.clone(),
+                        v,
                         Box::new(arg),
-                        Box::new(cerl_call("erlang", "error", vec![CExpr::Var(v)])),
+                        Box::new(CExpr::Let(
+                            prefixed,
+                            Box::new(prepend),
+                            Box::new(CExpr::Let(dummy, Box::new(print_stderr), Box::new(halt))),
+                        )),
                     );
                 }
 
