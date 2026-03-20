@@ -82,42 +82,7 @@ fn derive_record_stringify(
     let param_name = "__val".to_string();
     let param_var = Expr::synth(span, ExprKind::Var { name: param_name.clone() });
 
-    // Build: "RecordName { field1: " <> method r.field1 <> ", field2: " <> method r.field2 <> " }"
-    let mut parts: Vec<Expr> = Vec::new();
-    let mut prefix = format!("{record_name} {{ ");
-
-    for (i, (field_name, _ty)) in fields.iter().enumerate() {
-        if i > 0 {
-            prefix.push_str(", ");
-        }
-        prefix.push_str(field_name);
-        prefix.push_str(": ");
-        parts.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(prefix.clone()) }));
-        prefix.clear();
-
-        // method_name (param_var.field_name)
-        let field_access = Expr::synth(span, ExprKind::FieldAccess {
-            expr: Box::new(param_var.clone()),
-            field: field_name.clone(),
-        });
-        parts.push(Expr::synth(span, ExprKind::App {
-            func: Box::new(Expr::synth(span, ExprKind::Var { name: method_name.into() })),
-            arg: Box::new(field_access),
-        }));
-    }
-
-    parts.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(" }".into()) }));
-
-    let body = parts
-        .into_iter()
-        .reduce(|acc, part| {
-            Expr::synth(span, ExprKind::BinOp {
-                op: BinOp::Concat,
-                left: Box::new(acc),
-                right: Box::new(part),
-            })
-        })
-        .unwrap();
+    let body = build_record_debug_expr(method_name, record_name, fields, &param_var, span);
 
     // Each type param needs the same trait (same as ADT derive)
     let where_clause: Vec<TraitBound> = type_params
@@ -142,6 +107,65 @@ fn derive_record_stringify(
         )],
         span,
     }
+}
+
+/// Build the debug string expression for a record. For fields with anonymous
+/// record types, generates inline formatting instead of calling `debug`.
+fn build_record_debug_expr(
+    method_name: &str,
+    label: &str,
+    fields: &[(String, TypeExpr)],
+    base_expr: &Expr,
+    span: Span,
+) -> Expr {
+    let mut parts: Vec<Expr> = Vec::new();
+    let mut prefix = if label.is_empty() {
+        "{ ".to_string()
+    } else {
+        format!("{label} {{ ")
+    };
+
+    for (i, (field_name, ty)) in fields.iter().enumerate() {
+        if i > 0 {
+            prefix.push_str(", ");
+        }
+        prefix.push_str(field_name);
+        prefix.push_str(": ");
+        parts.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(prefix.clone()) }));
+        prefix.clear();
+
+        let field_access = Expr::synth(span, ExprKind::FieldAccess {
+            expr: Box::new(base_expr.clone()),
+            field: field_name.clone(),
+        });
+
+        match ty {
+            TypeExpr::Record { fields: inner_fields, .. } => {
+                // Inline the anonymous record's debug output
+                parts.push(build_record_debug_expr(method_name, "", inner_fields, &field_access, span));
+            }
+            _ => {
+                // Call debug/show on the field value
+                parts.push(Expr::synth(span, ExprKind::App {
+                    func: Box::new(Expr::synth(span, ExprKind::Var { name: method_name.into() })),
+                    arg: Box::new(field_access),
+                }));
+            }
+        }
+    }
+
+    parts.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(" }".into()) }));
+
+    parts
+        .into_iter()
+        .reduce(|acc, part| {
+            Expr::synth(span, ExprKind::BinOp {
+                op: BinOp::Concat,
+                left: Box::new(acc),
+                right: Box::new(part),
+            })
+        })
+        .unwrap()
 }
 
 fn generate_derive(

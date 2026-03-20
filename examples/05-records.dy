@@ -48,7 +48,7 @@ record House {
     number: Int,
     street: String,
   }
-}
+} deriving (Debug)
 
 # Polymorphic records
 record Box a {
@@ -93,9 +93,8 @@ main () = {
       street: "Fake Street"
     },
   }
-
-  println (show house.year_built)
-  println house.address.street
+  
+  house |> debug |> println
 
   # Record update on nested anonymous record
   let house2 = { house | address: { house.address | street: "Real Street" } }
