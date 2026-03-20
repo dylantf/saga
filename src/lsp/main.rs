@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -21,7 +21,7 @@ struct Backend {
     /// Cached base checker per project root. Key is the project root path (or empty for no project).
     base_checkers: Mutex<std::collections::HashMap<String, typechecker::Checker>>,
     /// Last check result per file, for hover/goto queries.
-    last_check: Mutex<std::collections::HashMap<Url, CheckSnapshot>>,
+    last_check: Mutex<std::collections::HashMap<Url, Arc<CheckSnapshot>>>,
 }
 
 impl Backend {
@@ -56,7 +56,7 @@ impl Backend {
             Ok(result) => {
                 let diagnostics = result.diagnostics.clone();
                 let mut last = self.last_check.lock().unwrap_or_else(|e| e.into_inner());
-                last.insert(uri, result);
+                last.insert(uri, Arc::new(result));
                 diagnostics
             }
             Err(e) => {
@@ -66,25 +66,15 @@ impl Backend {
         }
     }
 
-    /// Clone the check result for a specific URI out of the lock to avoid holding it
-    /// across async boundaries (which would deadlock with did_open).
-    fn snapshot(
-        &self,
-        uri: &Url,
-    ) -> Option<(
-        typechecker::CheckResult,
-        Vec<dylang::ast::Decl>,
-        line_index::LineIndex,
-        String,
-    )> {
+    /// Get a shared reference to the check result for a specific URI.
+    /// Clones the Arc (cheap pointer copy) to avoid holding the lock across async boundaries.
+    fn snapshot(&self, uri: &Url) -> Option<Arc<CheckSnapshot>> {
         let last = self.last_check.lock().ok()?;
-        let result = last.get(uri)?;
-        Some((
-            result.tc_result.clone(),
-            result.program.clone()?,
-            result.line_index.clone(),
-            result.source.clone(),
-        ))
+        let snap = last.get(uri)?;
+        if snap.program.is_none() {
+            return None;
+        }
+        Some(Arc::clone(snap))
     }
 }
 
@@ -181,9 +171,13 @@ impl LanguageServer for Backend {
             .text_document
             .uri
             .clone();
-        let Some((tc_result, program, line_index, _source)) = self.snapshot(&uri) else {
+        let Some(snap) = self.snapshot(&uri) else {
             return Ok(None);
         };
+        let tc_result = &snap.tc_result;
+        let program = snap.program.as_ref().unwrap();
+        let line_index = &snap.line_index;
+
 
         let position = params.text_document_position_params.position;
         let offset =
@@ -269,9 +263,13 @@ impl LanguageServer for Backend {
             .text_document
             .uri
             .clone();
-        let Some((tc_result, program, line_index, _source)) = self.snapshot(&uri) else {
+        let Some(snap) = self.snapshot(&uri) else {
             return Ok(None);
         };
+        let tc_result = &snap.tc_result;
+        let program = snap.program.as_ref().unwrap();
+        let line_index = &snap.line_index;
+
 
         let position = params.text_document_position_params.position;
         let offset =
@@ -370,9 +368,13 @@ impl LanguageServer for Backend {
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri.clone();
-        let Some((tc_result, program, line_index, source)) = self.snapshot(&uri) else {
+        let Some(snap) = self.snapshot(&uri) else {
             return Ok(None);
         };
+        let tc_result = &snap.tc_result;
+        let program = snap.program.as_ref().unwrap();
+        let line_index = &snap.line_index;
+        let source = &snap.source;
 
         let position = params.text_document_position.position;
         let offset =
@@ -389,9 +391,13 @@ impl LanguageServer for Backend {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = params.text_document.uri.clone();
-        let Some((_tc_result, program, line_index, _source)) = self.snapshot(&uri) else {
+        let Some(snap) = self.snapshot(&uri) else {
             return Ok(None);
         };
+
+        let program = snap.program.as_ref().unwrap();
+        let line_index = &snap.line_index;
+
 
         let mut symbols = document_symbol::collect_symbols(&program, &line_index);
         // Fill in the real URI (collect_symbols uses a placeholder)
@@ -408,9 +414,13 @@ impl LanguageServer for Backend {
             .text_document
             .uri
             .clone();
-        let Some((tc_result, program, line_index, source)) = self.snapshot(&uri) else {
+        let Some(snap) = self.snapshot(&uri) else {
             return Ok(None);
         };
+        let tc_result = &snap.tc_result;
+        let program = snap.program.as_ref().unwrap();
+        let line_index = &snap.line_index;
+        let source = &snap.source;
 
         let position = params.text_document_position_params.position;
         let offset =
@@ -459,9 +469,13 @@ impl LanguageServer for Backend {
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let uri = params.text_document_position.text_document.uri.clone();
-        let Some((tc_result, program, line_index, _source)) = self.snapshot(&uri) else {
+        let Some(snap) = self.snapshot(&uri) else {
             return Ok(None);
         };
+        let tc_result = &snap.tc_result;
+        let program = snap.program.as_ref().unwrap();
+        let line_index = &snap.line_index;
+
 
         let position = params.text_document_position.position;
         let offset =
