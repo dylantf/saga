@@ -767,9 +767,6 @@ pub struct Checker {
     /// Deferred effects for let bindings that partially apply effectful functions.
     /// name -> effect names. Used by the lowerer to register effectful local vars.
     pub(crate) let_effect_bindings: HashMap<String, Vec<String>>,
-    /// All local let binding names (including pure ones). Used by `with` validation
-    /// to distinguish local bindings from imports/parameters.
-    pub(crate) local_let_bindings: HashSet<String>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Per-node type information for Expr nodes (LSP hover, go-to-def, etc.).
@@ -870,7 +867,6 @@ impl Checker {
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
             let_effect_bindings: HashMap::new(),
-            local_let_bindings: HashSet::new(),
             collected_diagnostics: Vec::new(),
             type_at_node: HashMap::new(),
             type_at_span: HashMap::new(),

@@ -879,14 +879,9 @@ impl Checker {
                                 .insert(name.clone(), (dict_params, arity));
                         }
                         self.env.insert_with_def(name.clone(), scheme, *pat_id);
-                        if !deferred_effects.is_empty() {
-                            deferred_effects.sort();
-                            self.let_effect_bindings
-                                .insert(name.clone(), deferred_effects.clone());
-                        }
-                        // Track all local let bindings (including pure ones) so
-                        // `with` validation can distinguish them from imports.
-                        self.local_let_bindings.insert(name.clone());
+                        deferred_effects.sort();
+                        self.let_effect_bindings
+                            .insert(name.clone(), deferred_effects);
                         self.node_spans.insert(*pat_id, *var_span);
                         self.record_type_at_span(*var_span, &ty);
                         self.definitions.push((*pat_id, name.clone(), *var_span));
@@ -1431,7 +1426,6 @@ impl Checker {
                 .map(|name| {
                     self.fun_effects.contains_key(name)
                         || self.let_effect_bindings.contains_key(name)
-                        || self.local_let_bindings.contains(name)
                 })
                 .unwrap_or(false);
             if callee_effects_known {

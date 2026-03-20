@@ -7,7 +7,6 @@ mod util;
 
 use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
-use crate::typechecker::ModuleCodegenInfo;
 use std::collections::HashMap;
 
 use init::PendingAnnotation;
@@ -62,10 +61,8 @@ struct FunInfo {
 
 pub struct Lowerer<'a> {
     counter: usize,
-    /// Codegen info for imported modules (from typechecker cache).
-    codegen_info: &'a HashMap<String, ModuleCodegenInfo>,
-    /// Elaborated programs per module, for cross-module handler lookup.
-    elaborated_modules: &'a HashMap<String, ast::Program>,
+    /// Cross-module codegen context (codegen info, elaborated modules, effect bindings).
+    ctx: &'a super::CodegenContext,
     /// Maps module alias/name used in source -> Erlang module atom name.
     module_aliases: HashMap<String, String>,
     /// Names declared as `pub` in the current module (for export filtering).
@@ -111,21 +108,13 @@ pub struct Lowerer<'a> {
     /// Maps external function name -> (erlang_module, erlang_func, arity).
     /// Populated from `Decl::ExternalFun` declarations.
     external_funs: HashMap<String, (String, String, usize)>,
-    /// Deferred effects for let bindings that partially apply effectful functions.
-    /// Populated from CheckResult.let_effect_bindings.
-    let_effect_bindings: HashMap<String, Vec<String>>,
 }
 
 impl<'a> Lowerer<'a> {
-    pub fn new(
-        codegen_info: &'a HashMap<String, ModuleCodegenInfo>,
-        elaborated_modules: &'a HashMap<String, ast::Program>,
-        let_effect_bindings: HashMap<String, Vec<String>>,
-    ) -> Self {
+    pub fn new(ctx: &'a super::CodegenContext) -> Self {
         Lowerer {
             counter: 0,
-            codegen_info,
-            elaborated_modules,
+            ctx,
             module_aliases: HashMap::new(),
             pub_names: std::collections::HashSet::new(),
             record_fields: HashMap::new(),
@@ -142,7 +131,6 @@ impl<'a> Lowerer<'a> {
             constructor_modules: HashMap::new(),
             current_handler_k: None,
             external_funs: HashMap::new(),
-            let_effect_bindings,
         }
     }
 
