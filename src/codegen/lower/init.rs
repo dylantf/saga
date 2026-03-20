@@ -145,7 +145,7 @@ impl<'a> Lowerer<'a> {
         // so they're available even when not explicitly imported by user code. The
         // elaborator resolves dicts from all tc_codegen_info entries (not just direct
         // imports), so the lowerer must match that scope.
-        for (mod_name, info) in self.codegen_info {
+        for (mod_name, info) in &self.ctx.codegen_info {
             let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
             let erlang_name = util::module_name_to_erlang(&mod_path);
             for d in &info.trait_impl_dicts {
@@ -222,7 +222,7 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 // Register Std handler bodies from elaborated programs
-                if let Some(elab_program) = self.elaborated_modules.get(mod_name) {
+                if let Some(elab_program) = self.ctx.elaborated_modules.get(mod_name) {
                     for decl in elab_program {
                         if let Decl::HandlerDef {
                             name,
@@ -262,7 +262,7 @@ impl<'a> Lowerer<'a> {
                 self.module_aliases
                     .insert(prefix.clone(), erlang_name.clone());
 
-                if let Some(info) = self.codegen_info.get(&module_name) {
+                if let Some(info) = self.ctx.codegen_info.get(&module_name) {
                     // Build a set of exported names for checking exposing list
                     let exported_names: std::collections::HashSet<&str> =
                         info.exports.iter().map(|(n, _)| n.as_str()).collect();
@@ -349,7 +349,7 @@ impl<'a> Lowerer<'a> {
                         );
                     }
                     // Register imported handler bodies from elaborated programs
-                    if let Some(elab_program) = self.elaborated_modules.get(&module_name) {
+                    if let Some(elab_program) = self.ctx.elaborated_modules.get(&module_name) {
                         for decl in elab_program {
                             if let Decl::HandlerDef {
                                 name,

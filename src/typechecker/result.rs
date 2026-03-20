@@ -46,6 +46,9 @@ pub struct CheckResult {
     pub effect_call_targets: HashMap<crate::token::Span, (crate::token::Span, Option<String>)>,
     /// Dict params for let bindings with trait constraints: name -> (params, value_arity).
     pub let_dict_params: HashMap<String, (Vec<(String, String)>, usize)>,
+    /// Deferred effects for let bindings that partially apply effectful functions.
+    /// name -> effect names. Used by the lowerer to register effectful local vars.
+    pub let_effect_bindings: HashMap<String, Vec<String>>,
     /// Resolution map: usage NodeId -> definition NodeId (for find-all-references).
     pub references: HashMap<crate::ast::NodeId, crate::ast::NodeId>,
     /// NodeId -> Span map for recorded nodes (for resolving NodeIds to locations).
@@ -152,6 +155,7 @@ impl Checker {
             handler_arm_targets: self.handler_arm_targets.clone(),
             effect_call_targets: self.effect_call_targets.clone(),
             let_dict_params: self.let_dict_params.clone(),
+            let_effect_bindings: self.let_effect_bindings.clone(),
             references: self.references.clone(),
             node_spans: self.node_spans.clone(),
         }

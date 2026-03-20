@@ -443,6 +443,16 @@ impl<'a> Lowerer<'a> {
                 CExpr::LetRec(vec![(fun_name, arity, fun_body)], Box::new(rest_ce))
             }
             [first, rest @ ..] => {
+                // If this let binding partially applies an effectful function,
+                // register the bound variable so call sites thread handlers.
+                if let Stmt::Let { pattern, .. } = first
+                    && let Pat::Var { name, .. } = pattern
+                    && let Some(effects) = self.ctx.let_effect_bindings.get(name).cloned()
+                    && !effects.is_empty()
+                {
+                    self.current_effectful_vars.insert(name.clone(), effects);
+                }
+
                 // Check if the value is a `with` expression. If so, capture the rest
                 // of the block as _ReturnK so abort-style handlers skip subsequent stmts.
                 let with_info = match first {

@@ -5,8 +5,44 @@ use crate::ast::{self, BinOp, CaseArm, Expr, ExprKind, Lit, Pat, Stmt};
 use super::{Checker, Diagnostic, EffectOpSig, Scheme, Type};
 use crate::token::Span;
 
+/// Walk an App chain to find the callee name at the root.
+/// e.g. `App(App(Var("f"), a), b)` -> Some("f")
+///       `App(QualifiedName("M", "f"), a)` -> Some("M.f")
+/// Returns None if the callee isn't a Var or QualifiedName.
+fn extract_callee_name(expr: &Expr) -> Option<String> {
+    match &expr.kind {
+        ExprKind::Var { name, .. } => Some(name.clone()),
+        ExprKind::QualifiedName { module, name, .. } => Some(format!("{}.{}", module, name)),
+        ExprKind::App { func, .. } => extract_callee_name(func),
+        ExprKind::With { expr, .. } => extract_callee_name(expr),
+        _ => None,
+    }
+}
+
 impl Checker {
     // --- Expression inference ---
+
+    /// Collect effects for a callee from fun_effects and let_effect_bindings.
+    fn callee_effects(&self, name: &str) -> Vec<String> {
+        let mut effects = Vec::new();
+        if let Some(effs) = self.fun_effects.get(name) {
+            effects.extend(effs.iter().cloned());
+        }
+        if let Some(effs) = self.let_effect_bindings.get(name) {
+            effects.extend(effs.iter().cloned());
+        }
+        effects
+    }
+
+    /// Commit a callee's effects to current_effects.
+    fn commit_callee_effects(&mut self, name: &str) {
+        if let Some(effects) = self.fun_effects.get(name).cloned() {
+            self.current_effects.extend(effects);
+        }
+        if let Some(effects) = self.let_effect_bindings.get(name).cloned() {
+            self.current_effects.extend(effects);
+        }
+    }
 
     pub fn infer_expr(&mut self, expr: &Expr) -> Result<Type, Diagnostic> {
         let span = expr.span;
@@ -23,10 +59,6 @@ impl Checker {
             ExprKind::Var { name, .. } => {
                 if let Some(scheme) = self.env.get(name) {
                     let scheme = scheme.clone();
-                    // Propagate effects from functions with known needs
-                    if let Some(effects) = self.fun_effects.get(name).cloned() {
-                        self.current_effects.extend(effects);
-                    }
                     // Propagate effect type params from callee's annotations.
                     // e.g. calling `counter` which has `needs {Actor CounterMsg}`
                     // populates the cache so lambdas can build typed EffArrows.
@@ -58,6 +90,12 @@ impl Checker {
                         let eff_refs: Vec<(String, Vec<Type>)> =
                             eff_constraints.into_iter().collect();
                         ty = Type::EffArrow(a, b, eff_refs);
+                    }
+                    // Only propagate effects for zero-arity functions (where the
+                    // Var reference itself is the full "call"). For functions that
+                    // take args, effects are committed when the App chain saturates.
+                    if !matches!(ty, Type::Arrow(_, _) | Type::EffArrow(_, _, _)) {
+                        self.commit_callee_effects(name);
                     }
                     self.record_type(node_id, &ty);
                     // Record reference: this usage resolves to the definition
@@ -106,8 +144,8 @@ impl Checker {
                 // caller already had. This prevents spawn! from absorbing the caller's
                 // own Actor effect.
                 let resolved_func = self.sub.apply(&func_ty);
-                let param_ty = match resolved_func {
-                    Type::Arrow(p, _) | Type::EffArrow(p, _, _) => Some(self.sub.apply(&p)),
+                let param_ty = match &resolved_func {
+                    Type::Arrow(p, _) | Type::EffArrow(p, _, _) => Some(self.sub.apply(p)),
                     _ => None,
                 };
                 if let Some(Type::EffArrow(_, _, needs)) = param_ty {
@@ -116,6 +154,14 @@ impl Checker {
                             self.current_effects.remove(eff);
                         }
                     }
+                }
+                // Fully saturated call: if the return type is no longer an Arrow,
+                // walk the App chain to find the callee and commit its effects.
+                let resolved_ret = self.sub.apply(&ret_ty);
+                if !matches!(resolved_ret, Type::Arrow(_, _) | Type::EffArrow(_, _, _))
+                    && let Some(callee) = extract_callee_name(expr)
+                {
+                    self.commit_callee_effects(&callee);
                 }
                 self.record_type(node_id, &ret_ty);
                 Ok(ret_ty)
@@ -766,6 +812,16 @@ impl Checker {
                             Type::Error
                         }
                     };
+                    // Partial application of effectful function: if the result type
+                    // is still an Arrow, walk the RHS to find the callee and defer
+                    // its effects to this binding.
+                    let resolved_ty = self.sub.apply(&ty);
+                    let mut deferred_effects = Vec::new();
+                    if matches!(resolved_ty, Type::Arrow(_, _) | Type::EffArrow(_, _, _))
+                        && let Some(callee) = extract_callee_name(value)
+                    {
+                        deferred_effects.extend(self.callee_effects(&callee));
+                    }
                     if let Pat::Var {
                         id: pat_id,
                         name,
@@ -825,6 +881,9 @@ impl Checker {
                                 .insert(name.clone(), (dict_params, arity));
                         }
                         self.env.insert_with_def(name.clone(), scheme, *pat_id);
+                        deferred_effects.sort();
+                        self.let_effect_bindings
+                            .insert(name.clone(), deferred_effects);
                         self.node_spans.insert(*pat_id, *var_span);
                         self.record_type_at_span(*var_span, &ty);
                         self.definitions.push((*pat_id, name.clone(), *var_span));
@@ -1358,6 +1417,32 @@ impl Checker {
         // Capture the inner expression's effect type param cache before restoring.
         // Inline handler arms need these bindings to properly type resume arguments.
         let inner_effect_cache = self.effect_type_param_cache.clone();
+        // Unnecessary handler check: if the inner expression doesn't use any of
+        // the handled effects, the handler is unnecessary (e.g. `with` on a pure
+        // call or a partial application). Only emit when the callee is a known
+        // local function/binding; skip for imports, EffArrow params, qualified
+        // calls, etc. where effects are tracked outside fun_effects.
+        if !handled.is_empty() && self.current_effects.is_disjoint(&handled) {
+            let callee_name = extract_callee_name(expr);
+            let callee_effects_known = callee_name
+                .as_ref()
+                .map(|name| {
+                    self.fun_effects.contains_key(name.as_str())
+                        || self.let_effect_bindings.contains_key(name.as_str())
+                })
+                .unwrap_or(false);
+            if callee_effects_known {
+                let mut effects: Vec<_> = handled.iter().cloned().collect();
+                effects.sort();
+                self.collected_diagnostics.push(Diagnostic::error_at(
+                    expr.span,
+                    format!(
+                        "expression does not use effects {{{}}}; handler is unnecessary",
+                        effects.join(", ")
+                    ),
+                ));
+            }
+        }
         // Subtract handled effects from the inner expression's effects
         for eff in &handled {
             self.current_effects.remove(eff);

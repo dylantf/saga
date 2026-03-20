@@ -33,7 +33,12 @@ fn emit_from_program(
     }).unwrap_or_default();
     let result = checker.to_result();
     let elaborated = elaborate::elaborate_module(program, &result, &original_module_name);
-    codegen::emit_module_with_imports(module_name, &elaborated, result.codegen_info(), &std::collections::HashMap::new())
+    let ctx = codegen::CodegenContext {
+        codegen_info: result.codegen_info().clone(),
+        elaborated_modules: std::collections::HashMap::new(),
+        let_effect_bindings: result.let_effect_bindings.clone(),
+    };
+    codegen::emit_module_with_context(module_name, &elaborated, &ctx)
 }
 
 /// Parse and typecheck a source file with the given checker (project mode).

@@ -310,6 +310,8 @@ pub struct ModuleExports {
     pub(crate) handlers: HashMap<String, HandlerInfo>,
     /// Type name -> declared parameter count (for arity checking across modules).
     pub type_arity: HashMap<String, usize>,
+    /// Function name -> effect names from `needs` clause (for cross-module effect tracking).
+    pub fun_effects: HashMap<String, HashSet<String>>,
 }
 
 impl ModuleExports {
@@ -420,6 +422,14 @@ impl ModuleExports {
             }
         }
 
+        // Collect fun_effects for public functions
+        let mut fun_effects: HashMap<String, HashSet<String>> = HashMap::new();
+        for name in &pub_names {
+            if let Some(effs) = checker.fun_effects.get(name) {
+                fun_effects.insert(name.clone(), effs.clone());
+            }
+        }
+
         ModuleExports {
             bindings,
             type_constructors,
@@ -429,6 +439,7 @@ impl ModuleExports {
             effects,
             handlers,
             type_arity,
+            fun_effects,
         }
     }
 }
@@ -764,6 +775,9 @@ pub struct Checker {
     pub(crate) evidence: Vec<TraitEvidence>,
     /// Dict params for let bindings with trait constraints: name -> (params, value_arity).
     pub(crate) let_dict_params: HashMap<String, (Vec<(String, String)>, usize)>,
+    /// Deferred effects for let bindings that partially apply effectful functions.
+    /// name -> effect names. Used by the lowerer to register effectful local vars.
+    pub(crate) let_effect_bindings: HashMap<String, Vec<String>>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Per-node type information for Expr nodes (LSP hover, go-to-def, etc.).
@@ -863,6 +877,7 @@ impl Checker {
             type_arity: HashMap::new(),
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
+            let_effect_bindings: HashMap::new(),
             collected_diagnostics: Vec::new(),
             type_at_node: HashMap::new(),
             type_at_span: HashMap::new(),

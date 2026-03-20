@@ -427,6 +427,7 @@ impl Checker {
             effects,
             handlers,
             type_arity,
+            fun_effects,
         } = exports;
 
         // Traits and their methods (unqualified, so impl bodies can reference them)
@@ -469,6 +470,15 @@ impl Checker {
         // Type arities
         for (name, arity) in type_arity {
             self.type_arity.entry(name.clone()).or_insert(*arity);
+        }
+
+        // Function effects (for cross-module `with` validation and effect propagation).
+        // Register both qualified ("Logger.greet") and unqualified ("greet") forms
+        // so both qualified calls and exposed imports are covered.
+        for (name, effs) in fun_effects {
+            let qualified = format!("{}.{}", prefix, name);
+            self.fun_effects.entry(qualified).or_insert_with(|| effs.clone());
+            self.fun_effects.entry(name.clone()).or_insert_with(|| effs.clone());
         }
 
         // Bindings, type constructors, records (qualified + exposing)

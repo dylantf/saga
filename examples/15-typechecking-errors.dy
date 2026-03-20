@@ -6,11 +6,6 @@
 #
 #   Type error at examples/15-typechecking-errors.dy:70:13: type mismatch: expected Int, got String
 
-type Maybe a {
-  Just(a)
-  Nothing
-}
-
 # Polymorphic functions inferred correctly
 id x = x
 const x _ = x

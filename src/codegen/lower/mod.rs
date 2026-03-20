@@ -7,7 +7,6 @@ mod util;
 
 use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
-use crate::typechecker::ModuleCodegenInfo;
 use std::collections::HashMap;
 
 use init::PendingAnnotation;
@@ -62,10 +61,8 @@ struct FunInfo {
 
 pub struct Lowerer<'a> {
     counter: usize,
-    /// Codegen info for imported modules (from typechecker cache).
-    codegen_info: &'a HashMap<String, ModuleCodegenInfo>,
-    /// Elaborated programs per module, for cross-module handler lookup.
-    elaborated_modules: &'a HashMap<String, ast::Program>,
+    /// Cross-module codegen context (codegen info, elaborated modules, effect bindings).
+    ctx: &'a super::CodegenContext,
     /// Maps module alias/name used in source -> Erlang module atom name.
     module_aliases: HashMap<String, String>,
     /// Names declared as `pub` in the current module (for export filtering).
@@ -114,14 +111,10 @@ pub struct Lowerer<'a> {
 }
 
 impl<'a> Lowerer<'a> {
-    pub fn new(
-        codegen_info: &'a HashMap<String, ModuleCodegenInfo>,
-        elaborated_modules: &'a HashMap<String, ast::Program>,
-    ) -> Self {
+    pub fn new(ctx: &'a super::CodegenContext) -> Self {
         Lowerer {
             counter: 0,
-            codegen_info,
-            elaborated_modules,
+            ctx,
             module_aliases: HashMap::new(),
             pub_names: std::collections::HashSet::new(),
             record_fields: HashMap::new(),
@@ -856,19 +849,14 @@ impl<'a> Lowerer<'a> {
                             let mut call_args: Vec<CExpr> =
                                 arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
                             call_args.extend(params.iter().map(|p| CExpr::Var(p.clone())));
-                            // For effectful functions, capture handlers from scope
-                            // and add _ReturnK as a lambda param
+                            // For effectful functions, include handler params and
+                            // _ReturnK in the lambda. Handlers will be provided at
+                            // the eventual call site via `with`.
                             if !callee_ops.is_empty() {
                                 for (eff, op) in &callee_ops {
-                                    let key = format!("{}.{}", eff, op);
-                                    if let Some(param) = self.current_handler_params.get(&key) {
-                                        call_args.push(CExpr::Var(param.clone()));
-                                    } else {
-                                        panic!(
-                                            "partial application of '{}' needs handler for '{}.{}' but none in scope",
-                                            func_name, eff, op
-                                        );
-                                    }
+                                    let p = Self::handler_param_name(eff, op);
+                                    params.push(p.clone());
+                                    call_args.push(CExpr::Var(p));
                                 }
                                 let rk = "_ReturnK".to_string();
                                 params.push(rk.clone());
