@@ -310,6 +310,8 @@ pub struct ModuleExports {
     pub(crate) handlers: HashMap<String, HandlerInfo>,
     /// Type name -> declared parameter count (for arity checking across modules).
     pub type_arity: HashMap<String, usize>,
+    /// Function name -> effect names from `needs` clause (for cross-module effect tracking).
+    pub fun_effects: HashMap<String, HashSet<String>>,
 }
 
 impl ModuleExports {
@@ -420,6 +422,14 @@ impl ModuleExports {
             }
         }
 
+        // Collect fun_effects for public functions
+        let mut fun_effects: HashMap<String, HashSet<String>> = HashMap::new();
+        for name in &pub_names {
+            if let Some(effs) = checker.fun_effects.get(name) {
+                fun_effects.insert(name.clone(), effs.clone());
+            }
+        }
+
         ModuleExports {
             bindings,
             type_constructors,
@@ -429,6 +439,7 @@ impl ModuleExports {
             effects,
             handlers,
             type_arity,
+            fun_effects,
         }
     }
 }

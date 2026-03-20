@@ -7,10 +7,12 @@ use crate::token::Span;
 
 /// Walk an App chain to find the callee name at the root.
 /// e.g. `App(App(Var("f"), a), b)` -> Some("f")
-/// Returns None if the callee isn't a simple Var (e.g. lambda, dict access).
-fn extract_callee_name(expr: &Expr) -> Option<&str> {
+///       `App(QualifiedName("M", "f"), a)` -> Some("M.f")
+/// Returns None if the callee isn't a Var or QualifiedName.
+fn extract_callee_name(expr: &Expr) -> Option<String> {
     match &expr.kind {
-        ExprKind::Var { name, .. } => Some(name),
+        ExprKind::Var { name, .. } => Some(name.clone()),
+        ExprKind::QualifiedName { module, name, .. } => Some(format!("{}.{}", module, name)),
         ExprKind::App { func, .. } => extract_callee_name(func),
         ExprKind::With { expr, .. } => extract_callee_name(expr),
         _ => None,
@@ -159,7 +161,7 @@ impl Checker {
                 if !matches!(resolved_ret, Type::Arrow(_, _) | Type::EffArrow(_, _, _))
                     && let Some(callee) = extract_callee_name(expr)
                 {
-                    self.commit_callee_effects(callee);
+                    self.commit_callee_effects(&callee);
                 }
                 self.record_type(node_id, &ret_ty);
                 Ok(ret_ty)
@@ -818,7 +820,7 @@ impl Checker {
                     if matches!(resolved_ty, Type::Arrow(_, _) | Type::EffArrow(_, _, _))
                         && let Some(callee) = extract_callee_name(value)
                     {
-                        deferred_effects.extend(self.callee_effects(callee));
+                        deferred_effects.extend(self.callee_effects(&callee));
                     }
                     if let Pat::Var {
                         id: pat_id,
@@ -1423,9 +1425,10 @@ impl Checker {
         if !handled.is_empty() && self.current_effects.is_disjoint(&handled) {
             let callee_name = extract_callee_name(expr);
             let callee_effects_known = callee_name
+                .as_ref()
                 .map(|name| {
-                    self.fun_effects.contains_key(name)
-                        || self.let_effect_bindings.contains_key(name)
+                    self.fun_effects.contains_key(name.as_str())
+                        || self.let_effect_bindings.contains_key(name.as_str())
                 })
                 .unwrap_or(false);
             if callee_effects_known {
