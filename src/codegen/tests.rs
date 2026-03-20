@@ -1,13 +1,39 @@
 #[cfg(test)]
 use super::emit_module;
+use super::{emit_module_with_context, CodegenContext};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use crate::{derive, elaborate, typechecker};
 
 /// Parse `src` and emit Core Erlang for a single-file script module.
+/// Skips typechecking and elaboration — only tests basic lowering.
 fn emit(src: &str) -> String {
     let tokens = Lexer::new(src).lex().expect("lex error");
     let program = Parser::new(tokens).parse_program().expect("parse error");
     emit_module("_script", &program)
+}
+
+/// Parse, typecheck, elaborate, and emit Core Erlang — mirrors the real compiler pipeline.
+fn emit_full(src: &str) -> String {
+    let tokens = Lexer::new(src).lex().expect("lex error");
+    let mut program = Parser::new(tokens).parse_program().expect("parse error");
+    derive::expand_derives(&mut program);
+
+    let mut checker = typechecker::Checker::with_prelude(None).expect("prelude error");
+    let result = checker.check_program(&program);
+    assert!(
+        !result.has_errors(),
+        "Type errors: {:?}",
+        result.errors()
+    );
+
+    let elaborated = elaborate::elaborate(&program, &result);
+    let ctx = CodegenContext {
+        codegen_info: result.codegen_info().clone(),
+        elaborated_modules: std::collections::HashMap::new(),
+        let_effect_bindings: result.let_effect_bindings.clone(),
+    };
+    emit_module_with_context("_script", &elaborated, &ctx)
 }
 
 /// Assert that `emit(src)` contains `needle` as a substring.
@@ -18,6 +44,23 @@ fn assert_contains(src: &str, needle: &str) {
         out.contains(needle),
         "Expected to find:\n  {needle}\nIn output:\n{out}"
     );
+}
+
+/// Assert that `emit_full(src)` contains `needle` as a substring.
+/// On failure, prints the full output for easy debugging.
+fn assert_contains_full(src: &str, needle: &str) {
+    let out = emit_full(src);
+    assert!(
+        out.contains(needle),
+        "Expected to find:\n  {needle}\nIn output:\n{out}"
+    );
+}
+
+// --- Full pipeline smoke test ---
+
+#[test]
+fn full_pipeline_smoke() {
+    assert_contains_full("main () = 42", "42");
 }
 
 // --- Literals ---
