@@ -1036,6 +1036,7 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Constructor { name, .. } => match name.as_str() {
                 "Nil" => CExpr::Nil,
+                "Nothing" => CExpr::Lit(CLit::Atom("undefined".to_string())),
                 // Booleans are bare atoms to match Erlang's native true/false
                 "True" => CExpr::Lit(CLit::Atom("true".to_string())),
                 "False" => CExpr::Lit(CLit::Atom("false".to_string())),
