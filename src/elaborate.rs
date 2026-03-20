@@ -404,6 +404,7 @@ impl Elaborator {
                         effects: effects.clone(),
                         needs: needs.clone(),
                         arms: elab_arms,
+                        recovered_arms: vec![],
                         return_clause: elab_return,
                         span: *span,
                     });

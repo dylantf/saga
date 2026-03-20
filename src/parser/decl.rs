@@ -457,6 +457,7 @@ impl Parser {
         self.skip_terminators();
 
         let mut arms = Vec::new();
+        let mut recovered_arms = Vec::new();
         let mut return_clause = None;
 
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
@@ -505,8 +506,26 @@ impl Parser {
             })();
 
             if arm_result.is_err() {
-                // Recovery: skip to next terminator or closing brace
+                // Recovery: try to salvage the op name for LSP hover
                 self.pos = save;
+                if let Token::Ident(_) = self.peek() {
+                    let op_name = self.expect_ident().unwrap();
+                    let mut params = Vec::new();
+                    while !matches!(self.peek(), Token::Eq | Token::Terminator | Token::RBrace | Token::Eof) {
+                        if let Ok(p) = self.expect_ident() {
+                            params.push(p);
+                        } else {
+                            break;
+                        }
+                    }
+                    let end = self.tokens[self.pos.saturating_sub(1)].span;
+                    recovered_arms.push(HandlerArm {
+                        op_name,
+                        params,
+                        body: Box::new(Expr { id: NodeId::fresh(), kind: ExprKind::Lit { value: Lit::Unit }, span: end }),
+                        span: arm_start.to(end),
+                    });
+                }
                 while !matches!(self.peek(), Token::Terminator | Token::RBrace | Token::Eof) {
                     self.advance();
                 }
@@ -526,6 +545,7 @@ impl Parser {
             effects,
             needs,
             arms,
+            recovered_arms,
             return_clause,
             span: start.to(end),
         })

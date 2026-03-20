@@ -205,6 +205,46 @@ impl LanguageServer for Backend {
             }));
         }
 
+        // Effect operation: show signature from the effect definition
+        // Check if this name matches an effect op (and cursor is inside a handler)
+        for (effect_name, info) in &tc_result.effects {
+            for op in &info.ops {
+                if op.name == name {
+                    let params_display: Vec<String> = op
+                        .params
+                        .iter()
+                        .map(|(label, ty)| {
+                            let resolved = tc_result.sub.apply(ty);
+                            if label.starts_with('_') {
+                                format!("{}", resolved)
+                            } else {
+                                format!("({}: {})", label, resolved)
+                            }
+                        })
+                        .collect();
+                    let ret = tc_result.sub.apply(&op.return_type);
+                    let sig = if params_display.is_empty() {
+                        format!("{}.{} : () -> {}", effect_name, name, ret)
+                    } else {
+                        format!(
+                            "{}.{} : {} -> {}",
+                            effect_name,
+                            name,
+                            params_display.join(" -> "),
+                            ret
+                        )
+                    };
+                    return Ok(Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: format!("```dylang\n{}\n```", sig),
+                        }),
+                        range: None,
+                    }));
+                }
+            }
+        }
+
         let Some(type_str) =
             hover::type_at_name(&tc_result, &name, Some(&span), node_id.as_ref(), &program)
         else {

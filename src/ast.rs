@@ -119,6 +119,8 @@ pub enum Decl {
         effects: Vec<EffectRef>,
         needs: Vec<EffectRef>,
         arms: Vec<HandlerArm>,
+        /// Partially parsed arms from error recovery (for LSP hover, not typechecked).
+        recovered_arms: Vec<HandlerArm>,
         /// `return value = Ok(value)` clause
         return_clause: Option<Box<HandlerArm>>,
         span: Span,

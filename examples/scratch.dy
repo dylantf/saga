@@ -8,7 +8,7 @@ pub effect OtherEffect {
 
 pub handler test_handler for TestEffect, OtherEffect {
   # something () = 123
-  # something_else () = "Hello"
+  something_else value = 
 }
 
 main () = {

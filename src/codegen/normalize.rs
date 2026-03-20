@@ -462,6 +462,7 @@ pub fn normalize_effects(program: &Program) -> Program {
                 effects,
                 needs,
                 arms,
+                recovered_arms: _,
                 return_clause,
                 span,
             } => {
@@ -490,6 +491,7 @@ pub fn normalize_effects(program: &Program) -> Program {
                     effects: effects.clone(),
                     needs: needs.clone(),
                     arms: new_arms,
+                    recovered_arms: vec![],
                     return_clause: new_return,
                     span: *span,
                 }

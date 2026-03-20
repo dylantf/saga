@@ -62,6 +62,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<Node
             name,
             name_span,
             arms,
+            recovered_arms,
             return_clause,
             span,
             ..
@@ -69,7 +70,14 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<Node
             if !contains(span, offset) {
                 return None;
             }
-            for arm in arms {
+            for arm in arms.iter().chain(recovered_arms.iter()) {
+                if contains(&arm.span, offset) {
+                    // Check if cursor is on the op name (first token of the arm)
+                    let op_name_end = arm.span.start + arm.op_name.len();
+                    if offset >= arm.span.start && offset <= op_name_end {
+                        return Some((arm.op_name.clone(), Span { start: arm.span.start, end: op_name_end }, None));
+                    }
+                }
                 if let Some(r) = find_in_expr(&arm.body, offset) {
                     return Some(r);
                 }
