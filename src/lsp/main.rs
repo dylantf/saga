@@ -6,6 +6,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use dylang::typechecker;
 
 mod checker;
+mod code_action;
 mod completion;
 mod definition;
 mod diagnostics;
@@ -119,6 +120,7 @@ impl LanguageServer for Backend {
                     retrigger_characters: None,
                     work_done_progress_options: Default::default(),
                 }),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -384,6 +386,25 @@ impl LanguageServer for Backend {
         let items = completion::collect_completions(&tc_result, prefix, &program, offset);
 
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri.clone();
+        let Some(snap) = self.snapshot(&uri) else {
+            return Ok(None);
+        };
+        let tc_result = &snap.tc_result;
+        let program = snap.program.as_ref().unwrap();
+        let line_index = &snap.line_index;
+
+        let actions =
+            code_action::collect_code_actions(tc_result, program, line_index, &uri, params.range);
+
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
     }
 
     async fn document_symbol(
