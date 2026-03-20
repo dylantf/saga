@@ -278,19 +278,47 @@ impl Checker {
                 })?;
                 let (inst_fields, result_ty) = self.instantiate_record(name, &info);
 
-                for (fname, fexpr) in fields {
+                for (fname, fspan, fexpr) in fields {
                     let expected =
                         inst_fields
                             .iter()
-                            .find(|(n, _)| n == fname)
-                            .ok_or_else(|| {
-                                Diagnostic::error_at(
-                                    fexpr.span,
-                                    format!("unknown field '{}' on record {}", fname, name),
-                                )
-                            })?;
-                    let actual = self.infer_expr(fexpr)?;
-                    self.unify_at(&expected.1, &actual, fexpr.span)?;
+                            .find(|(n, _)| n == fname);
+                    match expected {
+                        None => {
+                            self.collected_diagnostics.push(Diagnostic::error_at(
+                                *fspan,
+                                format!("unknown field '{}' on record {}", fname, name),
+                            ));
+                            // Still infer the expression to check for errors within it
+                            let _ = self.infer_expr(fexpr);
+                        }
+                        Some((_, expected_ty)) => {
+                            if let Ok(actual) = self.infer_expr(fexpr) {
+                                if let Err(e) = self.unify_at(expected_ty, &actual, fexpr.span) {
+                                    self.collected_diagnostics.push(e);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Check for missing fields
+                let provided: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
+                let missing: Vec<&str> = inst_fields
+                    .iter()
+                    .filter(|(n, _)| !provided.contains(&n.as_str()))
+                    .map(|(n, _)| n.as_str())
+                    .collect();
+                if !missing.is_empty() {
+                    self.collected_diagnostics.push(Diagnostic::error_at(
+                        span,
+                        format!(
+                            "missing field{} on record {}: {}",
+                            if missing.len() > 1 { "s" } else { "" },
+                            name,
+                            missing.join(", "),
+                        ),
+                    ));
                 }
 
                 Ok(result_ty)
@@ -298,7 +326,7 @@ impl Checker {
 
             ExprKind::AnonRecordCreate { fields, .. } => {
                 let mut typed_fields: Vec<(String, Type)> = Vec::new();
-                for (fname, fexpr) in fields {
+                for (fname, _fspan, fexpr) in fields {
                     let ty = self.infer_expr(fexpr)?;
                     typed_fields.push((fname.clone(), ty));
                 }
@@ -315,7 +343,7 @@ impl Checker {
                 let mut resolved = self.sub.apply(&rec_ty);
 
                 if matches!(&resolved, Type::Var(_))
-                    && let Some((fname, _)) = fields.first()
+                    && let Some((fname, _, _)) = fields.first()
                 {
                     let candidates: Vec<_> = self
                         .records
@@ -338,13 +366,13 @@ impl Checker {
                         // Unify the record expression type with the instantiated result type
                         // so that type params flow from the input record to the field types.
                         self.unify_at(&resolved, &result_ty, span)?;
-                        for (fname, fexpr) in fields {
+                        for (fname, fspan, fexpr) in fields {
                             let expected = inst_fields
                                 .iter()
                                 .find(|(n, _)| n == fname)
                                 .ok_or_else(|| {
                                     Diagnostic::error_at(
-                                        fexpr.span,
+                                        *fspan,
                                         format!("unknown field '{}' on record {}", fname, name),
                                     )
                                 })?;
@@ -354,13 +382,13 @@ impl Checker {
                         Ok(self.sub.apply(&result_ty))
                     }
                     Type::Record(rec_fields) => {
-                        for (fname, fexpr) in fields {
+                        for (fname, fspan, fexpr) in fields {
                             let (_, expected_ty) = rec_fields
                                 .iter()
                                 .find(|(n, _)| n == fname)
                                 .ok_or_else(|| {
                                     Diagnostic::error_at(
-                                        fexpr.span,
+                                        *fspan,
                                         format!("unknown field '{}' on anonymous record", fname),
                                     )
                                 })?;

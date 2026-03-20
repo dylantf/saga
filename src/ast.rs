@@ -281,18 +281,18 @@ pub enum ExprKind {
     /// `User { name: "Dylan", age: 30 }`
     RecordCreate {
         name: String,
-        fields: Vec<(String, Expr)>,
+        fields: Vec<(String, Span, Expr)>,
     },
 
     /// `{ street: "Main St", city: "Portland" }` (anonymous record)
     AnonRecordCreate {
-        fields: Vec<(String, Expr)>,
+        fields: Vec<(String, Span, Expr)>,
     },
 
     /// `{ user | age: user.age + 1 }`
     RecordUpdate {
         record: Box<Expr>,
-        fields: Vec<(String, Expr)>,
+        fields: Vec<(String, Span, Expr)>,
     },
 
     /// `log! "hello"`, `Cache.get! key`
@@ -384,10 +384,10 @@ impl Expr {
             ExprKind::FieldAccess { expr, .. } => expr.contains_resume(),
             ExprKind::RecordCreate { fields, .. }
             | ExprKind::AnonRecordCreate { fields, .. } => {
-                fields.iter().any(|(_, e)| e.contains_resume())
+                fields.iter().any(|(_, _, e)| e.contains_resume())
             }
             ExprKind::RecordUpdate { record, fields, .. } => {
-                record.contains_resume() || fields.iter().any(|(_, e)| e.contains_resume())
+                record.contains_resume() || fields.iter().any(|(_, _, e)| e.contains_resume())
             }
             // Only check the `with` body, not the handler arm bodies: `resume` inside
             // an arm body refers to *that arm's* continuation, not the outer context's.

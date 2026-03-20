@@ -431,22 +431,22 @@ impl<'a> Lowerer<'a> {
         match &expr.kind {
             ast::ExprKind::AnonRecordCreate { fields } => {
                 let mut sorted_names: Vec<String> =
-                    fields.iter().map(|(n, _)| n.clone()).collect();
+                    fields.iter().map(|(n, _, _)| n.clone()).collect();
                 sorted_names.sort();
                 let tag = format!("__anon_{}", sorted_names.join("_"));
                 record_fields.entry(tag).or_insert(sorted_names);
-                for (_, e) in fields {
+                for (_, _, e) in fields {
                     Self::collect_anon_records_from_expr(e, record_fields);
                 }
             }
             ast::ExprKind::RecordCreate { fields, .. } => {
-                for (_, e) in fields {
+                for (_, _, e) in fields {
                     Self::collect_anon_records_from_expr(e, record_fields);
                 }
             }
             ast::ExprKind::RecordUpdate { record, fields, .. } => {
                 Self::collect_anon_records_from_expr(record, record_fields);
-                for (_, e) in fields {
+                for (_, _, e) in fields {
                     Self::collect_anon_records_from_expr(e, record_fields);
                 }
             }

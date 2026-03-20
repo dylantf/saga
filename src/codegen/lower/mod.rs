@@ -1440,7 +1440,7 @@ impl<'a> Lowerer<'a> {
             ExprKind::RecordCreate { name, fields, .. } => {
                 let order = self.record_fields.get(name).cloned().unwrap_or_default();
                 let field_map: HashMap<&str, &Expr> =
-                    fields.iter().map(|(n, e)| (n.as_str(), e)).collect();
+                    fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
                 let mut vars: Vec<String> = Vec::new();
                 let mut bindings: Vec<(String, CExpr)> = Vec::new();
                 for field_name in &order {
@@ -1463,11 +1463,11 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::AnonRecordCreate { fields, .. } => {
                 let mut sorted_names: Vec<String> =
-                    fields.iter().map(|(n, _)| n.clone()).collect();
+                    fields.iter().map(|(n, _, _)| n.clone()).collect();
                 sorted_names.sort();
                 let tag = format!("__anon_{}", sorted_names.join("_"));
                 let field_map: HashMap<&str, &Expr> =
-                    fields.iter().map(|(n, e)| (n.as_str(), e)).collect();
+                    fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
                 let mut vars: Vec<String> = Vec::new();
                 let mut bindings: Vec<(String, CExpr)> = Vec::new();
                 for field_name in &sorted_names {
@@ -1512,7 +1512,7 @@ impl<'a> Lowerer<'a> {
                 let rec_var = self.fresh();
                 let rec_ce = self.lower_expr(record);
                 let update_field_names: Vec<String> =
-                    fields.iter().map(|(n, _)| n.clone()).collect();
+                    fields.iter().map(|(n, _, _)| n.clone()).collect();
                 let record_name = field_access_record_name(record)
                     .or_else(|| self.find_record_by_fields(&update_field_names));
                 let order = record_name
@@ -1520,7 +1520,7 @@ impl<'a> Lowerer<'a> {
                     .cloned()
                     .unwrap_or_default();
                 let field_map: HashMap<&str, &Expr> =
-                    fields.iter().map(|(n, e)| (n.as_str(), e)).collect();
+                    fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
 
                 let mut vars: Vec<String> = Vec::new();
                 let mut bindings: Vec<(String, CExpr)> = Vec::new();

@@ -209,9 +209,10 @@ impl Parser {
                     let mut fields = Vec::new();
                     while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                         let field_name = self.expect_ident()?;
+                        let field_span = self.tokens[self.pos - 1].span;
                         self.expect(Token::Colon)?;
                         let value = self.parse_expr(0)?;
-                        fields.push((field_name, value));
+                        fields.push((field_name, field_span, value));
                         if matches!(self.peek(), Token::Comma) {
                             self.advance();
                         }
@@ -479,9 +480,10 @@ impl Parser {
                     let mut fields = Vec::new();
                     while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                         let field_name = self.expect_ident()?;
+                        let field_span = self.tokens[self.pos - 1].span;
                         self.expect(Token::Colon)?;
                         let value = self.parse_expr(0)?;
-                        fields.push((field_name, value));
+                        fields.push((field_name, field_span, value));
                         if matches!(self.peek(), Token::Comma) {
                             self.advance();
                         }
@@ -646,9 +648,10 @@ impl Parser {
                         let mut fields = Vec::new();
                         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                             let field_name = self.expect_ident()?;
+                            let field_span = self.tokens[self.pos - 1].span;
                             self.expect(Token::Colon)?;
                             let value = self.parse_expr(0)?;
-                            fields.push((field_name, value));
+                            fields.push((field_name, field_span, value));
                             if matches!(self.peek(), Token::Comma) {
                                 self.advance();
                             }
@@ -675,9 +678,10 @@ impl Parser {
                     let mut fields = Vec::new();
                     while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                         let field_name = self.expect_ident()?;
+                        let field_span = self.tokens[self.pos - 1].span;
                         self.expect(Token::Colon)?;
                         let value = self.parse_expr(0)?;
-                        fields.push((field_name, value));
+                        fields.push((field_name, field_span, value));
                         if matches!(self.peek(), Token::Comma) {
                             self.advance();
                         }

@@ -285,7 +285,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span, Option<Node
             None
         }
         ExprKind::RecordCreate { fields, .. } => {
-            for (_, e) in fields {
+            for (_, _, e) in fields {
                 if let Some(r) = find_in_expr(e, offset) {
                     return Some(r);
                 }
@@ -296,7 +296,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span, Option<Node
             if let Some(r) = find_in_expr(record, offset) {
                 return Some(r);
             }
-            for (_, e) in fields {
+            for (_, _, e) in fields {
                 if let Some(r) = find_in_expr(e, offset) {
                     return Some(r);
                 }

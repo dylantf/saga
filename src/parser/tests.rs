@@ -1244,11 +1244,11 @@ fn record_create_simple() {
             assert_eq!(fields.len(), 2);
             assert_eq!(fields[0].0, "name");
             assert!(
-                matches!(&fields[0].1, Expr { kind: ExprKind::Lit { value: Lit::String(s), .. }, .. } if s == "Dylan")
+                matches!(&fields[0].2, Expr { kind: ExprKind::Lit { value: Lit::String(s), .. }, .. } if s == "Dylan")
             );
             assert_eq!(fields[1].0, "age");
             assert!(matches!(
-                &fields[1].1,
+                &fields[1].2,
                 Expr {
                     kind: ExprKind::Lit {
                         value: Lit::Int(30),
@@ -1287,14 +1287,14 @@ fn record_create_with_expr_values() {
         } => {
             assert_eq!(fields.len(), 2);
             assert!(matches!(
-                &fields[0].1,
+                &fields[0].2,
                 Expr {
                     kind: ExprKind::BinOp { op: BinOp::Add, .. },
                     ..
                 }
             ));
             assert!(matches!(
-                &fields[1].1,
+                &fields[1].2,
                 Expr {
                     kind: ExprKind::BinOp { op: BinOp::Mul, .. },
                     ..
@@ -1344,7 +1344,7 @@ fn record_update_simple() {
             assert_eq!(fields.len(), 1);
             assert_eq!(fields[0].0, "age");
             assert!(matches!(
-                &fields[0].1,
+                &fields[0].2,
                 Expr {
                     kind: ExprKind::Lit {
                         value: Lit::Int(31),
@@ -1384,7 +1384,7 @@ fn record_update_with_expr_value() {
         } => {
             assert_eq!(fields.len(), 1);
             assert!(matches!(
-                &fields[0].1,
+                &fields[0].2,
                 Expr {
                     kind: ExprKind::BinOp { op: BinOp::Add, .. },
                     ..
