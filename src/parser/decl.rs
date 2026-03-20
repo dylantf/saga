@@ -7,6 +7,7 @@ impl Parser {
     // Parse `Name` or `Module.Name`, returning the full qualified string.
     // Used where we want to preserve the qualification (e.g. needs lists).
     fn parse_effect_ref(&mut self) -> Result<EffectRef, ParseError> {
+        let start = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let name = if matches!(self.peek(), Token::Dot) {
             self.advance(); // consume '.'
@@ -19,7 +20,9 @@ impl Parser {
         while self.can_start_type_atom() {
             type_args.push(self.parse_type_atom()?);
         }
-        Ok(EffectRef { name, type_args })
+        let end = self.tokens[self.pos - 1].span;
+        let span = Span { start: start.start, end: end.end };
+        Ok(EffectRef { name, type_args, span })
     }
 
     // Parse `Name` or `Module.Name`, returning only the base name.

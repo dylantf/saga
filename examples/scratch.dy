@@ -1,13 +1,16 @@
-fun foo : (first_number: Int) -> (second_number: Int) -> String
-foo a b = case a + b {
-  n | n > 50 -> "Wow, a big number"
-  _ -> "its a number"
+pub effect TestEffect {
+  fun something : () -> Int
 }
 
-fun bar : Int -> Int -> String
-bar = foo
+pub effect OtherEffect {
+  fun something_else : () -> String
+}
+
+pub handler test_handler for TestEffect, OtherEffect {
+  # something () = 123
+  # something_else () = "Hello"
+}
 
 main () = {
-  let description = foo 123 4
-  println description
+  print "Hello world"
 }

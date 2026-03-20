@@ -1245,16 +1245,20 @@ impl Checker {
                 arms.iter().map(|a| a.op_name.as_str()).collect();
             for effect_ref in effect_names {
                 if let Some(info) = self.effects.get(&effect_ref.name) {
-                    for op in &info.ops {
-                        if !handled_ops.contains(op.name.as_str()) {
-                            return Err(Diagnostic::error_at(
-                                span,
-                                format!(
-                                    "handler '{}' is missing operation '{}' from effect '{}'",
-                                    name, op.name, effect_ref.name
-                                ),
-                            ));
-                        }
+                    let missing: Vec<_> = info.ops.iter()
+                        .filter(|op| !handled_ops.contains(op.name.as_str()))
+                        .map(|op| op.name.as_str())
+                        .collect();
+                    if !missing.is_empty() {
+                        self.collected_diagnostics.push(Diagnostic::error_at(
+                            effect_ref.span,
+                            format!(
+                                "handler '{}' is missing {} from effect '{}'",
+                                name,
+                                missing.join(", "),
+                                effect_ref.name,
+                            ),
+                        ));
                     }
                 }
             }

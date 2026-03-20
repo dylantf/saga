@@ -5,10 +5,6 @@ module Std.Actor
 #@ authors can build alternative implementations (e.g. sync handlers for testing).
 pub type Pid msg { Pid(Int) }
 
-pub type Test {
-  ThisIsATest
-}
-
 #@ Process effect: spawn and send
 #@ Type variable `msg` is free per call site, inferred from the pid / spawned function.
 pub effect Process {
@@ -50,21 +46,21 @@ impl Show for ExitReason {
   }
 }
 
-#@ Monitor effect: watch processes and get notified when they die.
 pub opaque type MonitorRef { MonitorRef }
 
+#@ Monitor processes and get notified when they die
 pub effect Monitor {
   fun monitor : (pid: Pid msg) -> MonitorRef
   fun demonitor : (ref: MonitorRef) -> Unit
 }
 
-#@ Link effect: bidirectional crash propagation between processes.
+#@ Bidirectional crash propagation between processes
 pub effect Link {
   fun link : (pid: Pid msg) -> Unit
   fun unlink : (pid: Pid msg) -> Unit
 }
 
-#@ Timer effect: delays and scheduled messages.
+#@ Timer effect: delays and scheduled messages
 pub opaque type TimerRef { TimerRef }
 
 pub effect Timer {
@@ -73,6 +69,7 @@ pub effect Timer {
   fun cancel_timer : (ref: TimerRef) -> Unit
 }
 
-#@ beam_actor: handles Process, Actor, Monitor, Link, and Timer.
-# Compiler builtin -- ops are lowered to direct BEAM calls.
-pub handler beam_actor for Process, Actor msg, Monitor, Link, Timer {}
+#@ Native handler for BEAM effects
+pub handler beam_actor for Process, Actor msg, Monitor, Link, Timer {
+  # Compiler builtin - ops are lowered to direct BEAM calls.
+}

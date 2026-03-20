@@ -23,6 +23,7 @@ impl NodeId {
 pub struct EffectRef {
     pub name: String,
     pub type_args: Vec<TypeExpr>,
+    pub span: Span,
 }
 
 // --- Top-level ---

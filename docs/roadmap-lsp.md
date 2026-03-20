@@ -38,6 +38,11 @@ lock-free hover/goto/completion.
 - [x] Signature help (show param names/types while typing function arguments)
 - [x] Document symbols (outline view)
 
+## Phase 3.5: Type-position navigation
+
+- [ ] Hover/go-to-definition on type names in annotations (e.g. ctrl+click `Fail` in `needs {Fail String}` jumps to effect definition)
+- [ ] Hover/go-to-definition on constructor types, type aliases, traits in type signatures
+
 ## Phase 4: Editing support
 
 - [ ] Code actions -- add missing import
