@@ -184,11 +184,12 @@ fn emit_module(
     elaborated: &ast::Program,
     codegen_info: &std::collections::HashMap<String, typechecker::ModuleCodegenInfo>,
     elaborated_modules: &std::collections::HashMap<String, ast::Program>,
+    let_effect_bindings: std::collections::HashMap<String, Vec<String>>,
     build_dir: &std::path::Path,
 ) {
     let erlang_name = module_name.to_lowercase().replace('.', "_");
     let core_src =
-        codegen::emit_module_with_imports(&erlang_name, elaborated, codegen_info, elaborated_modules);
+        codegen::emit_module_with_imports(&erlang_name, elaborated, codegen_info, elaborated_modules, let_effect_bindings);
     let core_path = build_dir.join(format!("{}.core", erlang_name));
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
@@ -382,6 +383,7 @@ fn build_project(
             elaborated,
             result.codegen_info(),
             &elaborated_modules,
+            std::collections::HashMap::new(),
             &build_dir,
         );
     }
@@ -420,12 +422,18 @@ fn build_script(file: &str, profile: &str) -> PathBuf {
 
     // Phase 3: Emit all modules
     for (module_name, elaborated) in &elaborated_modules {
-        let erlang_name = module_name.to_lowercase().replace('.', "_");
+        // Pass let_effect_bindings only for the script module
+        let let_effs = if module_name == "_script" {
+            result.let_effect_bindings.clone()
+        } else {
+            std::collections::HashMap::new()
+        };
         emit_module(
-            &erlang_name,
+            module_name,
             elaborated,
             result.codegen_info(),
             &elaborated_modules,
+            let_effs,
             &build_dir,
         );
     }
@@ -537,6 +545,7 @@ fn cmd_emit(file: &str) {
         &elaborated,
         result.codegen_info(),
         &elaborated_modules,
+        result.let_effect_bindings.clone(),
     );
     print!("{}", core_src);
 }
@@ -590,7 +599,7 @@ fn cmd_test(_args: &[String]) {
         for (name, elab) in &test_std_modules {
             if !all_modules.contains_key(name) {
                 let erlang_name = name.to_lowercase().replace('.', "_");
-                emit_module(&erlang_name, elab, &all_codegen, &test_std_modules, &build_dir);
+                emit_module(&erlang_name, elab, &all_codegen, &test_std_modules, std::collections::HashMap::new(), &build_dir);
                 run_erlc_file(&build_dir.join(format!("{}.core", erlang_name)), &build_dir);
                 all_modules.insert(name.clone(), elab.clone());
             }
@@ -606,6 +615,7 @@ fn cmd_test(_args: &[String]) {
             &elaborated,
             &all_codegen,
             &all_modules,
+            result.let_effect_bindings.clone(),
         );
         let core_path = build_dir.join("_test.core");
         fs::write(&core_path, &core_src).unwrap_or_else(|e| {

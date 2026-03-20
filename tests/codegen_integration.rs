@@ -34,7 +34,7 @@ fn emit_elaborated(src: &str) -> String {
     let result = checker.check_program(&program);
     assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());
     let elaborated = elaborate::elaborate(&program, &result);
-    codegen::emit_module_with_imports("_script", &elaborated, result.codegen_info(), &std::collections::HashMap::new())
+    codegen::emit_module_with_imports("_script", &elaborated, result.codegen_info(), &std::collections::HashMap::new(), result.let_effect_bindings.clone())
 }
 
 /// Emit Core Erlang and compile it with erlc, asserting no compilation errors.
@@ -1643,6 +1643,114 @@ main () = {
   let fib 1 = 1
   let fib n = fib (n - 1) + fib (n - 2)
   fib 10
+}
+"#;
+    assert_compiles(src);
+}
+
+// --- Partial application tests ---
+
+#[test]
+fn pure_partial_application_compiles() {
+    let src = r#"
+fun add : Int -> Int -> Int
+add a b = a + b
+
+increment = add 1
+
+main () = println (show (increment 6))
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn pure_partial_application_emits_lambda() {
+    let src = r#"
+fun add : Int -> Int -> Int
+add a b = a + b
+
+increment = add 1
+"#;
+    let out = emit_elaborated(src);
+    // Partial application should emit a lambda wrapping the saturated call
+    assert!(
+        out.contains("fun ("),
+        "expected lambda in partial application output:\n{out}"
+    );
+    assert!(
+        out.contains("'add'/2"),
+        "expected reference to add/2:\n{out}"
+    );
+}
+
+#[test]
+fn effectful_partial_application_compiles() {
+    let src = r#"
+effect Logger {
+  fun log : String -> Unit
+}
+
+fun log_with_level : String -> String -> Unit needs {Logger}
+log_with_level level msg = log! msg
+
+main () = {
+  let debug_log = log_with_level "DEBUG"
+  debug_log "hello" with {
+    log msg = {
+      print msg
+      resume ()
+    }
+  }
+}
+"#;
+    assert_compiles(src);
+}
+
+#[test]
+fn effectful_partial_application_emits_handler_params() {
+    let src = r#"
+effect Logger {
+  fun log : String -> Unit
+}
+
+fun log_with_level : String -> String -> Unit needs {Logger}
+log_with_level level msg = log! msg
+
+main () = {
+  let debug_log = log_with_level "DEBUG"
+  debug_log "hello" with {
+    log msg = {
+      print msg
+      resume ()
+    }
+  }
+}
+"#;
+    let out = emit_elaborated(src);
+    // The partial application lambda should include handler params
+    assert!(
+        out.contains("_Handle_Logger_log"),
+        "expected handler param in partial application lambda:\n{out}"
+    );
+    assert!(
+        out.contains("_ReturnK"),
+        "expected _ReturnK in partial application lambda:\n{out}"
+    );
+}
+
+#[test]
+fn over_application_of_zero_arity_compiles() {
+    // increment is zero-arity (returns a lambda), calling it with an arg
+    // should split: call increment(), then apply the result
+    let src = r#"
+fun add : Int -> Int -> Int
+add a b = a + b
+
+increment = add 1
+
+main () = {
+  let result = increment 6
+  println (show result)
 }
 "#;
     assert_compiles(src);

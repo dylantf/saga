@@ -111,12 +111,16 @@ pub struct Lowerer<'a> {
     /// Maps external function name -> (erlang_module, erlang_func, arity).
     /// Populated from `Decl::ExternalFun` declarations.
     external_funs: HashMap<String, (String, String, usize)>,
+    /// Deferred effects for let bindings that partially apply effectful functions.
+    /// Populated from CheckResult.let_effect_bindings.
+    let_effect_bindings: HashMap<String, Vec<String>>,
 }
 
 impl<'a> Lowerer<'a> {
     pub fn new(
         codegen_info: &'a HashMap<String, ModuleCodegenInfo>,
         elaborated_modules: &'a HashMap<String, ast::Program>,
+        let_effect_bindings: HashMap<String, Vec<String>>,
     ) -> Self {
         Lowerer {
             counter: 0,
@@ -138,6 +142,7 @@ impl<'a> Lowerer<'a> {
             constructor_modules: HashMap::new(),
             current_handler_k: None,
             external_funs: HashMap::new(),
+            let_effect_bindings,
         }
     }
 
@@ -856,19 +861,14 @@ impl<'a> Lowerer<'a> {
                             let mut call_args: Vec<CExpr> =
                                 arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
                             call_args.extend(params.iter().map(|p| CExpr::Var(p.clone())));
-                            // For effectful functions, capture handlers from scope
-                            // and add _ReturnK as a lambda param
+                            // For effectful functions, include handler params and
+                            // _ReturnK in the lambda. Handlers will be provided at
+                            // the eventual call site via `with`.
                             if !callee_ops.is_empty() {
                                 for (eff, op) in &callee_ops {
-                                    let key = format!("{}.{}", eff, op);
-                                    if let Some(param) = self.current_handler_params.get(&key) {
-                                        call_args.push(CExpr::Var(param.clone()));
-                                    } else {
-                                        panic!(
-                                            "partial application of '{}' needs handler for '{}.{}' but none in scope",
-                                            func_name, eff, op
-                                        );
-                                    }
+                                    let p = Self::handler_param_name(eff, op);
+                                    params.push(p.clone());
+                                    call_args.push(CExpr::Var(p));
                                 }
                                 let rk = "_ReturnK".to_string();
                                 params.push(rk.clone());

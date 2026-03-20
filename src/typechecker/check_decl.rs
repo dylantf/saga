@@ -356,11 +356,14 @@ impl Checker {
                 }
                 annotations.insert(name.clone(), (fun_ty.clone(), *span));
 
+                // Always register in fun_effects (even pure functions get an empty
+                // set) so the `with` validation can distinguish local declarations
+                // from imports/parameters.
+                self.fun_effects.insert(
+                    name.clone(),
+                    effects.iter().map(|e| e.name.clone()).collect(),
+                );
                 if !effects.is_empty() {
-                    self.fun_effects.insert(
-                        name.clone(),
-                        effects.iter().map(|e| e.name.clone()).collect(),
-                    );
                     let mut constraints = Vec::new();
                     for eff in effects {
                         if !eff.type_args.is_empty() {
@@ -425,6 +428,13 @@ impl Checker {
             if let Decl::FunBinding { id, name, span, .. } = decl
                 && !fun_vars.contains_key(name)
             {
+                // Register all functions in fun_effects (annotated ones are
+                // already registered with their declared effects; un-annotated
+                // ones get an empty set). This lets `with` validation distinguish
+                // local functions from imports.
+                self.fun_effects
+                    .entry(name.clone())
+                    .or_default();
                 if annotations.contains_key(name) {
                     let var = self.fresh_var();
                     fun_vars.insert(name.clone(), var);

@@ -42,7 +42,7 @@ main () = {
   # Let with list cons
   let h :: t = [1, 2, 3, 4, 5]
   println $"head: {h}"
-  println $"tail: {t}"
+  println $"tail: {debug t}"
 
   # Nested destructuring
   let ((a, b), (c, d)) = ((1, 2), (3, 4))

@@ -279,6 +279,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 ## Cleanup
 
 - [ ] Span representation is inconsistent across the AST: some nodes use named `span: Span` fields, others use `(String, Span)` tuples, others embed spans in parent structs. Consider standardizing, e.g. a `Name { value: String, span: Span }` struct for the common "identifier with location" pattern.
+- [ ] Remove `emit` usage in integration tests. It skips typechecking and therefore elaboration cannot be performed. It should be replaced with emit_elaborated usage instead.
 
 ## Out of Scope (?)
 

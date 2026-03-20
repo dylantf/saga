@@ -3445,3 +3445,72 @@ fn references_map_populated() {
         .collect();
     assert!(!id_refs.is_empty(), "should have at least one reference to 'id'");
 }
+
+// --- Partial application effect tests ---
+
+#[test]
+fn partial_application_pure_function_typechecks() {
+    check("fun myAdd : Int -> Int -> Int\nmyAdd a b = a + b\nincrement = myAdd 1\nmain () = println (show (increment 6))").unwrap();
+}
+
+#[test]
+fn partial_application_effectful_defers_effects() {
+    // Partial application of an effectful function should not propagate
+    // effects to the enclosing scope; they're deferred to the call site
+    check(
+        "effect Boom {\n  fun boom : (msg: String) -> a\n}\nfun risky : Int -> Int -> Int needs {Boom}\nrisky a b = a + b\nmain () = {\n  let f = risky 1\n  f 2 with { boom msg = 0 }\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn partial_application_effectful_no_handler_is_error() {
+    let result = check(
+        "effect Boom {\n  fun boom : (msg: String) -> a\n}\nfun risky : Int -> Int -> Int needs {Boom}\nrisky a b = a + b\nmain () = {\n  let f = risky 1\n  f 2\n}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("Boom"),
+        "expected Boom effect error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn with_on_partial_application_is_error() {
+    let result = check(
+        "effect Boom {\n  fun boom : (msg: String) -> a\n}\nhandler safe for Boom {\n  boom msg = 0\n}\nfun risky : Int -> Int -> Int needs {Boom}\nrisky a b = a + b\nmain () = {\n  let _ = risky 1 with safe\n  0\n}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("unnecessary"),
+        "expected unnecessary handler message, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn with_on_pure_call_is_error() {
+    let result = check(
+        "effect Boom {\n  fun boom : (msg: String) -> a\n}\nfun myAdd : Int -> Int -> Int\nmyAdd a b = a + b\nmain () = myAdd 1 2 with { boom msg = 0 }",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("unnecessary"),
+        "expected unnecessary handler message, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn effects_propagate_at_saturation_not_reference() {
+    // Referencing an effectful function without calling it should not
+    // propagate effects (they propagate when fully saturated)
+    check(
+        "effect Boom {\n  fun boom : (msg: String) -> a\n}\nfun risky : Int -> Int needs {Boom}\nrisky x = x\nmain () = {\n  let f = risky\n  f 1 with { boom msg = 0 }\n}",
+    )
+    .unwrap();
+}

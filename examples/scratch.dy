@@ -1,33 +1,38 @@
-pub effect TestEffect {
-  fun something : () -> Int
+effect Logger {
+  fun log : String -> Unit
 }
 
-pub effect OtherEffect {
-  fun something_else : (value: String) -> String
+handler console_log for Logger {
+  log str = {
+    print str
+    resume ()
+  }
 }
 
-pub handler test_handler for TestEffect, OtherEffect {
-  something a = 1
-  something_else value = todo ()
-}
-
-fun do_something : () -> Int needs {TestEffect}
-do_something () = something! ()
-
+fun add : Int -> Int -> Int
 add a b = a + b
 
-unused a b = a
+increment = add 1
 
-trait Foo a {
-  fun foo : a -> Unit
-}
-
-impl Foo for String {
-  foo a = ()
+fun log_with_level : String -> String -> Unit needs {Logger}
+log_with_level level msg = {
+  log! $"[{level}]: "
+  log! $"{msg} \n"
 }
 
 main () = {
-  let result = add 1 2
-  let result1 = unused 1
+  let result = add 6 1
+  println (show result)
+
+  let incremented = increment 6
+  println (show incremented)
+
+  let increment_let_binding = add 1
+  let incremented_via_let = increment_let_binding 6
+  println (show incremented_via_let)
+
+  let debug_log = log_with_level "DEBUG"
+  debug_log "Test debug log message" with console_log
+
   print "Hello world"
 }
