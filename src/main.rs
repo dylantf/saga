@@ -8,7 +8,7 @@ use std::path::PathBuf;
 fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
     let mut line = 1;
     let mut col = 1;
-    for (i, ch) in source.char_indices() {
+    for (i, ch) in source.chars().enumerate() {
         if i >= offset {
             break;
         }
@@ -44,7 +44,6 @@ fn print_diagnostic(source: &str, source_path: &str, label: &str, span: Option<t
         "{} at {}:{}:{}: {}",
         label, source_path, start_line, start_col, message
     );
-
     if let Some(line_text) = get_source_line(source, start_line) {
         let line_num_width = start_line.to_string().len();
         eprintln!("  {} | {}", start_line, line_text);

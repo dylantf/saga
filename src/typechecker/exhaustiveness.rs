@@ -54,7 +54,7 @@ pub(crate) fn simplify_pat(pat: &Pat) -> SPat {
             SPat::Constructor(name.clone(), args.iter().map(simplify_pat).collect())
         }
         Pat::Tuple { elements, .. } => SPat::Tuple(elements.iter().map(simplify_pat).collect()),
-        Pat::Record { .. } => {
+        Pat::Record { .. } | Pat::AnonRecord { .. } => {
             // Records are structural, not ADT constructors -- treat as wildcard
             // (record exhaustiveness would require field-level analysis)
             SPat::Wildcard

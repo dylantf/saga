@@ -236,6 +236,13 @@ pub(super) fn collect_type_effects(ty: &TypeExpr) -> BTreeSet<String> {
             effects.extend(collect_type_effects(arg));
             effects
         }
+        TypeExpr::Record { fields, .. } => {
+            let mut effects = BTreeSet::new();
+            for (_, ty) in fields {
+                effects.extend(collect_type_effects(ty));
+            }
+            effects
+        }
         TypeExpr::Named { .. } | TypeExpr::Var { .. } => BTreeSet::new(),
     }
 }

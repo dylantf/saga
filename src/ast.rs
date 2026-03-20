@@ -281,13 +281,18 @@ pub enum ExprKind {
     /// `User { name: "Dylan", age: 30 }`
     RecordCreate {
         name: String,
-        fields: Vec<(String, Expr)>,
+        fields: Vec<(String, Span, Expr)>,
+    },
+
+    /// `{ street: "Main St", city: "Portland" }` (anonymous record)
+    AnonRecordCreate {
+        fields: Vec<(String, Span, Expr)>,
     },
 
     /// `{ user | age: user.age + 1 }`
     RecordUpdate {
         record: Box<Expr>,
-        fields: Vec<(String, Expr)>,
+        fields: Vec<(String, Span, Expr)>,
     },
 
     /// `log! "hello"`, `Cache.get! key`
@@ -377,11 +382,12 @@ impl Expr {
             ExprKind::UnaryMinus { expr, .. } => expr.contains_resume(),
             ExprKind::Tuple { elements, .. } => elements.iter().any(|e| e.contains_resume()),
             ExprKind::FieldAccess { expr, .. } => expr.contains_resume(),
-            ExprKind::RecordCreate { fields, .. } => {
-                fields.iter().any(|(_, e)| e.contains_resume())
+            ExprKind::RecordCreate { fields, .. }
+            | ExprKind::AnonRecordCreate { fields, .. } => {
+                fields.iter().any(|(_, _, e)| e.contains_resume())
             }
             ExprKind::RecordUpdate { record, fields, .. } => {
-                record.contains_resume() || fields.iter().any(|(_, e)| e.contains_resume())
+                record.contains_resume() || fields.iter().any(|(_, _, e)| e.contains_resume())
             }
             // Only check the `with` body, not the handler arm bodies: `resume` inside
             // an arm body refers to *that arm's* continuation, not the outer context's.
@@ -492,6 +498,13 @@ pub enum Pat {
         span: Span,
     },
 
+    /// `{ street, city }` (anonymous record destructure)
+    AnonRecord {
+        id: NodeId,
+        fields: Vec<(String, Option<Pat>)>,
+        span: Span,
+    },
+
     /// `(a, b)`, `(x, y, z)`
     Tuple {
         id: NodeId,
@@ -516,6 +529,7 @@ impl Pat {
             | Pat::Lit { id, .. }
             | Pat::Constructor { id, .. }
             | Pat::Record { id, .. }
+            | Pat::AnonRecord { id, .. }
             | Pat::Tuple { id, .. }
             | Pat::StringPrefix { id, .. } => *id,
         }
@@ -528,6 +542,7 @@ impl Pat {
             | Pat::Lit { span, .. }
             | Pat::Constructor { span, .. }
             | Pat::Record { span, .. }
+            | Pat::AnonRecord { span, .. }
             | Pat::Tuple { span, .. }
             | Pat::StringPrefix { span, .. } => *span,
         }
@@ -549,6 +564,9 @@ pub enum TypeExpr {
 
     /// `a -> b` or `a -> b needs {Eff}` or `a -> b needs {State Int}`
     Arrow { from: Box<TypeExpr>, to: Box<TypeExpr>, effects: Vec<EffectRef>, span: Span },
+
+    /// Anonymous record type: `{ street: String, city: String }`
+    Record { fields: Vec<(String, TypeExpr)>, span: Span },
 }
 
 impl TypeExpr {
@@ -557,7 +575,8 @@ impl TypeExpr {
             TypeExpr::Named { span, .. }
             | TypeExpr::Var { span, .. }
             | TypeExpr::App { span, .. }
-            | TypeExpr::Arrow { span, .. } => *span,
+            | TypeExpr::Arrow { span, .. }
+            | TypeExpr::Record { span, .. } => *span,
         }
     }
 }
@@ -576,6 +595,10 @@ impl PartialEq for TypeExpr {
                 TypeExpr::Arrow { from: f1, to: t1, effects: e1, .. },
                 TypeExpr::Arrow { from: f2, to: t2, effects: e2, .. },
             ) => f1 == f2 && t1 == t2 && e1 == e2,
+            (
+                TypeExpr::Record { fields: f1, .. },
+                TypeExpr::Record { fields: f2, .. },
+            ) => f1 == f2,
             _ => false,
         }
     }

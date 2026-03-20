@@ -293,10 +293,21 @@ impl Normalizer {
             ExprKind::RecordCreate { name, fields } => {
                 let new_fields = fields
                     .iter()
-                    .map(|(n, e)| (n.clone(), self.normalize_and_lift(e, lifted)))
+                    .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
                     .collect();
                 Expr::synth(span, ExprKind::RecordCreate {
                     name: name.clone(),
+                    fields: new_fields,
+                })
+            }
+
+            // AnonRecordCreate: normalize field values.
+            ExprKind::AnonRecordCreate { fields } => {
+                let new_fields = fields
+                    .iter()
+                    .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
+                    .collect();
+                Expr::synth(span, ExprKind::AnonRecordCreate {
                     fields: new_fields,
                 })
             }
@@ -309,7 +320,7 @@ impl Normalizer {
                 let new_record = self.normalize_and_lift(record, lifted);
                 let new_fields = fields
                     .iter()
-                    .map(|(n, e)| (n.clone(), self.normalize_and_lift(e, lifted)))
+                    .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
                     .collect();
                 Expr::synth(span, ExprKind::RecordUpdate {
                     record: Box::new(new_record),

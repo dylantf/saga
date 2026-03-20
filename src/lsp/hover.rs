@@ -285,7 +285,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span, Option<Node
             None
         }
         ExprKind::RecordCreate { fields, .. } => {
-            for (_, e) in fields {
+            for (_, _, e) in fields {
                 if let Some(r) = find_in_expr(e, offset) {
                     return Some(r);
                 }
@@ -296,7 +296,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span, Option<Node
             if let Some(r) = find_in_expr(record, offset) {
                 return Some(r);
             }
-            for (_, e) in fields {
+            for (_, _, e) in fields {
                 if let Some(r) = find_in_expr(e, offset) {
                     return Some(r);
                 }
@@ -640,6 +640,17 @@ fn find_in_type_expr(ty: &TypeExpr, offset: usize) -> Option<(String, Span, Opti
                     None
                 })
         }
+        TypeExpr::Record { fields, span } => {
+            if offset < span.start || offset > span.end {
+                return None;
+            }
+            for (_, ty) in fields {
+                if let Some(r) = find_in_type_expr(ty, offset) {
+                    return Some(r);
+                }
+            }
+            None
+        }
         TypeExpr::Var { .. } => None,
     }
 }
@@ -688,6 +699,13 @@ pub(crate) fn format_type_expr(ty: &dylang::ast::TypeExpr) -> String {
                     .collect();
                 format!("{} needs {{{}}}", arrow, effs_str.join(", "))
             }
+        }
+        TypeExpr::Record { fields, .. } => {
+            let field_strs: Vec<String> = fields
+                .iter()
+                .map(|(name, ty)| format!("{}: {}", name, format_type_expr(ty)))
+                .collect();
+            format!("{{ {} }}", field_strs.join(", "))
         }
     }
 }

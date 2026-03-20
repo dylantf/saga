@@ -839,7 +839,17 @@ impl Elaborator {
                     name: name.clone(),
                     fields: fields
                         .iter()
-                        .map(|(n, e)| (n.clone(), self.elaborate_expr(e)))
+                        .map(|(n, s, e)| (n.clone(), *s, self.elaborate_expr(e)))
+                        .collect(),
+                },
+            ),
+
+            ExprKind::AnonRecordCreate { fields } => Expr::synth(
+                span,
+                ExprKind::AnonRecordCreate {
+                    fields: fields
+                        .iter()
+                        .map(|(n, s, e)| (n.clone(), *s, self.elaborate_expr(e)))
                         .collect(),
                 },
             ),
@@ -850,7 +860,7 @@ impl Elaborator {
                     record: Box::new(self.elaborate_expr(record)),
                     fields: fields
                         .iter()
-                        .map(|(n, e)| (n.clone(), self.elaborate_expr(e)))
+                        .map(|(n, s, e)| (n.clone(), *s, self.elaborate_expr(e)))
                         .collect(),
                 },
             ),

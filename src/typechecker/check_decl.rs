@@ -432,9 +432,7 @@ impl Checker {
                 // already registered with their declared effects; un-annotated
                 // ones get an empty set). This lets `with` validation distinguish
                 // local functions from imports.
-                self.fun_effects
-                    .entry(name.clone())
-                    .or_default();
+                self.fun_effects.entry(name.clone()).or_default();
                 if annotations.contains_key(name) {
                     let var = self.fresh_var();
                     fun_vars.insert(name.clone(), var);
@@ -1206,7 +1204,8 @@ impl Checker {
                     param_id,
                 );
                 self.node_spans.insert(param_id, *param_span);
-                self.definitions.push((param_id, param_name.clone(), *param_span));
+                self.definitions
+                    .push((param_id, param_name.clone(), *param_span));
             }
 
             let body_ty = self.infer_expr(&arm.body)?;
@@ -1446,6 +1445,12 @@ impl Checker {
                         return Err(Diagnostic::error_at(
                             span,
                             format!("no impl of {} for function type", trait_name),
+                        ));
+                    }
+                    Type::Record(_) => {
+                        return Err(Diagnostic::error_at(
+                            span,
+                            format!("no impl of {} for anonymous record type", trait_name),
                         ));
                     }
                     // Error/Never type: skip trait checking
