@@ -1206,7 +1206,10 @@ impl Checker {
                 );
             }
 
-            self.infer_expr(&arm.body)?;
+            let body_ty = self.infer_expr(&arm.body)?;
+            if let Err(e) = self.unify(&op_sig.return_type, &body_ty) {
+                self.collected_diagnostics.push(e.with_span(arm.span));
+            }
             self.resume_type = saved_resume;
             self.resume_return_type = saved_resume_ret;
             self.env = saved_env;
