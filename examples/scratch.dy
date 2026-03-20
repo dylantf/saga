@@ -7,13 +7,27 @@ pub effect OtherEffect {
 }
 
 pub handler test_handler for TestEffect, OtherEffect {
-  something _ = 1
-  something_else value = todo ""
+  something a = 1
+  something_else value = todo ()
 }
 
 fun do_something : () -> Int needs {TestEffect}
 do_something () = something! ()
 
+add a b = a + b
+
+unused a b = a
+
+trait Foo a {
+  fun foo : a -> Unit
+}
+
+impl Foo for String {
+  foo a = ()
+}
+
 main () = {
+  let result = add 1 2
+  let result1 = unused 1
   print "Hello world"
 }

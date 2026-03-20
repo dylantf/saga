@@ -266,13 +266,14 @@ impl Parser {
                 if matches!(self.peek(), Token::Return) {
                     // return clause: `return value = body`
                     self.advance();
+                    let param_span = self.tokens[self.pos].span;
                     let param = self.expect_ident()?;
                     self.expect(Token::Eq)?;
                     let body = self.parse_expr(0)?;
                     let arm_end = body.span;
                     return_clause = Some(Box::new(HandlerArm {
                         op_name: "return".to_string(),
-                        params: vec![param],
+                        params: vec![(param, param_span)],
                         body: Box::new(body),
                         span: arm_start.to(arm_end),
                     }));
@@ -299,7 +300,8 @@ impl Parser {
                                 self.advance(); // consume ')'
                                 continue;
                             }
-                            params.push(self.expect_ident()?);
+                            let pspan = self.tokens[self.pos].span;
+                            params.push((self.expect_ident()?, pspan));
                         }
                         self.expect(Token::Eq)?;
                         let body = self.parse_expr(0)?;

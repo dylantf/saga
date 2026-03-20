@@ -778,6 +778,8 @@ pub struct Checker {
     pub(crate) node_spans: HashMap<crate::ast::NodeId, Span>,
     /// Constructor definition NodeIds: constructor name -> NodeId of the TypeConstructor/RecordDef.
     pub(crate) constructor_def_ids: HashMap<String, crate::ast::NodeId>,
+    /// All variable/param definitions: (NodeId, name, span) for unused variable detection.
+    pub(crate) definitions: Vec<(crate::ast::NodeId, String, Span)>,
     /// When true, function annotations without matching bodies are allowed
     /// (used for builtin stdlib modules where implementations are in Rust).
     pub(crate) allow_bodyless_annotations: bool,
@@ -867,6 +869,7 @@ impl Checker {
             references: HashMap::new(),
             node_spans: HashMap::new(),
             constructor_def_ids: HashMap::new(),
+            definitions: Vec::new(),
             allow_bodyless_annotations: false,
             current_module: None,
             with_arm_stacks: Vec::new(),
@@ -955,6 +958,23 @@ impl Checker {
     ) {
         self.references.insert(usage_id, def_id);
         self.node_spans.insert(usage_id, usage_span);
+    }
+
+    /// Emit warnings for local variable bindings that are never referenced.
+    pub(crate) fn check_unused_variables(&mut self) {
+        let used: std::collections::HashSet<crate::ast::NodeId> =
+            self.references.values().copied().collect();
+        for (def_id, name, span) in &self.definitions {
+            if name.starts_with('_') {
+                continue;
+            }
+            if !used.contains(def_id) {
+                self.collected_diagnostics.push(Diagnostic::warning_at(
+                    *span,
+                    format!("unused variable: `{}`", name),
+                ));
+            }
+        }
     }
 
     pub fn effect_names(&self) -> Vec<String> {
@@ -1116,13 +1136,13 @@ impl Checker {
             },
         );
 
-        // todo : String -> Never (type hole, crashes at runtime with "not implemented")
+        // todo : Unit -> Never (type hole, crashes at runtime with "not implemented")
         self.env.insert(
             "todo".into(),
             Scheme {
                 forall: vec![],
                 constraints: vec![],
-                ty: Type::Arrow(Box::new(Type::string()), Box::new(Type::Never)),
+                ty: Type::Arrow(Box::new(Type::unit()), Box::new(Type::Never)),
             },
         );
 
@@ -1516,7 +1536,9 @@ impl Checker {
                     }
                 }
             }
-            crate::ast::TypeExpr::Arrow { from, to, effects, .. } => {
+            crate::ast::TypeExpr::Arrow {
+                from, to, effects, ..
+            } => {
                 let a_ty = self.convert_type_expr(from, params);
                 let b_ty = self.convert_type_expr(to, params);
                 if effects.is_empty() {

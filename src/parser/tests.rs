@@ -1667,7 +1667,8 @@ fn handler_def_simple() {
             assert_eq!(effect_names(effects), vec!["Log"]);
             assert_eq!(arms.len(), 1);
             assert_eq!(arms[0].op_name, "log");
-            assert_eq!(arms[0].params, vec!["level", "msg"]);
+            let param_names: Vec<&str> = arms[0].params.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(param_names, vec!["level", "msg"]);
             assert!(return_clause.is_none());
         }
         _ => panic!("expected HandlerDef, got {:?}", decls[0]),
@@ -1692,7 +1693,8 @@ fn handler_def_with_return_clause() {
             assert_eq!(arms[0].op_name, "fail");
             assert!(return_clause.is_some());
             let rc = return_clause.as_ref().unwrap();
-            assert_eq!(rc.params, vec!["value"]);
+            let rc_names: Vec<&str> = rc.params.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(rc_names, vec!["value"]);
         }
         _ => panic!("expected HandlerDef, got {:?}", decls[0]),
     }
@@ -1919,7 +1921,8 @@ fn with_inline_handler() {
                 assert!(named.is_empty());
                 assert_eq!(arms.len(), 1);
                 assert_eq!(arms[0].op_name, "log");
-                assert_eq!(arms[0].params, vec!["level", "msg"]);
+                let param_names: Vec<&str> = arms[0].params.iter().map(|(n, _)| n.as_str()).collect();
+                assert_eq!(param_names, vec!["level", "msg"]);
                 assert!(return_clause.is_none());
             }
             _ => panic!("expected Inline handler, got {:?}", handler),

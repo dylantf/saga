@@ -827,6 +827,7 @@ impl Checker {
                         self.env.insert_with_def(name.clone(), scheme, *pat_id);
                         self.node_spans.insert(*pat_id, *var_span);
                         self.record_type_at_span(*var_span, &ty);
+                        self.definitions.push((*pat_id, name.clone(), *var_span));
                     } else if let Err(e) = self.bind_pattern(pattern, &ty) {
                         errors.push(e);
                     }
@@ -977,6 +978,7 @@ impl Checker {
                 );
                 self.record_type_at_span(*span, ty);
                 self.node_spans.insert(*id, *span);
+                self.definitions.push((*id, name.clone(), *span));
                 Ok(())
             }
             Pat::Lit { value, span, .. } => {
@@ -1402,7 +1404,7 @@ impl Checker {
                 // since arms need it for resume return type and body unification.
                 let answer_ty = if let Some(ret_arm) = return_clause {
                     let saved_env = self.env.clone();
-                    if let Some(param_name) = ret_arm.params.first() {
+                    if let Some((param_name, _)) = ret_arm.params.first() {
                         self.env.insert(
                             param_name.clone(),
                             Scheme {
@@ -1434,7 +1436,7 @@ impl Checker {
                     if let Some(ref sig) = op_sig {
                         self.resume_type = Some(sig.return_type.clone());
                         self.resume_return_type = Some(answer_ty.clone());
-                        for (i, param_name) in arm.params.iter().enumerate() {
+                        for (i, (param_name, _)) in arm.params.iter().enumerate() {
                             let param_ty = if i < sig.params.len() {
                                 sig.params[i].1.clone()
                             } else {
@@ -1450,7 +1452,7 @@ impl Checker {
                             );
                         }
                     } else {
-                        for param_name in &arm.params {
+                        for (param_name, _) in &arm.params {
                             let param_ty = self.fresh_var();
                             self.env.insert(
                                 param_name.clone(),

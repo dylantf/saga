@@ -25,6 +25,7 @@ impl Checker {
                 self.collected_diagnostics.push(e);
             }
         }
+        self.check_unused_variables();
         self.to_result()
     }
 
@@ -1178,20 +1179,24 @@ impl Checker {
             let saved_resume_ret = self.resume_return_type.take();
             self.resume_type = Some(op_sig.return_type.clone());
 
-            for (i, param_name) in arm.params.iter().enumerate() {
+            for (i, (param_name, param_span)) in arm.params.iter().enumerate() {
                 let param_ty = if i < op_sig.params.len() {
                     op_sig.params[i].1.clone()
                 } else {
                     self.fresh_var()
                 };
-                self.env.insert(
+                let param_id = crate::ast::NodeId::fresh();
+                self.env.insert_with_def(
                     param_name.clone(),
                     Scheme {
                         forall: vec![],
                         constraints: vec![],
                         ty: param_ty,
                     },
+                    param_id,
                 );
+                self.node_spans.insert(param_id, *param_span);
+                self.definitions.push((param_id, param_name.clone(), *param_span));
             }
 
             let body_ty = self.infer_expr(&arm.body)?;
@@ -1212,7 +1217,7 @@ impl Checker {
                 Type::Var(id) => *id,
                 _ => unreachable!(),
             };
-            if let Some(param_name) = rc.params.first() {
+            if let Some((param_name, _)) = rc.params.first() {
                 self.env.insert(
                     param_name.clone(),
                     Scheme {

@@ -251,7 +251,7 @@ impl<'a> Lowerer<'a> {
             let param = if ret.params.is_empty() {
                 self.fresh()
             } else {
-                core_var(&ret.params[0])
+                core_var(&ret.params[0].0)
             };
             let ret_body = self.lower_expr(&ret.body);
             Some(CExpr::Fun(vec![param], Box::new(ret_body)))
@@ -364,7 +364,7 @@ impl<'a> Lowerer<'a> {
         self.pending_callee_return_k = saved_pending_k;
 
         // Bind arm's named params to the positional handler args
-        for (i, param_name) in arm.params.iter().enumerate().rev() {
+        for (i, (param_name, _)) in arm.params.iter().enumerate().rev() {
             body_ce = CExpr::Let(
                 core_var(param_name),
                 Box::new(CExpr::Var(param_vars[i].clone())),

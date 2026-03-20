@@ -276,6 +276,10 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [ ] Docstrings/generated docs
 - [ ] Language documentation/website
 
+## Cleanup
+
+- [ ] Span representation is inconsistent across the AST: some nodes use named `span: Span` fields, others use `(String, Span)` tuples, others embed spans in parent structs. Consider standardizing, e.g. a `Name { value: String, span: Span }` struct for the common "identifier with location" pattern.
+
 ## Out of Scope (?)
 
 - Effect inference (explicit `needs` annotations required)

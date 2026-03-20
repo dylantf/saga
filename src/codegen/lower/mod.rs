@@ -664,29 +664,39 @@ impl<'a> Lowerer<'a> {
                     }
                 }
 
-                // Lower `panic msg` / `todo msg` to stderr print + erlang:halt(1)
+                // Lower `panic msg` / `todo ()` to stderr print + erlang:halt(1)
                 if let Some((func_name, args)) = collect_fun_call(expr)
                     && (func_name == "panic" || func_name == "todo")
                     && args.len() == 1
                 {
-                    let prefix = if func_name == "panic" {
-                        "panic: "
-                    } else {
-                        "todo: "
-                    };
-                    let arg = self.lower_expr(args[0]);
                     let v = self.fresh();
                     let prefixed = self.fresh();
                     let dummy = self.fresh();
-                    // Prepend "panic: " / "todo: " to the message
-                    let prepend = cerl_call(
-                        "erlang",
-                        "++",
-                        vec![
-                            CExpr::Lit(CLit::Str(prefix.into())),
-                            CExpr::Var(v.clone()),
-                        ],
-                    );
+                    let (arg, prepend) = if func_name == "todo" {
+                        // todo () - just print "todo: not implemented"
+                        let arg = CExpr::Lit(CLit::Str("not implemented".into()));
+                        let prep = cerl_call(
+                            "erlang",
+                            "++",
+                            vec![
+                                CExpr::Lit(CLit::Str("todo: ".into())),
+                                CExpr::Var(v.clone()),
+                            ],
+                        );
+                        (arg, prep)
+                    } else {
+                        // panic msg - prepend "panic: " to the message
+                        let arg = self.lower_expr(args[0]);
+                        let prep = cerl_call(
+                            "erlang",
+                            "++",
+                            vec![
+                                CExpr::Lit(CLit::Str("panic: ".into())),
+                                CExpr::Var(v.clone()),
+                            ],
+                        );
+                        (arg, prep)
+                    };
                     // io:format(standard_error, "~ts~n", [Msg])
                     let print_stderr = cerl_call(
                         "io",
