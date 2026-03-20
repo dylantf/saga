@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use tower_lsp::lsp_types::*;
 
 use dylang::ast::Decl;
@@ -14,7 +16,12 @@ pub fn extract_prefix(source: &str, offset: usize) -> &str {
 }
 
 /// Collect completion items from the checker's environment.
-pub fn collect_completions(result: &CheckResult, prefix: &str, program: &[Decl]) -> Vec<CompletionItem> {
+pub fn collect_completions(
+    result: &CheckResult,
+    prefix: &str,
+    program: &[Decl],
+    offset: usize,
+) -> Vec<CompletionItem> {
     let mut items = Vec::new();
     let prefix_lower = prefix.to_lowercase();
 
@@ -81,8 +88,7 @@ pub fn collect_completions(result: &CheckResult, prefix: &str, program: &[Decl])
 
     // Built-in type names
     let type_names = [
-        "Int", "Float", "String", "Bool", "Unit", "List", "Maybe", "Result",
-        "Tuple", "Pid", "Dict",
+        "Int", "Float", "String", "Bool", "Unit", "List", "Maybe", "Result", "Tuple", "Pid", "Dict",
     ];
     for type_name in type_names {
         if !prefix.is_empty() && !type_name.to_lowercase().starts_with(&prefix_lower) {
@@ -118,9 +124,9 @@ pub fn collect_completions(result: &CheckResult, prefix: &str, program: &[Decl])
 
     // Keywords
     let keywords = [
-        "if", "then", "else", "case", "let", "fun", "type", "record",
-        "effect", "handler", "with", "import", "module", "pub", "opaque",
-        "trait", "impl", "where", "needs", "receive", "do", "assert",
+        "if", "then", "else", "case", "let", "fun", "type", "record", "effect", "handler", "with",
+        "import", "module", "pub", "opaque", "trait", "impl", "where", "needs", "receive", "do",
+        "assert",
     ];
     for kw in keywords {
         if !prefix.is_empty() && !kw.starts_with(&prefix_lower) {
@@ -131,6 +137,79 @@ pub fn collect_completions(result: &CheckResult, prefix: &str, program: &[Decl])
             kind: Some(CompletionItemKind::KEYWORD),
             ..Default::default()
         });
+    }
+
+    // Missing handler operations: if cursor is inside a handler body, suggest unimplemented ops
+    for decl in program {
+        if let Decl::HandlerDef {
+            effects,
+            arms,
+            span,
+            ..
+        } = decl
+            && offset >= span.start
+            && offset <= span.end
+        {
+            let handled: HashSet<&str> = arms.iter().map(|a| a.op_name.as_str()).collect();
+            for effect_ref in effects {
+                if let Some(info) = result.effects.get(&effect_ref.name) {
+                    for op in &info.ops {
+                        if handled.contains(op.name.as_str()) {
+                            continue;
+                        }
+                        if !prefix.is_empty() && !op.name.to_lowercase().starts_with(&prefix_lower)
+                        {
+                            continue;
+                        }
+                        let ret = format!("{}", result.sub.apply(&op.return_type));
+                        let snippet = if op.params.is_empty() {
+                            format!("{} () = $0", op.name)
+                        } else {
+                            let tab_stops: Vec<String> = op
+                                .params
+                                .iter()
+                                .enumerate()
+                                .map(|(i, (label, _))| {
+                                    let name = if label.starts_with('_') {
+                                        format!("arg{}", i + 1)
+                                    } else {
+                                        label.clone()
+                                    };
+                                    format!("${{{}:{}}}", i + 1, name)
+                                })
+                                .collect();
+                            format!("{} {} = $0", op.name, tab_stops.join(" "))
+                        };
+
+                        let param_types: Vec<String> = op
+                            .params
+                            .iter()
+                            .map(|(_, t)| format!("{}", result.sub.apply(t)))
+                            .collect();
+
+                        let detail = if param_types.is_empty() {
+                            format!("-> {} ({})", ret, effect_ref.name)
+                        } else {
+                            format!(
+                                "{} -> {} ({})",
+                                param_types.join(" -> "),
+                                ret,
+                                effect_ref.name
+                            )
+                        };
+                        items.push(CompletionItem {
+                            label: op.name.clone(),
+                            kind: Some(CompletionItemKind::METHOD),
+                            detail: Some(detail),
+                            insert_text: Some(snippet),
+                            insert_text_format: Some(InsertTextFormat::SNIPPET),
+                            sort_text: Some(format!("!{}", op.name)), // sort to top
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
     }
 
     // Sort: exact prefix matches first, then alphabetical

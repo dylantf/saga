@@ -3,7 +3,7 @@ pub effect TestEffect {
 }
 
 pub effect OtherEffect {
-  fun something_else : () -> String
+  fun something_else : (value: String) -> String
 }
 
 pub handler test_handler for TestEffect, OtherEffect {

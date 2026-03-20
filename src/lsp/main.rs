@@ -339,7 +339,7 @@ impl LanguageServer for Backend {
             line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
         let prefix = completion::extract_prefix(&source, offset);
-        let items = completion::collect_completions(&tc_result, prefix, &program);
+        let items = completion::collect_completions(&tc_result, prefix, &program, offset);
 
         Ok(Some(CompletionResponse::Array(items)))
     }

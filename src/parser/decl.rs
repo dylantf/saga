@@ -461,43 +461,55 @@ impl Parser {
 
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
             let arm_start = self.tokens[self.pos].span;
+            let save = self.pos;
 
-            if matches!(self.peek(), Token::Return) {
-                // return clause: `return value = body`
-                self.advance();
-                let param = self.expect_ident()?;
-                self.expect(Token::Eq)?;
-                let body = self.parse_expr(0)?;
-                let arm_end = body.span;
-                return_clause = Some(Box::new(HandlerArm {
-                    op_name: "return".to_string(),
-                    params: vec![param],
-                    body: Box::new(body),
-                    span: arm_start.to(arm_end),
-                }));
-            } else {
-                let op_name = self.expect_ident()?;
-                let mut params = Vec::new();
-                while !matches!(self.peek(), Token::Eq | Token::Eof) {
-                    // Skip `()` unit params (zero-param effect ops)
-                    if matches!(self.peek(), Token::LParen)
-                        && matches!(self.peek_at(1), Token::RParen)
-                    {
-                        self.advance(); // consume '('
-                        self.advance(); // consume ')'
-                        continue;
+            let arm_result: Result<(), ParseError> = (|| {
+                if matches!(self.peek(), Token::Return) {
+                    // return clause: `return value = body`
+                    self.advance();
+                    let param = self.expect_ident()?;
+                    self.expect(Token::Eq)?;
+                    let body = self.parse_expr(0)?;
+                    let arm_end = body.span;
+                    return_clause = Some(Box::new(HandlerArm {
+                        op_name: "return".to_string(),
+                        params: vec![param],
+                        body: Box::new(body),
+                        span: arm_start.to(arm_end),
+                    }));
+                } else {
+                    let op_name = self.expect_ident()?;
+                    let mut params = Vec::new();
+                    while !matches!(self.peek(), Token::Eq | Token::Eof) {
+                        // Skip `()` unit params (zero-param effect ops)
+                        if matches!(self.peek(), Token::LParen)
+                            && matches!(self.peek_at(1), Token::RParen)
+                        {
+                            self.advance(); // consume '('
+                            self.advance(); // consume ')'
+                            continue;
+                        }
+                        params.push(self.expect_ident()?);
                     }
-                    params.push(self.expect_ident()?);
+                    self.expect(Token::Eq)?;
+                    let body = self.parse_expr(0)?;
+                    let arm_end = body.span;
+                    arms.push(HandlerArm {
+                        op_name,
+                        params,
+                        body: Box::new(body),
+                        span: arm_start.to(arm_end),
+                    });
                 }
-                self.expect(Token::Eq)?;
-                let body = self.parse_expr(0)?;
-                let arm_end = body.span;
-                arms.push(HandlerArm {
-                    op_name,
-                    params,
-                    body: Box::new(body),
-                    span: arm_start.to(arm_end),
-                });
+                Ok(())
+            })();
+
+            if arm_result.is_err() {
+                // Recovery: skip to next terminator or closing brace
+                self.pos = save;
+                while !matches!(self.peek(), Token::Terminator | Token::RBrace | Token::Eof) {
+                    self.advance();
+                }
             }
 
             self.skip_terminators();

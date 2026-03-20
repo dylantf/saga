@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use crate::ast::{self, Decl};
 
 use super::result::CheckResult;
-use super::{Checker, Diagnostic, EffectDefInfo, EffectOpSig, HandlerInfo, RecordInfo, Scheme, Span, Type};
+use super::{
+    Checker, Diagnostic, EffectDefInfo, EffectOpSig, HandlerInfo, RecordInfo, Scheme, Span, Type,
+};
 
 /// Annotations collected from FunAnnotation declarations:
 /// (name -> (type, span)) and (name -> where clause constraints).
@@ -949,7 +951,8 @@ impl Checker {
                     ty: ctor_ty,
                 },
             );
-            self.constructor_def_ids.insert(variant.name.clone(), variant.id);
+            self.constructor_def_ids
+                .insert(variant.name.clone(), variant.id);
             self.node_spans.insert(variant.id, variant.span);
         }
 
@@ -985,7 +988,12 @@ impl Checker {
 
         let field_types: Vec<(String, Type)> = fields
             .iter()
-            .map(|(fname, texpr)| (fname.clone(), self.convert_type_expr(texpr, &mut param_vars)))
+            .map(|(fname, texpr)| {
+                (
+                    fname.clone(),
+                    self.convert_type_expr(texpr, &mut param_vars),
+                )
+            })
             .collect();
 
         let forall: Vec<u32> = param_vars.iter().map(|(_, id)| *id).collect();
@@ -1049,10 +1057,15 @@ impl Checker {
         for op in operations {
             // Start with the shared effect type params, then add op-local type vars
             let mut params_list = shared_params.clone();
-            let param_types: Vec<Type> = op
+            let param_types: Vec<(String, Type)> = op
                 .params
                 .iter()
-                .map(|(_, texpr)| self.convert_type_expr(texpr, &mut params_list))
+                .map(|(label, texpr)| {
+                    (
+                        label.clone(),
+                        self.convert_type_expr(texpr, &mut params_list),
+                    )
+                })
                 .collect();
             let return_type = self.convert_type_expr(&op.return_type, &mut params_list);
             op_spans.insert(op.name.clone(), op.span);
@@ -1145,7 +1158,9 @@ impl Checker {
                         params: op
                             .params
                             .iter()
-                            .map(|t| self.replace_vars(t, &handler_type_mapping))
+                            .map(|(label, t)| {
+                                (label.clone(), self.replace_vars(t, &handler_type_mapping))
+                            })
                             .collect(),
                         return_type: self.replace_vars(&op.return_type, &handler_type_mapping),
                     };
@@ -1177,7 +1192,7 @@ impl Checker {
 
             for (i, param_name) in arm.params.iter().enumerate() {
                 let param_ty = if i < op_sig.params.len() {
-                    op_sig.params[i].clone()
+                    op_sig.params[i].1.clone()
                 } else {
                     self.fresh_var()
                 };
@@ -1245,7 +1260,9 @@ impl Checker {
                 arms.iter().map(|a| a.op_name.as_str()).collect();
             for effect_ref in effect_names {
                 if let Some(info) = self.effects.get(&effect_ref.name) {
-                    let missing: Vec<_> = info.ops.iter()
+                    let missing: Vec<_> = info
+                        .ops
+                        .iter()
                         .filter(|op| !handled_ops.contains(op.name.as_str()))
                         .map(|op| op.name.as_str())
                         .collect();

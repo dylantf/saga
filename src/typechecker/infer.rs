@@ -46,7 +46,8 @@ impl Checker {
                     }
                     let (mut ty, constraints) = self.instantiate(&scheme);
                     for (trait_name, trait_ty) in constraints {
-                        self.pending_constraints.push((trait_name, trait_ty, span, node_id));
+                        self.pending_constraints
+                            .push((trait_name, trait_ty, span, node_id));
                     }
                     // If this function has effect type constraints, convert the
                     // outermost Arrow to EffArrow so spawn! can link type args.
@@ -121,18 +122,19 @@ impl Checker {
             }
 
             ExprKind::BinOp {
-                op,
-                left,
-                right,
-                ..
+                op, left, right, ..
             } => {
                 let left_ty = self.infer_expr(left)?;
                 let right_ty = self.infer_expr(right)?;
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::IntDiv => {
                         self.unify_at(&left_ty, &right_ty, span)?;
-                        self.pending_constraints
-                            .push(("Num".into(), left_ty.clone(), span, node_id));
+                        self.pending_constraints.push((
+                            "Num".into(),
+                            left_ty.clone(),
+                            span,
+                            node_id,
+                        ));
                         Ok(left_ty)
                     }
                     BinOp::Mod => {
@@ -142,14 +144,22 @@ impl Checker {
                     }
                     BinOp::Eq | BinOp::NotEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
-                        self.pending_constraints
-                            .push(("Eq".into(), left_ty.clone(), span, node_id));
+                        self.pending_constraints.push((
+                            "Eq".into(),
+                            left_ty.clone(),
+                            span,
+                            node_id,
+                        ));
                         Ok(Type::bool())
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
-                        self.pending_constraints
-                            .push(("Ord".into(), left_ty.clone(), span, node_id));
+                        self.pending_constraints.push((
+                            "Ord".into(),
+                            left_ty.clone(),
+                            span,
+                            node_id,
+                        ));
                         Ok(Type::bool())
                     }
                     BinOp::And | BinOp::Or => {
@@ -191,9 +201,7 @@ impl Checker {
             ExprKind::Lambda { params, body, .. } => self.infer_lambda(params, body),
 
             ExprKind::Case {
-                scrutinee,
-                arms,
-                ..
+                scrutinee, arms, ..
             } => {
                 let scrut_ty = self.infer_expr(scrutinee)?;
                 let result_ty = self.fresh_var();
@@ -226,12 +234,15 @@ impl Checker {
 
                 for (fname, fexpr) in fields {
                     let expected =
-                        inst_fields.iter().find(|(n, _)| n == fname).ok_or_else(|| {
-                            Diagnostic::error_at(
-                                fexpr.span,
-                                format!("unknown field '{}' on record {}", fname, name),
-                            )
-                        })?;
+                        inst_fields
+                            .iter()
+                            .find(|(n, _)| n == fname)
+                            .ok_or_else(|| {
+                                Diagnostic::error_at(
+                                    fexpr.span,
+                                    format!("unknown field '{}' on record {}", fname, name),
+                                )
+                            })?;
                     let actual = self.infer_expr(fexpr)?;
                     self.unify_at(&expected.1, &actual, fexpr.span)?;
                 }
@@ -239,13 +250,11 @@ impl Checker {
                 Ok(result_ty)
             }
 
-            ExprKind::FieldAccess { expr: inner, field, .. } => self.infer_field_access(inner, field, span),
+            ExprKind::FieldAccess {
+                expr: inner, field, ..
+            } => self.infer_field_access(inner, field, span),
 
-            ExprKind::RecordUpdate {
-                record,
-                fields,
-                ..
-            } => {
+            ExprKind::RecordUpdate { record, fields, .. } => {
                 let rec_ty = self.infer_expr(record)?;
                 let mut resolved = self.sub.apply(&rec_ty);
 
@@ -274,8 +283,10 @@ impl Checker {
                         // so that type params flow from the input record to the field types.
                         self.unify_at(&resolved, &result_ty, span)?;
                         for (fname, fexpr) in fields {
-                            let expected =
-                                inst_fields.iter().find(|(n, _)| n == fname).ok_or_else(|| {
+                            let expected = inst_fields
+                                .iter()
+                                .find(|(n, _)| n == fname)
+                                .ok_or_else(|| {
                                     Diagnostic::error_at(
                                         fexpr.span,
                                         format!("unknown field '{}' on record {}", fname, name),
@@ -294,9 +305,7 @@ impl Checker {
             }
 
             ExprKind::EffectCall {
-                name,
-                qualifier,
-                ..
+                name, qualifier, ..
             } => {
                 let op_sig = self.lookup_effect_op(name, qualifier.as_deref(), span)?;
 
@@ -307,10 +316,14 @@ impl Checker {
 
                 // Record call site -> handler arm for LSP go-to-def (level 1).
                 // Scan the with-stack innermost-first; first match wins (innermost shadows outer).
-                if let Some((arm_span, arm_module)) =
-                    self.with_arm_stacks.iter().rev().find_map(|map| map.get(name.as_str()))
+                if let Some((arm_span, arm_module)) = self
+                    .with_arm_stacks
+                    .iter()
+                    .rev()
+                    .find_map(|map| map.get(name.as_str()))
                 {
-                    self.effect_call_targets.insert(span, (*arm_span, arm_module.clone()));
+                    self.effect_call_targets
+                        .insert(span, (*arm_span, arm_module.clone()));
                 }
 
                 // Build curried function type: param1 -> param2 -> ... -> return_type
@@ -319,14 +332,18 @@ impl Checker {
                     // Zero-param ops like `get! ()` still take a Unit argument
                     ty = Type::Arrow(Box::new(Type::unit()), Box::new(ty));
                 } else {
-                    for param_ty in op_sig.params.iter().rev() {
+                    for (_, param_ty) in op_sig.params.iter().rev() {
                         ty = Type::Arrow(Box::new(param_ty.clone()), Box::new(ty));
                     }
                 }
                 Ok(ty)
             }
 
-            ExprKind::With { expr: inner, handler, .. } => self.infer_with(inner, handler, span),
+            ExprKind::With {
+                expr: inner,
+                handler,
+                ..
+            } => self.infer_with(inner, handler, span),
 
             ExprKind::Resume { value, .. } => {
                 let val_ty = self.infer_expr(value)?;
@@ -356,7 +373,8 @@ impl Checker {
                     Some(scheme) => {
                         let (ty, constraints) = self.instantiate(&scheme);
                         for (trait_name, trait_ty) in constraints {
-                            self.pending_constraints.push((trait_name, trait_ty, span, node_id));
+                            self.pending_constraints
+                                .push((trait_name, trait_ty, span, node_id));
                         }
                         if let Some(def_id) = self.env.def_id(&key) {
                             self.record_reference(node_id, span, def_id);
@@ -417,16 +435,18 @@ impl Checker {
             }
 
             ExprKind::Receive {
-                arms,
-                after_clause,
-                ..
+                arms, after_clause, ..
             } => self.infer_receive(
                 arms,
                 after_clause.as_ref().map(|(t, b)| (t.as_ref(), b.as_ref())),
                 span,
             ),
 
-            ExprKind::Ascription { expr: inner, type_expr, .. } => {
+            ExprKind::Ascription {
+                expr: inner,
+                type_expr,
+                ..
+            } => {
                 let inferred = self.infer_expr(inner)?;
                 let ann_ty = self.convert_type_expr(type_expr, &mut vec![]);
                 self.unify_at(&inferred, &ann_ty, span)?;
@@ -434,7 +454,9 @@ impl Checker {
                 Ok(ann_ty)
             }
 
-            ExprKind::DictMethodAccess { .. } | ExprKind::DictRef { .. } | ExprKind::ForeignCall { .. } => {
+            ExprKind::DictMethodAccess { .. }
+            | ExprKind::DictRef { .. }
+            | ExprKind::ForeignCall { .. } => {
                 unreachable!("elaboration-only construct in typechecker")
             }
         }
@@ -529,15 +551,16 @@ impl Checker {
                 let (inst_fields, result_ty) = self.instantiate_record(name, &info);
                 // Unify so that the record's concrete type args flow into field types
                 self.unify_at(&resolved, &result_ty, span)?;
-                let (_, field_ty) = inst_fields
-                    .iter()
-                    .find(|(n, _)| n == field)
-                    .ok_or_else(|| {
-                        Diagnostic::error_at(
-                            span,
-                            format!("no field '{}' on record {}", field, name),
-                        )
-                    })?;
+                let (_, field_ty) =
+                    inst_fields
+                        .iter()
+                        .find(|(n, _)| n == field)
+                        .ok_or_else(|| {
+                            Diagnostic::error_at(
+                                span,
+                                format!("no field '{}' on record {}", field, name),
+                            )
+                        })?;
                 Ok(self.sub.apply(field_ty))
             }
             Type::Var(id) => {
@@ -559,11 +582,9 @@ impl Checker {
                     1 => {
                         let rname = &candidates[0];
                         let info = self.records.get(rname).cloned().unwrap();
-                        let (inst_fields, result_ty) =
-                            self.instantiate_record(rname, &info);
+                        let (inst_fields, result_ty) = self.instantiate_record(rname, &info);
                         self.unify(&resolved, &result_ty)?;
-                        let (_, field_ty) =
-                            inst_fields.iter().find(|(n, _)| n == field).unwrap();
+                        let (_, field_ty) = inst_fields.iter().find(|(n, _)| n == field).unwrap();
                         Ok(self.sub.apply(field_ty))
                     }
                     _ => {
@@ -601,21 +622,15 @@ impl Checker {
                                 let mut inst_results: Vec<(String, Type)> = Vec::new();
                                 for rname in &narrowed {
                                     let info = self.records.get(rname).cloned().unwrap();
-                                    let (inst_fields, _) =
-                                        self.instantiate_record(rname, &info);
-                                    let (_, field_ty) = inst_fields
-                                        .iter()
-                                        .find(|(n, _)| n == field)
-                                        .unwrap();
-                                    inst_results
-                                        .push((rname.clone(), self.sub.apply(field_ty)));
+                                    let (inst_fields, _) = self.instantiate_record(rname, &info);
+                                    let (_, field_ty) =
+                                        inst_fields.iter().find(|(n, _)| n == field).unwrap();
+                                    inst_results.push((rname.clone(), self.sub.apply(field_ty)));
                                 }
                                 let first_ty = &inst_results[0].1;
-                                let all_agree =
-                                    inst_results.iter().all(|(_, ty)| ty == first_ty);
+                                let all_agree = inst_results.iter().all(|(_, ty)| ty == first_ty);
                                 if all_agree {
-                                    self.field_candidates
-                                        .insert(id, (narrowed, span));
+                                    self.field_candidates.insert(id, (narrowed, span));
                                     Ok(first_ty.clone())
                                 } else {
                                     Err(Diagnostic::error_at(
@@ -751,32 +766,44 @@ impl Checker {
                             Type::Error
                         }
                     };
-                    if let Pat::Var { id: pat_id, name, span: var_span, .. } = pattern {
+                    if let Pat::Var {
+                        id: pat_id,
+                        name,
+                        span: var_span,
+                        ..
+                    } = pattern
+                    {
                         let mut scheme = self.generalize(&ty);
                         // Absorb pending trait constraints for generalized vars
                         // so let-bound values can be polymorphic over traits.
                         // e.g. `let f = debug >> println` gets scheme
                         // `forall a. a -> Unit where {a: Debug}`
-                        self.pending_constraints.retain(|(trait_name, cty, _span, node_id)| {
-                            let resolved = self.sub.apply(cty);
-                            if let Type::Var(id) = resolved
-                                && scheme.forall.contains(&id)
-                            {
-                                if !scheme.constraints.iter().any(|(t, v)| t == trait_name && *v == id) {
-                                    scheme.constraints.push((trait_name.clone(), id));
+                        self.pending_constraints
+                            .retain(|(trait_name, cty, _span, node_id)| {
+                                let resolved = self.sub.apply(cty);
+                                if let Type::Var(id) = resolved
+                                    && scheme.forall.contains(&id)
+                                {
+                                    if !scheme
+                                        .constraints
+                                        .iter()
+                                        .any(|(t, v)| t == trait_name && *v == id)
+                                    {
+                                        scheme.constraints.push((trait_name.clone(), id));
+                                    }
+                                    self.evidence.push(super::TraitEvidence {
+                                        node_id: *node_id,
+                                        trait_name: trait_name.clone(),
+                                        resolved_type: None,
+                                        type_var_name: None,
+                                    });
+                                    return false; // remove from pending
                                 }
-                                self.evidence.push(super::TraitEvidence {
-                                    node_id: *node_id,
-                                    trait_name: trait_name.clone(),
-                                    resolved_type: None,
-                                    type_var_name: None,
-                                });
-                                return false; // remove from pending
-                            }
-                            true // keep in pending
-                        });
+                                true // keep in pending
+                            });
                         // Record dict params for the elaborator
-                        let operator_traits: std::collections::HashSet<&str> = ["Num", "Eq"].into_iter().collect();
+                        let operator_traits: std::collections::HashSet<&str> =
+                            ["Num", "Eq"].into_iter().collect();
                         let dict_params: Vec<(String, String)> = scheme
                             .constraints
                             .iter()
@@ -788,11 +815,14 @@ impl Checker {
                             let resolved_ty = self.sub.apply(&ty);
                             let mut arity = 0usize;
                             let mut t = &resolved_ty;
-                            while let super::Type::Arrow(_, ret) | super::Type::EffArrow(_, ret, _) = t {
+                            while let super::Type::Arrow(_, ret)
+                            | super::Type::EffArrow(_, ret, _) = t
+                            {
                                 arity += 1;
                                 t = ret;
                             }
-                            self.let_dict_params.insert(name.clone(), (dict_params, arity));
+                            self.let_dict_params
+                                .insert(name.clone(), (dict_params, arity));
                         }
                         self.env.insert_with_def(name.clone(), scheme, *pat_id);
                         self.node_spans.insert(*pat_id, *var_span);
@@ -803,7 +833,13 @@ impl Checker {
                     last_ty = Type::unit();
                     i += 1;
                 }
-                Stmt::LetFun { id, name, name_span, span, .. } => {
+                Stmt::LetFun {
+                    id,
+                    name,
+                    name_span,
+                    span,
+                    ..
+                } => {
                     // Group consecutive LetFun clauses with the same name
                     let fun_name = name.clone();
                     let fun_id = *id;
@@ -953,7 +989,9 @@ impl Checker {
                 };
                 self.unify_at(ty, &lit_ty, *span)
             }
-            Pat::Constructor { name, args, span, .. } => {
+            Pat::Constructor {
+                name, args, span, ..
+            } => {
                 let ctor_scheme = self.constructors.get(name).cloned().ok_or_else(|| {
                     Diagnostic::error_at(
                         *span,
@@ -978,7 +1016,9 @@ impl Checker {
                 }
                 self.unify_at(ty, &current, *span)
             }
-            Pat::Record { name, fields, span, .. } => {
+            Pat::Record {
+                name, fields, span, ..
+            } => {
                 let info = self.records.get(name).cloned().ok_or_else(|| {
                     Diagnostic::error_at(
                         *span,
@@ -990,12 +1030,15 @@ impl Checker {
 
                 for (fname, alias_pat) in fields {
                     let (_, field_ty) =
-                        inst_fields.iter().find(|(n, _)| n == fname).ok_or_else(|| {
-                            Diagnostic::error_at(
-                                *span,
-                                format!("unknown field '{}' on record {}", fname, name),
-                            )
-                        })?;
+                        inst_fields
+                            .iter()
+                            .find(|(n, _)| n == fname)
+                            .ok_or_else(|| {
+                                Diagnostic::error_at(
+                                    *span,
+                                    format!("unknown field '{}' on record {}", fname, name),
+                                )
+                            })?;
                     let resolved_field_ty = self.sub.apply(field_ty);
                     match alias_pat {
                         Some(pat) => self.bind_pattern(pat, &resolved_field_ty)?,
@@ -1250,40 +1293,48 @@ impl Checker {
 
         // Build op_name -> (arm_span, source_module) map for this handler and push onto the stack.
         // This lets EffectCall inference record which arm handles each call (for LSP go-to-def).
-        let arm_stack_entry: std::collections::HashMap<String, (Span, Option<String>)> = match handler {
-            ast::Handler::Named(name, handler_span) => {
-                // Record reference to the handler definition
-                if let Some(def_id) = self.env.def_id(name) {
-                    let usage_id = crate::ast::NodeId::fresh();
-                    self.record_reference(usage_id, *handler_span, def_id);
-                }
-                self.handlers
-                    .get(name)
-                    .map(|h| {
-                        let src = h.source_module.clone();
-                        h.arm_spans.iter().map(|(op, &span)| (op.clone(), (span, src.clone()))).collect()
-                    })
-                    .unwrap_or_default()
-            }
-            ast::Handler::Inline { named, arms, .. } => {
-                let mut map = std::collections::HashMap::new();
-                for n in named {
-                    // Record reference to each named handler
-                    if let Some(def_id) = self.env.def_id(n) {
+        let arm_stack_entry: std::collections::HashMap<String, (Span, Option<String>)> =
+            match handler {
+                ast::Handler::Named(name, handler_span) => {
+                    // Record reference to the handler definition
+                    if let Some(def_id) = self.env.def_id(name) {
                         let usage_id = crate::ast::NodeId::fresh();
-                        self.record_reference(usage_id, _with_span, def_id);
+                        self.record_reference(usage_id, *handler_span, def_id);
                     }
-                    if let Some(h) = self.handlers.get(n) {
-                        let src = h.source_module.clone();
-                        map.extend(h.arm_spans.iter().map(|(op, &span)| (op.clone(), (span, src.clone()))));
+                    self.handlers
+                        .get(name)
+                        .map(|h| {
+                            let src = h.source_module.clone();
+                            h.arm_spans
+                                .iter()
+                                .map(|(op, &span)| (op.clone(), (span, src.clone())))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
+                ast::Handler::Inline { named, arms, .. } => {
+                    let mut map = std::collections::HashMap::new();
+                    for n in named {
+                        // Record reference to each named handler
+                        if let Some(def_id) = self.env.def_id(n) {
+                            let usage_id = crate::ast::NodeId::fresh();
+                            self.record_reference(usage_id, _with_span, def_id);
+                        }
+                        if let Some(h) = self.handlers.get(n) {
+                            let src = h.source_module.clone();
+                            map.extend(
+                                h.arm_spans
+                                    .iter()
+                                    .map(|(op, &span)| (op.clone(), (span, src.clone()))),
+                            );
+                        }
                     }
+                    for arm in arms {
+                        map.insert(arm.op_name.clone(), (arm.span, None));
+                    }
+                    map
                 }
-                for arm in arms {
-                    map.insert(arm.op_name.clone(), (arm.span, None));
-                }
-                map
-            }
-        };
+            };
         self.with_arm_stacks.push(arm_stack_entry);
 
         let ty = self.infer_with_inner(expr, handler, handled)?;
@@ -1370,10 +1421,8 @@ impl Checker {
 
                 // Use inner expression's effect cache so inline handler arms
                 // see the same type param bindings as the inner expression.
-                let outer_effect_cache = std::mem::replace(
-                    &mut self.effect_type_param_cache,
-                    inner_effect_cache,
-                );
+                let outer_effect_cache =
+                    std::mem::replace(&mut self.effect_type_param_cache, inner_effect_cache);
 
                 for arm in arms {
                     let op_sig = self.lookup_effect_op(&arm.op_name, None, arm.span).ok();
@@ -1387,7 +1436,7 @@ impl Checker {
                         self.resume_return_type = Some(answer_ty.clone());
                         for (i, param_name) in arm.params.iter().enumerate() {
                             let param_ty = if i < sig.params.len() {
-                                sig.params[i].clone()
+                                sig.params[i].1.clone()
                             } else {
                                 self.fresh_var()
                             };
@@ -1429,8 +1478,7 @@ impl Checker {
                 for eff in &handled {
                     self.current_effects.remove(eff);
                 }
-                let arm_effects =
-                    std::mem::replace(&mut self.current_effects, saved_effects_arms);
+                let arm_effects = std::mem::replace(&mut self.current_effects, saved_effects_arms);
                 self.current_effects.extend(arm_effects);
 
                 Ok(answer_ty)
@@ -1508,8 +1556,8 @@ impl Checker {
                     Type::Error | Type::Never => {}
                 }
             }
-            for p in &op.params {
-                collect_vars(p, &mut free_vars);
+            for (_, t) in &op.params {
+                collect_vars(t, &mut free_vars);
             }
             collect_vars(&op.return_type, &mut free_vars);
             if free_vars.is_empty() {
@@ -1522,7 +1570,7 @@ impl Checker {
                 params: op
                     .params
                     .iter()
-                    .map(|t| self.replace_vars(t, &mapping))
+                    .map(|(label, t)| (label.clone(), self.replace_vars(t, &mapping)))
                     .collect(),
                 return_type: self.replace_vars(&op.return_type, &mapping),
             };
@@ -1544,7 +1592,7 @@ impl Checker {
             params: op
                 .params
                 .iter()
-                .map(|t| self.replace_vars(t, &mapping))
+                .map(|(label, t)| (label.clone(), self.replace_vars(t, &mapping)))
                 .collect(),
             return_type: self.replace_vars(&op.return_type, &mapping),
         }

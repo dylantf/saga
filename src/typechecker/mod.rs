@@ -504,7 +504,12 @@ impl TypeEnv {
     }
 
     /// Insert a binding along with its definition-site NodeId.
-    pub fn insert_with_def(&mut self, name: std::string::String, scheme: Scheme, def_id: crate::ast::NodeId) {
+    pub fn insert_with_def(
+        &mut self,
+        name: std::string::String,
+        scheme: Scheme,
+        def_id: crate::ast::NodeId,
+    ) {
         self.bindings.insert(name.clone(), scheme);
         self.def_ids.insert(name, def_id);
     }
@@ -517,7 +522,6 @@ impl TypeEnv {
     pub fn def_id(&self, name: &str) -> Option<crate::ast::NodeId> {
         self.def_ids.get(name).copied()
     }
-
 
     pub fn remove(&mut self, name: &str) {
         self.bindings.remove(name);
@@ -639,7 +643,7 @@ impl std::fmt::Display for Diagnostic {
 #[derive(Debug, Clone)]
 pub struct EffectOpSig {
     pub name: std::string::String,
-    pub params: Vec<Type>,
+    pub params: Vec<(String, Type)>,
     pub return_type: Type,
 }
 
@@ -943,7 +947,12 @@ impl Checker {
     }
 
     /// Record a name resolution: usage_id references def_id.
-    pub(crate) fn record_reference(&mut self, usage_id: crate::ast::NodeId, usage_span: Span, def_id: crate::ast::NodeId) {
+    pub(crate) fn record_reference(
+        &mut self,
+        usage_id: crate::ast::NodeId,
+        usage_span: Span,
+        def_id: crate::ast::NodeId,
+    ) {
         self.references.insert(usage_id, def_id);
         self.node_spans.insert(usage_id, usage_span);
     }
