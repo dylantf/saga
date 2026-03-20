@@ -50,6 +50,12 @@ impl Checker {
                     .map(|a| self.substitute_trait_param(trait_param_id, replacement, a))
                     .collect(),
             ),
+            Type::Record(fields) => Type::Record(
+                fields
+                    .iter()
+                    .map(|(fname, ty)| (fname.clone(), self.substitute_trait_param(trait_param_id, replacement, ty)))
+                    .collect(),
+            ),
             Type::Error => Type::Error,
             Type::Never => Type::Never,
         }

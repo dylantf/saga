@@ -296,6 +296,16 @@ impl Checker {
                 Ok(result_ty)
             }
 
+            ExprKind::AnonRecordCreate { fields, .. } => {
+                let mut typed_fields: Vec<(String, Type)> = Vec::new();
+                for (fname, fexpr) in fields {
+                    let ty = self.infer_expr(fexpr)?;
+                    typed_fields.push((fname.clone(), ty));
+                }
+                typed_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+                Ok(Type::Record(typed_fields))
+            }
+
             ExprKind::FieldAccess {
                 expr: inner, field, ..
             } => self.infer_field_access(inner, field, span),
@@ -342,6 +352,22 @@ impl Checker {
                             self.unify_at(&expected.1, &actual, fexpr.span)?;
                         }
                         Ok(self.sub.apply(&result_ty))
+                    }
+                    Type::Record(rec_fields) => {
+                        for (fname, fexpr) in fields {
+                            let (_, expected_ty) = rec_fields
+                                .iter()
+                                .find(|(n, _)| n == fname)
+                                .ok_or_else(|| {
+                                    Diagnostic::error_at(
+                                        fexpr.span,
+                                        format!("unknown field '{}' on anonymous record", fname),
+                                    )
+                                })?;
+                            let actual = self.infer_expr(fexpr)?;
+                            self.unify_at(expected_ty, &actual, fexpr.span)?;
+                        }
+                        Ok(self.sub.apply(&resolved))
                     }
                     _ => Err(Diagnostic::error_at(
                         span,
@@ -692,6 +718,18 @@ impl Checker {
                         }
                     }
                 }
+            }
+            Type::Record(fields) => {
+                let (_, field_ty) = fields
+                    .iter()
+                    .find(|(n, _)| n == field)
+                    .ok_or_else(|| {
+                        Diagnostic::error_at(
+                            span,
+                            format!("no field '{}' on anonymous record", field),
+                        )
+                    })?;
+                Ok(self.sub.apply(field_ty))
             }
             _ => Err(Diagnostic::error_at(
                 span,
@@ -1144,6 +1182,39 @@ impl Checker {
             Pat::StringPrefix { rest, span, .. } => {
                 self.unify_at(ty, &Type::string(), *span)?;
                 self.bind_pattern(rest, &Type::string())
+            }
+
+            Pat::AnonRecord { fields, span, .. } => {
+                let mut field_tys: Vec<(String, Type)> = fields
+                    .iter()
+                    .map(|(fname, _)| (fname.clone(), self.fresh_var()))
+                    .collect();
+                field_tys.sort_by(|(a, _), (b, _)| a.cmp(b));
+                let record_ty = Type::Record(field_tys.clone());
+                self.unify_at(ty, &record_ty, *span)?;
+
+                for (fname, alias_pat) in fields {
+                    let (_, field_ty) = field_tys
+                        .iter()
+                        .find(|(n, _)| n == fname)
+                        .unwrap();
+                    let resolved_field_ty = self.sub.apply(field_ty);
+                    match alias_pat {
+                        Some(pat) => self.bind_pattern(pat, &resolved_field_ty)?,
+                        None => {
+                            self.env.insert(
+                                fname.clone(),
+                                Scheme {
+                                    forall: vec![],
+                                    constraints: vec![],
+                                    ty: resolved_field_ty.clone(),
+                                },
+                            );
+                            self.record_type_at_span(*span, &resolved_field_ty);
+                        }
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -1650,6 +1721,11 @@ impl Checker {
                     Type::Con(_, args) => {
                         for a in args {
                             collect_vars(a, vars);
+                        }
+                    }
+                    Type::Record(fields) => {
+                        for (_, ty) in fields {
+                            collect_vars(ty, vars);
                         }
                     }
                     Type::Error | Type::Never => {}

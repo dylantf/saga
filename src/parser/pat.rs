@@ -181,6 +181,32 @@ impl Parser {
                     })
                 }
             }
+            Token::LBrace => {
+                // Anonymous record pattern: { field, field: pat, ... }
+                self.skip_terminators();
+                let mut fields = Vec::new();
+                while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                    let field_name = self.expect_ident()?;
+                    let alias = if matches!(self.peek(), Token::Colon) {
+                        self.advance();
+                        Some(self.parse_pattern()?)
+                    } else {
+                        None
+                    };
+                    fields.push((field_name, alias));
+                    if matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                    }
+                    self.skip_terminators();
+                }
+                let end = self.tokens[self.pos].span;
+                self.expect(Token::RBrace)?;
+                Ok(Pat::AnonRecord {
+                    id: NodeId::fresh(),
+                    fields,
+                    span: span.to(end),
+                })
+            }
             Token::Ident(s) if s.starts_with('_') => Ok(Pat::Wildcard { id: NodeId::fresh(), span }),
             Token::Ident(s) => Ok(Pat::Var { id: NodeId::fresh(), name: s, span }),
             Token::Minus => match self.advance() {

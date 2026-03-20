@@ -666,6 +666,32 @@ impl Parser {
                     self.pos = save;
                 }
 
+                // Check for anonymous record create: { field: expr, ... }
+                // Recognized when current token is a lowercase ident followed by ':'
+                if matches!(self.peek(), Token::Ident(_))
+                    && self.pos + 1 < self.tokens.len()
+                    && matches!(self.tokens[self.pos + 1].token, Token::Colon)
+                {
+                    let mut fields = Vec::new();
+                    while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                        let field_name = self.expect_ident()?;
+                        self.expect(Token::Colon)?;
+                        let value = self.parse_expr(0)?;
+                        fields.push((field_name, value));
+                        if matches!(self.peek(), Token::Comma) {
+                            self.advance();
+                        }
+                        self.skip_terminators();
+                    }
+                    let end = self.tokens[self.pos].span;
+                    self.expect(Token::RBrace)?;
+                    return Ok(Expr {
+                        id: self.next_id(),
+                        span: span.to(end),
+                        kind: ExprKind::AnonRecordCreate { fields },
+                    });
+                }
+
                 let mut stmts: Vec<Stmt> = Vec::new();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                     if matches!(self.peek(), Token::Let) {

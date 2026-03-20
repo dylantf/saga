@@ -20,7 +20,7 @@ impl Parser {
             name
         };
         let mut type_args = Vec::new();
-        while self.can_start_type_atom() {
+        while self.can_start_type_atom_no_brace() {
             type_args.push(self.parse_type_atom()?);
         }
         let end = self.tokens[self.pos - 1].span;
@@ -939,6 +939,24 @@ impl Parser {
                     self.expect(Token::RParen)?;
                     Ok(first)
                 }
+            }
+            Token::LBrace => {
+                // Anonymous record type: { field: Type, ... }
+                self.skip_terminators();
+                let mut fields = Vec::new();
+                while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                    let field_name = self.expect_ident()?;
+                    self.expect(Token::Colon)?;
+                    let field_type = self.parse_type_expr()?;
+                    fields.push((field_name, field_type));
+                    if matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                    }
+                    self.skip_terminators();
+                }
+                let end = self.tokens[self.pos].span;
+                self.expect(Token::RBrace)?;
+                Ok(TypeExpr::Record { fields, span: start.to(end) })
             }
             tok => {
                 self.pos -= 1; // put back

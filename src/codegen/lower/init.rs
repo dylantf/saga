@@ -372,6 +372,127 @@ impl<'a> Lowerer<'a> {
             }
         }
 
+        // Register anonymous record types found in record field types and expressions.
+        Self::collect_anon_records_from_program(program, &mut self.record_fields);
+
         pending_annotations
+    }
+
+    /// Walk the AST to find anonymous record types and register them in record_fields.
+    fn collect_anon_records_from_program(
+        program: &[Decl],
+        record_fields: &mut HashMap<String, Vec<String>>,
+    ) {
+        for decl in program {
+            if let Decl::RecordDef { fields, .. } = decl {
+                for (_, type_expr) in fields {
+                    Self::collect_anon_records_from_type_expr(type_expr, record_fields);
+                }
+            }
+            // Also walk function bodies for AnonRecordCreate expressions
+            if let Decl::FunBinding { body, .. } = decl {
+                Self::collect_anon_records_from_expr(body, record_fields);
+            }
+        }
+    }
+
+    fn collect_anon_records_from_type_expr(
+        type_expr: &ast::TypeExpr,
+        record_fields: &mut HashMap<String, Vec<String>>,
+    ) {
+        match type_expr {
+            ast::TypeExpr::Record { fields, .. } => {
+                let mut sorted_names: Vec<String> =
+                    fields.iter().map(|(n, _)| n.clone()).collect();
+                sorted_names.sort();
+                let tag = format!("__anon_{}", sorted_names.join("_"));
+                record_fields.entry(tag).or_insert(sorted_names);
+                // Recurse into field types for nested anonymous records
+                for (_, inner_type) in fields {
+                    Self::collect_anon_records_from_type_expr(inner_type, record_fields);
+                }
+            }
+            ast::TypeExpr::App { func, arg, .. } => {
+                Self::collect_anon_records_from_type_expr(func, record_fields);
+                Self::collect_anon_records_from_type_expr(arg, record_fields);
+            }
+            ast::TypeExpr::Arrow { from, to, .. } => {
+                Self::collect_anon_records_from_type_expr(from, record_fields);
+                Self::collect_anon_records_from_type_expr(to, record_fields);
+            }
+            ast::TypeExpr::Named { .. } | ast::TypeExpr::Var { .. } => {}
+        }
+    }
+
+    fn collect_anon_records_from_expr(
+        expr: &ast::Expr,
+        record_fields: &mut HashMap<String, Vec<String>>,
+    ) {
+        match &expr.kind {
+            ast::ExprKind::AnonRecordCreate { fields } => {
+                let mut sorted_names: Vec<String> =
+                    fields.iter().map(|(n, _)| n.clone()).collect();
+                sorted_names.sort();
+                let tag = format!("__anon_{}", sorted_names.join("_"));
+                record_fields.entry(tag).or_insert(sorted_names);
+                for (_, e) in fields {
+                    Self::collect_anon_records_from_expr(e, record_fields);
+                }
+            }
+            ast::ExprKind::RecordCreate { fields, .. } => {
+                for (_, e) in fields {
+                    Self::collect_anon_records_from_expr(e, record_fields);
+                }
+            }
+            ast::ExprKind::RecordUpdate { record, fields, .. } => {
+                Self::collect_anon_records_from_expr(record, record_fields);
+                for (_, e) in fields {
+                    Self::collect_anon_records_from_expr(e, record_fields);
+                }
+            }
+            ast::ExprKind::Block { stmts, .. } => {
+                for stmt in stmts {
+                    match stmt {
+                        ast::Stmt::Expr(e) | ast::Stmt::Let { value: e, .. } => {
+                            Self::collect_anon_records_from_expr(e, record_fields);
+                        }
+                        ast::Stmt::LetFun { body, .. } => {
+                            Self::collect_anon_records_from_expr(body, record_fields);
+                        }
+                    }
+                }
+            }
+            ast::ExprKind::App { func, arg, .. } => {
+                Self::collect_anon_records_from_expr(func, record_fields);
+                Self::collect_anon_records_from_expr(arg, record_fields);
+            }
+            ast::ExprKind::If { cond, then_branch, else_branch, .. } => {
+                Self::collect_anon_records_from_expr(cond, record_fields);
+                Self::collect_anon_records_from_expr(then_branch, record_fields);
+                Self::collect_anon_records_from_expr(else_branch, record_fields);
+            }
+            ast::ExprKind::Case { scrutinee, arms, .. } => {
+                Self::collect_anon_records_from_expr(scrutinee, record_fields);
+                for arm in arms {
+                    Self::collect_anon_records_from_expr(&arm.body, record_fields);
+                }
+            }
+            ast::ExprKind::Lambda { body, .. } => {
+                Self::collect_anon_records_from_expr(body, record_fields);
+            }
+            ast::ExprKind::FieldAccess { expr, .. } => {
+                Self::collect_anon_records_from_expr(expr, record_fields);
+            }
+            ast::ExprKind::Tuple { elements, .. } => {
+                for e in elements {
+                    Self::collect_anon_records_from_expr(e, record_fields);
+                }
+            }
+            ast::ExprKind::BinOp { left, right, .. } => {
+                Self::collect_anon_records_from_expr(left, record_fields);
+                Self::collect_anon_records_from_expr(right, record_fields);
+            }
+            _ => {}
+        }
     }
 }

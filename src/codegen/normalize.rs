@@ -301,6 +301,17 @@ impl Normalizer {
                 })
             }
 
+            // AnonRecordCreate: normalize field values.
+            ExprKind::AnonRecordCreate { fields } => {
+                let new_fields = fields
+                    .iter()
+                    .map(|(n, e)| (n.clone(), self.normalize_and_lift(e, lifted)))
+                    .collect();
+                Expr::synth(span, ExprKind::AnonRecordCreate {
+                    fields: new_fields,
+                })
+            }
+
             // RecordUpdate: normalize record and field values.
             ExprKind::RecordUpdate {
                 record,

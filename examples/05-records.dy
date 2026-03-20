@@ -40,6 +40,16 @@ enroll_student (Student as student) (School as school)  = {
   { school | students: student :: school.students }
 }
 
+# Nested record
+
+record House {
+  year_built: Int
+  address: {
+    number: Int,
+    street: String,
+  }
+}
+
 # Polymorphic records
 record Box a {
   value: a,
@@ -75,4 +85,24 @@ main () = {
   |> enroll_student (Student { name: "José", grade: 6 })
   |> debug
   |> println
+
+  let house = House {
+    year_built: 2005,
+    address: {
+      number: 123,
+      street: "Fake Street"
+    },
+  }
+
+  println (show house.year_built)
+  println house.address.street
+
+  # Record update on nested anonymous record
+  let house2 = { house | address: { house.address | street: "Real Street" } }
+  println house2.address.street
+
+  # Pattern matching on anonymous record fields
+  let House { address: { number, street } } = house
+  println (show number)
+  println street
 }

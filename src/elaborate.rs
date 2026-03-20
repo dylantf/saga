@@ -844,6 +844,16 @@ impl Elaborator {
                 },
             ),
 
+            ExprKind::AnonRecordCreate { fields } => Expr::synth(
+                span,
+                ExprKind::AnonRecordCreate {
+                    fields: fields
+                        .iter()
+                        .map(|(n, e)| (n.clone(), self.elaborate_expr(e)))
+                        .collect(),
+                },
+            ),
+
             ExprKind::RecordUpdate { record, fields } => Expr::synth(
                 span,
                 ExprKind::RecordUpdate {

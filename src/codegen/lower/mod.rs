@@ -1461,6 +1461,32 @@ impl<'a> Lowerer<'a> {
                 })
             }
 
+            ExprKind::AnonRecordCreate { fields, .. } => {
+                let mut sorted_names: Vec<String> =
+                    fields.iter().map(|(n, _)| n.clone()).collect();
+                sorted_names.sort();
+                let tag = format!("__anon_{}", sorted_names.join("_"));
+                let field_map: HashMap<&str, &Expr> =
+                    fields.iter().map(|(n, e)| (n.as_str(), e)).collect();
+                let mut vars: Vec<String> = Vec::new();
+                let mut bindings: Vec<(String, CExpr)> = Vec::new();
+                for field_name in &sorted_names {
+                    let v = self.fresh();
+                    let e = field_map
+                        .get(field_name.as_str())
+                        .expect("field missing in AnonRecordCreate");
+                    let ce = self.lower_expr(e);
+                    vars.push(v.clone());
+                    bindings.push((v, ce));
+                }
+                let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
+                elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
+                let tuple = CExpr::Tuple(elems);
+                bindings.into_iter().rev().fold(tuple, |body, (var, val)| {
+                    CExpr::Let(var, Box::new(val), Box::new(body))
+                })
+            }
+
             ExprKind::FieldAccess { expr, field, .. } => {
                 let record_name =
                     field_access_record_name(expr).or_else(|| self.find_record_by_field(field));

@@ -125,6 +125,15 @@ impl Parser {
     pub(super) fn can_start_type_atom(&self) -> bool {
         matches!(
             self.peek(),
+            Token::UpperIdent(_) | Token::Ident(_) | Token::LParen | Token::LBrace
+        )
+    }
+
+    /// Like can_start_type_atom but excludes LBrace.
+    /// Used in effect ref parsing where `{` starts the handler body, not a type.
+    pub(super) fn can_start_type_atom_no_brace(&self) -> bool {
+        matches!(
+            self.peek(),
             Token::UpperIdent(_) | Token::Ident(_) | Token::LParen
         )
     }

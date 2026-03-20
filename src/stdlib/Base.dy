@@ -1,6 +1,7 @@
 module Std.Base
 
-# Base traits and primitive impls. Loaded before all other modules.
+# Base traits and primitive impls. Loaded before all other modules,
+# therefore cannot import from other modules.
 
 pub trait Show a {
   fun show : a -> String

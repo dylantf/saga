@@ -93,6 +93,25 @@ pub(super) fn lower_pat(
                 None => tuple_pat,
             }
         }
+        Pat::AnonRecord { fields, .. } => {
+            // Anonymous records are tagged tuples with a deterministic tag.
+            let mut sorted_fields: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+            sorted_fields.sort();
+            let tag = format!("__anon_{}", sorted_fields.join("_"));
+            let mut elems = vec![CPat::Lit(CLit::Atom(tag))];
+            let field_map: HashMap<&str, Option<&Pat>> = fields
+                .iter()
+                .map(|(n, p)| (n.as_str(), p.as_ref()))
+                .collect();
+            for field_name in &sorted_fields {
+                match field_map.get(field_name) {
+                    Some(Some(p)) => elems.push(lower_pat(p, record_fields, constructor_modules)),
+                    Some(None) => elems.push(CPat::Var(core_var(field_name))),
+                    None => elems.push(CPat::Wildcard),
+                }
+            }
+            CPat::Tuple(elems)
+        }
         Pat::StringPrefix {
             prefix, rest, ..
         } => {

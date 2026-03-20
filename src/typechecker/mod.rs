@@ -54,6 +54,9 @@ pub enum Type {
     EffArrow(Box<Type>, Box<Type>, Vec<(String, Vec<Type>)>),
     /// Named type constructor with args: Int = Con("Int", []), List a = Con("List", [a])
     Con(std::string::String, Vec<Type>),
+    /// Anonymous record type: `{ street: String, city: String }`
+    /// Fields are sorted by name for canonical comparison.
+    Record(Vec<(std::string::String, Type)>),
     /// Error recovery type: unifies with everything, suppresses cascading errors.
     Error,
     /// Bottom type: the type of expressions that never produce a value (panic, exit).
@@ -102,6 +105,16 @@ impl std::fmt::Display for Type {
                     Ok(())
                 }
             }
+            Type::Record(fields) => {
+                write!(f, "{{ ")?;
+                for (i, (name, ty)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", name, ty)?;
+                }
+                write!(f, " }}")
+            }
             Type::Error => write!(f, "<error>"),
             Type::Never => write!(f, "Never"),
         }
@@ -144,6 +157,12 @@ impl Substitution {
             Type::Con(name, args) => {
                 Type::Con(name.clone(), args.iter().map(|a| self.apply(a)).collect())
             }
+            Type::Record(fields) => Type::Record(
+                fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), self.apply(ty)))
+                    .collect(),
+            ),
             Type::Error => Type::Error,
             Type::Never => Type::Never,
         }
@@ -189,6 +208,7 @@ impl Substitution {
                         .any(|(_, args)| args.iter().any(|t| self.occurs(id, t)))
             }
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
+            Type::Record(fields) => fields.iter().any(|(_, ty)| self.occurs(id, ty)),
             Type::Error | Type::Never => false,
         }
     }
@@ -283,6 +303,12 @@ fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
         Type::Con(name, args) => Type::Con(
             name.clone(),
             args.iter().map(|a| rename_vars(a, names)).collect(),
+        ),
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(fname, ty)| (fname.clone(), rename_vars(ty, names)))
+                .collect(),
         ),
         Type::Error => Type::Error,
         Type::Never => Type::Never,
@@ -578,6 +604,11 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
         Type::Con(_, args) => {
             for arg in args {
                 free_vars_in_type(arg, bound, out);
+            }
+        }
+        Type::Record(fields) => {
+            for (_, ty) in fields {
+                free_vars_in_type(ty, bound, out);
             }
         }
         Type::Error | Type::Never => {}
@@ -1385,6 +1416,23 @@ impl Checker {
                 Ok(())
             }
 
+            (Type::Record(f1), Type::Record(f2)) => {
+                let names1: Vec<&str> = f1.iter().map(|(n, _)| n.as_str()).collect();
+                let names2: Vec<&str> = f2.iter().map(|(n, _)| n.as_str()).collect();
+                if names1 != names2 {
+                    let a_display = self.prettify_type(&a);
+                    let b_display = self.prettify_type(&b);
+                    return Err(Diagnostic::error(format!(
+                        "type mismatch: expected {}, got {}",
+                        a_display, b_display
+                    )));
+                }
+                for ((_, t1), (_, t2)) in f1.iter().zip(f2.iter()) {
+                    self.unify(t1, t2)?;
+                }
+                Ok(())
+            }
+
             _ => {
                 let a_display = self.prettify_type(&a);
                 let b_display = self.prettify_type(&b);
@@ -1465,6 +1513,12 @@ impl Checker {
             Type::Con(name, args) => Type::Con(
                 name.clone(),
                 args.iter().map(|a| self.replace_vars(a, mapping)).collect(),
+            ),
+            Type::Record(fields) => Type::Record(
+                fields
+                    .iter()
+                    .map(|(fname, ty)| (fname.clone(), self.replace_vars(ty, mapping)))
+                    .collect(),
             ),
             Type::Error => Type::Error,
             Type::Never => Type::Never,
@@ -1573,6 +1627,14 @@ impl Checker {
                     Type::EffArrow(Box::new(a_ty), Box::new(b_ty), effect_refs)
                 }
             }
+            crate::ast::TypeExpr::Record { fields, .. } => {
+                let mut typed_fields: Vec<(String, Type)> = fields
+                    .iter()
+                    .map(|(fname, texpr)| (fname.clone(), self.convert_type_expr(texpr, params)))
+                    .collect();
+                typed_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+                Type::Record(typed_fields)
+            }
         }
     }
 }
@@ -1600,6 +1662,11 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
         Type::Con(_, args) => {
             for arg in args {
                 collect_free_vars(arg, out);
+            }
+        }
+        Type::Record(fields) => {
+            for (_, ty) in fields {
+                collect_free_vars(ty, out);
             }
         }
         Type::Error | Type::Never => {}
