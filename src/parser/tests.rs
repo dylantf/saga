@@ -1,6 +1,7 @@
 use super::*;
 use crate::ast::Handler;
 use crate::lexer::Lexer;
+use crate::token::Span;
 
 /// Extract effect names from a slice of EffectRef for test assertions
 fn effect_names(refs: &[crate::ast::EffectRef]) -> Vec<&str> {
@@ -389,7 +390,7 @@ fn type_ascription() {
             ..
         } => {
             assert!(matches!(*expr, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
-            assert!(matches!(type_expr, TypeExpr::Named(n) if n == "Int"));
+            assert!(matches!(type_expr, TypeExpr::Named { name: n, .. } if n == "Int"));
         }
         _ => panic!("expected Ascription, got {:?}", expr),
     }
@@ -1015,8 +1016,8 @@ fn fun_annotation_simple() {
             assert!(!public);
             assert_eq!(params.len(), 2);
             assert_eq!(params[0].0, "a");
-            assert!(matches!(&params[0].1, TypeExpr::Named(n) if n == "Int"));
-            assert!(matches!(return_type, TypeExpr::Named(n) if n == "Int"));
+            assert!(matches!(&params[0].1, TypeExpr::Named { name: n, .. } if n == "Int"));
+            assert!(matches!(return_type, TypeExpr::Named { name: n, .. } if n == "Int"));
             assert!(effects.is_empty());
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
@@ -1052,7 +1053,7 @@ fn fun_annotation_unit_param() {
             assert_eq!(name, "do_work");
             assert_eq!(params.len(), 1);
             assert_eq!(params[0].0, "_0");
-            assert_eq!(params[0].1, TypeExpr::Named("Unit".into()));
+            assert_eq!(params[0].1, TypeExpr::Named { name: "Unit".into(), span: Span { start: 0, end: 0 } });
             assert_eq!(effect_names(effects), vec!["Log"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
@@ -1171,8 +1172,8 @@ fn type_expr_named() {
             return_type,
             ..
         } => {
-            assert!(matches!(&params[0].1, TypeExpr::Named(n) if n == "Int"));
-            assert!(matches!(return_type, TypeExpr::Named(n) if n == "Int"));
+            assert!(matches!(&params[0].1, TypeExpr::Named { name: n, .. } if n == "Int"));
+            assert!(matches!(return_type, TypeExpr::Named { name: n, .. } if n == "Int"));
         }
         _ => panic!("expected FunAnnotation"),
     }
@@ -1187,8 +1188,8 @@ fn type_expr_application() {
             return_type,
             ..
         } => {
-            assert!(matches!(&params[0].1, TypeExpr::App(_, _)));
-            assert!(matches!(return_type, TypeExpr::Var(v) if v == "a"));
+            assert!(matches!(&params[0].1, TypeExpr::App { .. }));
+            assert!(matches!(return_type, TypeExpr::Var { name: v, .. } if v == "a"));
         }
         _ => panic!("expected FunAnnotation"),
     }
@@ -1199,7 +1200,7 @@ fn type_expr_arrow() {
     let decls = parse("fun apply : (f: a -> b) -> (x: a) -> b");
     match &decls[0] {
         Decl::FunAnnotation { params, .. } => {
-            assert!(matches!(&params[0].1, TypeExpr::Arrow(_, _, _)));
+            assert!(matches!(&params[0].1, TypeExpr::Arrow { .. }));
         }
         _ => panic!("expected FunAnnotation"),
     }
@@ -1533,9 +1534,9 @@ fn record_def_simple() {
             assert_eq!(name, "User");
             assert_eq!(fields.len(), 2);
             assert_eq!(fields[0].0, "name");
-            assert!(matches!(&fields[0].1, TypeExpr::Named(n) if n == "String"));
+            assert!(matches!(&fields[0].1, TypeExpr::Named { name: n, .. } if n == "String"));
             assert_eq!(fields[1].0, "age");
-            assert!(matches!(&fields[1].1, TypeExpr::Named(n) if n == "Int"));
+            assert!(matches!(&fields[1].1, TypeExpr::Named { name: n, .. } if n == "Int"));
         }
         _ => panic!("expected RecordDef, got {:?}", decls[0]),
     }
@@ -1561,7 +1562,7 @@ fn record_def_with_type_app() {
     match &decls[0] {
         Decl::RecordDef { fields, .. } => {
             assert_eq!(fields.len(), 1);
-            assert!(matches!(&fields[0].1, TypeExpr::App(_, _)));
+            assert!(matches!(&fields[0].1, TypeExpr::App { .. }));
         }
         _ => panic!("expected RecordDef, got {:?}", decls[0]),
     }
@@ -1582,7 +1583,7 @@ fn record_def_with_type_params() {
             assert_eq!(type_params, &["a"]);
             assert_eq!(fields.len(), 1);
             assert_eq!(fields[0].0, "value");
-            assert!(matches!(&fields[0].1, TypeExpr::Var(v) if v == "a"));
+            assert!(matches!(&fields[0].1, TypeExpr::Var { name: v, .. } if v == "a"));
         }
         _ => panic!("expected RecordDef, got {:?}", decls[0]),
     }
@@ -2610,7 +2611,7 @@ fn handler_for_parameterized_effect() {
             assert_eq!(effects.len(), 1);
             assert_eq!(effects[0].name, "State");
             assert_eq!(effects[0].type_args.len(), 1);
-            assert_eq!(effects[0].type_args[0], TypeExpr::Named("Int".into()));
+            assert_eq!(effects[0].type_args[0], TypeExpr::Named { name: "Int".into(), span: Span { start: 0, end: 0 } });
             assert_eq!(arms.len(), 2);
         }
         _ => panic!("expected HandlerDef"),
@@ -2626,7 +2627,7 @@ fn fun_annotation_needs_parameterized_effect() {
             assert_eq!(effects.len(), 1);
             assert_eq!(effects[0].name, "State");
             assert_eq!(effects[0].type_args.len(), 1);
-            assert_eq!(effects[0].type_args[0], TypeExpr::Named("Int".into()));
+            assert_eq!(effects[0].type_args[0], TypeExpr::Named { name: "Int".into(), span: Span { start: 0, end: 0 } });
         }
         _ => panic!("expected FunAnnotation"),
     }

@@ -143,6 +143,7 @@ impl Parser {
     fn parse_record_def(&mut self, public: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'record'
+        let name_span = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let mut type_params = Vec::new();
         while !matches!(self.peek(), Token::LBrace | Token::Eof) {
@@ -186,6 +187,7 @@ impl Parser {
             id: NodeId::fresh(),
             public,
             name,
+            name_span,
             type_params,
             fields,
             deriving,
@@ -196,6 +198,7 @@ impl Parser {
     fn parse_type_def(&mut self, public: bool, opaque: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'type'
+        let name_span = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let mut type_params = Vec::new();
         while !matches!(self.peek(), Token::LBrace | Token::Eof) {
@@ -235,6 +238,7 @@ impl Parser {
             public,
             opaque,
             name,
+            name_span,
             type_params,
             variants,
             deriving,
@@ -394,6 +398,7 @@ impl Parser {
     fn parse_effect_def(&mut self, public: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'effect'
+        let name_span = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let mut type_params = Vec::new();
         while matches!(self.peek(), Token::Ident(_)) {
@@ -428,6 +433,7 @@ impl Parser {
             id: NodeId::fresh(),
             public,
             name,
+            name_span,
             type_params,
             operations,
             span: start.to(end),
@@ -571,6 +577,7 @@ impl Parser {
     fn parse_trait_def(&mut self, public: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'trait'
+        let name_span = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let type_param = self.expect_ident()?;
 
@@ -630,6 +637,7 @@ impl Parser {
             id: NodeId::fresh(),
             public,
             name,
+            name_span,
             type_param,
             supertraits,
             methods,
@@ -825,10 +833,12 @@ impl Parser {
         }
 
         // Regular type (may include application: `Option a`, `Result String Int`)
+        let seg_start = self.tokens[self.pos].span;
         let mut left = self.parse_type_atom()?;
         while self.can_start_type_atom() {
             let arg = self.parse_type_atom()?;
-            left = TypeExpr::App(Box::new(left), Box::new(arg));
+            let span = seg_start.to(arg.span());
+            left = TypeExpr::App { func: Box::new(left), arg: Box::new(arg), span };
         }
         Ok((None, left))
     }
@@ -847,11 +857,13 @@ impl Parser {
     // --- Type expressions ---
 
     pub(super) fn parse_type_expr(&mut self) -> Result<TypeExpr, ParseError> {
+        let start = self.tokens[self.pos].span;
         // First: parse a type with possible application (`Option a`, `Result a e`)
         let mut left = self.parse_type_atom()?;
         while self.can_start_type_atom() {
             let arg = self.parse_type_atom()?;
-            left = TypeExpr::App(Box::new(left), Box::new(arg));
+            let span = start.to(arg.span());
+            left = TypeExpr::App { func: Box::new(left), arg: Box::new(arg), span };
         }
 
         // Then: check for arrow (right-associative)
@@ -870,30 +882,35 @@ impl Parser {
                 }
                 self.expect(Token::RBrace)?;
             }
-            Ok(TypeExpr::Arrow(Box::new(left), Box::new(right), needs))
+            let end = self.tokens[self.pos - 1].span;
+            let span = start.to(end);
+            Ok(TypeExpr::Arrow { from: Box::new(left), to: Box::new(right), effects: needs, span })
         } else {
             Ok(left)
         }
     }
 
     fn parse_type_atom(&mut self) -> Result<TypeExpr, ParseError> {
+        let start = self.tokens[self.pos].span;
         match self.advance() {
             Token::UpperIdent(s) => {
                 // Support qualified type names: `Module.Type`
                 if matches!(self.peek(), Token::Dot) {
                     self.advance(); // consume '.'
+                    let end = self.tokens[self.pos].span;
                     let name = self.expect_upper_ident()?;
-                    Ok(TypeExpr::Named(format!("{}.{}", s, name)))
+                    Ok(TypeExpr::Named { name: format!("{}.{}", s, name), span: start.to(end) })
                 } else {
-                    Ok(TypeExpr::Named(s))
+                    Ok(TypeExpr::Named { name: s, span: start })
                 }
             }
-            Token::Ident(s) => Ok(TypeExpr::Var(s)),
+            Token::Ident(s) => Ok(TypeExpr::Var { name: s, span: start }),
             Token::LParen => {
                 // () is the Unit type
                 if matches!(self.peek(), Token::RParen) {
+                    let end = self.tokens[self.pos].span;
                     self.advance();
-                    return Ok(TypeExpr::Named("Unit".to_string()));
+                    return Ok(TypeExpr::Named { name: "Unit".to_string(), span: start.to(end) });
                 }
                 let first = self.parse_type_expr()?;
                 if matches!(self.peek(), Token::Comma) {
@@ -906,10 +923,13 @@ impl Parser {
                         }
                         elements.push(self.parse_type_expr()?);
                     }
+                    let end = self.tokens[self.pos].span;
                     self.expect(Token::RParen)?;
-                    let mut result = TypeExpr::Named("Tuple".into());
+                    let span = start.to(end);
+                    let mut result = TypeExpr::Named { name: "Tuple".into(), span };
                     for elem in elements {
-                        result = TypeExpr::App(Box::new(result), Box::new(elem));
+                        let elem_span = start.to(elem.span());
+                        result = TypeExpr::App { func: Box::new(result), arg: Box::new(elem), span: elem_span };
                     }
                     Ok(result)
                 } else {

@@ -66,11 +66,11 @@ fn find_in_decl(decl: &Decl, name: &str) -> Option<Span> {
         Decl::TypeDef {
             name: type_name,
             variants,
-            span,
+            name_span,
             ..
         } => {
             if type_name == name {
-                return Some(*span);
+                return Some(*name_span);
             }
             for variant in variants {
                 if variant.name == name {
@@ -82,18 +82,18 @@ fn find_in_decl(decl: &Decl, name: &str) -> Option<Span> {
 
         Decl::RecordDef {
             name: rec_name,
-            span,
+            name_span,
             ..
-        } if rec_name == name => Some(*span),
+        } if rec_name == name => Some(*name_span),
 
         Decl::EffectDef {
             name: eff_name,
             operations,
-            span,
+            name_span,
             ..
         } => {
             if eff_name == name {
-                return Some(*span);
+                return Some(*name_span);
             }
             for op in operations {
                 if op.name == name {
@@ -108,8 +108,8 @@ fn find_in_decl(decl: &Decl, name: &str) -> Option<Span> {
         } if h_name == name => Some(*name_span),
 
         Decl::TraitDef {
-            name: t_name, span, ..
-        } if t_name == name => Some(*span),
+            name: t_name, name_span, ..
+        } if t_name == name => Some(*name_span),
 
         // Search inside function bodies for local let bindings
         Decl::FunBinding { body, .. } => find_local_def(body, name),

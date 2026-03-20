@@ -225,18 +225,18 @@ fn branch_has_effect(expr: &Expr) -> bool {
 /// Recursively collect all effect names from `needs` clauses in a TypeExpr.
 pub(super) fn collect_type_effects(ty: &TypeExpr) -> BTreeSet<String> {
     match ty {
-        TypeExpr::Arrow(from, to, needs) => {
-            let mut effects: BTreeSet<String> = needs.iter().map(|e| e.name.clone()).collect();
-            effects.extend(collect_type_effects(from));
-            effects.extend(collect_type_effects(to));
+        TypeExpr::Arrow { from, to, effects, .. } => {
+            let mut effs: BTreeSet<String> = effects.iter().map(|e| e.name.clone()).collect();
+            effs.extend(collect_type_effects(from));
+            effs.extend(collect_type_effects(to));
+            effs
+        }
+        TypeExpr::App { func, arg, .. } => {
+            let mut effects = collect_type_effects(func);
+            effects.extend(collect_type_effects(arg));
             effects
         }
-        TypeExpr::App(a, b) => {
-            let mut effects = collect_type_effects(a);
-            effects.extend(collect_type_effects(b));
-            effects
-        }
-        TypeExpr::Named(_) | TypeExpr::Var(_) => BTreeSet::new(),
+        TypeExpr::Named { .. } | TypeExpr::Var { .. } => BTreeSet::new(),
     }
 }
 

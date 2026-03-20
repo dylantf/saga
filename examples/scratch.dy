@@ -7,9 +7,12 @@ pub effect OtherEffect {
 }
 
 pub handler test_handler for TestEffect, OtherEffect {
-  something arg1 = todo
-  something_else value = todo
+  something _ = 1
+  something_else value = todo ""
 }
+
+fun do_something : () -> Int needs {TestEffect}
+do_something () = something! ()
 
 main () = {
   print "Hello world"

@@ -1,4 +1,4 @@
-use dylang::ast::{Decl, Expr, ExprKind, NodeId, Pat, Stmt};
+use dylang::ast::{Decl, EffectRef, Expr, ExprKind, NodeId, Pat, Stmt, TypeExpr};
 use dylang::token::Span;
 use dylang::typechecker::CheckResult;
 
@@ -52,15 +52,29 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<Node
             }
             None
         }
-        Decl::FunAnnotation { name, name_span, span, .. } if contains(span, offset) => {
+        Decl::FunAnnotation { name, name_span, params, return_type, effects, span, .. } if contains(span, offset) => {
             if contains_ident(name_span, offset) {
                 return Some((name.clone(), *name_span, None));
+            }
+            for (_, ty) in params {
+                if let Some(r) = find_in_type_expr(ty, offset) {
+                    return Some(r);
+                }
+            }
+            if let Some(r) = find_in_type_expr(return_type, offset) {
+                return Some(r);
+            }
+            for eff in effects {
+                if let Some(r) = find_in_effect_ref(eff, offset) {
+                    return Some(r);
+                }
             }
             None
         }
         Decl::HandlerDef {
             name,
             name_span,
+            effects,
             arms,
             recovered_arms,
             return_clause,
@@ -86,6 +100,12 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<Node
                 && let Some(r) = find_in_expr(&rc.body, offset)
             {
                 return Some(r);
+            }
+            // Check effect refs in `for Effect1, Effect2`
+            for eff in effects {
+                if let Some(r) = find_in_effect_ref(eff, offset) {
+                    return Some(r);
+                }
             }
             // Check if cursor is on the handler name
             if offset >= name_span.start && offset <= name_span.end {
@@ -122,6 +142,53 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<Node
             let name_start = span.start + 4; // "let "
             if offset >= name_start && offset <= name_start + name.len() {
                 return Some((name.clone(), *span, None));
+            }
+            None
+        }
+        Decl::EffectDef { operations, span, .. } => {
+            if !contains(span, offset) {
+                return None;
+            }
+            for op in operations {
+                if contains(&op.span, offset) {
+                    for (_, ty) in &op.params {
+                        if let Some(r) = find_in_type_expr(ty, offset) {
+                            return Some(r);
+                        }
+                    }
+                    if let Some(r) = find_in_type_expr(&op.return_type, offset) {
+                        return Some(r);
+                    }
+                }
+            }
+            None
+        }
+        Decl::RecordDef { fields, span, .. } => {
+            if !contains(span, offset) {
+                return None;
+            }
+            for (_, ty) in fields {
+                if let Some(r) = find_in_type_expr(ty, offset) {
+                    return Some(r);
+                }
+            }
+            None
+        }
+        Decl::TraitDef { methods, span, .. } => {
+            if !contains(span, offset) {
+                return None;
+            }
+            for method in methods {
+                if contains(&method.span, offset) {
+                    for (_, ty) in &method.params {
+                        if let Some(r) = find_in_type_expr(ty, offset) {
+                            return Some(r);
+                        }
+                    }
+                    if let Some(r) = find_in_type_expr(&method.return_type, offset) {
+                        return Some(r);
+                    }
+                }
             }
             None
         }
@@ -542,18 +609,72 @@ pub(crate) fn find_annotation(program: &[Decl], name: &str) -> Option<String> {
     None
 }
 
+/// Find a type name at the given offset within a TypeExpr tree.
+fn find_in_type_expr(ty: &TypeExpr, offset: usize) -> Option<(String, Span, Option<NodeId>)> {
+    match ty {
+        TypeExpr::Named { name, span } => {
+            if offset >= span.start && offset <= span.end {
+                Some((name.clone(), *span, None))
+            } else {
+                None
+            }
+        }
+        TypeExpr::App { func, arg, span, .. } => {
+            if offset < span.start || offset > span.end {
+                return None;
+            }
+            find_in_type_expr(func, offset).or_else(|| find_in_type_expr(arg, offset))
+        }
+        TypeExpr::Arrow { from, to, effects, span } => {
+            if offset < span.start || offset > span.end {
+                return None;
+            }
+            find_in_type_expr(from, offset)
+                .or_else(|| find_in_type_expr(to, offset))
+                .or_else(|| {
+                    for eff in effects {
+                        if let Some(r) = find_in_effect_ref(eff, offset) {
+                            return Some(r);
+                        }
+                    }
+                    None
+                })
+        }
+        TypeExpr::Var { .. } => None,
+    }
+}
+
+/// Find a type/effect name at the given offset within an EffectRef.
+fn find_in_effect_ref(eff: &EffectRef, offset: usize) -> Option<(String, Span, Option<NodeId>)> {
+    if offset < eff.span.start || offset > eff.span.end {
+        return None;
+    }
+    // Check the effect name itself (before any type args)
+    let name_end = eff.span.start + eff.name.len();
+    if offset >= eff.span.start && offset <= name_end {
+        return Some((eff.name.clone(), Span { start: eff.span.start, end: name_end }, None));
+    }
+    // Check type args
+    for arg in &eff.type_args {
+        if let Some(r) = find_in_type_expr(arg, offset) {
+            return Some(r);
+        }
+    }
+    None
+}
+
 pub(crate) fn format_type_expr(ty: &dylang::ast::TypeExpr) -> String {
     use dylang::ast::TypeExpr;
     match ty {
-        TypeExpr::Named(n) => n.clone(),
-        TypeExpr::Var(v) => v.clone(),
-        TypeExpr::App(f, arg) => format!("{} {}", format_type_expr(f), format_type_expr(arg)),
-        TypeExpr::Arrow(a, b, effs) => {
-            let arrow = format!("{} -> {}", format_type_expr(a), format_type_expr(b));
-            if effs.is_empty() {
+        TypeExpr::Named { name, .. } => name.clone(),
+        TypeExpr::Var { name, .. } => name.clone(),
+        TypeExpr::App { func, arg, .. } => format!("{} {}", format_type_expr(func), format_type_expr(arg)),
+        TypeExpr::Arrow { from, to, effects, .. } => {
+            let arrow = format!("{} -> {}", format_type_expr(from), format_type_expr(to));
+            if effects.is_empty() {
                 arrow
             } else {
-                let effs_str: Vec<String> = effs
+                let effs_str: Vec<String> = effects
                     .iter()
                     .map(|e| {
                         if e.type_args.is_empty() {

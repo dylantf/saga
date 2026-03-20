@@ -92,14 +92,14 @@ Define a reusable handler with the `handler` keyword:
 
 ```
 handler console_log for Log needs {Console} {
-  log level msg -> {
+  log level msg = {
     print! ("[" <> level <> "] " <> msg)
     resume ()
   }
 }
 
 handler sentry_log for Log needs {Sentry} {
-  log level msg -> {
+  log level msg = {
     sentry_send! level msg
     resume ()
   }
@@ -122,7 +122,7 @@ For one-offs, define the handler inline:
 main () = {
   run_server ()
 } with {
-  log level msg -> {
+  log level msg = {
     print! ("[" <> level <> "] " <> msg)
     resume ()
   }
@@ -145,7 +145,7 @@ effect Ask {
 }
 
 handler interactive for Ask needs {Console} {
-  ask prompt -> {
+  ask prompt = {
     print! prompt
     let answer = read_line! ()
     resume answer     # send `answer` back as the return value of `ask!`
@@ -166,8 +166,8 @@ of the entire `with` block:
 
 ```
 handler to_result for Fail {
-  fail reason -> Err(reason)
-  return value -> Ok(value)
+  fail reason = Err(reason)
+  return value = Ok(value)
 }
 
 main () = {
@@ -195,8 +195,8 @@ successful computation (one that completes without triggering the effect):
 
 ```
 handler to_result for Fail {
-  fail reason -> Err(reason)
-  return value -> Ok(value)
+  fail reason = Err(reason)
+  return value = Ok(value)
 }
 ```
 
@@ -242,11 +242,11 @@ Handlers mirror this:
 
 ```
 } with {
-  Cache.get key -> {
+  Cache.get key = {
     let result = lookup_cache! key
     resume result
   },
-  Database.get key -> {
+  Database.get key = {
     let result = query_db! key
     resume result
   },
@@ -278,7 +278,7 @@ main () = {
 } with {
   sentry_log,
   real_db,
-  get url -> http_get! url |> resume,
+  get url = http_get! url |> resume,
 }
 ```
 
@@ -292,21 +292,21 @@ Or bundle multiple effects into a single named handler:
 
 ```
 handler dev_env for Log, Database, Http needs {Console, Sqlite, Net} {
-  log level msg -> {
+  log level msg = {
     print! ("[" <> level <> "] " <> msg)
     resume ()
   }
-  query sql -> sqlite_query! sql |> resume
-  get url -> http_get! url |> resume
+  query sql = sqlite_query! sql |> resume
+  get url = http_get! url |> resume
 }
 
 handler prod_env for Log, Database, Http needs {Sentry, Postgres, Net} {
-  log level msg -> {
+  log level msg = {
     sentry_send! level msg
     resume ()
   }
-  query sql -> postgres_query! sql |> resume
-  get url -> http_get! url |> resume
+  query sql = postgres_query! sql |> resume
+  get url = http_get! url |> resume
 }
 
 main () = {
@@ -327,7 +327,7 @@ just like functions. This makes the handler's dependencies visible:
 
 ```
 handler stripe_billing for Billing needs {Log, Http} {
-  charge account amount -> {
+  charge account amount = {
     log! ("Charging ${show amount}")
     let result = http_post! "/stripe/charge" (to_json { account, amount })
     resume (parse_receipt result)
@@ -339,7 +339,7 @@ If the handler is pure (no effects in its body), no `needs` clause:
 
 ```
 handler mock_billing for Billing {
-  charge account amount -> resume (fake_receipt ())
+  charge account amount = resume (fake_receipt ())
 }
 ```
 
@@ -369,7 +369,7 @@ main () = {
 
   run_app ()
 } with {
-  query sql -> {
+  query sql = {
     if debug then log! "debug" sql else ()
     pg_execute! db_conn sql |> resume
   },
@@ -453,7 +453,7 @@ fun foo : Int -> Int needs {Fail}
 foo x = (fun y -> fail! "oops") x
 
 # OK: handled at the expression level
-foo x = (fun y -> fail! "oops") x with { fail msg -> 0 }
+foo x = (fun y -> fail! "oops") x with { fail msg = 0 }
 ```
 
 This keeps lambdas annotation-free. You never write `fun x -> body needs {Eff}`.
@@ -480,8 +480,8 @@ don't propagate further:
 # `try` absorbs Fail: it declares needs {Fail} on the callback parameter
 fun try : (() -> a needs {Fail}) -> Result a String
 try computation = computation () with {
-  fail msg -> Err msg
-  return value -> Ok value
+  fail msg = Err msg
+  return value = Ok value
 }
 
 # Caller: Fail is absorbed by try, doesn't reach main
@@ -505,13 +505,13 @@ Effects make testing natural - swap the handler, not the code:
 
 ```
 handler mock_http for Http {
-  get url -> resume "{\"status\": \"ok\"}"
-  post url body -> resume "created"
+  get url = resume "{\"status\": \"ok\"}"
+  post url body = resume "created"
 }
 
 
 handler collect_logs for Log {
-  log level msg -> {
+  log level msg = {
     # swallow logs silently
     resume ()
   }
@@ -535,8 +535,8 @@ effect system - no `!`, no handler, no `needs` propagation:
 
 ```
 handler postgres_handler for Database {
-  query sql -> todo "connect to postgres and run query"
-  execute sql -> todo "connect to postgres and run execute"
+  query sql = todo "connect to postgres and run query"
+  execute sql = todo "connect to postgres and run execute"
 }
 
 fun impossible : Int -> String
@@ -561,14 +561,14 @@ handlers are for.
 | --------------------- | -------------------------------------------------- |
 | Define an effect      | `effect Log { fun log : String -> Unit }`           |
 | Perform an effect     | `log! "hello"`                                     |
-| Named handler         | `handler h for Log { log msg -> ... }`              |
+| Named handler         | `handler h for Log { log msg = ... }`              |
 | Handler with effects  | `handler h for Log needs {X} { ... }`               |
-| Inline handler        | `expr with { log msg -> ... }`                     |
+| Inline handler        | `expr with { log msg = ... }`                      |
 | Attach named handler  | `expr with console_log`                            |
-| Stack handlers        | `expr with { h1, h2, op args -> ... }`             |
+| Stack handlers        | `expr with { h1, h2, op args = ... }`              |
 | Continue computation  | `resume value`                                     |
 | Abort computation     | (just don't call `resume`)                         |
-| Intercept success     | `return value -> Ok(value)`                        |
+| Intercept success     | `return value = Ok(value)`                         |
 | Qualify ambiguous ops | `Cache.get! key`                                   |
 | Declare effects on fn | `fun f : Unit -> T needs {Log, Http}`              |
 | HOF absorbs callback's effects | `fun run : (() -> a needs {Fail}) -> a`  |

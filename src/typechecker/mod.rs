@@ -1473,9 +1473,9 @@ impl Checker {
         params: &mut Vec<(String, u32)>,
     ) -> Type {
         match texpr {
-            crate::ast::TypeExpr::Named(name) if name == "Never" => Type::Never,
-            crate::ast::TypeExpr::Named(name) => Type::Con(name.clone(), vec![]),
-            crate::ast::TypeExpr::Var(name) => {
+            crate::ast::TypeExpr::Named { name, .. } if name == "Never" => Type::Never,
+            crate::ast::TypeExpr::Named { name, .. } => Type::Con(name.clone(), vec![]),
+            crate::ast::TypeExpr::Var { name, .. } => {
                 if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
                     Type::Var(*id)
                 } else {
@@ -1486,7 +1486,7 @@ impl Checker {
                     Type::Var(id)
                 }
             }
-            crate::ast::TypeExpr::App(func, arg) => {
+            crate::ast::TypeExpr::App { func, arg, .. } => {
                 let func_ty = self.convert_type_expr(func, params);
                 let arg_ty = self.convert_type_expr(arg, params);
                 // Type application: push arg into Con's args list
@@ -1516,13 +1516,13 @@ impl Checker {
                     }
                 }
             }
-            crate::ast::TypeExpr::Arrow(a, b, needs) => {
-                let a_ty = self.convert_type_expr(a, params);
-                let b_ty = self.convert_type_expr(b, params);
-                if needs.is_empty() {
+            crate::ast::TypeExpr::Arrow { from, to, effects, .. } => {
+                let a_ty = self.convert_type_expr(from, params);
+                let b_ty = self.convert_type_expr(to, params);
+                if effects.is_empty() {
                     Type::Arrow(Box::new(a_ty), Box::new(b_ty))
                 } else {
-                    let effect_refs: Vec<(String, Vec<Type>)> = needs
+                    let effect_refs: Vec<(String, Vec<Type>)> = effects
                         .iter()
                         .map(|e| {
                             let args = e

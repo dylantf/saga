@@ -80,6 +80,7 @@ pub enum Decl {
         public: bool,
         opaque: bool,
         name: String,
+        name_span: Span,
         type_params: Vec<String>,
         variants: Vec<TypeConstructor>,
         deriving: Vec<String>,
@@ -92,6 +93,7 @@ pub enum Decl {
         id: NodeId,
         public: bool,
         name: String,
+        name_span: Span,
         type_params: Vec<String>,
         fields: Vec<(String, TypeExpr)>,
         deriving: Vec<String>,
@@ -104,6 +106,7 @@ pub enum Decl {
         id: NodeId,
         public: bool,
         name: String,
+        name_span: Span,
         type_params: Vec<String>,
         operations: Vec<EffectOp>,
         span: Span,
@@ -131,6 +134,7 @@ pub enum Decl {
         id: NodeId,
         public: bool,
         name: String,
+        name_span: Span,
         type_param: String,
         supertraits: Vec<String>,
         methods: Vec<TraitMethod>,
@@ -530,19 +534,49 @@ impl Pat {
 
 // --- Types ---
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum TypeExpr {
     /// Concrete type: `Int`, `String`, `Option`
-    Named(String),
+    Named { name: String, span: Span },
 
     /// Type variable: `a`, `b`, `e`
-    Var(String),
+    Var { name: String, span: Span },
 
     /// `Option a`, `Result a e`
-    App(Box<TypeExpr>, Box<TypeExpr>),
+    App { func: Box<TypeExpr>, arg: Box<TypeExpr>, span: Span },
 
     /// `a -> b` or `a -> b needs {Eff}` or `a -> b needs {State Int}`
-    Arrow(Box<TypeExpr>, Box<TypeExpr>, Vec<EffectRef>),
+    Arrow { from: Box<TypeExpr>, to: Box<TypeExpr>, effects: Vec<EffectRef>, span: Span },
+}
+
+impl TypeExpr {
+    pub fn span(&self) -> Span {
+        match self {
+            TypeExpr::Named { span, .. }
+            | TypeExpr::Var { span, .. }
+            | TypeExpr::App { span, .. }
+            | TypeExpr::Arrow { span, .. } => *span,
+        }
+    }
+}
+
+/// PartialEq compares structure only, ignoring spans (same as Expr).
+impl PartialEq for TypeExpr {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TypeExpr::Named { name: a, .. }, TypeExpr::Named { name: b, .. }) => a == b,
+            (TypeExpr::Var { name: a, .. }, TypeExpr::Var { name: b, .. }) => a == b,
+            (
+                TypeExpr::App { func: f1, arg: a1, .. },
+                TypeExpr::App { func: f2, arg: a2, .. },
+            ) => f1 == f2 && a1 == a2,
+            (
+                TypeExpr::Arrow { from: f1, to: t1, effects: e1, .. },
+                TypeExpr::Arrow { from: f2, to: t2, effects: e2, .. },
+            ) => f1 == f2 && t1 == t2 && e1 == e2,
+            _ => false,
+        }
+    }
 }
 
 // --- Supporting types ---

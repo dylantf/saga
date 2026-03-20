@@ -40,14 +40,19 @@ lock-free hover/goto/completion.
 
 ## Phase 3.5: Type-position navigation
 
-- [ ] Hover/go-to-definition on type names in annotations (e.g. ctrl+click `Fail` in `needs {Fail String}` jumps to effect definition)
-- [ ] Hover/go-to-definition on constructor types, type aliases, traits in type signatures
+- [x] Go-to-definition on type/effect names in annotations and handler `for` clauses
+- [x] Spans on all AST nodes (TypeExpr, name_span on TypeDef/RecordDef/EffectDef/TraitDef)
+- [x] Code action -- add missing handler arms (single + bulk)
+- [ ] Find references for type/effect names (handlers, needs clauses, annotations that reference a type/effect)
+- [ ] Hover on type names (show type definition summary for user-defined types)
 
 ## Phase 4: Editing support
 
 - [ ] Code actions -- add missing import
 - [ ] Code actions -- add `needs` clause
 - [ ] Code actions -- add missing pattern arm
+- [x] Code actions -- add missing handler methods
+- [ ] Code actions -- add missing trait impl methods
 - [ ] Rename symbol (local scope)
 - [ ] Rename symbol (cross-file)
 
