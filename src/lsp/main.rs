@@ -72,9 +72,7 @@ impl Backend {
     fn snapshot(&self, uri: &Url) -> Option<Arc<CheckSnapshot>> {
         let last = self.last_check.lock().ok()?;
         let snap = last.get(uri)?;
-        if snap.program.is_none() {
-            return None;
-        }
+        snap.program.as_ref()?;
         Some(Arc::clone(snap))
     }
 }
@@ -185,7 +183,7 @@ impl LanguageServer for Backend {
         let offset =
             line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
-        let Some((name, span, node_id)) = hover::find_name_at_offset(&program, offset) else {
+        let Some((name, span, node_id)) = hover::find_name_at_offset(program, offset) else {
             return Ok(None);
         };
 
@@ -242,7 +240,7 @@ impl LanguageServer for Backend {
         }
 
         let Some(type_str) =
-            hover::type_at_name(&tc_result, &name, Some(&span), node_id.as_ref(), &program)
+            hover::type_at_name(tc_result, &name, Some(&span), node_id.as_ref(), program)
         else {
             return Ok(None);
         };
@@ -277,14 +275,14 @@ impl LanguageServer for Backend {
         let offset =
             line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
-        let Some((name, span, _node_id)) = hover::find_name_at_offset(&program, offset) else {
+        let Some((name, span, _node_id)) = hover::find_name_at_offset(program, offset) else {
             return Ok(None);
         };
 
         // Level 1: effect call -> handler arm (op! -> the arm that handles it)
         if let Some((arm_span, arm_module)) = tc_result.effect_call_targets.get(&span) {
             let (target_uri, target_li) =
-                resolve_span_location(&uri, &line_index, arm_module.as_deref(), &tc_result)?;
+                resolve_span_location(&uri, line_index, arm_module.as_deref(), tc_result)?;
             let (start_line, start_col) = target_li.offset_to_line_col(arm_span.start);
             let (end_line, end_col) = target_li.offset_to_line_col(arm_span.end);
             return Ok(Some(GotoDefinitionResponse::Scalar(Location {
@@ -299,7 +297,7 @@ impl LanguageServer for Backend {
         // Level 2: handler arm -> effect op definition
         if let Some((op_def_span, op_module)) = tc_result.handler_arm_targets.get(&span) {
             let (target_uri, target_li) =
-                resolve_span_location(&uri, &line_index, op_module.as_deref(), &tc_result)?;
+                resolve_span_location(&uri, line_index, op_module.as_deref(), tc_result)?;
             let (start_line, start_col) = target_li.offset_to_line_col(op_def_span.start);
             let (end_line, end_col) = target_li.offset_to_line_col(op_def_span.end);
             return Ok(Some(GotoDefinitionResponse::Scalar(Location {
@@ -316,7 +314,7 @@ impl LanguageServer for Backend {
         if let Some(handler_info) = tc_result.handlers.get(&name) {
             let source_module = handler_info.source_module.as_deref();
             let (target_uri, target_li) =
-                resolve_span_location(&uri, &line_index, source_module, &tc_result)?;
+                resolve_span_location(&uri, line_index, source_module, tc_result)?;
             // Find the HandlerDef span in the target program
             let target_program = if let Some(m) = source_module {
                 tc_result.programs().get(m).map(|p| p.as_slice())
@@ -324,7 +322,7 @@ impl LanguageServer for Backend {
                 Some(program.as_slice())
             };
             if let Some(prog) = target_program
-                && let Some(def) = definition::find_definition(prog, &name, &tc_result)
+                && let Some(def) = definition::find_definition(prog, &name, tc_result)
             {
                 let (start_line, start_col) = target_li.offset_to_line_col(def.span.start);
                 let (end_line, end_col) = target_li.offset_to_line_col(def.span.end);
@@ -338,7 +336,7 @@ impl LanguageServer for Backend {
             }
         }
 
-        let Some(def_result) = definition::find_definition(&program, &name, &tc_result) else {
+        let Some(def_result) = definition::find_definition(program, &name, tc_result) else {
             return Ok(None);
         };
 
@@ -355,7 +353,7 @@ impl LanguageServer for Backend {
             target_line_index = None;
         }
 
-        let li = target_line_index.as_ref().unwrap_or(&line_index);
+        let li = target_line_index.as_ref().unwrap_or(line_index);
         let (start_line, start_col) = li.offset_to_line_col(def_result.span.start);
         let (end_line, end_col) = li.offset_to_line_col(def_result.span.end);
 
@@ -382,8 +380,8 @@ impl LanguageServer for Backend {
         let offset =
             line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
-        let prefix = completion::extract_prefix(&source, offset);
-        let items = completion::collect_completions(&tc_result, prefix, &program, offset);
+        let prefix = completion::extract_prefix(source, offset);
+        let items = completion::collect_completions(tc_result, prefix, program, offset);
 
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -420,7 +418,7 @@ impl LanguageServer for Backend {
         let line_index = &snap.line_index;
 
 
-        let mut symbols = document_symbol::collect_symbols(&program, &line_index);
+        let mut symbols = document_symbol::collect_symbols(program, line_index);
         // Fill in the real URI (collect_symbols uses a placeholder)
         for sym in &mut symbols {
             sym.location.uri = uri.clone();
@@ -462,19 +460,19 @@ impl LanguageServer for Backend {
         }
 
         let (func_name, active_param) =
-            if let Some(found) = signature_help::find_active_call(&program, offset) {
+            if let Some(found) = signature_help::find_active_call(program, offset) {
                 found
-            } else if let Some(found) = signature_help::find_call_near(&program, &source, offset) {
+            } else if let Some(found) = signature_help::find_call_near(program, source, offset) {
                 found
             } else {
                 // No App chain found -- check if cursor is after `<name> ` (no arg yet).
-                match signature_help::ident_before_spaces(&source, offset) {
+                match signature_help::ident_before_spaces(source, offset) {
                     Some(name) => (name, 0),
                     None => return Ok(None),
                 }
             };
 
-        let Some(mut sig_info) = signature_help::build_signature(&func_name, &program, &tc_result)
+        let Some(mut sig_info) = signature_help::build_signature(&func_name, program, tc_result)
         else {
             return Ok(None);
         };
@@ -502,7 +500,7 @@ impl LanguageServer for Backend {
         let offset =
             line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
-        let Some((_name, _span, node_id)) = hover::find_name_at_offset(&program, offset) else {
+        let Some((_name, _span, node_id)) = hover::find_name_at_offset(program, offset) else {
             return Ok(None);
         };
 

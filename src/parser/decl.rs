@@ -3,6 +3,9 @@ use crate::token::{Span, Token};
 
 use super::{ParseError, Parser};
 
+/// Parsed type annotation: labeled params, return type, and effect requirements.
+type AnnotatedSignature = (Vec<(String, TypeExpr)>, TypeExpr, Vec<EffectRef>);
+
 impl Parser {
     // Parse `Name` or `Module.Name`, returning the full qualified string.
     // Used where we want to preserve the qualification (e.g. needs lists).
@@ -21,8 +24,15 @@ impl Parser {
             type_args.push(self.parse_type_atom()?);
         }
         let end = self.tokens[self.pos - 1].span;
-        let span = Span { start: start.start, end: end.end };
-        Ok(EffectRef { name, type_args, span })
+        let span = Span {
+            start: start.start,
+            end: end.end,
+        };
+        Ok(EffectRef {
+            name,
+            type_args,
+            span,
+        })
     }
 
     // Parse `Name` or `Module.Name`, returning only the base name.
@@ -511,7 +521,10 @@ impl Parser {
                 if let Token::Ident(_) = self.peek() {
                     let op_name = self.expect_ident().unwrap();
                     let mut params = Vec::new();
-                    while !matches!(self.peek(), Token::Eq | Token::Terminator | Token::RBrace | Token::Eof) {
+                    while !matches!(
+                        self.peek(),
+                        Token::Eq | Token::Terminator | Token::RBrace | Token::Eof
+                    ) {
                         if let Ok(p) = self.expect_ident() {
                             params.push(p);
                         } else {
@@ -522,7 +535,11 @@ impl Parser {
                     recovered_arms.push(HandlerArm {
                         op_name,
                         params,
-                        body: Box::new(Expr { id: NodeId::fresh(), kind: ExprKind::Lit { value: Lit::Unit }, span: end }),
+                        body: Box::new(Expr {
+                            id: NodeId::fresh(),
+                            kind: ExprKind::Lit { value: Lit::Unit },
+                            span: end,
+                        }),
                         span: arm_start.to(end),
                     });
                 }
@@ -748,9 +765,7 @@ impl Parser {
     /// Parse an annotated type signature after the `:`.
     /// Each arrow segment can optionally have a label: `(label: Type) -> Type -> RetType`
     /// Returns (params, return_type, effects).
-    fn parse_annotated_signature(
-        &mut self,
-    ) -> Result<(Vec<(String, TypeExpr)>, TypeExpr, Vec<EffectRef>), ParseError> {
+    fn parse_annotated_signature(&mut self) -> Result<AnnotatedSignature, ParseError> {
         // Collect all arrow segments: parse "A -> B -> C -> D" as [A, B, C, D]
         // Each segment is either (Some(label), type) or (None, type)
         let mut segments: Vec<(Option<String>, TypeExpr)> = Vec::new();

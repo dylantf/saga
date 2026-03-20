@@ -182,25 +182,8 @@ impl Checker {
                 Ok(())
             }
 
-            Decl::HandlerDef {
-                id,
-                name,
-                effects: effect_names,
-                needs,
-                arms,
-                return_clause,
-                span,
-                ..
-            } => {
-                self.register_handler(
-                    name,
-                    effect_names,
-                    needs,
-                    arms,
-                    return_clause.as_deref(),
-                    *span,
-                    *id,
-                )?;
+            Decl::HandlerDef { .. } => {
+                self.register_handler(decl)?;
                 Ok(())
             }
 
@@ -1089,16 +1072,21 @@ impl Checker {
         Ok(())
     }
 
-    pub(crate) fn register_handler(
-        &mut self,
-        name: &str,
-        effect_names: &[ast::EffectRef],
-        needs: &[ast::EffectRef],
-        arms: &[ast::HandlerArm],
-        return_clause: Option<&ast::HandlerArm>,
-        span: crate::token::Span,
-        def_id: crate::ast::NodeId,
-    ) -> Result<(), Diagnostic> {
+    pub(crate) fn register_handler(&mut self, decl: &ast::Decl) -> Result<(), Diagnostic> {
+        let ast::Decl::HandlerDef {
+            id: def_id,
+            name,
+            effects: effect_names,
+            needs,
+            arms,
+            return_clause,
+            span,
+            ..
+        } = decl
+        else {
+            unreachable!("register_handler called with non-HandlerDef");
+        };
+        let return_clause = return_clause.as_deref();
         // Save and clear effect/field tracking for this handler body
         let body_scope = self.save_body_scope();
 
@@ -1248,7 +1236,7 @@ impl Checker {
             needs.iter().map(|e| e.name.clone()).collect();
 
         if !body_effects.is_empty() || !declared_effects.is_empty() {
-            let err_span = arms.first().map(|a| a.span).unwrap_or(span);
+            let err_span = arms.first().map(|a| a.span).unwrap_or(*span);
             Self::check_undeclared_effects(
                 &body_effects,
                 &declared_effects,
@@ -1302,9 +1290,9 @@ impl Checker {
                 constraints: vec![],
                 ty: Type::unit(), // handlers don't have a meaningful standalone type
             },
-            def_id,
+            *def_id,
         );
-        self.node_spans.insert(def_id, span);
+        self.node_spans.insert(*def_id, *span);
 
         Ok(())
     }
