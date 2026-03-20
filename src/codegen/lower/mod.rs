@@ -830,6 +830,69 @@ impl<'a> Lowerer<'a> {
                             CExpr::Let(var, Box::new(val), Box::new(body))
                         });
                     }
+
+                    // Partial application: fewer user args than user-arg slots.
+                    // Wraps in a lambda taking the remaining user args.
+                    // For effectful functions, handler params are captured from scope
+                    // (bound by `with`) and the lambda also takes _ReturnK.
+                    if let Some(arity) = total_arity {
+                        let user_slots = arity - effect_count - return_k_count;
+                        if non_unit_args.len() < user_slots {
+                            let remaining_user = user_slots - non_unit_args.len();
+                            let mut arg_vars: Vec<String> = Vec::new();
+                            let mut bindings: Vec<(String, CExpr)> = Vec::new();
+                            for arg in &non_unit_args {
+                                let v = self.fresh();
+                                let ce = self.lower_expr(arg);
+                                arg_vars.push(v.clone());
+                                bindings.push((v, ce));
+                            }
+                            // Remaining user-visible params
+                            let mut params: Vec<String> = Vec::new();
+                            for _ in 0..remaining_user {
+                                params.push(self.fresh());
+                            }
+                            // Build call args: given args + remaining user params
+                            let mut call_args: Vec<CExpr> =
+                                arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
+                            call_args.extend(params.iter().map(|p| CExpr::Var(p.clone())));
+                            // For effectful functions, capture handlers from scope
+                            // and add _ReturnK as a lambda param
+                            if !callee_ops.is_empty() {
+                                for (eff, op) in &callee_ops {
+                                    let key = format!("{}.{}", eff, op);
+                                    if let Some(param) = self.current_handler_params.get(&key) {
+                                        call_args.push(CExpr::Var(param.clone()));
+                                    } else {
+                                        panic!(
+                                            "partial application of '{}' needs handler for '{}.{}' but none in scope",
+                                            func_name, eff, op
+                                        );
+                                    }
+                                }
+                                let rk = "_ReturnK".to_string();
+                                params.push(rk.clone());
+                                call_args.push(CExpr::Var(rk));
+                            }
+                            let call = if let Some((erl_mod, erl_func, _)) =
+                                self.external_funs.get(func_name)
+                            {
+                                CExpr::Call(erl_mod.clone(), erl_func.clone(), call_args)
+                            } else if let Some((erl_mod, erl_name)) = self.import_origin(func_name)
+                            {
+                                CExpr::Call(erl_mod.clone(), erl_name.clone(), call_args)
+                            } else {
+                                CExpr::Apply(
+                                    Box::new(CExpr::FunRef(func_name.to_string(), arity)),
+                                    call_args,
+                                )
+                            };
+                            let lambda = CExpr::Fun(params, Box::new(call));
+                            return bindings.into_iter().rev().fold(lambda, |body, (var, val)| {
+                                CExpr::Let(var, Box::new(val), Box::new(body))
+                            });
+                        }
+                    }
                 }
 
                 // Check for call to an effectful variable (HOF absorption).
@@ -900,36 +963,87 @@ impl<'a> Lowerer<'a> {
                 }
                 args_rev.reverse();
 
-                let mut bindings = Vec::new();
-                let func_var = self.fresh();
-                let func_ce = self.lower_expr(callee);
-                bindings.push((func_var.clone(), func_ce));
+                // Filter out unit literal args
+                let args: Vec<&Expr> = args_rev
+                    .into_iter()
+                    .filter(|a| {
+                        !matches!(
+                            a.kind,
+                            ExprKind::Lit {
+                                value: ast::Lit::Unit,
+                                ..
+                            }
+                        )
+                    })
+                    .collect();
 
-                let mut arg_vars = Vec::new();
-                for arg in &args_rev {
-                    // Skip unit literal args (they don't exist at the BEAM level)
-                    if matches!(
-                        arg.kind,
-                        ExprKind::Lit {
-                            value: ast::Lit::Unit,
-                            ..
-                        }
-                    ) {
-                        continue;
+                // Check if callee is a known function with mismatched arity.
+                // If so, split into a saturated call + apply of remaining args.
+                let callee_arity = match &callee.kind {
+                    ExprKind::Var { name, .. } => self.fun_arity(name),
+                    _ => None,
+                };
+
+                if let Some(arity) = callee_arity
+                    && arity < args.len()
+                {
+                    let mut bindings = Vec::new();
+
+                    // Lower all args
+                    let mut arg_vars = Vec::new();
+                    for arg in &args {
+                        let v = self.fresh();
+                        let ce = self.lower_expr(arg);
+                        bindings.push((v.clone(), ce));
+                        arg_vars.push(v);
                     }
-                    let v = self.fresh();
-                    let ce = self.lower_expr(arg);
-                    bindings.push((v.clone(), ce));
-                    arg_vars.push(v);
-                }
 
-                let call = CExpr::Apply(
-                    Box::new(CExpr::Var(func_var)),
-                    arg_vars.into_iter().map(CExpr::Var).collect(),
-                );
-                bindings.into_iter().rev().fold(call, |body, (var, val)| {
-                    CExpr::Let(var, Box::new(val), Box::new(body))
-                })
+                    // Saturated call with the first `arity` args
+                    let sat_args: Vec<CExpr> = arg_vars[..arity]
+                        .iter()
+                        .map(|v| CExpr::Var(v.clone()))
+                        .collect();
+                    let func_ce = self.lower_expr(callee);
+                    let result_var = self.fresh();
+                    bindings.push((result_var.clone(), CExpr::Apply(
+                        Box::new(func_ce),
+                        sat_args,
+                    )));
+
+                    // Apply remaining args to the result
+                    let extra_args: Vec<CExpr> = arg_vars[arity..]
+                        .iter()
+                        .map(|v| CExpr::Var(v.clone()))
+                        .collect();
+                    let call = CExpr::Apply(
+                        Box::new(CExpr::Var(result_var)),
+                        extra_args,
+                    );
+                    bindings.into_iter().rev().fold(call, |body, (var, val)| {
+                        CExpr::Let(var, Box::new(val), Box::new(body))
+                    })
+                } else {
+                    let mut bindings = Vec::new();
+                    let func_var = self.fresh();
+                    let func_ce = self.lower_expr(callee);
+                    bindings.push((func_var.clone(), func_ce));
+
+                    let mut arg_vars = Vec::new();
+                    for arg in &args {
+                        let v = self.fresh();
+                        let ce = self.lower_expr(arg);
+                        bindings.push((v.clone(), ce));
+                        arg_vars.push(v);
+                    }
+
+                    let call = CExpr::Apply(
+                        Box::new(CExpr::Var(func_var)),
+                        arg_vars.into_iter().map(CExpr::Var).collect(),
+                    );
+                    bindings.into_iter().rev().fold(call, |body, (var, val)| {
+                        CExpr::Let(var, Box::new(val), Box::new(body))
+                    })
+                }
             }
 
             ExprKind::Constructor { name, .. } => match name.as_str() {
