@@ -62,7 +62,7 @@ pub(super) fn lower_pat(
                 CPat::Tuple(elems)
             }
         }
-        Pat::Record { name, fields, .. } => {
+        Pat::Record { name, fields, as_name, .. } => {
             // Records are tagged tuples in declared field order.
             let atom = mangle_ctor_atom(name, constructor_modules);
             let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
@@ -87,7 +87,11 @@ pub(super) fn lower_pat(
                     }
                 }
             }
-            CPat::Tuple(elems)
+            let tuple_pat = CPat::Tuple(elems);
+            match as_name {
+                Some(var) => CPat::Alias(core_var(var), Box::new(tuple_pat)),
+                None => tuple_pat,
+            }
         }
         Pat::StringPrefix {
             prefix, rest, ..

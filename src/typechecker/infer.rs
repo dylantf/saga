@@ -1078,7 +1078,7 @@ impl Checker {
                 self.unify_at(ty, &current, *span)
             }
             Pat::Record {
-                name, fields, span, ..
+                name, fields, as_name, span, ..
             } => {
                 let info = self.records.get(name).cloned().ok_or_else(|| {
                     Diagnostic::error_at(
@@ -1115,6 +1115,18 @@ impl Checker {
                             self.record_type_at_span(*span, &resolved_field_ty);
                         }
                     }
+                }
+                if let Some(as_var) = as_name {
+                    let resolved = self.sub.apply(&result_ty);
+                    self.env.insert(
+                        as_var.clone(),
+                        Scheme {
+                            forall: vec![],
+                            constraints: vec![],
+                            ty: resolved.clone(),
+                        },
+                    );
+                    self.record_type_at_span(*span, &resolved);
                 }
                 Ok(())
             }

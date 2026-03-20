@@ -422,8 +422,8 @@ impl Printer {
             }
             CPat::Nil => self.push("[]"),
             CPat::Alias(var, pat) => {
+                self.push(&format!("{} = ", var));
                 self.print_pat(pat);
-                self.push(&format!(" = {}", var));
             }
             // CPat::Values holds the contents of a multi-value arm pattern.
             // The surrounding <> are always emitted by the case arm printer,

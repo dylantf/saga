@@ -13,6 +13,33 @@ quadrant p = case p {
   _ -> "origin or axis"
 }
 
+# Nested records
+record Student {
+  name: String,
+  grade: Int,
+} deriving (Debug)
+
+record School {
+  name: String,
+  students: List Student,
+} deriving (Debug)
+
+fake_school () = {
+  let students = [
+    Student { name: "John", grade: 2 },
+    Student { name: "Suzy", grade: 3 },
+  ]
+
+  School {
+    name: "Some school",
+    students: students,
+  }
+}
+
+enroll_student (Student as student) (School as school)  = {
+  { school | students: student :: school.students }
+}
+
 # Polymorphic records
 record Box a {
   value: a,
@@ -41,4 +68,11 @@ main () = {
 
   let b3 = { b1 | value: 99 }
   println (show (unwrap b3))
+
+  fake_school () |> debug |> println
+
+  fake_school ()
+  |> enroll_student (Student { name: "José", grade: 6 })
+  |> debug
+  |> println
 }

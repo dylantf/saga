@@ -47,6 +47,42 @@ impl Parser {
             }
         }
 
+        // Record as-pattern: Student as s, Student { name } as s
+        if matches!(self.peek(), Token::As) {
+            match pat {
+                Pat::Constructor { name, args, span, .. } if args.is_empty() => {
+                    self.advance(); // consume 'as'
+                    let as_ident = self.expect_ident()?;
+                    let end = self.tokens[self.pos - 1].span;
+                    return Ok(Pat::Record {
+                        id: NodeId::fresh(),
+                        name,
+                        fields: vec![],
+                        as_name: Some(as_ident),
+                        span: span.to(end),
+                    });
+                }
+                Pat::Record { id, name, fields, span, .. } => {
+                    self.advance(); // consume 'as'
+                    let as_ident = self.expect_ident()?;
+                    let end = self.tokens[self.pos - 1].span;
+                    return Ok(Pat::Record {
+                        id,
+                        name,
+                        fields,
+                        as_name: Some(as_ident),
+                        span: span.to(end),
+                    });
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "'as' patterns are only supported on record patterns".to_string(),
+                        span: start,
+                    });
+                }
+            }
+        }
+
         Ok(pat)
     }
 
@@ -122,6 +158,7 @@ impl Parser {
                         id: NodeId::fresh(),
                         name,
                         fields,
+                        as_name: None,
                         span: span.to(end),
                     })
                 } else {

@@ -483,10 +483,12 @@ pub enum Pat {
     },
 
     /// `Success { status, body }` or `ApiError { code: c }`
+    /// Optional `as` binding: `Student { name } as s` or `Student as s`
     Record {
         id: NodeId,
         name: String,
         fields: Vec<(String, Option<Pat>)>, // (field_name, optional alias pattern)
+        as_name: Option<String>,
         span: Span,
     },
 
