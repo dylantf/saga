@@ -279,10 +279,7 @@ impl Checker {
                 let (inst_fields, result_ty) = self.instantiate_record(name, &info);
 
                 for (fname, fspan, fexpr) in fields {
-                    let expected =
-                        inst_fields
-                            .iter()
-                            .find(|(n, _)| n == fname);
+                    let expected = inst_fields.iter().find(|(n, _)| n == fname);
                     match expected {
                         None => {
                             self.collected_diagnostics.push(Diagnostic::error_at(
@@ -293,10 +290,10 @@ impl Checker {
                             let _ = self.infer_expr(fexpr);
                         }
                         Some((_, expected_ty)) => {
-                            if let Ok(actual) = self.infer_expr(fexpr) {
-                                if let Err(e) = self.unify_at(expected_ty, &actual, fexpr.span) {
-                                    self.collected_diagnostics.push(e);
-                                }
+                            if let Ok(actual) = self.infer_expr(fexpr)
+                                && let Err(e) = self.unify_at(expected_ty, &actual, fexpr.span)
+                            {
+                                self.collected_diagnostics.push(e);
                             }
                         }
                     }
@@ -383,10 +380,8 @@ impl Checker {
                     }
                     Type::Record(rec_fields) => {
                         for (fname, fspan, fexpr) in fields {
-                            let (_, expected_ty) = rec_fields
-                                .iter()
-                                .find(|(n, _)| n == fname)
-                                .ok_or_else(|| {
+                            let (_, expected_ty) =
+                                rec_fields.iter().find(|(n, _)| n == fname).ok_or_else(|| {
                                     Diagnostic::error_at(
                                         *fspan,
                                         format!("unknown field '{}' on anonymous record", fname),
@@ -576,8 +571,10 @@ impl Checker {
 
     fn infer_lambda(&mut self, params: &[Pat], body: &Expr) -> Result<Type, Diagnostic> {
         let saved_env = self.env.clone();
-        let saved_effect_cache = self.effect_type_param_cache.clone();
-        let saved_effects = self.current_effects.clone();
+        let scope = self.enter_effect_scope();
+        // Lambda inherits the outer effect cache so effect ops (e.g. get!)
+        // resolve type params from the enclosing function's annotations.
+        self.effect_type_param_cache = scope.effect_cache.clone();
 
         let mut param_types = Vec::new();
         for pat in params {
@@ -589,14 +586,8 @@ impl Checker {
         let body_ty = self.infer_expr(body)?;
         self.env = saved_env;
 
-        // Collect effects the lambda body introduced
-        let lambda_effects: Vec<String> = self
-            .current_effects
-            .difference(&saved_effects)
-            .cloned()
-            .collect();
-
-        // Build effect type args from the lambda's own cache
+        // Build effect type args from the lambda's cache before exiting scope
+        let lambda_effects: Vec<String> = self.current_effects.iter().cloned().collect();
         let eff_refs: Vec<(String, Vec<Type>)> = lambda_effects
             .iter()
             .map(|name| {
@@ -616,22 +607,25 @@ impl Checker {
             })
             .collect();
 
-        self.effect_type_param_cache = saved_effect_cache;
+        let result = self.exit_effect_scope(scope);
+        // Lambda effects propagate to enclosing scope (the enclosing function
+        // needs them for its `needs` declaration checking).
+        self.current_effects.extend(result.effects);
 
         // Build curried arrow: a -> b -> c -> ret
-        let mut result = body_ty;
+        let mut ty = body_ty;
         for param_ty in param_types.into_iter().rev() {
-            result = Type::Arrow(Box::new(param_ty), Box::new(result));
+            ty = Type::Arrow(Box::new(param_ty), Box::new(ty));
         }
 
         // If the lambda has effects, wrap the outermost arrow as EffArrow
         if !eff_refs.is_empty()
-            && let Type::Arrow(a, b) = result
+            && let Type::Arrow(a, b) = ty
         {
-            result = Type::EffArrow(a, b, eff_refs);
+            ty = Type::EffArrow(a, b, eff_refs);
         }
 
-        Ok(result)
+        Ok(ty)
     }
 
     fn infer_field_access(
@@ -748,15 +742,9 @@ impl Checker {
                 }
             }
             Type::Record(fields) => {
-                let (_, field_ty) = fields
-                    .iter()
-                    .find(|(n, _)| n == field)
-                    .ok_or_else(|| {
-                        Diagnostic::error_at(
-                            span,
-                            format!("no field '{}' on anonymous record", field),
-                        )
-                    })?;
+                let (_, field_ty) = fields.iter().find(|(n, _)| n == field).ok_or_else(|| {
+                    Diagnostic::error_at(span, format!("no field '{}' on anonymous record", field))
+                })?;
                 Ok(self.sub.apply(field_ty))
             }
             _ => Err(Diagnostic::error_at(
@@ -1144,7 +1132,11 @@ impl Checker {
                 self.unify_at(ty, &current, *span)
             }
             Pat::Record {
-                name, fields, as_name, span, ..
+                name,
+                fields,
+                as_name,
+                span,
+                ..
             } => {
                 let info = self.records.get(name).cloned().ok_or_else(|| {
                     Diagnostic::error_at(
@@ -1222,10 +1214,7 @@ impl Checker {
                 self.unify_at(ty, &record_ty, *span)?;
 
                 for (fname, alias_pat) in fields {
-                    let (_, field_ty) = field_tys
-                        .iter()
-                        .find(|(n, _)| n == fname)
-                        .unwrap();
+                    let (_, field_ty) = field_tys.iter().find(|(n, _)| n == fname).unwrap();
                     let resolved_field_ty = self.sub.apply(field_ty);
                     match alias_pat {
                         Some(pat) => self.bind_pattern(pat, &resolved_field_ty)?,
@@ -1521,19 +1510,15 @@ impl Checker {
         handler: &ast::Handler,
         handled: HashSet<String>,
     ) -> Result<Type, Diagnostic> {
-        // Infer the inner expression, tracking its effects separately
-        let saved_effects = std::mem::take(&mut self.current_effects);
-        let saved_effect_cache = std::mem::take(&mut self.effect_type_param_cache);
+        // --- Scope 1: infer the inner expression with isolated effect tracking ---
+        let inner_scope = self.enter_effect_scope();
         let expr_ty = self.infer_expr(expr)?;
-        // Capture the inner expression's effect type param cache before restoring.
-        // Inline handler arms need these bindings to properly type resume arguments.
-        let inner_effect_cache = self.effect_type_param_cache.clone();
+        let inner_result = self.exit_effect_scope(inner_scope);
+
         // Unnecessary handler check: if the inner expression doesn't use any of
-        // the handled effects, the handler is unnecessary (e.g. `with` on a pure
-        // call or a partial application). Only emit when the callee is a known
-        // local function/binding; skip for imports, EffArrow params, qualified
-        // calls, etc. where effects are tracked outside fun_effects.
-        if !handled.is_empty() && self.current_effects.is_disjoint(&handled) {
+        // the handled effects, the handler is unnecessary. Only emit when the
+        // callee is a known local function/binding.
+        if !handled.is_empty() && inner_result.effects.is_disjoint(&handled) {
             let callee_name = extract_callee_name(expr);
             let callee_effects_known = callee_name
                 .as_ref()
@@ -1554,13 +1539,13 @@ impl Checker {
                 ));
             }
         }
-        // Subtract handled effects from the inner expression's effects
+
+        // Propagate unhandled effects from the inner expression to outer scope
+        let mut unhandled = inner_result.effects;
         for eff in &handled {
-            self.current_effects.remove(eff);
+            unhandled.remove(eff);
         }
-        let inner_effects = std::mem::replace(&mut self.current_effects, saved_effects);
-        self.effect_type_param_cache = saved_effect_cache;
-        self.current_effects.extend(inner_effects);
+        self.current_effects.extend(unhandled);
 
         let with_span = expr.span;
         match handler {
@@ -1594,7 +1579,11 @@ impl Checker {
                     }
                 }
 
-                let saved_effects_arms = std::mem::take(&mut self.current_effects);
+                // --- Scope 2: handler arms with isolated effect tracking ---
+                let arms_scope = self.enter_effect_scope();
+                // Handler arms inherit the inner expression's effect cache so
+                // they see the same type param bindings (e.g. State s -> Int).
+                self.effect_type_param_cache = inner_result.effect_cache;
 
                 // Compute answer_ty: infer return clause first if present,
                 // since arms need it for resume return type and body unification.
@@ -1616,11 +1605,6 @@ impl Checker {
                 } else {
                     expr_ty.clone()
                 };
-
-                // Use inner expression's effect cache so inline handler arms
-                // see the same type param bindings as the inner expression.
-                let outer_effect_cache =
-                    std::mem::replace(&mut self.effect_type_param_cache, inner_effect_cache);
 
                 for arm in arms {
                     let op_sig = self.lookup_effect_op(&arm.op_name, None, arm.span).ok();
@@ -1670,13 +1654,12 @@ impl Checker {
                     self.env = saved_env;
                 }
 
-                // Restore the outer effect cache
-                self.effect_type_param_cache = outer_effect_cache;
-
+                let arms_result = self.exit_effect_scope(arms_scope);
+                // Propagate unhandled effects from handler arms to outer scope
+                let mut arm_effects = arms_result.effects;
                 for eff in &handled {
-                    self.current_effects.remove(eff);
+                    arm_effects.remove(eff);
                 }
-                let arm_effects = std::mem::replace(&mut self.current_effects, saved_effects_arms);
                 self.current_effects.extend(arm_effects);
 
                 Ok(answer_ty)

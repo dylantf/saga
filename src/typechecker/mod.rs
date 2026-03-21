@@ -866,13 +866,22 @@ pub struct ModuleContext {
 /// Per-variable record candidate narrowing: var_id -> (candidate record names, span).
 pub(crate) type FieldCandidates = HashMap<u32, (Vec<String>, Span)>;
 
-/// Snapshot of per-function-body inference state, saved before checking a body
-/// and restored afterward. Prevents effect tracking and field candidate narrowing
-/// from one body leaking into the next.
-pub(crate) struct BodyScope {
-    effects: HashSet<String>,
-    effect_cache: HashMap<String, HashMap<u32, Type>>,
-    field_candidates: FieldCandidates,
+/// Snapshot of effect-related inference state, saved when entering an isolated
+/// scope (function body, lambda, with-expression, handler arm) and restored on
+/// exit. Prevents effect tracking from leaking between scopes.
+pub(crate) struct EffectScope {
+    pub(crate) effects: HashSet<String>,
+    pub(crate) effect_cache: HashMap<String, HashMap<u32, Type>>,
+    pub(crate) field_candidates: FieldCandidates,
+    resume_type: Option<Type>,
+    resume_return_type: Option<Type>,
+}
+
+/// What accumulated inside an EffectScope while it was active.
+pub(crate) struct EffectScopeResult {
+    pub effects: HashSet<String>,
+    pub effect_cache: HashMap<String, HashMap<u32, Type>>,
+    pub field_candidates: FieldCandidates,
 }
 
 impl Default for Checker {
@@ -1068,27 +1077,37 @@ impl Checker {
         (fields, result_ty)
     }
 
-    /// Save and clear the per-body inference state (effects, effect cache, field candidates).
-    /// Call `restore_body_scope` after checking the body to get back the collected effects.
-    pub(crate) fn save_body_scope(&mut self) -> BodyScope {
-        BodyScope {
+    /// Enter an isolated effect scope. Saves and clears current_effects,
+    /// effect_type_param_cache, field_candidates, resume_type, and
+    /// resume_return_type. Call `exit_effect_scope` to restore and collect
+    /// what the scope accumulated.
+    pub(crate) fn enter_effect_scope(&mut self) -> EffectScope {
+        EffectScope {
             effects: std::mem::take(&mut self.current_effects),
             effect_cache: std::mem::take(&mut self.effect_type_param_cache),
             field_candidates: std::mem::take(&mut self.field_candidates),
+            resume_type: self.resume_type.take(),
+            resume_return_type: self.resume_return_type.take(),
         }
     }
 
-    /// Restore the saved scope, returning the effects and field candidates that
-    /// the body accumulated while it was active.
-    pub(crate) fn restore_body_scope(
-        &mut self,
-        scope: BodyScope,
-    ) -> (HashSet<String>, FieldCandidates) {
-        let body_effects = std::mem::replace(&mut self.current_effects, scope.effects);
-        self.effect_type_param_cache = scope.effect_cache;
-        let body_field_candidates =
-            std::mem::replace(&mut self.field_candidates, scope.field_candidates);
-        (body_effects, body_field_candidates)
+    /// Exit an effect scope, restoring saved state and returning what
+    /// accumulated during the scope's lifetime.
+    pub(crate) fn exit_effect_scope(&mut self, scope: EffectScope) -> EffectScopeResult {
+        let result = EffectScopeResult {
+            effects: std::mem::replace(&mut self.current_effects, scope.effects),
+            effect_cache: std::mem::replace(
+                &mut self.effect_type_param_cache,
+                scope.effect_cache,
+            ),
+            field_candidates: std::mem::replace(
+                &mut self.field_candidates,
+                scope.field_candidates,
+            ),
+        };
+        self.resume_type = scope.resume_type;
+        self.resume_return_type = scope.resume_return_type;
+        result
     }
 
     /// Check that all effects used in a body are covered by the declared `needs` set.

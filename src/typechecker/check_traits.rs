@@ -234,7 +234,7 @@ impl Checker {
             let expected_return = self.substitute_trait_param(trait_param_id, &target, &trait_method.2);
 
             let saved_env = self.env.clone();
-            let body_scope = self.save_body_scope();
+            let body_scope = self.enter_effect_scope();
 
             // Re-insert the trait's method schemes so that method calls inside
             // the impl body resolve to the trait signature, not to a user-defined
@@ -278,7 +278,9 @@ impl Checker {
                 })?;
 
             // Check that body effects are covered by the impl's needs declaration
-            let (body_effects, body_field_candidates) = self.restore_body_scope(body_scope);
+            let scope_result = self.exit_effect_scope(body_scope);
+            let body_effects = scope_result.effects;
+            let body_field_candidates = scope_result.field_candidates;
             if !body_effects.is_empty() || !declared_effects.is_empty() {
                 Self::check_undeclared_effects(
                     &body_effects,

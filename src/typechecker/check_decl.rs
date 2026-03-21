@@ -540,7 +540,7 @@ impl Checker {
         let constraints_before = self.pending_constraints.len();
 
         // Save and clear effect tracking and field candidate tracking for this function body
-        let body_scope = self.save_body_scope();
+        let body_scope = self.enter_effect_scope();
 
         // Pre-populate effect type param cache from annotation constraints (e.g. needs {State Int})
         if let Some(constraints) = self.fun_effect_type_constraints.get(name).cloned() {
@@ -624,7 +624,9 @@ impl Checker {
         }
 
         // Check effect requirements against declared needs
-        let (body_effects, body_field_candidates) = self.restore_body_scope(body_scope);
+        let scope_result = self.exit_effect_scope(body_scope);
+        let body_effects = scope_result.effects;
+        let body_field_candidates = scope_result.field_candidates;
         let declared_effects = self.fun_effects.get(name).cloned().unwrap_or_default();
 
         if !body_effects.is_empty() || !declared_effects.is_empty() {
@@ -1097,7 +1099,7 @@ impl Checker {
         };
         let return_clause = return_clause.as_deref();
         // Save and clear effect/field tracking for this handler body
-        let body_scope = self.save_body_scope();
+        let body_scope = self.enter_effect_scope();
 
         // Build type param bindings from handler's effect refs.
         // E.g. `handler counter for State Int` with effect State s:
@@ -1245,7 +1247,8 @@ impl Checker {
         };
 
         // Check effect requirements against declared needs
-        let (body_effects, _body_field_candidates) = self.restore_body_scope(body_scope);
+        let scope_result = self.exit_effect_scope(body_scope);
+        let body_effects = scope_result.effects;
         let declared_effects: std::collections::HashSet<String> =
             needs.iter().map(|e| e.name.clone()).collect();
 
