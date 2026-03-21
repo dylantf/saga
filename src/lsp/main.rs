@@ -581,9 +581,10 @@ impl LanguageServer for Backend {
         };
 
         // Resolve the symbol key: (module, name).
-        // If the name is in import_origins, it came from another module.
-        // Otherwise, it's locally defined in this file's module.
-        let module = if let Some(origin) = tc_result.import_origins.get(&name) {
+        // Check both value import_origins and type_import_origins.
+        let module = if let Some(origin) = tc_result.import_origins.get(&name)
+            .or_else(|| tc_result.type_import_origins.get(&name))
+        {
             origin.clone()
         } else {
             // Local definition: use this file's module declaration

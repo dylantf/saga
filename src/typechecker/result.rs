@@ -57,6 +57,10 @@ pub struct CheckResult {
     pub node_spans: HashMap<crate::ast::NodeId, crate::token::Span>,
     /// Import origins: binding name -> source module name (for cross-module find-references).
     pub import_origins: HashMap<String, String>,
+    /// Type/effect name references: (span, name) for find-references on types.
+    pub type_references: Vec<(crate::token::Span, String)>,
+    /// Import origins for type names: type_name -> source module name.
+    pub type_import_origins: HashMap<String, String>,
 }
 
 impl CheckResult {
@@ -164,6 +168,8 @@ impl Checker {
             references: self.lsp.references.clone(),
             node_spans: self.lsp.node_spans.clone(),
             import_origins: self.lsp.import_origins.clone(),
+            type_references: self.lsp.type_references.clone(),
+            type_import_origins: self.lsp.type_import_origins.clone(),
         }
     }
 }

@@ -1,10 +1,20 @@
 use std::collections::HashMap;
-use tower_lsp::lsp_types::{Range, Url};
+use tower_lsp::lsp_types::{Position, Range, Url};
 
 use dylang::ast::{Decl, NodeId};
+use dylang::token::Span;
 use dylang::typechecker::CheckResult;
 
 use crate::line_index::LineIndex;
+
+fn span_to_range(line_index: &LineIndex, source: &str, span: &Span) -> Range {
+    let (start_line, start_col) = line_index.offset_to_line_col(span.start, source);
+    let (end_line, end_col) = line_index.offset_to_line_col(span.end, source);
+    Range {
+        start: Position::new(start_line as u32, start_col as u32),
+        end: Position::new(end_line as u32, end_col as u32),
+    }
+}
 
 /// Stable cross-module identity for a symbol.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -101,22 +111,27 @@ impl SymbolIndex {
             if let Some(key) = def_id_to_symbol.get(def_id)
                 && let Some(span) = tc_result.node_spans.get(usage_id)
             {
-                let (start_line, start_col) = line_index.offset_to_line_col(span.start, source);
-                let (end_line, end_col) = line_index.offset_to_line_col(span.end, source);
-                entries.push((
-                    key.clone(),
-                    Range {
-                        start: tower_lsp::lsp_types::Position::new(
-                            start_line as u32,
-                            start_col as u32,
-                        ),
-                        end: tower_lsp::lsp_types::Position::new(
-                            end_line as u32,
-                            end_col as u32,
-                        ),
-                    },
-                ));
+                entries.push((key.clone(), span_to_range(line_index, source, span)));
             }
+        }
+
+        // Type/effect name references (from annotations, handler `for` clauses, etc.)
+        for (span, type_name) in &tc_result.type_references {
+            // Determine the module: check type_import_origins first, then local
+            let module = tc_result
+                .type_import_origins
+                .get(type_name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    local_module
+                        .clone()
+                        .unwrap_or_else(|| "_script".to_string())
+                });
+            let key = SymbolKey {
+                module,
+                name: type_name.clone(),
+            };
+            entries.push((key, span_to_range(line_index, source, span)));
         }
 
         self.by_file.insert(uri.clone(), entries);

@@ -649,6 +649,11 @@ pub(crate) struct LspState {
     /// Import origins: binding name -> source module name (for cross-module find-references).
     /// Populated by inject_scoped_bindings when importing modules.
     pub import_origins: HashMap<String, String>,
+    /// Type/effect name references: (span, name) pairs for all type names in annotations,
+    /// type expressions, effect refs, etc. Used for find-references on type/effect names.
+    pub type_references: Vec<(Span, String)>,
+    /// Import origins for type names: type_name -> source module name.
+    pub type_import_origins: HashMap<String, String>,
 }
 
 /// Module system state: caches, project root, and import tracking.
@@ -814,6 +819,15 @@ impl Checker {
     ) {
         self.lsp.references.insert(usage_id, def_id);
         self.lsp.node_spans.insert(usage_id, usage_span);
+    }
+
+    /// Record a type/effect name reference from an EffectRef AST node.
+    pub(crate) fn record_effect_ref(&mut self, effect_ref: &crate::ast::EffectRef) {
+        let name_end = effect_ref.span.start + effect_ref.name.len();
+        self.lsp.type_references.push((
+            Span { start: effect_ref.span.start, end: name_end },
+            effect_ref.name.clone(),
+        ));
     }
 
     /// Emit warnings for local variable bindings that are never referenced.

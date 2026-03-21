@@ -1,10 +1,30 @@
-record Foo {
-  bar: String
-}
+# # Option 1 (optional leading bar for multiline, no braces)
+# type Color = Red | Green | Blue
 
-main () = {
-  let user: String = "John" <> 456
-  let _ = Foo { bar: "asdf" <> 456 "Hello" }
-  
-  println "Ok"
-}
+# type Color =
+#   | Red
+#   | Green
+#   | Blue
+#   deriving (Enum)
+
+
+
+# # Option 2 (optional bars for multiline, always braces)
+# type Color { Red | Green | Blue }
+
+# type Color {
+#   Red
+#   Green
+#   Blue
+# } deriving (Enum)
+
+
+
+
+
+
+
+
+
+
+

@@ -682,6 +682,9 @@ impl Checker {
             self.effects
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
+            self.lsp.type_import_origins
+                .entry(name.clone())
+                .or_insert_with(|| module_name.to_string());
         }
 
         // Handlers
@@ -694,6 +697,9 @@ impl Checker {
         // Type arities
         for (name, arity) in type_arity {
             self.type_arity.entry(name.clone()).or_insert(*arity);
+            self.lsp.type_import_origins
+                .entry(name.clone())
+                .or_insert_with(|| module_name.to_string());
         }
 
         // Function effects (for cross-module `with` validation and effect propagation).
@@ -772,6 +778,8 @@ impl Checker {
                 let is_type = name.starts_with(|c: char| c.is_uppercase());
                 if is_type {
                     let mut found = binding_map.contains_key(name.as_str());
+                    self.lsp.type_import_origins
+                        .insert(name.clone(), module_name.to_string());
                     // Hoist the type name itself if it's in bindings
                     if let Some(&scheme) = binding_map.get(name.as_str()) {
                         if let Some(&did) = def_ids.get(name.as_str()) {

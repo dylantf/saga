@@ -275,8 +275,17 @@ impl Checker {
         params: &mut Vec<(String, u32)>,
     ) -> Type {
         match texpr {
-            crate::ast::TypeExpr::Named { name, .. } if name == "Never" => Type::Never,
-            crate::ast::TypeExpr::Named { name, .. } => Type::Con(name.clone(), vec![]),
+            crate::ast::TypeExpr::Named { name, span } if name == "Never" => {
+                self.lsp.type_references.push((*span, name.clone()));
+                Type::Never
+            }
+            crate::ast::TypeExpr::Named { name, span } => {
+                // Record type reference for find-references (skip type variables/params)
+                if name.starts_with(|c: char| c.is_uppercase()) {
+                    self.lsp.type_references.push((*span, name.clone()));
+                }
+                Type::Con(name.clone(), vec![])
+            }
             crate::ast::TypeExpr::Var { name, .. } => {
                 if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
                     Type::Var(*id)
@@ -329,6 +338,12 @@ impl Checker {
                     let effect_refs: Vec<(String, Vec<Type>)> = effects
                         .iter()
                         .map(|e| {
+                            // Record effect name reference
+                            let name_end = e.span.start + e.name.len();
+                            self.lsp.type_references.push((
+                                Span { start: e.span.start, end: name_end },
+                                e.name.clone(),
+                            ));
                             let args = e
                                 .type_args
                                 .iter()

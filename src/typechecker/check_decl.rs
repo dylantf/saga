@@ -398,6 +398,7 @@ impl Checker {
                 if !effects.is_empty() {
                     let mut constraints = Vec::new();
                     for eff in effects {
+                        self.record_effect_ref(eff);
                         if !eff.type_args.is_empty() {
                             let concrete_types: Vec<Type> = eff
                                 .type_args
@@ -1135,6 +1136,7 @@ impl Checker {
         let mut handler_type_mapping: std::collections::HashMap<u32, Type> =
             std::collections::HashMap::new();
         for effect_ref in effect_names {
+            self.record_effect_ref(effect_ref);
             if let Some(info) = self.effects.get(&effect_ref.name) {
                 let info = info.clone();
                 for (i, &param_id) in info.type_params.iter().enumerate() {
