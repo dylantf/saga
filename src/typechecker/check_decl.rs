@@ -127,6 +127,37 @@ impl Checker {
                 ));
         }
 
+        // Validate that `main` does not have unresolved trait constraints
+        // (it is the entry point -- there is no caller to supply dictionaries)
+        if let Some(scheme) = self.env.get("main") {
+            if !scheme.constraints.is_empty() {
+                let traits: Vec<_> = scheme
+                    .constraints
+                    .iter()
+                    .map(|(t, _)| t.as_str())
+                    .collect();
+                let span = program
+                    .iter()
+                    .find_map(|d| {
+                        if let Decl::FunBinding { name, span, .. } = d
+                            && name == "main"
+                        {
+                            Some(*span)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(crate::token::Span { start: 0, end: 0 });
+                errors.push(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "`main` cannot have unresolved trait constraints [{}] -- it is the entry point and there is no caller to supply dictionaries",
+                        traits.join(", ")
+                    ),
+                ));
+            }
+        }
+
         // Check for annotations without a matching function binding
         if !self.allow_bodyless_annotations {
             let bound_names: std::collections::HashSet<&str> = program
