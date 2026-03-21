@@ -145,7 +145,16 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<Node
             }
             None
         }
-        Decl::EffectDef { operations, span, .. } => {
+        Decl::TypeDef { name, name_span, span, .. } => {
+            if !contains(span, offset) {
+                return None;
+            }
+            if contains_ident(name_span, offset) {
+                return Some((name.clone(), *name_span, None));
+            }
+            None
+        }
+        Decl::EffectDef { name, name_span, operations, span, .. } => {
             if !contains(span, offset) {
                 return None;
             }
@@ -161,9 +170,12 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<Node
                     }
                 }
             }
+            if contains_ident(name_span, offset) {
+                return Some((name.clone(), *name_span, None));
+            }
             None
         }
-        Decl::RecordDef { fields, span, .. } => {
+        Decl::RecordDef { name, name_span, fields, span, .. } => {
             if !contains(span, offset) {
                 return None;
             }
@@ -172,9 +184,12 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<Node
                     return Some(r);
                 }
             }
+            if contains_ident(name_span, offset) {
+                return Some((name.clone(), *name_span, None));
+            }
             None
         }
-        Decl::TraitDef { methods, span, .. } => {
+        Decl::TraitDef { name, name_span, methods, span, .. } => {
             if !contains(span, offset) {
                 return None;
             }
@@ -189,6 +204,9 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Option<(String, Span, Option<Node
                         return Some(r);
                     }
                 }
+            }
+            if contains_ident(name_span, offset) {
+                return Some((name.clone(), *name_span, None));
             }
             None
         }
@@ -284,11 +302,16 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Option<(String, Span, Option<Node
             }
             None
         }
-        ExprKind::RecordCreate { fields, .. } => {
+        ExprKind::RecordCreate { name, fields, .. } => {
             for (_, _, e) in fields {
                 if let Some(r) = find_in_expr(e, offset) {
                     return Some(r);
                 }
+            }
+            // Check if cursor is on the record type name (starts at expr span start).
+            let name_end = span.start + name.len();
+            if offset >= span.start && offset <= name_end {
+                return Some((name.clone(), Span { start: span.start, end: name_end }, None));
             }
             None
         }
@@ -481,8 +504,10 @@ pub fn type_at_name(
     if let Some(id) = node_id
         && let Some(ty_str) = result.type_at_node(id)
     {
-        // Graft annotation labels onto the resolved type if available
-        if let Some(labels) = annotation_labels(program, name) {
+        // Graft labels onto the resolved type if available
+        if let Some(labels) = annotation_labels(program, name)
+            .or_else(|| constructor_labels(program, name))
+        {
             return Some(labeled_type(&labels, &ty_str));
         }
         return Some(ty_str);
@@ -507,7 +532,239 @@ pub fn type_at_name(
 
     // Check constructors
     if let Some(scheme) = result.constructors.get(name) {
-        return Some(scheme.display_with_constraints(&result.sub));
+        let type_str = scheme.display_with_constraints(&result.sub);
+        if let Some(labels) = constructor_labels(program, name) {
+            return Some(labeled_type(&labels, &type_str));
+        }
+        return Some(type_str);
+    }
+
+    None
+}
+
+/// Get constructor parameter labels from a TypeDef in the AST.
+/// Returns None if the constructor has no labeled fields.
+fn constructor_labels(program: &[Decl], constructor_name: &str) -> Option<Vec<String>> {
+    for decl in program {
+        if let Decl::TypeDef { variants, .. } = decl {
+            for variant in variants {
+                if variant.name == constructor_name && !variant.fields.is_empty() {
+                    let labels: Vec<String> = variant
+                        .fields
+                        .iter()
+                        .map(|(label, _)| label.as_deref().unwrap_or("_").to_string())
+                        .collect();
+                    if labels.iter().any(|l| l != "_") {
+                        return Some(labels);
+                    }
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Format a type/record/effect/trait definition summary for hover.
+/// Returns None if the name doesn't match any definition.
+pub fn type_definition_summary(
+    result: &CheckResult,
+    name: &str,
+    program: &[Decl],
+) -> Option<String> {
+    // Check AST declarations for the definition
+    for decl in program {
+        match decl {
+            Decl::TypeDef {
+                name: def_name,
+                type_params,
+                variants,
+                ..
+            } if def_name == name => {
+                let params = if type_params.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", type_params.join(" "))
+                };
+                let mut lines = vec![format!("type {}{} {{", name, params)];
+                for variant in variants {
+                    if variant.fields.is_empty() {
+                        lines.push(format!("  {}", variant.name));
+                    } else {
+                        let fields: Vec<String> = variant
+                            .fields
+                            .iter()
+                            .map(|(label, ty)| {
+                                if let Some(l) = label {
+                                    format!("{}: {}", l, format_type_expr(ty))
+                                } else {
+                                    format_type_expr(ty)
+                                }
+                            })
+                            .collect();
+                        lines.push(format!("  {}({})", variant.name, fields.join(", ")));
+                    }
+                }
+                lines.push("}".to_string());
+                return Some(lines.join("\n"));
+            }
+            Decl::RecordDef {
+                name: def_name,
+                type_params,
+                fields,
+                ..
+            } if def_name == name => {
+                let params = if type_params.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", type_params.join(" "))
+                };
+                let field_strs: Vec<String> = fields
+                    .iter()
+                    .map(|(fname, ty)| format!("  {}: {}", fname, format_type_expr(ty)))
+                    .collect();
+                return Some(format!(
+                    "record {}{} {{\n{}\n}}",
+                    name,
+                    params,
+                    field_strs.join(",\n")
+                ));
+            }
+            Decl::EffectDef {
+                name: def_name,
+                type_params,
+                operations,
+                ..
+            } if def_name == name => {
+                let params = if type_params.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", type_params.join(" "))
+                };
+                let ops: Vec<String> = operations
+                    .iter()
+                    .map(|op| {
+                        let op_params: Vec<String> = op
+                            .params
+                            .iter()
+                            .map(|(label, ty)| {
+                                if label.starts_with('_') {
+                                    format_type_expr(ty)
+                                } else {
+                                    format!("({}: {})", label, format_type_expr(ty))
+                                }
+                            })
+                            .collect();
+                        if op_params.is_empty() {
+                            format!("  {} : {}", op.name, format_type_expr(&op.return_type))
+                        } else {
+                            format!(
+                                "  {} : {} -> {}",
+                                op.name,
+                                op_params.join(" -> "),
+                                format_type_expr(&op.return_type)
+                            )
+                        }
+                    })
+                    .collect();
+                return Some(format!("effect {}{} {{\n{}\n}}", name, params, ops.join("\n")));
+            }
+            Decl::TraitDef {
+                name: def_name,
+                type_param,
+                supertraits,
+                methods,
+                ..
+            } if def_name == name => {
+                let supers = if supertraits.is_empty() {
+                    String::new()
+                } else {
+                    format!(" where {{{}}}", supertraits.join(", "))
+                };
+                let method_strs: Vec<String> = methods
+                    .iter()
+                    .map(|m| {
+                        let params: Vec<String> = m
+                            .params
+                            .iter()
+                            .map(|(label, ty)| {
+                                if label.starts_with('_') {
+                                    format_type_expr(ty)
+                                } else {
+                                    format!("({}: {})", label, format_type_expr(ty))
+                                }
+                            })
+                            .collect();
+                        if params.is_empty() {
+                            format!("  {} : {}", m.name, format_type_expr(&m.return_type))
+                        } else {
+                            format!(
+                                "  {} : {} -> {}",
+                                m.name,
+                                params.join(" -> "),
+                                format_type_expr(&m.return_type)
+                            )
+                        }
+                    })
+                    .collect();
+                return Some(format!(
+                    "trait {} {}{} {{\n{}\n}}",
+                    name,
+                    type_param,
+                    supers,
+                    method_strs.join("\n")
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    // Check imported types via CheckResult
+    if let Some(info) = result.records.get(name) {
+        let params = if info.type_params.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", info.type_params.len())
+        };
+        let field_strs: Vec<String> = info
+            .fields
+            .iter()
+            .map(|(fname, ty)| format!("  {}: {}", fname, result.sub.apply(ty)))
+            .collect();
+        return Some(format!(
+            "record {}{} {{\n{}\n}}",
+            name,
+            params,
+            field_strs.join(",\n")
+        ));
+    }
+
+    if let Some(info) = result.effects.get(name) {
+        let ops: Vec<String> = info
+            .ops
+            .iter()
+            .map(|op| {
+                let params: Vec<String> = op
+                    .params
+                    .iter()
+                    .map(|(label, ty)| {
+                        let resolved = result.sub.apply(ty);
+                        if label.starts_with('_') {
+                            format!("{}", resolved)
+                        } else {
+                            format!("({}: {})", label, resolved)
+                        }
+                    })
+                    .collect();
+                let ret = result.sub.apply(&op.return_type);
+                if params.is_empty() {
+                    format!("  {} : {}", op.name, ret)
+                } else {
+                    format!("  {} : {} -> {}", op.name, params.join(" -> "), ret)
+                }
+            })
+            .collect();
+        return Some(format!("effect {} {{\n{}\n}}", name, ops.join("\n")));
     }
 
     None

@@ -267,19 +267,36 @@ impl LanguageServer for Backend {
             }
         }
 
-        let Some(type_str) =
-            hover::type_at_name(tc_result, &name, Some(&span), node_id.as_ref(), program)
-        else {
-            return Ok(None);
-        };
+        // Type/record/effect/trait definition summary.
+        // Check this before type_at_name for uppercase names in type position (no node_id),
+        // since record names also exist as constructors and type_at_name would show the
+        // constructor signature instead of the definition.
+        if node_id.is_none()
+            && name.starts_with(|c: char| c.is_uppercase())
+            && let Some(summary) = hover::type_definition_summary(tc_result, &name, program)
+        {
+            return Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("```dylang\n{}\n```", summary),
+                }),
+                range: None,
+            }));
+        }
 
-        Ok(Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: format!("```dylang\n{}: {}\n```", name, type_str),
-            }),
-            range: None,
-        }))
+        if let Some(type_str) =
+            hover::type_at_name(tc_result, &name, Some(&span), node_id.as_ref(), program)
+        {
+            return Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("```dylang\n{}: {}\n```", name, type_str),
+                }),
+                range: None,
+            }));
+        }
+
+        Ok(None)
     }
 
     async fn goto_definition(
