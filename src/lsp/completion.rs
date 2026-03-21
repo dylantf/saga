@@ -84,16 +84,7 @@ fn resolve_record_fields(
     }
 
     // 2. Check per-span types (local let bindings, pattern bindings, params).
-    eprintln!("[resolve] looking for receiver={:?} in {} type_at_span entries, source_len={}", receiver, result.type_at_span.len(), source.len());
     for (span, ty) in &result.type_at_span {
-        if span.end <= source.len() {
-            let text = &source[span.start..span.end];
-            if text.contains(receiver) || receiver.contains(text.trim()) {
-                eprintln!("[resolve] near-match span={:?} text={:?} ty={:?}", span, text, ty);
-            }
-        } else {
-            eprintln!("[resolve] span {:?} OUT OF BOUNDS (source_len={})", span, source.len());
-        }
         if span.end <= source.len() && &source[span.start..span.end] == receiver {
             let resolved = result.sub.apply(ty);
             if let Some(fields) = extract_record_fields(result, &resolved) {
@@ -187,24 +178,40 @@ pub fn extract_record_construction_context(
     let prefix = extract_prefix(source, offset);
     let cursor_before_prefix = offset - prefix.len();
 
-    // We'll iteratively scan backwards through nested `fieldname: {` layers,
+    // Iteratively scan backwards through nested `fieldname: {` layers,
     // collecting the field path until we find a named record (uppercase ident before `{`).
     let mut field_path: Vec<String> = Vec::new();
     let mut search_from = cursor_before_prefix;
     let mut innermost_brace = 0;
 
     loop {
-        // Scan backwards from search_from, tracking brace depth, to find the unmatched `{`.
         let brace_pos = find_unmatched_open_brace(source, search_from)?;
 
         if field_path.is_empty() {
             innermost_brace = brace_pos;
         }
 
-        // Check what precedes the `{`: skip whitespace, then extract an identifier.
+        // Check what precedes the `{`: skip whitespace, then look for either
+        // an uppercase ident (named record) or `fieldname:` (anonymous nested record).
         let before_brace = source[..brace_pos].trim_end();
         if before_brace.is_empty() {
             return None;
+        }
+
+        // Check if the thing right before `{` is `:` (i.e., `fieldname: {`).
+        if let Some(before_colon) = before_brace.strip_suffix(':') {
+            let before_colon = before_colon.trim_end();
+            let field_start = before_colon
+                .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let field_name = &before_colon[field_start..];
+            if field_name.is_empty() {
+                return None;
+            }
+            field_path.push(field_name.to_string());
+            search_from = field_start;
+            continue;
         }
 
         // Extract the identifier just before the `{`.
@@ -219,9 +226,7 @@ pub fn extract_record_construction_context(
             return None;
         }
 
-        let first_char = ident.chars().next()?;
-        if first_char.is_uppercase() {
-            // Named record: look up in result.records and walk the field path.
+        if ident.starts_with(|c: char| c.is_uppercase()) {
             let info = result.records.get(ident)?;
             let mut fields = info.fields.clone();
 
@@ -238,21 +243,7 @@ pub fn extract_record_construction_context(
             });
         }
 
-        // Check if the ident is preceded by nothing useful or if it's a `fieldname:` pattern.
-        // For `address: {`, the ident is "address" and there should be a `:` before the `{`.
-        // Actually, ident is what's right before `{`. We need to check if the pattern is `ident: {`.
-        // The `{` is at brace_pos. Before it (trimmed) ends with ident. Before ident, check for `:`.
-        let before_ident = before_brace[..ident_start].trim_end();
-        if before_ident.ends_with(':') {
-            // This is `fieldname: {` — an anonymous nested record value.
-            field_path.push(ident.to_string());
-            // Continue scanning from before the colon.
-            let colon_pos = before_ident.len() - 1;
-            search_from = colon_pos;
-            continue;
-        }
-
-        // Neither uppercase ident nor `fieldname:` pattern — not a record construction.
+        // Neither uppercase ident nor `fieldname:` pattern.
         return None;
     }
 }

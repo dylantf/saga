@@ -414,37 +414,30 @@ impl LanguageServer for Backend {
         let offset = li.line_col_to_offset(position.line as usize, position.character as usize, source);
         let prefix = completion::extract_prefix(source, offset);
 
-        eprintln!("[completion] offset={} prefix={:?}", offset, prefix);
-
         // Dot-completion: record field access, supports chaining (e.g. `a.b.c.`).
         // Type resolution uses the snapshot's source (where spans are valid).
-        if let Some(chain) = completion::extract_dot_chain(source, offset) {
-            eprintln!("[completion] chain={:?}", chain);
-            if let Some(items) = completion::collect_field_completions(
+        if let Some(chain) = completion::extract_dot_chain(source, offset)
+            && let Some(items) = completion::collect_field_completions(
                 &snap.tc_result,
                 &chain,
                 prefix,
                 &snap.source,
-            ) {
-                return Ok(Some(CompletionResponse::Array(items)));
-            }
-            eprintln!("[completion] collect_field_completions returned None");
-        } else {
-            eprintln!("[completion] no dot chain, around cursor: {:?}", &source[offset.saturating_sub(10)..(offset+10).min(source.len())]);
+            )
+        {
+            return Ok(Some(CompletionResponse::Array(items)));
         }
 
         // Record construction completion: `House { a|` or `House { address: { n|`
-        if let Some(ctx) = completion::extract_record_construction_context(&snap.tc_result, source, offset) {
-            eprintln!("[completion] record construction context, {} fields available", ctx.fields.len());
-            if let Some(items) = completion::collect_record_construction_completions(
+        if let Some(ctx) = completion::extract_record_construction_context(&snap.tc_result, source, offset)
+            && let Some(items) = completion::collect_record_construction_completions(
                 &snap.tc_result,
                 &ctx,
                 prefix,
                 source,
                 offset,
-            ) {
-                return Ok(Some(CompletionResponse::Array(items)));
-            }
+            )
+        {
+            return Ok(Some(CompletionResponse::Array(items)));
         }
 
         // General completion.

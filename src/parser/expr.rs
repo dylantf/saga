@@ -3,6 +3,45 @@ use crate::ast::*;
 use crate::token::{Span, Token};
 
 impl Parser {
+    /// Parse record fields: `field: expr, field2: expr2, ...`
+    /// Handles recovery for incomplete fields (missing `:` or value) so that
+    /// the rest of the file can still be parsed for LSP features.
+    fn parse_record_fields(&mut self) -> Result<Vec<(String, Span, Expr)>, ParseError> {
+        let mut fields = Vec::new();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            // Recovery: if next token isn't an ident, skip it and try again.
+            if !matches!(self.peek(), Token::Ident(_)) {
+                self.advance();
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                }
+                self.skip_terminators();
+                continue;
+            }
+            let field_name = self.expect_ident()?;
+            let field_span = self.tokens[self.pos - 1].span;
+            if matches!(self.peek(), Token::Colon) {
+                self.advance(); // consume ':'
+                let value = self.parse_expr(0)?;
+                fields.push((field_name, field_span, value));
+            } else {
+                // Recovery: incomplete field (e.g. `House { a }` while typing).
+                // Treat as a punned field `name: name` so parsing can continue.
+                let value = Expr {
+                    id: self.next_id(),
+                    span: field_span,
+                    kind: ExprKind::Var { name: field_name.clone() },
+                };
+                fields.push((field_name, field_span, value));
+            }
+            if matches!(self.peek(), Token::Comma) {
+                self.advance();
+            }
+            self.skip_terminators();
+        }
+        Ok(fields)
+    }
+
     /// Pratt parser: binary operators with precedence.
     /// Precedence levels:
     ///     1 = piping |>
@@ -211,18 +250,7 @@ impl Parser {
                 {
                     self.advance(); // consume '{'
                     self.skip_terminators();
-                    let mut fields = Vec::new();
-                    while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                        let field_name = self.expect_ident()?;
-                        let field_span = self.tokens[self.pos - 1].span;
-                        self.expect(Token::Colon)?;
-                        let value = self.parse_expr(0)?;
-                        fields.push((field_name, field_span, value));
-                        if matches!(self.peek(), Token::Comma) {
-                            self.advance();
-                        }
-                        self.skip_terminators();
-                    }
+                    let fields = self.parse_record_fields()?;
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
                     let span = qspan.to(end);
@@ -490,18 +518,7 @@ impl Parser {
                     // Record create: User { name: "Dylan", age: 30 }
                     self.advance(); // consume '{'
                     self.skip_terminators();
-                    let mut fields = Vec::new();
-                    while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                        let field_name = self.expect_ident()?;
-                        let field_span = self.tokens[self.pos - 1].span;
-                        self.expect(Token::Colon)?;
-                        let value = self.parse_expr(0)?;
-                        fields.push((field_name, field_span, value));
-                        if matches!(self.peek(), Token::Comma) {
-                            self.advance();
-                        }
-                        self.skip_terminators();
-                    }
+                    let fields = self.parse_record_fields()?;
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
                     Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::RecordCreate {
@@ -658,18 +675,7 @@ impl Parser {
                     {
                         self.advance(); // consume '|'
                         self.skip_terminators();
-                        let mut fields = Vec::new();
-                        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                            let field_name = self.expect_ident()?;
-                            let field_span = self.tokens[self.pos - 1].span;
-                            self.expect(Token::Colon)?;
-                            let value = self.parse_expr(0)?;
-                            fields.push((field_name, field_span, value));
-                            if matches!(self.peek(), Token::Comma) {
-                                self.advance();
-                            }
-                            self.skip_terminators();
-                        }
+                        let fields = self.parse_record_fields()?;
                         let end = self.tokens[self.pos].span;
                         self.expect(Token::RBrace)?;
                         return Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::RecordUpdate {
@@ -688,18 +694,7 @@ impl Parser {
                     && self.pos + 1 < self.tokens.len()
                     && matches!(self.tokens[self.pos + 1].token, Token::Colon)
                 {
-                    let mut fields = Vec::new();
-                    while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                        let field_name = self.expect_ident()?;
-                        let field_span = self.tokens[self.pos - 1].span;
-                        self.expect(Token::Colon)?;
-                        let value = self.parse_expr(0)?;
-                        fields.push((field_name, field_span, value));
-                        if matches!(self.peek(), Token::Comma) {
-                            self.advance();
-                        }
-                        self.skip_terminators();
-                    }
+                    let fields = self.parse_record_fields()?;
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
                     return Ok(Expr {
