@@ -1188,17 +1188,6 @@ impl Checker {
             }
         }
 
-        // Build display-only mapping: for each handler type var, create a fresh var
-        // that is never unified. These survive sub.apply() and get prettified to a, b, ...
-        // so LSP hover shows polymorphic types instead of concrete usage-site types.
-        let mut display_remap: std::collections::HashMap<u32, Type> =
-            std::collections::HashMap::new();
-        for concrete_ty in handler_type_mapping.values() {
-            if let Type::Var(id) = concrete_ty {
-                display_remap.insert(*id, self.fresh_var());
-            }
-        }
-
         // Fresh type variable for the handler's answer type.
         // Arms unify against this; the return clause (if any) constrains it later.
         let answer_ty = self.fresh_var();
@@ -1293,10 +1282,7 @@ impl Checker {
                     param_id,
                 );
                 self.lsp.node_spans.insert(param_id, *param_span);
-                // Store display-only type (with unresolvable vars) so hover
-                // shows the handler's polymorphic signature, not usage-site types.
-                let display_ty = self.replace_vars(&param_ty, &display_remap);
-                self.lsp.type_at_span.insert(*param_span, display_ty);
+                self.lsp.type_at_span.insert(*param_span, param_ty);
                 self.lsp
                     .definitions
                     .push((param_id, param_name.clone(), *param_span));
@@ -1347,10 +1333,7 @@ impl Checker {
                     param_id,
                 );
                 self.lsp.node_spans.insert(param_id, *param_span);
-                // Display-only fresh var for the return clause param, so hover
-                // shows a polymorphic type instead of the concrete usage-site type.
-                let display_ty = self.fresh_var();
-                self.lsp.type_at_span.insert(*param_span, display_ty);
+                self.lsp.type_at_span.insert(*param_span, param_ty);
                 self.lsp.definitions.push((param_id, param_name.clone(), *param_span));
             }
             let ret_ty = self.infer_expr(&rc.body)?;

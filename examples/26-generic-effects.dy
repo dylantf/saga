@@ -12,7 +12,7 @@ fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail String}
 safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 
-handler to_result for Fail String {
+handler to_result for Fail a {
   fail msg = Err msg
   return value = Ok value
 }
