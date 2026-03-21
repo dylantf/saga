@@ -1188,6 +1188,17 @@ impl Checker {
             }
         }
 
+        // Build display-only mapping: for each handler type var, create a fresh var
+        // that is never unified. These survive sub.apply() and get prettified to a, b, ...
+        // so LSP hover shows polymorphic types instead of concrete usage-site types.
+        let mut display_remap: std::collections::HashMap<u32, Type> =
+            std::collections::HashMap::new();
+        for concrete_ty in handler_type_mapping.values() {
+            if let Type::Var(id) = concrete_ty {
+                display_remap.insert(*id, self.fresh_var());
+            }
+        }
+
         // Fresh type variable for the handler's answer type.
         // Arms unify against this; the return clause (if any) constrains it later.
         let answer_ty = self.fresh_var();
@@ -1277,11 +1288,15 @@ impl Checker {
                     Scheme {
                         forall: vec![],
                         constraints: vec![],
-                        ty: param_ty,
+                        ty: param_ty.clone(),
                     },
                     param_id,
                 );
                 self.lsp.node_spans.insert(param_id, *param_span);
+                // Store display-only type (with unresolvable vars) so hover
+                // shows the handler's polymorphic signature, not usage-site types.
+                let display_ty = self.replace_vars(&param_ty, &display_remap);
+                self.lsp.type_at_span.insert(*param_span, display_ty);
                 self.lsp
                     .definitions
                     .push((param_id, param_name.clone(), *param_span));
@@ -1320,15 +1335,23 @@ impl Checker {
                 Type::Var(id) => *id,
                 _ => unreachable!(),
             };
-            if let Some((param_name, _)) = rc.params.first() {
-                self.env.insert(
+            if let Some((param_name, param_span)) = rc.params.first() {
+                let param_id = crate::ast::NodeId::fresh();
+                self.env.insert_with_def(
                     param_name.clone(),
                     Scheme {
                         forall: vec![],
                         constraints: vec![],
-                        ty: param_ty,
+                        ty: param_ty.clone(),
                     },
+                    param_id,
                 );
+                self.lsp.node_spans.insert(param_id, *param_span);
+                // Display-only fresh var for the return clause param, so hover
+                // shows a polymorphic type instead of the concrete usage-site type.
+                let display_ty = self.fresh_var();
+                self.lsp.type_at_span.insert(*param_span, display_ty);
+                self.lsp.definitions.push((param_id, param_name.clone(), *param_span));
             }
             let ret_ty = self.infer_expr(&rc.body)?;
             // Constrain answer_ty to match the return clause's body type
@@ -1337,15 +1360,16 @@ impl Checker {
             }
             self.resume_type = saved_resume;
             self.env = saved_env;
-            Some((param_var_id, ret_ty))
+            // Freeze by applying sub: resolves internal handler vars but leaves
+            // polymorphic vars (handler type params, answer type) as free Var nodes.
+            let frozen_param = self.sub.apply(&Type::Var(param_var_id));
+            let frozen_ret = self.sub.apply(&ret_ty);
+            Some((frozen_param, frozen_ret))
         } else {
             // No return clause: the handler doesn't transform the result type.
-            // Store answer_ty so the use site unifies arm body types with expr_ty.
-            let param_var_id = match &answer_ty {
-                Type::Var(id) => *id,
-                _ => unreachable!(), // answer_ty is created as fresh_var()
-            };
-            Some((param_var_id, answer_ty.clone()))
+            // Freeze answer_ty so usage sites get a template to instantiate.
+            let frozen = self.sub.apply(&answer_ty);
+            Some((frozen.clone(), frozen))
         };
 
         // Check effect requirements against declared needs
@@ -1391,11 +1415,22 @@ impl Checker {
             }
         }
 
+        // Collect free vars from frozen return type as forall (polymorphic per usage).
+        let forall = if let Some((ref param_ty, ref ret_ty)) = handler_return_type {
+            let mut vars = Vec::new();
+            super::collect_free_vars(param_ty, &mut vars);
+            super::collect_free_vars(ret_ty, &mut vars);
+            vars
+        } else {
+            vec![]
+        };
+
         self.handlers.insert(
             name.into(),
             HandlerInfo {
                 effects: effect_names.iter().map(|e| e.name.clone()).collect(),
                 return_type: handler_return_type,
+                forall,
                 arm_spans,
                 source_module: self.current_module.clone(),
             },

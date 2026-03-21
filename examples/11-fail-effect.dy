@@ -2,8 +2,8 @@ effect Fail a {
   fun fail : (msg: String) -> a
 }
 
-handler log_failure for Fail Unit {
-  fail msg = print $"Error: {msg}"
+handler abort_failure for Fail Never {
+  fail msg = panic $"Error: {msg}"
 }
 
 handler to_result for Fail a {
@@ -20,6 +20,10 @@ fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail Int}
 safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 
+fun safe_str : String -> String needs {Fail String}
+safe_str "" = fail! "String was too short, here's a default one"
+safe_str str = str
+
 main () = {
   let a = (safe_div 10 2) with to_result
   println (debug a)
@@ -28,4 +32,7 @@ main () = {
     fail _ = resume 0
   }
   println (debug b)
+
+  let str = safe_str "Hello" with to_result
+  println (debug str)
 }

@@ -122,11 +122,23 @@ impl Checker {
                         format!("undefined handler: {}", name),
                     ));
                 }
-                if let Some((param_var_id, ret_ty)) =
-                    self.handlers.get(name).and_then(|h| h.return_type.clone())
-                {
-                    self.unify_at(&Type::Var(param_var_id), &expr_ty, with_span)?;
-                    Ok(self.sub.apply(&ret_ty))
+                if let Some(handler_info) = self.handlers.get(name).cloned() {
+                    if let Some((param_ty, ret_ty)) = &handler_info.return_type {
+                        // Instantiate fresh type vars for each usage site so
+                        // polymorphic handlers (e.g. `handler h for Fail a`)
+                        // don't leak type bindings between different uses.
+                        let mapping: std::collections::HashMap<u32, Type> = handler_info
+                            .forall
+                            .iter()
+                            .map(|&id| (id, self.fresh_var()))
+                            .collect();
+                        let fresh_param = self.replace_vars(param_ty, &mapping);
+                        let fresh_ret = self.replace_vars(ret_ty, &mapping);
+                        self.unify_at(&fresh_param, &expr_ty, with_span)?;
+                        Ok(self.sub.apply(&fresh_ret))
+                    } else {
+                        Ok(expr_ty)
+                    }
                 } else {
                     Ok(expr_ty)
                 }
@@ -155,15 +167,20 @@ impl Checker {
                 // since arms need it for resume return type and body unification.
                 let answer_ty = if let Some(ret_arm) = return_clause {
                     let saved_env = self.env.clone();
-                    if let Some((param_name, _)) = ret_arm.params.first() {
-                        self.env.insert(
+                    if let Some((param_name, param_span)) = ret_arm.params.first() {
+                        let param_id = crate::ast::NodeId::fresh();
+                        self.env.insert_with_def(
                             param_name.clone(),
                             Scheme {
                                 forall: vec![],
                                 constraints: vec![],
                                 ty: expr_ty.clone(),
                             },
+                            param_id,
                         );
+                        self.lsp.node_spans.insert(param_id, *param_span);
+                        self.lsp.type_at_span.insert(*param_span, expr_ty.clone());
+                        self.lsp.definitions.push((param_id, param_name.clone(), *param_span));
                     }
                     let ret_ty = self.infer_expr(&ret_arm.body)?;
                     self.env = saved_env;
@@ -182,32 +199,42 @@ impl Checker {
                     if let Some(ref sig) = op_sig {
                         self.resume_type = Some(sig.return_type.clone());
                         self.resume_return_type = Some(answer_ty.clone());
-                        for (i, (param_name, _)) in arm.params.iter().enumerate() {
+                        for (i, (param_name, param_span)) in arm.params.iter().enumerate() {
                             let param_ty = if i < sig.params.len() {
                                 sig.params[i].1.clone()
                             } else {
                                 self.fresh_var()
                             };
-                            self.env.insert(
+                            let param_id = crate::ast::NodeId::fresh();
+                            self.env.insert_with_def(
                                 param_name.clone(),
                                 Scheme {
                                     forall: vec![],
                                     constraints: vec![],
-                                    ty: param_ty,
+                                    ty: param_ty.clone(),
                                 },
+                                param_id,
                             );
+                            self.lsp.node_spans.insert(param_id, *param_span);
+                            self.lsp.type_at_span.insert(*param_span, param_ty);
+                            self.lsp.definitions.push((param_id, param_name.clone(), *param_span));
                         }
                     } else {
-                        for (param_name, _) in &arm.params {
+                        for (param_name, param_span) in &arm.params {
                             let param_ty = self.fresh_var();
-                            self.env.insert(
+                            let param_id = crate::ast::NodeId::fresh();
+                            self.env.insert_with_def(
                                 param_name.clone(),
                                 Scheme {
                                     forall: vec![],
                                     constraints: vec![],
-                                    ty: param_ty,
+                                    ty: param_ty.clone(),
                                 },
+                                param_id,
                             );
+                            self.lsp.node_spans.insert(param_id, *param_span);
+                            self.lsp.type_at_span.insert(*param_span, param_ty);
+                            self.lsp.definitions.push((param_id, param_name.clone(), *param_span));
                         }
                     }
 

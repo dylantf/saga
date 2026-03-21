@@ -144,15 +144,26 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                             None,
                         ));
                     }
+                    // Check handler arm parameters
+                    for (param_name, param_span) in &arm.params {
+                        if contains_ident(param_span, offset) {
+                            return Some((param_name.clone(), *param_span, None));
+                        }
+                    }
                 }
                 if let Some(r) = find_in_expr(&arm.body, offset) {
                     return Some(r);
                 }
             }
-            if let Some(rc) = return_clause
-                && let Some(r) = find_in_expr(&rc.body, offset)
-            {
-                return Some(r);
+            if let Some(rc) = return_clause {
+                for (param_name, param_span) in &rc.params {
+                    if contains_ident(param_span, offset) {
+                        return Some((param_name.clone(), *param_span, None));
+                    }
+                }
+                if let Some(r) = find_in_expr(&rc.body, offset) {
+                    return Some(r);
+                }
             }
             find_in_effect_refs(effects, offset).or_else(|| {
                 contains_ident(name_span, offset).then(|| (name.clone(), *name_span, None))
@@ -356,7 +367,23 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
                             if contains(&arm.body.span, offset) {
                                 return find_in_expr(&arm.body, offset);
                             }
-                            return Some((arm.op_name.clone(), arm.span, None));
+                            // Check inline handler arm parameters
+                            for (param_name, param_span) in &arm.params {
+                                if contains_ident(param_span, offset) {
+                                    return Some((param_name.clone(), *param_span, None));
+                                }
+                            }
+                            let op_name_end = arm.span.start + arm.op_name.len();
+                            if offset >= arm.span.start && offset <= op_name_end {
+                                return Some((
+                                    arm.op_name.clone(),
+                                    Span {
+                                        start: arm.span.start,
+                                        end: op_name_end,
+                                    },
+                                    None,
+                                ));
+                            }
                         }
                     }
                 }

@@ -483,8 +483,11 @@ pub struct EffectDefInfo {
 pub struct HandlerInfo {
     /// Which effects this handler handles
     pub effects: Vec<std::string::String>,
-    /// Return clause: (param_var_id, body_type). Used to compute the `with` expression type.
-    pub return_type: Option<(u32, Type)>,
+    /// Frozen return clause: (param_type, body_type). Sub-applied at register time so
+    /// internal handler vars are resolved but forall vars remain free.
+    pub return_type: Option<(Type, Type)>,
+    /// Type vars to instantiate fresh at each usage site (polymorphic handler params).
+    pub forall: Vec<u32>,
     /// op_name -> span of the handler arm (for LSP go-to-def and with-stack)
     pub arm_spans: HashMap<String, Span>,
     /// Which module this handler is defined in (None = main file).
