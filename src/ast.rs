@@ -136,7 +136,7 @@ pub enum Decl {
         name: String,
         name_span: Span,
         type_param: String,
-        supertraits: Vec<String>,
+        supertraits: Vec<(String, Span)>,
         methods: Vec<TraitMethod>,
         span: Span,
     },
@@ -146,11 +146,13 @@ pub enum Decl {
     ImplDef {
         id: NodeId,
         trait_name: String,
+        trait_name_span: Span,
         target_type: String,
+        target_type_span: Span,
         type_params: Vec<String>,
         where_clause: Vec<TraitBound>,
         needs: Vec<EffectRef>,
-        methods: Vec<(String, Vec<Pat>, Expr)>,
+        methods: Vec<(String, Span, Vec<Pat>, Expr)>,
         span: Span,
     },
 
@@ -672,8 +674,8 @@ pub struct HandlerArm {
 pub struct TraitBound {
     /// The type variable being constrained (e.g. `a`)
     pub type_var: String,
-    /// The required traits (e.g. `["Show", "Eq"]`)
-    pub traits: Vec<String>,
+    /// The required traits with their spans (e.g. `[("Show", span), ("Eq", span)]`)
+    pub traits: Vec<(String, Span)>,
 }
 
 /// The handler in a `with` expression

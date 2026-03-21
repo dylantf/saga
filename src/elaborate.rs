@@ -161,7 +161,7 @@ impl Elaborator {
                     if !where_clause.is_empty() {
                         let mut dict_params = Vec::new();
                         for bound in where_clause {
-                            for trait_name in &bound.traits {
+                            for (trait_name, _) in &bound.traits {
                                 if trait_name != "Num" && trait_name != "Eq" {
                                     dict_params
                                         .push((trait_name.clone(), bound.type_var.clone()));
@@ -205,7 +205,7 @@ impl Elaborator {
                                     .get(bound.type_var.as_str())
                                     .copied()
                                     .unwrap_or(0);
-                                bound.traits.iter().map(move |t| (t.clone(), idx))
+                                bound.traits.iter().map(move |(t, _)| (t.clone(), idx))
                             })
                             .collect();
                         self.impl_dict_params
@@ -252,7 +252,7 @@ impl Elaborator {
                     // Build dict_params for conditional impls
                     let mut dict_params = Vec::new();
                     for bound in where_clause {
-                        for req_trait in &bound.traits {
+                        for (req_trait, _) in &bound.traits {
                             dict_params.push(format!("__dict_{}_{}", req_trait, bound.type_var));
                         }
                     }
@@ -262,7 +262,7 @@ impl Elaborator {
                     let saved_dict_params_by_var =
                         std::mem::take(&mut self.current_dict_params_by_var);
                     for bound in where_clause {
-                        for req_trait in &bound.traits {
+                        for (req_trait, _) in &bound.traits {
                             let param_name = format!("__dict_{}_{}", req_trait, bound.type_var);
                             self.current_dict_params
                                 .insert(req_trait.clone(), param_name.clone());
@@ -275,8 +275,8 @@ impl Elaborator {
                     let mut ordered_methods = Vec::new();
                     if let Some(ref info) = trait_info {
                         for (trait_method_name, _, _, _) in &info.methods {
-                            if let Some((_, params, body)) =
-                                methods.iter().find(|(n, _, _)| n == trait_method_name)
+                            if let Some((_, _, params, body)) =
+                                methods.iter().find(|(n, _, _, _)| n == trait_method_name)
                             {
                                 let elab_body = self.elaborate_expr(body);
                                 ordered_methods.push(Expr::synth(

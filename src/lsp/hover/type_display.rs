@@ -166,7 +166,8 @@ pub fn type_definition_summary(
                 let supers = if supertraits.is_empty() {
                     String::new()
                 } else {
-                    format!(" where {{{}}}", supertraits.join(", "))
+                    let names: Vec<&str> = supertraits.iter().map(|(n, _)| n.as_str()).collect();
+                    format!(" where {{{}}}", names.join(", "))
                 };
                 let method_strs: Vec<String> = methods
                     .iter()
@@ -316,7 +317,7 @@ fn format_type_params(params: &[String]) -> String {
 }
 
 /// Format an operation/method signature from AST types: `name : params -> return`.
-fn format_signature(name: &str, params: &[(String, TypeExpr)], return_type: &TypeExpr) -> String {
+pub(crate) fn format_signature(name: &str, params: &[(String, TypeExpr)], return_type: &TypeExpr) -> String {
     let param_strs: Vec<String> = params
         .iter()
         .map(|(label, ty)| format_labeled_param(label, &format_type_expr(ty)))

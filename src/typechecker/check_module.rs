@@ -961,7 +961,7 @@ fn collect_codegen_info(
                     .iter()
                     .flat_map(|bound| {
                         let idx = var_to_idx.get(bound.type_var.as_str()).copied().unwrap_or(0);
-                        bound.traits.iter().map(move |t| (t.clone(), idx))
+                        bound.traits.iter().map(move |(t, _)| (t.clone(), idx))
                     })
                     .collect();
                 trait_impl_dicts.push(TraitImplDict {

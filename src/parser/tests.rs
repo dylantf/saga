@@ -1960,7 +1960,8 @@ fn fun_annotation_with_where_clause() {
         Decl::FunAnnotation { where_clause, .. } => {
             assert_eq!(where_clause.len(), 1);
             assert_eq!(where_clause[0].type_var, "a");
-            assert_eq!(where_clause[0].traits, vec!["Show"]);
+            let trait_names: Vec<&str> = where_clause[0].traits.iter().map(|(t, _)| t.as_str()).collect();
+            assert_eq!(trait_names, vec!["Show"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
     }
@@ -1974,9 +1975,11 @@ fn fun_annotation_where_multiple_bounds() {
         Decl::FunAnnotation { where_clause, .. } => {
             assert_eq!(where_clause.len(), 2);
             assert_eq!(where_clause[0].type_var, "a");
-            assert_eq!(where_clause[0].traits, vec!["Show", "Eq"]);
+            let trait_names_0: Vec<&str> = where_clause[0].traits.iter().map(|(t, _)| t.as_str()).collect();
+            assert_eq!(trait_names_0, vec!["Show", "Eq"]);
             assert_eq!(where_clause[1].type_var, "b");
-            assert_eq!(where_clause[1].traits, vec!["Ord"]);
+            let trait_names_1: Vec<&str> = where_clause[1].traits.iter().map(|(t, _)| t.as_str()).collect();
+            assert_eq!(trait_names_1, vec!["Ord"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
     }
@@ -2039,7 +2042,8 @@ fn trait_def_with_supertraits() {
         } => {
             assert_eq!(name, "Ord");
             assert_eq!(type_param, "a");
-            assert_eq!(supertraits, &["Eq"]);
+            let st_names: Vec<&str> = supertraits.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(st_names, &["Eq"]);
             assert_eq!(methods.len(), 1);
             assert_eq!(methods[0].name, "compare");
             assert_eq!(methods[0].params.len(), 2);
@@ -2065,7 +2069,7 @@ fn impl_def_simple() {
             assert_eq!(target_type, "User");
             assert_eq!(methods.len(), 1);
             assert_eq!(methods[0].0, "show");
-            assert_eq!(methods[0].1.len(), 1);
+            assert_eq!(methods[0].2.len(), 1);
         }
         _ => panic!("expected ImplDef, got {:?}", decls[0]),
     }
@@ -2735,7 +2739,8 @@ fn external_fun_with_where_clause() {
             assert_eq!(name, "do_thing");
             assert_eq!(where_clause.len(), 1);
             assert_eq!(where_clause[0].type_var, "a");
-            assert_eq!(where_clause[0].traits, vec!["Show"]);
+            let trait_names: Vec<&str> = where_clause[0].traits.iter().map(|(t, _)| t.as_str()).collect();
+            assert_eq!(trait_names, vec!["Show"]);
         }
         _ => panic!("expected ExternalFun"),
     }

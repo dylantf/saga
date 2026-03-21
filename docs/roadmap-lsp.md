@@ -54,6 +54,7 @@ lock-free hover/goto/completion.
 - [ ] Code actions -- add missing pattern arm
 - [x] Code actions -- add missing handler methods
 - [ ] Code actions -- add missing trait impl methods
+- [ ] Go-to-definition on trait method calls (jump to resolved impl based on argument type)
 - [ ] Rename symbol (local scope)
 - [ ] Rename symbol (cross-file)
 

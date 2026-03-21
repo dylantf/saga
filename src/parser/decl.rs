@@ -600,11 +600,15 @@ impl Parser {
                 // `a: Show + Eq` we ignore the type var since it must be the trait's param
                 self.expect_ident()?;
                 self.expect(Token::Colon)?;
-                supertraits.push(self.parse_upper_name()?);
+                let st_name = self.parse_upper_name()?;
+                let st_span = self.tokens[self.pos - 1].span;
+                supertraits.push((st_name, st_span));
 
                 while *self.peek() == Token::Plus {
                     self.advance();
-                    supertraits.push(self.parse_upper_name()?);
+                    let st_name = self.parse_upper_name()?;
+                    let st_span = self.tokens[self.pos - 1].span;
+                    supertraits.push((st_name, st_span));
                 }
             }
 
@@ -665,10 +669,14 @@ impl Parser {
             }
             let type_var = self.expect_ident()?;
             self.expect(Token::Colon)?;
-            let mut traits = vec![self.parse_upper_name()?];
+            let name = self.parse_upper_name()?;
+            let span = self.tokens[self.pos - 1].span;
+            let mut traits = vec![(name, span)];
             while *self.peek() == Token::Plus {
                 self.advance();
-                traits.push(self.parse_upper_name()?);
+                let name = self.parse_upper_name()?;
+                let span = self.tokens[self.pos - 1].span;
+                traits.push((name, span));
             }
             bounds.push(crate::ast::TraitBound { type_var, traits });
         }
@@ -681,8 +689,10 @@ impl Parser {
         self.advance(); // consume impl
 
         let trait_name = self.parse_upper_name()?;
+        let trait_name_span = self.tokens[self.pos - 1].span;
         self.expect(Token::For)?;
         let target_type = self.parse_upper_name()?;
+        let target_type_span = self.tokens[self.pos - 1].span;
 
         // Parse optional type params: `impl Show for Box a b`
         let mut type_params = Vec::new();
@@ -713,6 +723,7 @@ impl Parser {
         let mut methods = Vec::new();
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
             let name = self.expect_ident()?;
+            let name_span = self.tokens[self.pos - 1].span;
             let mut params = Vec::new();
             while !matches!(self.peek(), Token::Eq | Token::Eof) {
                 params.push(self.parse_pattern()?);
@@ -720,7 +731,7 @@ impl Parser {
 
             self.expect(Token::Eq)?;
             let body = self.parse_expr(0)?;
-            methods.push((name, params, body));
+            methods.push((name, name_span, params, body));
             self.skip_terminators();
         }
 
@@ -730,7 +741,9 @@ impl Parser {
         Ok(Decl::ImplDef {
             id: NodeId::fresh(),
             trait_name,
+            trait_name_span,
             target_type,
+            target_type_span,
             type_params,
             where_clause,
             needs,

@@ -67,7 +67,7 @@ impl Checker {
         &mut self,
         name: &str,
         type_param: &str,
-        supertraits: &[String],
+        supertraits: &[(String, crate::token::Span)],
         methods: &[ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
         let mut method_sigs = Vec::new();
@@ -120,11 +120,16 @@ impl Checker {
             );
         }
 
+        // Record supertrait references for find-references
+        for (st_name, st_span) in supertraits {
+            self.lsp.type_references.push((*st_span, st_name.clone()));
+        }
+
         self.trait_state.traits.insert(
             name.into(),
             super::TraitInfo {
                 type_param: type_param.into(),
-                supertraits: supertraits.to_vec(),
+                supertraits: supertraits.iter().map(|(n, _)| n.clone()).collect(),
                 methods: method_sigs,
             },
         );
@@ -140,7 +145,7 @@ impl Checker {
         type_params: &[String],
         where_clause: &[ast::TraitBound],
         needs: &[ast::EffectRef],
-        methods: &[(String, Vec<ast::Pat>, ast::Expr)],
+        methods: &[(String, Span, Vec<ast::Pat>, ast::Expr)],
         span: Span,
     ) -> Result<(), Diagnostic> {
         // Check the trait exists
@@ -149,7 +154,7 @@ impl Checker {
         })?;
 
         // Check all required methods are provided
-        let provided: Vec<&str> = methods.iter().map(|(n, _, _)| n.as_str()).collect();
+        let provided: Vec<&str> = methods.iter().map(|(n, _, _, _)| n.as_str()).collect();
         for (required_name, _, _, _) in &trait_info.methods {
             if !provided.contains(&required_name.as_str()) {
                 return Err(Diagnostic::error_at(
@@ -204,7 +209,8 @@ impl Checker {
                 {
                     self.trait_state.where_bound_var_names
                         .insert(*var_id, bound.type_var.clone());
-                    for trait_req in &bound.traits {
+                    for (trait_req, trait_span) in &bound.traits {
+                        self.lsp.type_references.push((*trait_span, trait_req.clone()));
                         self.trait_state.where_bounds
                             .entry(*var_id)
                             .or_default()
@@ -218,7 +224,7 @@ impl Checker {
         let declared_effects: std::collections::HashSet<String> =
             needs.iter().map(|e| e.name.clone()).collect();
 
-        for (method_name, params, body) in methods {
+        for (method_name, _method_span, params, body) in methods {
             let trait_method = trait_info
                 .methods
                 .iter()
@@ -327,7 +333,7 @@ impl Checker {
             let param_idx = type_params.iter().position(|p| p == &bound.type_var);
             match param_idx {
                 Some(idx) => {
-                    for trait_req in &bound.traits {
+                    for (trait_req, _) in &bound.traits {
                         param_constraints.push((trait_req.clone(), idx));
                     }
                 }

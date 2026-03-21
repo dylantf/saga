@@ -97,6 +97,56 @@ impl Backend {
     }
 }
 
+/// Find an effect op signature from the AST (preserves original type param names).
+fn find_effect_op_signature(program: &[dylang::ast::Decl], op_name: &str) -> Option<String> {
+    for decl in program {
+        if let dylang::ast::Decl::EffectDef { name: effect_name, operations, .. } = decl {
+            for op in operations {
+                if op.name == op_name {
+                    let sig = hover::format_signature(
+                        &op.name, &op.params, &op.return_type,
+                    );
+                    return Some(format!("{}.{}", effect_name, sig));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Find an effect op signature from CheckResult (for imported effects not in local AST).
+fn find_effect_op_signature_from_result(
+    tc_result: &dylang::typechecker::CheckResult,
+    op_name: &str,
+) -> Option<String> {
+    for (effect_name, info) in &tc_result.effects {
+        for op in &info.ops {
+            if op.name == op_name {
+                let params: Vec<String> = op
+                    .params
+                    .iter()
+                    .map(|(label, ty)| {
+                        let resolved = tc_result.sub.apply(ty);
+                        if label.starts_with('_') {
+                            format!("{}", resolved)
+                        } else {
+                            format!("({}: {})", label, resolved)
+                        }
+                    })
+                    .collect();
+                let ret = tc_result.sub.apply(&op.return_type);
+                let sig = if params.is_empty() {
+                    format!("{}.{} : () -> {}", effect_name, op_name, ret)
+                } else {
+                    format!("{}.{} : {} -> {}", effect_name, op_name, params.join(" -> "), ret)
+                };
+                return Some(sig);
+            }
+        }
+    }
+    None
+}
+
 /// Resolve a span's location: returns (URI, LineIndex) for a span that lives in `module_name`
 /// (None = same file as `current_uri`).
 fn resolve_span_location(
@@ -227,44 +277,18 @@ impl LanguageServer for Backend {
             }));
         }
 
-        // Effect operation: show signature from the effect definition
-        // Check if this name matches an effect op (and cursor is inside a handler)
-        for (effect_name, info) in &tc_result.effects {
-            for op in &info.ops {
-                if op.name == name {
-                    let params_display: Vec<String> = op
-                        .params
-                        .iter()
-                        .map(|(label, ty)| {
-                            let resolved = tc_result.sub.apply(ty);
-                            if label.starts_with('_') {
-                                format!("{}", resolved)
-                            } else {
-                                format!("({}: {})", label, resolved)
-                            }
-                        })
-                        .collect();
-                    let ret = tc_result.sub.apply(&op.return_type);
-                    let sig = if params_display.is_empty() {
-                        format!("{}.{} : () -> {}", effect_name, name, ret)
-                    } else {
-                        format!(
-                            "{}.{} : {} -> {}",
-                            effect_name,
-                            name,
-                            params_display.join(" -> "),
-                            ret
-                        )
-                    };
-                    return Ok(Some(Hover {
-                        contents: HoverContents::Markup(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: format!("```dylang\n{}\n```", sig),
-                        }),
-                        range: None,
-                    }));
-                }
-            }
+        // Effect operation: show signature from the effect definition.
+        // Prefer AST (has original type param names) over CheckResult (may have raw var IDs).
+        if let Some(sig) = find_effect_op_signature(program, &name)
+            .or_else(|| find_effect_op_signature_from_result(tc_result, &name))
+        {
+            return Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("```dylang\n{}\n```", sig),
+                }),
+                range: None,
+            }));
         }
 
         // Type/record/effect/trait definition summary.
@@ -340,7 +364,13 @@ impl LanguageServer for Backend {
         }
 
         // Level 2: handler arm -> effect op definition
-        if let Some((op_def_span, op_module)) = tc_result.handler_arm_targets.get(&span) {
+        // handler_arm_targets is keyed by the full arm span, so also check if the cursor's
+        // span is contained within any arm span.
+        if let Some((op_def_span, op_module)) = tc_result.handler_arm_targets.get(&span)
+            .or_else(|| tc_result.handler_arm_targets.iter().find_map(|(arm_span, target)| {
+                (span.start >= arm_span.start && span.end <= arm_span.end).then_some(target)
+            }))
+        {
             let (target_uri, target_li, target_source) =
                 resolve_span_location(&uri, line_index, &snap.source, op_module.as_deref(), tc_result)?;
             let (start_line, start_col) = target_li.offset_to_line_col(op_def_span.start, &target_source);

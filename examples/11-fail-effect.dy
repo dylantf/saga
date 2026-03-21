@@ -3,18 +3,20 @@ effect Fail a {
 }
 
 handler log_failure for Fail Never {
-  fail msg = println ("Error: " <> msg)
+  fail msg = println $"Error: {msg}"
 }
 
-handler try_catch for Fail Int {
+# Continues a failed call with a default value of 0
+handler int_fallback for Fail Int {
   fail _ = resume 0
 }
 
 fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail Int}
-safe_div x 0 = fail! "division by zero"
+safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 
 main () = {
+  # TODO: broke in b9db7d6 -- expected Unit, got Int
   let a = (safe_div 10 2) with log_failure
   println (show a)
 

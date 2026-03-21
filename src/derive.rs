@@ -89,11 +89,11 @@ fn derive_record_stringify(
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec![trait_name.into()],
+            traits: vec![(trait_name.into(), Span { start: 0, end: 0 })],
         })
         .collect();
 
-    Decl::ImplDef {
+    Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
         trait_name: trait_name.into(),
         target_type: record_name.into(),
@@ -102,6 +102,7 @@ fn derive_record_stringify(
         needs: vec![],
         methods: vec![(
             method_name.into(),
+            Span { start: 0, end: 0 },
             vec![Pat::Var { id: NodeId::fresh(), name: param_name, span }],
             body,
         )],
@@ -328,11 +329,11 @@ fn derive_stringify(
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec![trait_name.into()],
+            traits: vec![(trait_name.into(), Span { start: 0, end: 0 })],
         })
         .collect();
 
-    Decl::ImplDef {
+    Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
         trait_name: trait_name.into(),
         target_type: type_name.into(),
@@ -341,6 +342,7 @@ fn derive_stringify(
         needs: vec![],
         methods: vec![(
             method_name.into(),
+            Span { start: 0, end: 0 },
             vec![Pat::Var {
                 id: NodeId::fresh(),
                 name: scrutinee_name,
@@ -509,11 +511,11 @@ fn derive_ord(
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec!["Ord".into()],
+            traits: vec![("Ord".into(), Span { start: 0, end: 0 })],
         })
         .collect();
 
-    Decl::ImplDef {
+    Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
         trait_name: "Ord".into(),
         target_type: type_name.into(),
@@ -522,6 +524,7 @@ fn derive_ord(
         needs: vec![],
         methods: vec![(
             "compare".into(),
+            Span { start: 0, end: 0 },
             vec![Pat::Var { id: NodeId::fresh(), name: x, span }, Pat::Var { id: NodeId::fresh(), name: y, span }],
             body,
         )],
@@ -621,11 +624,11 @@ fn derive_marker_trait(
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec![trait_name.into()],
+            traits: vec![(trait_name.into(), Span { start: 0, end: 0 })],
         })
         .collect();
 
-    Decl::ImplDef {
+    Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
         trait_name: trait_name.into(),
         target_type: type_name.into(),
@@ -694,7 +697,7 @@ fn derive_enum(
         arms: from_enum_arms,
     });
 
-    Decl::ImplDef {
+    Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
         trait_name: "Enum".into(),
         target_type: type_name.into(),
@@ -704,11 +707,13 @@ fn derive_enum(
         methods: vec![
             (
                 "to_enum".into(),
+                Span { start: 0, end: 0 },
                 vec![Pat::Var { id: NodeId::fresh(), name: to_enum_param, span }],
                 to_enum_body,
             ),
             (
                 "from_enum".into(),
+                Span { start: 0, end: 0 },
                 vec![Pat::Var { id: NodeId::fresh(), name: from_enum_param, span }],
                 from_enum_body,
             ),

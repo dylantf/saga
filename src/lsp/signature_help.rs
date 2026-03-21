@@ -88,7 +88,7 @@ fn find_call_in_decl(decl: &Decl, offset: usize) -> Option<(String, usize)> {
             if !contains(span, offset) {
                 return None;
             }
-            for (_, params, body) in methods {
+            for (_, _, params, body) in methods {
                 for pat in params {
                     if let Some(r) = find_call_in_pat(pat, offset) {
                         return Some(r);

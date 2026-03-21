@@ -1,4 +1,4 @@
-use dylang::ast::{CaseArm, Decl, EffectRef, Expr, ExprKind, NodeId, Pat, Stmt, TypeExpr};
+use dylang::ast::{CaseArm, Decl, EffectRef, Expr, ExprKind, NodeId, Pat, Stmt, TraitBound, TypeExpr};
 use dylang::token::Span;
 
 type Found = Option<(String, Span, Option<NodeId>)>;
@@ -66,6 +66,18 @@ fn find_in_exprs(exprs: &[Expr], offset: usize) -> Found {
     exprs.iter().find_map(|e| find_in_expr(e, offset))
 }
 
+/// Search where clause trait bounds for trait names.
+fn find_in_where_clause(bounds: &[TraitBound], offset: usize) -> Found {
+    for bound in bounds {
+        for (trait_name, trait_span) in &bound.traits {
+            if contains_ident(trait_span, offset) {
+                return Some((trait_name.clone(), *trait_span, None));
+            }
+        }
+    }
+    None
+}
+
 /// Search record fields (name, span, value_expr).
 fn find_in_record_fields(fields: &[(String, Span, Expr)], offset: usize) -> Found {
     fields.iter().find_map(|(_, _, e)| find_in_expr(e, offset))
@@ -94,6 +106,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             params,
             return_type,
             effects,
+            where_clause,
             span,
             ..
         } if contains(span, offset) => {
@@ -103,6 +116,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             find_in_typed_params(params, offset)
                 .or_else(|| find_in_type_expr(return_type, offset))
                 .or_else(|| find_in_effect_refs(effects, offset))
+                .or_else(|| find_in_where_clause(where_clause, offset))
         }
         Decl::HandlerDef {
             name,
@@ -144,13 +158,32 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                 contains_ident(name_span, offset).then(|| (name.clone(), *name_span, None))
             })
         }
-        Decl::ImplDef { methods, span, .. } => {
+        Decl::ImplDef {
+            trait_name, trait_name_span, target_type, target_type_span,
+            where_clause, needs, methods, span, ..
+        } => {
             if !contains(span, offset) {
                 return None;
             }
-            for (_, params, body) in methods {
+            if contains_ident(trait_name_span, offset) {
+                return Some((trait_name.clone(), *trait_name_span, None));
+            }
+            if contains_ident(target_type_span, offset) {
+                return Some((target_type.clone(), *target_type_span, None));
+            }
+            if let Some(r) = find_in_where_clause(where_clause, offset) {
+                return Some(r);
+            }
+            if let Some(r) = find_in_effect_refs(needs, offset) {
+                return Some(r);
+            }
+            for (method_name, method_span, params, body) in methods {
                 if let Some(r) = find_in_params_body(params, body, offset) {
                     return Some(r);
+                }
+                // Method name hover
+                if contains_ident(method_span, offset) {
+                    return Some((method_name.clone(), *method_span, None));
                 }
             }
             None
@@ -218,12 +251,18 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
         Decl::TraitDef {
             name,
             name_span,
+            supertraits,
             methods,
             span,
             ..
         } => {
             if !contains(span, offset) {
                 return None;
+            }
+            for (st_name, st_span) in supertraits {
+                if contains_ident(st_span, offset) {
+                    return Some((st_name.clone(), *st_span, None));
+                }
             }
             for method in methods {
                 if contains(&method.span, offset)
