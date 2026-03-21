@@ -16,23 +16,37 @@ impl LineIndex {
         LineIndex { line_starts }
     }
 
-    /// Convert a byte offset to (line, column), both 0-based.
-    pub fn offset_to_line_col(&self, offset: usize) -> (usize, usize) {
+    /// Convert a byte offset to (line, utf16_column), both 0-based.
+    pub fn offset_to_line_col(&self, offset: usize, source: &str) -> (usize, usize) {
         let line = self
             .line_starts
             .partition_point(|&start| start <= offset)
             .saturating_sub(1);
-        let col = offset - self.line_starts[line];
-        (line, col)
+        let line_start = self.line_starts[line];
+        let line_text = &source[line_start..offset];
+        let utf16_col: usize = line_text.chars().map(|c| c.len_utf16()).sum();
+        (line, utf16_col)
     }
 
-    /// Convert (line, column) back to a byte offset. Both 0-based.
-    pub fn line_col_to_offset(&self, line: usize, col: usize) -> usize {
-        if line < self.line_starts.len() {
-            self.line_starts[line] + col
-        } else {
-            // Past end of file
-            *self.line_starts.last().unwrap_or(&0)
+    /// Convert (line, utf16_column) to a byte offset. Both 0-based.
+    pub fn line_col_to_offset(&self, line: usize, col: usize, source: &str) -> usize {
+        if line >= self.line_starts.len() {
+            return *self.line_starts.last().unwrap_or(&0);
         }
+        let line_start = self.line_starts[line];
+        let line_end = self
+            .line_starts
+            .get(line + 1)
+            .copied()
+            .unwrap_or(source.len());
+        let line_text = &source[line_start..line_end];
+        let mut utf16_count = 0;
+        for (byte_offset, ch) in line_text.char_indices() {
+            if utf16_count >= col {
+                return line_start + byte_offset;
+            }
+            utf16_count += ch.len_utf16();
+        }
+        line_end
     }
 }

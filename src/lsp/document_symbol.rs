@@ -4,9 +4,9 @@ use dylang::ast::Decl;
 
 use super::line_index::LineIndex;
 
-fn span_to_range(span: &dylang::token::Span, li: &LineIndex) -> Range {
-    let (sl, sc) = li.offset_to_line_col(span.start);
-    let (el, ec) = li.offset_to_line_col(span.end);
+fn span_to_range(span: &dylang::token::Span, li: &LineIndex, source: &str) -> Range {
+    let (sl, sc) = li.offset_to_line_col(span.start, source);
+    let (el, ec) = li.offset_to_line_col(span.end, source);
     Range {
         start: Position::new(sl as u32, sc as u32),
         end: Position::new(el as u32, ec as u32),
@@ -14,7 +14,7 @@ fn span_to_range(span: &dylang::token::Span, li: &LineIndex) -> Range {
 }
 
 #[allow(deprecated)] // SymbolInformation::deprecated is deprecated but required by the struct
-pub fn collect_symbols(program: &[Decl], li: &LineIndex) -> Vec<SymbolInformation> {
+pub fn collect_symbols(program: &[Decl], li: &LineIndex, source: &str) -> Vec<SymbolInformation> {
     let mut symbols = Vec::new();
     // Track which names already have an annotation so we skip duplicate FunBindings
     let mut annotated: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -32,7 +32,7 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex) -> Vec<SymbolInformatio
                     kind: SymbolKind::FUNCTION,
                     location: Location {
                         uri: Url::parse("file:///").unwrap(),
-                        range: span_to_range(span, li),
+                        range: span_to_range(span, li, source),
                     },
                     tags: None,
                     deprecated: None,
@@ -45,7 +45,7 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex) -> Vec<SymbolInformatio
                     kind: SymbolKind::FUNCTION,
                     location: Location {
                         uri: Url::parse("file:///").unwrap(),
-                        range: span_to_range(span, li),
+                        range: span_to_range(span, li, source),
                     },
                     tags: None,
                     deprecated: None,
@@ -58,7 +58,7 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex) -> Vec<SymbolInformatio
                     kind: SymbolKind::VARIABLE,
                     location: Location {
                         uri: Url::parse("file:///").unwrap(),
-                        range: span_to_range(span, li),
+                        range: span_to_range(span, li, source),
                     },
                     tags: None,
                     deprecated: None,
@@ -71,7 +71,7 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex) -> Vec<SymbolInformatio
                     kind: SymbolKind::ENUM,
                     location: Location {
                         uri: Url::parse("file:///").unwrap(),
-                        range: span_to_range(span, li),
+                        range: span_to_range(span, li, source),
                     },
                     tags: None,
                     deprecated: None,
@@ -84,7 +84,7 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex) -> Vec<SymbolInformatio
                     kind: SymbolKind::STRUCT,
                     location: Location {
                         uri: Url::parse("file:///").unwrap(),
-                        range: span_to_range(span, li),
+                        range: span_to_range(span, li, source),
                     },
                     tags: None,
                     deprecated: None,
@@ -97,7 +97,7 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex) -> Vec<SymbolInformatio
                     kind: SymbolKind::INTERFACE,
                     location: Location {
                         uri: Url::parse("file:///").unwrap(),
-                        range: span_to_range(span, li),
+                        range: span_to_range(span, li, source),
                     },
                     tags: None,
                     deprecated: None,
@@ -110,7 +110,7 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex) -> Vec<SymbolInformatio
                     kind: SymbolKind::FUNCTION,
                     location: Location {
                         uri: Url::parse("file:///").unwrap(),
-                        range: span_to_range(span, li),
+                        range: span_to_range(span, li, source),
                     },
                     tags: None,
                     deprecated: None,
@@ -123,7 +123,7 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex) -> Vec<SymbolInformatio
                     kind: SymbolKind::INTERFACE,
                     location: Location {
                         uri: Url::parse("file:///").unwrap(),
-                        range: span_to_range(span, li),
+                        range: span_to_range(span, li, source),
                     },
                     tags: None,
                     deprecated: None,
@@ -141,7 +141,7 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex) -> Vec<SymbolInformatio
                     kind: SymbolKind::CLASS,
                     location: Location {
                         uri: Url::parse("file:///").unwrap(),
-                        range: span_to_range(span, li),
+                        range: span_to_range(span, li, source),
                     },
                     tags: None,
                     deprecated: None,
@@ -154,7 +154,7 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex) -> Vec<SymbolInformatio
                     kind: SymbolKind::FUNCTION,
                     location: Location {
                         uri: Url::parse("file:///").unwrap(),
-                        range: span_to_range(span, li),
+                        range: span_to_range(span, li, source),
                     },
                     tags: None,
                     deprecated: None,

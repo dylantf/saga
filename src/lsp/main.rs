@@ -68,7 +68,7 @@ impl Backend {
                 // Update the symbol index with references from this file.
                 if let Some(ref program) = snap.program {
                     let mut idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
-                    idx.update_file(&uri, &snap.tc_result, program, &snap.line_index);
+                    idx.update_file(&uri, &snap.tc_result, program, &snap.line_index, &snap.source);
                 }
                 let mut last = self.last_check.lock().unwrap_or_else(|e| e.into_inner());
                 last.insert(uri, snap);
@@ -102,9 +102,10 @@ impl Backend {
 fn resolve_span_location(
     current_uri: &Url,
     current_li: &line_index::LineIndex,
+    current_source: &str,
     module_name: Option<&str>,
     tc_result: &dylang::typechecker::CheckResult,
-) -> tower_lsp::jsonrpc::Result<(Url, line_index::LineIndex)> {
+) -> tower_lsp::jsonrpc::Result<(Url, line_index::LineIndex, String)> {
     if let Some(module) = module_name
         && let Some(file_path) = tc_result.module_map().and_then(|m| m.get(module))
     {
@@ -112,9 +113,10 @@ fn resolve_span_location(
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         let source = std::fs::read_to_string(file_path)
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
-        return Ok((target_uri, line_index::LineIndex::new(&source)));
+        let li = line_index::LineIndex::new(&source);
+        return Ok((target_uri, li, source));
     }
-    Ok((current_uri.clone(), current_li.clone()))
+    Ok((current_uri.clone(), current_li.clone(), current_source.to_string()))
 }
 
 #[tower_lsp::async_trait]
@@ -207,7 +209,7 @@ impl LanguageServer for Backend {
 
         let position = params.text_document_position_params.position;
         let offset =
-            line_index.line_col_to_offset(position.line as usize, position.character as usize);
+            line_index.line_col_to_offset(position.line as usize, position.character as usize, &snap.source);
 
         let Some((name, span, node_id)) = hover::find_name_at_offset(program, offset) else {
             return Ok(None);
@@ -299,7 +301,7 @@ impl LanguageServer for Backend {
 
         let position = params.text_document_position_params.position;
         let offset =
-            line_index.line_col_to_offset(position.line as usize, position.character as usize);
+            line_index.line_col_to_offset(position.line as usize, position.character as usize, &snap.source);
 
         let Some((name, span, _node_id)) = hover::find_name_at_offset(program, offset) else {
             return Ok(None);
@@ -307,10 +309,10 @@ impl LanguageServer for Backend {
 
         // Level 1: effect call -> handler arm (op! -> the arm that handles it)
         if let Some((arm_span, arm_module)) = tc_result.effect_call_targets.get(&span) {
-            let (target_uri, target_li) =
-                resolve_span_location(&uri, line_index, arm_module.as_deref(), tc_result)?;
-            let (start_line, start_col) = target_li.offset_to_line_col(arm_span.start);
-            let (end_line, end_col) = target_li.offset_to_line_col(arm_span.end);
+            let (target_uri, target_li, target_source) =
+                resolve_span_location(&uri, line_index, &snap.source, arm_module.as_deref(), tc_result)?;
+            let (start_line, start_col) = target_li.offset_to_line_col(arm_span.start, &target_source);
+            let (end_line, end_col) = target_li.offset_to_line_col(arm_span.end, &target_source);
             return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                 uri: target_uri,
                 range: Range {
@@ -322,10 +324,10 @@ impl LanguageServer for Backend {
 
         // Level 2: handler arm -> effect op definition
         if let Some((op_def_span, op_module)) = tc_result.handler_arm_targets.get(&span) {
-            let (target_uri, target_li) =
-                resolve_span_location(&uri, line_index, op_module.as_deref(), tc_result)?;
-            let (start_line, start_col) = target_li.offset_to_line_col(op_def_span.start);
-            let (end_line, end_col) = target_li.offset_to_line_col(op_def_span.end);
+            let (target_uri, target_li, target_source) =
+                resolve_span_location(&uri, line_index, &snap.source, op_module.as_deref(), tc_result)?;
+            let (start_line, start_col) = target_li.offset_to_line_col(op_def_span.start, &target_source);
+            let (end_line, end_col) = target_li.offset_to_line_col(op_def_span.end, &target_source);
             return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                 uri: target_uri,
                 range: Range {
@@ -339,8 +341,8 @@ impl LanguageServer for Backend {
         // which knows the source module even if the handler isn't in the explicit exposing list.
         if let Some(handler_info) = tc_result.handlers.get(&name) {
             let source_module = handler_info.source_module.as_deref();
-            let (target_uri, target_li) =
-                resolve_span_location(&uri, line_index, source_module, tc_result)?;
+            let (target_uri, target_li, target_source) =
+                resolve_span_location(&uri, line_index, &snap.source, source_module, tc_result)?;
             // Find the HandlerDef span in the target program
             let target_program = if let Some(m) = source_module {
                 tc_result.programs().get(m).map(|p| p.as_slice())
@@ -350,8 +352,8 @@ impl LanguageServer for Backend {
             if let Some(prog) = target_program
                 && let Some(def) = definition::find_definition(prog, &name, tc_result)
             {
-                let (start_line, start_col) = target_li.offset_to_line_col(def.span.start);
-                let (end_line, end_col) = target_li.offset_to_line_col(def.span.end);
+                let (start_line, start_col) = target_li.offset_to_line_col(def.span.start, &target_source);
+                let (end_line, end_col) = target_li.offset_to_line_col(def.span.end, &target_source);
                 return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                     uri: target_uri,
                     range: Range {
@@ -367,21 +369,24 @@ impl LanguageServer for Backend {
         };
 
         // For cross-module definitions, build a line index for the target file
-        let (target_uri, target_line_index);
+        let (target_uri, target_line_index, target_source);
         if let Some(ref file_path) = def_result.file_path {
             target_uri = Url::from_file_path(file_path)
                 .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
-            let source = std::fs::read_to_string(file_path)
+            let src = std::fs::read_to_string(file_path)
                 .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
-            target_line_index = Some(line_index::LineIndex::new(&source));
+            target_line_index = Some(line_index::LineIndex::new(&src));
+            target_source = Some(src);
         } else {
             target_uri = uri;
             target_line_index = None;
+            target_source = None;
         }
 
         let li = target_line_index.as_ref().unwrap_or(line_index);
-        let (start_line, start_col) = li.offset_to_line_col(def_result.span.start);
-        let (end_line, end_col) = li.offset_to_line_col(def_result.span.end);
+        let src = target_source.as_deref().unwrap_or(&snap.source);
+        let (start_line, start_col) = li.offset_to_line_col(def_result.span.start, src);
+        let (end_line, end_col) = li.offset_to_line_col(def_result.span.end, src);
 
         Ok(Some(GotoDefinitionResponse::Scalar(Location {
             uri: target_uri,
@@ -406,7 +411,7 @@ impl LanguageServer for Backend {
         let editor_source = self.document_text(&uri);
         let source = editor_source.as_deref().unwrap_or(&snap.source);
         let li = line_index::LineIndex::new(source);
-        let offset = li.line_col_to_offset(position.line as usize, position.character as usize);
+        let offset = li.line_col_to_offset(position.line as usize, position.character as usize, source);
         let prefix = completion::extract_prefix(source, offset);
 
         eprintln!("[completion] offset={} prefix={:?}", offset, prefix);
@@ -428,6 +433,20 @@ impl LanguageServer for Backend {
             eprintln!("[completion] no dot chain, around cursor: {:?}", &source[offset.saturating_sub(10)..(offset+10).min(source.len())]);
         }
 
+        // Record construction completion: `House { a|` or `House { address: { n|`
+        if let Some(ctx) = completion::extract_record_construction_context(&snap.tc_result, source, offset) {
+            eprintln!("[completion] record construction context, {} fields available", ctx.fields.len());
+            if let Some(items) = completion::collect_record_construction_completions(
+                &snap.tc_result,
+                &ctx,
+                prefix,
+                source,
+                offset,
+            ) {
+                return Ok(Some(CompletionResponse::Array(items)));
+            }
+        }
+
         // General completion.
         let program = snap.program.as_ref().unwrap();
         let items = completion::collect_completions(&snap.tc_result, prefix, program, offset);
@@ -444,7 +463,7 @@ impl LanguageServer for Backend {
         let line_index = &snap.line_index;
 
         let actions =
-            code_action::collect_code_actions(tc_result, program, line_index, &uri, params.range);
+            code_action::collect_code_actions(tc_result, program, line_index, &snap.source, &uri, params.range);
 
         if actions.is_empty() {
             Ok(None)
@@ -466,7 +485,7 @@ impl LanguageServer for Backend {
         let line_index = &snap.line_index;
 
 
-        let mut symbols = document_symbol::collect_symbols(program, line_index);
+        let mut symbols = document_symbol::collect_symbols(program, line_index, &snap.source);
         // Fill in the real URI (collect_symbols uses a placeholder)
         for sym in &mut symbols {
             sym.location.uri = uri.clone();
@@ -491,7 +510,7 @@ impl LanguageServer for Backend {
 
         let position = params.text_document_position_params.position;
         let offset =
-            line_index.line_col_to_offset(position.line as usize, position.character as usize);
+            line_index.line_col_to_offset(position.line as usize, position.character as usize, source);
 
         // Only proceed if there's an identifier-like token before the cursor.
         // When triggered by space, cursor is after the space, so skip whitespace backwards.
@@ -545,7 +564,7 @@ impl LanguageServer for Backend {
 
         let position = params.text_document_position.position;
         let offset =
-            line_index.line_col_to_offset(position.line as usize, position.character as usize);
+            line_index.line_col_to_offset(position.line as usize, position.character as usize, &snap.source);
 
         let Some((name, _span, _node_id)) = hover::find_name_at_offset(program, offset) else {
             return Ok(None);
@@ -565,10 +584,7 @@ impl LanguageServer for Backend {
                     None
                 }
             });
-            match local_module {
-                Some(m) => m,
-                None => return Ok(None), // No module declaration, can't resolve
-            }
+            local_module.unwrap_or_else(|| "_script".to_string())
         };
 
         let key = symbol_index::SymbolKey {
@@ -609,7 +625,7 @@ impl LanguageServer for Backend {
                     {
                         let mut idx =
                             self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
-                        idx.update_file(&file_uri, &snap.tc_result, prog, &snap.line_index);
+                        idx.update_file(&file_uri, &snap.tc_result, prog, &snap.line_index, &snap.source);
                     }
                 }
             }
@@ -635,8 +651,8 @@ impl LanguageServer for Backend {
             if let Some(did) = tc_result.env.def_id(&name)
                 && let Some(&def_span) = tc_result.node_spans.get(&did)
             {
-                let (start_line, start_col) = line_index.offset_to_line_col(def_span.start);
-                let (end_line, end_col) = line_index.offset_to_line_col(def_span.end);
+                let (start_line, start_col) = line_index.offset_to_line_col(def_span.start, &snap.source);
+                let (end_line, end_col) = line_index.offset_to_line_col(def_span.end, &snap.source);
                 locations.push(Location {
                     uri: uri.clone(),
                     range: Range {

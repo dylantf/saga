@@ -81,8 +81,10 @@ main () = {
 
   fake_school () |> debug |> println
 
+  # let name = "John" <> " Smith" 123
+
   fake_school ()
-  |> enroll_student (Student { name: "小明", grade: 6 })
+  |> enroll_student (Student { name: "小明" <> "Hello" 123 123234, grade: 6 })
   |> debug
   |> println
 
@@ -94,7 +96,7 @@ main () = {
     },
   }
   
-  house |> debug |> println
+  house |> debug |> printl
 
   # Record update on nested anonymous record
   let house2 = { house | address: { house.address | street: "Real Street" } }
@@ -105,10 +107,9 @@ main () = {
   println (show number)
   println street
 
-  # House {
-  #   y
-  # }
-  let h = house.address.
+  let new_house = House {
+    a
+  }
 
   # let incomplete_house = House { year_built: 2005 }
 

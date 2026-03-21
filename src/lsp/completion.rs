@@ -161,6 +161,208 @@ pub fn collect_field_completions(
     Some(items)
 }
 
+/// Result of detecting a record construction context around the cursor.
+pub struct RecordConstructionContext {
+    /// The fields available for this record (from RecordInfo or anonymous Type::Record).
+    pub fields: Vec<(String, Type)>,
+    /// Byte offset of the innermost opening `{`.
+    pub brace_offset: usize,
+}
+
+/// Detect whether the cursor is inside a record construction expression.
+///
+/// Scans backwards from the cursor to find an unmatched `{`, then checks if it's
+/// preceded by an uppercase identifier (named record) or a `fieldname:` pattern
+/// (anonymous nested record inside a named record).
+///
+/// Examples:
+/// - `House { a|` → fields of House
+/// - `House { year_built: 2005, a|` → fields of House
+/// - `House { address: { n|` → fields of House.address (anonymous record)
+pub fn extract_record_construction_context(
+    result: &CheckResult,
+    source: &str,
+    offset: usize,
+) -> Option<RecordConstructionContext> {
+    let prefix = extract_prefix(source, offset);
+    let cursor_before_prefix = offset - prefix.len();
+
+    // We'll iteratively scan backwards through nested `fieldname: {` layers,
+    // collecting the field path until we find a named record (uppercase ident before `{`).
+    let mut field_path: Vec<String> = Vec::new();
+    let mut search_from = cursor_before_prefix;
+    let mut innermost_brace = 0;
+
+    loop {
+        // Scan backwards from search_from, tracking brace depth, to find the unmatched `{`.
+        let brace_pos = find_unmatched_open_brace(source, search_from)?;
+
+        if field_path.is_empty() {
+            innermost_brace = brace_pos;
+        }
+
+        // Check what precedes the `{`: skip whitespace, then extract an identifier.
+        let before_brace = source[..brace_pos].trim_end();
+        if before_brace.is_empty() {
+            return None;
+        }
+
+        // Extract the identifier just before the `{`.
+        let ident_end = before_brace.len();
+        let ident_start = before_brace
+            .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let ident = &before_brace[ident_start..ident_end];
+
+        if ident.is_empty() {
+            return None;
+        }
+
+        let first_char = ident.chars().next()?;
+        if first_char.is_uppercase() {
+            // Named record: look up in result.records and walk the field path.
+            let info = result.records.get(ident)?;
+            let mut fields = info.fields.clone();
+
+            // Walk the field path to resolve nested anonymous records.
+            for field_name in &field_path {
+                let (_, field_ty) = fields.iter().find(|(n, _)| n == field_name)?;
+                let resolved = result.sub.apply(field_ty);
+                fields = extract_record_fields(result, &resolved)?;
+            }
+
+            return Some(RecordConstructionContext {
+                fields,
+                brace_offset: innermost_brace,
+            });
+        }
+
+        // Check if the ident is preceded by nothing useful or if it's a `fieldname:` pattern.
+        // For `address: {`, the ident is "address" and there should be a `:` before the `{`.
+        // Actually, ident is what's right before `{`. We need to check if the pattern is `ident: {`.
+        // The `{` is at brace_pos. Before it (trimmed) ends with ident. Before ident, check for `:`.
+        let before_ident = before_brace[..ident_start].trim_end();
+        if before_ident.ends_with(':') {
+            // This is `fieldname: {` — an anonymous nested record value.
+            field_path.push(ident.to_string());
+            // Continue scanning from before the colon.
+            let colon_pos = before_ident.len() - 1;
+            search_from = colon_pos;
+            continue;
+        }
+
+        // Neither uppercase ident nor `fieldname:` pattern — not a record construction.
+        return None;
+    }
+}
+
+/// Scan backwards from `from` to find the nearest unmatched `{`.
+/// Tracks brace depth so that matched `{ }` pairs are skipped.
+fn find_unmatched_open_brace(source: &str, from: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth: i32 = 0;
+    let mut pos = from;
+
+    while pos > 0 {
+        pos -= 1;
+        match bytes[pos] {
+            b'}' => depth += 1,
+            b'{' => {
+                if depth == 0 {
+                    return Some(pos);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Scan the text between the opening `{` and the cursor to find field names
+/// that have already been provided. Respects brace depth so that fields
+/// inside nested `{ }` are not counted.
+fn find_used_fields(source: &str, brace_offset: usize, cursor_offset: usize) -> HashSet<String> {
+    let mut used = HashSet::new();
+    let region = &source[brace_offset + 1..cursor_offset];
+    let bytes = region.as_bytes();
+    let mut depth: i32 = 0;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            b':' if depth == 0 => {
+                // Check this isn't `::` (cons operator).
+                if i + 1 < bytes.len() && bytes[i + 1] == b':' {
+                    i += 2;
+                    continue;
+                }
+                // Extract the identifier before this colon.
+                let before = &region[..i];
+                let trimmed = before.trim_end();
+                let start = trimmed
+                    .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+                    .map(|j| j + 1)
+                    .unwrap_or(0);
+                let field_name = &trimmed[start..];
+                if !field_name.is_empty()
+                    && field_name
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_lowercase() || c == '_')
+                {
+                    used.insert(field_name.to_string());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    used
+}
+
+/// Collect completion items for record construction.
+/// Returns field names (with snippet `: $0`) for the record being constructed,
+/// filtering out fields that have already been provided.
+pub fn collect_record_construction_completions(
+    result: &CheckResult,
+    ctx: &RecordConstructionContext,
+    prefix: &str,
+    source: &str,
+    cursor_offset: usize,
+) -> Option<Vec<CompletionItem>> {
+    let used = find_used_fields(source, ctx.brace_offset, cursor_offset);
+    let prefix_lower = prefix.to_lowercase();
+    let mut items = Vec::new();
+
+    for (field_name, field_type) in &ctx.fields {
+        if used.contains(field_name) {
+            continue;
+        }
+        if !prefix.is_empty() && !field_name.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+        let resolved_type = result.sub.apply(field_type);
+        items.push(CompletionItem {
+            label: field_name.clone(),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some(format!("{}", resolved_type)),
+            insert_text: Some(format!("{}: $0", field_name)),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            sort_text: Some(format!("!{}", field_name)), // sort fields to top
+            ..Default::default()
+        });
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+    Some(items)
+}
+
 /// Collect completion items from the checker's environment.
 pub fn collect_completions(
     result: &CheckResult,

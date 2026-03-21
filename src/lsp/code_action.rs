@@ -13,6 +13,7 @@ pub fn collect_code_actions(
     tc_result: &CheckResult,
     program: &[Decl],
     line_index: &LineIndex,
+    source: &str,
     uri: &Url,
     range: Range,
 ) -> Vec<CodeActionOrCommand> {
@@ -29,8 +30,8 @@ pub fn collect_code_actions(
             ..
         } = decl
         {
-            let handler_start = line_index.offset_to_line_col(span.start);
-            let handler_end = line_index.offset_to_line_col(span.end);
+            let handler_start = line_index.offset_to_line_col(span.start, source);
+            let handler_end = line_index.offset_to_line_col(span.end, source);
             let handler_range = Range {
                 start: Position::new(handler_start.0 as u32, handler_start.1 as u32),
                 end: Position::new(handler_end.0 as u32, handler_end.1 as u32),
@@ -67,12 +68,12 @@ pub fn collect_code_actions(
 
             // Find insertion point: just before the closing `}`
             let insert_offset = span.end;
-            let (insert_line, _) = line_index.offset_to_line_col(insert_offset);
+            let (insert_line, _) = line_index.offset_to_line_col(insert_offset, source);
             let insert_pos = Position::new(insert_line as u32, 0);
 
             // Detect indentation from existing arms, or default to 2 spaces
             let indent = if let Some(first_arm) = arms.first() {
-                let (_, col) = line_index.offset_to_line_col(first_arm.span.start);
+                let (_, col) = line_index.offset_to_line_col(first_arm.span.start, source);
                 " ".repeat(col)
             } else {
                 "  ".to_string()

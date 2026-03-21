@@ -54,15 +54,19 @@ impl SymbolIndex {
         tc_result: &CheckResult,
         program: &[Decl],
         line_index: &LineIndex,
+        source: &str,
     ) {
         // Determine the current file's module name (for locally-defined symbols).
-        let local_module = program.iter().find_map(|decl| {
-            if let Decl::ModuleDecl { path, .. } = decl {
-                Some(path.join("."))
-            } else {
-                None
-            }
-        });
+        // For single-file scripts without a module declaration, use the URI as a fallback.
+        let local_module: Option<String> = Some(
+            program.iter().find_map(|decl| {
+                if let Decl::ModuleDecl { path, .. } = decl {
+                    Some(path.join("."))
+                } else {
+                    None
+                }
+            }).unwrap_or_else(|| "_script".to_string())
+        );
 
         // Build reverse map: def_id -> (module, name) so we can resolve each reference.
         let mut def_id_to_symbol: HashMap<NodeId, SymbolKey> = HashMap::new();
@@ -97,8 +101,8 @@ impl SymbolIndex {
             if let Some(key) = def_id_to_symbol.get(def_id)
                 && let Some(span) = tc_result.node_spans.get(usage_id)
             {
-                let (start_line, start_col) = line_index.offset_to_line_col(span.start);
-                let (end_line, end_col) = line_index.offset_to_line_col(span.end);
+                let (start_line, start_col) = line_index.offset_to_line_col(span.start, source);
+                let (end_line, end_col) = line_index.offset_to_line_col(span.end, source);
                 entries.push((
                     key.clone(),
                     Range {
