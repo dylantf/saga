@@ -753,6 +753,21 @@ pub struct TraitEvidence {
     pub type_var_name: Option<String>,
 }
 
+/// Warnings deferred until after inference, when substitutions are complete.
+#[derive(Clone)]
+pub enum PendingWarning {
+    /// A non-unit value was discarded in a block (not the last statement).
+    DiscardedValue { span: Span, ty: Type },
+    /// A local variable binding was never referenced.
+    UnusedVariable { span: Span, name: String },
+    /// A function declares effects in its `needs` clause that it never uses.
+    UnusedEffects {
+        span: Span,
+        fun_name: String,
+        effects: Vec<String>,
+    },
+}
+
 // --- Inference engine ---
 
 #[derive(Clone)]
@@ -811,6 +826,8 @@ pub struct Checker {
     pub(crate) let_effect_bindings: HashMap<String, Vec<String>>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
+    /// Warnings deferred until after inference, when substitutions are complete.
+    pub(crate) pending_warnings: Vec<PendingWarning>,
     /// Per-node type information for Expr nodes (LSP hover, go-to-def, etc.).
     /// Types are stored unresolved (may contain type variables); apply `sub`
     /// at lookup time to get the final resolved type.
@@ -919,6 +936,7 @@ impl Checker {
             let_dict_params: HashMap::new(),
             let_effect_bindings: HashMap::new(),
             collected_diagnostics: Vec::new(),
+            pending_warnings: Vec::new(),
             type_at_node: HashMap::new(),
             type_at_span: HashMap::new(),
             references: HashMap::new(),
@@ -1024,10 +1042,54 @@ impl Checker {
                 continue;
             }
             if !used.contains(def_id) {
-                self.collected_diagnostics.push(Diagnostic::warning_at(
-                    *span,
-                    format!("unused variable: `{}`", name),
-                ));
+                self.pending_warnings.push(PendingWarning::UnusedVariable {
+                    span: *span,
+                    name: name.clone(),
+                });
+            }
+        }
+    }
+
+    /// "Zonk" pass: apply final substitutions to deferred warnings and emit
+    /// only those that are still relevant. Named after GHC's zonking pass.
+    pub(crate) fn zonk_warnings(&mut self) {
+        for warning in std::mem::take(&mut self.pending_warnings) {
+            match warning {
+                PendingWarning::DiscardedValue { span, ty } => {
+                    let resolved = self.sub.apply(&ty);
+                    let is_unit = matches!(&resolved, Type::Con(n, args) if n == "Unit" && args.is_empty());
+                    if !is_unit && !matches!(resolved, Type::Var(_) | Type::Error | Type::Never) {
+                        let display_ty = self.prettify_type(&ty);
+                        self.collected_diagnostics.push(Diagnostic::warning_at(
+                            span,
+                            format!(
+                                "value of type `{}` is discarded; use `let _ = ...` to suppress",
+                                display_ty
+                            ),
+                        ));
+                    }
+                }
+                PendingWarning::UnusedVariable { span, name } => {
+                    self.collected_diagnostics.push(Diagnostic::warning_at(
+                        span,
+                        format!("unused variable: `{}`", name),
+                    ));
+                }
+                PendingWarning::UnusedEffects {
+                    span,
+                    fun_name,
+                    effects,
+                } => {
+                    self.collected_diagnostics.push(Diagnostic::warning_at(
+                        span,
+                        format!(
+                            "function '{}' declares needs {{{}}} but never uses {}",
+                            fun_name,
+                            effects.join(", "),
+                            if effects.len() == 1 { "it" } else { "them" },
+                        ),
+                    ));
+                }
             }
         }
     }

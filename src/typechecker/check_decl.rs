@@ -26,6 +26,7 @@ impl Checker {
             }
         }
         self.check_unused_variables();
+        self.zonk_warnings();
         self.to_result()
     }
 
@@ -647,15 +648,11 @@ impl Checker {
                 let span = annotation_span.expect("unused effects implies annotation exists");
                 let mut effects: Vec<_> = unused.into_iter().cloned().collect();
                 effects.sort();
-                self.collected_diagnostics.push(Diagnostic::warning_at(
+                self.pending_warnings.push(super::PendingWarning::UnusedEffects {
                     span,
-                    format!(
-                        "function '{}' declares needs {{{}}} but never uses {}",
-                        name,
-                        effects.join(", "),
-                        if effects.len() == 1 { "it" } else { "them" },
-                    ),
-                ));
+                    fun_name: name.to_string(),
+                    effects,
+                });
             }
         }
 

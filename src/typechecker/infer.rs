@@ -1037,20 +1037,13 @@ impl Checker {
                 Stmt::Expr(expr) => {
                     match self.infer_expr(expr) {
                         Ok(ty) => {
-                            // Warn if a non-unit value is discarded (not last statement)
+                            // Warn if a non-unit value is discarded (not last statement).
+                            // Deferred: the type may still contain unresolved variables.
                             if i + 1 < stmts.len() {
-                                let resolved = self.sub.apply(&ty);
-                                let is_unit = matches!(&resolved, Type::Con(n, args) if n == "Unit" && args.is_empty());
-                                if !is_unit && !matches!(resolved, Type::Error | Type::Never) {
-                                    let display_ty = self.prettify_type(&ty);
-                                    self.collected_diagnostics.push(Diagnostic::warning_at(
-                                        expr.span,
-                                        format!(
-                                            "value of type `{}` is discarded; use `let _ = ...` to suppress",
-                                            display_ty,
-                                        ),
-                                    ));
-                                }
+                                self.pending_warnings.push(super::PendingWarning::DiscardedValue {
+                                    span: expr.span,
+                                    ty: ty.clone(),
+                                });
                             }
                             last_ty = ty;
                         }
