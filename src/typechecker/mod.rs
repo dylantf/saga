@@ -2,6 +2,7 @@ mod check_decl;
 mod check_module;
 pub use check_module::{ModuleMap, builtin_module_source, scan_project_modules};
 mod check_traits;
+mod effects;
 pub(crate) mod exhaustiveness;
 mod infer;
 mod result;
