@@ -13,7 +13,7 @@ safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 
 handler to_result for Fail String {
-  fail msg = $"Error: {msg}"
+  fail msg = "Error: " <> (show msg)
   return value = show value
 }
 

@@ -429,7 +429,10 @@ effect Log {
 }
 
 handler console_log for Log {
-  log msg = print msg
+  log msg = {
+    print msg
+    resume ()
+  }
 }
 
 pub fun main : Unit -> String
@@ -457,7 +460,10 @@ effect Log {
 }
 
 handler console_log for Log {
-  log msg = print msg
+  log msg = {
+    print msg
+    resume ()
+  }
 }
 
 pub fun main : Unit -> String
@@ -495,7 +501,10 @@ effect Log {
 }
 
 handler console_log for Log {
-  log msg = print msg
+  log msg = {
+    print msg
+    resume ()
+  }
 }
 
 pub fun main : Unit -> String

@@ -1118,6 +1118,10 @@ impl Checker {
             }
         }
 
+        // Fresh type variable for the handler's answer type.
+        // Arms unify against this; the return clause (if any) constrains it later.
+        let answer_ty = self.fresh_var();
+
         // Validate that each arm's operation belongs to the handler's declared effects
         let mut seen_ops: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut arm_spans: std::collections::HashMap<String, Span> =
@@ -1188,6 +1192,7 @@ impl Checker {
             let saved_resume = self.resume_type.take();
             let saved_resume_ret = self.resume_return_type.take();
             self.resume_type = Some(op_sig.return_type.clone());
+            self.resume_return_type = Some(answer_ty.clone());
 
             for (i, (param_name, param_span)) in arm.params.iter().enumerate() {
                 let param_ty = if i < op_sig.params.len() {
@@ -1211,7 +1216,7 @@ impl Checker {
             }
 
             let body_ty = self.infer_expr(&arm.body)?;
-            if let Err(e) = self.unify(&op_sig.return_type, &body_ty) {
+            if let Err(e) = self.unify(&answer_ty, &body_ty) {
                 self.collected_diagnostics.push(e.with_span(arm.span));
             }
             self.resume_type = saved_resume;
@@ -1239,11 +1244,21 @@ impl Checker {
                 );
             }
             let ret_ty = self.infer_expr(&rc.body)?;
+            // Constrain answer_ty to match the return clause's body type
+            if let Err(e) = self.unify(&answer_ty, &ret_ty) {
+                self.collected_diagnostics.push(e.with_span(rc.body.span));
+            }
             self.resume_type = saved_resume;
             self.env = saved_env;
             Some((param_var_id, ret_ty))
         } else {
-            None
+            // No return clause: the handler doesn't transform the result type.
+            // Store answer_ty so the use site unifies arm body types with expr_ty.
+            let param_var_id = match &answer_ty {
+                Type::Var(id) => *id,
+                _ => unreachable!(), // answer_ty is created as fresh_var()
+            };
+            Some((param_var_id, answer_ty.clone()))
         };
 
         // Check effect requirements against declared needs

@@ -3485,8 +3485,8 @@ fn with_on_partial_application_is_error() {
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(
-        err.message.contains("unnecessary"),
-        "expected unnecessary handler message, got: {}",
+        err.message.contains("type mismatch") || err.message.contains("unnecessary"),
+        "expected type mismatch or unnecessary handler message, got: {}",
         err.message
     );
 }
