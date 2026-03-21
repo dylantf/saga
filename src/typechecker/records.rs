@@ -149,6 +149,14 @@ impl Checker {
         span: Span,
     ) -> Result<Type, Diagnostic> {
         let expr_ty = self.infer_expr(record_expr)?;
+
+        // Empty field name means incomplete field access (e.g. `record.`).
+        // The parser recovered, so we still have the receiver's type recorded.
+        // Return a fresh type var so inference can continue.
+        if field.is_empty() {
+            return Ok(self.fresh_var());
+        }
+
         let resolved = self.sub.apply(&expr_ty);
 
         match &resolved {

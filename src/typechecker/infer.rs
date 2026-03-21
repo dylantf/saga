@@ -327,6 +327,11 @@ impl Checker {
             }
 
             ExprKind::QualifiedName { module, name, .. } => {
+                // Empty name means incomplete module access (e.g. `Math.`).
+                // Return a fresh type var so inference can continue.
+                if name.is_empty() {
+                    return Ok(self.fresh_var());
+                }
                 let key = format!("{}.{}", module, name);
                 match self.env.get(&key).cloned() {
                     Some(scheme) => {

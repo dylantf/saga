@@ -186,11 +186,16 @@ impl Parser {
                         self.advance();
                         n
                     }
-                    tok => {
-                        return Err(ParseError {
-                            message: format!("expected identifier after '.', got {:?}", tok),
-                            span: self.tokens[self.pos].span,
-                        });
+                    _ => {
+                        // Recovery: incomplete module access (e.g. `Math.`).
+                        // Produce a QualifiedName with an empty name.
+                        let end = self.tokens[self.pos - 1].span;
+                        let qspan = Span { start, end: end.end };
+                        expr = Expr { id: self.next_id(), span: qspan, kind: ExprKind::QualifiedName {
+                            module,
+                            name: String::new(),
+                        }};
+                        continue;
                     }
                 };
                 let end = self.tokens[self.pos - 1].span;
@@ -234,8 +239,16 @@ impl Parser {
                 }};
                 continue;
             }
-            let field = self.expect_ident()?;
-            let end = self.tokens[self.pos - 1].span;
+            // Recovery: if no identifier follows the dot (e.g. `record.`),
+            // produce a FieldAccess with an empty field name so the rest of
+            // the file can still be parsed and typechecked.
+            let (field, end) = if matches!(self.peek(), Token::Ident(_)) {
+                let f = self.expect_ident()?;
+                (f, self.tokens[self.pos - 1].span)
+            } else {
+                // Incomplete field access -- use the dot's span as the end.
+                (String::new(), self.tokens[self.pos - 1].span)
+            };
             let span = Span {
                 start,
                 end: end.end,

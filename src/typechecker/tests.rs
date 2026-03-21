@@ -3219,6 +3219,29 @@ main () = case Just 42 {
     );
 }
 
+#[test]
+fn type_at_span_has_exact_span_text() {
+    // Verify that spans in type_at_span and type_at_node map to exactly the
+    // variable name (no leading/trailing whitespace).
+    let src = "record House { year_built: Int }\nmain () = {\n  let house = House { year_built: 2005 }\n  house\n}";
+    let checker = check(src).unwrap();
+    let result = checker.to_result();
+    for (span, _) in &result.type_at_span {
+        if span.end <= src.len() {
+            let text = &src[span.start..span.end];
+            assert_eq!(text, text.trim(), "type_at_span contains whitespace: {:?}", text);
+        }
+    }
+    for (node_id, _) in &result.type_at_node {
+        if let Some(span) = result.node_spans.get(node_id) {
+            if span.end <= src.len() {
+                let text = &src[span.start..span.end];
+                assert_eq!(text, text.trim(), "type_at_node span contains whitespace: {:?}", text);
+            }
+        }
+    }
+}
+
 // --- Effect op name collision tests ---
 
 #[test]
