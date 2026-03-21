@@ -104,11 +104,15 @@ fn find_in_decl(decl: &Decl, name: &str) -> Option<Span> {
         }
 
         Decl::HandlerDef {
-            name: h_name, name_span, ..
+            name: h_name,
+            name_span,
+            ..
         } if h_name == name => Some(*name_span),
 
         Decl::TraitDef {
-            name: t_name, name_span, ..
+            name: t_name,
+            name_span,
+            ..
         } if t_name == name => Some(*name_span),
 
         // Search inside function bodies for local let bindings
@@ -167,7 +171,6 @@ fn find_def_in_stmt(stmt: &Stmt, name: &str) -> Option<Span> {
         _ => None,
     }
 }
-
 
 fn find_def_in_pat(pat: &Pat, name: &str) -> Option<Span> {
     match pat {

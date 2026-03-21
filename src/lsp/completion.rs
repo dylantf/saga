@@ -490,7 +490,11 @@ pub fn collect_completions(
             && offset >= span.start
             && offset <= span.end
         {
-            let handled: HashSet<&str> = arms.iter().chain(recovered_arms.iter()).map(|a| a.op_name.as_str()).collect();
+            let handled: HashSet<&str> = arms
+                .iter()
+                .chain(recovered_arms.iter())
+                .map(|a| a.op_name.as_str())
+                .collect();
             for effect_ref in effects {
                 if let Some(info) = result.effects.get(&effect_ref.name) {
                     for op in &info.ops {
