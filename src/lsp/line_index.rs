@@ -1,15 +1,15 @@
-/// Maps character offsets to line:column positions.
+/// Maps byte offsets to line:column positions.
 #[derive(Clone)]
 pub struct LineIndex {
-    /// Character offset of the start of each line.
+    /// Byte offset of the start of each line.
     line_starts: Vec<usize>,
 }
 
 impl LineIndex {
     pub fn new(text: &str) -> Self {
         let mut line_starts = vec![0];
-        for (i, ch) in text.chars().enumerate() {
-            if ch == '\n' {
+        for (i, b) in text.bytes().enumerate() {
+            if b == b'\n' {
                 line_starts.push(i + 1);
             }
         }

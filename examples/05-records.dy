@@ -82,7 +82,7 @@ main () = {
   fake_school () |> debug |> println
 
   fake_school ()
-  |> enroll_student (Student { name: "Jose", grade: 6 })
+  |> enroll_student (Student { name: "小明", grade: 6 })
   |> debug
   |> println
 
@@ -109,7 +109,6 @@ main () = {
   #   y
   # }
   let h = house.address.
-  println (debug h)
 
   # let incomplete_house = House { year_built: 2005 }
 

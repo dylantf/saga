@@ -84,9 +84,17 @@ fn resolve_record_fields(
     }
 
     // 2. Check per-span types (local let bindings, pattern bindings, params).
-    // Note: spans may include leading/trailing whitespace, so we trim before comparing.
+    eprintln!("[resolve] looking for receiver={:?} in {} type_at_span entries, source_len={}", receiver, result.type_at_span.len(), source.len());
     for (span, ty) in &result.type_at_span {
-        if span.end <= source.len() && source[span.start..span.end].trim() == receiver {
+        if span.end <= source.len() {
+            let text = &source[span.start..span.end];
+            if text.contains(receiver) || receiver.contains(text.trim()) {
+                eprintln!("[resolve] near-match span={:?} text={:?} ty={:?}", span, text, ty);
+            }
+        } else {
+            eprintln!("[resolve] span {:?} OUT OF BOUNDS (source_len={})", span, source.len());
+        }
+        if span.end <= source.len() && &source[span.start..span.end] == receiver {
             let resolved = result.sub.apply(ty);
             if let Some(fields) = extract_record_fields(result, &resolved) {
                 return Some(fields);
@@ -98,7 +106,7 @@ fn resolve_record_fields(
     for (node_id, ty) in &result.type_at_node {
         if let Some(span) = result.node_spans.get(node_id)
             && span.end <= source.len()
-            && source[span.start..span.end].trim() == receiver
+            && &source[span.start..span.end] == receiver
         {
             let resolved = result.sub.apply(ty);
             if let Some(fields) = extract_record_fields(result, &resolved) {
