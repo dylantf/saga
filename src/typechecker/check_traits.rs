@@ -120,7 +120,7 @@ impl Checker {
             );
         }
 
-        self.traits.insert(
+        self.trait_state.traits.insert(
             name.into(),
             super::TraitInfo {
                 type_param: type_param.into(),
@@ -144,7 +144,7 @@ impl Checker {
         span: Span,
     ) -> Result<(), Diagnostic> {
         // Check the trait exists
-        let trait_info = self.traits.get(trait_name).cloned().ok_or_else(|| {
+        let trait_info = self.trait_state.traits.get(trait_name).cloned().ok_or_else(|| {
             Diagnostic::error_at(span, format!("impl for undefined trait: {}", trait_name))
         })?;
 
@@ -202,10 +202,10 @@ impl Checker {
                 if let Some(idx) = type_params.iter().position(|p| p == &bound.type_var)
                     && let Some(Type::Var(var_id)) = param_vars.get(idx)
                 {
-                    self.where_bound_var_names
+                    self.trait_state.where_bound_var_names
                         .insert(*var_id, bound.type_var.clone());
                     for trait_req in &bound.traits {
-                        self.where_bounds
+                        self.trait_state.where_bounds
                             .entry(*var_id)
                             .or_default()
                             .insert(trait_req.clone());
@@ -234,7 +234,7 @@ impl Checker {
             let expected_return = self.substitute_trait_param(trait_param_id, &target, &trait_method.2);
 
             let saved_env = self.env.clone();
-            let body_scope = self.save_body_scope();
+            let body_scope = self.enter_effect_scope();
 
             // Re-insert the trait's method schemes so that method calls inside
             // the impl body resolve to the trait signature, not to a user-defined
@@ -278,7 +278,9 @@ impl Checker {
                 })?;
 
             // Check that body effects are covered by the impl's needs declaration
-            let (body_effects, body_field_candidates) = self.restore_body_scope(body_scope);
+            let scope_result = self.exit_effect_scope(body_scope);
+            let body_effects = scope_result.effects;
+            let body_field_candidates = scope_result.field_candidates;
             if !body_effects.is_empty() || !declared_effects.is_empty() {
                 Self::check_undeclared_effects(
                     &body_effects,
@@ -294,7 +296,7 @@ impl Checker {
             // Register effects so callers of this method know what they propagate.
             // Union with any effects already registered (from other impls of the same method).
             if !declared_effects.is_empty() {
-                self.fun_effects
+                self.effect_state.fun_effects
                     .entry(method_name.clone())
                     .or_default()
                     .extend(declared_effects.iter().cloned());
@@ -342,7 +344,7 @@ impl Checker {
         }
 
         let key = (trait_name.to_string(), target_type.to_string());
-        if self.trait_impls.contains_key(&key) {
+        if self.trait_state.impls.contains_key(&key) {
             return Err(Diagnostic::error_at(
                 span,
                 format!(
@@ -351,7 +353,7 @@ impl Checker {
                 ),
             ));
         }
-        self.trait_impls.insert(
+        self.trait_state.impls.insert(
             key,
             ImplInfo {
                 param_constraints,

@@ -1,0 +1,34 @@
+# Multishot continuations: calling resume more than once
+#
+# Each resume re-runs the entire remaining computation from the
+# effect call site. With 2 effects and 2 resumes each, the
+# continuation tree branches exponentially.
+#
+# Expected trace:
+#   [1] A
+#   [1] B
+#   [2] B
+#   [2] A
+#   [1] B
+#   [2] B
+
+effect Log {
+  fun log : (msg: String) -> Unit
+}
+
+handler double_log for Log {
+  log msg = {
+    println ("[1] " <> msg)
+    resume ()
+    println ("[2] " <> msg)
+    resume ()
+  }
+}
+
+fun do_work : Unit -> Unit needs {Log}
+do_work () = {
+  log! "A"
+  log! "B"
+}
+
+main () = do_work () with double_log

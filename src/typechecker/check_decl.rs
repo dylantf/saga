@@ -26,6 +26,7 @@ impl Checker {
             }
         }
         self.check_unused_variables();
+        self.zonk_warnings();
         self.to_result()
     }
 
@@ -83,7 +84,7 @@ impl Checker {
                     errors.push(e);
                     // Clear pending constraints for this function -- they may reference
                     // unresolved types from the error site and would produce cascading errors
-                    self.pending_constraints.clear();
+                    self.trait_state.pending_constraints.clear();
                 }
                 // Drain any additional errors collected during block inference
                 let has_errors = self
@@ -91,7 +92,7 @@ impl Checker {
                     .iter()
                     .any(|d| matches!(d.severity, super::Severity::Error));
                 if has_errors {
-                    self.pending_constraints.clear();
+                    self.trait_state.pending_constraints.clear();
                 }
                 errors.extend(self.drain_errors());
             } else {
@@ -105,7 +106,7 @@ impl Checker {
 
         // Validate that `main` does not declare effects (it's the top of the call stack,
         // there is no caller above to provide handlers)
-        if let Some(effects) = self.fun_effects.get("main")
+        if let Some(effects) = self.effect_state.fun_effects.get("main")
             && !effects.is_empty()
         {
             let span = program.iter().find_map(|d| {
@@ -124,6 +125,37 @@ impl Checker {
                         effects.iter().cloned().collect::<Vec<_>>().join(", ")
                     ),
                 ));
+        }
+
+        // Validate that `main` does not have unresolved trait constraints
+        // (it is the entry point -- there is no caller to supply dictionaries)
+        if let Some(scheme) = self.env.get("main")
+            && !scheme.constraints.is_empty()
+        {
+            let traits: Vec<_> = scheme
+                .constraints
+                .iter()
+                .map(|(t, _)| t.as_str())
+                .collect();
+            let span = program
+                .iter()
+                .find_map(|d| {
+                    if let Decl::FunBinding { name, span, .. } = d
+                        && name == "main"
+                    {
+                        Some(*span)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(crate::token::Span { start: 0, end: 0 });
+            errors.push(Diagnostic::error_at(
+                span,
+                format!(
+                    "`main` cannot have unresolved trait constraints [{}] -- it is the entry point and there is no caller to supply dictionaries",
+                    traits.join(", ")
+                ),
+            ));
         }
 
         // Check for annotations without a matching function binding
@@ -174,7 +206,7 @@ impl Checker {
                 }
                 let scheme = self.generalize(&ty);
                 self.env.insert_with_def(name.clone(), scheme, *id);
-                self.node_spans.insert(*id, *span);
+                self.lsp.node_spans.insert(*id, *span);
                 Ok(())
             }
 
@@ -359,7 +391,7 @@ impl Checker {
                 // Always register in fun_effects (even pure functions get an empty
                 // set) so the `with` validation can distinguish local declarations
                 // from imports/parameters.
-                self.fun_effects.insert(
+                self.effect_state.fun_effects.insert(
                     name.clone(),
                     effects.iter().map(|e| e.name.clone()).collect(),
                 );
@@ -376,7 +408,7 @@ impl Checker {
                         }
                     }
                     if !constraints.is_empty() {
-                        self.fun_effect_type_constraints
+                        self.effect_state.fun_type_constraints
                             .insert(name.clone(), constraints);
                     }
                 }
@@ -387,7 +419,7 @@ impl Checker {
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
                         {
-                            self.where_bound_var_names
+                            self.trait_state.where_bound_var_names
                                 .insert(*var_id, bound.type_var.clone());
                             for trait_name in &bound.traits {
                                 constraints.push((trait_name.clone(), *var_id));
@@ -410,7 +442,7 @@ impl Checker {
                     scheme.constraints = c.clone();
                 }
                 self.env.insert_with_def(name.clone(), scheme, *id);
-                self.node_spans.insert(*id, *span);
+                self.lsp.node_spans.insert(*id, *span);
             }
         }
 
@@ -432,7 +464,7 @@ impl Checker {
                 // already registered with their declared effects; un-annotated
                 // ones get an empty set). This lets `with` validation distinguish
                 // local functions from imports.
-                self.fun_effects.entry(name.clone()).or_default();
+                self.effect_state.fun_effects.entry(name.clone()).or_default();
                 if annotations.contains_key(name) {
                     let var = self.fresh_var();
                     fun_vars.insert(name.clone(), var);
@@ -449,7 +481,7 @@ impl Checker {
                     },
                     *id,
                 );
-                self.node_spans.insert(*id, *span);
+                self.lsp.node_spans.insert(*id, *span);
             }
         }
         fun_vars
@@ -530,20 +562,20 @@ impl Checker {
 
         // Register where clause bounds on type variable IDs
         for (trait_name, var_id) in where_constraints {
-            self.where_bounds
+            self.trait_state.where_bounds
                 .entry(*var_id)
                 .or_default()
                 .insert(trait_name.clone());
         }
 
         // Snapshot pending constraints so we can partition new ones after body checking
-        let constraints_before = self.pending_constraints.len();
+        let constraints_before = self.trait_state.pending_constraints.len();
 
         // Save and clear effect tracking and field candidate tracking for this function body
-        let body_scope = self.save_body_scope();
+        let body_scope = self.enter_effect_scope();
 
         // Pre-populate effect type param cache from annotation constraints (e.g. needs {State Int})
-        if let Some(constraints) = self.fun_effect_type_constraints.get(name).cloned() {
+        if let Some(constraints) = self.effect_state.fun_type_constraints.get(name).cloned() {
             for (effect_name, concrete_types) in &constraints {
                 if let Some(info) = self.effects.get(effect_name).cloned() {
                     let mapping: std::collections::HashMap<u32, Type> = info
@@ -552,7 +584,7 @@ impl Checker {
                         .zip(concrete_types.iter())
                         .map(|(&param_id, ty)| (param_id, ty.clone()))
                         .collect();
-                    self.effect_type_param_cache
+                    self.effect_state.type_param_cache
                         .insert(effect_name.clone(), mapping);
                 }
             }
@@ -624,8 +656,10 @@ impl Checker {
         }
 
         // Check effect requirements against declared needs
-        let (body_effects, body_field_candidates) = self.restore_body_scope(body_scope);
-        let declared_effects = self.fun_effects.get(name).cloned().unwrap_or_default();
+        let scope_result = self.exit_effect_scope(body_scope);
+        let body_effects = scope_result.effects;
+        let body_field_candidates = scope_result.field_candidates;
+        let declared_effects = self.effect_state.fun_effects.get(name).cloned().unwrap_or_default();
 
         if !body_effects.is_empty() || !declared_effects.is_empty() {
             let err_span = match clauses[0] {
@@ -645,15 +679,11 @@ impl Checker {
                 let span = annotation_span.expect("unused effects implies annotation exists");
                 let mut effects: Vec<_> = unused.into_iter().cloned().collect();
                 effects.sort();
-                self.collected_diagnostics.push(Diagnostic::warning_at(
+                self.pending_warnings.push(super::PendingWarning::UnusedEffects {
                     span,
-                    format!(
-                        "function '{}' declares needs {{{}}} but never uses {}",
-                        name,
-                        effects.join(", "),
-                        if effects.len() == 1 { "it" } else { "them" },
-                    ),
-                ));
+                    fun_name: name.to_string(),
+                    effects,
+                });
             }
         }
 
@@ -719,7 +749,7 @@ impl Checker {
         has_annotation: bool,
         where_constraints: &[(String, u32)],
     ) -> Result<Scheme, Diagnostic> {
-        let new_constraints = self.pending_constraints.split_off(constraints_before);
+        let new_constraints = self.trait_state.pending_constraints.split_off(constraints_before);
         let mut scheme_constraints: Vec<(String, u32, Span)> = Vec::new();
         for (trait_name, ty, span, node_id) in new_constraints {
             let resolved = self.sub.apply(&ty);
@@ -727,7 +757,7 @@ impl Checker {
                 Type::Var(id) => {
                     // Check where_bounds, resolving bound var IDs through
                     // substitution so they match after annotation unification.
-                    let in_where = self.where_bounds.iter().any(|(bound_id, traits)| {
+                    let in_where = self.trait_state.where_bounds.iter().any(|(bound_id, traits)| {
                         traits.contains(&trait_name)
                             && match self.sub.apply(&Type::Var(*bound_id)) {
                                 Type::Var(resolved) => resolved == id,
@@ -737,7 +767,7 @@ impl Checker {
                     if in_where {
                         // Record polymorphic passthrough evidence so the elaborator
                         // knows this is a trait method call (needs DictMethodAccess).
-                        let var_name = self.where_bound_var_names.get(&id).cloned();
+                        let var_name = self.trait_state.where_bound_var_names.get(&id).cloned();
                         self.evidence.push(super::TraitEvidence {
                             node_id,
                             trait_name: trait_name.clone(),
@@ -757,7 +787,7 @@ impl Checker {
                     }
                     // Record evidence for inferred constraints too, so the
                     // elaborator can resolve trait method calls (DictMethodAccess).
-                    let var_name = self.where_bound_var_names.get(&id).cloned();
+                    let var_name = self.trait_state.where_bound_var_names.get(&id).cloned();
                     self.evidence.push(super::TraitEvidence {
                         node_id,
                         trait_name: trait_name.clone(),
@@ -767,7 +797,7 @@ impl Checker {
                     scheme_constraints.push((trait_name, id, span));
                 }
                 _ => {
-                    self.pending_constraints
+                    self.trait_state.pending_constraints
                         .push((trait_name, ty, span, node_id));
                 }
             }
@@ -943,9 +973,9 @@ impl Checker {
                     ty: ctor_ty,
                 },
             );
-            self.constructor_def_ids
+            self.lsp.constructor_def_ids
                 .insert(variant.name.clone(), variant.id);
-            self.node_spans.insert(variant.id, variant.span);
+            self.lsp.node_spans.insert(variant.id, variant.span);
         }
 
         self.adt_variants.insert(
@@ -1010,7 +1040,7 @@ impl Checker {
                 ty: ctor_ty,
             },
         );
-        self.constructor_def_ids.insert(name.into(), def_id);
+        self.lsp.constructor_def_ids.insert(name.into(), def_id);
 
         self.records.insert(
             name.into(),
@@ -1097,7 +1127,7 @@ impl Checker {
         };
         let return_clause = return_clause.as_deref();
         // Save and clear effect/field tracking for this handler body
-        let body_scope = self.save_body_scope();
+        let body_scope = self.enter_effect_scope();
 
         // Build type param bindings from handler's effect refs.
         // E.g. `handler counter for State Int` with effect State s:
@@ -1115,6 +1145,10 @@ impl Checker {
                 }
             }
         }
+
+        // Fresh type variable for the handler's answer type.
+        // Arms unify against this; the return clause (if any) constrains it later.
+        let answer_ty = self.fresh_var();
 
         // Validate that each arm's operation belongs to the handler's declared effects
         let mut seen_ops: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1145,7 +1179,7 @@ impl Checker {
                     belongs_to_declared = true;
                     // Record arm span -> (op definition span, source module) for LSP go-to-def (level 2)
                     if let Some(&op_span) = info.op_spans.get(&arm.op_name) {
-                        self.handler_arm_targets
+                        self.lsp.handler_arm_targets
                             .insert(arm.span, (op_span, info.source_module.clone()));
                     }
                     arm_spans.insert(arm.op_name.clone(), arm.span);
@@ -1186,6 +1220,7 @@ impl Checker {
             let saved_resume = self.resume_type.take();
             let saved_resume_ret = self.resume_return_type.take();
             self.resume_type = Some(op_sig.return_type.clone());
+            self.resume_return_type = Some(answer_ty.clone());
 
             for (i, (param_name, param_span)) in arm.params.iter().enumerate() {
                 let param_ty = if i < op_sig.params.len() {
@@ -1203,13 +1238,13 @@ impl Checker {
                     },
                     param_id,
                 );
-                self.node_spans.insert(param_id, *param_span);
-                self.definitions
+                self.lsp.node_spans.insert(param_id, *param_span);
+                self.lsp.definitions
                     .push((param_id, param_name.clone(), *param_span));
             }
 
             let body_ty = self.infer_expr(&arm.body)?;
-            if let Err(e) = self.unify(&op_sig.return_type, &body_ty) {
+            if let Err(e) = self.unify(&answer_ty, &body_ty) {
                 self.collected_diagnostics.push(e.with_span(arm.span));
             }
             self.resume_type = saved_resume;
@@ -1237,15 +1272,26 @@ impl Checker {
                 );
             }
             let ret_ty = self.infer_expr(&rc.body)?;
+            // Constrain answer_ty to match the return clause's body type
+            if let Err(e) = self.unify(&answer_ty, &ret_ty) {
+                self.collected_diagnostics.push(e.with_span(rc.body.span));
+            }
             self.resume_type = saved_resume;
             self.env = saved_env;
             Some((param_var_id, ret_ty))
         } else {
-            None
+            // No return clause: the handler doesn't transform the result type.
+            // Store answer_ty so the use site unifies arm body types with expr_ty.
+            let param_var_id = match &answer_ty {
+                Type::Var(id) => *id,
+                _ => unreachable!(), // answer_ty is created as fresh_var()
+            };
+            Some((param_var_id, answer_ty.clone()))
         };
 
         // Check effect requirements against declared needs
-        let (body_effects, _body_field_candidates) = self.restore_body_scope(body_scope);
+        let scope_result = self.exit_effect_scope(body_scope);
+        let body_effects = scope_result.effects;
         let declared_effects: std::collections::HashSet<String> =
             needs.iter().map(|e| e.name.clone()).collect();
 
@@ -1306,7 +1352,7 @@ impl Checker {
             },
             *def_id,
         );
-        self.node_spans.insert(*def_id, *span);
+        self.lsp.node_spans.insert(*def_id, *span);
 
         Ok(())
     }
@@ -1320,13 +1366,13 @@ impl Checker {
         // Also resolve var names through substitution
         let mut resolved_var_names: std::collections::HashMap<u32, String> =
             std::collections::HashMap::new();
-        for (&var_id, traits) in &self.where_bounds {
+        for (&var_id, traits) in &self.trait_state.where_bounds {
             if let Type::Var(resolved_id) = self.sub.apply(&Type::Var(var_id)) {
                 resolved_bounds
                     .entry(resolved_id)
                     .or_default()
                     .extend(traits.iter().cloned());
-                if let Some(name) = self.where_bound_var_names.get(&var_id) {
+                if let Some(name) = self.trait_state.where_bound_var_names.get(&var_id) {
                     resolved_var_names.insert(resolved_id, name.clone());
                 }
             }
@@ -1334,7 +1380,7 @@ impl Checker {
 
         // Process constraints in a loop since conditional impls may push new ones
         loop {
-            let constraints = std::mem::take(&mut self.pending_constraints);
+            let constraints = std::mem::take(&mut self.trait_state.pending_constraints);
             if constraints.is_empty() {
                 break;
             }
@@ -1347,16 +1393,18 @@ impl Checker {
                     // Concrete type (includes primitives): check that an impl exists
                     Type::Con(type_name, args) => {
                         let impl_info = self
-                            .trait_impls
+                            .trait_state
+                            .impls
                             .get(&(trait_name.clone(), type_name.clone()));
                         match impl_info {
                             None => {
                                 // Check if this might be caused by a user function
                                 // shadowing a trait method that would have worked.
                                 let mut hint = String::new();
-                                for (t_name, t_info) in &self.traits {
+                                for (t_name, t_info) in &self.trait_state.traits {
                                     if self
-                                        .trait_impls
+                                        .trait_state
+                                        .impls
                                         .contains_key(&(t_name.clone(), type_name.clone()))
                                     {
                                         for (m_name, _, _, _) in &t_info.methods {
@@ -1396,7 +1444,7 @@ impl Checker {
                                 if type_name == "Tuple" {
                                     // Tuples: propagate the trait to all elements
                                     for arg_ty in args {
-                                        self.pending_constraints.push((
+                                        self.trait_state.pending_constraints.push((
                                             trait_name.clone(),
                                             arg_ty.clone(),
                                             span,
@@ -1406,7 +1454,7 @@ impl Checker {
                                 } else {
                                     for (req_trait, param_idx) in &info.param_constraints {
                                         if let Some(arg_ty) = args.get(*param_idx) {
-                                            self.pending_constraints.push((
+                                            self.trait_state.pending_constraints.push((
                                                 req_trait.clone(),
                                                 arg_ty.clone(),
                                                 span,
@@ -1465,11 +1513,12 @@ impl Checker {
 
     /// Verify that every impl's trait has its supertraits also implemented for the same type.
     pub(crate) fn check_supertrait_impls(&self) -> Result<(), Diagnostic> {
-        for ((trait_name, target_type), impl_info) in &self.trait_impls {
-            if let Some(trait_info) = self.traits.get(trait_name) {
+        for ((trait_name, target_type), impl_info) in &self.trait_state.impls {
+            if let Some(trait_info) = self.trait_state.traits.get(trait_name) {
                 for supertrait in &trait_info.supertraits {
                     if !self
-                        .trait_impls
+                        .trait_state
+                        .impls
                         .contains_key(&(supertrait.clone(), target_type.clone()))
                     {
                         let msg = format!(

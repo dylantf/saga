@@ -1,10 +1,16 @@
+mod builtins;
 mod check_decl;
 mod check_module;
 pub use check_module::{ModuleMap, builtin_module_source, scan_project_modules};
 mod check_traits;
+mod effects;
 pub(crate) mod exhaustiveness;
+mod handlers;
 mod infer;
+mod patterns;
+mod records;
 mod result;
+mod unify;
 pub use result::CheckResult;
 
 #[cfg(test)]
@@ -274,252 +280,10 @@ impl Scheme {
     }
 }
 
-/// Replace `Type::Var(id)` with `Type::Con(name, [])` for display purposes.
-fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
-    match ty {
-        Type::Var(id) => {
-            if let Some(name) = names.get(id) {
-                Type::Con(name.clone(), vec![])
-            } else {
-                ty.clone()
-            }
-        }
-        Type::Arrow(a, b) => Type::Arrow(
-            Box::new(rename_vars(a, names)),
-            Box::new(rename_vars(b, names)),
-        ),
-        Type::EffArrow(a, b, effs) => Type::EffArrow(
-            Box::new(rename_vars(a, names)),
-            Box::new(rename_vars(b, names)),
-            effs.iter()
-                .map(|(name, args)| {
-                    (
-                        name.clone(),
-                        args.iter().map(|t| rename_vars(t, names)).collect(),
-                    )
-                })
-                .collect(),
-        ),
-        Type::Con(name, args) => Type::Con(
-            name.clone(),
-            args.iter().map(|a| rename_vars(a, names)).collect(),
-        ),
-        Type::Record(fields) => Type::Record(
-            fields
-                .iter()
-                .map(|(fname, ty)| (fname.clone(), rename_vars(ty, names)))
-                .collect(),
-        ),
-        Type::Error => Type::Error,
-        Type::Never => Type::Never,
-    }
-}
-
-// --- Module exports ---
-
-/// All public items exported by a typechecked module, cached as a single unit.
-#[derive(Debug, Clone, Default)]
-pub struct ModuleExports {
-    /// Public type bindings: name -> scheme.
-    pub bindings: Vec<(String, Scheme)>,
-    /// Type name -> constructor names (empty vec for opaque types).
-    pub type_constructors: HashMap<String, Vec<String>>,
-    /// Record name -> record info (type params + field types).
-    pub record_defs: HashMap<String, RecordInfo>,
-    /// Trait name -> trait info.
-    pub traits: HashMap<String, TraitInfo>,
-    /// (trait_name, target_type) -> impl info.
-    pub trait_impls: HashMap<(String, String), ImplInfo>,
-    /// Effect name -> effect def info.
-    pub(crate) effects: HashMap<String, EffectDefInfo>,
-    /// Handler name -> handler info.
-    pub(crate) handlers: HashMap<String, HandlerInfo>,
-    /// Type name -> declared parameter count (for arity checking across modules).
-    pub type_arity: HashMap<String, usize>,
-    /// Function name -> effect names from `needs` clause (for cross-module effect tracking).
-    pub fun_effects: HashMap<String, HashSet<String>>,
-}
-
-impl ModuleExports {
-    /// Collect all public exports from a typechecked module.
-    pub fn collect(program: &[crate::ast::Decl], checker: &Checker) -> Self {
-        use crate::ast::Decl;
-
-        let pub_names = crate::typechecker::check_module::public_names_for_tc(program);
-
-        // Bindings: from env and constructors
-        let mut bindings: Vec<(String, Scheme)> = Vec::new();
-        for name in &pub_names {
-            if let Some(scheme) = checker.env.get(name) {
-                bindings.push((name.to_string(), scheme.clone()));
-            } else if let Some(scheme) = checker.constructors.get(name) {
-                bindings.push((name.to_string(), scheme.clone()));
-            }
-        }
-
-        // Type constructors
-        let mut type_constructors: HashMap<String, Vec<String>> = HashMap::new();
-        for decl in program {
-            match decl {
-                Decl::TypeDef {
-                    public: true,
-                    opaque,
-                    name,
-                    variants,
-                    ..
-                } => {
-                    if *opaque {
-                        type_constructors.insert(name.clone(), vec![]);
-                    } else {
-                        let ctors: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-                        type_constructors.insert(name.clone(), ctors);
-                    }
-                }
-                Decl::RecordDef {
-                    public: true, name, ..
-                } => {
-                    type_constructors.insert(name.clone(), vec![name.clone()]);
-                }
-                _ => {}
-            }
-        }
-
-        // Records, traits, trait impls, effects, handlers: all from AST + checker state
-        let mut record_defs: HashMap<String, RecordInfo> = HashMap::new();
-        let mut traits: HashMap<String, TraitInfo> = HashMap::new();
-        let mut trait_impls: HashMap<(String, String), ImplInfo> = HashMap::new();
-        let mut effects: HashMap<String, EffectDefInfo> = HashMap::new();
-        let mut handlers: HashMap<String, HandlerInfo> = HashMap::new();
-
-        for decl in program {
-            match decl {
-                Decl::RecordDef {
-                    public: true, name, ..
-                } => {
-                    if let Some(fields) = checker.records.get(name.as_str()) {
-                        record_defs.insert(name.clone(), fields.clone());
-                    }
-                }
-                Decl::TraitDef {
-                    public: true, name, ..
-                } => {
-                    if let Some(info) = checker.traits.get(name.as_str()) {
-                        traits.insert(name.clone(), info.clone());
-                    }
-                }
-                Decl::ImplDef {
-                    trait_name,
-                    target_type,
-                    ..
-                } => {
-                    let key = (trait_name.clone(), target_type.clone());
-                    if let Some(info) = checker.trait_impls.get(&key) {
-                        trait_impls.insert(key, info.clone());
-                    }
-                }
-                Decl::EffectDef {
-                    public: true, name, ..
-                } => {
-                    if let Some(info) = checker.effects.get(name) {
-                        effects.insert(name.clone(), info.clone());
-                    }
-                }
-                Decl::HandlerDef {
-                    public: true, name, ..
-                } => {
-                    if let Some(info) = checker.handlers.get(name) {
-                        handlers.insert(name.clone(), info.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Collect type arities for all exported types
-        let mut type_arity: HashMap<String, usize> = HashMap::new();
-        for name in type_constructors.keys() {
-            if let Some(&arity) = checker.type_arity.get(name) {
-                type_arity.insert(name.clone(), arity);
-            }
-        }
-        for name in record_defs.keys() {
-            if let Some(&arity) = checker.type_arity.get(name) {
-                type_arity.insert(name.clone(), arity);
-            }
-        }
-
-        // Collect fun_effects for public functions
-        let mut fun_effects: HashMap<String, HashSet<String>> = HashMap::new();
-        for name in &pub_names {
-            if let Some(effs) = checker.fun_effects.get(name) {
-                fun_effects.insert(name.clone(), effs.clone());
-            }
-        }
-
-        ModuleExports {
-            bindings,
-            type_constructors,
-            record_defs,
-            traits,
-            trait_impls,
-            effects,
-            handlers,
-            type_arity,
-            fun_effects,
-        }
-    }
-}
-
-// --- Module codegen info ---
-
-/// An effect operation definition for codegen: operation name and parameter count.
-#[derive(Debug, Clone)]
-pub struct EffectOpDef {
-    pub name: String,
-    pub param_count: usize,
-}
-
-/// An effect definition for codegen: effect name, its operations, and type parameter count.
-#[derive(Debug, Clone)]
-pub struct EffectDef {
-    pub name: String,
-    pub ops: Vec<EffectOpDef>,
-    pub type_param_count: usize,
-}
-
-/// A trait impl dict exported by a module.
-#[derive(Debug, Clone)]
-pub struct TraitImplDict {
-    pub trait_name: String,
-    pub target_type: String,
-    /// Module-qualified dict name (e.g. `__dict_Show_animals_Animal`).
-    pub dict_name: String,
-    /// Number of dict parameters (from where clause).
-    pub arity: usize,
-    /// Where-clause constraints as (constraint_trait, param_index) pairs.
-    /// Used by the elaborator to pass correct sub-dicts for parameterized impls.
-    pub param_constraints: Vec<(String, usize)>,
-}
-
-/// Information about a module's exports needed by the lowerer/codegen.
-/// Populated during typechecking alongside `tc_modules`.
-#[derive(Debug, Clone, Default)]
-pub struct ModuleCodegenInfo {
-    /// Public type bindings: name -> scheme.
-    pub exports: Vec<(String, Scheme)>,
-    /// Public effect definitions.
-    pub effect_defs: Vec<EffectDef>,
-    /// Public record definitions: record name -> ordered field names.
-    pub record_fields: Vec<(String, Vec<String>)>,
-    /// Public handler names.
-    pub handler_defs: Vec<String>,
-    /// Public function effect annotations: name -> sorted effect names.
-    pub fun_effects: Vec<(String, Vec<String>)>,
-    /// Public type constructors: type name -> [constructor names].
-    pub type_constructors: Vec<(String, Vec<String>)>,
-    /// Trait impl dicts exported by this module.
-    pub trait_impl_dicts: Vec<TraitImplDict>,
-}
+// Module export types are defined in check_module.rs and re-exported here.
+pub use check_module::{
+    EffectDef, EffectOpDef, ModuleCodegenInfo, ModuleExports, TraitImplDict,
+};
 
 // --- Type environment ---
 
@@ -753,6 +517,21 @@ pub struct TraitEvidence {
     pub type_var_name: Option<String>,
 }
 
+/// Warnings deferred until after inference, when substitutions are complete.
+#[derive(Clone)]
+pub enum PendingWarning {
+    /// A non-unit value was discarded in a block (not the last statement).
+    DiscardedValue { span: Span, ty: Type },
+    /// A local variable binding was never referenced.
+    UnusedVariable { span: Span, name: String },
+    /// A function declares effects in its `needs` clause that it never uses.
+    UnusedEffects {
+        span: Span,
+        fun_name: String,
+        effects: Vec<String>,
+    },
+}
+
 // --- Inference engine ---
 
 #[derive(Clone)]
@@ -772,29 +551,14 @@ pub struct Checker {
     pub(crate) resume_type: Option<Type>,
     /// Context for resume return typing: when inside a handler arm, the answer type of the with-expression
     pub(crate) resume_return_type: Option<Type>,
-    /// Effects used in the current function body (accumulated during inference)
-    pub(crate) current_effects: HashSet<String>,
-    /// Per-scope cache of instantiated effect type params: effect name -> mapping from original var IDs to fresh vars.
-    /// Ensures all ops from the same effect share type params within a function scope.
-    pub(crate) effect_type_param_cache: HashMap<String, HashMap<u32, Type>>,
-    /// Known effect requirements for named functions: name -> set of effect names
-    pub(crate) fun_effects: HashMap<String, HashSet<String>>,
-    /// Annotation-provided effect type constraints: fn name -> [(effect_name, [concrete types])]
-    pub(crate) fun_effect_type_constraints: HashMap<String, Vec<(String, Vec<Type>)>>,
-    /// Trait definitions: trait name -> info
-    pub(crate) traits: HashMap<String, TraitInfo>,
-    /// Impl registry: (trait_name, target_type) -> impl info
-    pub(crate) trait_impls: HashMap<(String, String), ImplInfo>,
-    /// Pending trait constraints to check: (trait_name, type, span_for_errors, node_id)
-    pub(crate) pending_constraints: Vec<(String, Type, Span, crate::ast::NodeId)>,
+    /// Effect tracking state (current effects, caches, annotations).
+    pub(crate) effect_state: EffectState,
+    /// Trait system state (definitions, impls, constraints, where bounds).
+    pub(crate) trait_state: TraitState,
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
     /// Tracks which records are still candidates for an unresolved type variable based on
     /// the intersection of all fields accessed on it. Checked at end of each function body.
     pub(crate) field_candidates: FieldCandidates,
-    /// Where clause bounds: var_id -> set of trait names assumed satisfied
-    pub(crate) where_bounds: HashMap<u32, HashSet<String>>,
-    /// Reverse map from type var ID to original type parameter name (for polymorphic evidence)
-    pub(crate) where_bound_var_names: HashMap<u32, String>,
     /// Module system state: caches, project root, import tracking.
     pub(crate) modules: ModuleContext,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
@@ -806,37 +570,77 @@ pub struct Checker {
     pub(crate) evidence: Vec<TraitEvidence>,
     /// Dict params for let bindings with trait constraints: name -> (params, value_arity).
     pub(crate) let_dict_params: HashMap<String, (Vec<(String, String)>, usize)>,
-    /// Deferred effects for let bindings that partially apply effectful functions.
-    /// name -> effect names. Used by the lowerer to register effectful local vars.
-    pub(crate) let_effect_bindings: HashMap<String, Vec<String>>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
-    /// Per-node type information for Expr nodes (LSP hover, go-to-def, etc.).
-    /// Types are stored unresolved (may contain type variables); apply `sub`
-    /// at lookup time to get the final resolved type.
-    pub(crate) type_at_node: HashMap<crate::ast::NodeId, Type>,
-    /// Per-span type information for Pat bindings.
-    pub(crate) type_at_span: HashMap<Span, Type>,
-    /// Resolution map: usage NodeId -> definition NodeId (for find-all-references).
-    pub(crate) references: HashMap<crate::ast::NodeId, crate::ast::NodeId>,
-    /// NodeId -> Span map for all recorded expression nodes (for resolving NodeIds to locations).
-    pub(crate) node_spans: HashMap<crate::ast::NodeId, Span>,
-    /// Constructor definition NodeIds: constructor name -> NodeId of the TypeConstructor/RecordDef.
-    pub(crate) constructor_def_ids: HashMap<String, crate::ast::NodeId>,
-    /// All variable/param definitions: (NodeId, name, span) for unused variable detection.
-    pub(crate) definitions: Vec<(crate::ast::NodeId, String, Span)>,
+    /// Warnings deferred until after inference, when substitutions are complete.
+    pub(crate) pending_warnings: Vec<PendingWarning>,
+    /// LSP/IDE state: type info, references, definitions, go-to-def targets.
+    pub(crate) lsp: LspState,
     /// When true, function annotations without matching bodies are allowed
     /// (used for builtin stdlib modules where implementations are in Rust).
     pub(crate) allow_bodyless_annotations: bool,
     /// Set to the module name when checking a module file; None for the main file.
     pub(crate) current_module: Option<String>,
+}
+
+/// Trait system state: definitions, impl registry, deferred constraints, where bounds.
+#[derive(Clone, Default)]
+pub(crate) struct TraitState {
+    /// Trait definitions: trait name -> info.
+    pub traits: HashMap<String, TraitInfo>,
+    /// Impl registry: (trait_name, target_type) -> impl info.
+    pub impls: HashMap<(String, String), ImplInfo>,
+    /// Pending trait constraints to check: (trait_name, type, span_for_errors, node_id).
+    pub pending_constraints: Vec<(String, Type, Span, crate::ast::NodeId)>,
+    /// Where clause bounds: var_id -> set of trait names assumed satisfied.
+    pub where_bounds: HashMap<u32, HashSet<String>>,
+    /// Reverse map from type var ID to original type parameter name (for polymorphic evidence).
+    pub where_bound_var_names: HashMap<u32, String>,
+}
+
+/// Effect tracking state accumulated during inference.
+#[derive(Clone, Default)]
+pub(crate) struct EffectState {
+    /// Effects used in the current function body (accumulated during inference).
+    pub current: HashSet<String>,
+    /// Per-scope cache of instantiated effect type params: effect name -> mapping
+    /// from original var IDs to fresh vars. Ensures all ops from the same effect
+    /// share type params within a function scope.
+    pub type_param_cache: HashMap<String, HashMap<u32, Type>>,
+    /// Known effect requirements for named functions: name -> set of effect names.
+    pub fun_effects: HashMap<String, HashSet<String>>,
+    /// Annotation-provided effect type constraints: fn name -> [(effect_name, [concrete types])].
+    pub fun_type_constraints: HashMap<String, Vec<(String, Vec<Type>)>>,
+    /// Deferred effects for let bindings that partially apply effectful functions.
+    /// name -> effect names. Used by the lowerer to register effectful local vars.
+    pub let_bindings: HashMap<String, Vec<String>>,
+}
+
+/// State accumulated during typechecking for IDE/LSP features: hover types,
+/// go-to-definition, find-all-references, unused variable detection.
+#[derive(Clone, Default)]
+pub(crate) struct LspState {
+    /// Per-node type information for Expr nodes (LSP hover, go-to-def, etc.).
+    /// Types are stored unresolved (may contain type variables); apply `sub`
+    /// at lookup time to get the final resolved type.
+    pub type_at_node: HashMap<crate::ast::NodeId, Type>,
+    /// Per-span type information for Pat bindings.
+    pub type_at_span: HashMap<Span, Type>,
+    /// Resolution map: usage NodeId -> definition NodeId (for find-all-references).
+    pub references: HashMap<crate::ast::NodeId, crate::ast::NodeId>,
+    /// NodeId -> Span map for all recorded expression nodes (for resolving NodeIds to locations).
+    pub node_spans: HashMap<crate::ast::NodeId, Span>,
+    /// Constructor definition NodeIds: constructor name -> NodeId of the TypeConstructor/RecordDef.
+    pub constructor_def_ids: HashMap<String, crate::ast::NodeId>,
+    /// All variable/param definitions: (NodeId, name, span) for unused variable detection.
+    pub definitions: Vec<(crate::ast::NodeId, String, Span)>,
     /// Stack of (op_name -> (arm_span, source_module)) maps for nested `with` expressions.
     /// Innermost handler is last. Used to record which arm handles each effect call.
-    pub(crate) with_arm_stacks: Vec<HashMap<String, (Span, Option<String>)>>,
+    pub with_arm_stacks: Vec<HashMap<String, (Span, Option<String>)>>,
     /// Maps effect call span -> (handler arm span, source module) (for LSP go-to-def, level 1).
-    pub(crate) effect_call_targets: HashMap<Span, (Span, Option<String>)>,
+    pub effect_call_targets: HashMap<Span, (Span, Option<String>)>,
     /// Maps handler arm span -> (effect op definition span, source module) (for LSP go-to-def, level 2).
-    pub(crate) handler_arm_targets: HashMap<Span, (Span, Option<String>)>,
+    pub handler_arm_targets: HashMap<Span, (Span, Option<String>)>,
 }
 
 /// Module system state: caches, project root, and import tracking.
@@ -866,13 +670,22 @@ pub struct ModuleContext {
 /// Per-variable record candidate narrowing: var_id -> (candidate record names, span).
 pub(crate) type FieldCandidates = HashMap<u32, (Vec<String>, Span)>;
 
-/// Snapshot of per-function-body inference state, saved before checking a body
-/// and restored afterward. Prevents effect tracking and field candidate narrowing
-/// from one body leaking into the next.
-pub(crate) struct BodyScope {
-    effects: HashSet<String>,
-    effect_cache: HashMap<String, HashMap<u32, Type>>,
-    field_candidates: FieldCandidates,
+/// Snapshot of effect-related inference state, saved when entering an isolated
+/// scope (function body, lambda, with-expression, handler arm) and restored on
+/// exit. Prevents effect tracking from leaking between scopes.
+pub(crate) struct EffectScope {
+    pub(crate) effects: HashSet<String>,
+    pub(crate) effect_cache: HashMap<String, HashMap<u32, Type>>,
+    pub(crate) field_candidates: FieldCandidates,
+    resume_type: Option<Type>,
+    resume_return_type: Option<Type>,
+}
+
+/// What accumulated inside an EffectScope while it was active.
+pub(crate) struct EffectScopeResult {
+    pub effects: HashSet<String>,
+    pub effect_cache: HashMap<String, HashMap<u32, Type>>,
+    pub field_candidates: FieldCandidates,
 }
 
 impl Default for Checker {
@@ -893,34 +706,19 @@ impl Checker {
             handlers: HashMap::new(),
             resume_type: None,
             resume_return_type: None,
-            current_effects: HashSet::new(),
-            effect_type_param_cache: HashMap::new(),
-            fun_effects: HashMap::new(),
-            fun_effect_type_constraints: HashMap::new(),
-            traits: HashMap::new(),
-            trait_impls: HashMap::new(),
-            pending_constraints: Vec::new(),
+            effect_state: EffectState::default(),
+            trait_state: TraitState::default(),
             field_candidates: HashMap::new(),
-            where_bounds: HashMap::new(),
-            where_bound_var_names: HashMap::new(),
             modules: ModuleContext::default(),
             adt_variants: HashMap::new(),
             type_arity: HashMap::new(),
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
-            let_effect_bindings: HashMap::new(),
             collected_diagnostics: Vec::new(),
-            type_at_node: HashMap::new(),
-            type_at_span: HashMap::new(),
-            references: HashMap::new(),
-            node_spans: HashMap::new(),
-            constructor_def_ids: HashMap::new(),
-            definitions: Vec::new(),
+            pending_warnings: Vec::new(),
+            lsp: LspState::default(),
             allow_bodyless_annotations: false,
             current_module: None,
-            with_arm_stacks: Vec::new(),
-            effect_call_targets: HashMap::new(),
-            handler_arm_targets: HashMap::new(),
         };
         checker.register_builtins();
         checker
@@ -935,7 +733,7 @@ impl Checker {
     /// Snapshot current trait impls as the base layer (from Std.dy).
     /// Called after loading Std.dy so builtin module checkers inherit these impls.
     pub fn snapshot_base_trait_impls(&mut self) {
-        self.modules.base_trait_impls = self.trait_impls.clone();
+        self.modules.base_trait_impls = self.trait_state.impls.clone();
     }
 
     /// Create a checker with the prelude loaded and (optionally) a project
@@ -985,14 +783,18 @@ impl Checker {
 
     /// Record the type of an expression node (by NodeId).
     pub(crate) fn record_type(&mut self, node_id: crate::ast::NodeId, ty: &Type) {
-        self.type_at_node
+        self.lsp
+            .type_at_node
             .entry(node_id)
             .or_insert_with(|| ty.clone());
     }
 
     /// Record the type of a pattern binding (by Span).
     pub(crate) fn record_type_at_span(&mut self, span: Span, ty: &Type) {
-        self.type_at_span.entry(span).or_insert_with(|| ty.clone());
+        self.lsp
+            .type_at_span
+            .entry(span)
+            .or_insert_with(|| ty.clone());
     }
 
     /// Record a name resolution: usage_id references def_id.
@@ -1002,23 +804,67 @@ impl Checker {
         usage_span: Span,
         def_id: crate::ast::NodeId,
     ) {
-        self.references.insert(usage_id, def_id);
-        self.node_spans.insert(usage_id, usage_span);
+        self.lsp.references.insert(usage_id, def_id);
+        self.lsp.node_spans.insert(usage_id, usage_span);
     }
 
     /// Emit warnings for local variable bindings that are never referenced.
     pub(crate) fn check_unused_variables(&mut self) {
         let used: std::collections::HashSet<crate::ast::NodeId> =
-            self.references.values().copied().collect();
-        for (def_id, name, span) in &self.definitions {
+            self.lsp.references.values().copied().collect();
+        for (def_id, name, span) in &self.lsp.definitions {
             if name.starts_with('_') {
                 continue;
             }
             if !used.contains(def_id) {
-                self.collected_diagnostics.push(Diagnostic::warning_at(
-                    *span,
-                    format!("unused variable: `{}`", name),
-                ));
+                self.pending_warnings.push(PendingWarning::UnusedVariable {
+                    span: *span,
+                    name: name.clone(),
+                });
+            }
+        }
+    }
+
+    /// "Zonk" pass: apply final substitutions to deferred warnings and emit
+    /// only those that are still relevant. Named after GHC's zonking pass.
+    pub(crate) fn zonk_warnings(&mut self) {
+        for warning in std::mem::take(&mut self.pending_warnings) {
+            match warning {
+                PendingWarning::DiscardedValue { span, ty } => {
+                    let resolved = self.sub.apply(&ty);
+                    let is_unit = matches!(&resolved, Type::Con(n, args) if n == "Unit" && args.is_empty());
+                    if !is_unit && !matches!(resolved, Type::Var(_) | Type::Error | Type::Never) {
+                        let display_ty = self.prettify_type(&ty);
+                        self.collected_diagnostics.push(Diagnostic::warning_at(
+                            span,
+                            format!(
+                                "value of type `{}` is discarded; use `let _ = ...` to suppress",
+                                display_ty
+                            ),
+                        ));
+                    }
+                }
+                PendingWarning::UnusedVariable { span, name } => {
+                    self.collected_diagnostics.push(Diagnostic::warning_at(
+                        span,
+                        format!("unused variable: `{}`", name),
+                    ));
+                }
+                PendingWarning::UnusedEffects {
+                    span,
+                    fun_name,
+                    effects,
+                } => {
+                    self.collected_diagnostics.push(Diagnostic::warning_at(
+                        span,
+                        format!(
+                            "function '{}' declares needs {{{}}} but never uses {}",
+                            fun_name,
+                            effects.join(", "),
+                            if effects.len() == 1 { "it" } else { "them" },
+                        ),
+                    ));
+                }
             }
         }
     }
@@ -1068,27 +914,37 @@ impl Checker {
         (fields, result_ty)
     }
 
-    /// Save and clear the per-body inference state (effects, effect cache, field candidates).
-    /// Call `restore_body_scope` after checking the body to get back the collected effects.
-    pub(crate) fn save_body_scope(&mut self) -> BodyScope {
-        BodyScope {
-            effects: std::mem::take(&mut self.current_effects),
-            effect_cache: std::mem::take(&mut self.effect_type_param_cache),
+    /// Enter an isolated effect scope. Saves and clears current_effects,
+    /// effect_type_param_cache, field_candidates, resume_type, and
+    /// resume_return_type. Call `exit_effect_scope` to restore and collect
+    /// what the scope accumulated.
+    pub(crate) fn enter_effect_scope(&mut self) -> EffectScope {
+        EffectScope {
+            effects: std::mem::take(&mut self.effect_state.current),
+            effect_cache: std::mem::take(&mut self.effect_state.type_param_cache),
             field_candidates: std::mem::take(&mut self.field_candidates),
+            resume_type: self.resume_type.take(),
+            resume_return_type: self.resume_return_type.take(),
         }
     }
 
-    /// Restore the saved scope, returning the effects and field candidates that
-    /// the body accumulated while it was active.
-    pub(crate) fn restore_body_scope(
-        &mut self,
-        scope: BodyScope,
-    ) -> (HashSet<String>, FieldCandidates) {
-        let body_effects = std::mem::replace(&mut self.current_effects, scope.effects);
-        self.effect_type_param_cache = scope.effect_cache;
-        let body_field_candidates =
-            std::mem::replace(&mut self.field_candidates, scope.field_candidates);
-        (body_effects, body_field_candidates)
+    /// Exit an effect scope, restoring saved state and returning what
+    /// accumulated during the scope's lifetime.
+    pub(crate) fn exit_effect_scope(&mut self, scope: EffectScope) -> EffectScopeResult {
+        let result = EffectScopeResult {
+            effects: std::mem::replace(&mut self.effect_state.current, scope.effects),
+            effect_cache: std::mem::replace(
+                &mut self.effect_state.type_param_cache,
+                scope.effect_cache,
+            ),
+            field_candidates: std::mem::replace(
+                &mut self.field_candidates,
+                scope.field_candidates,
+            ),
+        };
+        self.resume_type = scope.resume_type;
+        self.resume_return_type = scope.resume_return_type;
+        result
     }
 
     /// Check that all effects used in a body are covered by the declared `needs` set.
@@ -1127,548 +983,8 @@ impl Checker {
         }
     }
 
-    fn register_builtins(&mut self) {
-        // Note: Show and Ord traits are defined in Std.dy (loaded before
-        // stdlib modules). Eq is built-in (BEAM BIF dispatch).
-
-        // Built-in Num trait (arithmetic: +, -, *, /, %, unary -)
-        self.traits.insert(
-            "Num".into(),
-            TraitInfo {
-                type_param: "a".into(),
-                supertraits: vec![],
-                methods: vec![],
-            },
-        );
-        for prim in &["Int", "Float"] {
-            self.trait_impls.insert(
-                ("Num".into(), prim.to_string()),
-                ImplInfo {
-                    param_constraints: vec![],
-                    span: None,
-                },
-            );
-        }
-
-        // Built-in Eq trait (==, !=)
-        self.traits.insert(
-            "Eq".into(),
-            TraitInfo {
-                type_param: "a".into(),
-                supertraits: vec![],
-                methods: vec![],
-            },
-        );
-        for prim in &["Int", "Float", "String", "Bool", "Unit"] {
-            self.trait_impls.insert(
-                ("Eq".into(), prim.to_string()),
-                ImplInfo {
-                    param_constraints: vec![],
-                    span: None,
-                },
-            );
-        }
-
-        // Ord impls for primitives are defined in Std.Int, Std.Float, Std.String
-        // (they provide real dict constructors for `compare`).
-
-        // panic : String -> Never (crashes at runtime)
-        self.env.insert(
-            "panic".into(),
-            Scheme {
-                forall: vec![],
-                constraints: vec![],
-                ty: Type::Arrow(Box::new(Type::string()), Box::new(Type::Never)),
-            },
-        );
-
-        // todo : Unit -> Never (type hole, crashes at runtime with "not implemented")
-        self.env.insert(
-            "todo".into(),
-            Scheme {
-                forall: vec![],
-                constraints: vec![],
-                ty: Type::Arrow(Box::new(Type::unit()), Box::new(Type::Never)),
-            },
-        );
-
-        // List constructors
-        let a = self.fresh_var();
-        let a_id = match &a {
-            Type::Var(id) => *id,
-            _ => unreachable!(),
-        };
-        self.constructors.insert(
-            "Nil".into(),
-            Scheme {
-                forall: vec![a_id],
-                constraints: vec![],
-                ty: Type::Con("List".into(), vec![a.clone()]),
-            },
-        );
-
-        let a = self.fresh_var();
-        let a_id = match &a {
-            Type::Var(id) => *id,
-            _ => unreachable!(),
-        };
-        let list_a = Type::Con("List".into(), vec![a.clone()]);
-        self.constructors.insert(
-            "Cons".into(),
-            Scheme {
-                forall: vec![a_id],
-                constraints: vec![],
-                ty: Type::Arrow(
-                    Box::new(a),
-                    Box::new(Type::Arrow(Box::new(list_a.clone()), Box::new(list_a))),
-                ),
-            },
-        );
-
-        // Bool constructors
-        self.constructors.insert(
-            "True".into(),
-            Scheme {
-                forall: vec![],
-                constraints: vec![],
-                ty: Type::bool(),
-            },
-        );
-        self.constructors.insert(
-            "False".into(),
-            Scheme {
-                forall: vec![],
-                constraints: vec![],
-                ty: Type::bool(),
-            },
-        );
-
-        // Built-in ADT variant maps (for exhaustiveness checking)
-        self.adt_variants
-            .insert("List".into(), vec![("Nil".into(), 0), ("Cons".into(), 2)]);
-        self.adt_variants
-            .insert("Bool".into(), vec![("True".into(), 0), ("False".into(), 0)]);
-
-        // Built-in type arities
-        for name in &["Int", "Float", "String", "Bool", "Unit"] {
-            self.type_arity.insert(name.to_string(), 0);
-        }
-        self.type_arity.insert("List".into(), 1);
-
-        // Show, Debug, and Eq for Tuple (any arity -- all params must satisfy the trait)
-        // We use "Tuple" as the type name; param_constraints are checked dynamically
-        // based on actual type args at constraint resolution time
-        self.trait_impls.insert(
-            ("Show".into(), "Tuple".into()),
-            ImplInfo {
-                param_constraints: vec![],
-                span: None,
-            }, // handled specially in check_pending_constraints
-        );
-        self.trait_impls.insert(
-            ("Debug".into(), "Tuple".into()),
-            ImplInfo {
-                param_constraints: vec![],
-                span: None,
-            }, // handled specially in check_pending_constraints
-        );
-        self.trait_impls.insert(
-            ("Eq".into(), "Tuple".into()),
-            ImplInfo {
-                param_constraints: vec![],
-                span: None,
-            }, // handled specially in check_pending_constraints
-        );
-
-        // --- Dict type ---
-
-        // Eq for Dict k v: requires Eq on both k and v
-        self.trait_impls.insert(
-            ("Eq".into(), "Dict".into()),
-            ImplInfo {
-                param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],
-                span: None,
-            },
-        );
-
-        // Dict.empty : forall k v. Dict k v
-        {
-            let k = self.fresh_var();
-            let k_id = match &k {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let v = self.fresh_var();
-            let v_id = match &v {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            self.env.insert(
-                "Dict.empty".into(),
-                Scheme {
-                    forall: vec![k_id, v_id],
-                    constraints: vec![],
-                    ty: Type::Con("Dict".into(), vec![k, v]),
-                },
-            );
-        }
-
-        // Dict.get : forall k v. Eq k => k -> Dict k v -> Maybe v
-        {
-            let k = self.fresh_var();
-            let k_id = match &k {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let v = self.fresh_var();
-            let v_id = match &v {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
-            };
-            let dict_kv = Type::Con("Dict".into(), vec![k.clone(), v.clone()]);
-            let maybe_v = Type::Con("Maybe".into(), vec![v]);
-            self.env.insert(
-                "Dict.get".into(),
-                Scheme {
-                    forall: vec![k_id, v_id],
-                    constraints: vec![("Eq".into(), k_id)],
-                    ty: Type::Arrow(
-                        Box::new(k),
-                        Box::new(Type::Arrow(Box::new(dict_kv), Box::new(maybe_v))),
-                    ),
-                },
-            );
-        }
-
-        // --- Conversion builtins ---
-
-        // Int.parse : String -> Maybe Int
-        self.env.insert(
-            "Int.parse".into(),
-            Scheme {
-                forall: vec![],
-                constraints: vec![],
-                ty: Type::Arrow(
-                    Box::new(Type::string()),
-                    Box::new(Type::Con("Maybe".into(), vec![Type::int()])),
-                ),
-            },
-        );
-
-        // Float.parse : String -> Maybe Float
-        self.env.insert(
-            "Float.parse".into(),
-            Scheme {
-                forall: vec![],
-                constraints: vec![],
-                ty: Type::Arrow(
-                    Box::new(Type::string()),
-                    Box::new(Type::Con("Maybe".into(), vec![Type::float()])),
-                ),
-            },
-        );
-    }
-
-    // --- Unification ---
-
-    pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), Diagnostic> {
-        let a = self.sub.apply(a);
-        let b = self.sub.apply(b);
-
-        match (&a, &b) {
-            _ if a == b => Ok(()),
-
-            // Error type unifies with anything (suppresses cascading errors)
-            (Type::Error, _) | (_, Type::Error) => Ok(()),
-
-            // Never (bottom) unifies with anything
-            (Type::Never, _) | (_, Type::Never) => Ok(()),
-
-            (Type::Var(id), _) => self.sub.bind(*id, &b),
-            (_, Type::Var(id)) => self.sub.bind(*id, &a),
-
-            (Type::Arrow(a1, a2), Type::Arrow(b1, b2))
-            | (Type::Arrow(a1, a2), Type::EffArrow(b1, b2, _))
-            | (Type::EffArrow(a1, a2, _), Type::Arrow(b1, b2)) => {
-                self.unify(a1, b1)?;
-                self.unify(a2, b2)
-            }
-            (Type::EffArrow(a1, a2, effs1), Type::EffArrow(b1, b2, effs2)) => {
-                self.unify(a1, b1)?;
-                self.unify(a2, b2)?;
-                // Unify effect type args pairwise (matched by effect name)
-                for (name, args1) in effs1 {
-                    if let Some((_, args2)) = effs2.iter().find(|(n, _)| n == name) {
-                        for (t1, t2) in args1.iter().zip(args2.iter()) {
-                            self.unify(t1, t2)?;
-                        }
-                    }
-                }
-                Ok(())
-            }
-
-            (Type::Con(n1, args1), Type::Con(n2, args2))
-                if n1 == n2 && args1.len() == args2.len() =>
-            {
-                for (a, b) in args1.iter().zip(args2.iter()) {
-                    self.unify(a, b)?;
-                }
-                Ok(())
-            }
-
-            (Type::Record(f1), Type::Record(f2)) => {
-                let names1: Vec<&str> = f1.iter().map(|(n, _)| n.as_str()).collect();
-                let names2: Vec<&str> = f2.iter().map(|(n, _)| n.as_str()).collect();
-                if names1 != names2 {
-                    let a_display = self.prettify_type(&a);
-                    let b_display = self.prettify_type(&b);
-                    return Err(Diagnostic::error(format!(
-                        "type mismatch: expected {}, got {}",
-                        a_display, b_display
-                    )));
-                }
-                for ((_, t1), (_, t2)) in f1.iter().zip(f2.iter()) {
-                    self.unify(t1, t2)?;
-                }
-                Ok(())
-            }
-
-            _ => {
-                let a_display = self.prettify_type(&a);
-                let b_display = self.prettify_type(&b);
-                Err(Diagnostic::error(format!(
-                    "type mismatch: expected {}, got {}",
-                    a_display, b_display
-                )))
-            }
-        }
-    }
-
-    /// Format a type for error messages: apply substitutions, then replace
-    /// any remaining unresolved type variables with readable names (a, b, c, ...).
-    fn prettify_type(&self, ty: &Type) -> Type {
-        let resolved = self.sub.apply(ty);
-        let mut vars = Vec::new();
-        collect_free_vars(&resolved, &mut vars);
-        if vars.is_empty() {
-            return resolved;
-        }
-        let names: HashMap<u32, String> = vars
-            .iter()
-            .enumerate()
-            .map(|(i, &id)| {
-                let name = ((b'a' + i as u8) as char).to_string();
-                (id, name)
-            })
-            .collect();
-        rename_vars(&resolved, &names)
-    }
-
-    /// Unify with span context: if unification fails, attach the span to the error.
-    pub(crate) fn unify_at(&mut self, a: &Type, b: &Type, span: Span) -> Result<(), Diagnostic> {
-        self.unify(a, b).map_err(|e| e.with_span(span))
-    }
-
-    // --- Instantiation & Generalization ---
-
-    /// Replace forall'd variables with fresh type variables.
-    /// Returns the instantiated type and any trait constraints (remapped to fresh vars).
-    pub(crate) fn instantiate(&mut self, scheme: &Scheme) -> (Type, Vec<(String, Type)>) {
-        let mapping: HashMap<u32, Type> = scheme
-            .forall
-            .iter()
-            .map(|&id| (id, self.fresh_var()))
-            .collect();
-        let ty = self.replace_vars(&scheme.ty, &mapping);
-        let constraints = scheme
-            .constraints
-            .iter()
-            .map(|(trait_name, var_id)| {
-                let fresh = mapping.get(var_id).cloned().unwrap_or(Type::Var(*var_id));
-                (trait_name.clone(), fresh)
-            })
-            .collect();
-        (ty, constraints)
-    }
-
-    pub(crate) fn replace_vars(&self, ty: &Type, mapping: &HashMap<u32, Type>) -> Type {
-        match ty {
-            Type::Var(id) => mapping.get(id).cloned().unwrap_or_else(|| ty.clone()),
-            Type::Arrow(a, b) => Type::Arrow(
-                Box::new(self.replace_vars(a, mapping)),
-                Box::new(self.replace_vars(b, mapping)),
-            ),
-            Type::EffArrow(a, b, effs) => Type::EffArrow(
-                Box::new(self.replace_vars(a, mapping)),
-                Box::new(self.replace_vars(b, mapping)),
-                effs.iter()
-                    .map(|(name, args)| {
-                        (
-                            name.clone(),
-                            args.iter().map(|t| self.replace_vars(t, mapping)).collect(),
-                        )
-                    })
-                    .collect(),
-            ),
-            Type::Con(name, args) => Type::Con(
-                name.clone(),
-                args.iter().map(|a| self.replace_vars(a, mapping)).collect(),
-            ),
-            Type::Record(fields) => Type::Record(
-                fields
-                    .iter()
-                    .map(|(fname, ty)| (fname.clone(), self.replace_vars(ty, mapping)))
-                    .collect(),
-            ),
-            Type::Error => Type::Error,
-            Type::Never => Type::Never,
-        }
-    }
-
-    /// Generalize a type over variables not free in the environment.
-    pub(crate) fn generalize(&self, ty: &Type) -> Scheme {
-        let resolved = self.sub.apply(ty);
-        let env_vars = self.env.free_vars(&self.sub);
-        // Collect effect type param vars that must not be generalized --
-        // these are shared across ops of the same effect within a function scope.
-        let effect_vars: HashSet<u32> = self
-            .effect_type_param_cache
-            .values()
-            .flat_map(|mapping| {
-                mapping.values().filter_map(|ty| {
-                    let resolved = self.sub.apply(ty);
-                    if let Type::Var(id) = resolved {
-                        Some(id)
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect();
-        let mut forall = Vec::new();
-        collect_free_vars(&resolved, &mut forall);
-        forall.retain(|v| !env_vars.contains(v) && !effect_vars.contains(v));
-        Scheme {
-            forall,
-            constraints: vec![],
-            ty: resolved,
-        }
-    }
-
-    /// Convert a surface TypeExpr to our internal Type representation.
-    pub(crate) fn convert_type_expr(
-        &mut self,
-        texpr: &crate::ast::TypeExpr,
-        params: &mut Vec<(String, u32)>,
-    ) -> Type {
-        match texpr {
-            crate::ast::TypeExpr::Named { name, .. } if name == "Never" => Type::Never,
-            crate::ast::TypeExpr::Named { name, .. } => Type::Con(name.clone(), vec![]),
-            crate::ast::TypeExpr::Var { name, .. } => {
-                if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
-                    Type::Var(*id)
-                } else {
-                    // New type variable -- create fresh and remember for reuse
-                    let id = self.next_var;
-                    self.next_var += 1;
-                    params.push((name.clone(), id));
-                    Type::Var(id)
-                }
-            }
-            crate::ast::TypeExpr::App { func, arg, .. } => {
-                let func_ty = self.convert_type_expr(func, params);
-                let arg_ty = self.convert_type_expr(arg, params);
-                // Type application: push arg into Con's args list
-                match func_ty {
-                    Type::Con(name, mut args) => {
-                        args.push(arg_ty);
-                        if let Some(&expected) = self.type_arity.get(&name)
-                            && args.len() > expected
-                        {
-                            self.collected_diagnostics.push(Diagnostic {
-                                severity: Severity::Error,
-                                message: format!(
-                                    "Type '{}' expects {} type argument{} but was given {}",
-                                    name,
-                                    expected,
-                                    if expected == 1 { "" } else { "s" },
-                                    args.len(),
-                                ),
-                                span: None,
-                            });
-                        }
-                        Type::Con(name, args)
-                    }
-                    _ => {
-                        // Shouldn't happen with well-formed type exprs
-                        Type::Con("?".into(), vec![func_ty, arg_ty])
-                    }
-                }
-            }
-            crate::ast::TypeExpr::Arrow {
-                from, to, effects, ..
-            } => {
-                let a_ty = self.convert_type_expr(from, params);
-                let b_ty = self.convert_type_expr(to, params);
-                if effects.is_empty() {
-                    Type::Arrow(Box::new(a_ty), Box::new(b_ty))
-                } else {
-                    let effect_refs: Vec<(String, Vec<Type>)> = effects
-                        .iter()
-                        .map(|e| {
-                            let args = e
-                                .type_args
-                                .iter()
-                                .map(|te| self.convert_type_expr(te, params))
-                                .collect();
-                            (e.name.clone(), args)
-                        })
-                        .collect();
-                    Type::EffArrow(Box::new(a_ty), Box::new(b_ty), effect_refs)
-                }
-            }
-            crate::ast::TypeExpr::Record { fields, .. } => {
-                let mut typed_fields: Vec<(String, Type)> = fields
-                    .iter()
-                    .map(|(fname, texpr)| (fname.clone(), self.convert_type_expr(texpr, params)))
-                    .collect();
-                typed_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
-                Type::Record(typed_fields)
-            }
-        }
-    }
 }
 
-pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
-    match ty {
-        Type::Var(id) => {
-            if !out.contains(id) {
-                out.push(*id);
-            }
-        }
-        Type::Arrow(a, b) => {
-            collect_free_vars(a, out);
-            collect_free_vars(b, out);
-        }
-        Type::EffArrow(a, b, effs) => {
-            collect_free_vars(a, out);
-            collect_free_vars(b, out);
-            for (_, args) in effs {
-                for t in args {
-                    collect_free_vars(t, out);
-                }
-            }
-        }
-        Type::Con(_, args) => {
-            for arg in args {
-                collect_free_vars(arg, out);
-            }
-        }
-        Type::Record(fields) => {
-            for (_, ty) in fields {
-                collect_free_vars(ty, out);
-            }
-        }
-        Type::Error | Type::Never => {}
-    }
-}
+// Re-export from unify module so other files can use `super::collect_free_vars`
+pub(crate) use unify::collect_free_vars;
+use unify::rename_vars;
