@@ -1,8 +1,214 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::{Checker, Diagnostic, EffectDef, EffectOpDef, ModuleCodegenInfo, Scheme, Type};
+use super::{
+    Checker, Diagnostic, EffectDefInfo, HandlerInfo, ImplInfo, RecordInfo, Scheme, TraitInfo, Type,
+};
 use crate::token::Span;
+
+// --- Module export types ---
+
+/// All public items exported by a typechecked module, cached as a single unit.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleExports {
+    /// Public type bindings: name -> scheme.
+    pub bindings: Vec<(String, Scheme)>,
+    /// Type name -> constructor names (empty vec for opaque types).
+    pub type_constructors: HashMap<String, Vec<String>>,
+    /// Record name -> record info (type params + field types).
+    pub record_defs: HashMap<String, RecordInfo>,
+    /// Trait name -> trait info.
+    pub traits: HashMap<String, TraitInfo>,
+    /// (trait_name, target_type) -> impl info.
+    pub trait_impls: HashMap<(String, String), ImplInfo>,
+    /// Effect name -> effect def info.
+    pub(crate) effects: HashMap<String, EffectDefInfo>,
+    /// Handler name -> handler info.
+    pub(crate) handlers: HashMap<String, HandlerInfo>,
+    /// Type name -> declared parameter count (for arity checking across modules).
+    pub type_arity: HashMap<String, usize>,
+    /// Function name -> effect names from `needs` clause (for cross-module effect tracking).
+    pub fun_effects: HashMap<String, HashSet<String>>,
+}
+
+impl ModuleExports {
+    /// Collect all public exports from a typechecked module.
+    pub fn collect(program: &[crate::ast::Decl], checker: &Checker) -> Self {
+        use crate::ast::Decl;
+
+        let pub_names = public_names_for_tc(program);
+
+        // Bindings: from env and constructors
+        let mut bindings: Vec<(String, Scheme)> = Vec::new();
+        for name in &pub_names {
+            if let Some(scheme) = checker.env.get(name) {
+                bindings.push((name.to_string(), scheme.clone()));
+            } else if let Some(scheme) = checker.constructors.get(name) {
+                bindings.push((name.to_string(), scheme.clone()));
+            }
+        }
+
+        // Type constructors
+        let mut type_constructors: HashMap<String, Vec<String>> = HashMap::new();
+        for decl in program {
+            match decl {
+                Decl::TypeDef {
+                    public: true,
+                    opaque,
+                    name,
+                    variants,
+                    ..
+                } => {
+                    if *opaque {
+                        type_constructors.insert(name.clone(), vec![]);
+                    } else {
+                        let ctors: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                        type_constructors.insert(name.clone(), ctors);
+                    }
+                }
+                Decl::RecordDef {
+                    public: true, name, ..
+                } => {
+                    type_constructors.insert(name.clone(), vec![name.clone()]);
+                }
+                _ => {}
+            }
+        }
+
+        // Records, traits, trait impls, effects, handlers: all from AST + checker state
+        let mut record_defs: HashMap<String, RecordInfo> = HashMap::new();
+        let mut traits: HashMap<String, TraitInfo> = HashMap::new();
+        let mut trait_impls: HashMap<(String, String), ImplInfo> = HashMap::new();
+        let mut effects: HashMap<String, EffectDefInfo> = HashMap::new();
+        let mut handlers: HashMap<String, HandlerInfo> = HashMap::new();
+
+        for decl in program {
+            match decl {
+                Decl::RecordDef {
+                    public: true, name, ..
+                } => {
+                    if let Some(fields) = checker.records.get(name.as_str()) {
+                        record_defs.insert(name.clone(), fields.clone());
+                    }
+                }
+                Decl::TraitDef {
+                    public: true, name, ..
+                } => {
+                    if let Some(info) = checker.traits.get(name.as_str()) {
+                        traits.insert(name.clone(), info.clone());
+                    }
+                }
+                Decl::ImplDef {
+                    trait_name,
+                    target_type,
+                    ..
+                } => {
+                    let key = (trait_name.clone(), target_type.clone());
+                    if let Some(info) = checker.trait_impls.get(&key) {
+                        trait_impls.insert(key, info.clone());
+                    }
+                }
+                Decl::EffectDef {
+                    public: true, name, ..
+                } => {
+                    if let Some(info) = checker.effects.get(name) {
+                        effects.insert(name.clone(), info.clone());
+                    }
+                }
+                Decl::HandlerDef {
+                    public: true, name, ..
+                } => {
+                    if let Some(info) = checker.handlers.get(name) {
+                        handlers.insert(name.clone(), info.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Collect type arities for all exported types
+        let mut type_arity: HashMap<String, usize> = HashMap::new();
+        for name in type_constructors.keys() {
+            if let Some(&arity) = checker.type_arity.get(name) {
+                type_arity.insert(name.clone(), arity);
+            }
+        }
+        for name in record_defs.keys() {
+            if let Some(&arity) = checker.type_arity.get(name) {
+                type_arity.insert(name.clone(), arity);
+            }
+        }
+
+        // Collect fun_effects for public functions
+        let mut fun_effects: HashMap<String, HashSet<String>> = HashMap::new();
+        for name in &pub_names {
+            if let Some(effs) = checker.fun_effects.get(name) {
+                fun_effects.insert(name.clone(), effs.clone());
+            }
+        }
+
+        ModuleExports {
+            bindings,
+            type_constructors,
+            record_defs,
+            traits,
+            trait_impls,
+            effects,
+            handlers,
+            type_arity,
+            fun_effects,
+        }
+    }
+}
+
+/// An effect operation definition for codegen: operation name and parameter count.
+#[derive(Debug, Clone)]
+pub struct EffectOpDef {
+    pub name: String,
+    pub param_count: usize,
+}
+
+/// An effect definition for codegen: effect name, its operations, and type parameter count.
+#[derive(Debug, Clone)]
+pub struct EffectDef {
+    pub name: String,
+    pub ops: Vec<EffectOpDef>,
+    pub type_param_count: usize,
+}
+
+/// A trait impl dict exported by a module.
+#[derive(Debug, Clone)]
+pub struct TraitImplDict {
+    pub trait_name: String,
+    pub target_type: String,
+    /// Module-qualified dict name (e.g. `__dict_Show_animals_Animal`).
+    pub dict_name: String,
+    /// Number of dict parameters (from where clause).
+    pub arity: usize,
+    /// Where-clause constraints as (constraint_trait, param_index) pairs.
+    /// Used by the elaborator to pass correct sub-dicts for parameterized impls.
+    pub param_constraints: Vec<(String, usize)>,
+}
+
+/// Information about a module's exports needed by the lowerer/codegen.
+/// Populated during typechecking alongside `tc_modules`.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleCodegenInfo {
+    /// Public type bindings: name -> scheme.
+    pub exports: Vec<(String, Scheme)>,
+    /// Public effect definitions.
+    pub effect_defs: Vec<EffectDef>,
+    /// Public record definitions: record name -> ordered field names.
+    pub record_fields: Vec<(String, Vec<String>)>,
+    /// Public handler names.
+    pub handler_defs: Vec<String>,
+    /// Public function effect annotations: name -> sorted effect names.
+    pub fun_effects: Vec<(String, Vec<String>)>,
+    /// Public type constructors: type name -> [constructor names].
+    pub type_constructors: Vec<(String, Vec<String>)>,
+    /// Trait impl dicts exported by this module.
+    pub trait_impl_dicts: Vec<TraitImplDict>,
+}
 
 /// Count the arity of a constructor from its type (number of Arrow/EffArrow levels).
 fn ctor_arity(ty: &Type) -> usize {
@@ -283,7 +489,7 @@ impl Checker {
         })?;
 
         // Collect all public exports into a single struct
-        let exports = super::ModuleExports::collect(&program, &mod_checker);
+        let exports = ModuleExports::collect(&program, &mod_checker);
 
         // Cache the CheckResult for elaboration (avoids re-typechecking in compile_std_modules)
         let mod_result = mod_checker.to_result();
@@ -413,12 +619,12 @@ impl Checker {
     /// Destructures ModuleExports so adding a new field is a compile error until handled here.
     fn inject_exports(
         &mut self,
-        exports: &super::ModuleExports,
+        exports: &ModuleExports,
         prefix: &str,
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        let super::ModuleExports {
+        let ModuleExports {
             bindings,
             type_constructors,
             record_defs,
@@ -595,7 +801,7 @@ impl Checker {
 fn collect_codegen_info(
     module_name: &str,
     program: &[crate::ast::Decl],
-    exports: &super::ModuleExports,
+    exports: &ModuleExports,
 ) -> ModuleCodegenInfo {
     use crate::ast::Decl;
     let mut effect_defs = Vec::new();
@@ -692,7 +898,7 @@ fn collect_codegen_info(
                         bound.traits.iter().map(move |t| (t.clone(), idx))
                     })
                     .collect();
-                trait_impl_dicts.push(super::TraitImplDict {
+                trait_impl_dicts.push(TraitImplDict {
                     trait_name: trait_name.clone(),
                     target_type: target_type.clone(),
                     dict_name,

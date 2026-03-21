@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, CaseArm, Expr, ExprKind, Lit, Pat, Stmt};
+use crate::ast::{BinOp, CaseArm, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
 
 use super::{Checker, Diagnostic, Scheme, Type};
 use crate::token::Span;
@@ -620,64 +620,9 @@ impl Checker {
                         ..
                     } = pattern
                     {
-                        let mut scheme = self.generalize(&ty);
-                        // Absorb pending trait constraints for generalized vars
-                        // so let-bound values can be polymorphic over traits.
-                        // e.g. `let f = debug >> println` gets scheme
-                        // `forall a. a -> Unit where {a: Debug}`
-                        self.pending_constraints
-                            .retain(|(trait_name, cty, _span, node_id)| {
-                                let resolved = self.sub.apply(cty);
-                                if let Type::Var(id) = resolved
-                                    && scheme.forall.contains(&id)
-                                {
-                                    if !scheme
-                                        .constraints
-                                        .iter()
-                                        .any(|(t, v)| t == trait_name && *v == id)
-                                    {
-                                        scheme.constraints.push((trait_name.clone(), id));
-                                    }
-                                    self.evidence.push(super::TraitEvidence {
-                                        node_id: *node_id,
-                                        trait_name: trait_name.clone(),
-                                        resolved_type: None,
-                                        type_var_name: None,
-                                    });
-                                    return false; // remove from pending
-                                }
-                                true // keep in pending
-                            });
-                        // Record dict params for the elaborator
-                        let operator_traits: std::collections::HashSet<&str> =
-                            ["Num", "Eq"].into_iter().collect();
-                        let dict_params: Vec<(String, String)> = scheme
-                            .constraints
-                            .iter()
-                            .filter(|(t, _)| !operator_traits.contains(t.as_str()))
-                            .map(|(t, id)| (t.clone(), format!("v{}", id)))
-                            .collect();
-                        if !dict_params.is_empty() {
-                            // Count arrow arity of the resolved type
-                            let resolved_ty = self.sub.apply(&ty);
-                            let mut arity = 0usize;
-                            let mut t = &resolved_ty;
-                            while let super::Type::Arrow(_, ret)
-                            | super::Type::EffArrow(_, ret, _) = t
-                            {
-                                arity += 1;
-                                t = ret;
-                            }
-                            self.let_dict_params
-                                .insert(name.clone(), (dict_params, arity));
-                        }
-                        self.env.insert_with_def(name.clone(), scheme, *pat_id);
-                        deferred_effects.sort();
-                        self.let_effect_bindings
-                            .insert(name.clone(), deferred_effects);
-                        self.node_spans.insert(*pat_id, *var_span);
-                        self.record_type_at_span(*var_span, &ty);
-                        self.definitions.push((*pat_id, name.clone(), *var_span));
+                        self.generalize_let_binding(
+                            name, *pat_id, *var_span, &ty, deferred_effects,
+                        );
                     } else if let Err(e) = self.bind_pattern(pattern, &ty) {
                         errors.push(e);
                     }
@@ -803,4 +748,76 @@ impl Checker {
         }
     }
 
+    /// Generalize a let-bound variable: absorb trait constraints into the
+    /// scheme, record dict params for the elaborator, and register metadata
+    /// (env entry, spans, definitions, deferred effects).
+    fn generalize_let_binding(
+        &mut self,
+        name: &str,
+        pat_id: NodeId,
+        var_span: Span,
+        ty: &Type,
+        mut deferred_effects: Vec<String>,
+    ) {
+        let mut scheme = self.generalize(ty);
+
+        // Absorb pending trait constraints for generalized vars
+        // so let-bound values can be polymorphic over traits.
+        // e.g. `let f = debug >> println` gets scheme
+        // `forall a. a -> Unit where {a: Debug}`
+        self.pending_constraints
+            .retain(|(trait_name, cty, _span, node_id)| {
+                let resolved = self.sub.apply(cty);
+                if let Type::Var(id) = resolved
+                    && scheme.forall.contains(&id)
+                {
+                    if !scheme
+                        .constraints
+                        .iter()
+                        .any(|(t, v)| t == trait_name && *v == id)
+                    {
+                        scheme.constraints.push((trait_name.clone(), id));
+                    }
+                    self.evidence.push(super::TraitEvidence {
+                        node_id: *node_id,
+                        trait_name: trait_name.clone(),
+                        resolved_type: None,
+                        type_var_name: None,
+                    });
+                    return false; // remove from pending
+                }
+                true // keep in pending
+            });
+
+        // Record dict params for the elaborator
+        let operator_traits: std::collections::HashSet<&str> =
+            ["Num", "Eq"].into_iter().collect();
+        let dict_params: Vec<(String, String)> = scheme
+            .constraints
+            .iter()
+            .filter(|(t, _)| !operator_traits.contains(t.as_str()))
+            .map(|(t, id)| (t.clone(), format!("v{}", id)))
+            .collect();
+        if !dict_params.is_empty() {
+            let resolved_ty = self.sub.apply(ty);
+            let mut arity = 0usize;
+            let mut t = &resolved_ty;
+            while let Type::Arrow(_, ret) | Type::EffArrow(_, ret, _) = t {
+                arity += 1;
+                t = ret;
+            }
+            self.let_dict_params
+                .insert(name.to_string(), (dict_params, arity));
+        }
+
+        self.env
+            .insert_with_def(name.to_string(), scheme, pat_id);
+        deferred_effects.sort();
+        self.let_effect_bindings
+            .insert(name.to_string(), deferred_effects);
+        self.node_spans.insert(pat_id, var_span);
+        self.record_type_at_span(var_span, ty);
+        self.definitions
+            .push((pat_id, name.to_string(), var_span));
+    }
 }
