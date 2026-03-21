@@ -49,6 +49,8 @@ pub struct CheckResult {
     /// Deferred effects for let bindings that partially apply effectful functions.
     /// name -> effect names. Used by the lowerer to register effectful local vars.
     pub let_effect_bindings: HashMap<String, Vec<String>>,
+    /// Record definitions: record name -> field info (for LSP completion).
+    pub records: HashMap<String, super::RecordInfo>,
     /// Resolution map: usage NodeId -> definition NodeId (for find-all-references).
     pub references: HashMap<crate::ast::NodeId, crate::ast::NodeId>,
     /// NodeId -> Span map for recorded nodes (for resolving NodeIds to locations).
@@ -158,6 +160,7 @@ impl Checker {
             effect_call_targets: self.lsp.effect_call_targets.clone(),
             let_dict_params: self.let_dict_params.clone(),
             let_effect_bindings: self.effect_state.let_bindings.clone(),
+            records: self.records.clone(),
             references: self.lsp.references.clone(),
             node_spans: self.lsp.node_spans.clone(),
             import_origins: self.lsp.import_origins.clone(),

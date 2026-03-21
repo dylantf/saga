@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use tower_lsp::lsp_types::*;
 
 use dylang::ast::Decl;
-use dylang::typechecker::CheckResult;
+use dylang::typechecker::{CheckResult, Type};
 
 /// Extract the identifier prefix at the cursor position by scanning backwards.
 pub fn extract_prefix(source: &str, offset: usize) -> &str {
@@ -13,6 +13,144 @@ pub fn extract_prefix(source: &str, offset: usize) -> &str {
         .map(|i| i + 1)
         .unwrap_or(0);
     &before[start..]
+}
+
+/// Extract the full dot-access chain before the cursor.
+/// e.g. for `house.address.` returns `["house", "address"]`
+/// e.g. for `house.address.str` returns `["house", "address"]` (prefix "str" is excluded)
+/// e.g. for `house.` returns `["house"]`
+pub fn extract_dot_chain(source: &str, offset: usize) -> Option<Vec<String>> {
+    let prefix = extract_prefix(source, offset);
+    let mut pos = offset - prefix.len();
+
+    // Must have at least one dot
+    if pos == 0 || !source[..pos].ends_with('.') {
+        return None;
+    }
+
+    let mut chain = Vec::new();
+    loop {
+        if pos == 0 || !source[..pos].ends_with('.') {
+            break;
+        }
+        // Skip the dot
+        pos -= 1;
+        // Extract the identifier before this dot
+        let before = &source[..pos];
+        let start = before
+            .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '\'')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let ident = &before[start..];
+        if ident.is_empty() {
+            break;
+        }
+        chain.push(ident.to_string());
+        pos = start;
+    }
+
+    if chain.is_empty() {
+        return None;
+    }
+    chain.reverse();
+    Some(chain)
+}
+
+/// Extract record fields from a type, supporting both named records (via `records` map)
+/// and anonymous/inline records (`Type::Record`).
+fn extract_record_fields(result: &CheckResult, ty: &Type) -> Option<Vec<(String, Type)>> {
+    match ty {
+        Type::Con(name, _) => {
+            let info = result.records.get(name.as_str())?;
+            Some(info.fields.clone())
+        }
+        Type::Record(fields) => Some(fields.clone()),
+        _ => None,
+    }
+}
+
+/// Resolve a receiver name to its record fields, checking multiple type sources.
+fn resolve_record_fields(
+    result: &CheckResult,
+    receiver: &str,
+    source: &str,
+) -> Option<Vec<(String, Type)>> {
+    // 1. Check top-level env (top-level let bindings, functions)
+    if let Some(scheme) = result.env.get(receiver) {
+        let ty = result.sub.apply(&scheme.ty);
+        if let Some(fields) = extract_record_fields(result, &ty) {
+            return Some(fields);
+        }
+    }
+
+    // 2. Check per-span types (local let bindings, pattern bindings, params).
+    // Note: spans may include leading/trailing whitespace, so we trim before comparing.
+    for (span, ty) in &result.type_at_span {
+        if span.end <= source.len() && source[span.start..span.end].trim() == receiver {
+            let resolved = result.sub.apply(ty);
+            if let Some(fields) = extract_record_fields(result, &resolved) {
+                return Some(fields);
+            }
+        }
+    }
+
+    // 3. Check per-node types (expression nodes, e.g. Var references).
+    for (node_id, ty) in &result.type_at_node {
+        if let Some(span) = result.node_spans.get(node_id)
+            && span.end <= source.len()
+            && source[span.start..span.end].trim() == receiver
+        {
+            let resolved = result.sub.apply(ty);
+            if let Some(fields) = extract_record_fields(result, &resolved) {
+                return Some(fields);
+            }
+        }
+    }
+
+    None
+}
+
+/// Collect field completion items for a record receiver.
+/// Supports chained access (e.g. `house.address.`).
+/// `chain` is the list of identifiers before the final dot (e.g. `["house", "address"]`).
+/// Returns None if the receiver's type is not a record.
+pub fn collect_field_completions(
+    result: &CheckResult,
+    chain: &[String],
+    prefix: &str,
+    source: &str,
+) -> Option<Vec<CompletionItem>> {
+    if chain.is_empty() {
+        return None;
+    }
+
+    // Resolve the root variable to its fields.
+    let mut fields = resolve_record_fields(result, &chain[0], source)?;
+
+    // Walk the chain: for each subsequent segment, find the field and resolve its type.
+    for segment in &chain[1..] {
+        let (_, field_ty) = fields.iter().find(|(name, _)| name == segment)?;
+        let resolved = result.sub.apply(field_ty);
+        fields = extract_record_fields(result, &resolved)?;
+    }
+
+    let prefix_lower = prefix.to_lowercase();
+    let mut items = Vec::new();
+    for (field_name, field_type) in &fields {
+        if !prefix.is_empty() && !field_name.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+        let resolved_type = result.sub.apply(field_type);
+        items.push(CompletionItem {
+            label: field_name.clone(),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some(format!("{}", resolved_type)),
+            sort_text: Some(format!("!{}", field_name)), // sort fields to top
+            ..Default::default()
+        });
+    }
+
+    Some(items)
 }
 
 /// Collect completion items from the checker's environment.

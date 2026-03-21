@@ -24,6 +24,12 @@ struct Backend {
     base_checkers: Mutex<std::collections::HashMap<String, typechecker::Checker>>,
     /// Last check result per file, for hover/goto queries.
     last_check: Mutex<std::collections::HashMap<Url, Arc<CheckSnapshot>>>,
+    /// Last successfully parsed+checked snapshot per file. Used as fallback for
+    /// completion when the current edit causes a parse error (e.g. typing `record.`).
+    last_good_check: Mutex<std::collections::HashMap<Url, Arc<CheckSnapshot>>>,
+    /// Latest document text per file, updated immediately on did_change/did_open
+    /// so that completion can access the current text without racing check_file.
+    document_texts: Mutex<std::collections::HashMap<Url, String>>,
     /// Project-wide symbol reference index for cross-module find-references.
     symbol_index: Mutex<symbol_index::SymbolIndex>,
 }
@@ -59,13 +65,23 @@ impl Backend {
         match result {
             Ok(result) => {
                 let diagnostics = result.diagnostics.clone();
+                let snap = Arc::new(result);
                 // Update the symbol index with references from this file.
-                if let Some(ref program) = result.program {
+                if let Some(ref program) = snap.program {
                     let mut idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
-                    idx.update_file(&uri, &result.tc_result, program, &result.line_index);
+                    idx.update_file(&uri, &snap.tc_result, program, &snap.line_index);
+                }
+                // On successful parse+check, save as last good snapshot for
+                // completion fallback when future edits cause parse errors.
+                if snap.program.is_some() {
+                    let mut good = self
+                        .last_good_check
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    good.insert(uri.clone(), Arc::clone(&snap));
                 }
                 let mut last = self.last_check.lock().unwrap_or_else(|e| e.into_inner());
-                last.insert(uri, Arc::new(result));
+                last.insert(uri, snap);
                 diagnostics
             }
             Err(e) => {
@@ -82,6 +98,20 @@ impl Backend {
         let snap = last.get(uri)?;
         snap.program.as_ref()?;
         Some(Arc::clone(snap))
+    }
+
+    /// Get the last successfully parsed+checked snapshot for a file.
+    /// Used as fallback for completion when the current edit causes a parse error.
+    fn last_good_snapshot(&self, uri: &Url) -> Option<Arc<CheckSnapshot>> {
+        let good = self.last_good_check.lock().ok()?;
+        let snap = good.get(uri)?;
+        Some(Arc::clone(snap))
+    }
+
+    /// Get the latest stored source text for a file.
+    fn document_text(&self, uri: &Url) -> Option<String> {
+        let texts = self.document_texts.lock().ok()?;
+        texts.get(uri).cloned()
     }
 }
 
@@ -146,6 +176,10 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         eprintln!("[did_open] {}", uri);
+        self.document_texts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(uri.clone(), params.text_document.text.clone());
         let diagnostics = self.check_file(uri.clone(), &params.text_document.text);
         eprintln!("[did_open] {} diagnostics", diagnostics.len());
         self.client
@@ -156,6 +190,10 @@ impl LanguageServer for Backend {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         if let Some(change) = params.content_changes.into_iter().last() {
+            self.document_texts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(uri.clone(), change.text.clone());
             let diagnostics = self.check_file(uri.clone(), &change.text);
             self.client
                 .publish_diagnostics(uri, diagnostics, None)
@@ -376,21 +414,72 @@ impl LanguageServer for Backend {
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri.clone();
+        let position = params.text_document_position.position;
+
+        let dot_triggered = params
+            .context
+            .as_ref()
+            .and_then(|ctx| ctx.trigger_character.as_deref())
+            == Some(".");
+
+        let Some(source) = self.document_text(&uri) else {
+            return Ok(None);
+        };
+        let li = line_index::LineIndex::new(&source);
+        let offset = li.line_col_to_offset(position.line as usize, position.character as usize);
+
+        // Dot-completion (record field access, supports chaining like `a.b.c.`).
+        // Uses the last good snapshot for type resolution since the current edit
+        // may have broken parsing.
+        //
+        // When triggered by `.`, the completion request races did_change, so our
+        // stored text may not have the dot yet. In that case, the cursor offset
+        // points to the end of the receiver identifier (e.g. end of "house").
+        // We treat this as a dot-chain of just that identifier with empty prefix.
+        //
+        // When not dot-triggered (user is typing after the dot, e.g. `house.ye`),
+        // did_change has already run, so the source has the dot and we can use
+        // extract_dot_chain normally.
+        if let Some(good_snap) = self.last_good_snapshot(&uri) {
+            let (chain, prefix) = if dot_triggered {
+                // The stored text may not have the dot yet. The identifier ending
+                // at `offset` is the receiver. Build a chain from it.
+                let receiver = completion::extract_prefix(&source, offset);
+                if receiver.is_empty() {
+                    (None, "")
+                } else {
+                    // Check if there's already a dot chain before this receiver
+                    // (e.g. `house.address` where user just typed another `.`).
+                    // Synthesize a dot to parse the full chain.
+                    let with_dot = format!("{}.", &source[..offset]);
+                    let chain = completion::extract_dot_chain(&with_dot, offset + 1);
+                    (chain, "")
+                }
+            } else {
+                let prefix = completion::extract_prefix(&source, offset);
+                let chain = completion::extract_dot_chain(&source, offset);
+                (chain, prefix)
+            };
+
+            if let Some(chain) = chain
+                && let Some(items) = completion::collect_field_completions(
+                    &good_snap.tc_result,
+                    &chain,
+                    prefix,
+                    &good_snap.source,
+                )
+            {
+                return Ok(Some(CompletionResponse::Array(items)));
+            }
+        }
+
+        // General completion requires a successfully parsed program.
         let Some(snap) = self.snapshot(&uri) else {
             return Ok(None);
         };
-        let tc_result = &snap.tc_result;
+        let prefix = completion::extract_prefix(&source, offset);
         let program = snap.program.as_ref().unwrap();
-        let line_index = &snap.line_index;
-        let source = &snap.source;
-
-        let position = params.text_document_position.position;
-        let offset =
-            line_index.line_col_to_offset(position.line as usize, position.character as usize);
-
-        let prefix = completion::extract_prefix(source, offset);
-        let items = completion::collect_completions(tc_result, prefix, program, offset);
-
+        let items = completion::collect_completions(&snap.tc_result, prefix, program, offset);
         Ok(Some(CompletionResponse::Array(items)))
     }
 
@@ -624,6 +713,8 @@ async fn main() {
         client,
         base_checkers: Mutex::new(std::collections::HashMap::new()),
         last_check: Mutex::new(std::collections::HashMap::new()),
+        last_good_check: Mutex::new(std::collections::HashMap::new()),
+        document_texts: Mutex::new(std::collections::HashMap::new()),
         symbol_index: Mutex::new(symbol_index::SymbolIndex::default()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;

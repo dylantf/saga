@@ -105,6 +105,11 @@ main () = {
   println (show number)
   println street
 
+  # House {
+  #   y
+  # }
+  let h = house.address.number
+
   # let incomplete_house = House { year_built: 2005 }
 
   # let invalid_house = House {
