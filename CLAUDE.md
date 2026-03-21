@@ -50,12 +50,19 @@ Key phases:
 - `src/parser/` - Pratt parser (mod.rs=core, decl.rs=declarations, expr.rs=expressions, pat.rs=patterns)
 - `src/ast.rs` - AST node types
 - `src/typechecker/` - Type inference and checking (~15 files, largest subsystem)
-  - `mod.rs` - Core types: Type, Scheme, Substitution, TypeEnv, Checker
-  - `infer.rs` - Expression inference
-  - `check_decl.rs` - Declaration checking
-  - `check_module.rs` - Multi-module checking with module map
-  - `unify.rs` - Unification algorithm
-  - `effects.rs`, `handlers.rs`, `patterns.rs`, `records.rs`, `check_traits.rs`, `exhaustiveness.rs` - Specialized subsystems
+  - `mod.rs` - Core types (Type, Scheme, Substitution, TypeEnv), Checker struct and sub-structs
+  - `infer.rs` - Expression inference dispatch (infer_expr, infer_block, infer_lambda)
+  - `check_decl.rs` - Declaration checking and multi-pass registration
+  - `check_module.rs` - Multi-module checking, module map, ModuleExports/ModuleCodegenInfo
+  - `unify.rs` - Unification, instantiation, generalization, convert_type_expr
+  - `builtins.rs` - Built-in type/trait registration
+  - `effects.rs` - Effect tracking, lookup, instantiation
+  - `handlers.rs` - With-expression and handler arm inference
+  - `patterns.rs` - Pattern binding and exhaustiveness checking
+  - `records.rs` - Record create/update/field access inference
+  - `check_traits.rs` - Trait/impl registration and checking
+  - `exhaustiveness.rs` - Maranget usefulness algorithm
+  - The Checker struct groups related fields into sub-structs: `lsp: LspState` (type info, references, go-to-def targets), `effect_state: EffectState` (current effects, caches, annotations), `trait_state: TraitState` (definitions, impls, constraints, where bounds)
 - `src/elaborate.rs` - Dictionary passing transform
 - `src/derive.rs` - Trait deriving (Show, Debug, Eq, Ord, Enum)
 - `src/codegen/` - Core Erlang emission
