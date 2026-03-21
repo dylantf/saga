@@ -376,20 +376,18 @@ fn polymorphic_record_different_instantiations() {
 
 #[test]
 fn polymorphic_record_update() {
-    let checker = check(
-        "record Box a { value: a }\nlet b = Box { value: 42 }\nlet b2 = { b | value: 99 }",
-    )
-    .unwrap();
+    let checker =
+        check("record Box a { value: a }\nlet b = Box { value: 42 }\nlet b2 = { b | value: 99 }")
+            .unwrap();
     let ty = checker.sub.apply(&checker.env.get("b2").unwrap().ty);
     assert_eq!(ty, Type::Con("Box".into(), vec![Type::int()]));
 }
 
 #[test]
 fn polymorphic_record_pattern() {
-    let checker = check(
-        "record Box a { value: a }\nunwrap b = case b {\n  Box { value: v } -> v\n}",
-    )
-    .unwrap();
+    let checker =
+        check("record Box a { value: a }\nunwrap b = case b {\n  Box { value: v } -> v\n}")
+            .unwrap();
     let scheme = checker.env.get("unwrap").unwrap();
     // unwrap : Box a -> a (polymorphic)
     let ty = checker.sub.apply(&scheme.ty);
@@ -1012,7 +1010,8 @@ main () = unwrap (Ok(\"hello\"))",
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(
-        err.message.contains("ambiguous type variable requires Show"),
+        err.message
+            .contains("ambiguous type variable requires Show"),
         "got: {}",
         err.message
     );
@@ -1670,9 +1669,8 @@ fn handler_missing_operation() {
 
 #[test]
 fn handler_empty_body() {
-    let result = check(
-        "effect Log {\n  fun log : (msg: String) -> Unit\n}\nhandler noop for Log {}",
-    );
+    let result =
+        check("effect Log {\n  fun log : (msg: String) -> Unit\n}\nhandler noop for Log {}");
     assert!(result.is_err());
 }
 
@@ -3226,18 +3224,28 @@ fn type_at_span_has_exact_span_text() {
     let src = "record House { year_built: Int }\nmain () = {\n  let house = House { year_built: 2005 }\n  house\n}";
     let checker = check(src).unwrap();
     let result = checker.to_result();
-    for (span, _) in &result.type_at_span {
+    for span in result.type_at_span.keys() {
         if span.end <= src.len() {
             let text = &src[span.start..span.end];
-            assert_eq!(text, text.trim(), "type_at_span contains whitespace: {:?}", text);
+            assert_eq!(
+                text,
+                text.trim(),
+                "type_at_span contains whitespace: {:?}",
+                text
+            );
         }
     }
-    for (node_id, _) in &result.type_at_node {
-        if let Some(span) = result.node_spans.get(node_id) {
-            if span.end <= src.len() {
-                let text = &src[span.start..span.end];
-                assert_eq!(text, text.trim(), "type_at_node span contains whitespace: {:?}", text);
-            }
+    for node_id in result.type_at_node.keys() {
+        if let Some(span) = result.node_spans.get(node_id)
+            && span.end <= src.len()
+        {
+            let text = &src[span.start..span.end];
+            assert_eq!(
+                text,
+                text.trim(),
+                "type_at_node span contains whitespace: {:?}",
+                text
+            );
         }
     }
 }
@@ -3403,9 +3411,7 @@ fn type_arity_too_many_args_builtin_list() {
 
 #[test]
 fn type_arity_too_many_args_user_type() {
-    let result = check(
-        "type Box a { Box(a) }\nfun foo : (x: Box Int String) -> Int\nfoo x = 1",
-    );
+    let result = check("type Box a { Box(a) }\nfun foo : (x: Box Int String) -> Int\nfoo x = 1");
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(
@@ -3457,16 +3463,23 @@ fn references_map_populated() {
     assert!(id_def.is_some(), "env should have def_id for 'id'");
 
     // The resolution map has entries (usage -> definition)
-    assert!(result.references.len() >= 2,
+    assert!(
+        result.references.len() >= 2,
         "expected at least 2 references (x in body + id in main), got {}",
-        result.references.len());
+        result.references.len()
+    );
 
     // At least one reference points to the 'id' definition
     let id_def_id = id_def.unwrap();
-    let id_refs: Vec<_> = result.references.values()
+    let id_refs: Vec<_> = result
+        .references
+        .values()
         .filter(|&&def_id| def_id == id_def_id)
         .collect();
-    assert!(!id_refs.is_empty(), "should have at least one reference to 'id'");
+    assert!(
+        !id_refs.is_empty(),
+        "should have at least one reference to 'id'"
+    );
 }
 
 // --- Partial application effect tests ---

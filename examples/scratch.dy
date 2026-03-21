@@ -1,38 +1,10 @@
-effect Logger {
-  fun log : String -> Unit
-}
-
-handler console_log for Logger {
-  log str = {
-    print str
-    resume ()
-  }
-}
-
-fun add : Int -> Int -> Int
-add a b = a + b
-
-increment = add 1
-
-fun log_with_level : String -> String -> Unit needs {Logger}
-log_with_level level msg = {
-  log! $"[{level}]: "
-  log! $"{msg} \n"
+record Foo {
+  bar: String
 }
 
 main () = {
-  let result = add 6 1
-  println (show result)
-
-  let incremented = increment 6
-  println (show incremented)
-
-  let increment_let_binding = add 1
-  let incremented_via_let = increment_let_binding 6
-  println (show incremented_via_let)
-
-  let debug_log = log_with_level "DEBUG"
-  debug_log "Test debug log message" with console_log
-
-  print "Hello world"
+  let user: String = "John" <> 456
+  let _ = Foo { bar: "asdf" <> 456 "Hello" }
+  
+  println "Ok"
 }

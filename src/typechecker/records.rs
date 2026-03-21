@@ -28,13 +28,16 @@ impl Checker {
                     // Still infer the expression to check for errors within it
                     let _ = self.infer_expr(fexpr);
                 }
-                Some((_, expected_ty)) => {
-                    if let Ok(actual) = self.infer_expr(fexpr)
-                        && let Err(e) = self.unify_at(expected_ty, &actual, fexpr.span)
-                    {
+                Some((_, expected_ty)) => match self.infer_expr(fexpr) {
+                    Ok(actual) => {
+                        if let Err(e) = self.unify_at(expected_ty, &actual, fexpr.span) {
+                            self.collected_diagnostics.push(e);
+                        }
+                    }
+                    Err(e) => {
                         self.collected_diagnostics.push(e);
                     }
-                }
+                },
             }
         }
 

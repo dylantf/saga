@@ -109,11 +109,21 @@ impl Checker {
                 let effects_before_arg = self.effect_state.current.clone();
                 let arg_ty = self.infer_expr(arg)?;
                 let ret_ty = self.fresh_var();
-                self.unify_at(
-                    &func_ty,
-                    &Type::Arrow(Box::new(arg_ty), Box::new(ret_ty.clone())),
-                    span,
-                )?;
+                if self
+                    .unify_at(
+                        &func_ty,
+                        &Type::Arrow(Box::new(arg_ty), Box::new(ret_ty.clone())),
+                        span,
+                    )
+                    .is_err()
+                {
+                    let resolved = self.sub.apply(&func_ty);
+                    let display = self.prettify_type(&resolved);
+                    return Err(Diagnostic::error_at(
+                        func.span,
+                        format!("{} is not a function", display),
+                    ));
+                }
                 // If the function declares its argument absorbs specific effects
                 // (via EffArrow on the parameter type), subtract those from current_effects.
                 // Only remove effects that the argument *introduced*, not effects the
@@ -190,8 +200,8 @@ impl Checker {
                         Ok(Type::bool())
                     }
                     BinOp::Concat => {
-                        self.unify_at(&left_ty, &Type::string(), span)?;
-                        self.unify_at(&right_ty, &Type::string(), span)?;
+                        self.unify_at(&Type::string(), &left_ty, span)?;
+                        self.unify_at(&Type::string(), &right_ty, span)?;
                         Ok(Type::string())
                     }
                 }
