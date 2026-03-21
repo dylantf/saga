@@ -358,6 +358,20 @@ fn spans_are_correct() {
     assert_eq!(tokens[1].span, Span { start: 3, end: 5 });
 }
 
+#[test]
+fn spans_are_byte_offsets() {
+    // "小明" is 6 bytes (2 chars x 3 bytes each), so the token after it
+    // should start at byte offset 9 (quote + 6 bytes + quote + space).
+    let src = "\"小明\" ab";
+    let tokens = Lexer::new(src).lex().unwrap();
+    // String token: bytes 0..8 (quote + 6 bytes + quote)
+    assert_eq!(tokens[0].span, Span { start: 0, end: 8 });
+    // Ident "ab": bytes 9..11
+    assert_eq!(tokens[1].span, Span { start: 9, end: 11 });
+    // Verify spans can slice the source correctly
+    assert_eq!(&src[tokens[1].span.start..tokens[1].span.end], "ab");
+}
+
 // --- Raw strings ---
 
 #[test]
