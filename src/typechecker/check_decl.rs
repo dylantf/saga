@@ -129,33 +129,33 @@ impl Checker {
 
         // Validate that `main` does not have unresolved trait constraints
         // (it is the entry point -- there is no caller to supply dictionaries)
-        if let Some(scheme) = self.env.get("main") {
-            if !scheme.constraints.is_empty() {
-                let traits: Vec<_> = scheme
-                    .constraints
-                    .iter()
-                    .map(|(t, _)| t.as_str())
-                    .collect();
-                let span = program
-                    .iter()
-                    .find_map(|d| {
-                        if let Decl::FunBinding { name, span, .. } = d
-                            && name == "main"
-                        {
-                            Some(*span)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(crate::token::Span { start: 0, end: 0 });
-                errors.push(Diagnostic::error_at(
-                    span,
-                    format!(
-                        "`main` cannot have unresolved trait constraints [{}] -- it is the entry point and there is no caller to supply dictionaries",
-                        traits.join(", ")
-                    ),
-                ));
-            }
+        if let Some(scheme) = self.env.get("main")
+            && !scheme.constraints.is_empty()
+        {
+            let traits: Vec<_> = scheme
+                .constraints
+                .iter()
+                .map(|(t, _)| t.as_str())
+                .collect();
+            let span = program
+                .iter()
+                .find_map(|d| {
+                    if let Decl::FunBinding { name, span, .. } = d
+                        && name == "main"
+                    {
+                        Some(*span)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(crate::token::Span { start: 0, end: 0 });
+            errors.push(Diagnostic::error_at(
+                span,
+                format!(
+                    "`main` cannot have unresolved trait constraints [{}] -- it is the entry point and there is no caller to supply dictionaries",
+                    traits.join(", ")
+                ),
+            ));
         }
 
         // Check for annotations without a matching function binding
@@ -206,7 +206,7 @@ impl Checker {
                 }
                 let scheme = self.generalize(&ty);
                 self.env.insert_with_def(name.clone(), scheme, *id);
-                self.node_spans.insert(*id, *span);
+                self.lsp.node_spans.insert(*id, *span);
                 Ok(())
             }
 
@@ -442,7 +442,7 @@ impl Checker {
                     scheme.constraints = c.clone();
                 }
                 self.env.insert_with_def(name.clone(), scheme, *id);
-                self.node_spans.insert(*id, *span);
+                self.lsp.node_spans.insert(*id, *span);
             }
         }
 
@@ -481,7 +481,7 @@ impl Checker {
                     },
                     *id,
                 );
-                self.node_spans.insert(*id, *span);
+                self.lsp.node_spans.insert(*id, *span);
             }
         }
         fun_vars
@@ -973,9 +973,9 @@ impl Checker {
                     ty: ctor_ty,
                 },
             );
-            self.constructor_def_ids
+            self.lsp.constructor_def_ids
                 .insert(variant.name.clone(), variant.id);
-            self.node_spans.insert(variant.id, variant.span);
+            self.lsp.node_spans.insert(variant.id, variant.span);
         }
 
         self.adt_variants.insert(
@@ -1040,7 +1040,7 @@ impl Checker {
                 ty: ctor_ty,
             },
         );
-        self.constructor_def_ids.insert(name.into(), def_id);
+        self.lsp.constructor_def_ids.insert(name.into(), def_id);
 
         self.records.insert(
             name.into(),
@@ -1179,7 +1179,7 @@ impl Checker {
                     belongs_to_declared = true;
                     // Record arm span -> (op definition span, source module) for LSP go-to-def (level 2)
                     if let Some(&op_span) = info.op_spans.get(&arm.op_name) {
-                        self.handler_arm_targets
+                        self.lsp.handler_arm_targets
                             .insert(arm.span, (op_span, info.source_module.clone()));
                     }
                     arm_spans.insert(arm.op_name.clone(), arm.span);
@@ -1238,8 +1238,8 @@ impl Checker {
                     },
                     param_id,
                 );
-                self.node_spans.insert(param_id, *param_span);
-                self.definitions
+                self.lsp.node_spans.insert(param_id, *param_span);
+                self.lsp.definitions
                     .push((param_id, param_name.clone(), *param_span));
             }
 
@@ -1352,7 +1352,7 @@ impl Checker {
             },
             *def_id,
         );
-        self.node_spans.insert(*def_id, *span);
+        self.lsp.node_spans.insert(*def_id, *span);
 
         Ok(())
     }

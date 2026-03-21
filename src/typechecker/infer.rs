@@ -92,7 +92,7 @@ impl Checker {
                     let scheme = scheme.clone();
                     let (ty, _) = self.instantiate(&scheme);
                     self.record_type(node_id, &ty);
-                    if let Some(def_id) = self.constructor_def_ids.get(name).copied() {
+                    if let Some(def_id) = self.lsp.constructor_def_ids.get(name).copied() {
                         self.record_reference(node_id, span, def_id);
                     }
                     Ok(ty)
@@ -275,12 +275,13 @@ impl Checker {
                 // Record call site -> handler arm for LSP go-to-def (level 1).
                 // Scan the with-stack innermost-first; first match wins (innermost shadows outer).
                 if let Some((arm_span, arm_module)) = self
+                    .lsp
                     .with_arm_stacks
                     .iter()
                     .rev()
                     .find_map(|map| map.get(name.as_str()))
                 {
-                    self.effect_call_targets
+                    self.lsp.effect_call_targets
                         .insert(span, (*arm_span, arm_module.clone()));
                 }
 
@@ -674,7 +675,7 @@ impl Checker {
                         },
                         fun_id,
                     );
-                    self.node_spans.insert(fun_id, fun_name_span);
+                    self.lsp.node_spans.insert(fun_id, fun_name_span);
 
                     // Check each clause like a lambda, unifying with fun_ty
                     let arity = clauses[0].0.len();
@@ -815,9 +816,9 @@ impl Checker {
         deferred_effects.sort();
         self.let_effect_bindings
             .insert(name.to_string(), deferred_effects);
-        self.node_spans.insert(pat_id, var_span);
+        self.lsp.node_spans.insert(pat_id, var_span);
         self.record_type_at_span(var_span, ty);
-        self.definitions
+        self.lsp.definitions
             .push((pat_id, name.to_string(), var_span));
     }
 }

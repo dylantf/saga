@@ -23,8 +23,8 @@ impl Checker {
                     *id,
                 );
                 self.record_type_at_span(*span, ty);
-                self.node_spans.insert(*id, *span);
-                self.definitions.push((*id, name.clone(), *span));
+                self.lsp.node_spans.insert(*id, *span);
+                self.lsp.definitions.push((*id, name.clone(), *span));
                 Ok(())
             }
             Pat::Lit { value, span, .. } => {

@@ -280,8 +280,6 @@ impl Scheme {
     }
 }
 
-/// Replace `Type::Var(id)` with `Type::Con(name, [])` for display purposes.
-
 // Module export types are defined in check_module.rs and re-exported here.
 pub use check_module::{
     EffectDef, EffectOpDef, ModuleCodegenInfo, ModuleExports, TraitImplDict,
@@ -594,32 +592,40 @@ pub struct Checker {
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Warnings deferred until after inference, when substitutions are complete.
     pub(crate) pending_warnings: Vec<PendingWarning>,
-    /// Per-node type information for Expr nodes (LSP hover, go-to-def, etc.).
-    /// Types are stored unresolved (may contain type variables); apply `sub`
-    /// at lookup time to get the final resolved type.
-    pub(crate) type_at_node: HashMap<crate::ast::NodeId, Type>,
-    /// Per-span type information for Pat bindings.
-    pub(crate) type_at_span: HashMap<Span, Type>,
-    /// Resolution map: usage NodeId -> definition NodeId (for find-all-references).
-    pub(crate) references: HashMap<crate::ast::NodeId, crate::ast::NodeId>,
-    /// NodeId -> Span map for all recorded expression nodes (for resolving NodeIds to locations).
-    pub(crate) node_spans: HashMap<crate::ast::NodeId, Span>,
-    /// Constructor definition NodeIds: constructor name -> NodeId of the TypeConstructor/RecordDef.
-    pub(crate) constructor_def_ids: HashMap<String, crate::ast::NodeId>,
-    /// All variable/param definitions: (NodeId, name, span) for unused variable detection.
-    pub(crate) definitions: Vec<(crate::ast::NodeId, String, Span)>,
+    /// LSP/IDE state: type info, references, definitions, go-to-def targets.
+    pub(crate) lsp: LspState,
     /// When true, function annotations without matching bodies are allowed
     /// (used for builtin stdlib modules where implementations are in Rust).
     pub(crate) allow_bodyless_annotations: bool,
     /// Set to the module name when checking a module file; None for the main file.
     pub(crate) current_module: Option<String>,
+}
+
+/// State accumulated during typechecking for IDE/LSP features: hover types,
+/// go-to-definition, find-all-references, unused variable detection.
+#[derive(Clone, Default)]
+pub(crate) struct LspState {
+    /// Per-node type information for Expr nodes (LSP hover, go-to-def, etc.).
+    /// Types are stored unresolved (may contain type variables); apply `sub`
+    /// at lookup time to get the final resolved type.
+    pub type_at_node: HashMap<crate::ast::NodeId, Type>,
+    /// Per-span type information for Pat bindings.
+    pub type_at_span: HashMap<Span, Type>,
+    /// Resolution map: usage NodeId -> definition NodeId (for find-all-references).
+    pub references: HashMap<crate::ast::NodeId, crate::ast::NodeId>,
+    /// NodeId -> Span map for all recorded expression nodes (for resolving NodeIds to locations).
+    pub node_spans: HashMap<crate::ast::NodeId, Span>,
+    /// Constructor definition NodeIds: constructor name -> NodeId of the TypeConstructor/RecordDef.
+    pub constructor_def_ids: HashMap<String, crate::ast::NodeId>,
+    /// All variable/param definitions: (NodeId, name, span) for unused variable detection.
+    pub definitions: Vec<(crate::ast::NodeId, String, Span)>,
     /// Stack of (op_name -> (arm_span, source_module)) maps for nested `with` expressions.
     /// Innermost handler is last. Used to record which arm handles each effect call.
-    pub(crate) with_arm_stacks: Vec<HashMap<String, (Span, Option<String>)>>,
+    pub with_arm_stacks: Vec<HashMap<String, (Span, Option<String>)>>,
     /// Maps effect call span -> (handler arm span, source module) (for LSP go-to-def, level 1).
-    pub(crate) effect_call_targets: HashMap<Span, (Span, Option<String>)>,
+    pub effect_call_targets: HashMap<Span, (Span, Option<String>)>,
     /// Maps handler arm span -> (effect op definition span, source module) (for LSP go-to-def, level 2).
-    pub(crate) handler_arm_targets: HashMap<Span, (Span, Option<String>)>,
+    pub handler_arm_targets: HashMap<Span, (Span, Option<String>)>,
 }
 
 /// Module system state: caches, project root, and import tracking.
@@ -703,17 +709,9 @@ impl Checker {
             let_effect_bindings: HashMap::new(),
             collected_diagnostics: Vec::new(),
             pending_warnings: Vec::new(),
-            type_at_node: HashMap::new(),
-            type_at_span: HashMap::new(),
-            references: HashMap::new(),
-            node_spans: HashMap::new(),
-            constructor_def_ids: HashMap::new(),
-            definitions: Vec::new(),
+            lsp: LspState::default(),
             allow_bodyless_annotations: false,
             current_module: None,
-            with_arm_stacks: Vec::new(),
-            effect_call_targets: HashMap::new(),
-            handler_arm_targets: HashMap::new(),
         };
         checker.register_builtins();
         checker
@@ -778,14 +776,18 @@ impl Checker {
 
     /// Record the type of an expression node (by NodeId).
     pub(crate) fn record_type(&mut self, node_id: crate::ast::NodeId, ty: &Type) {
-        self.type_at_node
+        self.lsp
+            .type_at_node
             .entry(node_id)
             .or_insert_with(|| ty.clone());
     }
 
     /// Record the type of a pattern binding (by Span).
     pub(crate) fn record_type_at_span(&mut self, span: Span, ty: &Type) {
-        self.type_at_span.entry(span).or_insert_with(|| ty.clone());
+        self.lsp
+            .type_at_span
+            .entry(span)
+            .or_insert_with(|| ty.clone());
     }
 
     /// Record a name resolution: usage_id references def_id.
@@ -795,15 +797,15 @@ impl Checker {
         usage_span: Span,
         def_id: crate::ast::NodeId,
     ) {
-        self.references.insert(usage_id, def_id);
-        self.node_spans.insert(usage_id, usage_span);
+        self.lsp.references.insert(usage_id, def_id);
+        self.lsp.node_spans.insert(usage_id, usage_span);
     }
 
     /// Emit warnings for local variable bindings that are never referenced.
     pub(crate) fn check_unused_variables(&mut self) {
         let used: std::collections::HashSet<crate::ast::NodeId> =
-            self.references.values().copied().collect();
-        for (def_id, name, span) in &self.definitions {
+            self.lsp.references.values().copied().collect();
+        for (def_id, name, span) in &self.lsp.definitions {
             if name.starts_with('_') {
                 continue;
             }

@@ -62,10 +62,10 @@ impl Checker {
                     map
                 }
             };
-        self.with_arm_stacks.push(arm_stack_entry);
+        self.lsp.with_arm_stacks.push(arm_stack_entry);
 
         let ty = self.infer_with_inner(expr, handler, handled)?;
-        self.with_arm_stacks.pop();
+        self.lsp.with_arm_stacks.pop();
 
         Ok(ty)
     }
