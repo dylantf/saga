@@ -93,11 +93,12 @@ impl Checker {
             // Error type unifies with anything (suppresses cascading errors)
             (Type::Error, _) | (_, Type::Error) => Ok(()),
 
-            // Never (bottom) unifies with anything
-            (Type::Never, _) | (_, Type::Never) => Ok(()),
-
+            // Var bindings before Never so that variables get bound to Never
             (Type::Var(id), _) => self.sub.bind(*id, &b),
             (_, Type::Var(id)) => self.sub.bind(*id, &a),
+
+            // Never (bottom) unifies with anything
+            (Type::Never, _) | (_, Type::Never) => Ok(()),
 
             (Type::Arrow(a1, a2), Type::Arrow(b1, b2))
             | (Type::Arrow(a1, a2), Type::EffArrow(b1, b2, _))

@@ -2,8 +2,13 @@ effect Fail a {
   fun fail : (msg: String) -> a
 }
 
-handler log_failure for Fail Never {
-  fail msg = println $"Error: {msg}"
+handler log_failure for Fail Unit {
+  fail msg = print $"Error: {msg}"
+}
+
+handler to_result for Fail a {
+  fail x = Err x
+  return val = Ok val
 }
 
 # Continues a failed call with a default value of 0
@@ -16,9 +21,8 @@ safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 
 main () = {
-  # TODO: broke in b9db7d6 -- expected Unit, got Int
-  let a = (safe_div 10 2) with log_failure
-  println (show a)
+  let a = (safe_div 10 2) with to_result
+  println (debug a)
 
   let b = (safe_div 10 0) with {
     fail _ = resume 0

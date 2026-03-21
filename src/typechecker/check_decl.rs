@@ -1288,7 +1288,22 @@ impl Checker {
             }
 
             let body_ty = self.infer_expr(&arm.body)?;
-            if let Err(e) = self.unify(&answer_ty, &body_ty) {
+            // If the op returns Never (non-resumable), the arm body must also
+            // be Never (i.e. diverge). Otherwise the handler would silently
+            // produce a non-Never value with no way to continue the computation.
+            if matches!(op_sig.return_type, Type::Never) {
+                let resolved = self.sub.apply(&body_ty);
+                if !matches!(resolved, Type::Never | Type::Error) {
+                    let display_ty = self.prettify_type(&body_ty);
+                    self.collected_diagnostics.push(Diagnostic::error_at(
+                        arm.span,
+                        format!(
+                            "non-resumable handler arm must diverge (return Never), but returns `{}`",
+                            display_ty
+                        ),
+                    ));
+                }
+            } else if let Err(e) = self.unify(&answer_ty, &body_ty) {
                 self.collected_diagnostics.push(e.with_span(arm.span));
             }
             self.resume_type = saved_resume;
