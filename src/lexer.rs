@@ -112,7 +112,7 @@ fn strip_indentation_interp(parts: &mut Vec<InterpPart>, indent: usize) {
 }
 
 pub struct Lexer {
-    source: Vec<char>,
+    source: String,
     pos: usize,
     nesting: i32,
     // Stack of saved nesting levels: `{` pushes and resets, `}` pops and restores.
@@ -129,7 +129,7 @@ pub struct LexError {
 impl Lexer {
     pub fn new(source: &str) -> Self {
         Lexer {
-            source: source.chars().collect(),
+            source: source.to_string(),
             pos: 0,
             nesting: 0,
             nesting_stack: Vec::new(),
@@ -137,35 +137,33 @@ impl Lexer {
     }
 
     fn peek(&self) -> Option<char> {
-        self.source.get(self.pos).copied()
+        self.source[self.pos..].chars().next()
     }
 
     fn peek_next(&self) -> Option<char> {
-        self.source.get(self.pos + 1).copied()
+        let mut chars = self.source[self.pos..].chars();
+        chars.next();
+        chars.next()
     }
 
     fn peek_ahead(&self, n: usize) -> Option<char> {
-        self.source.get(self.pos + n).copied()
+        self.source[self.pos..].chars().nth(n)
     }
 
-    /// Compute the 0-based column of `pos` by scanning back to the last newline.
+    /// Compute the 0-based character column of `pos` (a byte offset) by counting
+    /// chars from the last newline. Used for multiline string indentation stripping.
     fn column_of(&self, pos: usize) -> usize {
-        let mut col = 0;
-        let mut i = pos;
-        while i > 0 {
-            i -= 1;
-            if self.source[i] == '\n' {
-                return col;
-            }
-            col += 1;
+        let before = &self.source[..pos];
+        match before.rfind('\n') {
+            Some(nl) => before[nl + 1..].chars().count(),
+            None => before.chars().count(),
         }
-        col
     }
 
     fn advance(&mut self) -> Option<char> {
-        let ch = self.peek();
-        self.pos += 1;
-        ch
+        let ch = self.peek()?;
+        self.pos += ch.len_utf8();
+        Some(ch)
     }
 
     fn skip_whitespace(&mut self) {

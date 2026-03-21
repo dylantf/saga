@@ -8,7 +8,7 @@ use std::path::PathBuf;
 fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
     let mut line = 1;
     let mut col = 1;
-    for (i, ch) in source.chars().enumerate() {
+    for (i, ch) in source.char_indices() {
         if i >= offset {
             break;
         }
