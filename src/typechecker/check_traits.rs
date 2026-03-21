@@ -296,7 +296,7 @@ impl Checker {
             // Register effects so callers of this method know what they propagate.
             // Union with any effects already registered (from other impls of the same method).
             if !declared_effects.is_empty() {
-                self.fun_effects
+                self.effect_state.fun_effects
                     .entry(method_name.clone())
                     .or_default()
                     .extend(declared_effects.iter().cloned());

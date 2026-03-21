@@ -106,7 +106,7 @@ impl Checker {
 
         // Validate that `main` does not declare effects (it's the top of the call stack,
         // there is no caller above to provide handlers)
-        if let Some(effects) = self.fun_effects.get("main")
+        if let Some(effects) = self.effect_state.fun_effects.get("main")
             && !effects.is_empty()
         {
             let span = program.iter().find_map(|d| {
@@ -391,7 +391,7 @@ impl Checker {
                 // Always register in fun_effects (even pure functions get an empty
                 // set) so the `with` validation can distinguish local declarations
                 // from imports/parameters.
-                self.fun_effects.insert(
+                self.effect_state.fun_effects.insert(
                     name.clone(),
                     effects.iter().map(|e| e.name.clone()).collect(),
                 );
@@ -408,7 +408,7 @@ impl Checker {
                         }
                     }
                     if !constraints.is_empty() {
-                        self.fun_effect_type_constraints
+                        self.effect_state.fun_type_constraints
                             .insert(name.clone(), constraints);
                     }
                 }
@@ -464,7 +464,7 @@ impl Checker {
                 // already registered with their declared effects; un-annotated
                 // ones get an empty set). This lets `with` validation distinguish
                 // local functions from imports.
-                self.fun_effects.entry(name.clone()).or_default();
+                self.effect_state.fun_effects.entry(name.clone()).or_default();
                 if annotations.contains_key(name) {
                     let var = self.fresh_var();
                     fun_vars.insert(name.clone(), var);
@@ -575,7 +575,7 @@ impl Checker {
         let body_scope = self.enter_effect_scope();
 
         // Pre-populate effect type param cache from annotation constraints (e.g. needs {State Int})
-        if let Some(constraints) = self.fun_effect_type_constraints.get(name).cloned() {
+        if let Some(constraints) = self.effect_state.fun_type_constraints.get(name).cloned() {
             for (effect_name, concrete_types) in &constraints {
                 if let Some(info) = self.effects.get(effect_name).cloned() {
                     let mapping: std::collections::HashMap<u32, Type> = info
@@ -584,7 +584,7 @@ impl Checker {
                         .zip(concrete_types.iter())
                         .map(|(&param_id, ty)| (param_id, ty.clone()))
                         .collect();
-                    self.effect_type_param_cache
+                    self.effect_state.type_param_cache
                         .insert(effect_name.clone(), mapping);
                 }
             }
@@ -659,7 +659,7 @@ impl Checker {
         let scope_result = self.exit_effect_scope(body_scope);
         let body_effects = scope_result.effects;
         let body_field_candidates = scope_result.field_candidates;
-        let declared_effects = self.fun_effects.get(name).cloned().unwrap_or_default();
+        let declared_effects = self.effect_state.fun_effects.get(name).cloned().unwrap_or_default();
 
         if !body_effects.is_empty() || !declared_effects.is_empty() {
             let err_span = match clauses[0] {

@@ -142,7 +142,7 @@ impl ModuleExports {
         // Collect fun_effects for public functions
         let mut fun_effects: HashMap<String, HashSet<String>> = HashMap::new();
         for name in &pub_names {
-            if let Some(effs) = checker.fun_effects.get(name) {
+            if let Some(effs) = checker.effect_state.fun_effects.get(name) {
                 fun_effects.insert(name.clone(), effs.clone());
             }
         }
@@ -683,8 +683,8 @@ impl Checker {
         // so both qualified calls and exposed imports are covered.
         for (name, effs) in fun_effects {
             let qualified = format!("{}.{}", prefix, name);
-            self.fun_effects.entry(qualified).or_insert_with(|| effs.clone());
-            self.fun_effects.entry(name.clone()).or_insert_with(|| effs.clone());
+            self.effect_state.fun_effects.entry(qualified).or_insert_with(|| effs.clone());
+            self.effect_state.fun_effects.entry(name.clone()).or_insert_with(|| effs.clone());
         }
 
         // Bindings, type constructors, records (qualified + exposing)

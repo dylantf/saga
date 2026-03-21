@@ -551,15 +551,8 @@ pub struct Checker {
     pub(crate) resume_type: Option<Type>,
     /// Context for resume return typing: when inside a handler arm, the answer type of the with-expression
     pub(crate) resume_return_type: Option<Type>,
-    /// Effects used in the current function body (accumulated during inference)
-    pub(crate) current_effects: HashSet<String>,
-    /// Per-scope cache of instantiated effect type params: effect name -> mapping from original var IDs to fresh vars.
-    /// Ensures all ops from the same effect share type params within a function scope.
-    pub(crate) effect_type_param_cache: HashMap<String, HashMap<u32, Type>>,
-    /// Known effect requirements for named functions: name -> set of effect names
-    pub(crate) fun_effects: HashMap<String, HashSet<String>>,
-    /// Annotation-provided effect type constraints: fn name -> [(effect_name, [concrete types])]
-    pub(crate) fun_effect_type_constraints: HashMap<String, Vec<(String, Vec<Type>)>>,
+    /// Effect tracking state (current effects, caches, annotations).
+    pub(crate) effect_state: EffectState,
     /// Trait definitions: trait name -> info
     pub(crate) traits: HashMap<String, TraitInfo>,
     /// Impl registry: (trait_name, target_type) -> impl info
@@ -585,9 +578,6 @@ pub struct Checker {
     pub(crate) evidence: Vec<TraitEvidence>,
     /// Dict params for let bindings with trait constraints: name -> (params, value_arity).
     pub(crate) let_dict_params: HashMap<String, (Vec<(String, String)>, usize)>,
-    /// Deferred effects for let bindings that partially apply effectful functions.
-    /// name -> effect names. Used by the lowerer to register effectful local vars.
-    pub(crate) let_effect_bindings: HashMap<String, Vec<String>>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Warnings deferred until after inference, when substitutions are complete.
@@ -599,6 +589,24 @@ pub struct Checker {
     pub(crate) allow_bodyless_annotations: bool,
     /// Set to the module name when checking a module file; None for the main file.
     pub(crate) current_module: Option<String>,
+}
+
+/// Effect tracking state accumulated during inference.
+#[derive(Clone, Default)]
+pub(crate) struct EffectState {
+    /// Effects used in the current function body (accumulated during inference).
+    pub current: HashSet<String>,
+    /// Per-scope cache of instantiated effect type params: effect name -> mapping
+    /// from original var IDs to fresh vars. Ensures all ops from the same effect
+    /// share type params within a function scope.
+    pub type_param_cache: HashMap<String, HashMap<u32, Type>>,
+    /// Known effect requirements for named functions: name -> set of effect names.
+    pub fun_effects: HashMap<String, HashSet<String>>,
+    /// Annotation-provided effect type constraints: fn name -> [(effect_name, [concrete types])].
+    pub fun_type_constraints: HashMap<String, Vec<(String, Vec<Type>)>>,
+    /// Deferred effects for let bindings that partially apply effectful functions.
+    /// name -> effect names. Used by the lowerer to register effectful local vars.
+    pub let_bindings: HashMap<String, Vec<String>>,
 }
 
 /// State accumulated during typechecking for IDE/LSP features: hover types,
@@ -691,10 +699,7 @@ impl Checker {
             handlers: HashMap::new(),
             resume_type: None,
             resume_return_type: None,
-            current_effects: HashSet::new(),
-            effect_type_param_cache: HashMap::new(),
-            fun_effects: HashMap::new(),
-            fun_effect_type_constraints: HashMap::new(),
+            effect_state: EffectState::default(),
             traits: HashMap::new(),
             trait_impls: HashMap::new(),
             pending_constraints: Vec::new(),
@@ -706,7 +711,6 @@ impl Checker {
             type_arity: HashMap::new(),
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
-            let_effect_bindings: HashMap::new(),
             collected_diagnostics: Vec::new(),
             pending_warnings: Vec::new(),
             lsp: LspState::default(),
@@ -913,8 +917,8 @@ impl Checker {
     /// what the scope accumulated.
     pub(crate) fn enter_effect_scope(&mut self) -> EffectScope {
         EffectScope {
-            effects: std::mem::take(&mut self.current_effects),
-            effect_cache: std::mem::take(&mut self.effect_type_param_cache),
+            effects: std::mem::take(&mut self.effect_state.current),
+            effect_cache: std::mem::take(&mut self.effect_state.type_param_cache),
             field_candidates: std::mem::take(&mut self.field_candidates),
             resume_type: self.resume_type.take(),
             resume_return_type: self.resume_return_type.take(),
@@ -925,9 +929,9 @@ impl Checker {
     /// accumulated during the scope's lifetime.
     pub(crate) fn exit_effect_scope(&mut self, scope: EffectScope) -> EffectScopeResult {
         let result = EffectScopeResult {
-            effects: std::mem::replace(&mut self.current_effects, scope.effects),
+            effects: std::mem::replace(&mut self.effect_state.current, scope.effects),
             effect_cache: std::mem::replace(
-                &mut self.effect_type_param_cache,
+                &mut self.effect_state.type_param_cache,
                 scope.effect_cache,
             ),
             field_candidates: std::mem::replace(

@@ -89,8 +89,8 @@ impl Checker {
             let callee_effects_known = callee_name
                 .as_ref()
                 .map(|name| {
-                    self.fun_effects.contains_key(name.as_str())
-                        || self.let_effect_bindings.contains_key(name.as_str())
+                    self.effect_state.fun_effects.contains_key(name.as_str())
+                        || self.effect_state.let_bindings.contains_key(name.as_str())
                 })
                 .unwrap_or(false);
             if callee_effects_known {
@@ -111,7 +111,7 @@ impl Checker {
         for eff in &handled {
             unhandled.remove(eff);
         }
-        self.current_effects.extend(unhandled);
+        self.effect_state.current.extend(unhandled);
 
         let with_span = expr.span;
         match handler {
@@ -149,7 +149,7 @@ impl Checker {
                 let arms_scope = self.enter_effect_scope();
                 // Handler arms inherit the inner expression's effect cache so
                 // they see the same type param bindings (e.g. State s -> Int).
-                self.effect_type_param_cache = inner_result.effect_cache;
+                self.effect_state.type_param_cache = inner_result.effect_cache;
 
                 // Compute answer_ty: infer return clause first if present,
                 // since arms need it for resume return type and body unification.
@@ -226,7 +226,7 @@ impl Checker {
                 for eff in &handled {
                     arm_effects.remove(eff);
                 }
-                self.current_effects.extend(arm_effects);
+                self.effect_state.current.extend(arm_effects);
 
                 Ok(answer_ty)
             }

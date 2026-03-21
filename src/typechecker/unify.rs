@@ -244,7 +244,8 @@ impl Checker {
         // Collect effect type param vars that must not be generalized --
         // these are shared across ops of the same effect within a function scope.
         let effect_vars: HashSet<u32> = self
-            .effect_type_param_cache
+            .effect_state
+            .type_param_cache
             .values()
             .flat_map(|mapping| {
                 mapping.values().filter_map(|ty| {

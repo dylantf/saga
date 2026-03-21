@@ -38,7 +38,7 @@ impl Checker {
                     // Propagate effect type params from callee's annotations.
                     // e.g. calling `counter` which has `needs {Actor CounterMsg}`
                     // populates the cache so lambdas can build typed EffArrows.
-                    if let Some(constraints) = self.fun_effect_type_constraints.get(name).cloned() {
+                    if let Some(constraints) = self.effect_state.fun_type_constraints.get(name).cloned() {
                         for (effect_name, concrete_types) in &constraints {
                             if let Some(info) = self.effects.get(effect_name).cloned() {
                                 let mapping: std::collections::HashMap<u32, Type> = info
@@ -47,7 +47,7 @@ impl Checker {
                                     .zip(concrete_types.iter())
                                     .map(|(&param_id, ty)| (param_id, ty.clone()))
                                     .collect();
-                                self.effect_type_param_cache
+                                self.effect_state.type_param_cache
                                     .insert(effect_name.clone(), mapping);
                             }
                         }
@@ -60,7 +60,7 @@ impl Checker {
                     // If this function has effect type constraints, convert the
                     // outermost Arrow to EffArrow so spawn! can link type args.
                     if let Some(eff_constraints) =
-                        self.fun_effect_type_constraints.get(name).cloned()
+                        self.effect_state.fun_type_constraints.get(name).cloned()
                         && let Type::Arrow(a, b) = ty
                     {
                         let eff_refs: Vec<(String, Vec<Type>)> =
@@ -106,7 +106,7 @@ impl Checker {
 
             ExprKind::App { func, arg, .. } => {
                 let func_ty = self.infer_expr(func)?;
-                let effects_before_arg = self.current_effects.clone();
+                let effects_before_arg = self.effect_state.current.clone();
                 let arg_ty = self.infer_expr(arg)?;
                 let ret_ty = self.fresh_var();
                 self.unify_at(
@@ -127,7 +127,7 @@ impl Checker {
                 if let Some(Type::EffArrow(_, _, needs)) = param_ty {
                     for (eff, _) in &needs {
                         if !effects_before_arg.contains(eff) {
-                            self.current_effects.remove(eff);
+                            self.effect_state.current.remove(eff);
                         }
                     }
                 }
@@ -269,7 +269,7 @@ impl Checker {
 
                 // Track which effect this op belongs to
                 if let Some(effect_name) = self.effect_for_op(name, qualifier.as_deref()) {
-                    self.current_effects.insert(effect_name);
+                    self.effect_state.current.insert(effect_name);
                 }
 
                 // Record call site -> handler arm for LSP go-to-def (level 1).
@@ -438,7 +438,7 @@ impl Checker {
         let scope = self.enter_effect_scope();
         // Lambda inherits the outer effect cache so effect ops (e.g. get!)
         // resolve type params from the enclosing function's annotations.
-        self.effect_type_param_cache = scope.effect_cache.clone();
+        self.effect_state.type_param_cache = scope.effect_cache.clone();
 
         let mut param_types = Vec::new();
         for pat in params {
@@ -451,11 +451,11 @@ impl Checker {
         self.env = saved_env;
 
         // Build effect type args from the lambda's cache before exiting scope
-        let lambda_effects: Vec<String> = self.current_effects.iter().cloned().collect();
+        let lambda_effects: Vec<String> = self.effect_state.current.iter().cloned().collect();
         let eff_refs: Vec<(String, Vec<Type>)> = lambda_effects
             .iter()
             .map(|name| {
-                let args = if let Some(cache) = self.effect_type_param_cache.get(name) {
+                let args = if let Some(cache) = self.effect_state.type_param_cache.get(name) {
                     if let Some(info) = self.effects.get(name) {
                         info.type_params
                             .iter()
@@ -474,7 +474,7 @@ impl Checker {
         let result = self.exit_effect_scope(scope);
         // Lambda effects propagate to enclosing scope (the enclosing function
         // needs them for its `needs` declaration checking).
-        self.current_effects.extend(result.effects);
+        self.effect_state.current.extend(result.effects);
 
         // Build curried arrow: a -> b -> c -> ret
         let mut ty = body_ty;
@@ -500,7 +500,7 @@ impl Checker {
     ) -> Result<Type, Diagnostic> {
         // Look up Actor effect's message type from the effect type param cache
         let msg_ty = match (
-            self.effect_type_param_cache.get("Actor"),
+            self.effect_state.type_param_cache.get("Actor"),
             self.effects.get("Actor"),
         ) {
             (Some(cache), Some(info)) => {
@@ -568,7 +568,7 @@ impl Checker {
             self.unify_at(&result_ty, &body_ty, body.span)?;
         }
 
-        self.current_effects.insert("Actor".to_string());
+        self.effect_state.current.insert("Actor".to_string());
         Ok(result_ty)
     }
 
@@ -814,7 +814,7 @@ impl Checker {
         self.env
             .insert_with_def(name.to_string(), scheme, pat_id);
         deferred_effects.sort();
-        self.let_effect_bindings
+        self.effect_state.let_bindings
             .insert(name.to_string(), deferred_effects);
         self.lsp.node_spans.insert(pat_id, var_span);
         self.record_type_at_span(var_span, ty);

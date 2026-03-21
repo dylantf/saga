@@ -11,10 +11,10 @@ impl Checker {
     /// Collect effects for a callee from fun_effects and let_effect_bindings.
     pub(crate) fn callee_effects(&self, name: &str) -> Vec<String> {
         let mut effects = Vec::new();
-        if let Some(effs) = self.fun_effects.get(name) {
+        if let Some(effs) = self.effect_state.fun_effects.get(name) {
             effects.extend(effs.iter().cloned());
         }
-        if let Some(effs) = self.let_effect_bindings.get(name) {
+        if let Some(effs) = self.effect_state.let_bindings.get(name) {
             effects.extend(effs.iter().cloned());
         }
         effects
@@ -22,11 +22,11 @@ impl Checker {
 
     /// Commit a callee's effects to current_effects.
     pub(crate) fn commit_callee_effects(&mut self, name: &str) {
-        if let Some(effects) = self.fun_effects.get(name).cloned() {
-            self.current_effects.extend(effects);
+        if let Some(effects) = self.effect_state.fun_effects.get(name).cloned() {
+            self.effect_state.current.extend(effects);
         }
-        if let Some(effects) = self.let_effect_bindings.get(name).cloned() {
-            self.current_effects.extend(effects);
+        if let Some(effects) = self.effect_state.let_bindings.get(name).cloned() {
+            self.effect_state.current.extend(effects);
         }
     }
 
@@ -125,14 +125,14 @@ impl Checker {
             };
         }
         // Reuse cached mapping or create fresh vars
-        let mapping = if let Some(cached) = self.effect_type_param_cache.get(effect_name) {
+        let mapping = if let Some(cached) = self.effect_state.type_param_cache.get(effect_name) {
             cached.clone()
         } else {
             let mapping: std::collections::HashMap<u32, Type> = type_params
                 .iter()
                 .map(|&old_id| (old_id, self.fresh_var()))
                 .collect();
-            self.effect_type_param_cache
+            self.effect_state.type_param_cache
                 .insert(effect_name.to_string(), mapping.clone());
             mapping
         };
