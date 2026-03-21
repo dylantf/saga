@@ -14,6 +14,7 @@ mod document_symbol;
 mod hover;
 mod line_index;
 mod signature_help;
+mod symbol_index;
 
 use diagnostics::CheckSnapshot;
 
@@ -23,6 +24,8 @@ struct Backend {
     base_checkers: Mutex<std::collections::HashMap<String, typechecker::Checker>>,
     /// Last check result per file, for hover/goto queries.
     last_check: Mutex<std::collections::HashMap<Url, Arc<CheckSnapshot>>>,
+    /// Project-wide symbol reference index for cross-module find-references.
+    symbol_index: Mutex<symbol_index::SymbolIndex>,
 }
 
 impl Backend {
@@ -56,6 +59,11 @@ impl Backend {
         match result {
             Ok(result) => {
                 let diagnostics = result.diagnostics.clone();
+                // Update the symbol index with references from this file.
+                if let Some(ref program) = result.program {
+                    let mut idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+                    idx.update_file(&uri, &result.tc_result, program, &result.line_index);
+                }
                 let mut last = self.last_check.lock().unwrap_or_else(|e| e.into_inner());
                 last.insert(uri, Arc::new(result));
                 diagnostics
@@ -495,45 +503,100 @@ impl LanguageServer for Backend {
         let program = snap.program.as_ref().unwrap();
         let line_index = &snap.line_index;
 
-
         let position = params.text_document_position.position;
         let offset =
             line_index.line_col_to_offset(position.line as usize, position.character as usize);
 
-        let Some((_name, _span, node_id)) = hover::find_name_at_offset(program, offset) else {
+        let Some((name, _span, _node_id)) = hover::find_name_at_offset(program, offset) else {
             return Ok(None);
         };
 
-        // Determine the definition NodeId.
-        // If cursor is on a usage expression, look up the resolution map.
-        // If cursor is on a definition, the node_id itself is the definition.
-        let def_id = if let Some(expr_id) = node_id {
-            if let Some(&did) = tc_result.references.get(&expr_id) {
-                // Cursor is on a usage -> follow to definition
-                did
-            } else {
-                // Cursor might be on a definition itself (e.g., clicking the function name
-                // in a FunAnnotation). Check if anything references this node.
-                expr_id
-            }
+        // Resolve the symbol key: (module, name).
+        // If the name is in import_origins, it came from another module.
+        // Otherwise, it's locally defined in this file's module.
+        let module = if let Some(origin) = tc_result.import_origins.get(&name) {
+            origin.clone()
         } else {
-            // No expr NodeId (Pat binding). Find the definition by looking up the
-            // env's def_id for this name.
-            if let Some(did) = tc_result.env.def_id(&_name) {
-                did
-            } else {
-                return Ok(None);
+            // Local definition: use this file's module declaration
+            let local_module = program.iter().find_map(|decl| {
+                if let dylang::ast::Decl::ModuleDecl { path, .. } = decl {
+                    Some(path.join("."))
+                } else {
+                    None
+                }
+            });
+            match local_module {
+                Some(m) => m,
+                None => return Ok(None), // No module declaration, can't resolve
             }
         };
 
-        // Collect all usage spans that resolve to this definition.
-        let mut locations = Vec::new();
-        for (usage_id, &ref_def_id) in &tc_result.references {
-            if ref_def_id == def_id
-                && let Some(&usage_span) = tc_result.node_spans.get(usage_id)
+        let key = symbol_index::SymbolKey {
+            module: module.clone(),
+            name: name.clone(),
+        };
+
+        // Ensure all project files are indexed before querying.
+        if let Some(module_map) = tc_result.module_map() {
+            let current_path = uri.to_file_path().ok();
+            for file_path in module_map.values() {
+                if current_path.as_ref() == Some(file_path) {
+                    continue;
+                }
+                let file_uri = match Url::from_file_path(file_path) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                let needs_index = {
+                    let idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+                    !idx.has_file(&file_uri)
+                };
+                if needs_index {
+                    let source = match std::fs::read_to_string(file_path) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    // Quick text check: skip files that don't mention the name
+                    if !source.contains(&name) {
+                        continue;
+                    }
+                    let checker = self.get_checker(&file_uri);
+                    let check_result = std::panic::catch_unwind(
+                        std::panic::AssertUnwindSafe(|| diagnostics::check(checker, &source)),
+                    );
+                    if let Ok(snap) = check_result
+                        && let Some(ref prog) = snap.program
+                    {
+                        let mut idx =
+                            self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+                        idx.update_file(&file_uri, &snap.tc_result, prog, &snap.line_index);
+                    }
+                }
+            }
+        }
+
+        // Query the index for all references to this symbol.
+        let refs = {
+            let idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+            idx.query(&key)
+        };
+
+        let mut locations: Vec<Location> = refs
+            .into_iter()
+            .map(|r| Location {
+                uri: r.uri,
+                range: r.range,
+            })
+            .collect();
+
+        // Include the definition site if requested.
+        if params.context.include_declaration {
+            // Find the definition span in the current file's check result
+            if let Some(did) = tc_result.env.def_id(&name)
+                && let Some(&def_span) = tc_result.node_spans.get(&did)
             {
-                let (start_line, start_col) = line_index.offset_to_line_col(usage_span.start);
-                let (end_line, end_col) = line_index.offset_to_line_col(usage_span.end);
+                let (start_line, start_col) = line_index.offset_to_line_col(def_span.start);
+                let (end_line, end_col) = line_index.offset_to_line_col(def_span.end);
                 locations.push(Location {
                     uri: uri.clone(),
                     range: Range {
@@ -542,21 +605,6 @@ impl LanguageServer for Backend {
                     },
                 });
             }
-        }
-
-        // Include the definition site itself if requested.
-        if params.context.include_declaration
-            && let Some(&def_span) = tc_result.node_spans.get(&def_id)
-        {
-            let (start_line, start_col) = line_index.offset_to_line_col(def_span.start);
-            let (end_line, end_col) = line_index.offset_to_line_col(def_span.end);
-            locations.push(Location {
-                uri: uri.clone(),
-                range: Range {
-                    start: Position::new(start_line as u32, start_col as u32),
-                    end: Position::new(end_line as u32, end_col as u32),
-                },
-            });
         }
 
         if locations.is_empty() {
@@ -576,6 +624,7 @@ async fn main() {
         client,
         base_checkers: Mutex::new(std::collections::HashMap::new()),
         last_check: Mutex::new(std::collections::HashMap::new()),
+        symbol_index: Mutex::new(symbol_index::SymbolIndex::default()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

@@ -6,6 +6,7 @@ pub fun main : Unit -> Unit
 main () = {
   println (show (add 10 20))
   println (show (double 7))
+  println (show (double 14))
   println (show (MathLib.add 100 200))
 
   let pair = (42, "hello")

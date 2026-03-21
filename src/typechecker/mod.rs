@@ -335,6 +335,11 @@ impl TypeEnv {
         self.bindings.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// All (name, def_id) pairs in the environment.
+    pub fn all_def_ids(&self) -> impl Iterator<Item = (String, crate::ast::NodeId)> + '_ {
+        self.def_ids.iter().map(|(k, v)| (k.clone(), *v))
+    }
+
     /// Free type variables in the environment (used for generalization).
     fn free_vars(&self, sub: &Substitution) -> Vec<u32> {
         let mut vars = Vec::new();
@@ -641,6 +646,9 @@ pub(crate) struct LspState {
     pub effect_call_targets: HashMap<Span, (Span, Option<String>)>,
     /// Maps handler arm span -> (effect op definition span, source module) (for LSP go-to-def, level 2).
     pub handler_arm_targets: HashMap<Span, (Span, Option<String>)>,
+    /// Import origins: binding name -> source module name (for cross-module find-references).
+    /// Populated by inject_scoped_bindings when importing modules.
+    pub import_origins: HashMap<String, String>,
 }
 
 /// Module system state: caches, project root, and import tracking.

@@ -45,6 +45,7 @@ lock-free hover/goto/completion.
 - [x] Code action -- add missing handler arms (single + bulk)
 - [ ] Find references for type/effect names (handlers, needs clauses, annotations that reference a type/effect)
 - [ ] Hover on type names (show type definition summary for user-defined types)
+- [ ] Autocomplete for record field names
 
 ## Phase 4: Editing support
 

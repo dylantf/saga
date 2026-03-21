@@ -29,6 +29,8 @@ pub struct ModuleExports {
     pub type_arity: HashMap<String, usize>,
     /// Function name -> effect names from `needs` clause (for cross-module effect tracking).
     pub fun_effects: HashMap<String, HashSet<String>>,
+    /// Definition-site NodeIds for exported bindings (for cross-module find-references).
+    pub def_ids: HashMap<String, crate::ast::NodeId>,
 }
 
 impl ModuleExports {
@@ -40,11 +42,18 @@ impl ModuleExports {
 
         // Bindings: from env and constructors
         let mut bindings: Vec<(String, Scheme)> = Vec::new();
+        let mut def_ids: HashMap<String, crate::ast::NodeId> = HashMap::new();
         for name in &pub_names {
             if let Some(scheme) = checker.env.get(name) {
                 bindings.push((name.to_string(), scheme.clone()));
+                if let Some(did) = checker.env.def_id(name) {
+                    def_ids.insert(name.to_string(), did);
+                }
             } else if let Some(scheme) = checker.constructors.get(name) {
                 bindings.push((name.to_string(), scheme.clone()));
+                if let Some(&did) = checker.lsp.constructor_def_ids.get(name) {
+                    def_ids.insert(name.to_string(), did);
+                }
             }
         }
 
@@ -157,6 +166,7 @@ impl ModuleExports {
             handlers,
             type_arity,
             fun_effects,
+            def_ids,
         }
     }
 }
@@ -392,7 +402,7 @@ impl Checker {
 
         // Cache hit: inject cached exports
         if let Some(exports) = self.modules.exports.get(&module_name).cloned() {
-            return self.inject_exports(&exports, &prefix, exposing, span);
+            return self.inject_exports(&exports, &module_name, &prefix, exposing, span);
         }
 
         // Resolve source: builtin modules are embedded, others looked up via module map
@@ -526,7 +536,7 @@ impl Checker {
         self.modules
             .exports
             .insert(module_name.clone(), exports.clone());
-        let result = self.inject_exports(&exports, &prefix, exposing, span);
+        let result = self.inject_exports(&exports, &module_name, &prefix, exposing, span);
 
         // After loading any Std module, merge its exported impls into the base
         // snapshot so later builtin module checkers inherit impls from all
@@ -620,6 +630,7 @@ impl Checker {
     fn inject_exports(
         &mut self,
         exports: &ModuleExports,
+        module_name: &str,
         prefix: &str,
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
@@ -634,6 +645,7 @@ impl Checker {
             handlers,
             type_arity,
             fun_effects,
+            def_ids,
         } = exports;
 
         // Traits and their methods (unqualified, so impl bodies can reference them)
@@ -647,7 +659,13 @@ impl Checker {
                 if let Some(&scheme) = binding_map.get(method_name.as_str())
                     && self.env.get(method_name).is_none()
                 {
-                    self.env.insert(method_name.clone(), scheme.clone());
+                    if let Some(&did) = def_ids.get(method_name.as_str()) {
+                        self.env.insert_with_def(method_name.clone(), scheme.clone(), did);
+                    } else {
+                        self.env.insert(method_name.clone(), scheme.clone());
+                    }
+                    self.lsp.import_origins
+                        .insert(method_name.clone(), module_name.to_string());
                 }
             }
         }
@@ -692,17 +710,22 @@ impl Checker {
             bindings,
             type_constructors,
             record_defs,
+            def_ids,
+            module_name,
             prefix,
             exposing,
             span,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn inject_scoped_bindings(
         &mut self,
         bindings: &[(String, Scheme)],
         ctors_map: &std::collections::HashMap<String, Vec<String>>,
         record_defs: &std::collections::HashMap<String, super::RecordInfo>,
+        def_ids: &HashMap<String, crate::ast::NodeId>,
+        module_name: &str,
         prefix: &str,
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
@@ -720,9 +743,21 @@ impl Checker {
             }
         }
 
+        // Record import origins for all bindings from this module.
+        // Both qualified (Prefix.name) and unqualified (exposed) forms
+        // map back to the same source module.
+        for (name, _) in bindings {
+            self.lsp.import_origins
+                .insert(name.clone(), module_name.to_string());
+        }
+
         for (name, scheme) in bindings {
-            self.env
-                .insert(format!("{}.{}", prefix, name), scheme.clone());
+            let qualified = format!("{}.{}", prefix, name);
+            if let Some(&did) = def_ids.get(name.as_str()) {
+                self.env.insert_with_def(qualified, scheme.clone(), did);
+            } else {
+                self.env.insert(qualified, scheme.clone());
+            }
         }
 
         // Always inject record definitions for qualified access
@@ -739,7 +774,11 @@ impl Checker {
                     let mut found = binding_map.contains_key(name.as_str());
                     // Hoist the type name itself if it's in bindings
                     if let Some(&scheme) = binding_map.get(name.as_str()) {
-                        self.env.insert(name.clone(), scheme.clone());
+                        if let Some(&did) = def_ids.get(name.as_str()) {
+                            self.env.insert_with_def(name.clone(), scheme.clone(), did);
+                        } else {
+                            self.env.insert(name.clone(), scheme.clone());
+                        }
                     }
                     // If it's a record type, register its fields
                     if let Some(fields) = record_defs.get(name.as_str()) {
@@ -753,7 +792,14 @@ impl Checker {
                         let mut variants = Vec::new();
                         for ctor in ctors {
                             if let Some(&scheme) = binding_map.get(ctor.as_str()) {
-                                self.env.insert(ctor.clone(), scheme.clone());
+                                if let Some(&did) = def_ids.get(ctor.as_str()) {
+                                    self.env.insert_with_def(ctor.clone(), scheme.clone(), did);
+                                    self.lsp.constructor_def_ids
+                                        .entry(ctor.clone())
+                                        .or_insert(did);
+                                } else {
+                                    self.env.insert(ctor.clone(), scheme.clone());
+                                }
                                 self.constructors.insert(ctor.clone(), scheme.clone());
                                 variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
                                 found = true;
@@ -767,7 +813,14 @@ impl Checker {
                     if ctor_to_type.contains_key(name.as_str())
                         && let Some(&scheme) = binding_map.get(name.as_str())
                     {
-                        self.env.insert(name.clone(), scheme.clone());
+                        if let Some(&did) = def_ids.get(name.as_str()) {
+                            self.env.insert_with_def(name.clone(), scheme.clone(), did);
+                            self.lsp.constructor_def_ids
+                                .entry(name.clone())
+                                .or_insert(did);
+                        } else {
+                            self.env.insert(name.clone(), scheme.clone());
+                        }
                         self.constructors.insert(name.clone(), scheme.clone());
                         found = true;
                     }
@@ -781,7 +834,12 @@ impl Checker {
                     let qualified = format!("{}.{}", prefix, name);
                     match self.env.get(&qualified).cloned() {
                         Some(scheme) => {
-                            self.env.insert(name.clone(), scheme);
+                            // Use the same def_id as the qualified form
+                            if let Some(did) = self.env.def_id(&qualified) {
+                                self.env.insert_with_def(name.clone(), scheme, did);
+                            } else {
+                                self.env.insert(name.clone(), scheme);
+                            }
                         }
                         None => {
                             return Err(Diagnostic::error_at(

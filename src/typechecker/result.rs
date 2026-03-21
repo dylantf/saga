@@ -53,6 +53,8 @@ pub struct CheckResult {
     pub references: HashMap<crate::ast::NodeId, crate::ast::NodeId>,
     /// NodeId -> Span map for recorded nodes (for resolving NodeIds to locations).
     pub node_spans: HashMap<crate::ast::NodeId, crate::token::Span>,
+    /// Import origins: binding name -> source module name (for cross-module find-references).
+    pub import_origins: HashMap<String, String>,
 }
 
 impl CheckResult {
@@ -158,6 +160,7 @@ impl Checker {
             let_effect_bindings: self.effect_state.let_bindings.clone(),
             references: self.lsp.references.clone(),
             node_spans: self.lsp.node_spans.clone(),
+            import_origins: self.lsp.import_origins.clone(),
         }
     }
 }
