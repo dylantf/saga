@@ -5,6 +5,7 @@ mod check_traits;
 mod effects;
 pub(crate) mod exhaustiveness;
 mod infer;
+mod patterns;
 mod result;
 pub use result::CheckResult;
 
