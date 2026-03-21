@@ -120,7 +120,7 @@ impl Checker {
             );
         }
 
-        self.traits.insert(
+        self.trait_state.traits.insert(
             name.into(),
             super::TraitInfo {
                 type_param: type_param.into(),
@@ -144,7 +144,7 @@ impl Checker {
         span: Span,
     ) -> Result<(), Diagnostic> {
         // Check the trait exists
-        let trait_info = self.traits.get(trait_name).cloned().ok_or_else(|| {
+        let trait_info = self.trait_state.traits.get(trait_name).cloned().ok_or_else(|| {
             Diagnostic::error_at(span, format!("impl for undefined trait: {}", trait_name))
         })?;
 
@@ -202,10 +202,10 @@ impl Checker {
                 if let Some(idx) = type_params.iter().position(|p| p == &bound.type_var)
                     && let Some(Type::Var(var_id)) = param_vars.get(idx)
                 {
-                    self.where_bound_var_names
+                    self.trait_state.where_bound_var_names
                         .insert(*var_id, bound.type_var.clone());
                     for trait_req in &bound.traits {
-                        self.where_bounds
+                        self.trait_state.where_bounds
                             .entry(*var_id)
                             .or_default()
                             .insert(trait_req.clone());
@@ -344,7 +344,7 @@ impl Checker {
         }
 
         let key = (trait_name.to_string(), target_type.to_string());
-        if self.trait_impls.contains_key(&key) {
+        if self.trait_state.impls.contains_key(&key) {
             return Err(Diagnostic::error_at(
                 span,
                 format!(
@@ -353,7 +353,7 @@ impl Checker {
                 ),
             ));
         }
-        self.trait_impls.insert(
+        self.trait_state.impls.insert(
             key,
             ImplInfo {
                 param_constraints,

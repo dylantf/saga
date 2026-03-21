@@ -6,7 +6,7 @@ impl Checker {
         // stdlib modules). Eq is built-in (BEAM BIF dispatch).
 
         // Built-in Num trait (arithmetic: +, -, *, /, %, unary -)
-        self.traits.insert(
+        self.trait_state.traits.insert(
             "Num".into(),
             TraitInfo {
                 type_param: "a".into(),
@@ -15,7 +15,7 @@ impl Checker {
             },
         );
         for prim in &["Int", "Float"] {
-            self.trait_impls.insert(
+            self.trait_state.impls.insert(
                 ("Num".into(), prim.to_string()),
                 ImplInfo {
                     param_constraints: vec![],
@@ -25,7 +25,7 @@ impl Checker {
         }
 
         // Built-in Eq trait (==, !=)
-        self.traits.insert(
+        self.trait_state.traits.insert(
             "Eq".into(),
             TraitInfo {
                 type_param: "a".into(),
@@ -34,7 +34,7 @@ impl Checker {
             },
         );
         for prim in &["Int", "Float", "String", "Bool", "Unit"] {
-            self.trait_impls.insert(
+            self.trait_state.impls.insert(
                 ("Eq".into(), prim.to_string()),
                 ImplInfo {
                     param_constraints: vec![],
@@ -132,21 +132,21 @@ impl Checker {
         // Show, Debug, and Eq for Tuple (any arity -- all params must satisfy the trait)
         // We use "Tuple" as the type name; param_constraints are checked dynamically
         // based on actual type args at constraint resolution time
-        self.trait_impls.insert(
+        self.trait_state.impls.insert(
             ("Show".into(), "Tuple".into()),
             ImplInfo {
                 param_constraints: vec![],
                 span: None,
             }, // handled specially in check_pending_constraints
         );
-        self.trait_impls.insert(
+        self.trait_state.impls.insert(
             ("Debug".into(), "Tuple".into()),
             ImplInfo {
                 param_constraints: vec![],
                 span: None,
             }, // handled specially in check_pending_constraints
         );
-        self.trait_impls.insert(
+        self.trait_state.impls.insert(
             ("Eq".into(), "Tuple".into()),
             ImplInfo {
                 param_constraints: vec![],
@@ -157,7 +157,7 @@ impl Checker {
         // --- Dict type ---
 
         // Eq for Dict k v: requires Eq on both k and v
-        self.trait_impls.insert(
+        self.trait_state.impls.insert(
             ("Eq".into(), "Dict".into()),
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],

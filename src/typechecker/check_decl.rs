@@ -84,7 +84,7 @@ impl Checker {
                     errors.push(e);
                     // Clear pending constraints for this function -- they may reference
                     // unresolved types from the error site and would produce cascading errors
-                    self.pending_constraints.clear();
+                    self.trait_state.pending_constraints.clear();
                 }
                 // Drain any additional errors collected during block inference
                 let has_errors = self
@@ -92,7 +92,7 @@ impl Checker {
                     .iter()
                     .any(|d| matches!(d.severity, super::Severity::Error));
                 if has_errors {
-                    self.pending_constraints.clear();
+                    self.trait_state.pending_constraints.clear();
                 }
                 errors.extend(self.drain_errors());
             } else {
@@ -419,7 +419,7 @@ impl Checker {
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
                         {
-                            self.where_bound_var_names
+                            self.trait_state.where_bound_var_names
                                 .insert(*var_id, bound.type_var.clone());
                             for trait_name in &bound.traits {
                                 constraints.push((trait_name.clone(), *var_id));
@@ -562,14 +562,14 @@ impl Checker {
 
         // Register where clause bounds on type variable IDs
         for (trait_name, var_id) in where_constraints {
-            self.where_bounds
+            self.trait_state.where_bounds
                 .entry(*var_id)
                 .or_default()
                 .insert(trait_name.clone());
         }
 
         // Snapshot pending constraints so we can partition new ones after body checking
-        let constraints_before = self.pending_constraints.len();
+        let constraints_before = self.trait_state.pending_constraints.len();
 
         // Save and clear effect tracking and field candidate tracking for this function body
         let body_scope = self.enter_effect_scope();
@@ -749,7 +749,7 @@ impl Checker {
         has_annotation: bool,
         where_constraints: &[(String, u32)],
     ) -> Result<Scheme, Diagnostic> {
-        let new_constraints = self.pending_constraints.split_off(constraints_before);
+        let new_constraints = self.trait_state.pending_constraints.split_off(constraints_before);
         let mut scheme_constraints: Vec<(String, u32, Span)> = Vec::new();
         for (trait_name, ty, span, node_id) in new_constraints {
             let resolved = self.sub.apply(&ty);
@@ -757,7 +757,7 @@ impl Checker {
                 Type::Var(id) => {
                     // Check where_bounds, resolving bound var IDs through
                     // substitution so they match after annotation unification.
-                    let in_where = self.where_bounds.iter().any(|(bound_id, traits)| {
+                    let in_where = self.trait_state.where_bounds.iter().any(|(bound_id, traits)| {
                         traits.contains(&trait_name)
                             && match self.sub.apply(&Type::Var(*bound_id)) {
                                 Type::Var(resolved) => resolved == id,
@@ -767,7 +767,7 @@ impl Checker {
                     if in_where {
                         // Record polymorphic passthrough evidence so the elaborator
                         // knows this is a trait method call (needs DictMethodAccess).
-                        let var_name = self.where_bound_var_names.get(&id).cloned();
+                        let var_name = self.trait_state.where_bound_var_names.get(&id).cloned();
                         self.evidence.push(super::TraitEvidence {
                             node_id,
                             trait_name: trait_name.clone(),
@@ -787,7 +787,7 @@ impl Checker {
                     }
                     // Record evidence for inferred constraints too, so the
                     // elaborator can resolve trait method calls (DictMethodAccess).
-                    let var_name = self.where_bound_var_names.get(&id).cloned();
+                    let var_name = self.trait_state.where_bound_var_names.get(&id).cloned();
                     self.evidence.push(super::TraitEvidence {
                         node_id,
                         trait_name: trait_name.clone(),
@@ -797,7 +797,7 @@ impl Checker {
                     scheme_constraints.push((trait_name, id, span));
                 }
                 _ => {
-                    self.pending_constraints
+                    self.trait_state.pending_constraints
                         .push((trait_name, ty, span, node_id));
                 }
             }
@@ -1366,13 +1366,13 @@ impl Checker {
         // Also resolve var names through substitution
         let mut resolved_var_names: std::collections::HashMap<u32, String> =
             std::collections::HashMap::new();
-        for (&var_id, traits) in &self.where_bounds {
+        for (&var_id, traits) in &self.trait_state.where_bounds {
             if let Type::Var(resolved_id) = self.sub.apply(&Type::Var(var_id)) {
                 resolved_bounds
                     .entry(resolved_id)
                     .or_default()
                     .extend(traits.iter().cloned());
-                if let Some(name) = self.where_bound_var_names.get(&var_id) {
+                if let Some(name) = self.trait_state.where_bound_var_names.get(&var_id) {
                     resolved_var_names.insert(resolved_id, name.clone());
                 }
             }
@@ -1380,7 +1380,7 @@ impl Checker {
 
         // Process constraints in a loop since conditional impls may push new ones
         loop {
-            let constraints = std::mem::take(&mut self.pending_constraints);
+            let constraints = std::mem::take(&mut self.trait_state.pending_constraints);
             if constraints.is_empty() {
                 break;
             }
@@ -1393,16 +1393,18 @@ impl Checker {
                     // Concrete type (includes primitives): check that an impl exists
                     Type::Con(type_name, args) => {
                         let impl_info = self
-                            .trait_impls
+                            .trait_state
+                            .impls
                             .get(&(trait_name.clone(), type_name.clone()));
                         match impl_info {
                             None => {
                                 // Check if this might be caused by a user function
                                 // shadowing a trait method that would have worked.
                                 let mut hint = String::new();
-                                for (t_name, t_info) in &self.traits {
+                                for (t_name, t_info) in &self.trait_state.traits {
                                     if self
-                                        .trait_impls
+                                        .trait_state
+                                        .impls
                                         .contains_key(&(t_name.clone(), type_name.clone()))
                                     {
                                         for (m_name, _, _, _) in &t_info.methods {
@@ -1442,7 +1444,7 @@ impl Checker {
                                 if type_name == "Tuple" {
                                     // Tuples: propagate the trait to all elements
                                     for arg_ty in args {
-                                        self.pending_constraints.push((
+                                        self.trait_state.pending_constraints.push((
                                             trait_name.clone(),
                                             arg_ty.clone(),
                                             span,
@@ -1452,7 +1454,7 @@ impl Checker {
                                 } else {
                                     for (req_trait, param_idx) in &info.param_constraints {
                                         if let Some(arg_ty) = args.get(*param_idx) {
-                                            self.pending_constraints.push((
+                                            self.trait_state.pending_constraints.push((
                                                 req_trait.clone(),
                                                 arg_ty.clone(),
                                                 span,
@@ -1511,11 +1513,12 @@ impl Checker {
 
     /// Verify that every impl's trait has its supertraits also implemented for the same type.
     pub(crate) fn check_supertrait_impls(&self) -> Result<(), Diagnostic> {
-        for ((trait_name, target_type), impl_info) in &self.trait_impls {
-            if let Some(trait_info) = self.traits.get(trait_name) {
+        for ((trait_name, target_type), impl_info) in &self.trait_state.impls {
+            if let Some(trait_info) = self.trait_state.traits.get(trait_name) {
                 for supertrait in &trait_info.supertraits {
                     if !self
-                        .trait_impls
+                        .trait_state
+                        .impls
                         .contains_key(&(supertrait.clone(), target_type.clone()))
                     {
                         let msg = format!(

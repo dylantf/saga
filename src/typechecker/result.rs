@@ -146,7 +146,7 @@ impl Checker {
             evidence: self.evidence.clone(),
             diagnostics,
             modules: self.modules.clone(),
-            traits: self.traits.clone(),
+            traits: self.trait_state.traits.clone(),
             effects: self.effects.clone(),
             handlers: self.handlers.clone(),
             fun_effects: self.effect_state.fun_effects.clone(),

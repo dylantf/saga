@@ -94,7 +94,7 @@ impl ModuleExports {
                 Decl::TraitDef {
                     public: true, name, ..
                 } => {
-                    if let Some(info) = checker.traits.get(name.as_str()) {
+                    if let Some(info) = checker.trait_state.traits.get(name.as_str()) {
                         traits.insert(name.clone(), info.clone());
                     }
                 }
@@ -104,7 +104,7 @@ impl ModuleExports {
                     ..
                 } => {
                     let key = (trait_name.clone(), target_type.clone());
-                    if let Some(info) = checker.trait_impls.get(&key) {
+                    if let Some(info) = checker.trait_state.impls.get(&key) {
                         trait_impls.insert(key, info.clone());
                     }
                 }
@@ -532,7 +532,7 @@ impl Checker {
         // snapshot so later builtin module checkers inherit impls from all
         // previously loaded Std modules (e.g. Show for String from Std.String).
         // We merge only the module's own exports rather than cloning all of
-        // self.trait_impls, to avoid leaking user-defined impls into the snapshot.
+        // self.trait_state.impls, to avoid leaking user-defined impls into the snapshot.
         if module_name.starts_with("Std.") {
             for (key, info) in &exports.trait_impls {
                 self.modules
@@ -548,9 +548,9 @@ impl Checker {
     /// Seed a builtin (Std.*) module checker with the parent's trait definitions,
     /// ADT constructors, and trait impls so it can reference prelude-defined types.
     fn seed_builtin_checker(&self, mc: &mut Checker) {
-        for (name, info) in &self.traits {
-            if !mc.traits.contains_key(name) {
-                mc.traits.insert(name.clone(), info.clone());
+        for (name, info) in &self.trait_state.traits {
+            if !mc.trait_state.traits.contains_key(name) {
+                mc.trait_state.traits.insert(name.clone(), info.clone());
                 for (method_name, _, _, _) in &info.methods {
                     if let Some(scheme) = self.env.get(method_name)
                         && mc.env.get(method_name).is_none()
@@ -572,7 +572,7 @@ impl Checker {
         // Share trait impls from all previously loaded Std modules so stdlib modules
         // can use traits on standard types (e.g. Show for String, Ord for Int).
         for (key, info) in &self.modules.base_trait_impls {
-            mc.trait_impls.entry(key.clone()).or_insert_with(|| info.clone());
+            mc.trait_state.impls.entry(key.clone()).or_insert_with(|| info.clone());
         }
     }
 
@@ -640,7 +640,7 @@ impl Checker {
         let binding_map: std::collections::HashMap<&str, &Scheme> =
             bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
         for (name, info) in traits {
-            self.traits
+            self.trait_state.traits
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
             for (method_name, _, _, _) in &info.methods {
@@ -654,7 +654,7 @@ impl Checker {
 
         // Trait impls
         for (key, info) in trait_impls {
-            self.trait_impls
+            self.trait_state.impls
                 .entry(key.clone())
                 .or_insert_with(|| info.clone());
         }

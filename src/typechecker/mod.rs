@@ -553,20 +553,12 @@ pub struct Checker {
     pub(crate) resume_return_type: Option<Type>,
     /// Effect tracking state (current effects, caches, annotations).
     pub(crate) effect_state: EffectState,
-    /// Trait definitions: trait name -> info
-    pub(crate) traits: HashMap<String, TraitInfo>,
-    /// Impl registry: (trait_name, target_type) -> impl info
-    pub(crate) trait_impls: HashMap<(String, String), ImplInfo>,
-    /// Pending trait constraints to check: (trait_name, type, span_for_errors, node_id)
-    pub(crate) pending_constraints: Vec<(String, Type, Span, crate::ast::NodeId)>,
+    /// Trait system state (definitions, impls, constraints, where bounds).
+    pub(crate) trait_state: TraitState,
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
     /// Tracks which records are still candidates for an unresolved type variable based on
     /// the intersection of all fields accessed on it. Checked at end of each function body.
     pub(crate) field_candidates: FieldCandidates,
-    /// Where clause bounds: var_id -> set of trait names assumed satisfied
-    pub(crate) where_bounds: HashMap<u32, HashSet<String>>,
-    /// Reverse map from type var ID to original type parameter name (for polymorphic evidence)
-    pub(crate) where_bound_var_names: HashMap<u32, String>,
     /// Module system state: caches, project root, import tracking.
     pub(crate) modules: ModuleContext,
     /// Reverse map: type name -> list of (constructor_name, arity) pairs (for exhaustiveness checking)
@@ -589,6 +581,21 @@ pub struct Checker {
     pub(crate) allow_bodyless_annotations: bool,
     /// Set to the module name when checking a module file; None for the main file.
     pub(crate) current_module: Option<String>,
+}
+
+/// Trait system state: definitions, impl registry, deferred constraints, where bounds.
+#[derive(Clone, Default)]
+pub(crate) struct TraitState {
+    /// Trait definitions: trait name -> info.
+    pub traits: HashMap<String, TraitInfo>,
+    /// Impl registry: (trait_name, target_type) -> impl info.
+    pub impls: HashMap<(String, String), ImplInfo>,
+    /// Pending trait constraints to check: (trait_name, type, span_for_errors, node_id).
+    pub pending_constraints: Vec<(String, Type, Span, crate::ast::NodeId)>,
+    /// Where clause bounds: var_id -> set of trait names assumed satisfied.
+    pub where_bounds: HashMap<u32, HashSet<String>>,
+    /// Reverse map from type var ID to original type parameter name (for polymorphic evidence).
+    pub where_bound_var_names: HashMap<u32, String>,
 }
 
 /// Effect tracking state accumulated during inference.
@@ -700,12 +707,8 @@ impl Checker {
             resume_type: None,
             resume_return_type: None,
             effect_state: EffectState::default(),
-            traits: HashMap::new(),
-            trait_impls: HashMap::new(),
-            pending_constraints: Vec::new(),
+            trait_state: TraitState::default(),
             field_candidates: HashMap::new(),
-            where_bounds: HashMap::new(),
-            where_bound_var_names: HashMap::new(),
             modules: ModuleContext::default(),
             adt_variants: HashMap::new(),
             type_arity: HashMap::new(),
@@ -730,7 +733,7 @@ impl Checker {
     /// Snapshot current trait impls as the base layer (from Std.dy).
     /// Called after loading Std.dy so builtin module checkers inherit these impls.
     pub fn snapshot_base_trait_impls(&mut self) {
-        self.modules.base_trait_impls = self.trait_impls.clone();
+        self.modules.base_trait_impls = self.trait_state.impls.clone();
     }
 
     /// Create a checker with the prelude loaded and (optionally) a project

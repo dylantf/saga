@@ -54,7 +54,7 @@ impl Checker {
                     }
                     let (mut ty, constraints) = self.instantiate(&scheme);
                     for (trait_name, trait_ty) in constraints {
-                        self.pending_constraints
+                        self.trait_state.pending_constraints
                             .push((trait_name, trait_ty, span, node_id));
                     }
                     // If this function has effect type constraints, convert the
@@ -151,7 +151,7 @@ impl Checker {
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::IntDiv => {
                         self.unify_at(&left_ty, &right_ty, span)?;
-                        self.pending_constraints.push((
+                        self.trait_state.pending_constraints.push((
                             "Num".into(),
                             left_ty.clone(),
                             span,
@@ -166,7 +166,7 @@ impl Checker {
                     }
                     BinOp::Eq | BinOp::NotEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
-                        self.pending_constraints.push((
+                        self.trait_state.pending_constraints.push((
                             "Eq".into(),
                             left_ty.clone(),
                             span,
@@ -176,7 +176,7 @@ impl Checker {
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
-                        self.pending_constraints.push((
+                        self.trait_state.pending_constraints.push((
                             "Ord".into(),
                             left_ty.clone(),
                             span,
@@ -199,7 +199,7 @@ impl Checker {
 
             ExprKind::UnaryMinus { expr: inner, .. } => {
                 let ty = self.infer_expr(inner)?;
-                self.pending_constraints
+                self.trait_state.pending_constraints
                     .push(("Num".into(), ty.clone(), span, node_id));
                 Ok(ty)
             }
@@ -332,7 +332,7 @@ impl Checker {
                     Some(scheme) => {
                         let (ty, constraints) = self.instantiate(&scheme);
                         for (trait_name, trait_ty) in constraints {
-                            self.pending_constraints
+                            self.trait_state.pending_constraints
                                 .push((trait_name, trait_ty, span, node_id));
                         }
                         if let Some(def_id) = self.env.def_id(&key) {
@@ -766,7 +766,7 @@ impl Checker {
         // so let-bound values can be polymorphic over traits.
         // e.g. `let f = debug >> println` gets scheme
         // `forall a. a -> Unit where {a: Debug}`
-        self.pending_constraints
+        self.trait_state.pending_constraints
             .retain(|(trait_name, cty, _span, node_id)| {
                 let resolved = self.sub.apply(cty);
                 if let Type::Var(id) = resolved
