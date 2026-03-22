@@ -1,6 +1,6 @@
 module Main
 
-import MathLib (add, square)
+import MathLib (add, square, tripled)
 
 pub fun main : Unit -> Unit
 main () = {
@@ -9,4 +9,7 @@ main () = {
 
   let sq = square 7
   println (show sq)
+
+  let tri = tripled 4
+  println (show tri)
 }

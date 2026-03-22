@@ -5,4 +5,4 @@ name = "git-consumer"
 main = "Main.dy"
 
 [deps]
-mathlib = { git = "/tmp/dylang-test-lib", tag = "v1.0.0" }
+mathlib = { git = "/tmp/dylang-test-lib", tag = "v1.1.0" }

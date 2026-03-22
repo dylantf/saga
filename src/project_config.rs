@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::typechecker;
@@ -206,8 +206,6 @@ fn cache_dir() -> PathBuf {
 
 /// Hash a git URL to a short directory name.
 fn url_hash(url: &str) -> String {
-    // Simple hash: take the URL, replace non-alphanumeric chars, and truncate.
-    // We also include a short numeric hash to avoid collisions.
     let mut hash: u64 = 0;
     for b in url.bytes() {
         hash = hash.wrapping_mul(31).wrapping_add(b as u64);
@@ -227,9 +225,8 @@ fn ensure_bare_clone(url: &str) -> Result<PathBuf, String> {
     let repo_dir = dir.join("repo");
 
     if repo_dir.exists() {
-        // Fetch latest
         let status = std::process::Command::new("git")
-            .args(["fetch", "--all", "--quiet"])
+            .args(["fetch", "--all", "--tags", "--quiet"])
             .current_dir(&repo_dir)
             .status()
             .map_err(|e| format!("failed to run git fetch: {}", e))?;
@@ -260,7 +257,6 @@ fn resolve_ref(bare_repo: &Path, dep: &DepEntry) -> Result<String, String> {
     } else if let Some(rev) = &dep.rev {
         rev.clone()
     } else {
-        // Default to HEAD (main/master)
         "HEAD".to_string()
     };
 
@@ -293,7 +289,6 @@ fn ensure_checkout(bare_repo: &Path, commit: &str) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&checkout_dir)
         .map_err(|e| format!("failed to create checkout dir: {}", e))?;
 
-    // Clone from the local bare repo (fast, no network)
     let status = std::process::Command::new("git")
         .args(["clone", "--quiet"])
         .arg(bare_repo)
@@ -301,7 +296,6 @@ fn ensure_checkout(bare_repo: &Path, commit: &str) -> Result<PathBuf, String> {
         .status()
         .map_err(|e| format!("failed to clone from cache: {}", e))?;
     if !status.success() {
-        // Clean up failed checkout
         let _ = std::fs::remove_dir_all(&checkout_dir);
         return Err("git clone from cache failed".to_string());
     }
@@ -333,7 +327,6 @@ pub fn resolve_git_dep(
 
     let bare_repo = ensure_bare_clone(url)?;
 
-    // Use locked commit if available, otherwise resolve the ref
     let commit = if let Some(locked) = locked_commit {
         locked.to_string()
     } else {
@@ -345,24 +338,79 @@ pub fn resolve_git_dep(
     Ok((checkout, commit))
 }
 
-/// Run `dylang install`: fetch all git deps, resolve refs, write lockfile.
-pub fn install_deps(project_root: &Path) -> Result<(), String> {
+// --- Resolve a dep entry to a local directory path ---
+
+/// Resolve a single dependency to a local filesystem path.
+/// For path deps, joins with the parent directory. For git deps, uses the cache.
+fn resolve_dep_to_path(
+    dep_name: &str,
+    dep_entry: &DepEntry,
+    parent_dir: &Path,
+    lockfile: Option<&Lockfile>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = &dep_entry.path {
+        let p = parent_dir.join(path);
+        p.canonicalize()
+            .map_err(|e| format!("dependency '{}' path '{}': {}", dep_name, path, e))
+    } else if dep_entry.git.is_some() {
+        let locked_commit = lockfile
+            .and_then(|lf| lf.deps.get(dep_name))
+            .map(|entry| entry.commit.as_str());
+
+        if locked_commit.is_none() {
+            return Err(format!(
+                "git dependency '{}' is not installed. Run `dylang install` first.",
+                dep_name
+            ));
+        }
+
+        let (checkout_path, _) = resolve_git_dep(dep_name, dep_entry, locked_commit)?;
+        Ok(checkout_path)
+    } else {
+        Err(format!("dependency '{}' has no 'path' or 'git'", dep_name))
+    }
+}
+
+// --- Install (fetch + lockfile) ---
+
+/// Recursively fetch all git deps and collect lock entries.
+fn install_deps_recursive(
+    project_root: &Path,
+    lockfile: &mut Lockfile,
+    installing: &mut HashSet<String>,
+    depth: usize,
+) -> Result<(), String> {
     let config = ProjectConfig::load(project_root);
-    config.validate()?;
 
     let deps = match &config.deps {
-        Some(deps) => deps,
-        None => {
-            eprintln!("No dependencies to install.");
-            return Ok(());
-        }
+        Some(deps) => deps.clone(),
+        None => return Ok(()),
     };
 
-    let existing_lock = Lockfile::load(project_root);
-    let mut lockfile = Lockfile::default();
+    let indent = "  ".repeat(depth + 1);
 
-    for (dep_name, dep_entry) in deps {
-        if let Some(url) = &dep_entry.git {
+    for (dep_name, dep_entry) in &deps {
+        // Cycle detection
+        let dep_key = if let Some(url) = &dep_entry.git {
+            url.clone()
+        } else if let Some(path) = &dep_entry.path {
+            project_root
+                .join(path)
+                .canonicalize()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.clone())
+        } else {
+            continue;
+        };
+
+        if !installing.insert(dep_key.clone()) {
+            return Err(format!(
+                "circular dependency detected: '{}' depends on itself (directly or transitively)",
+                dep_name
+            ));
+        }
+
+        let dep_path = if let Some(url) = &dep_entry.git {
             let ref_label = dep_entry
                 .tag
                 .as_deref()
@@ -370,11 +418,13 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
                 .or(dep_entry.rev.as_deref())
                 .unwrap_or("HEAD");
 
-            eprintln!("  Fetching {} ({} @ {})...", dep_name, url, ref_label);
+            eprintln!(
+                "{}Fetching {} ({} @ {})...",
+                indent, dep_name, url, ref_label
+            );
 
             let (checkout_path, commit) = resolve_git_dep(dep_name, dep_entry, None)?;
 
-            // Validate the dep has a library section
             let dep_config = ProjectConfig::load(&checkout_path);
             if dep_config.library.is_none() {
                 return Err(format!(
@@ -384,7 +434,7 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
             }
 
             let short_commit = &commit[..commit.len().min(12)];
-            eprintln!("  Resolved {} -> {}", dep_name, short_commit);
+            eprintln!("{}Resolved {} -> {}", indent, dep_name, short_commit);
 
             lockfile.deps.insert(
                 dep_name.clone(),
@@ -394,16 +444,42 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
                     commit,
                 },
             );
-        } else if dep_entry.path.is_some() {
-            // Path deps don't go in the lockfile
-            eprintln!(
-                "  Skipping path dependency '{}' (no install needed)",
-                dep_name
-            );
-        }
+
+            checkout_path
+        } else if let Some(path) = &dep_entry.path {
+            let p = project_root.join(path);
+            p.canonicalize()
+                .map_err(|e| format!("dependency '{}' path '{}': {}", dep_name, path, e))?
+        } else {
+            continue;
+        };
+
+        // Recurse into the dep's own dependencies
+        install_deps_recursive(&dep_path, lockfile, installing, depth + 1)?;
+
+        installing.remove(&dep_key);
     }
 
-    // Preserve lock entries for deps that haven't changed their ref
+    Ok(())
+}
+
+/// Run `dylang install`: fetch all git deps (recursively), resolve refs, write lockfile.
+pub fn install_deps(project_root: &Path) -> Result<(), String> {
+    let config = ProjectConfig::load(project_root);
+    config.validate()?;
+
+    if config.deps.is_none() {
+        eprintln!("No dependencies to install.");
+        return Ok(());
+    }
+
+    let existing_lock = Lockfile::load(project_root);
+    let mut lockfile = Lockfile::default();
+    let mut installing = HashSet::new();
+
+    install_deps_recursive(project_root, &mut lockfile, &mut installing, 0)?;
+
+    // Report updates compared to previous lockfile
     if let Some(existing) = &existing_lock {
         for (name, new_entry) in &lockfile.deps {
             if let Some(old_entry) = existing.deps.get(name)
@@ -427,42 +503,33 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Resolve dependencies and merge their modules into the checker's module map.
-pub fn resolve_deps(
-    checker: &mut typechecker::Checker,
-    project_root: &Path,
+// --- Resolve deps into the checker's module map ---
+
+/// Recursively resolve dependencies and collect their exposed modules.
+fn resolve_deps_recursive(
+    parent_dir: &Path,
     deps: &HashMap<String, DepEntry>,
+    lockfile: Option<&Lockfile>,
+    dep_modules: &mut typechecker::ModuleMap,
+    resolving: &mut HashSet<String>,
+    depth: usize,
 ) -> Result<(), String> {
-    let mut dep_modules = typechecker::ModuleMap::new();
-    let lockfile = Lockfile::load(project_root);
+    let indent = "  ".repeat(depth + 1);
 
     for (dep_name, dep_entry) in deps {
-        // Resolve the dependency to a local path
-        let dep_path = if let Some(path) = &dep_entry.path {
-            let p = project_root.join(path);
-            p.canonicalize()
-                .map_err(|e| format!("dependency '{}' path '{}': {}", dep_name, path, e))?
-        } else if dep_entry.git.is_some() {
-            // Look up locked commit
-            let locked_commit = lockfile
-                .as_ref()
-                .and_then(|lf| lf.deps.get(dep_name))
-                .map(|entry| entry.commit.as_str());
+        let dep_path = resolve_dep_to_path(dep_name, dep_entry, parent_dir, lockfile)?;
 
-            if locked_commit.is_none() {
-                return Err(format!(
-                    "git dependency '{}' is not installed. Run `dylang install` first.",
-                    dep_name
-                ));
-            }
+        // Cycle detection
+        let dep_key = dep_path.to_string_lossy().to_string();
+        if !resolving.insert(dep_key.clone()) {
+            return Err(format!(
+                "circular dependency detected: '{}' at '{}'",
+                dep_name,
+                dep_path.display()
+            ));
+        }
 
-            let (checkout_path, _) = resolve_git_dep(dep_name, dep_entry, locked_commit)?;
-            checkout_path
-        } else {
-            return Err(format!("dependency '{}' has no 'path' or 'git'", dep_name));
-        };
-
-        eprintln!("  Resolving dependency '{}'...", dep_name);
+        eprintln!("{}Resolving dependency '{}'...", indent, dep_name);
 
         let dep_config = ProjectConfig::load(&dep_path);
         let lib = dep_config.library.ok_or_else(|| {
@@ -473,6 +540,19 @@ pub fn resolve_deps(
             )
         })?;
 
+        // Recurse into this dep's own dependencies first
+        if let Some(transitive_deps) = &dep_config.deps {
+            resolve_deps_recursive(
+                &dep_path,
+                transitive_deps,
+                lockfile,
+                dep_modules,
+                resolving,
+                depth + 1,
+            )?;
+        }
+
+        // Now scan and collect this dep's exposed modules
         let dep_map = typechecker::scan_project_modules(&dep_path)
             .map_err(|e| format!("scanning dependency '{}': {}", dep_name, e))?;
 
@@ -500,18 +580,45 @@ pub fn resolve_deps(
             };
 
             if let Some(existing) = dep_modules.get(&mapped_name) {
-                return Err(format!(
-                    "module name collision '{}' between dependency '{}' and another dependency ({}). \
-                     Hint: use `as` in project.toml to alias one of the dependencies",
-                    mapped_name,
-                    dep_name,
-                    existing.display()
-                ));
+                // Same file path = same module from a shared transitive dep, not a collision
+                if existing != &file_path {
+                    return Err(format!(
+                        "module name collision '{}' between dependency '{}' and another dependency ({}). \
+                         Hint: use `as` in project.toml to alias one of the dependencies",
+                        mapped_name,
+                        dep_name,
+                        existing.display()
+                    ));
+                }
+            } else {
+                dep_modules.insert(mapped_name, file_path);
             }
-
-            dep_modules.insert(mapped_name, file_path);
         }
+
+        resolving.remove(&dep_key);
     }
+
+    Ok(())
+}
+
+/// Resolve dependencies and merge their modules into the checker's module map.
+pub fn resolve_deps(
+    checker: &mut typechecker::Checker,
+    project_root: &Path,
+    deps: &HashMap<String, DepEntry>,
+) -> Result<(), String> {
+    let mut dep_modules = typechecker::ModuleMap::new();
+    let lockfile = Lockfile::load(project_root);
+    let mut resolving = HashSet::new();
+
+    resolve_deps_recursive(
+        project_root,
+        deps,
+        lockfile.as_ref(),
+        &mut dep_modules,
+        &mut resolving,
+        0,
+    )?;
 
     if !dep_modules.is_empty() {
         let module_names: Vec<&str> = dep_modules.keys().map(|s| s.as_str()).collect();
