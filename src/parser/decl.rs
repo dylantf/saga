@@ -491,6 +491,8 @@ impl Parser {
             self.expect(Token::RBrace)?;
         }
 
+        let where_clause = self.parse_where_clause()?;
+
         self.expect(Token::LBrace)?;
         self.skip_terminators();
 
@@ -592,6 +594,7 @@ impl Parser {
             name_span,
             effects,
             needs,
+            where_clause,
             arms,
             recovered_arms,
             return_clause,

@@ -259,10 +259,10 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 - [x] Error messages with file:line:column and source context (currently byte offsets only)
 - [ ] REPL (interactive expression evaluation, type display, effect handling)
-- [ ] Library compilation mode (`dylang build --lib`): compile modules to `.beam` without
+- [x] Library compilation mode (`dylang build --lib`): compile modules to `.beam` without
       an entry point, serialize type info (types, effects, handlers, trait impls) alongside
       `.beam` files so downstream projects can typecheck against the library
-- [ ] Dependency management (`project.toml` dependencies, git deps first, Hex registry later)
+- [x] Dependency management (`project.toml` dependencies, git deps first, Hex registry later)
 - [ ] Hex package integration: package format (`.beam` files + type info sidecar), publish/install
       commands. Prerequisite: library compilation mode
 - [x] LSP (go-to-definition, hover types, error squiggles, autocomplete for constructors/effects). See separate LSP roadmap

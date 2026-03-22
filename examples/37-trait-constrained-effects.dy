@@ -1,0 +1,24 @@
+effect Recorder a {
+  fun log_state : (entity: a) -> Unit
+}
+
+handler console_logger for Recorder a where {a: Show} {
+  log_state entity = {
+    println $"Current state: {entity}"
+    resume ()
+  }
+}
+
+record User {
+  name: String,
+  is_cool: Bool,
+}
+
+impl Show for User {
+  show user = user.name
+}
+
+main () = {
+  let user = User { name: "Dylan", is_cool: True }
+  log_state! user with console_logger
+}

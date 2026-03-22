@@ -468,7 +468,12 @@ impl Checker {
     ) -> HashMap<String, Type> {
         let mut fun_vars: HashMap<String, Type> = HashMap::new();
         for decl in program {
-            if let Decl::FunBinding { id, name, name_span, .. } = decl
+            if let Decl::FunBinding {
+                id,
+                name,
+                name_span,
+                ..
+            } = decl
                 && !fun_vars.contains_key(name)
             {
                 // Register all functions in fun_effects (annotated ones are
@@ -1161,6 +1166,7 @@ impl Checker {
             name_span,
             effects: effect_names,
             needs,
+            where_clause,
             arms,
             return_clause,
             span,
@@ -1176,18 +1182,49 @@ impl Checker {
         // Build type param bindings from handler's effect refs.
         // E.g. `handler counter for State Int` with effect State s:
         //   creates mapping {s_var_id -> Int}
+        // Also track type variable names -> var IDs for where clause binding.
         let mut handler_type_mapping: std::collections::HashMap<u32, Type> =
             std::collections::HashMap::new();
+        let mut type_var_params: Vec<(String, u32)> = Vec::new();
         for effect_ref in effect_names {
             self.record_effect_ref(effect_ref);
             if let Some(info) = self.effects.get(&effect_ref.name) {
                 let info = info.clone();
                 for (i, &param_id) in info.type_params.iter().enumerate() {
                     if let Some(type_arg_expr) = effect_ref.type_args.get(i) {
-                        let concrete_ty = self.convert_type_expr(type_arg_expr, &mut vec![]);
+                        let concrete_ty =
+                            self.convert_type_expr(type_arg_expr, &mut type_var_params);
                         handler_type_mapping.insert(param_id, concrete_ty);
                     }
                 }
+            }
+        }
+
+        // Register where clause bounds on handler type params.
+        // E.g. `handler show_store for Store a where {a: Show}` registers Show bound on `a`'s var.
+        for bound in where_clause {
+            if let Some((_, var_id)) = type_var_params.iter().find(|(n, _)| n == &bound.type_var) {
+                self.trait_state
+                    .where_bound_var_names
+                    .insert(*var_id, bound.type_var.clone());
+                for (trait_req, trait_span) in &bound.traits {
+                    self.lsp
+                        .type_references
+                        .push((*trait_span, trait_req.clone()));
+                    self.trait_state
+                        .where_bounds
+                        .entry(*var_id)
+                        .or_default()
+                        .insert(trait_req.clone());
+                }
+            } else {
+                self.collected_diagnostics.push(Diagnostic::error_at(
+                    *span,
+                    format!(
+                        "where clause references unknown type variable '{}' in handler '{}'",
+                        bound.type_var, name
+                    ),
+                ));
             }
         }
 
@@ -1337,7 +1374,9 @@ impl Checker {
                 );
                 self.lsp.node_spans.insert(param_id, *param_span);
                 self.lsp.type_at_span.insert(*param_span, param_ty);
-                self.lsp.definitions.push((param_id, param_name.clone(), *param_span));
+                self.lsp
+                    .definitions
+                    .push((param_id, param_name.clone(), *param_span));
             }
             let ret_ty = self.infer_expr(&rc.body)?;
             // Constrain answer_ty to match the return clause's body type
@@ -1411,6 +1450,34 @@ impl Checker {
             vec![]
         };
 
+        // Build where_constraints map: (effect_name, param_index) -> set of required trait names.
+        // Links where clause type vars back to their position in the effect's type param list.
+        let mut where_constraints: std::collections::HashMap<
+            (String, usize),
+            std::collections::HashSet<String>,
+        > = std::collections::HashMap::new();
+        for bound in where_clause {
+            if let Some((_, var_id)) = type_var_params.iter().find(|(n, _)| n == &bound.type_var) {
+                // Find which effect and param index this var corresponds to
+                for effect_ref in effect_names {
+                    if let Some(info) = self.effects.get(&effect_ref.name) {
+                        for (i, &param_id) in info.type_params.iter().enumerate() {
+                            if let Some(mapped_ty) = handler_type_mapping.get(&param_id)
+                                && matches!(mapped_ty, Type::Var(id) if *id == *var_id)
+                            {
+                                let entry = where_constraints
+                                    .entry((effect_ref.name.clone(), i))
+                                    .or_default();
+                                for (trait_name, _) in &bound.traits {
+                                    entry.insert(trait_name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         self.handlers.insert(
             name.into(),
             HandlerInfo {
@@ -1418,6 +1485,7 @@ impl Checker {
                 return_type: handler_return_type,
                 forall,
                 arm_spans,
+                where_constraints,
                 source_module: self.current_module.clone(),
             },
         );

@@ -2855,6 +2855,92 @@ use_it () = {
 }
 
 #[test]
+fn handler_where_clause_allows_trait_methods() {
+    // Where clause on handler should let arm bodies call trait methods on type params
+    assert!(
+        check(
+            "effect Store s {
+  fun save : s -> Unit
+  fun load : Unit -> s
+}
+
+handler show_store for Store a where {a: Show} {
+  save item = {
+    let _ = show item
+    resume ()
+  }
+  load () = resume (show 42)
+}"
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn handler_where_clause_with_needs_and_where() {
+    // Handler with both needs and where clause should typecheck
+    assert!(
+        check(
+            "effect Log {
+  fun log : String -> Unit
+}
+
+effect Store s {
+  fun save : s -> Unit
+}
+
+handler logged_store for Store a needs {Log} where {a: Show} {
+  save item = {
+    log! (show item)
+    resume ()
+  }
+}"
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn handler_where_clause_multiple_bounds() {
+    // Multiple trait bounds on the same type param
+    assert!(
+        check(
+            "effect Store s {
+  fun save : s -> Unit
+  fun load : Unit -> s
+}
+
+handler eq_show_store for Store a where {a: Show + Eq} {
+  save item = {
+    let _ = show item
+    let _ = item == item
+    resume ()
+  }
+  load () = resume (show 42)
+}"
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn handler_where_clause_unknown_type_var() {
+    // Referencing a type var not in the effect's params should produce an error
+    let result = check(
+        "effect Store s {
+  fun save : s -> Unit
+  fun load : Unit -> s
+}
+
+handler bad for Store Int where {b: Show} {
+  save item = resume ()
+  load () = resume 42
+}"
+    );
+    assert!(result.is_err());
+}
+
+#[test]
 fn main_cannot_have_effects() {
     let result = check(
         "effect Log {

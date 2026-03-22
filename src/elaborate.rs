@@ -30,6 +30,8 @@ struct Elaborator {
     trait_methods: HashMap<String, (String, usize)>,
     /// fun_name -> [(trait_name, type_var_name)] from where clauses
     fun_dict_params: HashMap<String, Vec<(String, String)>>,
+    /// handler_name -> [(trait_name, type_var_name)] from handler where clauses
+    handler_dict_params: HashMap<String, Vec<(String, String)>>,
     /// (trait_name, target_type) -> dict constructor name
     dict_names: HashMap<(String, String), String>,
     /// (trait_name, target_type) -> ordered list of (constraint_trait, param_index) for dict params.
@@ -124,6 +126,7 @@ impl Elaborator {
         Elaborator {
             trait_methods: HashMap::new(),
             fun_dict_params: inferred_dict_params,
+            handler_dict_params: HashMap::new(),
             dict_names,
             impl_dict_params: impl_dict_params_from_imports,
             traits: result.traits.clone(),
@@ -134,6 +137,51 @@ impl Elaborator {
             erlang_module,
             let_binding_arities,
         }
+    }
+
+    /// Extract dict param info from a where clause: [(trait_name, type_var_name)]
+    /// for traits that use dictionary dispatch (excludes Num, Eq which use BIFs).
+    fn dict_params_from_where(where_clause: &[TraitBound]) -> Vec<(String, String)> {
+        let mut dict_params = Vec::new();
+        for bound in where_clause {
+            for (trait_name, _) in &bound.traits {
+                if trait_name != "Num" && trait_name != "Eq" {
+                    dict_params.push((trait_name.clone(), bound.type_var.clone()));
+                }
+            }
+        }
+        dict_params
+    }
+
+    /// Set up `current_dict_params` from a where clause, saving the previous state.
+    /// Returns the saved state to be restored later via `restore_dict_params`.
+    fn setup_dict_params(
+        &mut self,
+        where_clause: &[TraitBound],
+    ) -> (HashMap<String, String>, HashMap<(String, String), String>) {
+        let saved = (
+            std::mem::take(&mut self.current_dict_params),
+            std::mem::take(&mut self.current_dict_params_by_var),
+        );
+        for bound in where_clause {
+            for (req_trait, _) in &bound.traits {
+                let param_name = format!("__dict_{}_{}", req_trait, bound.type_var);
+                self.current_dict_params
+                    .insert(req_trait.clone(), param_name.clone());
+                self.current_dict_params_by_var
+                    .insert((req_trait.clone(), bound.type_var.clone()), param_name);
+            }
+        }
+        saved
+    }
+
+    /// Restore `current_dict_params` from a previous `setup_dict_params` call.
+    fn restore_dict_params(
+        &mut self,
+        saved: (HashMap<String, String>, HashMap<(String, String), String>),
+    ) {
+        self.current_dict_params = saved.0;
+        self.current_dict_params_by_var = saved.1;
     }
 
     fn elaborate_program(&mut self, program: &Program) -> Program {
@@ -158,19 +206,9 @@ impl Elaborator {
                 | Decl::ExternalFun {
                     name, where_clause, ..
                 } => {
-                    if !where_clause.is_empty() {
-                        let mut dict_params = Vec::new();
-                        for bound in where_clause {
-                            for (trait_name, _) in &bound.traits {
-                                if trait_name != "Num" && trait_name != "Eq" {
-                                    dict_params
-                                        .push((trait_name.clone(), bound.type_var.clone()));
-                                }
-                            }
-                        }
-                        if !dict_params.is_empty() {
-                            self.fun_dict_params.insert(name.clone(), dict_params);
-                        }
+                    let dict_params = Self::dict_params_from_where(where_clause);
+                    if !dict_params.is_empty() {
+                        self.fun_dict_params.insert(name.clone(), dict_params);
                     }
                 }
                 Decl::ImplDef {
@@ -210,6 +248,14 @@ impl Elaborator {
                             .collect();
                         self.impl_dict_params
                             .insert((trait_name.clone(), target_type.clone()), params);
+                    }
+                }
+                Decl::HandlerDef {
+                    name, where_clause, ..
+                } => {
+                    let dict_params = Self::dict_params_from_where(where_clause);
+                    if !dict_params.is_empty() {
+                        self.handler_dict_params.insert(name.clone(), dict_params);
                     }
                 }
                 _ => {}
@@ -258,18 +304,7 @@ impl Elaborator {
                     }
 
                     // Set up current dict params for elaborating method bodies
-                    let saved_dict_params = std::mem::take(&mut self.current_dict_params);
-                    let saved_dict_params_by_var =
-                        std::mem::take(&mut self.current_dict_params_by_var);
-                    for bound in where_clause {
-                        for (req_trait, _) in &bound.traits {
-                            let param_name = format!("__dict_{}_{}", req_trait, bound.type_var);
-                            self.current_dict_params
-                                .insert(req_trait.clone(), param_name.clone());
-                            self.current_dict_params_by_var
-                                .insert((req_trait.clone(), bound.type_var.clone()), param_name);
-                        }
-                    }
+                    let saved = self.setup_dict_params(where_clause);
 
                     // Order methods by trait declaration order
                     let mut ordered_methods = Vec::new();
@@ -290,8 +325,7 @@ impl Elaborator {
                         }
                     }
 
-                    self.current_dict_params = saved_dict_params;
-                    self.current_dict_params_by_var = saved_dict_params_by_var;
+                    self.restore_dict_params(saved);
 
                     // For parameterized types, if there are type_params but no where_clause,
                     // no dict params are needed. The dict is still nullary.
@@ -325,9 +359,10 @@ impl Elaborator {
                     self.current_fun = Some(name.clone());
 
                     // Set up dict params for this function
-                    let saved_dict_params = std::mem::take(&mut self.current_dict_params);
-                    let saved_dict_params_by_var =
-                        std::mem::take(&mut self.current_dict_params_by_var);
+                    let saved = (
+                        std::mem::take(&mut self.current_dict_params),
+                        std::mem::take(&mut self.current_dict_params_by_var),
+                    );
                     let mut extra_params = Vec::new();
 
                     if let Some(dict_param_info) = self.fun_dict_params.get(name) {
@@ -352,8 +387,7 @@ impl Elaborator {
                     let mut full_params = extra_params;
                     full_params.extend(params.clone());
 
-                    self.current_dict_params = saved_dict_params;
-                    self.current_dict_params_by_var = saved_dict_params_by_var;
+                    self.restore_dict_params(saved);
                     self.current_fun = None;
 
                     output.push(Decl::FunBinding {
@@ -374,11 +408,16 @@ impl Elaborator {
                     name_span,
                     effects,
                     needs,
+                    where_clause,
                     arms,
                     return_clause,
                     span,
                     ..
                 } => {
+                    // Set up dict params from where clause so arm bodies can
+                    // reference trait dicts (e.g. `show entity` -> `__dict_Show_a`)
+                    let saved = self.setup_dict_params(where_clause);
+
                     let elab_arms: Vec<HandlerArm> = arms
                         .iter()
                         .map(|arm| HandlerArm {
@@ -396,6 +435,9 @@ impl Elaborator {
                             span: rc.span,
                         })
                     });
+
+                    self.restore_dict_params(saved);
+
                     output.push(Decl::HandlerDef {
                         id: NodeId::fresh(),
                         public: *public,
@@ -403,6 +445,7 @@ impl Elaborator {
                         name_span: *name_span,
                         effects: effects.clone(),
                         needs: needs.clone(),
+                        where_clause: where_clause.clone(),
                         arms: elab_arms,
                         recovered_arms: vec![],
                         return_clause: elab_return,
@@ -719,9 +762,10 @@ impl Elaborator {
                                     // Eta-expand: `let f = val` becomes
                                     // `let f = fun (dict, __arg) -> (elaborated_val)(__arg)`
                                     // so the lowerer sees a single function of arity N+1.
-                                    let saved_dict_params = std::mem::take(&mut self.current_dict_params);
-                                    let saved_dict_params_by_var =
-                                        std::mem::take(&mut self.current_dict_params_by_var);
+                                    let saved = (
+                                        std::mem::take(&mut self.current_dict_params),
+                                        std::mem::take(&mut self.current_dict_params_by_var),
+                                    );
                                     let mut lambda_params = Vec::new();
 
                                     for (trait_name, type_var) in &dict_param_info {
@@ -739,8 +783,7 @@ impl Elaborator {
 
                                     let elab_value = self.elaborate_expr(value);
 
-                                    self.current_dict_params = saved_dict_params;
-                                    self.current_dict_params_by_var = saved_dict_params_by_var;
+                                    self.restore_dict_params(saved);
 
                                     // Eta-expand with the correct arity
                                     let let_name = if let Pat::Var { name: n, .. } = pattern { n } else { "" };
@@ -930,13 +973,50 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::With { expr: e, handler } => Expr::synth(
-                span,
-                ExprKind::With {
-                    expr: Box::new(self.elaborate_expr(e)),
-                    handler: Box::new(self.elaborate_handler(handler)),
-                },
-            ),
+            ExprKind::With { expr: e, handler } => {
+                let with_expr = Expr::synth(
+                    span,
+                    ExprKind::With {
+                        expr: Box::new(self.elaborate_expr(e)),
+                        handler: Box::new(self.elaborate_handler(handler)),
+                    },
+                );
+
+                // For named handlers with where clauses, bind the dict variables
+                // so handler arm bodies (which reference e.g. `__dict_Show_a`) can
+                // capture them from the enclosing scope.
+                if let Handler::Named(handler_name, _) = handler.as_ref() {
+                    if let Some(dict_param_info) = self.handler_dict_params.get(handler_name).cloned() {
+                        let mut stmts: Vec<Stmt> = Vec::new();
+                        for (trait_name, type_var) in &dict_param_info {
+                            let dict_var = format!("__dict_{}_{}", trait_name, type_var);
+                            if let Some(dict_expr) = self.resolve_dict(trait_name, node_id, span) {
+                                stmts.push(Stmt::Let {
+                                    pattern: Pat::Var {
+                                        id: NodeId::fresh(),
+                                        name: dict_var,
+                                        span,
+                                    },
+                                    annotation: None,
+                                    value: dict_expr,
+                                    assert: false,
+                                    span,
+                                });
+                            }
+                        }
+                        if stmts.is_empty() {
+                            with_expr
+                        } else {
+                            stmts.push(Stmt::Expr(with_expr));
+                            Expr::synth(span, ExprKind::Block { stmts })
+                        }
+                    } else {
+                        with_expr
+                    }
+                } else {
+                    with_expr
+                }
+            }
 
             ExprKind::Resume { value } => Expr::synth(
                 span,
