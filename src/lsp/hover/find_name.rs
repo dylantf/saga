@@ -86,6 +86,7 @@ fn find_in_record_fields(fields: &[(String, Span, Expr)], offset: usize) -> Foun
 fn find_in_decl(decl: &Decl, offset: usize) -> Found {
     match decl {
         Decl::FunBinding {
+            id,
             name,
             name_span,
             params,
@@ -97,10 +98,11 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                 return None;
             }
             find_in_params_body(params, body, offset).or_else(|| {
-                contains_ident(name_span, offset).then(|| (name.clone(), *name_span, None))
+                contains_ident(name_span, offset).then(|| (name.clone(), *name_span, Some(*id)))
             })
         }
         Decl::FunAnnotation {
+            id,
             name,
             name_span,
             params,
@@ -111,7 +113,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             ..
         } if contains(span, offset) => {
             if contains_ident(name_span, offset) {
-                return Some((name.clone(), *name_span, None));
+                return Some((name.clone(), *name_span, Some(*id)));
             }
             find_in_typed_params(params, offset)
                 .or_else(|| find_in_type_expr(return_type, offset))
@@ -119,6 +121,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                 .or_else(|| find_in_where_clause(where_clause, offset))
         }
         Decl::HandlerDef {
+            id,
             name,
             name_span,
             effects,
@@ -166,7 +169,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                 }
             }
             find_in_effect_refs(effects, offset).or_else(|| {
-                contains_ident(name_span, offset).then(|| (name.clone(), *name_span, None))
+                contains_ident(name_span, offset).then(|| (name.clone(), *name_span, Some(*id)))
             })
         }
         Decl::ImplDef {
@@ -200,7 +203,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             None
         }
         Decl::Let {
-            name, value, span, ..
+            id, name, name_span, value, span, ..
         } => {
             if !contains(span, offset) {
                 return None;
@@ -208,20 +211,25 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             if let Some(r) = find_in_expr(value, offset) {
                 return Some(r);
             }
-            let name_start = span.start + 4; // "let "
-            if offset >= name_start && offset <= name_start + name.len() {
-                return Some((name.clone(), *span, None));
+            if contains_ident(name_span, offset) {
+                return Some((name.clone(), *name_span, Some(*id)));
             }
             None
         }
         Decl::TypeDef {
             name,
             name_span,
+            variants,
             span,
             ..
         } => {
             if !contains(span, offset) {
                 return None;
+            }
+            for variant in variants {
+                if contains_ident(&variant.span, offset) {
+                    return Some((variant.name.clone(), variant.span, Some(variant.id)));
+                }
             }
             contains_ident(name_span, offset).then(|| (name.clone(), *name_span, None))
         }

@@ -61,6 +61,7 @@ impl Parser {
                 let start = self.tokens[self.pos].span;
                 self.advance(); // consume 'let'
                 let name = self.expect_ident()?;
+                let name_span = self.tokens[self.pos - 1].span;
                 let annotation = if matches!(self.peek(), Token::Colon) {
                     self.advance(); // consume ':'
                     Some(self.parse_type_expr()?)
@@ -73,6 +74,7 @@ impl Parser {
                     id: NodeId::fresh(),
                     span: start.to(value.span),
                     name,
+                    name_span,
                     annotation,
                     value,
                 })
@@ -126,6 +128,7 @@ impl Parser {
                 Ok(Decl::Let {
                     id: NodeId::fresh(),
                     name: "_".to_string(),
+                    name_span: start,
                     annotation: None,
                     span: start.to(value.span),
                     value,

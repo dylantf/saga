@@ -61,13 +61,13 @@ unwrap b = case b {
 }
 
 main () = {
-  let p = Point { x: 3, y: 4 }
-  println (show p)
+  let my_point = Point { x: 3, y: 4 }
+  println (show my_point)
 
-  let p2 = translate 1 (-5) p  # negative args need parens, like Elm/Haskell
+  let p2 = translate 1 (-5) my_point  # negative args need parens, like Elm/Haskell
   println (show p2)
 
-  println (quadrant p)
+  println (quadrant my_point)
   println (quadrant p2)
 
   # polymorphic records

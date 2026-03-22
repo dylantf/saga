@@ -95,6 +95,209 @@ impl Backend {
         let texts = self.document_texts.lock().ok()?;
         texts.get(uri).cloned()
     }
+
+    /// Ensure all project files are indexed in the symbol index, then collect
+    /// all reference + definition locations for a symbol. Shared by references and rename.
+    fn collect_all_symbol_locations(
+        &self,
+        uri: &Url,
+        snap: &CheckSnapshot,
+        name: &str,
+        node_id: Option<dylang::ast::NodeId>,
+        include_definition: bool,
+    ) -> Vec<Location> {
+        let tc_result = &snap.tc_result;
+        let program = snap.program.as_ref().unwrap();
+        let line_index = &snap.line_index;
+
+        // Node-id-based lookup: resolve cursor to a def_id, then find all
+        // same-file usages via tc_result.references. This handles local
+        // variables, function params, pattern bindings, etc. that aren't
+        // tracked in the cross-module symbol index.
+        if let Some(nid) = node_id {
+            // Resolve to def_id: if this node is a usage, look up its target;
+            // otherwise it might be the definition itself.
+            let def_id = tc_result.references.get(&nid).copied().unwrap_or(nid);
+
+            // Collect all usages that point to this def_id
+            let mut locations: Vec<Location> = Vec::new();
+            for (usage_id, &did) in &tc_result.references {
+                if did == def_id
+                    && let Some(&span) = tc_result.node_spans.get(usage_id)
+                {
+                    let (sl, sc) = line_index.offset_to_line_col(span.start, &snap.source);
+                    let (el, ec) = line_index.offset_to_line_col(span.end, &snap.source);
+                    locations.push(Location {
+                        uri: uri.clone(),
+                        range: Range {
+                            start: Position::new(sl as u32, sc as u32),
+                            end: Position::new(el as u32, ec as u32),
+                        },
+                    });
+                }
+            }
+
+            // Include the definition site itself
+            if include_definition
+                && let Some(&def_span) = tc_result.node_spans.get(&def_id)
+            {
+                let (sl, sc) = line_index.offset_to_line_col(def_span.start, &snap.source);
+                let (el, ec) = line_index.offset_to_line_col(def_span.end, &snap.source);
+                let def_loc = Location {
+                    uri: uri.clone(),
+                    range: Range {
+                        start: Position::new(sl as u32, sc as u32),
+                        end: Position::new(el as u32, ec as u32),
+                    },
+                };
+                if !locations.iter().any(|l| l.range == def_loc.range) {
+                    locations.push(def_loc);
+                }
+            }
+
+            // If we found usages (not just the definition), return them.
+            // Types/records/effects use type_references instead of references,
+            // so they won't have usages here -- fall through to symbol index.
+            if locations.len() > 1 || (!include_definition && !locations.is_empty()) {
+                return locations;
+            }
+        }
+
+        // Resolve the symbol key: (module, name).
+        let module = if let Some(origin) = tc_result
+            .import_origins
+            .get(name)
+            .or_else(|| tc_result.type_import_origins.get(name))
+        {
+            origin.clone()
+        } else {
+            let local_module = program.iter().find_map(|decl| {
+                if let dylang::ast::Decl::ModuleDecl { path, .. } = decl {
+                    Some(path.join("."))
+                } else {
+                    None
+                }
+            });
+            local_module.unwrap_or_else(|| uri.to_string())
+        };
+
+        let key = symbol_index::SymbolKey {
+            module: module.clone(),
+            name: name.to_string(),
+        };
+
+        // Ensure all project files are indexed before querying.
+        if let Some(module_map) = tc_result.module_map() {
+            let current_path = uri.to_file_path().ok();
+            for file_path in module_map.values() {
+                if current_path.as_ref() == Some(file_path) {
+                    continue;
+                }
+                let file_uri = match Url::from_file_path(file_path) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                let needs_index = {
+                    let idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+                    !idx.has_file(&file_uri)
+                };
+                if needs_index {
+                    let source = match std::fs::read_to_string(file_path) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    if !source.contains(name) {
+                        continue;
+                    }
+                    let checker = self.get_checker(&file_uri);
+                    let check_result = std::panic::catch_unwind(
+                        std::panic::AssertUnwindSafe(|| diagnostics::check(checker, &source)),
+                    );
+                    if let Ok(snap) = check_result
+                        && let Some(ref prog) = snap.program
+                    {
+                        let mut idx =
+                            self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+                        idx.update_file(
+                            &file_uri,
+                            &snap.tc_result,
+                            prog,
+                            &snap.line_index,
+                            &snap.source,
+                        );
+                    }
+                }
+            }
+        }
+
+        // Query the index for all references.
+        let refs = {
+            let idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+            idx.query(&key)
+        };
+
+        let mut locations: Vec<Location> = refs
+            .into_iter()
+            .map(|r| Location {
+                uri: r.uri,
+                range: r.range,
+            })
+            .collect();
+
+        // Include the definition site.
+        if include_definition {
+            if let Some(did) = tc_result.env.def_id(name)
+                && let Some(&def_span) = tc_result.node_spans.get(&did)
+            {
+                let line_index = &snap.line_index;
+                let (start_line, start_col) =
+                    line_index.offset_to_line_col(def_span.start, &snap.source);
+                let (end_line, end_col) =
+                    line_index.offset_to_line_col(def_span.end, &snap.source);
+                locations.push(Location {
+                    uri: uri.clone(),
+                    range: Range {
+                        start: Position::new(start_line as u32, start_col as u32),
+                        end: Position::new(end_line as u32, end_col as u32),
+                    },
+                });
+            }
+            // For type/effect/record/trait/handler definitions, find via AST
+            if let Some(def_result) = definition::find_definition(program, name, tc_result) {
+                let (def_uri, def_li, def_source) = if let Some(ref fp) = def_result.file_path {
+                    let u = match Url::from_file_path(fp) {
+                        Ok(u) => u,
+                        Err(_) => return locations,
+                    };
+                    let s = match std::fs::read_to_string(fp) {
+                        Ok(s) => s,
+                        Err(_) => return locations,
+                    };
+                    let li = line_index::LineIndex::new(&s);
+                    (u, li, s)
+                } else {
+                    (uri.clone(), snap.line_index.clone(), snap.source.clone())
+                };
+                let (sl, sc) =
+                    def_li.offset_to_line_col(def_result.span.start, &def_source);
+                let (el, ec) =
+                    def_li.offset_to_line_col(def_result.span.end, &def_source);
+                let def_loc = Location {
+                    uri: def_uri,
+                    range: Range {
+                        start: Position::new(sl as u32, sc as u32),
+                        end: Position::new(el as u32, ec as u32),
+                    },
+                };
+                // Avoid duplicates
+                if !locations.iter().any(|l| l.uri == def_loc.uri && l.range == def_loc.range) {
+                    locations.push(def_loc);
+                }
+            }
+        }
+
+        locations
+    }
 }
 
 /// Find an effect op signature from the AST (preserves original type param names).
@@ -191,6 +394,10 @@ impl LanguageServer for Backend {
                     work_done_progress_options: Default::default(),
                 }),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 ..Default::default()
             },
             ..Default::default()
@@ -598,7 +805,6 @@ impl LanguageServer for Backend {
         let Some(snap) = self.snapshot(&uri) else {
             return Ok(None);
         };
-        let tc_result = &snap.tc_result;
         let program = snap.program.as_ref().unwrap();
         let line_index = &snap.line_index;
 
@@ -606,109 +812,116 @@ impl LanguageServer for Backend {
         let offset =
             line_index.line_col_to_offset(position.line as usize, position.character as usize, &snap.source);
 
-        let Some((name, _span, _node_id)) = hover::find_name_at_offset(program, offset) else {
+        let Some((name, _span, node_id)) = hover::find_name_at_offset(program, offset) else {
             return Ok(None);
         };
 
-        // Resolve the symbol key: (module, name).
-        // Check both value import_origins and type_import_origins.
-        let module = if let Some(origin) = tc_result.import_origins.get(&name)
-            .or_else(|| tc_result.type_import_origins.get(&name))
-        {
-            origin.clone()
-        } else {
-            // Local definition: use this file's module declaration
-            let local_module = program.iter().find_map(|decl| {
-                if let dylang::ast::Decl::ModuleDecl { path, .. } = decl {
-                    Some(path.join("."))
-                } else {
-                    None
-                }
-            });
-            local_module.unwrap_or_else(|| "_script".to_string())
-        };
-
-        let key = symbol_index::SymbolKey {
-            module: module.clone(),
-            name: name.clone(),
-        };
-
-        // Ensure all project files are indexed before querying.
-        if let Some(module_map) = tc_result.module_map() {
-            let current_path = uri.to_file_path().ok();
-            for file_path in module_map.values() {
-                if current_path.as_ref() == Some(file_path) {
-                    continue;
-                }
-                let file_uri = match Url::from_file_path(file_path) {
-                    Ok(u) => u,
-                    Err(_) => continue,
-                };
-                let needs_index = {
-                    let idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
-                    !idx.has_file(&file_uri)
-                };
-                if needs_index {
-                    let source = match std::fs::read_to_string(file_path) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-                    // Quick text check: skip files that don't mention the name
-                    if !source.contains(&name) {
-                        continue;
-                    }
-                    let checker = self.get_checker(&file_uri);
-                    let check_result = std::panic::catch_unwind(
-                        std::panic::AssertUnwindSafe(|| diagnostics::check(checker, &source)),
-                    );
-                    if let Ok(snap) = check_result
-                        && let Some(ref prog) = snap.program
-                    {
-                        let mut idx =
-                            self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
-                        idx.update_file(&file_uri, &snap.tc_result, prog, &snap.line_index, &snap.source);
-                    }
-                }
-            }
-        }
-
-        // Query the index for all references to this symbol.
-        let refs = {
-            let idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
-            idx.query(&key)
-        };
-
-        let mut locations: Vec<Location> = refs
-            .into_iter()
-            .map(|r| Location {
-                uri: r.uri,
-                range: r.range,
-            })
-            .collect();
-
-        // Include the definition site if requested.
-        if params.context.include_declaration {
-            // Find the definition span in the current file's check result
-            if let Some(did) = tc_result.env.def_id(&name)
-                && let Some(&def_span) = tc_result.node_spans.get(&did)
-            {
-                let (start_line, start_col) = line_index.offset_to_line_col(def_span.start, &snap.source);
-                let (end_line, end_col) = line_index.offset_to_line_col(def_span.end, &snap.source);
-                locations.push(Location {
-                    uri: uri.clone(),
-                    range: Range {
-                        start: Position::new(start_line as u32, start_col as u32),
-                        end: Position::new(end_line as u32, end_col as u32),
-                    },
-                });
-            }
-        }
+        let locations = self.collect_all_symbol_locations(
+            &uri,
+            &snap,
+            &name,
+            node_id,
+            params.context.include_declaration,
+        );
 
         if locations.is_empty() {
             Ok(None)
         } else {
             Ok(Some(locations))
         }
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri.clone();
+        let Some(snap) = self.snapshot(&uri) else {
+            return Ok(None);
+        };
+        let program = snap.program.as_ref().unwrap();
+        let line_index = &snap.line_index;
+
+        let position = params.position;
+        let offset =
+            line_index.line_col_to_offset(position.line as usize, position.character as usize, &snap.source);
+
+        let Some((name, span, _node_id)) = hover::find_name_at_offset(program, offset) else {
+            return Ok(None);
+        };
+
+        // Don't allow renaming module-prefixed names, keywords, or wildcards
+        if name.starts_with("module:") || name == "_" {
+            return Ok(None);
+        }
+        // Reject imported symbols that aren't locally redefined
+        let tc_result = &snap.tc_result;
+        let is_imported = tc_result.import_origins.contains_key(&name)
+            || tc_result.type_import_origins.contains_key(&name);
+        let is_locally_defined = definition::find_definition(program, &name, tc_result)
+            .is_some_and(|d| d.file_path.is_none());
+        if is_imported && !is_locally_defined {
+            return Ok(None);
+        }
+
+        let (start_line, start_col) = line_index.offset_to_line_col(span.start, &snap.source);
+        let (end_line, end_col) = line_index.offset_to_line_col(span.end, &snap.source);
+        let range = Range {
+            start: Position::new(start_line as u32, start_col as u32),
+            end: Position::new(end_line as u32, end_col as u32),
+        };
+
+        Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+            range,
+            placeholder: name,
+        }))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let Some(snap) = self.snapshot(&uri) else {
+            return Ok(None);
+        };
+        let program = snap.program.as_ref().unwrap();
+        let line_index = &snap.line_index;
+
+        let position = params.text_document_position.position;
+        let offset =
+            line_index.line_col_to_offset(position.line as usize, position.character as usize, &snap.source);
+
+        let Some((name, _span, node_id)) = hover::find_name_at_offset(program, offset) else {
+            return Ok(None);
+        };
+
+        if name.starts_with("module:") {
+            return Ok(None);
+        }
+
+        let new_name = params.new_name;
+        // Collect all locations: references + definition
+        let locations = self.collect_all_symbol_locations(&uri, &snap, &name, node_id, true);
+
+        if locations.is_empty() {
+            return Ok(None);
+        }
+
+        // Group edits by URI
+        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+            std::collections::HashMap::new();
+        for loc in locations {
+            changes
+                .entry(loc.uri)
+                .or_default()
+                .push(TextEdit {
+                    range: loc.range,
+                    new_text: new_name.clone(),
+                });
+        }
+
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
     }
 }
 

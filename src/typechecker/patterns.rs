@@ -38,7 +38,7 @@ impl Checker {
                 self.unify_at(ty, &lit_ty, *span)
             }
             Pat::Constructor {
-                name, args, span, ..
+                id, name, args, span, ..
             } => {
                 let ctor_scheme = self.constructors.get(name).cloned().ok_or_else(|| {
                     Diagnostic::error_at(
@@ -46,6 +46,10 @@ impl Checker {
                         format!("undefined constructor in pattern: {}", name),
                     )
                 })?;
+                // Record reference to constructor definition for find-references/rename
+                if let Some(def_id) = self.lsp.constructor_def_ids.get(name).copied() {
+                    self.record_reference(*id, *span, def_id);
+                }
                 let (ctor_ty, _) = self.instantiate(&ctor_scheme);
                 let mut current = ctor_ty;
                 for arg_pat in args {
@@ -77,6 +81,12 @@ impl Checker {
                         format!("undefined record type in pattern: {}", name),
                     )
                 })?;
+                // Record the type name reference for find-references/rename
+                let name_end = span.start + name.len();
+                self.lsp.type_references.push((
+                    crate::token::Span { start: span.start, end: name_end },
+                    name.to_string(),
+                ));
                 let (inst_fields, result_ty) = self.instantiate_record(name, &info);
                 self.unify_at(ty, &result_ty, *span)?;
 

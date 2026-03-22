@@ -67,7 +67,8 @@ impl SymbolIndex {
         source: &str,
     ) {
         // Determine the current file's module name (for locally-defined symbols).
-        // For single-file scripts without a module declaration, use the URI as a fallback.
+        // For single-file scripts without a module declaration, use the file URI
+        // to avoid collisions between unrelated scripts sharing the same name.
         let local_module: Option<String> = Some(
             program.iter().find_map(|decl| {
                 if let Decl::ModuleDecl { path, .. } = decl {
@@ -75,7 +76,7 @@ impl SymbolIndex {
                 } else {
                     None
                 }
-            }).unwrap_or_else(|| "_script".to_string())
+            }).unwrap_or_else(|| uri.to_string())
         );
 
         // Build reverse map: def_id -> (module, name) so we can resolve each reference.
@@ -105,6 +106,23 @@ impl SymbolIndex {
             }
         }
 
+        // Constructor def_ids (not in env, stored separately)
+        if let Some(ref local_mod) = local_module {
+            for (name, &did) in &tc_result.constructor_def_ids {
+                def_id_to_symbol.entry(did).or_insert_with(|| {
+                    let module = tc_result
+                        .import_origins
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| local_mod.clone());
+                    SymbolKey {
+                        module,
+                        name: name.clone(),
+                    }
+                });
+            }
+        }
+
         // Scan all references and resolve each to a SymbolKey + location.
         let mut entries = Vec::new();
         for (usage_id, def_id) in &tc_result.references {
@@ -125,7 +143,7 @@ impl SymbolIndex {
                 .unwrap_or_else(|| {
                     local_module
                         .clone()
-                        .unwrap_or_else(|| "_script".to_string())
+                        .unwrap_or_else(|| uri.to_string())
                 });
             let key = SymbolKey {
                 module,

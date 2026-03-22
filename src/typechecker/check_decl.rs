@@ -190,6 +190,7 @@ impl Checker {
             Decl::Let {
                 id,
                 name,
+                name_span,
                 annotation,
                 value,
                 span,
@@ -202,7 +203,7 @@ impl Checker {
                 }
                 let scheme = self.generalize(&ty);
                 self.env.insert_with_def(name.clone(), scheme, *id);
-                self.lsp.node_spans.insert(*id, *span);
+                self.lsp.node_spans.insert(*id, *name_span);
                 Ok(())
             }
 
@@ -373,6 +374,7 @@ impl Checker {
             if let Decl::FunAnnotation {
                 id,
                 name,
+                name_span,
                 params,
                 return_type,
                 effects,
@@ -451,7 +453,7 @@ impl Checker {
                     scheme.constraints = c.clone();
                 }
                 self.env.insert_with_def(name.clone(), scheme, *id);
-                self.lsp.node_spans.insert(*id, *span);
+                self.lsp.node_spans.insert(*id, *name_span);
             }
         }
 
@@ -466,7 +468,7 @@ impl Checker {
     ) -> HashMap<String, Type> {
         let mut fun_vars: HashMap<String, Type> = HashMap::new();
         for decl in program {
-            if let Decl::FunBinding { id, name, span, .. } = decl
+            if let Decl::FunBinding { id, name, name_span, .. } = decl
                 && !fun_vars.contains_key(name)
             {
                 // Register all functions in fun_effects (annotated ones are
@@ -493,7 +495,7 @@ impl Checker {
                     },
                     *id,
                 );
-                self.lsp.node_spans.insert(*id, *span);
+                self.lsp.node_spans.insert(*id, *name_span);
             }
         }
         fun_vars
@@ -1156,6 +1158,7 @@ impl Checker {
         let ast::Decl::HandlerDef {
             id: def_id,
             name,
+            name_span,
             effects: effect_names,
             needs,
             arms,
@@ -1429,7 +1432,7 @@ impl Checker {
             },
             *def_id,
         );
-        self.lsp.node_spans.insert(*def_id, *span);
+        self.lsp.node_spans.insert(*def_id, *name_span);
 
         Ok(())
     }

@@ -69,6 +69,7 @@ pub enum Decl {
     Let {
         id: NodeId,
         name: String,
+        name_span: Span,
         annotation: Option<TypeExpr>,
         value: Expr,
         span: Span,

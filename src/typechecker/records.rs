@@ -15,6 +15,12 @@ impl Checker {
         let info = self.records.get(name).cloned().ok_or_else(|| {
             Diagnostic::error_at(span, format!("undefined record type: {}", name))
         })?;
+        // Record the type name reference for find-references/rename
+        let name_end = span.start + name.len();
+        self.lsp.type_references.push((
+            crate::token::Span { start: span.start, end: name_end },
+            name.to_string(),
+        ));
         let (inst_fields, result_ty) = self.instantiate_record(name, &info);
 
         for (fname, fspan, fexpr) in fields {

@@ -61,6 +61,8 @@ pub struct CheckResult {
     pub type_references: Vec<(crate::token::Span, String)>,
     /// Import origins for type names: type_name -> source module name.
     pub type_import_origins: HashMap<String, String>,
+    /// Constructor name -> definition NodeId (for symbol index).
+    pub constructor_def_ids: HashMap<String, crate::ast::NodeId>,
 }
 
 impl CheckResult {
@@ -170,6 +172,7 @@ impl Checker {
             import_origins: self.lsp.import_origins.clone(),
             type_references: self.lsp.type_references.clone(),
             type_import_origins: self.lsp.type_import_origins.clone(),
+            constructor_def_ids: self.lsp.constructor_def_ids.clone(),
         }
     }
 }
