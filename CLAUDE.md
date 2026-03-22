@@ -69,6 +69,11 @@ Key phases:
   - `cerl.rs` - Core Erlang AST and pretty-printer
   - `normalize.rs` - Effect normalization pre-pass
   - `lower/` - Main lowering (exprs.rs, effects.rs, builtins.rs, pats.rs, init.rs, util.rs)
+- `src/cli/` - CLI entry point (arg parsing, build orchestration, commands)
+  - `mod.rs` - Submodule declarations, `find_project_root`
+  - `diagnostics.rs` - Error/warning formatting with source underlines
+  - `build.rs` - Build pipeline (parse+typecheck, elaborate, emit, erlc/erl invocation)
+  - `commands.rs` - Command implementations (run, build, check, emit, test)
 - `src/lsp/` - Language server (hover, completion, diagnostics, go-to-def, etc.)
 - `src/stdlib/` - Standard library (.dy files); `prelude.dy` is auto-loaded
 - `examples/` - Example programs, sort of doubles as E2E testing but purpose is for structured examples of features

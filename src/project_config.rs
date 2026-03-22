@@ -133,6 +133,8 @@ pub fn resolve_deps(
             .canonicalize()
             .map_err(|e| format!("dependency '{}' path '{}': {}", dep_name, dep_entry.path, e))?;
 
+        eprintln!("  Resolving dependency '{}'...", dep_name);
+
         let dep_config = ProjectConfig::load(&dep_path);
         let lib = dep_config.library.ok_or_else(|| {
             format!(
@@ -179,6 +181,12 @@ pub fn resolve_deps(
     }
 
     if !dep_modules.is_empty() {
+        let module_names: Vec<&str> = dep_modules.keys().map(|s| s.as_str()).collect();
+        eprintln!(
+            "  Resolved {} dependency module(s): {}",
+            module_names.len(),
+            module_names.join(", ")
+        );
         let mut map = checker.module_map().cloned().unwrap_or_default();
         for (name, path) in dep_modules {
             if let Some(existing) = map.get(&name) {
