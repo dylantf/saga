@@ -115,6 +115,7 @@ pub enum Decl {
 
     /// `handler console_log for Log needs {Http} { ... }`
     /// `handler counter for State Int { ... }`
+    /// `handler show_store for Store a where {a: Show} { ... }`
     HandlerDef {
         id: NodeId,
         public: bool,
@@ -122,6 +123,7 @@ pub enum Decl {
         name_span: Span,
         effects: Vec<EffectRef>,
         needs: Vec<EffectRef>,
+        where_clause: Vec<TraitBound>,
         arms: Vec<HandlerArm>,
         /// Partially parsed arms from error recovery (for LSP hover, not typechecked).
         recovered_arms: Vec<HandlerArm>,

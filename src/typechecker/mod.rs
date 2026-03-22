@@ -490,6 +490,9 @@ pub struct HandlerInfo {
     pub forall: Vec<u32>,
     /// op_name -> span of the handler arm (for LSP go-to-def and with-stack)
     pub arm_spans: HashMap<String, Span>,
+    /// Trait constraints from `where` clause, keyed by (effect_name, param_index).
+    /// E.g. `handler h for Store a where {a: Show}` -> {("Store", 0) -> {"Show"}}
+    pub where_constraints: HashMap<(String, usize), HashSet<String>>,
     /// Which module this handler is defined in (None = main file).
     pub source_module: Option<String>,
 }

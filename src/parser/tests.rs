@@ -2626,6 +2626,58 @@ fn handler_for_parameterized_effect() {
 }
 
 #[test]
+fn handler_with_where_clause() {
+    let decls = parse(
+        "handler show_store for Store a where {a: Show} {\n  save item = resume ()\n  load () = resume \"\"\n}",
+    );
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::HandlerDef {
+            name,
+            effects,
+            where_clause,
+            arms,
+            ..
+        } => {
+            assert_eq!(name, "show_store");
+            assert_eq!(effects.len(), 1);
+            assert_eq!(effects[0].name, "Store");
+            assert_eq!(where_clause.len(), 1);
+            assert_eq!(where_clause[0].type_var, "a");
+            assert_eq!(where_clause[0].traits.len(), 1);
+            assert_eq!(where_clause[0].traits[0].0, "Show");
+            assert_eq!(arms.len(), 2);
+        }
+        _ => panic!("expected HandlerDef"),
+    }
+}
+
+#[test]
+fn handler_with_needs_and_where_clause() {
+    let decls = parse(
+        "handler logged_store for Store a needs {Log} where {a: Show} {\n  save item = { log! (show item); resume () }\n  load () = resume \"\"\n}",
+    );
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::HandlerDef {
+            name,
+            effects,
+            needs,
+            where_clause,
+            ..
+        } => {
+            assert_eq!(name, "logged_store");
+            assert_eq!(effects[0].name, "Store");
+            assert_eq!(effect_names(needs), vec!["Log"]);
+            assert_eq!(where_clause.len(), 1);
+            assert_eq!(where_clause[0].type_var, "a");
+            assert_eq!(where_clause[0].traits[0].0, "Show");
+        }
+        _ => panic!("expected HandlerDef"),
+    }
+}
+
+#[test]
 fn fun_annotation_needs_parameterized_effect() {
     let decls = parse("fun foo : Unit -> Int needs {State Int}");
     assert_eq!(decls.len(), 1);

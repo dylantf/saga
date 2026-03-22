@@ -15,6 +15,7 @@ impl Checker {
         expr: &Expr,
         handler: &ast::Handler,
         _with_span: Span,
+        with_node_id: crate::ast::NodeId,
     ) -> Result<Type, Diagnostic> {
         let handled = self.handler_handled_effects(handler);
 
@@ -64,7 +65,7 @@ impl Checker {
             };
         self.lsp.with_arm_stacks.push(arm_stack_entry);
 
-        let ty = self.infer_with_inner(expr, handler, handled)?;
+        let ty = self.infer_with_inner(expr, handler, handled, with_node_id)?;
         self.lsp.with_arm_stacks.pop();
 
         Ok(ty)
@@ -75,6 +76,7 @@ impl Checker {
         expr: &Expr,
         handler: &ast::Handler,
         handled: HashSet<String>,
+        with_node_id: crate::ast::NodeId,
     ) -> Result<Type, Diagnostic> {
         // --- Scope 1: infer the inner expression with isolated effect tracking ---
         let inner_scope = self.enter_effect_scope();
@@ -106,7 +108,9 @@ impl Checker {
             }
         }
 
-        // Propagate unhandled effects from the inner expression to outer scope
+        // Save effect cache for handler where-clause enforcement (Named branch)
+        // and type param cache inheritance (Inline branch).
+        let inner_effect_cache = inner_result.effect_cache;
         let mut unhandled = inner_result.effects;
         for eff in &handled {
             unhandled.remove(eff);
@@ -135,6 +139,36 @@ impl Checker {
                         let fresh_param = self.replace_vars(param_ty, &mapping);
                         let fresh_ret = self.replace_vars(ret_ty, &mapping);
                         self.unify_at(&fresh_param, &expr_ty, with_span)?;
+
+                        // Enforce handler where clause constraints at the usage site.
+                        // Use the inner expression's effect cache to find what each
+                        // effect type param resolved to, then push pending constraints.
+                        for ((effect_name, param_idx), trait_names) in
+                            &handler_info.where_constraints
+                        {
+                            if let Some(effect_info) = self.effects.get(effect_name).cloned()
+                                && let Some(&param_var_id) = effect_info.type_params.get(*param_idx)
+                            {
+                                // The effect cache stores the fresh var IDs used at the call site.
+                                // Resolve through the cache first, then through substitution.
+                                let ty = if let Some(cache) = inner_effect_cache.get(effect_name)
+                                    && let Some(cached_ty) = cache.get(&param_var_id)
+                                {
+                                    self.sub.apply(cached_ty)
+                                } else {
+                                    self.sub.apply(&Type::Var(param_var_id))
+                                };
+                                for trait_name in trait_names {
+                                    self.trait_state.pending_constraints.push((
+                                        trait_name.clone(),
+                                        ty.clone(),
+                                        with_span,
+                                        with_node_id,
+                                    ));
+                                }
+                            }
+                        }
+
                         Ok(self.sub.apply(&fresh_ret))
                     } else {
                         Ok(expr_ty)
@@ -161,7 +195,7 @@ impl Checker {
                 let arms_scope = self.enter_effect_scope();
                 // Handler arms inherit the inner expression's effect cache so
                 // they see the same type param bindings (e.g. State s -> Int).
-                self.effect_state.type_param_cache = inner_result.effect_cache;
+                self.effect_state.type_param_cache = inner_effect_cache;
 
                 // Compute answer_ty: infer return clause first if present,
                 // since arms need it for resume return type and body unification.
@@ -180,7 +214,9 @@ impl Checker {
                         );
                         self.lsp.node_spans.insert(param_id, *param_span);
                         self.lsp.type_at_span.insert(*param_span, expr_ty.clone());
-                        self.lsp.definitions.push((param_id, param_name.clone(), *param_span));
+                        self.lsp
+                            .definitions
+                            .push((param_id, param_name.clone(), *param_span));
                     }
                     let ret_ty = self.infer_expr(&ret_arm.body)?;
                     self.env = saved_env;
@@ -217,7 +253,9 @@ impl Checker {
                             );
                             self.lsp.node_spans.insert(param_id, *param_span);
                             self.lsp.type_at_span.insert(*param_span, param_ty);
-                            self.lsp.definitions.push((param_id, param_name.clone(), *param_span));
+                            self.lsp
+                                .definitions
+                                .push((param_id, param_name.clone(), *param_span));
                         }
                     } else {
                         for (param_name, param_span) in &arm.params {
@@ -234,7 +272,9 @@ impl Checker {
                             );
                             self.lsp.node_spans.insert(param_id, *param_span);
                             self.lsp.type_at_span.insert(*param_span, param_ty);
-                            self.lsp.definitions.push((param_id, param_name.clone(), *param_span));
+                            self.lsp
+                                .definitions
+                                .push((param_id, param_name.clone(), *param_span));
                         }
                     }
 

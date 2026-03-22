@@ -312,7 +312,7 @@ impl Checker {
                 expr: inner,
                 handler,
                 ..
-            } => self.infer_with(inner, handler, span),
+            } => self.infer_with(inner, handler, span, node_id),
 
             ExprKind::Resume { value, .. } => {
                 let val_ty = self.infer_expr(value)?;
