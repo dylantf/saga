@@ -3,12 +3,12 @@
 ## Syntax
 
 ```
-type Color { Red | Green | Blue } deriving {Show, Eq}
+type Color = Red | Green | Blue deriving {Show, Eq}
 
-type Maybe a { Some(a) | None } deriving {Show}
+type Maybe a = Some(a) | None deriving {Show}
 ```
 
-`deriving {Trait1, Trait2}` appears after the closing `}` of a type definition.
+`deriving {Trait1, Trait2}` appears after the last variant of a type definition.
 
 ## Existing infrastructure
 
@@ -37,7 +37,7 @@ This is exactly the pattern we need to generalize.
 
 Add `deriving: Vec<String>` field to the `TypeDef` AST node in `ast.rs`.
 
-In the parser (`parser/decl.rs`), after parsing the closing `}` of a type definition, check for the `deriving` keyword. If present, parse `{ Trait1, Trait2 }` as a comma-separated list of trait names.
+In the parser (`parser/decl.rs`), after parsing the last variant of a type definition, check for the `deriving` keyword. If present, parse `{ Trait1, Trait2 }` as a comma-separated list of trait names.
 
 ### 2. Typechecker (small)
 

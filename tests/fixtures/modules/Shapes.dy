@@ -1,13 +1,10 @@
 module Shapes
 
-pub type Shape { 
-  Circle(Float)
-  Rect(Float, Float) 
-}
+pub type Shape
+  = Circle(Float)
+  | Rect(Float, Float)
 
-type InternalConfig { 
-  Config(Int) 
-}
+type InternalConfig = Config(Int)
 
 pub fun area : (s: Shape) -> Float
 area s = case s {

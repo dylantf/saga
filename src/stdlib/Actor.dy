@@ -3,7 +3,7 @@ module Std.Actor
 #@ Process identifier, parameterized by the message type the process accepts.
 #@ At runtime this is an Erlang pid. The constructor is exposed so handler
 #@ authors can build alternative implementations (e.g. sync handlers for testing).
-pub type Pid msg { Pid(Int) }
+pub type Pid msg = Pid(Int)
 
 #@ Process effect: spawn and send
 #@ Type variable `msg` is free per call site, inferred from the pid / spawned function.
@@ -19,21 +19,19 @@ pub effect Actor msg {
 }
 
 #@ Exit reasons for monitored processes
-pub type ExitReason {
-  Normal
-  Shutdown
-  Killed
-  Noproc
-  Error(String)
-  Other(String)
-}
+pub type ExitReason
+  = Normal
+  | Shutdown
+  | Killed
+  | Noproc
+  | Error(String)
+  | Other(String)
 
 #@ System messages delivered to the mailbox by the runtime (e.g. monitor notifications).
 #@ These can be matched in receive blocks alongside regular messages.
-pub type SystemMsg {
-  Down(Pid a, ExitReason)
-  Exit(Pid a, ExitReason)
-}
+pub type SystemMsg
+  = Down(Pid a, ExitReason)
+  | Exit(Pid a, ExitReason)
 
 impl Show for ExitReason {
   show r = case r {
@@ -46,7 +44,7 @@ impl Show for ExitReason {
   }
 }
 
-pub opaque type MonitorRef { MonitorRef }
+pub opaque type MonitorRef = MonitorRef
 
 #@ Monitor processes and get notified when they die
 pub effect Monitor {
@@ -61,7 +59,7 @@ pub effect Link {
 }
 
 #@ Timer effect: delays and scheduled messages
-pub opaque type TimerRef { TimerRef }
+pub opaque type TimerRef = TimerRef
 
 pub effect Timer {
   fun sleep : (ms: Int) -> Unit

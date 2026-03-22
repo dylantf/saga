@@ -98,11 +98,10 @@ Under the hood:
 ## Example: Counter
 
 ```
-type CounterMsg {
-  Increment(Int)
-  GetCount(Pid Int)
-  Stop
-}
+type CounterMsg
+  = Increment(Int)
+  | GetCount(Pid Int)
+  | Stop
 
 fun counter (count: Int) -> Unit needs {Process, Actor CounterMsg}
 counter count = {
@@ -134,15 +133,13 @@ main () = {
 ## Example: Multiple child types
 
 ```
-type CounterMsg {
-  Increment(Int)
-  GetCount(Pid Int)
-}
+type CounterMsg
+  = Increment(Int)
+  | GetCount(Pid Int)
 
-type LogMsg {
-  Log(String)
-  Flush
-}
+type LogMsg
+  = Log(String)
+  | Flush
 
 fun run () -> Unit needs {Process, Actor Int}
 run () = {

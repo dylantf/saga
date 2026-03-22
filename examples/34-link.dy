@@ -1,6 +1,6 @@
 import Std.Actor
 
-type WorkerMsg { Go | Crash }
+type WorkerMsg = Go | Crash
 
 fun worker : Unit -> Unit needs {Process, Actor WorkerMsg}
 worker () = receive {

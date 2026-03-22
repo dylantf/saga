@@ -158,10 +158,13 @@ impl Parser {
             self.expect(Token::Colon)?;
             let field_type = self.parse_type_expr()?;
             fields.push((field_name, field_type));
-            if matches!(self.peek(), Token::Comma) {
-                self.advance();
-            }
             self.skip_terminators();
+            if matches!(self.peek(), Token::RBrace) {
+                // last field, no trailing comma needed
+            } else {
+                self.expect(Token::Comma)?;
+                self.skip_terminators();
+            }
         }
 
         let end = self.tokens[self.pos].span;
@@ -201,21 +204,36 @@ impl Parser {
         let name_span = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let mut type_params = Vec::new();
-        while !matches!(self.peek(), Token::LBrace | Token::Eof) {
+        while !matches!(self.peek(), Token::Eq | Token::Terminator | Token::Eof) {
             type_params.push(self.expect_ident()?);
         }
-        self.expect(Token::LBrace)?;
         self.skip_terminators();
-        let mut variants = Vec::new();
-        while !matches!(self.peek(), Token::RBrace) {
-            if matches!(self.peek(), Token::Bar) {
-                self.advance(); // skip optional `|` separator
-            }
-            variants.push(self.parse_type_constructor_def()?);
+        self.expect(Token::Eq)?;
+        self.skip_terminators();
+
+        // Optional leading `|` before first variant
+        if matches!(self.peek(), Token::Bar) {
+            self.advance();
             self.skip_terminators();
         }
-        let end = self.tokens[self.pos].span;
-        self.expect(Token::RBrace)?;
+
+        let mut variants = Vec::new();
+        let first = self.parse_type_constructor_def()?;
+        let mut end = first.span;
+        variants.push(first);
+
+        loop {
+            self.skip_terminators();
+            if matches!(self.peek(), Token::Bar) {
+                self.advance();
+                self.skip_terminators();
+                let variant = self.parse_type_constructor_def()?;
+                end = variant.span;
+                variants.push(variant);
+            } else {
+                break;
+            }
+        }
 
         // Parse optional `deriving (Show, Eq, ...)`
         let mut deriving = Vec::new();
@@ -230,6 +248,7 @@ impl Parser {
                     break;
                 }
             }
+            end = self.tokens[self.pos].span;
             self.expect(Token::RParen)?;
         }
 
@@ -962,10 +981,13 @@ impl Parser {
                     self.expect(Token::Colon)?;
                     let field_type = self.parse_type_expr()?;
                     fields.push((field_name, field_type));
-                    if matches!(self.peek(), Token::Comma) {
-                        self.advance();
-                    }
                     self.skip_terminators();
+                    if matches!(self.peek(), Token::RBrace) {
+                        // last field, no trailing comma needed
+                    } else {
+                        self.expect(Token::Comma)?;
+                        self.skip_terminators();
+                    }
                 }
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;

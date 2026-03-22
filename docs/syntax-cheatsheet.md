@@ -105,23 +105,21 @@ abs n = if n < 0 then -n else n
 ## ADTs
 
 ```
-type Shape {
-  Circle(Float)
-  Rect(Float, Float)
-  Point
-}
+type Shape
+  = Circle(Float)
+  | Rect(Float, Float)
+  | Point
 
 # With type parameter
-type Maybe a {
-  Just(a)
-  Nothing
-}
+type Maybe a
+  = Just(a)
+  | Nothing
 
-# Pipe separator (optional, newlines also work)
-type Color { Red | Green | Blue }
+# Single line
+type Color = Red | Green | Blue
 
 # Opaque types (opaque keyword implies `pub`)
-opaque type Foo { Bar | Baz }
+opaque type Foo = Bar | Baz
 ```
 
 ---
@@ -129,6 +127,7 @@ opaque type Foo { Bar | Baz }
 ## Records
 
 ```
+# Comma-separated fields (trailing comma optional)
 record User {
   name : String,
   age  : Int,
@@ -448,7 +447,7 @@ M.abs (-5)
 # Visibility
 pub fun exported : Unit -> Int   # visible to importers
 fun private : Unit -> Int        # module-internal only
-pub type Shape { ... }
+pub type Shape = ...
 pub record User { ... }
 pub handler console for Log { ... }
 ```

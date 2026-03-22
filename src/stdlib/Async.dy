@@ -2,7 +2,7 @@ module Std.Async
 
 import Std.Actor
 
-pub opaque type Future a { Future(Pid a) }
+pub opaque type Future a = Future(Pid a)
 
 pub effect Async {
   fun async : (f: () -> a) -> Future a

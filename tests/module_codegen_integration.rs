@@ -756,7 +756,7 @@ main () = {
 fn opaque_type_exports_name_but_not_constructors() {
     let lib_src = "
 module OpaqueLib
-opaque type Token { Secret(String) }
+opaque type Token = Secret(String)
 pub fun make_token : (s: String) -> Token
 make_token s = Secret s
 ";
@@ -778,7 +778,7 @@ main () = make_token \"abc\"
 fn opaque_type_constructor_rejected_by_importer() {
     let lib_src = "
 module OpaqueLib2
-opaque type Token { Secret(String) }
+opaque type Token = Secret(String)
 pub fun make_token : (s: String) -> Token
 make_token s = Secret s
 ";
@@ -802,7 +802,7 @@ main () = Secret \"abc\"
 fn opaque_type_compiles_and_runs_on_beam() {
     let lib_src = "
 module OpaqueLib3
-opaque type Token { Secret(String) }
+opaque type Token = Secret(String)
 pub fun make_token : (s: String) -> Token
 make_token s = Secret s
 

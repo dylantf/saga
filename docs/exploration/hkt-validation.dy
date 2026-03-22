@@ -9,10 +9,9 @@ trait Applicative (f: * -> *) where {f: Functor} {
   fun ap : (ff: f (a -> b)) -> (fa: f a) -> f b
 }
 
-type Validation e a {
-  Valid(a)
-  Invalid(e)
-}
+type Validation e a
+  = Valid(a)
+  | Invalid(e)
 
 impl Functor for Validation e {
   map f v = case v {

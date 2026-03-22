@@ -18,10 +18,9 @@ require_min_age min age =
 record UserInput { name: String, age: Int }
 record ValidUser { name: String, age: Int } deriving (Debug)
 
-type Validation e a { 
-  Valid(a)
-  Invalid(e) 
-}
+type Validation e a
+  = Valid(a)
+  | Invalid(e)
 
 impl Debug for Validation e a where {e: Debug, a: Debug} {
   debug v = case v {

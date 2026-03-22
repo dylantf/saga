@@ -1104,7 +1104,7 @@ fn fun_binding_with_guard() {
 
 #[test]
 fn type_def_simple() {
-    let decls = parse("type Option a {\n  Just(a)\n  Nothing\n}");
+    let decls = parse("type Option a\n  = Just(a)\n  | Nothing");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::TypeDef {
@@ -1544,7 +1544,7 @@ fn record_def_simple() {
 
 #[test]
 fn record_def_no_trailing_comma() {
-    let decls = parse("record Point {\n  x: Int\n  y: Int\n}");
+    let decls = parse("record Point { x: Int, y: Int }");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::RecordDef { name, fields, .. } => {
@@ -2101,7 +2101,7 @@ fn impl_def_with_needs() {
 
 #[test]
 fn pub_type_def() {
-    let decls = parse("pub type Shape { Circle(Float) }");
+    let decls = parse("pub type Shape = Circle(Float)");
     match &decls[0] {
         Decl::TypeDef { public, name, .. } => {
             assert!(public, "pub type should set public = true");
@@ -2113,7 +2113,7 @@ fn pub_type_def() {
 
 #[test]
 fn private_type_def() {
-    let decls = parse("type Shape { Circle(Float) }");
+    let decls = parse("type Shape = Circle(Float)");
     match &decls[0] {
         Decl::TypeDef { public, .. } => {
             assert!(!public, "bare type should set public = false");
@@ -2124,7 +2124,7 @@ fn private_type_def() {
 
 #[test]
 fn pub_record_def() {
-    let decls = parse("pub record User {\n  name: String\n}");
+    let decls = parse("pub record User { name: String }");
     match &decls[0] {
         Decl::RecordDef { public, name, .. } => {
             assert!(public);
@@ -2136,7 +2136,7 @@ fn pub_record_def() {
 
 #[test]
 fn private_record_def() {
-    let decls = parse("record User {\n  name: String\n}");
+    let decls = parse("record User { name: String }");
     match &decls[0] {
         Decl::RecordDef { public, .. } => {
             assert!(!public);
@@ -2748,7 +2748,7 @@ fn external_fun_with_where_clause() {
 
 #[test]
 fn type_def_deriving_show() {
-    let decls = parse("type Color { Red | Green | Blue } deriving (Show)");
+    let decls = parse("type Color = Red | Green | Blue deriving (Show)");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::TypeDef { name, deriving, .. } => {
@@ -2762,7 +2762,7 @@ fn type_def_deriving_show() {
 #[test]
 fn type_def_deriving_multiple() {
     // Parser accepts multiple traits even if not all are implemented yet
-    let decls = parse("type Foo { A | B } deriving (Show, Eq)");
+    let decls = parse("type Foo = A | B deriving (Show, Eq)");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::TypeDef { deriving, .. } => {
@@ -2774,7 +2774,7 @@ fn type_def_deriving_multiple() {
 
 #[test]
 fn type_def_no_deriving() {
-    let decls = parse("type Foo { A | B }");
+    let decls = parse("type Foo = A | B");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::TypeDef { deriving, .. } => {

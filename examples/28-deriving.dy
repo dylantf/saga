@@ -1,7 +1,7 @@
-type Animal {
-  Dog(age: Int)
-  Cat
-} deriving (Show, Eq)
+type Animal
+  = Dog(age: Int)
+  | Cat
+  deriving (Show, Eq)
 
 speak animal = case animal {
   Dog(age) | age > 15 -> "im tired"
@@ -14,9 +14,9 @@ comp _ _ = "🚫 Not equal!"
 
 # Deriving Ord: constructors are compared by declaration order,
 # fields are compared left-to-right.
-type Color { Red | Green | Blue } deriving (Show, Eq, Ord, Enum)
-type Priority { Low | Medium | High } deriving (Show, Eq, Ord, Enum)
-type Scored a { Scored(score: Int, value: a) } deriving (Show, Eq, Ord)
+type Color = Red | Green | Blue deriving (Show, Eq, Ord, Enum)
+type Priority = Low | Medium | High deriving (Show, Eq, Ord, Enum)
+type Scored a = Scored(score: Int, value: a) deriving (Show, Eq, Ord)
 
 main () = {
   let hans = Dog 5
