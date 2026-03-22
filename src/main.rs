@@ -1,5 +1,5 @@
-use dylang::{ast, codegen, derive, elaborate, lexer, parser, token, typechecker};
-use serde::Deserialize;
+use dylang::{ast, codegen, derive, elaborate, lexer, parser, project_config, token, typechecker};
+use project_config::ProjectConfig;
 
 use std::env;
 use std::fs;
@@ -67,125 +67,6 @@ fn print_tc_diagnostic(source: &str, source_path: &str, d: &typechecker::Diagnos
         typechecker::Severity::Warning => "Warning",
     };
     print_diagnostic(source, source_path, label, d.span, &d.message);
-}
-
-/// Parsed project.toml configuration.
-#[derive(Debug, Deserialize, Default)]
-struct ProjectConfig {
-    #[serde(default)]
-    project: ProjectSection,
-    #[serde(default)]
-    library: Option<LibrarySection>,
-    #[serde(default)]
-    bin: Option<BinSection>,
-    #[serde(default)]
-    deps: Option<std::collections::HashMap<String, DepEntry>>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[allow(dead_code)]
-struct ProjectSection {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    tests_dir: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct LibrarySection {
-    module: String,
-    expose: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Clone, Default)]
-struct BinSection {
-    #[serde(default)]
-    main: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
-struct DepEntry {
-    path: String,
-    #[serde(rename = "as")]
-    alias: Option<String>,
-}
-
-impl ProjectConfig {
-    fn load(project_root: &std::path::Path) -> Self {
-        let path = project_root.join("project.toml");
-        match fs::read_to_string(&path) {
-            Ok(contents) => toml::from_str(&contents).unwrap_or_else(|e| {
-                eprintln!("Warning: failed to parse project.toml: {}", e);
-                ProjectConfig::default()
-            }),
-            Err(_) => ProjectConfig::default(),
-        }
-    }
-
-    fn tests_dir(&self) -> &str {
-        self.project.tests_dir.as_deref().unwrap_or("tests")
-    }
-
-    /// The main entry point file. Defaults to "Main.dy".
-    fn main_file(&self) -> &str {
-        self.bin
-            .as_ref()
-            .and_then(|b| b.main.as_deref())
-            .unwrap_or("Main.dy")
-    }
-
-    /// Whether this project can be run (has a binary entry point).
-    fn is_bin(&self) -> bool {
-        // Backward compat: if no [library] or [bin] section, treat as bin
-        if self.library.is_none() && self.bin.is_none() {
-            return true;
-        }
-        self.bin.is_some()
-    }
-
-    /// Whether this project is a library.
-    #[allow(dead_code)]
-    fn is_library(&self) -> bool {
-        self.library.is_some()
-    }
-
-    /// Validate the config and exit on errors.
-    fn validate(&self) {
-        if let Some(lib) = &self.library {
-            // All expose entries must be prefixed by the library module name
-            for exposed in &lib.expose {
-                if exposed != &lib.module && !exposed.starts_with(&format!("{}.", lib.module)) {
-                    eprintln!(
-                        "Error in project.toml: exposed module '{}' must be prefixed by library module '{}'",
-                        exposed, lib.module
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        if let Some(deps) = &self.deps {
-            for (name, dep) in deps {
-                // Validate dep path exists
-                let dep_path = std::path::Path::new(&dep.path);
-                if !dep_path.exists() {
-                    eprintln!(
-                        "Error in project.toml: dependency '{}' path '{}' does not exist",
-                        name, dep.path
-                    );
-                    std::process::exit(1);
-                }
-                if !dep_path.join("project.toml").exists() {
-                    eprintln!(
-                        "Error in project.toml: dependency '{}' at '{}' has no project.toml",
-                        name, dep.path
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
-    }
 }
 
 fn print_usage() {
@@ -261,6 +142,7 @@ fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
         std::process::exit(1);
     })
 }
+
 
 /// Compile all Std.* modules referenced in codegen_info into the build directory.
 /// Lower an elaborated module to Core Erlang and write it to the build directory.
@@ -377,12 +259,23 @@ fn build_project(
     });
 
     let config = ProjectConfig::load(&project_root);
-    config.validate();
+    if let Err(e) = config.validate() {
+        eprintln!("Error in project.toml: {}", e);
+        std::process::exit(1);
+    }
 
     let has_bin = config.is_bin();
 
     // Phase 1: Typecheck
     let mut checker = make_checker(Some(project_root.clone()));
+
+    // Resolve dependencies and merge their modules into the module map
+    if let Some(deps) = &config.deps
+        && let Err(e) = project_config::resolve_deps(&mut checker, &project_root, deps)
+    {
+        eprintln!("Error resolving dependencies: {}", e);
+        std::process::exit(1);
+    }
 
     // If this project has a binary entry point, typecheck Main
     let main_program = if has_bin {
@@ -635,14 +528,23 @@ fn cmd_check(file: Option<&str>) {
                 std::process::exit(1);
             });
             let config = ProjectConfig::load(&project_root);
-            config.validate();
+            if let Err(e) = config.validate() {
+        eprintln!("Error in project.toml: {}", e);
+        std::process::exit(1);
+    }
             let main_file = config.main_file();
             let main_path = project_root.join(main_file);
             let source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
                 eprintln!("Error reading {}: {}", main_file, e);
                 std::process::exit(1);
             });
-            let mut checker = make_checker(Some(project_root));
+            let mut checker = make_checker(Some(project_root.clone()));
+            if let Some(deps) = &config.deps
+                && let Err(e) = project_config::resolve_deps(&mut checker, &project_root, deps)
+            {
+                eprintln!("Error resolving dependencies: {}", e);
+                std::process::exit(1);
+            }
             let _ = parse_and_typecheck(&source, main_file, &mut checker);
             eprintln!("OK");
         }

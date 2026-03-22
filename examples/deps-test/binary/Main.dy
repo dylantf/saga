@@ -2,6 +2,7 @@ module Main
 
 import MathLib (add, double, square)
 
+pub fun main : Unit -> Unit
 main () = {
   let result = add 3 4
   println (show result)

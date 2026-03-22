@@ -4,5 +4,6 @@ pub mod derive;
 pub mod elaborate;
 pub mod lexer;
 pub mod parser;
+pub mod project_config;
 pub mod token;
 pub mod typechecker;
