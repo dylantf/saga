@@ -206,10 +206,10 @@ fn cache_dir() -> PathBuf {
 
 /// Hash a git URL to a short directory name.
 fn url_hash(url: &str) -> String {
-    let mut hash: u64 = 0;
-    for b in url.bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(b as u64);
-    }
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    let hash = hasher.finish();
     let name = url
         .trim_end_matches('/')
         .rsplit('/')
@@ -220,11 +220,24 @@ fn url_hash(url: &str) -> String {
 }
 
 /// Ensure a bare clone of the repo exists in the cache. Returns the path to the bare repo.
-fn ensure_bare_clone(url: &str) -> Result<PathBuf, String> {
+/// If `needed_commit` is provided and already exists in the repo, skip fetching.
+fn ensure_bare_clone(url: &str, needed_commit: Option<&str>) -> Result<PathBuf, String> {
     let dir = cache_dir().join(url_hash(url));
     let repo_dir = dir.join("repo");
 
     if repo_dir.exists() {
+        // If we already have the commit we need, skip the network fetch
+        if let Some(commit) = needed_commit {
+            let output = std::process::Command::new("git")
+                .args(["cat-file", "-t", commit])
+                .current_dir(&repo_dir)
+                .output()
+                .map_err(|e| format!("failed to run git cat-file: {}", e))?;
+            if output.status.success() {
+                return Ok(repo_dir);
+            }
+        }
+
         let status = std::process::Command::new("git")
             .args(["fetch", "--all", "--tags", "--quiet"])
             .current_dir(&repo_dir)
@@ -325,7 +338,7 @@ pub fn resolve_git_dep(
         .as_ref()
         .ok_or_else(|| format!("dependency '{}' has no git URL", dep_name))?;
 
-    let bare_repo = ensure_bare_clone(url)?;
+    let bare_repo = ensure_bare_clone(url, locked_commit)?;
 
     let commit = if let Some(locked) = locked_commit {
         locked.to_string()

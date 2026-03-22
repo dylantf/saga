@@ -1,8 +1,0 @@
-[project]
-name = "git-consumer"
-
-[bin]
-main = "Main.dy"
-
-[deps]
-mathlib = { git = "/tmp/dylang-test-lib", tag = "v1.1.0" }
