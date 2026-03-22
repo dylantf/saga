@@ -2,11 +2,10 @@
 
 # --- Custom types ---
 
-type Shape {
-  Circle(radius: Float)
-  Rect(Float, Float)
-  Triangle(Float, Float, Float)
-}
+type Shape
+  = Circle(radius: Float)
+  | Rect(Float, Float)
+  | Triangle(Float, Float, Float)
 
 fun area : Shape -> Float
 area shape = case shape {

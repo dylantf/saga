@@ -148,7 +148,7 @@ is_odd n = if n == 0 then False else is_even (n - 1)
 #[test]
 fn trait_dict_constructor_emitted() {
     let src = "
-type Color { Red | Green | Blue }
+type Color = Red | Green | Blue
 
 trait Describe a {
   fun describe : (x: a) -> String
@@ -180,7 +180,7 @@ main () = describe Red
 #[test]
 fn trait_method_call_uses_dict() {
     let src = "
-type Color { Red | Green | Blue }
+type Color = Red | Green | Blue
 
 trait Describe a {
   fun describe : (x: a) -> String
@@ -344,7 +344,7 @@ fn show_triple_tuple_has_three_elements() {
 #[test]
 fn show_user_defined_adt_uses_impl() {
     let src = "
-type Color { Red | Green | Blue }
+type Color = Red | Green | Blue
 
 impl Show for Color {
   show c = case c {
@@ -377,7 +377,7 @@ main () = show Red
 #[test]
 fn print_user_defined_adt() {
     let src = "
-type Color { Red | Green | Blue }
+type Color = Red | Green | Blue
 
 impl Show for Color {
   show c = case c {
@@ -407,7 +407,7 @@ main () = println (show Red)
 #[test]
 fn show_parameterized_type_applies_sub_dicts() {
     let src = r#"
-type Box a { Wrap(a) }
+type Box a = Wrap(a)
 
 impl Show for Box a where {a: Show} {
   show b = case b {
@@ -599,7 +599,7 @@ main () = risky () with {
 #[test]
 fn with_return_clause() {
     let src = r#"
-type Result a b { Ok(a) | Err(b) }
+type Result a b = Ok(a) | Err(b)
 
 effect Fail {
   fun fail : (msg: String) -> a
@@ -1072,7 +1072,7 @@ fn hof_effect_absorption_try_pattern() {
     // The lambda should get _HandleFail as an extra param,
     // and `computation ()` inside try should pass it.
     let src = r#"
-type Result a e { Ok(a) | Err(e) }
+type Result a e = Ok(a) | Err(e)
 
 effect Fail {
   fun fail : (msg: String) -> a
@@ -1097,7 +1097,7 @@ main () = try_it (fun () -> fail! "oops")
 fn hof_effect_absorption_lambda_with_block() {
     // Lambda with a block body that uses effects
     let src = r#"
-type Result a e { Ok(a) | Err(e) }
+type Result a e = Ok(a) | Err(e)
 
 effect Fail {
   fun fail : (msg: String) -> a
@@ -1147,7 +1147,7 @@ fn return_clause_inside_cps_chain() {
     // The return clause should be inside the CPS chain, not a post-wrapper.
     // Verify the return clause (Ok wrapper) is inside the CPS chain.
     let src = r#"
-type Result a e { Ok(a) | Err(e) }
+type Result a e = Ok(a) | Err(e)
 
 effect Fail {
   fun fail : (msg: String) -> a
@@ -1170,7 +1170,7 @@ try_it computation = computation () with {
 fn return_clause_with_handler_compiles() {
     // End-to-end: return clause + handler abort compiles to valid Core Erlang.
     let src = r#"
-type Result a e { Ok(a) | Err(e) }
+type Result a e = Ok(a) | Err(e)
 
 effect Fail {
   fun fail : (msg: String) -> a
@@ -1329,7 +1329,7 @@ main () = make_pair () with answer_42
 fn effect_in_adt_constructor_arg() {
     // Effect call as ADT constructor argument.
     let src = r#"
-type Maybe a { Some(a) | None }
+type Maybe a = Some(a) | None
 
 effect Ask {
   fun ask : Unit -> Int
@@ -1479,7 +1479,7 @@ main () = outer () with silent
 fn abort_skips_remaining_in_nested_calls() {
     // Abort-style handler in inner function should skip continuation in outer.
     let src = r#"
-type Result a e { Ok(a) | Err(e) }
+type Result a e = Ok(a) | Err(e)
 
 effect Fail {
   fun fail : (msg: String) -> a
@@ -1565,7 +1565,7 @@ main () = use_pair () with answer
 fn constructor_destructure_after_effect() {
     // Constructor pattern match on effect result.
     let src = r#"
-type Maybe a { Just(a) | Nothing }
+type Maybe a = Just(a) | Nothing
 
 effect Ask {
   fun ask : Unit -> Maybe Int

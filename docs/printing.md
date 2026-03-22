@@ -82,7 +82,7 @@ $"Debug: {debug x}"
 
 ```
 # Derives structural Debug (and Show, if you want it)
-type Color { Red | Green | Blue } deriving (Debug, Show)
+type Color = Red | Green | Blue deriving (Debug, Show)
 
 # Debug only (the common case for complex types)
 record User { name: String, age: Int } deriving (Debug)

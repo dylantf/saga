@@ -44,7 +44,7 @@ enroll_student (Student as student) (School as school)  = {
 # Nested record
 
 record House {
-  year_built: Int
+  year_built: Int,
   address: {
     number: Int,
     street: String,

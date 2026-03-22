@@ -3,10 +3,9 @@ record Point {
   y: Int,
 }
 
-type Shape {
-  Circle(Float)
-  Rect(Float, Float)
-}
+type Shape
+  = Circle(Float)
+  | Rect(Float, Float)
 
 impl Show for Point {
   show p = $"({p.x}, {p.y})"

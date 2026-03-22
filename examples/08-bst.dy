@@ -1,7 +1,6 @@
-type Tree {
-  Empty
-  Node(Tree, Int, Tree)
-}
+type Tree
+  = Empty
+  | Node(Tree, Int, Tree)
 
 insert t x = case t {
   Empty -> Node(Empty, x, Empty)

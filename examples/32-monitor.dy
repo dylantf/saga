@@ -1,9 +1,8 @@
 import Std.Actor
 
-type WorkerMsg {
-  Work(Int)
-  Die
-}
+type WorkerMsg
+  = Work(Int)
+  | Die
 
 fun worker : Unit -> Unit needs {Process, Actor WorkerMsg}
 worker () = receive {

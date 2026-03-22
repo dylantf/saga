@@ -63,20 +63,17 @@ main () = {
 ## 2. ADTs and Pattern Matching
 
 ```
-type Maybe a {
-  Maybe(a)
-  Nothing
-}
+type Maybe a
+  = Maybe(a)
+  | Nothing
 
-type Result a e {
-  Ok(a)
-  Err(e)
-}
+type Result a e
+  = Ok(a)
+  | Err(e)
 
-type List a {
-  Cons(a, List a)
-  Nil
-}
+type List a
+  = Cons(a, List a)
+  | Nil
 
 # Exhaustive pattern matching
 pub fun unwrap : Option a -> a -> a
@@ -86,11 +83,10 @@ unwrap opt default = case opt {
 }
 
 # Nested patterns
-type Expr {
-  Lit(Int)
-  Add(Expr, Expr)
-  Mul(Expr, Expr)
-}
+type Expr
+  = Lit(Int)
+  | Add(Expr, Expr)
+  | Mul(Expr, Expr)
 
 pub fun eval : Expr -> Int
 eval expr = case expr {
@@ -127,7 +123,7 @@ Opaque types are also possible. The type is exposed to other modules, but the co
 
 ```
 module A
-opaque type Foo { Bar | Baz }
+opaque type Foo = Bar | Baz
 
 module B
 # This is ok
@@ -175,10 +171,9 @@ record ApiError {
   message : String,
 }
 
-type ApiResponse {
-  Success
-  ApiError
-}
+type ApiResponse
+  = Success
+  | ApiError
 
 # Pattern matching on record variants
 pub fun describe : ApiResponse -> String
@@ -214,10 +209,9 @@ has_value opt = case opt {
 }
 
 # ADTs can still have simple positional variants
-type Maybe a {
-  Just(a)
-  None
-}
+type Maybe a
+  = Just(a)
+  | None
 
 # Rule: ADT variants are either bare names (possibly records)
 # or carry positional data with parens. Never inline field definitions.
@@ -524,11 +518,10 @@ record User {
   email : String,
 }
 
-type ApiError {
-  NotFound(String)
-  Unauthorized
-  ServerError(String)
-}
+type ApiError
+  = NotFound(String)
+  | Unauthorized
+  | ServerError(String)
 
 effect Log {
   fun log : String -> Unit

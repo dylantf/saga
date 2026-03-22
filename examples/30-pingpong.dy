@@ -1,12 +1,8 @@
 import Std.Actor
 
-type PingMsg {
-  Ping(Pid PongMsg)
-}
+type PingMsg = Ping(Pid PongMsg)
 
-type PongMsg {
-  Pong(Int)
-}
+type PongMsg = Pong(Int)
 
 fun pong_server : (count: Int) -> Unit needs {Process, Actor PingMsg}
 pong_server count = {

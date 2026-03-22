@@ -8,9 +8,7 @@ import Std.Actor (Pid)
 
 # A simple "worker" that would normally run in a separate process.
 # It just computes a value and sends it back to the caller.
-type WorkerMsg {
-  Compute(Int, Pid Int)
-}
+type WorkerMsg = Compute(Int, Pid Int)
 
 fun worker : Unit -> Unit needs {Process, Actor WorkerMsg}
 worker () = {

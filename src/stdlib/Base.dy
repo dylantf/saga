@@ -11,7 +11,7 @@ pub trait Debug a {
   fun debug : a -> String
 }
 
-pub type Ordering { Lt | Eq | Gt } deriving (Show, Debug, Eq)
+pub type Ordering = Lt | Eq | Gt deriving (Show, Debug, Eq)
 
 pub trait Ord a where {a: Eq} {
   fun compare : a -> a -> Ordering

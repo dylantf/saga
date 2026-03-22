@@ -148,7 +148,7 @@ fn block_returns_last() {
 
 #[test]
 fn constructor_type() {
-    let checker = check("type Maybe a {\n  Just(a)\n  Nothing\n}\nlet x = Just 42").unwrap();
+    let checker = check("type Maybe a\n  = Just(a)\n  | Nothing\nlet x = Just 42").unwrap();
     let ty = checker.sub.apply(&checker.env.get("x").unwrap().ty);
     assert_eq!(ty, Type::Con("Maybe".into(), vec![Type::int()]));
 }
@@ -162,7 +162,7 @@ fn case_literal_patterns() {
 #[test]
 fn case_constructor_patterns() {
     let checker =
-        check("type Maybe a {\n  Just(a)\n  Nothing\n}\nlet x = case Just 42 {\n  Just(n) -> n + 1\n  Nothing -> 0\n}")
+        check("type Maybe a\n  = Just(a)\n  | Nothing\nlet x = case Just 42 {\n  Just(n) -> n + 1\n  Nothing -> 0\n}")
             .unwrap();
     let ty = checker.sub.apply(&checker.env.get("x").unwrap().ty);
     assert_eq!(ty, Type::int());
@@ -171,7 +171,7 @@ fn case_constructor_patterns() {
 #[test]
 fn case_branch_type_mismatch() {
     let result = check(
-        "type Maybe a {\n  Just(a)\n  Nothing\n}\nlet x = case Just 42 {\n  Just(n) -> n\n  Nothing -> \"nope\"\n}",
+        "type Maybe a\n  = Just(a)\n  | Nothing\nlet x = case Just 42 {\n  Just(n) -> n\n  Nothing -> \"nope\"\n}",
     );
     assert!(result.is_err());
 }
@@ -179,7 +179,7 @@ fn case_branch_type_mismatch() {
 #[test]
 fn case_binds_pattern_vars() {
     let checker =
-        check("type Maybe a {\n  Just(a)\n  Nothing\n}\nlet x = case Just \"hello\" {\n  Just(s) -> s <> \" world\"\n  Nothing -> \"default\"\n}")
+        check("type Maybe a\n  = Just(a)\n  | Nothing\nlet x = case Just \"hello\" {\n  Just(s) -> s <> \" world\"\n  Nothing -> \"default\"\n}")
             .unwrap();
     let ty = checker.sub.apply(&checker.env.get("x").unwrap().ty);
     assert_eq!(ty, Type::string());
@@ -195,14 +195,14 @@ fn case_with_guard() {
 #[test]
 fn case_pattern_vars_dont_leak() {
     let result = check(
-        "type Maybe a {\n  Just(a)\n  Nothing\n}\nlet x = case Just 42 {\n  Just(n) -> n\n  Nothing -> n\n}",
+        "type Maybe a\n  = Just(a)\n  | Nothing\nlet x = case Just 42 {\n  Just(n) -> n\n  Nothing -> n\n}",
     );
     assert!(result.is_err());
 }
 
 #[test]
 fn constructor_no_args() {
-    let checker = check("type Maybe a {\n  Just(a)\n  Nothing\n}\nlet x = Nothing").unwrap();
+    let checker = check("type Maybe a\n  = Just(a)\n  | Nothing\nlet x = Nothing").unwrap();
     let ty = checker.sub.apply(&checker.env.get("x").unwrap().ty);
     match ty {
         Type::Con(name, args) => {
@@ -996,10 +996,9 @@ fn ambiguous_type_var_from_where_clause() {
     // bound to a concrete type should be an error, not silently ignored.
     // e.g. Ok("foo") |> unwrap where unwrap requires {b: Show} but b is never resolved.
     let result = check(
-        "type MyResult a b {
-  Ok(a)
-  Err(b)
-}
+        "type MyResult a b
+  = Ok(a)
+  | Err(b)
 fun unwrap : (r: MyResult a b) -> a where {b: Show}
 unwrap r = case r {
   Ok(a) -> a
@@ -1027,10 +1026,9 @@ fn no_ambiguity_when_type_var_is_concrete() {
 impl Describe for String {
   describe s = s
 }
-type Result a b {
-  Ok(a)
-  Err(b)
-}
+type Result a b
+  = Ok(a)
+  | Err(b)
 fun unwrap : (r: Result a b) -> a where {b: Describe}
 unwrap r = case r {
   Ok(a) -> a
@@ -1055,10 +1053,9 @@ fn ascription_wrong_type() {
 #[test]
 fn ascription_resolves_ambiguous_type_var() {
     check(
-        "type MyResult a b {
-  Ok(a)
-  Err(b)
-}
+        "type MyResult a b
+  = Ok(a)
+  | Err(b)
 main () = {
   let x = (Ok(1) : MyResult Int String)
   x
@@ -1471,7 +1468,7 @@ fn debug_nested_list() {
 fn user_conditional_impl_satisfied() {
     // impl Show for Box a where {a: Show} -- show (Box 1) should work
     let result = check(
-        "type Box a { Box(a) }
+        "type Box a = Box(a)
 impl Show for Box a where {a: Show} {
   show box = \"box\"
 }
@@ -1485,7 +1482,7 @@ fn user_conditional_impl_unsatisfied() {
     // show (Box (Foo {})) should fail -- Foo has no Show impl
     let result = check(
         "record Foo { x: Int }
-type Box a { Box(a) }
+type Box a = Box(a)
 impl Show for Box a where {a: Show} {
   show box = \"box\"
 }
@@ -1503,7 +1500,7 @@ main () = show (Box (Foo { x: 1 }))",
 #[test]
 fn user_conditional_impl_unknown_type_var() {
     let result = check(
-        "type Box a { Box(a) }
+        "type Box a = Box(a)
 impl Show for Box a where {b: Show} {
   show box = \"box\"
 }
@@ -1721,7 +1718,7 @@ fn interp_infers_string() {
 fn interp_show_constraint_enforced() {
     // A type without Show cannot appear in a hole
     let result = check(
-        r#"type Foo { Foo }
+        r#"type Foo = Foo
 main () = $"val: {Foo}""#,
     );
     assert!(result.is_err());
@@ -1732,7 +1729,7 @@ main () = $"val: {Foo}""#,
 #[test]
 fn exhaustive_case_all_constructors() {
     check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
   Just(n) -> n
   Nothing -> 0
@@ -1744,7 +1741,7 @@ let x = case Just 42 {
 #[test]
 fn exhaustive_case_wildcard() {
     check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
   Just(n) -> n
   _ -> 0
@@ -1756,7 +1753,7 @@ let x = case Just 42 {
 #[test]
 fn exhaustive_case_var_pattern() {
     check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
   y -> 0
 }",
@@ -1767,7 +1764,7 @@ let x = case Just 42 {
 #[test]
 fn non_exhaustive_case_missing_constructor() {
     let result = check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
   Just(n) -> n
 }",
@@ -1784,7 +1781,7 @@ let x = case Just 42 {
 #[test]
 fn non_exhaustive_case_three_variants() {
     let result = check(
-        "type Color { Red | Green | Blue }
+        "type Color = Red | Green | Blue
 fun f : (c: Color) -> Int
 f c = case c {
   Red -> 1
@@ -1823,7 +1820,7 @@ fn non_exhaustive_case_bool_missing_false() {
 fn exhaustive_case_guard_with_wildcard_fallback() {
     // Guarded arm doesn't count for exhaustiveness, but wildcard fallback covers all
     check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
   Just(n) | n > 0 -> n
   _ -> 0
@@ -1836,7 +1833,7 @@ let x = case Just 42 {
 fn non_exhaustive_case_only_guarded_arm() {
     // Guarded arm alone doesn't cover the constructor
     let result = check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
   Just(n) | n > 0 -> n
   Nothing -> 0
@@ -1862,7 +1859,7 @@ fn case_int_with_wildcard() {
 #[test]
 fn do_else_exhaustive() {
     check(
-        "type Result a e { Ok(a) | Err(e) }
+        "type Result a e = Ok(a) | Err(e)
 fun get : Unit -> Result Int String
 get () = Ok(42)
 let x = do {
@@ -1878,7 +1875,7 @@ let x = do {
 #[test]
 fn do_else_non_exhaustive() {
     let result = check(
-        "type Shape { Circle | Rect | Point }
+        "type Shape = Circle | Rect | Point
 fun get_shape : Unit -> Shape
 get_shape () = Circle
 let x = do {
@@ -1896,7 +1893,7 @@ let x = do {
 #[test]
 fn do_else_wildcard_covers_all() {
     check(
-        "type Result a e { Ok(a) | Err(e) }
+        "type Result a e = Ok(a) | Err(e)
 fun get : Unit -> Result Int String
 get () = Ok(42)
 let x = do {
@@ -1914,7 +1911,7 @@ let x = do {
 #[test]
 fn unreachable_duplicate_constructor() {
     let result = check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
   Just(n) -> n
   Nothing -> 0
@@ -1929,7 +1926,7 @@ let x = case Just 42 {
 #[test]
 fn unreachable_after_wildcard() {
     let result = check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
   _ -> 0
   Just(n) -> n
@@ -1942,7 +1939,7 @@ let x = case Just 42 {
 #[test]
 fn unreachable_wildcard_after_all_covered() {
     let result = check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
   Just(n) -> n
   Nothing -> 0
@@ -1971,7 +1968,7 @@ fn unreachable_bool_duplicate() {
 fn guarded_arm_not_redundant() {
     // A guarded arm followed by an unguarded arm for the same constructor is fine
     check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
   Just(n) | n > 0 -> n
   Just(n) -> 0
@@ -2013,7 +2010,7 @@ fn int_case_with_var_fallback() {
 fn nested_exhaustive_all_combinations() {
     // All 4 combinations of (Bool, Bool) inside a constructor
     check(
-        "type Pair { MkPair(Bool, Bool) }
+        "type Pair = MkPair(Bool, Bool)
 fun f : (p: Pair) -> Int
 f p = case p {
   MkPair(True, True) -> 1
@@ -2029,7 +2026,7 @@ f p = case p {
 fn nested_non_exhaustive_missing_combination() {
     // Missing MkPair(False, False)
     let result = check(
-        "type Pair { MkPair(Bool, Bool) }
+        "type Pair = MkPair(Bool, Bool)
 fun f : (p: Pair) -> Int
 f p = case p {
   MkPair(True, True) -> 1
@@ -2047,7 +2044,7 @@ f p = case p {
 fn nested_exhaustive_with_wildcard_in_subpattern() {
     // Wildcard in second position covers both True and False
     check(
-        "type Pair { MkPair(Bool, Bool) }
+        "type Pair = MkPair(Bool, Bool)
 fun f : (p: Pair) -> Int
 f p = case p {
   MkPair(True, _) -> 1
@@ -2061,7 +2058,7 @@ f p = case p {
 fn nested_exhaustive_with_top_level_wildcard() {
     // A top-level wildcard covers everything
     check(
-        "type Pair { MkPair(Bool, Bool) }
+        "type Pair = MkPair(Bool, Bool)
 fun f : (p: Pair) -> Int
 f p = case p {
   MkPair(True, True) -> 1
@@ -2075,7 +2072,7 @@ f p = case p {
 fn nested_redundant_after_wildcards() {
     // MkPair(True, True) is already covered by the two wildcard arms
     let result = check(
-        "type Pair { MkPair(Bool, Bool) }
+        "type Pair = MkPair(Bool, Bool)
 fun f : (p: Pair) -> Int
 f p = case p {
   MkPair(True, _) -> 1
@@ -2091,7 +2088,7 @@ f p = case p {
 fn nested_maybe_of_bool_exhaustive() {
     // Maybe(Bool) fully covered
     check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 fun f : (m: Maybe Bool) -> Int
 f m = case m {
   Just(True) -> 1
@@ -2106,7 +2103,7 @@ f m = case m {
 fn nested_maybe_of_bool_missing() {
     // Missing Just(False)
     let result = check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 fun f : (m: Maybe Bool) -> Int
 f m = case m {
   Just(True) -> 1
@@ -2122,7 +2119,7 @@ f m = case m {
 fn nested_list_cons_exhaustive() {
     // List with nested pattern on head
     check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 fun f : (xs: List (Maybe Int)) -> Int
 f xs = case xs {
   Just(_) :: _ -> 1
@@ -2199,7 +2196,7 @@ f True = 1",
 #[test]
 fn fun_clauses_exhaustive_adt() {
     check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 fun f : (m: Maybe Int) -> Int
 f (Just(x)) = x
 f Nothing = 0",
@@ -2210,7 +2207,7 @@ f Nothing = 0",
 #[test]
 fn fun_clauses_non_exhaustive_adt() {
     let result = check(
-        "type Maybe a { Just(a) | Nothing }
+        "type Maybe a = Just(a) | Nothing
 fun f : (m: Maybe Int) -> Int
 f (Just(x)) = x",
     );
@@ -2234,7 +2231,7 @@ f True = 2",
 #[test]
 fn fun_clauses_with_wildcard_exhaustive() {
     check(
-        "type Color { Red | Green | Blue }
+        "type Color = Red | Green | Blue
 fun f : (c: Color) -> Int
 f Red = 1
 f _ = 0",
@@ -2595,7 +2592,7 @@ fn generic_effect_complex_type_param() {
   fun put : (val: s) -> Unit
 }
 
-type List a { Nil | Cons(a, List a) }
+type List a = Nil | Cons(a, List a)
 
 handler list_state for State (List Int) {
   get () = resume Nil
@@ -2616,7 +2613,7 @@ fn generic_effect_handler_return_clause() {
   fun put : (val: s) -> Unit
 }
 
-type Result a { Ok(a) | Err(String) }
+type Result a = Ok(a) | Err(String)
 
 handler safe_state for State Int {
   get () = resume 0
@@ -2905,7 +2902,7 @@ trait Display a {
 fun helper : (n: Int) -> String
 helper n = show n
 
-type Wrapper { Wrapper(Int) }
+type Wrapper = Wrapper(Int)
 
 impl Display for Wrapper {
   display Wrapper(n) = "Wrapped: " <> helper n
@@ -2925,7 +2922,7 @@ trait Display a {
 
 helper n = show n
 
-type Wrapper { Wrapper(Int) }
+type Wrapper = Wrapper(Int)
 
 impl Display for Wrapper {
     display Wrapper(n) = "Wrapped: " <> helper n
@@ -2997,7 +2994,7 @@ let result = {
 fn derive_show_simple_enum() {
     check(
         r#"
-type Color { Red | Green | Blue } deriving (Show)
+type Color = Red | Green | Blue deriving (Show)
 let x = show Red
 "#,
     )
@@ -3008,11 +3005,11 @@ let x = show Red
 fn derive_show_with_fields() {
     check(
         r#"
-type Shape {
-  Circle(Int)
-  Rect(Int, Int)
-  Point
-} deriving (Show)
+type Shape
+  = Circle(Int)
+  | Rect(Int, Int)
+  | Point
+  deriving (Show)
 let x = show (Circle 5)
 "#,
     )
@@ -3023,7 +3020,7 @@ let x = show (Circle 5)
 fn derive_show_polymorphic() {
     check(
         r#"
-type Box a { Box(a) | Empty } deriving (Show)
+type Box a = Box(a) | Empty deriving (Show)
 let x = show (Box 42)
 "#,
     )
@@ -3034,7 +3031,7 @@ let x = show (Box 42)
 fn receive_requires_actor_effect() {
     let result = check(
         r#"
-type Msg { Ping | Stop }
+type Msg = Ping | Stop
 foo () = receive {
   Ping -> 1
   Stop -> 0
@@ -3056,7 +3053,7 @@ fn receive_typechecks_with_actor() {
         r#"
 import Std.Actor
 
-type Msg { Ping | Stop }
+type Msg = Ping | Stop
 
 fun handle_msg : (x: Int) -> Int needs {Actor Msg}
 handle_msg x = receive {
@@ -3074,7 +3071,7 @@ fn receive_after_timeout_must_be_int() {
         r#"
 import Std.Actor
 
-type Msg { Ping }
+type Msg = Ping
 
 fun handle_msg : Unit -> Int needs {Actor Msg}
 handle_msg () = receive {
@@ -3093,7 +3090,7 @@ fn receive_no_exhaustiveness_error() {
         r#"
 import Std.Actor
 
-type Msg { A | B | C }
+type Msg = A | B | C
 
 fun handle_msg : Unit -> Int needs {Actor Msg}
 handle_msg () = receive {
@@ -3196,7 +3193,7 @@ fn type_at_node_records_locals_in_body() {
 fn type_at_span_records_case_bindings() {
     let checker = check(
         r#"
-type Maybe a { Just(a) | Nothing }
+type Maybe a = Just(a) | Nothing
 main () = case Just 42 {
   Just(x) -> x
   Nothing -> 0
@@ -3411,7 +3408,7 @@ fn type_arity_too_many_args_builtin_list() {
 
 #[test]
 fn type_arity_too_many_args_user_type() {
-    let result = check("type Box a { Box(a) }\nfun foo : (x: Box Int String) -> Int\nfoo x = 1");
+    let result = check("type Box a = Box(a)\nfun foo : (x: Box Int String) -> Int\nfoo x = 1");
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(
