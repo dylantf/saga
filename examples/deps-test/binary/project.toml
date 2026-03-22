@@ -1,0 +1,8 @@
+[project]
+name = "my-app"
+
+[bin]
+main = "Main.dy"
+
+[deps]
+mathlib = { path = "../library" }

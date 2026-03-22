@@ -55,8 +55,10 @@ lock-free hover/goto/completion.
 - [x] Code actions -- add missing handler methods
 - [ ] Code actions -- add missing trait impl methods
 - [ ] Go-to-definition on trait method calls (jump to resolved impl based on argument type)
-- [ ] Rename symbol (local scope)
-- [ ] Rename symbol (cross-file)
+- [x] Rename symbol (local variables, functions, handlers, types, records, constructors)
+- [ ] Rename symbol -- effect operation names (needs tracking across effect def, handler arms, and `op!` call sites)
+- [ ] Rename symbol -- trait method names (needs tracking across trait def, impl methods, and call sites)
+- [ ] Rename symbol -- trait impl methods (no reference tracking back to trait method definition)
 
 ## Phase 5: Polish
 

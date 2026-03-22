@@ -70,13 +70,16 @@ impl SymbolIndex {
         // For single-file scripts without a module declaration, use the file URI
         // to avoid collisions between unrelated scripts sharing the same name.
         let local_module: Option<String> = Some(
-            program.iter().find_map(|decl| {
-                if let Decl::ModuleDecl { path, .. } = decl {
-                    Some(path.join("."))
-                } else {
-                    None
-                }
-            }).unwrap_or_else(|| uri.to_string())
+            program
+                .iter()
+                .find_map(|decl| {
+                    if let Decl::ModuleDecl { path, .. } = decl {
+                        Some(path.join("."))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| uri.to_string()),
         );
 
         // Build reverse map: def_id -> (module, name) so we can resolve each reference.
@@ -85,10 +88,13 @@ impl SymbolIndex {
         // Imported names: use import_origins
         for (name, module) in &tc_result.import_origins {
             if let Some(did) = tc_result.env.def_id(name) {
-                def_id_to_symbol.insert(did, SymbolKey {
-                    module: module.clone(),
-                    name: name.clone(),
-                });
+                def_id_to_symbol.insert(
+                    did,
+                    SymbolKey {
+                        module: module.clone(),
+                        name: name.clone(),
+                    },
+                );
             }
         }
 
@@ -98,10 +104,13 @@ impl SymbolIndex {
                 if !def_id_to_symbol.contains_key(&did)
                     && !tc_result.import_origins.contains_key(&name)
                 {
-                    def_id_to_symbol.insert(did, SymbolKey {
-                        module: local_mod.clone(),
-                        name,
-                    });
+                    def_id_to_symbol.insert(
+                        did,
+                        SymbolKey {
+                            module: local_mod.clone(),
+                            name,
+                        },
+                    );
                 }
             }
         }
@@ -140,11 +149,7 @@ impl SymbolIndex {
                 .type_import_origins
                 .get(type_name)
                 .cloned()
-                .unwrap_or_else(|| {
-                    local_module
-                        .clone()
-                        .unwrap_or_else(|| uri.to_string())
-                });
+                .unwrap_or_else(|| local_module.clone().unwrap_or_else(|| uri.to_string()));
             let key = SymbolKey {
                 module,
                 name: type_name.clone(),

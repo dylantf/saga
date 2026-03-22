@@ -1,0 +1,10 @@
+module MathLib
+
+pub fun add : Int -> Int -> Int
+add a b = a + b
+
+pub fun double : Int -> Int
+double x = add x x
+
+pub fun square : Int -> Int
+square x = x * x

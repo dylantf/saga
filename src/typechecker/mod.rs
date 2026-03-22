@@ -906,6 +906,21 @@ impl Checker {
         self.modules.map = Some(map);
     }
 
+    pub fn module_map(&self) -> Option<&check_module::ModuleMap> {
+        self.modules.map.as_ref()
+    }
+
+    /// Typecheck a module by name, triggering the full dependency walk.
+    /// Used for library builds where there is no Main.dy entry point.
+    pub fn typecheck_import_by_name(&mut self, module_name: &str) {
+        let parts: Vec<String> = module_name.split('.').map(|s| s.to_string()).collect();
+        let span = crate::token::Span { start: 0, end: 0 };
+        if let Err(e) = self.typecheck_import(&parts, None, None, span) {
+            eprintln!("Error typechecking module '{}': {}", module_name, e);
+            std::process::exit(1);
+        }
+    }
+
     pub(crate) fn fresh_var(&mut self) -> Type {
         let id = self.next_var;
         self.next_var += 1;

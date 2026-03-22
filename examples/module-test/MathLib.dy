@@ -1,8 +1,8 @@
 module MathLib
 
 pub record Point {
-  x: Int
-  y: Int
+  x: Int,
+  y: Int,
 }
 
 pub fun add : (a: Int) -> (b: Int) -> Int
