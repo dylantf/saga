@@ -74,6 +74,12 @@ fn print_tc_diagnostic(source: &str, source_path: &str, d: &typechecker::Diagnos
 struct ProjectConfig {
     #[serde(default)]
     project: ProjectSection,
+    #[serde(default)]
+    library: Option<LibrarySection>,
+    #[serde(default)]
+    bin: Option<BinSection>,
+    #[serde(default)]
+    deps: Option<std::collections::HashMap<String, DepEntry>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -83,6 +89,26 @@ struct ProjectSection {
     name: Option<String>,
     #[serde(default)]
     tests_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct LibrarySection {
+    module: String,
+    expose: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct BinSection {
+    #[serde(default)]
+    main: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+struct DepEntry {
+    path: String,
+    #[serde(rename = "as")]
+    alias: Option<String>,
 }
 
 impl ProjectConfig {
@@ -99,6 +125,66 @@ impl ProjectConfig {
 
     fn tests_dir(&self) -> &str {
         self.project.tests_dir.as_deref().unwrap_or("tests")
+    }
+
+    /// The main entry point file. Defaults to "Main.dy".
+    fn main_file(&self) -> &str {
+        self.bin
+            .as_ref()
+            .and_then(|b| b.main.as_deref())
+            .unwrap_or("Main.dy")
+    }
+
+    /// Whether this project can be run (has a binary entry point).
+    fn is_bin(&self) -> bool {
+        // Backward compat: if no [library] or [bin] section, treat as bin
+        if self.library.is_none() && self.bin.is_none() {
+            return true;
+        }
+        self.bin.is_some()
+    }
+
+    /// Whether this project is a library.
+    #[allow(dead_code)]
+    fn is_library(&self) -> bool {
+        self.library.is_some()
+    }
+
+    /// Validate the config and exit on errors.
+    fn validate(&self) {
+        if let Some(lib) = &self.library {
+            // All expose entries must be prefixed by the library module name
+            for exposed in &lib.expose {
+                if exposed != &lib.module && !exposed.starts_with(&format!("{}.", lib.module)) {
+                    eprintln!(
+                        "Error in project.toml: exposed module '{}' must be prefixed by library module '{}'",
+                        exposed, lib.module
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        if let Some(deps) = &self.deps {
+            for (name, dep) in deps {
+                // Validate dep path exists
+                let dep_path = std::path::Path::new(&dep.path);
+                if !dep_path.exists() {
+                    eprintln!(
+                        "Error in project.toml: dependency '{}' path '{}' does not exist",
+                        name, dep.path
+                    );
+                    std::process::exit(1);
+                }
+                if !dep_path.join("project.toml").exists() {
+                    eprintln!(
+                        "Error in project.toml: dependency '{}' at '{}' has no project.toml",
+                        name, dep.path
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
 
@@ -290,15 +376,43 @@ fn build_project(
         std::process::exit(1);
     });
 
-    let main_path = project_root.join("Main.dy");
-    let main_source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
-        eprintln!("Error reading Main.dy: {}", e);
-        std::process::exit(1);
-    });
+    let config = ProjectConfig::load(&project_root);
+    config.validate();
+
+    let has_bin = config.is_bin();
 
     // Phase 1: Typecheck
     let mut checker = make_checker(Some(project_root.clone()));
-    let (main_program, _) = parse_and_typecheck(&main_source, "Main.dy", &mut checker);
+
+    // If this project has a binary entry point, typecheck Main
+    let main_program = if has_bin {
+        let main_file = config.main_file();
+        let main_path = project_root.join(main_file);
+        let main_source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
+            eprintln!("Error reading {}: {}", main_file, e);
+            std::process::exit(1);
+        });
+        let (program, _) = parse_and_typecheck(&main_source, main_file, &mut checker);
+        Some(program)
+    } else {
+        // Library-only: typecheck all exposed modules to trigger the dependency walk
+        if let Some(lib) = &config.library {
+            let module_map = checker.module_map().cloned().unwrap_or_default();
+            for exposed in &lib.expose {
+                if module_map.contains_key(exposed) {
+                    checker.typecheck_import_by_name(exposed);
+                } else {
+                    eprintln!(
+                        "Error: exposed module '{}' not found in project",
+                        exposed
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        None
+    };
+
     let result = checker.to_result();
 
     let build_dir = project_root.join("_build").join(profile);
@@ -363,9 +477,11 @@ fn build_project(
         elaborated_modules.insert(module_name.clone(), elaborated);
     }
 
-    // Elaborate Main
-    let main_elaborated = elaborate::elaborate_module(&main_program, &result, "Main");
-    elaborated_modules.insert("Main".to_string(), main_elaborated);
+    // Elaborate Main (if this is a bin project)
+    if let Some(main_program) = &main_program {
+        let main_elaborated = elaborate::elaborate_module(main_program, &result, "Main");
+        elaborated_modules.insert("Main".to_string(), main_elaborated);
+    }
 
     // Phase 3: Lower and emit all modules
     let ctx = codegen::CodegenContext {
@@ -456,6 +572,11 @@ fn cmd_run(args: &[String]) {
                 eprintln!("No project.toml found.");
                 std::process::exit(1);
             });
+            let config = ProjectConfig::load(&project_root);
+            if !config.is_bin() {
+                eprintln!("This project is a library and cannot be run. Use `dylang build` instead.");
+                std::process::exit(1);
+            }
             let build_dir = project_root.join("_build").join("release");
             if !build_dir.join("main.beam").exists() {
                 build_project("release");
@@ -468,6 +589,15 @@ fn cmd_run(args: &[String]) {
             let build_dir = build_script(f, "dev");
             exec_erl(&build_dir, "_script");
         } else {
+            let project_root = find_project_root().unwrap_or_else(|| {
+                eprintln!("No project.toml found.");
+                std::process::exit(1);
+            });
+            let config = ProjectConfig::load(&project_root);
+            if !config.is_bin() {
+                eprintln!("This project is a library and cannot be run. Use `dylang build` instead.");
+                std::process::exit(1);
+            }
             let (build_dir, _, _) = build_project("dev");
             exec_erl(&build_dir, "main");
         }
@@ -504,13 +634,16 @@ fn cmd_check(file: Option<&str>) {
                 eprintln!("No project.toml found. Run with a filename to check a single file.");
                 std::process::exit(1);
             });
-            let main_path = project_root.join("Main.dy");
+            let config = ProjectConfig::load(&project_root);
+            config.validate();
+            let main_file = config.main_file();
+            let main_path = project_root.join(main_file);
             let source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
-                eprintln!("Error reading Main.dy: {}", e);
+                eprintln!("Error reading {}: {}", main_file, e);
                 std::process::exit(1);
             });
             let mut checker = make_checker(Some(project_root));
-            let _ = parse_and_typecheck(&source, "Main.dy", &mut checker);
+            let _ = parse_and_typecheck(&source, main_file, &mut checker);
             eprintln!("OK");
         }
     }
