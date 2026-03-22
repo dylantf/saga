@@ -25,7 +25,9 @@ pub fn cmd_run(args: &[String]) {
             });
             let config = ProjectConfig::load(&project_root);
             if !config.is_bin() {
-                eprintln!("This project is a library and cannot be run. Use `dylang build` instead.");
+                eprintln!(
+                    "This project is a library and cannot be run. Use `dylang build` instead."
+                );
                 std::process::exit(1);
             }
             let build_dir = project_root.join("_build").join("release");
@@ -46,7 +48,9 @@ pub fn cmd_run(args: &[String]) {
             });
             let config = ProjectConfig::load(&project_root);
             if !config.is_bin() {
-                eprintln!("This project is a library and cannot be run. Use `dylang build` instead.");
+                eprintln!(
+                    "This project is a library and cannot be run. Use `dylang build` instead."
+                );
                 std::process::exit(1);
             }
             let (build_dir, _, _) = build_project("dev");
@@ -110,6 +114,18 @@ pub fn cmd_check(file: Option<&str>) {
     }
 }
 
+pub fn cmd_install() {
+    let project_root = super::find_project_root().unwrap_or_else(|| {
+        eprintln!("No project.toml found.");
+        std::process::exit(1);
+    });
+
+    if let Err(e) = dylang::project_config::install_deps(&project_root) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+}
+
 pub fn cmd_emit(file: &str) {
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Error reading {}: {}", file, e);
@@ -166,8 +182,7 @@ pub fn cmd_test(_args: &[String]) {
         // imports stay at top, everything else goes into main () = run (fun () -> { ... })
         let source = inject_test_main(&source);
 
-        let (program, _) =
-            parse_and_typecheck_inner(&source, &source_path, &mut checker, true);
+        let (program, _) = parse_and_typecheck_inner(&source, &source_path, &mut checker, true);
         let result = checker.to_result();
 
         // Compile any std modules the test file needs that weren't in the project build

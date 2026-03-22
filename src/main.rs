@@ -15,6 +15,7 @@ fn print_usage() {
     eprintln!("  dylang emit <file.dy>   Print generated Core Erlang to stdout");
     eprintln!("  dylang test             Run tests (requires project.toml)");
     eprintln!("  dylang test <pattern>   Run tests matching pattern");
+    eprintln!("  dylang install          Fetch and cache git dependencies");
 }
 
 fn main() {
@@ -25,6 +26,7 @@ fn main() {
         Some("build") => cli::commands::cmd_build(&args[2..]),
         Some("check") => cli::commands::cmd_check(args.get(2).map(|s| s.as_str())),
         Some("test") => cli::commands::cmd_test(&args[2..]),
+        Some("install") => cli::commands::cmd_install(),
         Some("emit") => match args.get(2).map(|s| s.as_str()) {
             Some(file) => cli::commands::cmd_emit(file),
             None => {

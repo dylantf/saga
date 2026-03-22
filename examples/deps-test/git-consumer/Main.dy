@@ -1,0 +1,12 @@
+module Main
+
+import MathLib (add, square)
+
+pub fun main : Unit -> Unit
+main () = {
+  let result = add 10 20
+  println (show result)
+
+  let sq = square 7
+  println (show sq)
+}

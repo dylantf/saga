@@ -60,14 +60,85 @@ If two deps expose the same module name (after aliasing), it's a compile error t
 - `import` syntax is unchanged. Consumers import dep modules by their (possibly aliased) names like any other module.
 - Script mode is unaffected.
 
-## Future Work (Not in Scope)
+## Future Work
 
-- **Re-exports / `export` syntax**: A mechanism for a module to surface imported names as part of its own public API without wrapper functions. Useful for building flat facade modules over complex internal structures. Deferred until the pain point is hit in practice.
-- **Remote dependencies**: The dep entry structure is designed to extend to other sources. `path` is one variant; `hex` and `github` are natural additions that resolve to a cached local directory, then follow the same pipeline (read project.toml, filter expose, scan modules). Adding remote deps requires a fetch/cache layer and a lockfile, but no changes to module resolution.
-  ```toml
-  json = { hex = "jason", version = "~> 1.4" }
-  utils = { github = "dylan/utils", ref = "main" }
-  ```
+### Re-exports / `export` syntax
+
+A mechanism for a module to surface imported names as part of its own public API without wrapper functions. Useful for building flat facade modules over complex internal structures. Deferred until the pain point is hit in practice.
+
+### Git Dependencies
+
+Deps can specify a git URL instead of a local path:
+
+```toml
+[deps]
+math = { git = "https://github.com/someone/math-lib", tag = "v1.0.0" }
+utils = { git = "https://github.com/someone/utils", branch = "main" }
+http = { git = "https://github.com/someone/http", rev = "abc123f" }
+```
+
+Resolution flow:
+1. `dylang install` reads `[deps]`, clones/fetches repos into a global cache (`~/.dylang/cache/git/`)
+2. Cache structure: `<url-hash>/repo/` (bare clone, shared), `<url-hash>/<commit-hash>/` (checked-out working copy)
+3. Each checked-out dep is compiled and its `.beam` files cached in `<commit-hash>/_build/`
+4. Subsequent builds skip clone/compile if the cached commit matches the lockfile
+5. At build time, cached deps are typechecked (for type info) but codegen/erlc is skipped since `.beam` files already exist
+6. The `erl` invocation includes cached dep beam dirs via `-pa`
+
+Tags and branches resolve to concrete commit hashes. The cache is always keyed by commit hash, so two deps wanting different versions of the same repo get separate checkouts.
+
+### Lockfile
+
+`dylang.lock` pins each dependency to an exact resolved commit, ensuring reproducible builds:
+
+```toml
+# dylang.lock (auto-generated, do not edit)
+
+[deps.math]
+git = "https://github.com/someone/math-lib"
+ref = "v1.0.0"
+commit = "abc123def456789..."
+
+[deps.http]
+git = "https://github.com/someone/http"
+ref = "main"
+commit = "789abc123def456..."
+```
+
+Workflow:
+- First build (no lockfile): resolve all refs to commits, write `dylang.lock`
+- Subsequent builds: use pinned commit hashes, skip resolution
+- `dylang update`: re-resolve refs, write new lockfile
+- The lockfile should be committed to version control
+
+### Version Constraints
+
+When deps specify version requirements (via semver tags), version constraint syntax is:
+
+| Operator | Meaning | Example |
+|----------|---------|---------|
+| `^` | Compatible (same major version) | `^1.4.0` means `>= 1.4.0, < 2.0.0` |
+| `=` | Exact version | `= 1.4.0` |
+| `>=` | Greater than or equal | `>= 1.2.0` |
+| `>` | Greater than | `> 1.0.0` |
+| `<=` | Less than or equal | `<= 2.0.0` |
+| `<` | Less than | `< 2.0.0` |
+| _(none)_ | Implicit `^` | `1.4.0` means `^1.4.0` |
+
+Operators can be combined with `,` for intersection: `">= 1.2.0, < 1.8.0"`.
+
+```toml
+[deps]
+math = { git = "...", version = "1.4" }         # implicitly ^1.4.0
+http = { git = "...", version = "= 2.0.0" }     # exact pin
+utils = { git = "...", version = ">= 1.0, < 3.0" }
+```
+
+Libraries declare compatible version ranges for their own deps. When the consumer's dependency tree has multiple constraints on the same package, the resolver picks the highest version satisfying all constraints. If no version satisfies all constraints, it's a compile error.
+
+### Package Registry
+
+A centralized registry (like Hex, crates.io, npm) for publishing and discovering packages. Would add a `hex` source type to dep entries and proper version resolution with a solver. Requires the version constraint system above.
 
 ---
 
