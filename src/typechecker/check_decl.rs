@@ -417,8 +417,14 @@ impl Checker {
                     name.clone(),
                     effects.iter().map(|e| e.name.clone()).collect(),
                 );
-                if effect_row_var.is_some() {
-                    self.effect_state.fun_has_row_var.insert(name.clone());
+                if let Some((row_var_name, _)) = effect_row_var {
+                    // Store the row var ID if it appears in the type (so it gets
+                    // unified with caller args). None if it only appears in the
+                    // function's own needs clause.
+                    let id = params_list.iter()
+                        .find(|(n, _)| n == row_var_name)
+                        .map(|(_, id)| *id);
+                    self.effect_state.fun_has_row_var.insert(name.clone(), id);
                 }
                 if !effects.is_empty() {
                     let mut constraints = Vec::new();
@@ -729,7 +735,7 @@ impl Checker {
             Self::check_undeclared_effects(
                 &body_effects,
                 &declared_effects,
-                self.effect_state.fun_has_row_var.contains(name),
+                self.effect_state.fun_has_row_var.contains_key(name),
                 &format!("function '{}'", name),
                 err_span,
             )?;

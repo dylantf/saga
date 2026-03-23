@@ -28,6 +28,23 @@ impl Checker {
         if let Some(effects) = self.effect_state.let_bindings.get(name).cloned() {
             self.effect_state.current.extend(effects);
         }
+        // If the function has a row variable in its needs clause that also
+        // appears in its type (i.e., linked to a parameter's effect row),
+        // resolve it through the substitution to find which effects flow through.
+        if let Some(Some(row_var_id)) = self.effect_state.fun_has_row_var.get(name) {
+            let resolved = self.sub.apply(&Type::Var(*row_var_id));
+            // After apply, the var either resolved to a concrete type (shouldn't
+            // happen for row vars) or chased to a final Var whose bindings live
+            // in row_map, not the type substitution.
+            if let Type::Var(id) = &resolved
+                && let Some(row) = self.sub.row_map.get(id)
+            {
+                let applied = self.sub.apply_effect_row(row);
+                for (eff, _) in &applied.effects {
+                    self.effect_state.current.insert(eff.clone());
+                }
+            }
+        }
     }
 
     /// Find which effect an operation belongs to.

@@ -749,8 +749,11 @@ pub(crate) struct EffectState {
     /// name -> effect names. Used by the lowerer to register effectful local vars.
     pub let_bindings: HashMap<String, Vec<String>>,
     /// Functions with open effect rows (row variable in their `needs` clause).
-    /// name -> true. Extra body effects are allowed and flow through the row variable.
-    pub fun_has_row_var: HashSet<String>,
+    /// Maps function name -> optional row variable ID. The ID is present when
+    /// the row variable also appears in a parameter type (so it gets unified
+    /// with caller-provided effects). It's None when the row var only appears
+    /// in the function's own needs clause.
+    pub fun_has_row_var: HashMap<String, Option<u32>>,
 }
 
 /// State accumulated during typechecking for IDE/LSP features: hover types,
