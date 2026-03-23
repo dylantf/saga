@@ -1004,7 +1004,7 @@ fn fun_annotation_simple() {
     let decls = parse("fun add : (a: Int) -> (b: Int) -> Int");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::FunAnnotation {
+        Decl::FunSignature {
             name,
             params,
             return_type,
@@ -1029,7 +1029,7 @@ fn fun_annotation_public_with_effects() {
     let decls = parse("pub fun print : (msg: String) -> Unit needs { Console }");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::FunAnnotation {
+        Decl::FunSignature {
             public, effects, ..
         } => {
             assert!(public);
@@ -1044,7 +1044,7 @@ fn fun_annotation_unit_param() {
     let decls = parse("fun do_work : Unit -> Int needs { Log }");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::FunAnnotation {
+        Decl::FunSignature {
             name,
             params,
             effects,
@@ -1167,7 +1167,7 @@ fn case_with_guard() {
 fn type_expr_named() {
     let decls = parse("fun id : (x: Int) -> Int");
     match &decls[0] {
-        Decl::FunAnnotation {
+        Decl::FunSignature {
             params,
             return_type,
             ..
@@ -1183,7 +1183,7 @@ fn type_expr_named() {
 fn type_expr_application() {
     let decls = parse("fun unwrap : (x: Option a) -> a");
     match &decls[0] {
-        Decl::FunAnnotation {
+        Decl::FunSignature {
             params,
             return_type,
             ..
@@ -1199,7 +1199,7 @@ fn type_expr_application() {
 fn type_expr_arrow() {
     let decls = parse("fun apply : (f: a -> b) -> (x: a) -> b");
     match &decls[0] {
-        Decl::FunAnnotation { params, .. } => {
+        Decl::FunSignature { params, .. } => {
             assert!(matches!(&params[0].1, TypeExpr::Arrow { .. }));
         }
         _ => panic!("expected FunAnnotation"),
@@ -1212,7 +1212,7 @@ fn type_expr_arrow() {
 fn annotation_and_binding() {
     let decls = parse("fun add : (a: Int) -> (b: Int) -> Int\nadd x y = x + y");
     assert_eq!(decls.len(), 2);
-    assert!(matches!(&decls[0], Decl::FunAnnotation { .. }));
+    assert!(matches!(&decls[0], Decl::FunSignature { .. }));
     assert!(matches!(&decls[1], Decl::FunBinding { .. }));
 }
 
@@ -1957,7 +1957,7 @@ fn fun_annotation_with_where_clause() {
     let decls = parse("fun show : (x: a) -> String where {a: Show}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::FunAnnotation { where_clause, .. } => {
+        Decl::FunSignature { where_clause, .. } => {
             assert_eq!(where_clause.len(), 1);
             assert_eq!(where_clause[0].type_var, "a");
             let trait_names: Vec<&str> = where_clause[0].traits.iter().map(|(t, _)| t.as_str()).collect();
@@ -1972,7 +1972,7 @@ fn fun_annotation_where_multiple_bounds() {
     let decls = parse("fun compare : (x: a) -> (y: b) -> Int where {a: Show + Eq, b: Ord}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::FunAnnotation { where_clause, .. } => {
+        Decl::FunSignature { where_clause, .. } => {
             assert_eq!(where_clause.len(), 2);
             assert_eq!(where_clause[0].type_var, "a");
             let trait_names_0: Vec<&str> = where_clause[0].traits.iter().map(|(t, _)| t.as_str()).collect();
@@ -1990,7 +1990,7 @@ fn fun_annotation_needs_and_where() {
     let decls = parse("fun f : (x: a) -> Unit needs {Log} where {a: Show}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::FunAnnotation {
+        Decl::FunSignature {
             effects,
             where_clause,
             ..
@@ -2218,7 +2218,7 @@ fn private_trait_def() {
 fn pub_fun_annotation() {
     let decls = parse("pub fun add : (a: Int) -> (b: Int) -> Int");
     match &decls[0] {
-        Decl::FunAnnotation { public, name, .. } => {
+        Decl::FunSignature { public, name, .. } => {
             assert!(public);
             assert_eq!(name, "add");
         }
@@ -2230,7 +2230,7 @@ fn pub_fun_annotation() {
 fn private_fun_annotation() {
     let decls = parse("fun add : (a: Int) -> (b: Int) -> Int");
     match &decls[0] {
-        Decl::FunAnnotation { public, .. } => {
+        Decl::FunSignature { public, .. } => {
             assert!(!public);
         }
         _ => panic!("expected FunAnnotation"),
@@ -2682,7 +2682,7 @@ fn fun_annotation_needs_parameterized_effect() {
     let decls = parse("fun foo : Unit -> Int needs {State Int}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::FunAnnotation { effects, .. } => {
+        Decl::FunSignature { effects, .. } => {
             assert_eq!(effects.len(), 1);
             assert_eq!(effects[0].name, "State");
             assert_eq!(effects[0].type_args.len(), 1);
@@ -2697,7 +2697,7 @@ fn needs_mixed_parameterized_and_plain() {
     let decls = parse("fun foo : Unit -> Int needs {State Int, Log}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::FunAnnotation { effects, .. } => {
+        Decl::FunSignature { effects, .. } => {
             assert_eq!(effects.len(), 2);
             assert_eq!(effects[0].name, "State");
             assert_eq!(effects[0].type_args.len(), 1);
@@ -2716,47 +2716,48 @@ fn external_fun_basic() {
         parse(r#"@external("erlang", "lists", "reverse") fun reverse : (list: List a) -> List a"#);
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::ExternalFun {
+        Decl::FunSignature {
             public,
             name,
-            runtime,
-            module,
-            func,
             params,
+            annotations,
             ..
         } => {
             assert!(!public);
             assert_eq!(name, "reverse");
-            assert_eq!(runtime, "erlang");
-            assert_eq!(module, "lists");
-            assert_eq!(func, "reverse");
             assert_eq!(params.len(), 1);
             assert_eq!(params[0].0, "list");
+            assert_eq!(annotations.len(), 1);
+            assert_eq!(annotations[0].name, "external");
+            assert_eq!(annotations[0].args, vec![
+                Lit::String("erlang".to_string()),
+                Lit::String("lists".to_string()),
+                Lit::String("reverse".to_string()),
+            ]);
         }
-        _ => panic!("expected ExternalFun"),
+        _ => panic!("expected FunSignature with @external"),
     }
 }
 
 #[test]
 fn external_fun_pub() {
-    let decls = parse(r#"pub @external("erlang", "maps", "new") fun empty : Unit -> Dict a b"#);
+    let decls = parse(r#"@external("erlang", "maps", "new") pub fun empty : Unit -> Dict a b"#);
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::ExternalFun {
+        Decl::FunSignature {
             public,
             name,
-            module,
-            func,
             params,
+            annotations,
             ..
         } => {
             assert!(public);
             assert_eq!(name, "empty");
-            assert_eq!(module, "maps");
-            assert_eq!(func, "new");
             assert_eq!(params.len(), 1); // () counts as a unit param
+            assert_eq!(annotations.len(), 1);
+            assert_eq!(annotations[0].name, "external");
         }
-        _ => panic!("expected ExternalFun"),
+        _ => panic!("expected FunSignature with @external"),
     }
 }
 
@@ -2770,11 +2771,18 @@ fun foldl : (f: a -> b -> a) -> (acc: a) -> (list: List b) -> a
     );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::ExternalFun { name, params, .. } => {
+        Decl::FunSignature {
+            name,
+            params,
+            annotations,
+            ..
+        } => {
             assert_eq!(name, "foldl");
             assert_eq!(params.len(), 3);
+            assert_eq!(annotations.len(), 1);
+            assert_eq!(annotations[0].name, "external");
         }
-        _ => panic!("expected ExternalFun"),
+        _ => panic!("expected FunSignature with @external"),
     }
 }
 
@@ -2785,16 +2793,21 @@ fn external_fun_with_where_clause() {
     );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::ExternalFun {
-            name, where_clause, ..
+        Decl::FunSignature {
+            name,
+            where_clause,
+            annotations,
+            ..
         } => {
             assert_eq!(name, "do_thing");
             assert_eq!(where_clause.len(), 1);
             assert_eq!(where_clause[0].type_var, "a");
             let trait_names: Vec<&str> = where_clause[0].traits.iter().map(|(t, _)| t.as_str()).collect();
             assert_eq!(trait_names, vec!["Show"]);
+            assert_eq!(annotations.len(), 1);
+            assert_eq!(annotations[0].name, "external");
         }
-        _ => panic!("expected ExternalFun"),
+        _ => panic!("expected FunSignature with @external"),
     }
 }
 

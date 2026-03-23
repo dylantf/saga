@@ -81,14 +81,28 @@ impl Parser {
             }
             Token::At => {
                 let start = self.tokens[self.pos].span;
-                self.parse_external_fun(false, start)
+                let annotations = self.parse_annotations()?;
+                self.skip_terminators();
+                // After annotations, expect a function declaration (optionally pub)
+                let public = if matches!(self.peek(), Token::Pub) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+                if !matches!(self.peek(), Token::Fun) {
+                    return Err(ParseError {
+                        message: format!("expected 'fun' after annotation, got {:?}", self.peek()),
+                        span: self.tokens[self.pos].span,
+                    });
+                }
+                self.parse_fun_signature(public, start, annotations)
             }
             Token::Pub => {
                 let start = self.tokens[self.pos].span;
                 self.advance(); // consume 'pub'
                 match self.peek() {
-                    Token::Fun => self.parse_fun_annotation(true, start),
-                    Token::At => self.parse_external_fun(true, start),
+                    Token::Fun => self.parse_fun_signature(true, start, vec![]),
                     Token::Type => self.parse_type_def(true, false),
                     Token::Opaque => {
                         self.advance(); // consume 'opaque'
@@ -106,7 +120,7 @@ impl Parser {
             }
             Token::Fun => {
                 let start = self.tokens[self.pos].span;
-                self.parse_fun_annotation(false, start)
+                self.parse_fun_signature(false, start, vec![])
             }
             Token::Effect => self.parse_effect_def(false),
             Token::Handler => self.parse_handler_def(false),
@@ -313,7 +327,12 @@ impl Parser {
     }
 
     // Parses: [pub] fun <name> (<p>: <Type>) ... -> <ReturnType> [needs {Effect, ...}]
-    fn parse_fun_annotation(&mut self, public: bool, start: Span) -> Result<Decl, ParseError> {
+    fn parse_fun_signature(
+        &mut self,
+        public: bool,
+        start: Span,
+        annotations: Vec<Annotation>,
+    ) -> Result<Decl, ParseError> {
         self.advance(); // consume 'fun'
         let name = self.expect_ident()?;
         let name_span = self.tokens[self.pos - 1].span;
@@ -325,7 +344,7 @@ impl Parser {
         let where_clause = self.parse_where_clause()?;
 
         let end = self.tokens[self.pos - 1].span;
-        Ok(Decl::FunAnnotation {
+        Ok(Decl::FunSignature {
             id: NodeId::fresh(),
             public,
             name,
@@ -334,86 +353,71 @@ impl Parser {
             return_type,
             effects,
             where_clause,
+            annotations,
             span: start.to(end),
         })
     }
 
-    // Parses: @external("erlang", "module", "func") [pub] fun name (params) -> RetType
-    fn parse_external_fun(&mut self, public: bool, start: Span) -> Result<Decl, ParseError> {
-        self.advance(); // consume '@'
+    /// Parse one or more annotations: `@name` or `@name(arg1, arg2, ...)`
+    fn parse_annotations(&mut self) -> Result<Vec<Annotation>, ParseError> {
+        let mut annotations = Vec::new();
+        while matches!(self.peek(), Token::At) {
+            let start = self.tokens[self.pos].span;
+            self.advance(); // consume '@'
 
-        // Expect 'external' identifier
-        match self.peek() {
-            Token::Ident(s) if s == "external" => {
-                self.advance();
-            }
-            _ => {
+            let name = self.expect_ident()?;
+            let name_span = self.tokens[self.pos - 1].span;
+
+            const KNOWN_ANNOTATIONS: &[&str] = &["external", "builtin"];
+            if !KNOWN_ANNOTATIONS.contains(&name.as_str()) {
                 return Err(ParseError {
-                    message: format!("expected 'external' after '@', got {:?}", self.peek()),
-                    span: self.tokens[self.pos].span,
+                    message: format!("unknown annotation @{}", name),
+                    span: name_span,
                 });
             }
+
+            let args = if matches!(self.peek(), Token::LParen) {
+                self.advance(); // consume '('
+                let mut args = Vec::new();
+                while !matches!(self.peek(), Token::RParen) {
+                    if !args.is_empty() {
+                        self.expect(Token::Comma)?;
+                    }
+                    let lit = match self.advance() {
+                        Token::String(s) => Lit::String(s),
+                        Token::Int(n) => Lit::Int(n),
+                        Token::Float(f) => Lit::Float(f),
+                        Token::True => Lit::Bool(true),
+                        Token::False => Lit::Bool(false),
+                        tok => {
+                            return Err(ParseError {
+                                message: format!(
+                                    "expected literal in annotation arguments, got {:?}",
+                                    tok
+                                ),
+                                span: self.tokens[self.pos - 1].span,
+                            });
+                        }
+                    };
+                    args.push(lit);
+                }
+                self.expect(Token::RParen)?;
+                args
+            } else {
+                vec![]
+            };
+
+            let end = self.tokens[self.pos - 1].span;
+            annotations.push(Annotation {
+                name,
+                name_span,
+                args,
+                span: start.to(end),
+            });
+
+            self.skip_terminators();
         }
-
-        // Parse (runtime, module, func)
-        self.expect(Token::LParen)?;
-        let runtime = match self.advance() {
-            Token::String(s) => s,
-            tok => {
-                return Err(ParseError {
-                    message: format!("expected string literal for runtime, got {:?}", tok),
-                    span: self.tokens[self.pos - 1].span,
-                });
-            }
-        };
-        self.expect(Token::Comma)?;
-        let module = match self.advance() {
-            Token::String(s) => s,
-            tok => {
-                return Err(ParseError {
-                    message: format!("expected string literal for module, got {:?}", tok),
-                    span: self.tokens[self.pos - 1].span,
-                });
-            }
-        };
-        self.expect(Token::Comma)?;
-        let func = match self.advance() {
-            Token::String(s) => s,
-            tok => {
-                return Err(ParseError {
-                    message: format!("expected string literal for function, got {:?}", tok),
-                    span: self.tokens[self.pos - 1].span,
-                });
-            }
-        };
-        self.expect(Token::RParen)?;
-
-        // Skip terminators between @external(...) and fun signature
-        self.skip_terminators();
-
-        // Parse the fun signature (no body)
-        self.expect(Token::Fun)?;
-        let name = self.expect_ident()?;
-
-        self.expect(Token::Colon)?;
-        let (params, return_type, effects) = self.parse_annotated_signature()?;
-
-        let where_clause = self.parse_where_clause()?;
-
-        let end = self.tokens[self.pos - 1].span;
-        Ok(Decl::ExternalFun {
-            id: NodeId::fresh(),
-            public,
-            name,
-            runtime,
-            module,
-            func,
-            params,
-            return_type,
-            effects,
-            where_clause,
-            span: start.to(end),
-        })
+        Ok(annotations)
     }
 
     // Parses: effect <Name> { fun <op> (<p>: <T>) ... -> <T> ... }

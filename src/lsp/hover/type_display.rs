@@ -231,7 +231,7 @@ pub fn type_definition_summary(
 /// Returns None if no annotation exists or if no params have real labels.
 pub(crate) fn annotation_labels(program: &[Decl], name: &str) -> Option<Vec<String>> {
     for decl in program {
-        if let Decl::FunAnnotation {
+        if let Decl::FunSignature {
             name: fn_name,
             params,
             ..
@@ -267,7 +267,7 @@ fn labeled_type(labels: &[String], type_str: &str) -> String {
 /// Find a FunAnnotation for the given name and format it with labels.
 pub(crate) fn find_annotation(program: &[Decl], name: &str) -> Option<String> {
     for decl in program {
-        if let Decl::FunAnnotation {
+        if let Decl::FunSignature {
             name: fn_name,
             params,
             return_type,

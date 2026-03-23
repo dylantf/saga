@@ -16,14 +16,14 @@ tail xs = case xs {
   Nil -> panic "tail: empty list"
 }
 
-pub @external("erlang", "erlang", "length")
-fun length : (xs: List a) -> Int
+@external("erlang", "erlang", "length")
+pub fun length : (xs: List a) -> Int
 
-pub @external("erlang", "lists", "map")
-fun map : (f: a -> b) -> (xs: List a) -> List b
+@external("erlang", "lists", "map")
+pub fun map : (f: a -> b) -> (xs: List a) -> List b
 
-pub @external("erlang", "lists", "filter")
-fun filter : (pred: a -> Bool) -> (xs: List a) -> List a
+@external("erlang", "lists", "filter")
+pub fun filter : (pred: a -> Bool) -> (xs: List a) -> List a
 
 pub fun foldl : (f: b -> a -> b) -> (acc: b) -> (xs: List a) -> b
 foldl f acc xs = case xs {
@@ -31,23 +31,23 @@ foldl f acc xs = case xs {
   h :: t -> foldl f (f acc h) t
 }
 
-pub @external("erlang", "lists", "foldr")
-fun foldr : (f: a -> b -> b) -> (acc: b) -> (xs: List a) -> b
+@external("erlang", "lists", "foldr")
+pub fun foldr : (f: a -> b -> b) -> (acc: b) -> (xs: List a) -> b
 
-pub @external("erlang", "lists", "reverse")
-fun reverse : (xs: List a) -> List a
+@external("erlang", "lists", "reverse")
+pub fun reverse : (xs: List a) -> List a
 
-pub @external("erlang", "lists", "append")
-fun append : (xs: List a) -> (ys: List a) -> List a
+@external("erlang", "lists", "append")
+pub fun append : (xs: List a) -> (ys: List a) -> List a
 
-pub @external("erlang", "lists", "flatmap")
-fun flat_map : (f: a -> List b) -> (xs: List a) -> List b
+@external("erlang", "lists", "flatmap")
+pub fun flat_map : (f: a -> List b) -> (xs: List a) -> List b
 
-pub @external("erlang", "lists", "join")
-fun join : (separator: String) -> (xs: List String) -> List String
+@external("erlang", "lists", "join")
+pub fun join : (separator: String) -> (xs: List String) -> List String
 
-pub @external("erlang", "lists", "flatten")
-fun flatten : (xs: List String) -> String
+@external("erlang", "lists", "flatten")
+pub fun flatten : (xs: List String) -> String
 
 pub fun take : (n: Int) -> (xs: List a) -> List a
 take n xs = if n <= 0 then [] else case xs {

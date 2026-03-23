@@ -8,11 +8,11 @@ impl Debug for Int {
   debug x = to_string x
 }
 
-pub @external("erlang", "erlang", "float")
-fun to_float : Int -> Float
+@external("erlang", "erlang", "float")
+pub fun to_float : Int -> Float
 
 @external("erlang", "erlang", "integer_to_list")
 fun to_string : Int -> String
 
-pub @external("erlang", "std_int_bridge", "parse")
-fun parse : (s: String) -> Maybe Int
+@external("erlang", "std_int_bridge", "parse")
+pub fun parse : (s: String) -> Maybe Int

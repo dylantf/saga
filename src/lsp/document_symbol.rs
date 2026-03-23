@@ -19,14 +19,14 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex, source: &str) -> Vec<Sy
     // Track which names already have an annotation so we skip duplicate FunBindings
     let mut annotated: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for decl in program {
-        if let Decl::FunAnnotation { name, .. } = decl {
+        if let Decl::FunSignature { name, .. } = decl {
             annotated.insert(name);
         }
     }
 
     for decl in program {
         match decl {
-            Decl::FunAnnotation { name, span, .. } => {
+            Decl::FunSignature { name, span, .. } => {
                 symbols.push(SymbolInformation {
                     name: name.clone(),
                     kind: SymbolKind::FUNCTION,
@@ -139,19 +139,6 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex, source: &str) -> Vec<Sy
                 symbols.push(SymbolInformation {
                     name: format!("impl {} for {}", trait_name, target_type),
                     kind: SymbolKind::CLASS,
-                    location: Location {
-                        uri: Url::parse("file:///").unwrap(),
-                        range: span_to_range(span, li, source),
-                    },
-                    tags: None,
-                    deprecated: None,
-                    container_name: None,
-                });
-            }
-            Decl::ExternalFun { name, span, .. } => {
-                symbols.push(SymbolInformation {
-                    name: name.clone(),
-                    kind: SymbolKind::FUNCTION,
                     location: Location {
                         uri: Url::parse("file:///").unwrap(),
                         range: span_to_range(span, li, source),

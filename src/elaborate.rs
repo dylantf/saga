@@ -200,10 +200,7 @@ impl Elaborator {
                             .insert(method.name.clone(), (name.clone(), idx));
                     }
                 }
-                Decl::FunAnnotation {
-                    name, where_clause, ..
-                }
-                | Decl::ExternalFun {
+                Decl::FunSignature {
                     name, where_clause, ..
                 } => {
                     let dict_params = Self::dict_params_from_where(where_clause);
@@ -342,7 +339,7 @@ impl Elaborator {
 
                 // TraitDef and FunAnnotation are consumed (not emitted)
                 Decl::TraitDef { .. } => {}
-                Decl::FunAnnotation { .. } => {
+                Decl::FunSignature { .. } => {
                     // Keep annotations for the lowerer (it uses them for arity).
                     output.push(decl.clone());
                 }

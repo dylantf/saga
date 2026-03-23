@@ -101,7 +101,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                 contains_ident(name_span, offset).then(|| (name.clone(), *name_span, Some(*id)))
             })
         }
-        Decl::FunAnnotation {
+        Decl::FunSignature {
             id,
             name,
             name_span,

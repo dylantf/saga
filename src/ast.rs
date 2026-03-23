@@ -33,6 +33,17 @@ pub struct Module {
     pub declarations: Vec<Decl>,
 }
 
+// --- Annotations ---
+
+/// A compile-time annotation attached to a declaration, e.g. `@external("erlang", "lists", "reverse")`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Annotation {
+    pub name: String,
+    pub name_span: Span,
+    pub args: Vec<Lit>,
+    pub span: Span,
+}
+
 // --- Declarations ---
 
 /// An item in an import exposing list: `import Foo (bar, Baz)`.
@@ -42,7 +53,7 @@ pub type ExposedItem = String;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decl {
     /// `pub fun add : (a: Int) -> (b: Int) -> Int needs {Log} where {a: Show, Eq}`
-    FunAnnotation {
+    FunSignature {
         id: NodeId,
         public: bool,
         name: String,
@@ -52,6 +63,8 @@ pub enum Decl {
         effects: Vec<EffectRef>,
         /// `where {a: Show + Eq, b: Ord}` - trait bounds on type variables
         where_clause: Vec<TraitBound>,
+        /// Compile-time annotations, e.g. `@external("erlang", "lists", "reverse")`
+        annotations: Vec<Annotation>,
         span: Span,
     },
 
@@ -159,23 +172,6 @@ pub enum Decl {
         span: Span,
     },
 
-    /// `@external("erlang", "lists", "reverse") pub fun reverse (list: List a) -> List a`
-    ExternalFun {
-        id: NodeId,
-        public: bool,
-        name: String,
-        /// Target runtime, e.g. "erlang"
-        runtime: String,
-        /// Erlang module name, e.g. "lists"
-        module: String,
-        /// Erlang function name, e.g. "reverse"
-        func: String,
-        params: Vec<(String, TypeExpr)>,
-        return_type: TypeExpr,
-        effects: Vec<EffectRef>,
-        where_clause: Vec<TraitBound>,
-        span: Span,
-    },
 
     /// `import Math exposing { abs, max }`
     Import {

@@ -7,7 +7,19 @@ use std::collections::HashMap;
 use super::util::{self, collect_type_effects};
 use super::{EffectInfo, FunInfo, HandlerInfo, Lowerer};
 
-/// Staging area for FunAnnotation data consumed by FunBinding.
+/// Extract the (module, func) pair from an `@external("runtime", "module", "func")` annotation.
+pub fn extract_external(annotations: &[ast::Annotation]) -> Option<(String, String)> {
+    annotations.iter().find(|a| a.name == "external").and_then(|a| {
+        if a.args.len() >= 3
+            && let (ast::Lit::String(module), ast::Lit::String(func)) = (&a.args[1], &a.args[2])
+        {
+            return Some((module.clone(), func.clone()));
+        }
+        None
+    })
+}
+
+/// Staging area for FunSignature data consumed by FunBinding.
 /// Keeps fun_info free of half-initialized entries.
 pub(super) struct PendingAnnotation {
     pub effects: Vec<String>,
@@ -71,71 +83,63 @@ impl<'a> Lowerer<'a> {
                         },
                     );
                 }
-                Decl::FunAnnotation {
+                Decl::FunSignature {
                     public,
                     name,
                     effects,
                     params,
+                    annotations,
                     ..
                 } => {
                     if *public {
                         self.pub_names.insert(name.clone());
                     }
-                    let mut sorted_effects = Vec::new();
-                    if !effects.is_empty() {
-                        sorted_effects = effects.iter().map(|e| e.name.clone()).collect();
-                        sorted_effects.sort();
-                    }
-                    // Extract EffArrow info from parameter types
-                    let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
-                    for (i, (_param_name, type_expr)) in params.iter().enumerate() {
-                        let effs = collect_type_effects(type_expr);
-                        if !effs.is_empty() {
-                            let mut sorted: Vec<String> = effs.into_iter().collect();
-                            sorted.sort();
-                            param_effs.insert(i, sorted);
+                    if let Some((erl_module, erl_func)) = extract_external(annotations) {
+                        // @external function
+                        let real_arity = params.len();
+                        self.external_funs.insert(
+                            name.clone(),
+                            (erl_module, erl_func, real_arity),
+                        );
+                        let mut sorted_effects = Vec::new();
+                        if !effects.is_empty() {
+                            sorted_effects = effects.iter().map(|e| e.name.clone()).collect();
+                            sorted_effects.sort();
                         }
+                        let expanded_arity = self.expanded_arity(real_arity, &sorted_effects);
+                        self.fun_info.insert(
+                            name.clone(),
+                            FunInfo {
+                                arity: expanded_arity,
+                                effects: sorted_effects,
+                                param_absorbed_effects: HashMap::new(),
+                                import_origin: None,
+                            },
+                        );
+                    } else {
+                        // Regular function signature
+                        let mut sorted_effects = Vec::new();
+                        if !effects.is_empty() {
+                            sorted_effects = effects.iter().map(|e| e.name.clone()).collect();
+                            sorted_effects.sort();
+                        }
+                        let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
+                        for (i, (_param_name, type_expr)) in params.iter().enumerate() {
+                            let effs = collect_type_effects(type_expr);
+                            if !effs.is_empty() {
+                                let mut sorted: Vec<String> = effs.into_iter().collect();
+                                sorted.sort();
+                                param_effs.insert(i, sorted);
+                            }
+                        }
+                        pending_annotations.insert(
+                            name.clone(),
+                            PendingAnnotation {
+                                effects: sorted_effects,
+                                param_absorbed_effects: param_effs,
+                            },
+                        );
                     }
-                    pending_annotations.insert(
-                        name.clone(),
-                        PendingAnnotation {
-                            effects: sorted_effects,
-                            param_absorbed_effects: param_effs,
-                        },
-                    );
-                }
-                Decl::ExternalFun {
-                    public,
-                    name,
-                    module: erl_module,
-                    func: erl_func,
-                    params,
-                    effects,
-                    ..
-                } => {
-                    if *public {
-                        self.pub_names.insert(name.clone());
-                    }
-                    let real_arity = params.len();
-                    self.external_funs.insert(
-                        name.clone(),
-                        (erl_module.clone(), erl_func.clone(), real_arity),
-                    );
-                    let mut sorted_effects = Vec::new();
-                    if !effects.is_empty() {
-                        sorted_effects = effects.iter().map(|e| e.name.clone()).collect();
-                        sorted_effects.sort();
-                    }
-                    let expanded_arity = self.expanded_arity(real_arity, &sorted_effects);
-                    self.fun_info.insert(
-                        name.clone(),
-                        FunInfo {
-                            arity: expanded_arity,
-                            effects: sorted_effects,
-                            param_absorbed_effects: HashMap::new(),
-                            import_origin: None,
-                        },
-                    );
                 }
                 _ => {}
             }
@@ -181,12 +185,9 @@ impl<'a> Lowerer<'a> {
                 // Register Std exports so prelude-imported functions (e.g. fst, snd)
                 // resolve to cross-module calls without an explicit import in user code.
                 for (name, scheme) in &info.exports {
-                    let (base_arity, mut effects) =
-                        util::arity_and_effects_from_type(&scheme.ty);
+                    let (base_arity, mut effects) = util::arity_and_effects_from_type(&scheme.ty);
                     // Supplement with annotation-derived effects (needs clause)
-                    if let Some((_, ann_effs)) =
-                        info.fun_effects.iter().find(|(n, _)| n == name)
-                    {
+                    if let Some((_, ann_effs)) = info.fun_effects.iter().find(|(n, _)| n == name) {
                         for eff in ann_effs {
                             if !effects.contains(eff) {
                                 effects.push(eff.clone());
@@ -232,40 +233,41 @@ impl<'a> Lowerer<'a> {
                                 return_clause,
                                 ..
                             } => {
-                                self.handler_defs.entry(name.clone()).or_insert(HandlerInfo {
-                                    effects: effects.iter().map(|e| e.name.clone()).collect(),
-                                    arms: arms.clone(),
-                                    return_clause: return_clause.clone(),
-                                    source_module: Some(mod_name.clone()),
-                                });
+                                self.handler_defs
+                                    .entry(name.clone())
+                                    .or_insert(HandlerInfo {
+                                        effects: effects.iter().map(|e| e.name.clone()).collect(),
+                                        arms: arms.clone(),
+                                        return_clause: return_clause.clone(),
+                                        source_module: Some(mod_name.clone()),
+                                    });
                             }
-                            Decl::ExternalFun {
+                            Decl::FunSignature {
                                 name,
-                                module: erl_module,
-                                func: erl_func,
                                 params,
+                                annotations,
                                 ..
                             } => {
-                                let arity = params.len();
-                                // Register with qualified key so Module.func resolves correctly
-                                let qualified_key = format!("{}.{}", alias, name);
-                                self.external_funs.entry(qualified_key).or_insert((
-                                    erl_module.clone(),
-                                    erl_func.clone(),
-                                    arity,
-                                ));
-                                // Also register unqualified (first-wins for prelude fallback)
-                                self.external_funs.entry(name.clone()).or_insert((
-                                    erl_module.clone(),
-                                    erl_func.clone(),
-                                    arity,
-                                ));
-                                self.fun_info.entry(name.clone()).or_insert(FunInfo {
-                                    arity,
-                                    effects: Vec::new(),
-                                    param_absorbed_effects: HashMap::new(),
-                                    import_origin: None,
-                                });
+                                if let Some((erl_module, erl_func)) = extract_external(annotations) {
+                                    let arity = params.len();
+                                    let qualified_key = format!("{}.{}", alias, name);
+                                    self.external_funs.entry(qualified_key).or_insert((
+                                        erl_module.clone(),
+                                        erl_func.clone(),
+                                        arity,
+                                    ));
+                                    self.external_funs.entry(name.clone()).or_insert((
+                                        erl_module.clone(),
+                                        erl_func.clone(),
+                                        arity,
+                                    ));
+                                    self.fun_info.entry(name.clone()).or_insert(FunInfo {
+                                        arity,
+                                        effects: Vec::new(),
+                                        param_absorbed_effects: HashMap::new(),
+                                        import_origin: None,
+                                    });
+                                }
                             }
                             _ => {}
                         }
@@ -389,50 +391,56 @@ impl<'a> Lowerer<'a> {
                                     return_clause,
                                     ..
                                 } => {
-                                    self.handler_defs.entry(name.clone()).or_insert(HandlerInfo {
-                                        effects: effects.iter().map(|e| e.name.clone()).collect(),
-                                        arms: arms.clone(),
-                                        return_clause: return_clause.clone(),
-                                        source_module: Some(module_name.clone()),
-                                    });
+                                    self.handler_defs
+                                        .entry(name.clone())
+                                        .or_insert(HandlerInfo {
+                                            effects: effects
+                                                .iter()
+                                                .map(|e| e.name.clone())
+                                                .collect(),
+                                            arms: arms.clone(),
+                                            return_clause: return_clause.clone(),
+                                            source_module: Some(module_name.clone()),
+                                        });
                                 }
-                                Decl::ExternalFun {
+                                Decl::FunSignature {
                                     name,
-                                    module: erl_module,
-                                    func: erl_func,
                                     params,
+                                    annotations,
                                     ..
                                 } => {
-                                    // Register external functions so handler bodies that
-                                    // reference them can resolve to the correct BEAM call.
-                                    let arity = params.len();
-                                    // Register with qualified key so Module.func resolves correctly
-                                    let qualified_key = format!("{}.{}", prefix, name);
-                                    self.external_funs.entry(qualified_key).or_insert((
-                                        erl_module.clone(),
-                                        erl_func.clone(),
-                                        arity,
-                                    ));
-                                    // Register unqualified: override if explicitly
-                                    // exposed, otherwise first-wins fallback.
-                                    if exposing.as_ref().is_some_and(|e| e.iter().any(|n| n == name)) {
-                                        self.external_funs.insert(
-                                            name.clone(),
-                                            (erl_module.clone(), erl_func.clone(), arity),
-                                        );
-                                    } else {
-                                        self.external_funs.entry(name.clone()).or_insert((
+                                    if let Some((erl_module, erl_func)) = extract_external(annotations) {
+                                        // Register external functions so handler bodies that
+                                        // reference them can resolve to the correct BEAM call.
+                                        let arity = params.len();
+                                        let qualified_key = format!("{}.{}", prefix, name);
+                                        self.external_funs.entry(qualified_key).or_insert((
                                             erl_module.clone(),
                                             erl_func.clone(),
                                             arity,
                                         ));
+                                        if exposing
+                                            .as_ref()
+                                            .is_some_and(|e| e.iter().any(|n| n == name))
+                                        {
+                                            self.external_funs.insert(
+                                                name.clone(),
+                                                (erl_module.clone(), erl_func.clone(), arity),
+                                            );
+                                        } else {
+                                            self.external_funs.entry(name.clone()).or_insert((
+                                                erl_module.clone(),
+                                                erl_func.clone(),
+                                                arity,
+                                            ));
+                                        }
+                                        self.fun_info.entry(name.clone()).or_insert(FunInfo {
+                                            arity,
+                                            effects: Vec::new(),
+                                            param_absorbed_effects: HashMap::new(),
+                                            import_origin: None,
+                                        });
                                     }
-                                    self.fun_info.entry(name.clone()).or_insert(FunInfo {
-                                        arity,
-                                        effects: Vec::new(),
-                                        param_absorbed_effects: HashMap::new(),
-                                        import_origin: None,
-                                    });
                                 }
                                 _ => {}
                             }
@@ -472,8 +480,7 @@ impl<'a> Lowerer<'a> {
     ) {
         match type_expr {
             ast::TypeExpr::Record { fields, .. } => {
-                let mut sorted_names: Vec<String> =
-                    fields.iter().map(|(n, _)| n.clone()).collect();
+                let mut sorted_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
                 sorted_names.sort();
                 let tag = format!("__anon_{}", sorted_names.join("_"));
                 record_fields.entry(tag).or_insert(sorted_names);
@@ -536,12 +543,19 @@ impl<'a> Lowerer<'a> {
                 Self::collect_anon_records_from_expr(func, record_fields);
                 Self::collect_anon_records_from_expr(arg, record_fields);
             }
-            ast::ExprKind::If { cond, then_branch, else_branch, .. } => {
+            ast::ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 Self::collect_anon_records_from_expr(cond, record_fields);
                 Self::collect_anon_records_from_expr(then_branch, record_fields);
                 Self::collect_anon_records_from_expr(else_branch, record_fields);
             }
-            ast::ExprKind::Case { scrutinee, arms, .. } => {
+            ast::ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
                 Self::collect_anon_records_from_expr(scrutinee, record_fields);
                 for arm in arms {
                     Self::collect_anon_records_from_expr(&arm.body, record_fields);

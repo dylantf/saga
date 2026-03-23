@@ -110,7 +110,7 @@ impl Checker {
             && !effects.is_empty()
         {
             let span = program.iter().find_map(|d| {
-                if let Decl::FunAnnotation { name, span, .. } = d
+                if let Decl::FunSignature { name, span, .. } = d
                     && name == "main"
                 {
                     Some(*span)
@@ -155,6 +155,7 @@ impl Checker {
         }
 
         // Check for annotations without a matching function binding
+        // (skip @external and other bodyless annotations)
         if !self.allow_bodyless_annotations {
             let bound_names: std::collections::HashSet<&str> = program
                 .iter()
@@ -163,8 +164,21 @@ impl Checker {
                     _ => None,
                 })
                 .collect();
+            let bodyless_names: std::collections::HashSet<&str> = program
+                .iter()
+                .filter_map(|d| match d {
+                    Decl::FunSignature {
+                        name, annotations: ann, ..
+                    } if ann.iter().any(|a| a.name == "external" || a.name == "builtin") => {
+                        Some(name.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
             for (name, (_, span)) in &annotations {
-                if !bound_names.contains(name.as_str()) {
+                if !bound_names.contains(name.as_str())
+                    && !bodyless_names.contains(name.as_str())
+                {
                     errors.push(Diagnostic::error_at(
                         *span,
                         format!("type annotation for `{name}` has no matching function definition"),
@@ -300,16 +314,20 @@ impl Checker {
     /// Pass 3: Register external functions so they're available in impl bodies.
     fn register_externals(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
         for decl in program {
-            if let Decl::ExternalFun {
+            if let Decl::FunSignature {
                 name,
                 params,
                 return_type,
                 effects,
                 where_clause,
+                annotations,
                 span,
                 ..
             } = decl
             {
+                if !annotations.iter().any(|a| a.name == "external") {
+                    continue;
+                }
                 let mut params_list: Vec<(String, u32)> = vec![];
                 let mut fun_ty = self.convert_type_expr(return_type, &mut params_list);
                 for (_, texpr) in params.iter().rev() {
@@ -371,7 +389,7 @@ impl Checker {
         let mut annotation_constraints: HashMap<String, Vec<(String, u32)>> = HashMap::new();
 
         for decl in program {
-            if let Decl::FunAnnotation {
+            if let Decl::FunSignature {
                 id,
                 name,
                 name_span,

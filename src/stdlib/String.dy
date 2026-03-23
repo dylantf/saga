@@ -10,41 +10,41 @@ impl Debug for String {
   debug x = "\"" <> x <> "\""
 }
 
-pub @external("erlang", "string", "length")
-fun length : (s: String) -> Int
+@external("erlang", "string", "length")
+pub fun length : (s: String) -> Int
 
-pub @external("erlang", "string", "to_graphemes")
-fun graphemes : (s: String) -> List String
+@external("erlang", "string", "to_graphemes")
+pub fun graphemes : (s: String) -> List String
 
-pub @external("erlang", "string", "trim")
-fun trim : (s: String) -> String
+@external("erlang", "string", "trim")
+pub fun trim : (s: String) -> String
 
-pub @external("erlang", "string", "lowercase")
-fun to_lower : (s: String) -> String
+@external("erlang", "string", "lowercase")
+pub fun to_lower : (s: String) -> String
 
-pub @external("erlang", "string", "uppercase")
-fun to_upper : (s: String) -> String
+@external("erlang", "string", "uppercase")
+pub fun to_upper : (s: String) -> String
 
-pub @external("erlang", "string", "reverse")
-fun reverse : (s: String) -> String
+@external("erlang", "string", "reverse")
+pub fun reverse : (s: String) -> String
 
-pub @external("erlang", "string", "slice")
-fun slice : (s: String) -> (start: Int) -> (len: Int) -> String
+@external("erlang", "string", "slice")
+pub fun slice : (s: String) -> (start: Int) -> (len: Int) -> String
 
-pub @external("erlang", "std_string_bridge", "find")
-fun find : (s: String) -> (sub: String) -> Maybe String
+@external("erlang", "std_string_bridge", "find")
+pub fun find : (s: String) -> (sub: String) -> Maybe String
 
-pub @external("erlang", "std_string_bridge", "strip_prefix")
-fun strip_prefix : (s: String) -> (prefix: String) -> Maybe String
+@external("erlang", "std_string_bridge", "strip_prefix")
+pub fun strip_prefix : (s: String) -> (prefix: String) -> Maybe String
 
-pub @external("erlang", "std_string_bridge", "contains")
-fun contains : (s: String) -> (sub: String) -> Bool
+@external("erlang", "std_string_bridge", "contains")
+pub fun contains : (s: String) -> (sub: String) -> Bool
 
-pub @external("erlang", "std_string_bridge", "starts_with")
-fun starts_with : (s: String) -> (prefix: String) -> Bool
+@external("erlang", "std_string_bridge", "starts_with")
+pub fun starts_with : (s: String) -> (prefix: String) -> Bool
 
-pub @external("erlang", "std_string_bridge", "ends_with")
-fun ends_with : (s: String) -> (suffix: String) -> Bool
+@external("erlang", "std_string_bridge", "ends_with")
+pub fun ends_with : (s: String) -> (suffix: String) -> Bool
 
-pub @external("erlang", "std_string_bridge", "split")
-fun split : (s: String) -> (sep: String) -> List String
+@external("erlang", "std_string_bridge", "split")
+pub fun split : (s: String) -> (sep: String) -> List String

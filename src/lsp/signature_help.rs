@@ -280,7 +280,7 @@ pub fn build_signature(
 
 fn build_from_annotation(name: &str, program: &[Decl]) -> Option<SignatureInformation> {
     for decl in program {
-        if let Decl::FunAnnotation {
+        if let Decl::FunSignature {
             name: fn_name,
             params,
             return_type,

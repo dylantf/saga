@@ -937,7 +937,7 @@ fn collect_codegen_info(
             } => {
                 handler_defs.push(name.clone());
             }
-            Decl::FunAnnotation {
+            Decl::FunSignature {
                 public: true,
                 name,
                 effects,
@@ -1011,7 +1011,7 @@ pub(super) fn public_names_for_tc(
     let mut names = std::collections::HashSet::new();
     for decl in program {
         match decl {
-            Decl::FunAnnotation {
+            Decl::FunSignature {
                 public: true, name, ..
             } => {
                 names.insert(name.clone());
@@ -1036,11 +1036,6 @@ pub(super) fn public_names_for_tc(
                 names.insert(name.clone());
             }
             Decl::HandlerDef {
-                public: true, name, ..
-            } => {
-                names.insert(name.clone());
-            }
-            Decl::ExternalFun {
                 public: true, name, ..
             } => {
                 names.insert(name.clone());

@@ -9,7 +9,7 @@ use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use std::collections::HashMap;
 
-use init::PendingAnnotation;
+use init::{extract_external, PendingAnnotation};
 use pats::{lower_params, lower_pat};
 use util::{
     cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_qualified_call,
@@ -320,15 +320,17 @@ impl<'a> Lowerer<'a> {
         // Generate wrapper functions for external declarations so cross-module
         // imports can call them by the local name.
         for decl in program {
-            if let Decl::ExternalFun {
+            if let Decl::FunSignature {
                 public,
                 name,
-                module: erl_module,
-                func: erl_func,
                 params,
+                annotations,
                 ..
             } = decl
             {
+                let Some((erl_module, erl_func)) = extract_external(annotations) else {
+                    continue;
+                };
                 let arity = params.len();
                 let arg_vars: Vec<String> = (0..arity).map(|i| format!("_Ext{}", i)).collect();
                 let call_args: Vec<CExpr> =

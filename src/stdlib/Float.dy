@@ -11,17 +11,17 @@ impl Debug for Float {
 @external("erlang", "erlang", "float_to_list")
 fun to_string : (x: Float) -> String
 
-pub @external("erlang", "erlang", "trunc")
-fun trunc : (x: Float) -> Int
+@external("erlang", "erlang", "trunc")
+pub fun trunc : (x: Float) -> Int
 
-pub @external("erlang", "erlang", "round")
-fun round : (x: Float) -> Int
+@external("erlang", "erlang", "round")
+pub fun round : (x: Float) -> Int
 
-pub @external("erlang", "erlang", "floor")
-fun floor : (x: Float) -> Int
+@external("erlang", "erlang", "floor")
+pub fun floor : (x: Float) -> Int
 
-pub @external("erlang", "erlang", "ceil")
-fun ceil : (x: Float) -> Int
+@external("erlang", "erlang", "ceil")
+pub fun ceil : (x: Float) -> Int
 
-pub @external("erlang", "std_float_bridge", "parse")
-fun parse : (s: String) -> Maybe Float
+@external("erlang", "std_float_bridge", "parse")
+pub fun parse : (s: String) -> Maybe Float

@@ -6,32 +6,32 @@ impl Debug for Dict k v where {k: Debug, v: Debug} {
   debug d = "{" <> List.flatten (List.join ", " (List.map (fun (k, v) -> debug k <> ": " <> debug v) (to_list d))) <> "}"
 }
 
-pub @external("erlang", "maps", "put")
-fun put : (key: k) -> (value: v) -> (dict: Dict k v) -> Dict k v where {k: Eq}
+@external("erlang", "maps", "put")
+pub fun put : (key: k) -> (value: v) -> (dict: Dict k v) -> Dict k v where {k: Eq}
 
-pub @external("erlang", "maps", "remove")
-fun remove : (key: k) -> (dict: Dict k v) -> Dict k v where {k: Eq}
+@external("erlang", "maps", "remove")
+pub fun remove : (key: k) -> (dict: Dict k v) -> Dict k v where {k: Eq}
 
-pub @external("erlang", "maps", "keys")
-fun keys : (dict: Dict k v) -> List k
+@external("erlang", "maps", "keys")
+pub fun keys : (dict: Dict k v) -> List k
 
-pub @external("erlang", "maps", "values")
-fun values : (dict: Dict k v) -> List v
+@external("erlang", "maps", "values")
+pub fun values : (dict: Dict k v) -> List v
 
-pub @external("erlang", "maps", "size")
-fun size : (dict: Dict k v) -> Int
+@external("erlang", "maps", "size")
+pub fun size : (dict: Dict k v) -> Int
 
-pub @external("erlang", "maps", "from_list")
-fun from_list : (pairs: List (k, v)) -> Dict k v where {k: Eq}
+@external("erlang", "maps", "from_list")
+pub fun from_list : (pairs: List (k, v)) -> Dict k v where {k: Eq}
 
-pub @external("erlang", "maps", "to_list")
-fun to_list : (dict: Dict k v) -> List (k, v)
+@external("erlang", "maps", "to_list")
+pub fun to_list : (dict: Dict k v) -> List (k, v)
 
-pub @external("erlang", "maps", "is_key")
-fun member : (key: k) -> (dict: Dict k v) -> Bool where {k: Eq}
+@external("erlang", "maps", "is_key")
+pub fun member : (key: k) -> (dict: Dict k v) -> Bool where {k: Eq}
 
-pub @external("erlang", "std_dict_bridge", "get")
-fun get : (key: k) -> (dict: Dict k v) -> Maybe v where {k: Eq}
+@external("erlang", "std_dict_bridge", "get")
+pub fun get : (key: k) -> (dict: Dict k v) -> Maybe v where {k: Eq}
 
-pub @external("erlang", "std_dict_bridge", "new")
-fun new : Unit -> Dict k v
+@external("erlang", "std_dict_bridge", "new")
+pub fun new : Unit -> Dict k v

@@ -45,7 +45,7 @@ fn find_local(program: &[Decl], name: &str) -> Option<Span> {
 
 fn find_in_decl(decl: &Decl, name: &str) -> Option<Span> {
     match decl {
-        Decl::FunAnnotation {
+        Decl::FunSignature {
             name: fn_name,
             span,
             ..
