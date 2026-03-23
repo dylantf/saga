@@ -2252,8 +2252,8 @@ f x = x + 1",
 // --- Dict ---
 
 #[test]
-fn dict_empty_typechecks() {
-    assert!(check("main () = Dict.empty").is_ok());
+fn dict_new_typechecks() {
+    assert!(check("import Std.Dict\nmain () = Dict.new ()").is_ok());
 }
 
 // Dict.put, Dict.keys, Dict.values, Dict.size, Dict.from_list, Dict.to_list,

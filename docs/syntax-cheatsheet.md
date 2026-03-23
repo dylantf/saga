@@ -499,7 +499,7 @@ do {
 # Built-in Dict k v type. Keys require Eq. All operations are immutable.
 
 # Empty dict
-let d = Dict.empty
+let d = Dict.new ()
 
 # Create from list of tuples
 let ages = Dict.from_list [("alice", 30), ("bob", 25)]
@@ -528,7 +528,7 @@ Dict.values ages             # [30, 25]
 Dict.to_list ages            # [("alice", 30), ("bob", 25)]
 
 # Pipe-friendly
-Dict.empty
+Dict.new ()
   |> Dict.put "x" 1
   |> Dict.put "y" 2
 ```

@@ -2,17 +2,17 @@ module Std.Regex
 
 import Std.Maybe as Maybe (Maybe)
 
-pub fun match : (pattern: String) -> (s: String) -> Bool
-# builtin
+pub @external("erlang", "std_regex_bridge", "match")
+fun match : (pattern: String) -> (s: String) -> Bool
 
-pub fun find : (pattern: String) -> (s: String) -> Maybe String
-# builtin
+pub @external("erlang", "std_regex_bridge", "find")
+fun find : (pattern: String) -> (s: String) -> Maybe String
 
-pub fun find_all : (pattern: String) -> (s: String) -> List String
-# builtin
+pub @external("erlang", "std_regex_bridge", "find_all")
+fun find_all : (pattern: String) -> (s: String) -> List String
 
-pub fun replace : (pattern: String) -> (s: String) -> (replacement: String) -> String
-# builtin
+pub @external("erlang", "std_regex_bridge", "replace")
+fun replace : (pattern: String) -> (s: String) -> (replacement: String) -> String
 
-pub fun replace_all : (pattern: String) -> (s: String) -> (replacement: String) -> String
-# builtin
+pub @external("erlang", "std_regex_bridge", "replace_all")
+fun replace_all : (pattern: String) -> (s: String) -> (replacement: String) -> String

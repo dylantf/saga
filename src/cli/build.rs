@@ -107,6 +107,11 @@ pub fn compile_std_modules(
 fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
     vec![
         ("std_file_bridge.erl", include_str!("../stdlib/File.bridge.erl")),
+        ("std_dict_bridge.erl", include_str!("../stdlib/Dict.bridge.erl")),
+        ("std_string_bridge.erl", include_str!("../stdlib/String.bridge.erl")),
+        ("std_int_bridge.erl", include_str!("../stdlib/Int.bridge.erl")),
+        ("std_float_bridge.erl", include_str!("../stdlib/Float.bridge.erl")),
+        ("std_regex_bridge.erl", include_str!("../stdlib/Regex.bridge.erl")),
     ]
 }
 

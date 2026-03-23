@@ -39,7 +39,7 @@ main () = {
 
   # Start from empty
   let d =
-    Dict.empty
+    Dict.new ()
     |> Dict.put "y" 2
     |> Dict.put "x" 1
   println $"from empty: {debug d}"
