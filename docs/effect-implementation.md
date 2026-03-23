@@ -211,3 +211,4 @@ The effect call/handler/continuation mechanism is always CPS. The handler's *bod
 - **Inlining:** When the handler is statically known (`with console_log` right there in the source), the compiler can inline the handler body directly, eliminating the closure allocation and indirect call entirely
 - **Dead effect elimination:** If a handled effect is never actually called in the computation, the handler can be stripped
 - **Pure functions (no `needs`):** No CPS transform at all — compiled as normal Core Erlang functions with zero overhead
+- **Effect row polymorphism (`..e`):** Row variables are a type-checking concept only. They're fully resolved before codegen, so the CPS transform sees concrete effect sets. No runtime cost.
