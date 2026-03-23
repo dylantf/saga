@@ -221,23 +221,45 @@ impl<'a> Lowerer<'a> {
                             .insert(ctor.clone(), erlang_name.clone());
                     }
                 }
-                // Register Std handler bodies from elaborated programs
+                // Register Std handler bodies and external functions from elaborated programs
                 if let Some(elab_program) = self.ctx.elaborated_modules.get(mod_name) {
                     for decl in elab_program {
-                        if let Decl::HandlerDef {
-                            name,
-                            effects,
-                            arms,
-                            return_clause,
-                            ..
-                        } = decl
-                        {
-                            self.handler_defs.entry(name.clone()).or_insert(HandlerInfo {
-                                effects: effects.iter().map(|e| e.name.clone()).collect(),
-                                arms: arms.clone(),
-                                return_clause: return_clause.clone(),
-                                source_module: Some(mod_name.clone()),
-                            });
+                        match decl {
+                            Decl::HandlerDef {
+                                name,
+                                effects,
+                                arms,
+                                return_clause,
+                                ..
+                            } => {
+                                self.handler_defs.entry(name.clone()).or_insert(HandlerInfo {
+                                    effects: effects.iter().map(|e| e.name.clone()).collect(),
+                                    arms: arms.clone(),
+                                    return_clause: return_clause.clone(),
+                                    source_module: Some(mod_name.clone()),
+                                });
+                            }
+                            Decl::ExternalFun {
+                                name,
+                                module: erl_module,
+                                func: erl_func,
+                                params,
+                                ..
+                            } => {
+                                let arity = params.len();
+                                self.external_funs.entry(name.clone()).or_insert((
+                                    erl_module.clone(),
+                                    erl_func.clone(),
+                                    arity,
+                                ));
+                                self.fun_info.entry(name.clone()).or_insert(FunInfo {
+                                    arity,
+                                    effects: Vec::new(),
+                                    param_absorbed_effects: HashMap::new(),
+                                    import_origin: None,
+                                });
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -348,23 +370,47 @@ impl<'a> Lowerer<'a> {
                             },
                         );
                     }
-                    // Register imported handler bodies from elaborated programs
+                    // Register imported handler bodies and external functions from elaborated programs
                     if let Some(elab_program) = self.ctx.elaborated_modules.get(&module_name) {
                         for decl in elab_program {
-                            if let Decl::HandlerDef {
-                                name,
-                                effects,
-                                arms,
-                                return_clause,
-                                ..
-                            } = decl
-                            {
-                                self.handler_defs.entry(name.clone()).or_insert(HandlerInfo {
-                                    effects: effects.iter().map(|e| e.name.clone()).collect(),
-                                    arms: arms.clone(),
-                                    return_clause: return_clause.clone(),
-                                    source_module: Some(module_name.clone()),
-                                });
+                            match decl {
+                                Decl::HandlerDef {
+                                    name,
+                                    effects,
+                                    arms,
+                                    return_clause,
+                                    ..
+                                } => {
+                                    self.handler_defs.entry(name.clone()).or_insert(HandlerInfo {
+                                        effects: effects.iter().map(|e| e.name.clone()).collect(),
+                                        arms: arms.clone(),
+                                        return_clause: return_clause.clone(),
+                                        source_module: Some(module_name.clone()),
+                                    });
+                                }
+                                Decl::ExternalFun {
+                                    name,
+                                    module: erl_module,
+                                    func: erl_func,
+                                    params,
+                                    ..
+                                } => {
+                                    // Register external functions so handler bodies that
+                                    // reference them can resolve to the correct BEAM call.
+                                    let arity = params.len();
+                                    self.external_funs.entry(name.clone()).or_insert((
+                                        erl_module.clone(),
+                                        erl_func.clone(),
+                                        arity,
+                                    ));
+                                    self.fun_info.entry(name.clone()).or_insert(FunInfo {
+                                        arity,
+                                        effects: Vec::new(),
+                                        param_absorbed_effects: HashMap::new(),
+                                        import_origin: None,
+                                    });
+                                }
+                                _ => {}
                             }
                         }
                     }

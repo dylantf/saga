@@ -1,0 +1,15 @@
+import Std.File
+
+fun process : Unit -> Unit needs {File}
+process () = {
+  let _ = File.write! "test_output.txt" "hello from dylang!"
+  let result = File.read! "test_output.txt"
+  case result {
+    Ok content -> println content
+    Err e -> println ("error: " <> e)
+  }
+  let _ = File.delete! "test_output.txt"
+  println $"file exists after delete: {File.exists! "test_output.txt"}"
+}
+
+main () = process () with fs

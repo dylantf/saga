@@ -103,6 +103,63 @@ pub fn compile_std_modules(
     elaborated_modules
 }
 
+/// Returns embedded stdlib bridge (.erl) files as (filename, source) pairs.
+fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("std_file_bridge.erl", include_str!("../stdlib/File.bridge.erl")),
+    ]
+}
+
+/// Write stdlib bridge .erl files into the build directory.
+fn write_stdlib_bridges(build_dir: &Path) {
+    for (filename, source) in stdlib_bridge_files() {
+        let path = build_dir.join(filename);
+        fs::write(&path, source).unwrap_or_else(|e| {
+            eprintln!("Error writing bridge file {}: {}", path.display(), e);
+            std::process::exit(1);
+        });
+    }
+}
+
+/// Scan a project directory for .erl bridge files and copy them to the build directory.
+fn copy_project_bridges(project_root: &Path, build_dir: &Path) {
+    let mut count = 0;
+    if let Err(e) = copy_bridges_from_dir(project_root, build_dir, &mut count) {
+        eprintln!("Error scanning for bridge files: {}", e);
+        std::process::exit(1);
+    }
+    if count > 0 {
+        eprintln!("Copied {} bridge file(s)", count);
+    }
+}
+
+fn copy_bridges_from_dir(
+    dir: &Path,
+    build_dir: &Path,
+    count: &mut usize,
+) -> Result<(), String> {
+    let entries =
+        fs::read_dir(dir).map_err(|e| format!("cannot read {}: {}", dir.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read_dir error: {}", e))?;
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "_build" || n == "tests") {
+                continue;
+            }
+            copy_bridges_from_dir(&path, build_dir, count)?;
+        } else if path.extension().is_some_and(|ext| ext == "erl") {
+            let filename = path.file_name().unwrap();
+            let dest = build_dir.join(filename);
+            fs::copy(&path, &dest).map_err(|e| {
+                format!("cannot copy {} to {}: {}", path.display(), dest.display(), e)
+            })?;
+            *count += 1;
+        }
+    }
+    Ok(())
+}
+
 /// Compile a single .core file with erlc.
 pub fn run_erlc_file(core_file: &Path, build_dir: &Path) {
     let status = std::process::Command::new("erlc")
@@ -121,22 +178,26 @@ pub fn run_erlc_file(core_file: &Path, build_dir: &Path) {
     }
 }
 
-/// Compile all .core files in a directory with erlc.
+/// Compile all .core and .erl files in a directory with erlc.
 pub fn run_erlc(build_dir: &Path) {
-    let core_files: Vec<_> = fs::read_dir(build_dir)
+    let compilable_files: Vec<_> = fs::read_dir(build_dir)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "core"))
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext == "core" || ext == "erl")
+        })
         .map(|e| e.path())
         .collect();
 
-    for core_file in &core_files {
-        run_erlc_file(core_file, build_dir);
+    for file in &compilable_files {
+        run_erlc_file(file, build_dir);
     }
 
     eprintln!(
         "Built {} module(s) in {}",
-        core_files.len(),
+        compilable_files.len(),
         build_dir.display()
     );
 }
@@ -311,6 +372,10 @@ pub fn build_project(
         emit_module(&erlang_name, elaborated, &ctx, &build_dir);
     }
 
+    // Copy bridge (.erl) files into build dir
+    write_stdlib_bridges(&build_dir);
+    copy_project_bridges(&project_root, &build_dir);
+
     run_erlc(&build_dir);
     let codegen_info = result.codegen_info().clone();
     (build_dir, elaborated_modules, codegen_info)
@@ -352,6 +417,9 @@ pub fn build_script(file: &str, profile: &str) -> PathBuf {
     for (module_name, elaborated) in &elaborated_modules {
         emit_module(module_name, elaborated, &ctx, &build_dir);
     }
+
+    // Copy stdlib bridge (.erl) files into build dir
+    write_stdlib_bridges(&build_dir);
 
     run_erlc(&build_dir);
     build_dir
