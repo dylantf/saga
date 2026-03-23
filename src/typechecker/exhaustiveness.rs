@@ -49,9 +49,15 @@ pub(crate) fn simplify_pat(pat: &Pat) -> SPat {
             let name = if *b { "True" } else { "False" };
             SPat::Constructor(name.into(), vec![])
         }
+        Pat::Lit {
+            value: Lit::Unit, ..
+        } => SPat::Wildcard,
         Pat::Lit { value, .. } => SPat::Literal(value.clone()),
         Pat::Constructor { name, args, .. } => {
-            SPat::Constructor(name.clone(), args.iter().map(simplify_pat).collect())
+            // Use bare constructor name (last segment) so qualified patterns
+            // like `Std.File.FileError` match adt_variants which use bare names.
+            let bare = name.rsplit('.').next().unwrap_or(name);
+            SPat::Constructor(bare.to_string(), args.iter().map(simplify_pat).collect())
         }
         Pat::Tuple { elements, .. } => SPat::Tuple(elements.iter().map(simplify_pat).collect()),
         Pat::Record { .. } | Pat::AnonRecord { .. } => {

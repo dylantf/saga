@@ -767,6 +767,21 @@ impl Checker {
             }
         }
 
+        // Always inject constructors qualified for pattern matching (e.g. File.NotFound)
+        for (type_name, ctors) in ctors_map {
+            let mut variants = Vec::new();
+            for ctor in ctors {
+                let qualified = format!("{}.{}", prefix, ctor);
+                if let Some(&scheme) = binding_map.get(ctor.as_str()) {
+                    self.constructors.insert(qualified, scheme.clone());
+                    variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
+                }
+            }
+            if !self.adt_variants.contains_key(type_name) && !variants.is_empty() {
+                self.adt_variants.insert(type_name.clone(), variants);
+            }
+        }
+
         // Always inject record definitions for qualified access
         for (rec_name, fields) in record_defs {
             self.records

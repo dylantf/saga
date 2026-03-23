@@ -2,14 +2,18 @@ import Std.File (FileError)
 
 fun process : Unit -> Unit needs {File}
 process () = {
-  let _ = File.write! "test_output.txt" "hello from dylang!"
+  let result = File.write! "test_output.txt" "hello from dylang!"
+  case result {
+    Ok(()) -> ()
+    Err _ -> println "write failed"
+  }
 
   let result = File.read! "test_output.txt"
   case result {
     Ok content -> println content
     Err e -> case e {
-      NotFound -> println "file not found"
-      PermissionDenied -> println "permission denied"
+      Std.File.NotFound -> println "file not found"
+      Std.File.PermissionDenied -> println "permission denied"
       _ -> println "other error"
     }
   }
@@ -21,7 +25,7 @@ process () = {
   let missing = File.read! "nonexistent.txt"
   case missing {
     Ok _ -> println "unexpected"
-    Err NotFound -> println "correctly got NotFound"
+    Err Std.File.NotFound -> println "correctly got NotFound"
     Err _ -> println "wrong error"
   }
 }

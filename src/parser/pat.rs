@@ -109,14 +109,15 @@ impl Parser {
 
         match self.advance() {
             Token::UpperIdent(s) => {
-                // Support qualified constructor patterns: `Module.Name` or bare `Name`
-                let name = if matches!(self.peek(), Token::Dot) {
+                // Support qualified constructor patterns: `Module.Name`, `A.B.Name`, or bare `Name`
+                let mut name = s;
+                let mut name_end = span;
+                while matches!(self.peek(), Token::Dot) {
                     self.advance(); // consume '.'
-                    let base = self.expect_upper_ident()?;
-                    format!("{}.{}", s, base)
-                } else {
-                    s
-                };
+                    let segment = self.expect_upper_ident()?;
+                    name_end = self.tokens[self.pos - 1].span;
+                    name = format!("{}.{}", name, segment);
+                }
                 if matches!(self.peek(), Token::LParen) {
                     // Constructor with args: Some(x), Shapes.Circle(r)
                     self.advance(); // consume '('
@@ -169,7 +170,7 @@ impl Parser {
                         args.push(self.parse_pattern_atom()?);
                     }
                     let end = if args.is_empty() {
-                        span
+                        name_end
                     } else {
                         self.tokens[self.pos - 1].span
                     };

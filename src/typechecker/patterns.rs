@@ -40,15 +40,42 @@ impl Checker {
             Pat::Constructor {
                 id, name, args, span, ..
             } => {
-                let ctor_scheme = self.constructors.get(name).cloned().ok_or_else(|| {
-                    Diagnostic::error_at(
-                        *span,
-                        format!("undefined constructor in pattern: {}", name),
-                    )
-                })?;
+                // Look up constructor by name; if the name is qualified (e.g.
+                // "Std.File.NotFound"), try progressively shorter suffixes since
+                // constructors may be registered as "File.NotFound" or "NotFound"
+                // depending on how the module was imported.
+                let ctor_scheme = {
+                    let mut result = self.constructors.get(name);
+                    let mut suffix = name.as_str();
+                    while result.is_none() {
+                        if let Some(pos) = suffix.find('.') {
+                            suffix = &suffix[pos + 1..];
+                            result = self.constructors.get(suffix);
+                        } else {
+                            break;
+                        }
+                    }
+                    result.cloned().ok_or_else(|| {
+                        Diagnostic::error_at(
+                            *span,
+                            format!("undefined constructor in pattern: {}", name),
+                        )
+                    })?
+                };
                 // Record reference to constructor definition for find-references/rename
-                if let Some(def_id) = self.lsp.constructor_def_ids.get(name).copied() {
-                    self.record_reference(*id, *span, def_id);
+                {
+                    let mut lookup = name.as_str();
+                    loop {
+                        if let Some(def_id) = self.lsp.constructor_def_ids.get(lookup).copied() {
+                            self.record_reference(*id, *span, def_id);
+                            break;
+                        }
+                        if let Some(pos) = lookup.find('.') {
+                            lookup = &lookup[pos + 1..];
+                        } else {
+                            break;
+                        }
+                    }
                 }
                 let (ctor_ty, _) = self.instantiate(&ctor_scheme);
                 let mut current = ctor_ty;
@@ -180,6 +207,65 @@ impl Checker {
     }
 
     // --- Exhaustiveness checking ---
+
+    /// Check that a `let` binding pattern is irrefutable (covers all values of
+    /// the type). Refutable patterns like `Ok(x)` in `let Ok(x) = expr` are
+    /// rejected because the unmatched cases would crash at runtime.
+    pub(crate) fn check_let_pattern_irrefutable(
+        &self,
+        pat: &Pat,
+        ty: &Type,
+    ) -> Result<(), Diagnostic> {
+        use super::exhaustiveness::{self as exh, ExhaustivenessCtx, SPat};
+
+        // Wildcards and variables are always irrefutable
+        if matches!(pat, Pat::Wildcard { .. } | Pat::Var { .. }) {
+            return Ok(());
+        }
+
+        let resolved = self.sub.apply(ty);
+
+        // Only check ADT types -- primitives with constructors (like Result/Maybe)
+        // are the main concern. Tuples are single-constructor and always irrefutable
+        // at the top level.
+        let type_name = match &resolved {
+            Type::Con(name, _) => name.clone(),
+            _ => return Ok(()),
+        };
+
+        if !self.adt_variants.contains_key(&type_name) {
+            return Ok(());
+        }
+
+        let ctx = ExhaustivenessCtx {
+            adt_variants: &self.adt_variants,
+        };
+
+        let spat = exh::simplify_pat(pat);
+        let matrix = vec![vec![spat]];
+        let wildcard_row = vec![SPat::Wildcard];
+
+        if exh::useful(&ctx, &matrix, &wildcard_row) {
+            let witnesses = exh::find_all_witnesses(&ctx, &matrix, 1);
+            if !witnesses.is_empty() {
+                let formatted: Vec<String> =
+                    witnesses.iter().map(|w| exh::format_witness(w)).collect();
+                return Err(Diagnostic::error_at(
+                    pat.span(),
+                    format!(
+                        "refutable pattern in let binding: not covered: {}",
+                        formatted.join(", ")
+                    ),
+                ));
+            }
+            return Err(Diagnostic::error_at(
+                pat.span(),
+                "refutable pattern in let binding",
+            ));
+        }
+
+        Ok(())
+    }
 
     /// Check whether case arms exhaustively cover a type using Maranget's
     /// usefulness algorithm. Also detects unreachable/redundant arms.

@@ -639,8 +639,14 @@ impl Checker {
                         self.generalize_let_binding(
                             name, *pat_id, *var_span, &ty, deferred_effects,
                         );
-                    } else if let Err(e) = self.bind_pattern(pattern, &ty) {
-                        errors.push(e);
+                    } else {
+                        if let Err(e) = self.bind_pattern(pattern, &ty) {
+                            errors.push(e);
+                        }
+                        if let Err(e) = self.check_let_pattern_irrefutable(pattern, &ty)
+                        {
+                            errors.push(e);
+                        }
                     }
                     last_ty = Type::unit();
                     i += 1;
