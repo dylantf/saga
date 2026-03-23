@@ -64,7 +64,7 @@ only name body = {
 
 #@ Skip a test. The body is never executed.
 pub fun skip : (name: String) -> (body: () -> Unit needs {Assert}) -> Unit needs {TestRunner}
-skip name body = report_test! name [] SkipMode
+skip name _body = report_test! name [] SkipMode
 
 #@ Group tests under a label.
 pub fun describe : (name: String) -> (body: () -> Unit needs {TestRunner}) -> Unit needs {TestRunner}
@@ -76,7 +76,7 @@ describe name body = {
 
 #@ Collecting handler (pass 1). Records test entries, discards results.
 handler collect_handler for TestRunner {
-  report_test name failures mode = {
+  report_test name _failures mode = {
     let k = resume ()
     fun entries -> k (TestCase(name, mode) :: entries)
   }
@@ -103,16 +103,16 @@ pub handler exec_handler for TestRunner {
         OnlyMode -> False
       }
       if should_skip then {
-        println (indent <> "\x1b[33m○\x1b[0m " <> name <> " (skipped)")
+        println (indent <> "\x1b[33m○\x1b[0m " <> name <> " (skipped)") # grey
         k { state | skipped: state.skipped + 1 }
       } else {
         case failures {
           [] -> {
-            println (indent <> "\x1b[32m✓\x1b[0m " <> name)
+            println (indent <> "\x1b[32m✓\x1b[0m " <> name) # green
             k { state | passed: state.passed + 1 }
           }
           h :: _ -> {
-            println (indent <> "\x1b[31m✗\x1b[0m " <> name)
+            println (indent <> "\x1b[31m✗\x1b[0m " <> name) # red
             println (indent <> "    " <> h)
             k { state | failed: state.failed + 1 }
           }

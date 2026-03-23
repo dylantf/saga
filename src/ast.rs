@@ -41,7 +41,7 @@ pub type ExposedItem = String;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decl {
-    /// `pub fun add (a: Int) (b: Int) -> Int needs {Log} where {a: Show + Eq}`
+    /// `pub fun add : (a: Int) -> (b: Int) -> Int needs {Log} where {a: Show, Eq}`
     FunAnnotation {
         id: NodeId,
         public: bool,
@@ -290,9 +290,7 @@ pub enum ExprKind {
     },
 
     /// `{ street: "Main St", city: "Portland" }` (anonymous record)
-    AnonRecordCreate {
-        fields: Vec<(String, Span, Expr)>,
-    },
+    AnonRecordCreate { fields: Vec<(String, Span, Expr)> },
 
     /// `{ user | age: user.age + 1 }`
     RecordUpdate {
@@ -387,8 +385,7 @@ impl Expr {
             ExprKind::UnaryMinus { expr, .. } => expr.contains_resume(),
             ExprKind::Tuple { elements, .. } => elements.iter().any(|e| e.contains_resume()),
             ExprKind::FieldAccess { expr, .. } => expr.contains_resume(),
-            ExprKind::RecordCreate { fields, .. }
-            | ExprKind::AnonRecordCreate { fields, .. } => {
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
                 fields.iter().any(|(_, _, e)| e.contains_resume())
             }
             ExprKind::RecordUpdate { record, fields, .. } => {
@@ -565,13 +562,25 @@ pub enum TypeExpr {
     Var { name: String, span: Span },
 
     /// `Option a`, `Result a e`
-    App { func: Box<TypeExpr>, arg: Box<TypeExpr>, span: Span },
+    App {
+        func: Box<TypeExpr>,
+        arg: Box<TypeExpr>,
+        span: Span,
+    },
 
     /// `a -> b` or `a -> b needs {Eff}` or `a -> b needs {State Int}`
-    Arrow { from: Box<TypeExpr>, to: Box<TypeExpr>, effects: Vec<EffectRef>, span: Span },
+    Arrow {
+        from: Box<TypeExpr>,
+        to: Box<TypeExpr>,
+        effects: Vec<EffectRef>,
+        span: Span,
+    },
 
     /// Anonymous record type: `{ street: String, city: String }`
-    Record { fields: Vec<(String, TypeExpr)>, span: Span },
+    Record {
+        fields: Vec<(String, TypeExpr)>,
+        span: Span,
+    },
 }
 
 impl TypeExpr {
@@ -593,17 +602,28 @@ impl PartialEq for TypeExpr {
             (TypeExpr::Named { name: a, .. }, TypeExpr::Named { name: b, .. }) => a == b,
             (TypeExpr::Var { name: a, .. }, TypeExpr::Var { name: b, .. }) => a == b,
             (
-                TypeExpr::App { func: f1, arg: a1, .. },
-                TypeExpr::App { func: f2, arg: a2, .. },
+                TypeExpr::App {
+                    func: f1, arg: a1, ..
+                },
+                TypeExpr::App {
+                    func: f2, arg: a2, ..
+                },
             ) => f1 == f2 && a1 == a2,
             (
-                TypeExpr::Arrow { from: f1, to: t1, effects: e1, .. },
-                TypeExpr::Arrow { from: f2, to: t2, effects: e2, .. },
+                TypeExpr::Arrow {
+                    from: f1,
+                    to: t1,
+                    effects: e1,
+                    ..
+                },
+                TypeExpr::Arrow {
+                    from: f2,
+                    to: t2,
+                    effects: e2,
+                    ..
+                },
             ) => f1 == f2 && t1 == t2 && e1 == e2,
-            (
-                TypeExpr::Record { fields: f1, .. },
-                TypeExpr::Record { fields: f2, .. },
-            ) => f1 == f2,
+            (TypeExpr::Record { fields: f1, .. }, TypeExpr::Record { fields: f2, .. }) => f1 == f2,
             _ => false,
         }
     }

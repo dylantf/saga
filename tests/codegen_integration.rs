@@ -26,6 +26,17 @@ fn emit(src: &str) -> String {
 /// Parse, typecheck, elaborate, then emit Core Erlang.
 /// Use this for tests that involve traits or other elaboration features.
 fn emit_elaborated(src: &str) -> String {
+    emit_elaborated_inner(src, false)
+}
+
+/// Like `emit_elaborated` but also compiles and includes Std module elaborated
+/// programs in the codegen context. This mirrors the real `build_script` pipeline
+/// and is needed to test cross-module external function resolution.
+fn emit_elaborated_with_std(src: &str) -> String {
+    emit_elaborated_inner(src, true)
+}
+
+fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
     let tokens = lexer::Lexer::new(src).lex().expect("lex error");
     let program = parser::Parser::new(tokens)
         .parse_program()
@@ -34,9 +45,28 @@ fn emit_elaborated(src: &str) -> String {
     let result = checker.check_program(&program);
     assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());
     let elaborated = elaborate::elaborate(&program, &result);
+
+    let elaborated_modules = if include_std_modules {
+        let mut modules = std::collections::HashMap::new();
+        for (module_name, mod_result) in result.module_check_results() {
+            if !module_name.starts_with("Std.") {
+                continue;
+            }
+            let mod_program = match result.programs().get(module_name) {
+                Some(p) => p,
+                None => continue,
+            };
+            let elab = elaborate::elaborate_module(mod_program, mod_result, module_name);
+            modules.insert(module_name.clone(), elab);
+        }
+        modules
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let ctx = codegen::CodegenContext {
         codegen_info: result.codegen_info().clone(),
-        elaborated_modules: std::collections::HashMap::new(),
+        elaborated_modules,
         let_effect_bindings: result.let_effect_bindings.clone(),
     };
     codegen::emit_module_with_context("_script", &elaborated, &ctx)
@@ -1759,4 +1789,77 @@ main () = {
 }
 "#;
     assert_compiles(src);
+}
+
+// --- Cross-module external function disambiguation ---
+
+#[test]
+fn qualified_external_calls_resolve_to_correct_module() {
+    // List.reverse and String.reverse are both @external but point to
+    // different Erlang modules (lists vs string). Qualified calls must
+    // resolve to the correct one, not whichever was registered first.
+    let src = r#"
+import Std.List
+import Std.String
+
+main () = {
+  let xs = List.reverse [1, 2, 3]
+  let s = String.reverse "hello"
+  xs
+}
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        out.contains("call 'lists':'reverse'"),
+        "List.reverse should emit lists:reverse\n{out}"
+    );
+    assert!(
+        out.contains("call 'string':'reverse'"),
+        "String.reverse should emit string:reverse\n{out}"
+    );
+}
+
+#[test]
+fn exposed_external_overrides_unqualified_lookup() {
+    // When reverse is explicitly exposed from Std.String, an unqualified
+    // call to reverse must resolve to string:reverse, not lists:reverse.
+    let src = r#"
+import Std.String (reverse)
+
+main () = reverse "hello"
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        out.contains("call 'string':'reverse'"),
+        "Exposed reverse should emit string:reverse, not lists:reverse\n{out}"
+    );
+    assert!(
+        !out.contains("call 'lists':'reverse'"),
+        "Should not contain lists:reverse\n{out}"
+    );
+}
+
+#[test]
+fn qualified_and_exposed_externals_coexist() {
+    // Expose reverse from one module, use the other qualified.
+    // Both must resolve correctly.
+    let src = r#"
+import Std.String (reverse)
+import Std.List
+
+main () = {
+  let s = reverse "hello"
+  let xs = List.reverse [1, 2, 3]
+  s
+}
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        out.contains("call 'string':'reverse'"),
+        "Exposed reverse should emit string:reverse\n{out}"
+    );
+    assert!(
+        out.contains("call 'lists':'reverse'"),
+        "List.reverse should emit lists:reverse\n{out}"
+    );
 }

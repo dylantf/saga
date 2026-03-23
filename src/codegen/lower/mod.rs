@@ -1757,9 +1757,15 @@ impl<'a> Lowerer<'a> {
             arg_vars.push(rk_var);
         }
 
-        // Check if the function is an @external with a specific bridge module
+        // Check if the function is an @external with a specific bridge module.
+        // Look up by qualified name first to disambiguate same-named externals
+        // from different modules (e.g. List.reverse vs String.reverse).
         let call_args: Vec<CExpr> = arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-        let call = if let Some((erl_mod, erl_func, _)) = self.external_funs.get(func_name) {
+        let call = if let Some((erl_mod, erl_func, _)) = self
+            .external_funs
+            .get(&qualified)
+            .or_else(|| self.external_funs.get(func_name))
+        {
             CExpr::Call(erl_mod.clone(), erl_func.clone(), call_args)
         } else {
             CExpr::Call(erlang_module, func_name.to_string(), call_args)

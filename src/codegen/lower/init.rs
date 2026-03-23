@@ -161,7 +161,7 @@ impl<'a> Lowerer<'a> {
                 // `List.map` resolve to `std_list:map` instead of `list:map`.
                 let alias = mod_path.last().unwrap().clone();
                 self.module_aliases
-                    .entry(alias)
+                    .entry(alias.clone())
                     .or_insert_with(|| erlang_name.clone());
 
                 // Register Std effect definitions so expanded_arity can look up op counts.
@@ -247,6 +247,14 @@ impl<'a> Lowerer<'a> {
                                 ..
                             } => {
                                 let arity = params.len();
+                                // Register with qualified key so Module.func resolves correctly
+                                let qualified_key = format!("{}.{}", alias, name);
+                                self.external_funs.entry(qualified_key).or_insert((
+                                    erl_module.clone(),
+                                    erl_func.clone(),
+                                    arity,
+                                ));
+                                // Also register unqualified (first-wins for prelude fallback)
                                 self.external_funs.entry(name.clone()).or_insert((
                                     erl_module.clone(),
                                     erl_func.clone(),
@@ -398,11 +406,27 @@ impl<'a> Lowerer<'a> {
                                     // Register external functions so handler bodies that
                                     // reference them can resolve to the correct BEAM call.
                                     let arity = params.len();
-                                    self.external_funs.entry(name.clone()).or_insert((
+                                    // Register with qualified key so Module.func resolves correctly
+                                    let qualified_key = format!("{}.{}", prefix, name);
+                                    self.external_funs.entry(qualified_key).or_insert((
                                         erl_module.clone(),
                                         erl_func.clone(),
                                         arity,
                                     ));
+                                    // Register unqualified: override if explicitly
+                                    // exposed, otherwise first-wins fallback.
+                                    if exposing.as_ref().is_some_and(|e| e.iter().any(|n| n == name)) {
+                                        self.external_funs.insert(
+                                            name.clone(),
+                                            (erl_module.clone(), erl_func.clone(), arity),
+                                        );
+                                    } else {
+                                        self.external_funs.entry(name.clone()).or_insert((
+                                            erl_module.clone(),
+                                            erl_func.clone(),
+                                            arity,
+                                        ));
+                                    }
                                     self.fun_info.entry(name.clone()).or_insert(FunInfo {
                                         arity,
                                         effects: Vec::new(),
