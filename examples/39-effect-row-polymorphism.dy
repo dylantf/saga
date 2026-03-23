@@ -1,0 +1,55 @@
+# Effect row polymorphism
+#
+# The `..e` syntax in effect annotations creates an "open" effect row:
+# the function accepts callbacks with the declared effects plus any extras,
+# and those extras propagate to the caller.
+#
+# This is essential for higher-order functions that need to forward
+# effects from their callbacks without knowing what those effects are.
+
+effect Log {
+  fun log : (msg: String) -> Unit
+}
+
+effect Fail {
+  fun fail : (msg: String) -> a
+}
+
+# --- Open rows: forwarding unknown effects ---
+
+# `run_with_log` handles Log but forwards any other effects from the callback.
+# The `..e` captures extras and propagates them to the caller's needs.
+fun run_with_log : (f: () -> Unit needs {Log, ..e}) -> Unit needs {..e}
+run_with_log f = f () with { 
+  log msg = { 
+    println msg
+    resume ()
+  } 
+}
+
+# This caller uses both Log and Fail. Log is handled by run_with_log,
+# Fail propagates through `..e` to the caller.
+fun greet : (name: String) -> Unit needs {Fail}
+greet name = {
+  run_with_log (fun () -> log! $"hello, {name}")
+  if name == "" then fail! "empty name" else ()
+}
+
+# --- Pure callbacks: no effects allowed ---
+
+# When a parameter has no `needs` clause, only pure callbacks are accepted.
+# This is useful for functions like map where side effects would be surprising.
+fun twice : (f: Int -> Int) -> Int -> Int
+twice f x = f (f x)
+
+# --- Putting it together ---
+
+main () = {
+  # twice requires a pure callback
+  let result = twice (fun x -> x * 2) 5
+  println $"5 doubled twice: {result}"
+
+  # run_with_log handles Log, inline handler catches Fail
+  { greet "world" } with { fail msg = println $"caught: {msg}" }
+  { greet "" } with { fail msg = println $"caught: {msg}" }
+}

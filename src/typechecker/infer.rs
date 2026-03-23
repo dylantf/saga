@@ -65,7 +65,7 @@ impl Checker {
                     {
                         let eff_refs: Vec<(String, Vec<Type>)> =
                             eff_constraints.into_iter().collect();
-                        ty = Type::EffArrow(a, b, eff_refs);
+                        ty = Type::EffArrow(a, b, super::EffectRow::closed(eff_refs));
                     }
                     // Only propagate effects for zero-arity functions (where the
                     // Var reference itself is the full "call"). For functions that
@@ -134,8 +134,8 @@ impl Checker {
                     Type::Arrow(p, _) | Type::EffArrow(p, _, _) => Some(self.sub.apply(p)),
                     _ => None,
                 };
-                if let Some(Type::EffArrow(_, _, needs)) = param_ty {
-                    for (eff, _) in &needs {
+                if let Some(Type::EffArrow(_, _, row)) = param_ty {
+                    for (eff, _) in &row.effects {
                         if !effects_before_arg.contains(eff) {
                             self.effect_state.current.remove(eff);
                         }
@@ -501,7 +501,7 @@ impl Checker {
         if !eff_refs.is_empty()
             && let Type::Arrow(a, b) = ty
         {
-            ty = Type::EffArrow(a, b, eff_refs);
+            ty = Type::EffArrow(a, b, super::EffectRow::closed(eff_refs));
         }
 
         Ok(ty)

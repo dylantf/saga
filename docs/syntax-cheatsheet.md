@@ -609,8 +609,17 @@ fun add : Int -> Int -> Int
 # Labels are optional (purely documentation)
 fun add : (a: Int) -> (b: Int) -> Int
 
-# With needs on a parameter type (HOF effect absorption)
+# Pure callback parameter (no needs = no effects allowed)
+fun map : (f: a -> b) -> List a -> List b
+
+# Closed effect set on parameter (exactly these effects)
 fun try : (() -> a needs {Fail}) -> Result a String
+
+# Open effect row (..e captures extras and forwards them)
+fun run_logged : (f: () -> Unit needs {Log, ..e}) -> Unit needs {..e}
+
+# Row variable only (any effects forwarded)
+fun apply : (f: () -> a needs {..e}) -> a needs {..e}
 
 # Unit param
 fun main : Unit -> Unit
@@ -618,7 +627,7 @@ fun main : Unit -> Unit
 # Needs and where together
 fun f : a -> b needs {Log} where {a: Show}
 
-# Arrow type parameter
+# Arrow type parameter (pure -- no effects allowed)
 fun apply : (a -> b) -> a -> b
 
 # Mix labeled and unlabeled freely

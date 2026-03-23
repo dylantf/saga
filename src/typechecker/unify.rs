@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::token::Span;
 
-use super::{Checker, Diagnostic, Scheme, Severity, Type};
+use super::{Checker, Diagnostic, EffectRow, Scheme, Severity, Type};
 
 /// Replace type variable IDs with readable names for display.
 pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
@@ -18,17 +18,20 @@ pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
             Box::new(rename_vars(a, names)),
             Box::new(rename_vars(b, names)),
         ),
-        Type::EffArrow(a, b, effs) => Type::EffArrow(
+        Type::EffArrow(a, b, row) => Type::EffArrow(
             Box::new(rename_vars(a, names)),
             Box::new(rename_vars(b, names)),
-            effs.iter()
-                .map(|(name, args)| {
-                    (
-                        name.clone(),
-                        args.iter().map(|t| rename_vars(t, names)).collect(),
-                    )
-                })
-                .collect(),
+            EffectRow {
+                effects: row.effects.iter()
+                    .map(|(name, args)| {
+                        (
+                            name.clone(),
+                            args.iter().map(|t| rename_vars(t, names)).collect(),
+                        )
+                    })
+                    .collect(),
+                tail: row.tail.as_ref().map(|t| Box::new(rename_vars(t, names))),
+            },
         ),
         Type::Con(name, args) => Type::Con(
             name.clone(),
@@ -57,13 +60,16 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
             collect_free_vars(a, out);
             collect_free_vars(b, out);
         }
-        Type::EffArrow(a, b, effs) => {
+        Type::EffArrow(a, b, row) => {
             collect_free_vars(a, out);
             collect_free_vars(b, out);
-            for (_, args) in effs {
+            for (_, args) in &row.effects {
                 for t in args {
                     collect_free_vars(t, out);
                 }
+            }
+            if let Some(tail) = &row.tail {
+                collect_free_vars(tail, out);
             }
         }
         Type::Con(_, args) => {
@@ -100,24 +106,21 @@ impl Checker {
             // Never (bottom) unifies with anything
             (Type::Never, _) | (_, Type::Never) => Ok(()),
 
-            (Type::Arrow(a1, a2), Type::Arrow(b1, b2))
-            | (Type::Arrow(a1, a2), Type::EffArrow(b1, b2, _))
+            (Type::Arrow(a1, a2), Type::Arrow(b1, b2)) => {
+                self.unify(a1, b1)?;
+                self.unify(a2, b2)
+            }
+            // Arrow is effect-agnostic: unifies with any EffArrow (effects are
+            // handled elsewhere via effect tracking, not unification).
+            (Type::Arrow(a1, a2), Type::EffArrow(b1, b2, _))
             | (Type::EffArrow(a1, a2, _), Type::Arrow(b1, b2)) => {
                 self.unify(a1, b1)?;
                 self.unify(a2, b2)
             }
-            (Type::EffArrow(a1, a2, effs1), Type::EffArrow(b1, b2, effs2)) => {
+            (Type::EffArrow(a1, a2, row1), Type::EffArrow(b1, b2, row2)) => {
                 self.unify(a1, b1)?;
                 self.unify(a2, b2)?;
-                // Unify effect type args pairwise (matched by effect name)
-                for (name, args1) in effs1 {
-                    if let Some((_, args2)) = effs2.iter().find(|(n, _)| n == name) {
-                        for (t1, t2) in args1.iter().zip(args2.iter()) {
-                            self.unify(t1, t2)?;
-                        }
-                    }
-                }
-                Ok(())
+                self.unify_effect_rows(row1, row2)
             }
 
             (Type::Con(n1, args1), Type::Con(n2, args2))
@@ -153,6 +156,92 @@ impl Checker {
                     "type mismatch: expected {}, got {}",
                     a_display, b_display
                 )))
+            }
+        }
+    }
+
+    /// Unify two effect rows. Matches effects by name, unifies type args,
+    /// then binds leftover effects to row variables (if open).
+    fn unify_effect_rows(&mut self, row1: &EffectRow, row2: &EffectRow) -> Result<(), Diagnostic> {
+        // Apply row substitutions to resolve any already-bound row variables
+        let r1 = self.sub.apply_effect_row(row1);
+        let r2 = self.sub.apply_effect_row(row2);
+
+        // Match effects by name and unify their type args pairwise
+        for (name, args1) in &r1.effects {
+            if let Some((_, args2)) = r2.effects.iter().find(|(n, _)| n == name) {
+                for (t1, t2) in args1.iter().zip(args2.iter()) {
+                    self.unify(t1, t2)?;
+                }
+            }
+        }
+
+        // Collect unmatched effects from each side
+        let extras1: Vec<_> = r1.effects.iter()
+            .filter(|(n, _)| !r2.effects.iter().any(|(n2, _)| n2 == n))
+            .cloned()
+            .collect();
+        let extras2: Vec<_> = r2.effects.iter()
+            .filter(|(n, _)| !r1.effects.iter().any(|(n1, _)| n1 == n))
+            .cloned()
+            .collect();
+
+        match (r1.tail_var_id(), r2.tail_var_id()) {
+            // Both closed: unmatched effects are an error
+            (None, None) => {
+                if extras1.is_empty() && extras2.is_empty() {
+                    Ok(())
+                } else if r1.effects.is_empty() || r2.effects.is_empty() {
+                    // One side is pure (empty), the other has effects
+                    let mut effects: Vec<_> = extras1.iter().chain(extras2.iter())
+                        .map(|(n, _)| n.as_str())
+                        .collect();
+                    effects.sort();
+                    Err(Diagnostic::error(format!(
+                        "expected pure function but it uses effects {{{}}}",
+                        effects.join(", ")
+                    )))
+                } else {
+                    // Both have effects but they don't match
+                    let mut extras: Vec<_> = extras1.iter().chain(extras2.iter())
+                        .map(|(n, _)| n.as_str())
+                        .collect();
+                    extras.sort();
+                    let mut allowed: Vec<_> = r1.effects.iter()
+                        .filter(|(n, _)| r2.effects.iter().any(|(n2, _)| n2 == n))
+                        .map(|(n, _)| n.as_str())
+                        .collect();
+                    allowed.sort();
+                    if allowed.is_empty() {
+                        Err(Diagnostic::error(format!(
+                            "effect mismatch: {{{}}} not expected here",
+                            extras.join(", ")
+                        )))
+                    } else {
+                        Err(Diagnostic::error(format!(
+                            "effect mismatch: {{{}}} not expected (allowed: {{{}}})",
+                            extras.join(", "),
+                            allowed.join(", ")
+                        )))
+                    }
+                }
+            }
+            // row1 is open: bind its tail to the extras from row2
+            (Some(tail1), None) => {
+                self.sub.bind_row(tail1, EffectRow::closed(extras2))
+            }
+            // row2 is open: bind its tail to the extras from row1
+            (None, Some(tail2)) => {
+                self.sub.bind_row(tail2, EffectRow::closed(extras1))
+            }
+            // Both open: create a fresh row variable for the shared tail
+            (Some(tail1), Some(tail2)) => {
+                if tail1 == tail2 {
+                    return Ok(());
+                }
+                let fresh_var = self.fresh_var();
+                self.sub.bind_row(tail1, EffectRow { effects: extras2, tail: Some(Box::new(fresh_var.clone())) })?;
+                self.sub.bind_row(tail2, EffectRow { effects: extras1, tail: Some(Box::new(fresh_var)) })
             }
         }
     }
@@ -211,18 +300,23 @@ impl Checker {
                 Box::new(self.replace_vars(a, mapping)),
                 Box::new(self.replace_vars(b, mapping)),
             ),
-            Type::EffArrow(a, b, effs) => Type::EffArrow(
-                Box::new(self.replace_vars(a, mapping)),
-                Box::new(self.replace_vars(b, mapping)),
-                effs.iter()
-                    .map(|(name, args)| {
-                        (
-                            name.clone(),
-                            args.iter().map(|t| self.replace_vars(t, mapping)).collect(),
-                        )
-                    })
-                    .collect(),
-            ),
+            Type::EffArrow(a, b, row) => {
+                Type::EffArrow(
+                    Box::new(self.replace_vars(a, mapping)),
+                    Box::new(self.replace_vars(b, mapping)),
+                    EffectRow {
+                        effects: row.effects.iter()
+                            .map(|(name, args)| {
+                                (
+                                    name.clone(),
+                                    args.iter().map(|t| self.replace_vars(t, mapping)).collect(),
+                                )
+                            })
+                            .collect(),
+                        tail: row.tail.as_ref().map(|t| Box::new(self.replace_vars(t, mapping))),
+                    },
+                )
+            }
             Type::Con(name, args) => Type::Con(
                 name.clone(),
                 args.iter().map(|a| self.replace_vars(a, mapping)).collect(),
@@ -329,13 +423,11 @@ impl Checker {
                 }
             }
             crate::ast::TypeExpr::Arrow {
-                from, to, effects, ..
+                from, to, effects, effect_row_var, ..
             } => {
                 let a_ty = self.convert_type_expr(from, params);
                 let b_ty = self.convert_type_expr(to, params);
-                if effects.is_empty() {
-                    Type::Arrow(Box::new(a_ty), Box::new(b_ty))
-                } else {
+                {
                     let effect_refs: Vec<(String, Vec<Type>)> = effects
                         .iter()
                         .map(|e| {
@@ -353,7 +445,18 @@ impl Checker {
                             (e.name.clone(), args)
                         })
                         .collect();
-                    Type::EffArrow(Box::new(a_ty), Box::new(b_ty), effect_refs)
+                    let tail = effect_row_var.as_ref().map(|(name, _)| {
+                        let id = if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
+                            *id
+                        } else {
+                            let id = self.next_var;
+                            self.next_var += 1;
+                            params.push((name.clone(), id));
+                            id
+                        };
+                        Box::new(Type::Var(id))
+                    });
+                    Type::EffArrow(Box::new(a_ty), Box::new(b_ty), EffectRow { effects: effect_refs, tail })
                 }
             }
             crate::ast::TypeExpr::Record { fields, .. } => {

@@ -4,6 +4,7 @@ import Std.Base
 import Std.IO (print, println)
 import Std.Process
 import Std.List
+import Std.String
 
 pub effect Assert {
   fun assert : (ok: Bool) -> (msg: String) -> Unit
@@ -11,7 +12,10 @@ pub effect Assert {
 
 type TestMode = Normal | OnlyMode | SkipMode
 
-type TestEntry = TestCase(String, TestMode) | GroupStart(String) | GroupEnd
+type TestEntry 
+  = TestCase(String, TestMode) 
+  | GroupStart(String) 
+  | GroupEnd
 
 pub effect TestRunner {
   fun report_test : (name: String) -> (failures: List String) -> (mode: TestMode) -> Unit
@@ -27,12 +31,10 @@ record TestState {
   has_only: Bool,
 }
 
-fun make_indent : (n: Int) -> String
-make_indent n =
-  if n <= 0 then ""
-  else "  " <> make_indent (n - 1)
+fun indent : (n: Int) -> (s: String) -> String
+indent n s = String.repeat "  " n <> s
 
-fun run_body : (body: () -> Unit needs {Assert}) -> List String
+fun run_body : (body: () -> Unit needs {Assert, ..e}) -> List String needs {..e}
 run_body body = {
   let (_, failures) = { body () } with {
     assert ok msg =
@@ -49,25 +51,25 @@ run_body body = {
 }
 
 #@ Run a test.
-pub fun test : (name: String) -> (body: () -> Unit needs {Assert}) -> Unit needs {TestRunner}
+pub fun test : (name: String) -> (body: () -> Unit needs {Assert, ..e}) -> Unit needs {TestRunner, ..e}
 test name body = {
   let failures = run_body body
   report_test! name failures Normal
 }
 
 #@ Run a focused test. When any test uses `only`, all other tests are skipped.
-pub fun only : (name: String) -> (body: () -> Unit needs {Assert}) -> Unit needs {TestRunner}
+pub fun only : (name: String) -> (body: () -> Unit needs {Assert, ..e}) -> Unit needs {TestRunner, ..e}
 only name body = {
   let failures = run_body body
   report_test! name failures OnlyMode
 }
 
 #@ Skip a test. The body is never executed.
-pub fun skip : (name: String) -> (body: () -> Unit needs {Assert}) -> Unit needs {TestRunner}
+pub fun skip : (name: String) -> (body: () -> Unit needs {Assert, ..e}) -> Unit needs {TestRunner, ..e}
 skip name _body = report_test! name [] SkipMode
 
 #@ Group tests under a label.
-pub fun describe : (name: String) -> (body: () -> Unit needs {TestRunner}) -> Unit needs {TestRunner}
+pub fun describe : (name: String) -> (body: () -> Unit needs {TestRunner, ..e}) -> Unit needs {TestRunner, ..e}
 describe name body = {
   enter_group! name
   body ()
@@ -96,24 +98,24 @@ pub handler exec_handler for TestRunner {
   report_test name failures mode = {
     let k = resume ()
     fun state -> {
-      let indent = make_indent state.depth
+      let d = state.depth
       let should_skip = case mode {
         SkipMode -> True
         Normal -> state.has_only
         OnlyMode -> False
       }
       if should_skip then {
-        println (indent <> "\x1b[33m○\x1b[0m " <> name <> " (skipped)") # grey
+        println (indent d $"\x1b[33m○\x1b[0m {name} (skipped)") # grey
         k { state | skipped: state.skipped + 1 }
       } else {
         case failures {
           [] -> {
-            println (indent <> "\x1b[32m✓\x1b[0m " <> name) # green
+            println (indent d $"\x1b[32m✓\x1b[0m {name}") # green
             k { state | passed: state.passed + 1 }
           }
           h :: _ -> {
-            println (indent <> "\x1b[31m✗\x1b[0m " <> name) # red
-            println (indent <> "    " <> h)
+            println (indent d $"\x1b[31m✗\x1b[0m {name}") # red
+            println (indent d $"    {h}")
             k { state | failed: state.failed + 1 }
           }
         }
@@ -123,8 +125,7 @@ pub handler exec_handler for TestRunner {
   enter_group name = {
     let k = resume ()
     fun state -> {
-      let indent = make_indent state.depth
-      println (indent <> name)
+      println (indent state.depth name)
       k { state | depth: state.depth + 1 }
     }
   }
@@ -150,7 +151,7 @@ has_only_entry entry = case entry {
 #@ Run a test suite with two-pass collect-then-execute.
 #@ Pass 1 collects test metadata to check for `only`.
 #@ Pass 2 executes, skipping non-only tests if any only was found.
-pub fun run_collected : (body: () -> Unit needs {TestRunner}) -> Unit
+pub fun run_collected : (body: () -> Unit needs {TestRunner, ..e}) -> Unit needs {..e}
 run_collected body = {
   # Pass 1: collect entries (bodies run but results discarded)
   let entries_fn = { body () } with collect_handler
@@ -163,8 +164,8 @@ run_collected body = {
 
   # Summary
   println ""
-  let summary = show final.passed <> " passed, " <> show final.failed <> " failed"
-  let summary = if final.skipped > 0 then summary <> ", " <> show final.skipped <> " skipped"
+  let summary = $"{final.passed} passed, {final.failed} failed"
+  let summary = if final.skipped > 0 then $"{summary}, {final.skipped} skipped"
                 else summary
   println summary
   if final.failed > 0 then Process.exit 1 else ()
@@ -175,16 +176,16 @@ run_collected body = {
 pub fun assert_eq : (a: x) -> (b: x) -> Unit needs {Assert} where {x: Debug + Eq}
 assert_eq a b =
   if a == b then assert! True ""
-  else assert! False ("Expected " <> debug b <> ", got " <> debug a)
+  else assert! False $"Expected {debug b}, got {debug a}"
 
 pub fun assert_neq : (a: x) -> (b: x) -> Unit needs {Assert} where {x: Debug + Eq}
 assert_neq a b =
   if a != b then assert! True ""
-  else assert! False ("Expected " <> debug a <> " to not equal " <> debug b)
+  else assert! False $"Expected {debug a} to not equal {debug b}"
 
-pub fun assert_gt : (a: x) -> (b: x) -> Unit needs {Assert} where {x: Debug + Ord}
+pub fun assert_gt : a -> a -> Unit needs {Assert} where {a: Debug + Ord}
 assert_gt a b =
-  assert! (a > b) ("Expected " <> debug a <> " > " <> debug b)
+  assert! (a > b) $"Expected {debug a} > {debug b}"
 
 pub fun assert_lt : (a: x) -> (b: x) -> Unit needs {Assert} where {x: Debug + Ord}
 assert_lt a b =

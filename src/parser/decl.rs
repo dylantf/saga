@@ -4,7 +4,7 @@ use crate::token::{Span, Token};
 use super::{ParseError, Parser};
 
 /// Parsed type annotation: labeled params, return type, and effect requirements.
-type AnnotatedSignature = (Vec<(String, TypeExpr)>, TypeExpr, Vec<EffectRef>);
+type AnnotatedSignature = (Vec<(String, TypeExpr)>, TypeExpr, Vec<EffectRef>, Option<(String, Span)>);
 
 impl Parser {
     // Parse `Name` or `Module.Name`, returning the full qualified string.
@@ -337,10 +337,13 @@ impl Parser {
         let name = self.expect_ident()?;
         let name_span = self.tokens[self.pos - 1].span;
 
+        self.skip_terminators();
         self.expect(Token::Colon)?;
-        let (params, return_type, effects) = self.parse_annotated_signature()?;
+        self.skip_terminators();
+        let (params, return_type, effects, effect_row_var) = self.parse_annotated_signature()?;
 
         // Parse optional `where {a: Show + Eq, b: Ord}`
+        self.skip_terminators();
         let where_clause = self.parse_where_clause()?;
 
         let end = self.tokens[self.pos - 1].span;
@@ -352,6 +355,7 @@ impl Parser {
             params,
             return_type,
             effects,
+            effect_row_var,
             where_clause,
             annotations,
             span: start.to(end),
@@ -440,7 +444,7 @@ impl Parser {
             let op_name = self.expect_ident()?;
 
             self.expect(Token::Colon)?;
-            let (params, return_type, _effects) = self.parse_annotated_signature()?;
+            let (params, return_type, _effects, _effect_row_var) = self.parse_annotated_signature()?;
             let op_end = self.tokens[self.pos - 1].span;
 
             operations.push(EffectOp {
@@ -654,7 +658,7 @@ impl Parser {
             let method_name = self.expect_ident()?;
 
             self.expect(Token::Colon)?;
-            let (params, return_type, _effects) = self.parse_annotated_signature()?;
+            let (params, return_type, _effects, _effect_row_var) = self.parse_annotated_signature()?;
             let method_end = self.tokens[self.pos - 1].span;
 
             methods.push(TraitMethod {
@@ -824,20 +828,40 @@ impl Parser {
         let mut segments: Vec<(Option<String>, TypeExpr)> = Vec::new();
         segments.push(self.parse_labeled_type_segment()?);
 
-        while matches!(self.peek(), Token::Arrow) {
+        while {
+            self.skip_terminators();
+            matches!(self.peek(), Token::Arrow)
+        } {
             self.advance(); // consume '->'
+            self.skip_terminators();
             segments.push(self.parse_labeled_type_segment()?);
         }
 
         // Parse trailing `needs {...}` if present
         let mut effects = Vec::new();
+        let mut effect_row_var = None;
+        self.skip_terminators();
         if matches!(self.peek(), Token::Needs) {
             self.advance();
             self.expect(Token::LBrace)?;
-            effects.push(self.parse_effect_ref()?);
-            while matches!(self.peek(), Token::Comma) {
-                self.advance();
+            while !matches!(self.peek(), Token::RBrace) {
+                // Check for row variable: `..e`
+                if matches!(self.peek(), Token::DotDot) {
+                    let dot_span = self.tokens[self.pos].span;
+                    self.advance(); // consume '..'
+                    let name = self.expect_ident()?;
+                    let end_span = self.tokens[self.pos - 1].span;
+                    effect_row_var = Some((name, dot_span.to(end_span)));
+                    // optional trailing comma
+                    if matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                    }
+                    break;
+                }
                 effects.push(self.parse_effect_ref()?);
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                }
             }
             self.expect(Token::RBrace)?;
         }
@@ -845,7 +869,7 @@ impl Parser {
         if segments.len() < 2 {
             // No arrow at all, e.g. `fun x : Int` -- just a constant annotation
             let (_label, ty) = segments.pop().unwrap();
-            return Ok((vec![], ty, effects));
+            return Ok((vec![], ty, effects, effect_row_var));
         }
 
         // Last segment is the return type, rest are params
@@ -859,7 +883,7 @@ impl Parser {
             })
             .collect();
 
-        Ok((params, return_type, effects))
+        Ok((params, return_type, effects, effect_row_var))
     }
 
     /// Parse a single type segment that may have an optional label: `(label: Type)` or just `Type`.
@@ -916,10 +940,22 @@ impl Parser {
             self.advance();
             let right = self.parse_type_expr()?; // recurse = right-associative
             let mut needs = Vec::new();
+            let mut row_var = None;
             if matches!(self.peek(), Token::Needs) {
                 self.advance();
                 self.expect(Token::LBrace)?;
                 while !matches!(self.peek(), Token::RBrace) {
+                    if matches!(self.peek(), Token::DotDot) {
+                        let dot_span = self.tokens[self.pos].span;
+                        self.advance();
+                        let name = self.expect_ident()?;
+                        let end_span = self.tokens[self.pos - 1].span;
+                        row_var = Some((name, dot_span.to(end_span)));
+                        if matches!(self.peek(), Token::Comma) {
+                            self.advance();
+                        }
+                        break;
+                    }
                     needs.push(self.parse_effect_ref()?);
                     if matches!(self.peek(), Token::Comma) {
                         self.advance();
@@ -929,7 +965,7 @@ impl Parser {
             }
             let end = self.tokens[self.pos - 1].span;
             let span = start.to(end);
-            Ok(TypeExpr::Arrow { from: Box::new(left), to: Box::new(right), effects: needs, span })
+            Ok(TypeExpr::Arrow { from: Box::new(left), to: Box::new(right), effects: needs, effect_row_var: row_var, span })
         } else {
             Ok(left)
         }

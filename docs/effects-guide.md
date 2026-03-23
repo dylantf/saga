@@ -440,9 +440,8 @@ The program's entry point must handle everything - nothing escapes unhandled.
 
 ### Lambdas and effects
 
-Lambdas (`fun x -> body`) are transparent to the effect system -- they have
-no `needs` clause of their own. Any effects used inside a lambda propagate
-up to the nearest named function boundary, which must handle or declare them:
+Lambdas infer their effects automatically. If a lambda uses effects, they
+become part of its type and must be accounted for by the caller:
 
 ```
 # Error: foo uses Fail but has no needs declaration
@@ -456,46 +455,53 @@ foo x = (fun y -> fail! "oops") x
 foo x = (fun y -> fail! "oops") x with { fail msg = 0 }
 ```
 
-This keeps lambdas annotation-free. You never write `fun x -> body needs {Eff}`.
-
 ### Effects through higher-order functions
 
-When you pass an effectful lambda to a function, the effects from the lambda
-propagate through to the enclosing `with` or `needs` boundary. For `map` and
-similar HOFs with no `needs` annotation on the callback parameter, the effects
-pass through transparently:
+When a function takes a callback, the type annotation on the parameter
+controls which effects are allowed. There are three cases:
+
+**No `needs` clause (pure):** The callback must be pure. This is enforced --
+passing an effectful lambda is a type error:
 
 ```
-# Log propagates through map to the enclosing function
-fun process : List String -> List Unit needs {Log}
-process xs = map (fun x -> log! x) xs
+fun map : (f: a -> b) -> List a -> List b
+
+# Error: log! is not allowed in a pure callback
+map (fun x -> { log! (show x); x }) xs
 ```
 
-For HOFs that internally handle the effect -- like `try` which absorbs `Fail`
--- the function's parameter type must annotate `needs`. This tells the type
-checker that this function absorbs those effects from its callback, so they
-don't propagate further:
+**Closed `needs` (specific effects):** The callback may use exactly the listed
+effects. The HOF is expected to handle them:
 
 ```
-# `try` absorbs Fail: it declares needs {Fail} on the callback parameter
 fun try : (() -> a needs {Fail}) -> Result a String
-try computation = computation () with {
+try f = f () with {
   fail msg = Err msg
   return value = Ok value
 }
+```
 
-# Caller: Fail is absorbed by try, doesn't reach main
-main () = {
-  let result = try (fun () -> {
-    let x = safe_div! 10 0   # uses Fail
-    x * 2
-  })
-  ...
+**Open `needs` with `..e` (effect row polymorphism):** The callback may use
+the listed effects plus any others. The extras propagate to the caller through
+the row variable `..e`:
+
+```
+# run_logged handles Log, but forwards any other effects from the callback
+fun run_logged : (f: () -> Unit needs {Log, ..e}) -> Unit needs {..e}
+run_logged f = f () with { log msg = { println msg; resume () } }
+
+# Caller uses both Log and Fail in the lambda.
+# Log is handled by run_logged, Fail propagates through ..e
+fun greet : Unit needs {Fail}
+greet = {
+  run_logged (fun () -> log! "about to greet")
+  fail! "greeting failed"
 }
 ```
 
-The `needs {Fail}` on the parameter type is the declaration: "I will handle
-`Fail` for this callback." Without it, the effects pass through unchanged.
+The `..e` captures any additional effects from the lambda and makes them
+appear in the function's own `needs` clause, so callers know they must handle
+them. This is essential for HOFs that handle some effects but forward others.
 
 ---
 
@@ -571,4 +577,6 @@ handlers are for.
 | Intercept success     | `return value = Ok(value)`                         |
 | Qualify ambiguous ops | `Cache.get! key`                                   |
 | Declare effects on fn | `fun f : Unit -> T needs {Log, Http}`              |
-| HOF absorbs callback's effects | `fun run : (() -> a needs {Fail}) -> a`  |
+| Pure callback param   | `fun map : (f: a -> b) -> List a -> List b`        |
+| Closed effect param   | `fun try : (() -> a needs {Fail}) -> Result a String` |
+| Open effect row       | `fun run : (f: () -> a needs {Log, ..e}) -> a needs {..e}` |

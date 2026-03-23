@@ -3633,3 +3633,89 @@ fn effects_propagate_at_saturation_not_reference() {
     )
     .unwrap();
 }
+
+// --- Effect row polymorphism ---
+
+#[test]
+fn effect_row_var_basic_hof() {
+    // HOF with open effect row: lambda with extra effects is accepted.
+    // The extra Log effect propagates through ..e to the caller.
+    check(
+        "effect Assert {\n  fun assert_ok : (ok: Bool) -> Unit\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: () -> Unit needs {Assert, ..e}) -> Unit needs {..e}\nrun f = f () with { assert_ok ok = () }\nfun caller : Unit needs {Log}\ncaller = run (fun () -> {\n  assert_ok! True\n  log! \"hello\"\n})",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_row_var_pure_lambda_satisfies_open_row() {
+    // A pure lambda satisfies a parameter with an open effect row
+    check(
+        "effect Chk {\n  fun chk : (ok: Bool) -> Unit\n}\nfun run : (f: () -> Unit needs {..e}) -> Unit needs {..e}\nrun f = f ()\nmain () = run (fun () -> ())",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_row_var_propagation() {
+    // Extra effects from the lambda propagate through the row variable
+    // to the caller's needs clause
+    check(
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run_with_fail : (f: () -> Int needs {Fail, ..e}) -> Int needs {..e}\nrun_with_fail f = f () with { fail msg = 0 }\nfun caller : Int needs {Log}\ncaller = run_with_fail (fun () -> {\n  log! \"hello\"\n  fail! \"oops\"\n})",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_row_var_only_row_var() {
+    // `needs {..e}` with no concrete effects
+    check(
+        "fun apply : (f: () -> Int needs {..e}) -> Int needs {..e}\napply f = f ()\nmain () = apply (fun () -> 42)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_row_var_closed_row_rejects_extra_effects() {
+    // A lambda with extra effects should be rejected when the parameter has a closed row
+    let result = check(
+        "effect Assert {\n  fun assert_ok : (ok: Bool) -> Unit\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: () -> Unit needs {Assert}) -> Unit\nrun f = f () with { assert_ok ok = () }\nmain () = run (fun () -> {\n  assert_ok! True\n  log! \"hello\"\n})",
+    );
+    assert!(result.is_err(), "expected error for extra effects in closed row");
+}
+
+#[test]
+fn effect_row_var_function_open_needs() {
+    // Function with open needs clause allows extra effects in body
+    check(
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun both : Int -> Int needs {Fail, ..e}\nboth x = {\n  log! \"hello\"\n  fail! \"oops\"\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn needs_empty_enforces_purity() {
+    // `needs {}` means the callback must be pure -- no effects allowed
+    let result = check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run_pure : (f: () -> Int needs {}) -> Int\nrun_pure f = f ()\nmain () = run_pure (fun () -> {\n  log! \"hello\"\n  42\n})",
+    );
+    assert!(result.is_err(), "expected error: effectful lambda passed to pure parameter");
+}
+
+#[test]
+fn needs_empty_accepts_pure_lambda() {
+    // `needs {}` should accept a pure lambda
+    check(
+        "fun run_pure : (f: () -> Int needs {}) -> Int\nrun_pure f = f ()\nmain () = run_pure (fun () -> 42)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_row_var_handler_not_unnecessary() {
+    // When effects flow through a row variable, the handler should not be
+    // flagged as unnecessary (the string-based tracking can't see row-bound effects)
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: () -> Unit needs {..e}) -> Unit needs {..e}\nrun f = f ()\nmain () = run (fun () -> log! \"hello\") with { log msg = () }",
+    )
+    .unwrap();
+}
