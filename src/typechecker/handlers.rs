@@ -95,16 +95,10 @@ impl Checker {
                         || self.effect_state.let_bindings.contains_key(name.as_str())
                 })
                 .unwrap_or(false);
-            // If the callee has an open effect row, effects may flow through
-            // the row variable that the string-based tracking can't see.
-            let callee_has_row_var = callee_name
-                .as_ref()
-                .map(|name| self.effect_state.fun_has_row_var.contains(name.as_str()))
-                .unwrap_or(false);
-            if callee_effects_known && !callee_has_row_var {
+            if callee_effects_known {
                 let mut effects: Vec<_> = handled.iter().cloned().collect();
                 effects.sort();
-                self.collected_diagnostics.push(Diagnostic::error_at(
+                self.collected_diagnostics.push(Diagnostic::warning_at(
                     expr.span,
                     format!(
                         "expression does not use effects {{{}}}; handler is unnecessary",

@@ -248,6 +248,34 @@ impl Substitution {
         EffectRow { effects, tail }
     }
 
+    /// Resolve a type variable to its binding, without recursively applying
+    /// to the whole type structure. Just chases Var -> Var chains.
+    pub fn resolve_var<'a>(&'a self, ty: &'a Type) -> &'a Type {
+        let mut current = ty;
+        while let Type::Var(id) = current {
+            if let Some(resolved) = self.map.get(id) {
+                current = resolved;
+            } else {
+                break;
+            }
+        }
+        current
+    }
+
+    /// Apply the substitution to effect type args only, without chasing row
+    /// variable bindings. Used for effect absorption where we only want the
+    /// explicitly declared effects, not effects captured by a row variable.
+    pub fn apply_effect_row_shallow(&self, row: &EffectRow) -> EffectRow {
+        EffectRow {
+            effects: row.effects.iter()
+                .map(|(name, args)| {
+                    (name.clone(), args.iter().map(|t| self.apply(t)).collect())
+                })
+                .collect(),
+            tail: row.tail.as_ref().map(|t| Box::new(self.apply(t))),
+        }
+    }
+
     /// Bind a row variable to an effect row, with occurs check.
     pub(crate) fn bind_row(&mut self, id: u32, row: EffectRow) -> Result<(), Diagnostic> {
         if let Some(tail_id) = row.tail_var_id()

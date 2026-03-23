@@ -129,15 +129,21 @@ impl Checker {
                 // Only remove effects that the argument *introduced*, not effects the
                 // caller already had. This prevents spawn! from absorbing the caller's
                 // own Actor effect.
-                let resolved_func = self.sub.apply(&func_ty);
-                let param_ty = match &resolved_func {
-                    Type::Arrow(p, _) | Type::EffArrow(p, _, _) => Some(self.sub.apply(p)),
-                    _ => None,
-                };
-                if let Some(Type::EffArrow(_, _, row)) = param_ty {
-                    for (eff, _) in &row.effects {
-                        if !effects_before_arg.contains(eff) {
-                            self.effect_state.current.remove(eff);
+                //
+                // Only absorb explicitly declared effects, not effects captured by
+                // a row variable (..e). Row-captured effects pass through to the
+                // caller. We use resolve_var to find the Arrow/EffArrow structure
+                // without deeply applying the sub (which would chase row_map and
+                // merge row-bound effects into the declared list).
+                let func_shallow = self.sub.resolve_var(&func_ty);
+                if let Type::Arrow(p, _) | Type::EffArrow(p, _, _) = func_shallow {
+                    let param_shallow = self.sub.resolve_var(p);
+                    if let Type::EffArrow(_, _, row) = param_shallow {
+                        let shallow = self.sub.apply_effect_row_shallow(row);
+                        for (eff, _) in &shallow.effects {
+                            if !effects_before_arg.contains(eff) {
+                                self.effect_state.current.remove(eff);
+                            }
                         }
                     }
                 }

@@ -3611,16 +3611,16 @@ fn with_on_partial_application_is_error() {
 }
 
 #[test]
-fn with_on_pure_call_is_error() {
-    let result = check(
+fn with_on_pure_call_is_warning() {
+    let checker = check(
         "effect Boom {\n  fun boom : (msg: String) -> a\n}\nfun myAdd : Int -> Int -> Int\nmyAdd a b = a + b\nmain () = myAdd 1 2 with { boom msg = 0 }",
-    );
-    assert!(result.is_err());
-    let err = result.err().unwrap();
+    )
+    .unwrap();
     assert!(
-        err.message.contains("unnecessary"),
-        "expected unnecessary handler message, got: {}",
-        err.message
+        checker.collected_diagnostics.iter().any(|d| {
+            matches!(d.severity, Severity::Warning) && d.message.contains("unnecessary")
+        }),
+        "expected unnecessary handler warning"
     );
 }
 
