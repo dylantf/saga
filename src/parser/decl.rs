@@ -337,10 +337,13 @@ impl Parser {
         let name = self.expect_ident()?;
         let name_span = self.tokens[self.pos - 1].span;
 
+        self.skip_terminators();
         self.expect(Token::Colon)?;
+        self.skip_terminators();
         let (params, return_type, effects, effect_row_var) = self.parse_annotated_signature()?;
 
         // Parse optional `where {a: Show + Eq, b: Ord}`
+        self.skip_terminators();
         let where_clause = self.parse_where_clause()?;
 
         let end = self.tokens[self.pos - 1].span;
@@ -825,14 +828,19 @@ impl Parser {
         let mut segments: Vec<(Option<String>, TypeExpr)> = Vec::new();
         segments.push(self.parse_labeled_type_segment()?);
 
-        while matches!(self.peek(), Token::Arrow) {
+        while {
+            self.skip_terminators();
+            matches!(self.peek(), Token::Arrow)
+        } {
             self.advance(); // consume '->'
+            self.skip_terminators();
             segments.push(self.parse_labeled_type_segment()?);
         }
 
         // Parse trailing `needs {...}` if present
         let mut effects = Vec::new();
         let mut effect_row_var = None;
+        self.skip_terminators();
         if matches!(self.peek(), Token::Needs) {
             self.advance();
             self.expect(Token::LBrace)?;

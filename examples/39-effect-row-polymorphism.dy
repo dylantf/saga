@@ -50,6 +50,6 @@ main () = {
   println $"5 doubled twice: {result}"
 
   # run_with_log handles Log, inline handler catches Fail
-  { greet "world" } with { fail msg = println ("caught: " <> msg) }
-  { greet "" } with { fail msg = println ("caught: " <> msg) }
+  { greet "world" } with { fail msg = println $"caught: {msg}" }
+  { greet "" } with { fail msg = println $"caught: {msg}" }
 }

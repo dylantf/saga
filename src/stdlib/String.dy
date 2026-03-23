@@ -48,3 +48,22 @@ pub fun ends_with : (s: String) -> (suffix: String) -> Bool
 
 @external("erlang", "std_string_bridge", "split")
 pub fun split : (s: String) -> (sep: String) -> List String
+
+pub fun repeat : (s: String) -> (n: Int) -> String
+repeat s n =
+  if n <= 0 then ""
+  else s <> repeat s (n - 1)
+
+pub fun pad_left : (s: String) -> (width: Int) -> (fill: String) -> String
+pad_left s width fill = {
+  let pad = width - length s
+  if pad <= 0 then s
+  else repeat fill pad <> s
+}
+
+pub fun pad_right : (s: String) -> (width: Int) -> (fill: String) -> String
+pad_right s width fill = {
+  let pad = width - length s
+  if pad <= 0 then s
+  else s <> repeat fill pad
+}
