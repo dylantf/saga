@@ -278,9 +278,9 @@ pub(super) fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
                 arity += 1;
                 current = ret;
             }
-            Type::EffArrow(_, ret, effs) => {
+            Type::EffArrow(_, ret, row) => {
                 arity += 1;
-                for (eff, _) in effs {
+                for (eff, _) in &row.effects {
                     effects.insert(eff.clone());
                 }
                 current = ret;
@@ -331,8 +331,8 @@ fn collect_effarrow_effects(ty: &Type) -> Vec<String> {
     let mut current = ty;
     loop {
         match current {
-            Type::EffArrow(_, ret, effs) => {
-                for (eff, _) in effs {
+            Type::EffArrow(_, ret, row) => {
+                for (eff, _) in &row.effects {
                     effects.insert(eff.clone());
                 }
                 current = ret;

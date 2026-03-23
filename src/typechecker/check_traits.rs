@@ -30,19 +30,22 @@ impl Checker {
                 Box::new(self.substitute_trait_param(trait_param_id, replacement, a)),
                 Box::new(self.substitute_trait_param(trait_param_id, replacement, b)),
             ),
-            Type::EffArrow(a, b, effs) => Type::EffArrow(
+            Type::EffArrow(a, b, row) => Type::EffArrow(
                 Box::new(self.substitute_trait_param(trait_param_id, replacement, a)),
                 Box::new(self.substitute_trait_param(trait_param_id, replacement, b)),
-                effs.iter()
-                    .map(|(name, args)| {
-                        (
-                            name.clone(),
-                            args.iter()
-                                .map(|t| self.substitute_trait_param(trait_param_id, replacement, t))
-                                .collect(),
-                        )
-                    })
-                    .collect(),
+                super::EffectRow {
+                    effects: row.effects.iter()
+                        .map(|(name, args)| {
+                            (
+                                name.clone(),
+                                args.iter()
+                                    .map(|t| self.substitute_trait_param(trait_param_id, replacement, t))
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                    tail: row.tail,
+                },
             ),
             Type::Con(name, args) => Type::Con(
                 name.clone(),
@@ -291,6 +294,7 @@ impl Checker {
                 Self::check_undeclared_effects(
                     &body_effects,
                     &declared_effects,
+                    false,
                     &format!(
                         "impl {} for {}, method '{}'",
                         trait_name, target_type, method_name

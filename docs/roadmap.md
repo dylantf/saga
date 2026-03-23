@@ -220,7 +220,8 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Monitor effect (`monitor`, `demonitor`, system `Down` messages)
 - [x] Link effect (`link`, `unlink`, bidirectional crash propagation)
 - [x] Async effect (higher-level wrapper around Actor for request/response patterns)
-- [x] "Handler bundling"? I.e. group together all the beam handlers as "beam" so we don't need to pass in multiple at every callsite? (already exists lol)
+- [x] Single handler for multiple effects (e.g. beam_handler that covers all the native BEAM actor, supervisor, monitor, ...)
+- [x] Effect row polymorphism / effect variables (`needs e`)
 
 ### Stdlib / prelude
 
@@ -251,7 +252,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - Higher-kinded types (`* -> *`, enables `Functor`, `Applicative`)
 - `Functor` / `Applicative` traits in stdlib
 - `Semigroup` / `Monoid` in stdlib
-- Effect row polymorphism / effect variables (`needs e`)
+
 - `Dynamic` type for consuming untyped Erlang data (JSON parsers, ETS, message passing)
 - Cache cloning in typecheck_import: At check_module.rs:204-209, six HashMap caches are .clone()d into every module checker. For deep import trees this is a lot of allocation. The caches are read-heavy and append-only during module checking. Using Rc<RefCell<...>> or passing references would avoid the cloning, but this makes the borrow checker harder to work with. Can be revisited if performance becomes a concern (and after profiling to see if the cloning is the issue).
 
@@ -268,8 +269,8 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] LSP (go-to-definition, hover types, error squiggles, autocomplete for constructors/effects). See separate LSP roadmap
 - [x] Testing framework (assert_eq, test runner, test discovery, skip, nested describe)
   - [x] Exit code 1 on test failure (for CI)
-  - [ ] Test filtering (`dylang test --filter "name"`)
-  - [ ] `only` (run a single test, ignore others)
+  - [x] Test filtering (`dylang test --filter "name"`)
+  - [x] `only` (run a single test, ignore others)
   - [ ] `assert_throws` / `assert_fails` (test that an effect or panic is raised)
   - [ ] Test timing (suite duration)
 - [ ] Formatter

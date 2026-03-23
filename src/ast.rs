@@ -61,6 +61,8 @@ pub enum Decl {
         params: Vec<(String, TypeExpr)>,
         return_type: TypeExpr,
         effects: Vec<EffectRef>,
+        /// Row variable for open effect rows, e.g. `..e` in `needs {Assert, ..e}`
+        effect_row_var: Option<(String, Span)>,
         /// `where {a: Show + Eq, b: Ord}` - trait bounds on type variables
         where_clause: Vec<TraitBound>,
         /// Compile-time annotations, e.g. `@external("erlang", "lists", "reverse")`
@@ -564,11 +566,15 @@ pub enum TypeExpr {
         span: Span,
     },
 
-    /// `a -> b` or `a -> b needs {Eff}` or `a -> b needs {State Int}`
+    /// `a -> b` or `a -> b needs {Eff}` or `a -> b needs {State Int, ..e}`
     Arrow {
         from: Box<TypeExpr>,
         to: Box<TypeExpr>,
         effects: Vec<EffectRef>,
+        /// Row variable for open effect rows, e.g. `..e` in `needs {Assert, ..e}`
+        effect_row_var: Option<(String, Span)>,
+        /// True when `needs` was written explicitly (distinguishes `needs {}` from no clause)
+        has_needs: bool,
         span: Span,
     },
 

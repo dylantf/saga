@@ -45,6 +45,21 @@ pub(crate) fn find_effect_call(expr: &Expr) -> Option<Span> {
 
 // --- Type representation ---
 
+/// An effect row: a list of known effects plus an optional row variable (tail).
+/// When `tail` is `None`, the row is closed (no additional effects allowed).
+/// When `tail` is `Some(id)`, the row is open (additional effects unify with the variable).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectRow {
+    pub effects: Vec<(String, Vec<Type>)>,
+    pub tail: Option<u32>,
+}
+
+impl EffectRow {
+    pub fn closed(effects: Vec<(String, Vec<Type>)>) -> Self {
+        EffectRow { effects, tail: None }
+    }
+}
+
 /// Internal type representation used during inference.
 /// Separate from ast::TypeExpr, which is surface syntax.
 /// All types (including primitives like Int, Bool) are represented as `Con`.
@@ -57,7 +72,7 @@ pub enum Type {
     /// Function type with effect annotation: a -> b needs {Eff1, Eff2 T}
     /// Used for HOF parameter types that declare which effects they absorb.
     /// Each effect is (name, type_args), e.g. ("Actor", [CounterMsg]).
-    EffArrow(Box<Type>, Box<Type>, Vec<(String, Vec<Type>)>),
+    EffArrow(Box<Type>, Box<Type>, EffectRow),
     /// Named type constructor with args: Int = Con("Int", []), List a = Con("List", [a])
     Con(std::string::String, Vec<Type>),
     /// Anonymous record type: `{ street: String, city: String }`
@@ -96,10 +111,36 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Var(id) => write!(f, "?{}", id),
-            Type::Arrow(a, b) | Type::EffArrow(a, b, _) => match a.as_ref() {
+            Type::Arrow(a, b) => match a.as_ref() {
                 Type::Arrow(_, _) | Type::EffArrow(_, _, _) => write!(f, "({}) -> {}", a, b),
                 _ => write!(f, "{} -> {}", a, b),
             },
+            Type::EffArrow(a, b, row) => {
+                match a.as_ref() {
+                    Type::Arrow(_, _) | Type::EffArrow(_, _, _) => write!(f, "({}) -> {}", a, b)?,
+                    _ => write!(f, "{} -> {}", a, b)?,
+                }
+                if !row.effects.is_empty() || row.tail.is_some() {
+                    write!(f, " needs {{")?;
+                    for (i, (name, args)) in row.effects.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", name)?;
+                        for arg in args {
+                            write!(f, " {}", arg)?;
+                        }
+                    }
+                    if let Some(tail_id) = row.tail {
+                        if !row.effects.is_empty() {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "..?{}", tail_id)?;
+                    }
+                    write!(f, "}}")?;
+                }
+                Ok(())
+            }
             Type::Con(name, args) => {
                 if args.is_empty() {
                     write!(f, "{}", name)
@@ -133,6 +174,8 @@ impl std::fmt::Display for Type {
 #[derive(Debug, Default, Clone)]
 pub struct Substitution {
     map: HashMap<u32, Type>,
+    /// Row variable bindings for effect row polymorphism.
+    pub(crate) row_map: HashMap<u32, EffectRow>,
 }
 
 impl Substitution {
@@ -151,14 +194,10 @@ impl Substitution {
                 }
             }
             Type::Arrow(a, b) => Type::Arrow(Box::new(self.apply(a)), Box::new(self.apply(b))),
-            Type::EffArrow(a, b, effs) => Type::EffArrow(
+            Type::EffArrow(a, b, row) => Type::EffArrow(
                 Box::new(self.apply(a)),
                 Box::new(self.apply(b)),
-                effs.iter()
-                    .map(|(name, args)| {
-                        (name.clone(), args.iter().map(|t| self.apply(t)).collect())
-                    })
-                    .collect(),
+                self.apply_effect_row(row),
             ),
             Type::Con(name, args) => {
                 Type::Con(name.clone(), args.iter().map(|a| self.apply(a)).collect())
@@ -172,6 +211,47 @@ impl Substitution {
             Type::Error => Type::Error,
             Type::Never => Type::Never,
         }
+    }
+
+    /// Apply the substitution to an effect row, resolving type args and chasing
+    /// row variable bindings.
+    pub fn apply_effect_row(&self, row: &EffectRow) -> EffectRow {
+        let mut effects: Vec<(String, Vec<Type>)> = row.effects.iter()
+            .map(|(name, args)| {
+                (name.clone(), args.iter().map(|t| self.apply(t)).collect())
+            })
+            .collect();
+        let mut tail = row.tail;
+        // Chase row variable bindings
+        while let Some(tail_id) = tail {
+            if let Some(bound) = self.row_map.get(&tail_id) {
+                for (name, args) in &bound.effects {
+                    effects.push((name.clone(), args.iter().map(|t| self.apply(t)).collect()));
+                }
+                tail = bound.tail;
+            } else {
+                break;
+            }
+        }
+        EffectRow { effects, tail }
+    }
+
+    /// Bind a row variable to an effect row, with occurs check.
+    pub(crate) fn bind_row(&mut self, id: u32, row: EffectRow) -> Result<(), Diagnostic> {
+        if let Some(tail_id) = row.tail
+            && tail_id == id
+        {
+            // Binding to itself (e.g., ..e = ..e) is a no-op
+            if row.effects.is_empty() {
+                return Ok(());
+            }
+            return Err(Diagnostic::error(format!(
+                "infinite effect row: ?{} occurs in its own binding",
+                id
+            )));
+        }
+        self.row_map.insert(id, row);
+        Ok(())
     }
 
     /// Bind a type variable to a type, with occurs check.
@@ -206,10 +286,10 @@ impl Substitution {
                 }
             }
             Type::Arrow(a, b) => self.occurs(id, a) || self.occurs(id, b),
-            Type::EffArrow(a, b, effs) => {
+            Type::EffArrow(a, b, row) => {
                 self.occurs(id, a)
                     || self.occurs(id, b)
-                    || effs
+                    || row.effects
                         .iter()
                         .any(|(_, args)| args.iter().any(|t| self.occurs(id, t)))
             }
@@ -361,13 +441,18 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
             free_vars_in_type(a, bound, out);
             free_vars_in_type(b, bound, out);
         }
-        Type::EffArrow(a, b, effs) => {
+        Type::EffArrow(a, b, row) => {
             free_vars_in_type(a, bound, out);
             free_vars_in_type(b, bound, out);
-            for (_, args) in effs {
+            for (_, args) in &row.effects {
                 for t in args {
                     free_vars_in_type(t, bound, out);
                 }
+            }
+            if let Some(tail_id) = row.tail
+                && !bound.contains(&tail_id) && !out.contains(&tail_id)
+            {
+                out.push(tail_id);
             }
         }
         Type::Con(_, args) => {
@@ -625,6 +710,9 @@ pub(crate) struct EffectState {
     /// Deferred effects for let bindings that partially apply effectful functions.
     /// name -> effect names. Used by the lowerer to register effectful local vars.
     pub let_bindings: HashMap<String, Vec<String>>,
+    /// Functions with open effect rows (row variable in their `needs` clause).
+    /// name -> true. Extra body effects are allowed and flow through the row variable.
+    pub fun_has_row_var: HashSet<String>,
 }
 
 /// State accumulated during typechecking for IDE/LSP features: hover types,
@@ -996,9 +1084,14 @@ impl Checker {
     pub(crate) fn check_undeclared_effects(
         body_effects: &HashSet<String>,
         declared_effects: &HashSet<String>,
+        has_row_var: bool,
         label: &str,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        // Open effect row: extra body effects flow through the row variable
+        if has_row_var {
+            return Ok(());
+        }
         let undeclared: Vec<_> = body_effects.difference(declared_effects).collect();
         if undeclared.is_empty() {
             return Ok(());

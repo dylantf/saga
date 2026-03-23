@@ -396,6 +396,7 @@ impl Checker {
                 params,
                 return_type,
                 effects,
+                effect_row_var,
                 where_clause,
                 span,
                 ..
@@ -416,6 +417,9 @@ impl Checker {
                     name.clone(),
                     effects.iter().map(|e| e.name.clone()).collect(),
                 );
+                if effect_row_var.is_some() {
+                    self.effect_state.fun_has_row_var.insert(name.clone());
+                }
                 if !effects.is_empty() {
                     let mut constraints = Vec::new();
                     for eff in effects {
@@ -725,6 +729,7 @@ impl Checker {
             Self::check_undeclared_effects(
                 &body_effects,
                 &declared_effects,
+                self.effect_state.fun_has_row_var.contains(name),
                 &format!("function '{}'", name),
                 err_span,
             )?;
@@ -1426,6 +1431,7 @@ impl Checker {
             Self::check_undeclared_effects(
                 &body_effects,
                 &declared_effects,
+                false,
                 &format!("handler '{}'", name),
                 err_span,
             )?;
