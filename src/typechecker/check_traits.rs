@@ -44,7 +44,7 @@ impl Checker {
                             )
                         })
                         .collect(),
-                    tail: row.tail,
+                    tail: row.tail.as_ref().map(|t| Box::new(self.substitute_trait_param(trait_param_id, replacement, t))),
                 },
             ),
             Type::Con(name, args) => Type::Con(

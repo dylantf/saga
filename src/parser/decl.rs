@@ -933,8 +933,7 @@ impl Parser {
             let right = self.parse_type_expr()?; // recurse = right-associative
             let mut needs = Vec::new();
             let mut row_var = None;
-            let has_needs = matches!(self.peek(), Token::Needs);
-            if has_needs {
+            if matches!(self.peek(), Token::Needs) {
                 self.advance();
                 self.expect(Token::LBrace)?;
                 while !matches!(self.peek(), Token::RBrace) {
@@ -958,7 +957,7 @@ impl Parser {
             }
             let end = self.tokens[self.pos - 1].span;
             let span = start.to(end);
-            Ok(TypeExpr::Arrow { from: Box::new(left), to: Box::new(right), effects: needs, effect_row_var: row_var, has_needs, span })
+            Ok(TypeExpr::Arrow { from: Box::new(left), to: Box::new(right), effects: needs, effect_row_var: row_var, span })
         } else {
             Ok(left)
         }

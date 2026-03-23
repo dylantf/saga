@@ -30,8 +30,7 @@ pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
                         )
                     })
                     .collect(),
-                // Rename row tail variable to readable name if in the mapping
-                tail: row.tail,
+                tail: row.tail.as_ref().map(|t| Box::new(rename_vars(t, names))),
             },
         ),
         Type::Con(name, args) => Type::Con(
@@ -69,10 +68,8 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
                     collect_free_vars(t, out);
                 }
             }
-            if let Some(tail_id) = row.tail
-                && !out.contains(&tail_id)
-            {
-                out.push(tail_id);
+            if let Some(tail) = &row.tail {
+                collect_free_vars(tail, out);
             }
         }
         Type::Con(_, args) => {
@@ -189,39 +186,62 @@ impl Checker {
             .cloned()
             .collect();
 
-        match (r1.tail, r2.tail) {
+        match (r1.tail_var_id(), r2.tail_var_id()) {
             // Both closed: unmatched effects are an error
             (None, None) => {
                 if extras1.is_empty() && extras2.is_empty() {
                     Ok(())
-                } else {
-                    let all_extras: Vec<_> = extras1.iter().chain(extras2.iter())
+                } else if r1.effects.is_empty() || r2.effects.is_empty() {
+                    // One side is pure (empty), the other has effects
+                    let mut effects: Vec<_> = extras1.iter().chain(extras2.iter())
                         .map(|(n, _)| n.as_str())
                         .collect();
+                    effects.sort();
                     Err(Diagnostic::error(format!(
-                        "effect mismatch: {{{}}} not covered by closed effect row",
-                        all_extras.join(", ")
+                        "expected pure function but it uses effects {{{}}}",
+                        effects.join(", ")
                     )))
+                } else {
+                    // Both have effects but they don't match
+                    let mut extras: Vec<_> = extras1.iter().chain(extras2.iter())
+                        .map(|(n, _)| n.as_str())
+                        .collect();
+                    extras.sort();
+                    let mut allowed: Vec<_> = r1.effects.iter()
+                        .filter(|(n, _)| r2.effects.iter().any(|(n2, _)| n2 == n))
+                        .map(|(n, _)| n.as_str())
+                        .collect();
+                    allowed.sort();
+                    if allowed.is_empty() {
+                        Err(Diagnostic::error(format!(
+                            "effect mismatch: {{{}}} not expected here",
+                            extras.join(", ")
+                        )))
+                    } else {
+                        Err(Diagnostic::error(format!(
+                            "effect mismatch: {{{}}} not expected (allowed: {{{}}})",
+                            extras.join(", "),
+                            allowed.join(", ")
+                        )))
+                    }
                 }
             }
             // row1 is open: bind its tail to the extras from row2
             (Some(tail1), None) => {
-                self.sub.bind_row(tail1, EffectRow { effects: extras2, tail: None })
+                self.sub.bind_row(tail1, EffectRow::closed(extras2))
             }
             // row2 is open: bind its tail to the extras from row1
             (None, Some(tail2)) => {
-                self.sub.bind_row(tail2, EffectRow { effects: extras1, tail: None })
+                self.sub.bind_row(tail2, EffectRow::closed(extras1))
             }
             // Both open: create a fresh row variable for the shared tail
             (Some(tail1), Some(tail2)) => {
                 if tail1 == tail2 {
-                    // Same row variable: just check extras are empty
                     return Ok(());
                 }
-                let fresh = self.next_var;
-                self.next_var += 1;
-                self.sub.bind_row(tail1, EffectRow { effects: extras2, tail: Some(fresh) })?;
-                self.sub.bind_row(tail2, EffectRow { effects: extras1, tail: Some(fresh) })
+                let fresh_var = self.fresh_var();
+                self.sub.bind_row(tail1, EffectRow { effects: extras2, tail: Some(Box::new(fresh_var.clone())) })?;
+                self.sub.bind_row(tail2, EffectRow { effects: extras1, tail: Some(Box::new(fresh_var)) })
             }
         }
     }
@@ -281,13 +301,6 @@ impl Checker {
                 Box::new(self.replace_vars(b, mapping)),
             ),
             Type::EffArrow(a, b, row) => {
-                let new_tail = row.tail.map(|id| {
-                    if let Some(Type::Var(new_id)) = mapping.get(&id) {
-                        *new_id
-                    } else {
-                        id
-                    }
-                });
                 Type::EffArrow(
                     Box::new(self.replace_vars(a, mapping)),
                     Box::new(self.replace_vars(b, mapping)),
@@ -300,7 +313,7 @@ impl Checker {
                                 )
                             })
                             .collect(),
-                        tail: new_tail,
+                        tail: row.tail.as_ref().map(|t| Box::new(self.replace_vars(t, mapping))),
                     },
                 )
             }
@@ -433,14 +446,15 @@ impl Checker {
                         })
                         .collect();
                     let tail = effect_row_var.as_ref().map(|(name, _)| {
-                        if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
+                        let id = if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
                             *id
                         } else {
                             let id = self.next_var;
                             self.next_var += 1;
                             params.push((name.clone(), id));
                             id
-                        }
+                        };
+                        Box::new(Type::Var(id))
                     });
                     Type::EffArrow(Box::new(a_ty), Box::new(b_ty), EffectRow { effects: effect_refs, tail })
                 }

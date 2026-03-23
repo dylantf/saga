@@ -3709,3 +3709,13 @@ fn needs_empty_accepts_pure_lambda() {
     )
     .unwrap();
 }
+
+#[test]
+fn effect_row_var_handler_not_unnecessary() {
+    // When effects flow through a row variable, the handler should not be
+    // flagged as unnecessary (the string-based tracking can't see row-bound effects)
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: () -> Unit needs {..e}) -> Unit needs {..e}\nrun f = f ()\nmain () = run (fun () -> log! \"hello\") with { log msg = () }",
+    )
+    .unwrap();
+}

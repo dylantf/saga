@@ -51,12 +51,22 @@ pub(crate) fn find_effect_call(expr: &Expr) -> Option<Span> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectRow {
     pub effects: Vec<(String, Vec<Type>)>,
-    pub tail: Option<u32>,
+    pub tail: Option<Box<Type>>,
 }
 
 impl EffectRow {
     pub fn closed(effects: Vec<(String, Vec<Type>)>) -> Self {
         EffectRow { effects, tail: None }
+    }
+
+    pub fn tail_var_id(&self) -> Option<u32> {
+        match &self.tail {
+            Some(ty) => match ty.as_ref() {
+                Type::Var(id) => Some(*id),
+                _ => None,
+            },
+            None => None,
+        }
     }
 }
 
@@ -131,11 +141,11 @@ impl std::fmt::Display for Type {
                             write!(f, " {}", arg)?;
                         }
                     }
-                    if let Some(tail_id) = row.tail {
+                    if let Some(tail) = &row.tail {
                         if !row.effects.is_empty() {
                             write!(f, ", ")?;
                         }
-                        write!(f, "..?{}", tail_id)?;
+                        write!(f, "..{}", tail)?;
                     }
                     write!(f, "}}")?;
                 }
@@ -221,24 +231,26 @@ impl Substitution {
                 (name.clone(), args.iter().map(|t| self.apply(t)).collect())
             })
             .collect();
-        let mut tail = row.tail;
+        let mut tail = row.tail.as_ref().map(|t| Box::new(self.apply(t)));
         // Chase row variable bindings
-        while let Some(tail_id) = tail {
-            if let Some(bound) = self.row_map.get(&tail_id) {
+        while let Some(tail_ty) = &tail {
+            if let Type::Var(tail_id) = tail_ty.as_ref()
+                && let Some(bound) = self.row_map.get(tail_id)
+            {
                 for (name, args) in &bound.effects {
                     effects.push((name.clone(), args.iter().map(|t| self.apply(t)).collect()));
                 }
-                tail = bound.tail;
-            } else {
-                break;
+                tail = bound.tail.clone();
+                continue;
             }
+            break;
         }
         EffectRow { effects, tail }
     }
 
     /// Bind a row variable to an effect row, with occurs check.
     pub(crate) fn bind_row(&mut self, id: u32, row: EffectRow) -> Result<(), Diagnostic> {
-        if let Some(tail_id) = row.tail
+        if let Some(tail_id) = row.tail_var_id()
             && tail_id == id
         {
             // Binding to itself (e.g., ..e = ..e) is a no-op
@@ -449,10 +461,8 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                     free_vars_in_type(t, bound, out);
                 }
             }
-            if let Some(tail_id) = row.tail
-                && !bound.contains(&tail_id) && !out.contains(&tail_id)
-            {
-                out.push(tail_id);
+            if let Some(tail) = &row.tail {
+                free_vars_in_type(tail, bound, out);
             }
         }
         Type::Con(_, args) => {

@@ -573,8 +573,6 @@ pub enum TypeExpr {
         effects: Vec<EffectRef>,
         /// Row variable for open effect rows, e.g. `..e` in `needs {Assert, ..e}`
         effect_row_var: Option<(String, Span)>,
-        /// True when `needs` was written explicitly (distinguishes `needs {}` from no clause)
-        has_needs: bool,
         span: Span,
     },
 
