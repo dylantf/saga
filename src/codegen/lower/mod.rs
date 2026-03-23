@@ -1407,11 +1407,6 @@ impl<'a> Lowerer<'a> {
             ExprKind::Tuple { elements, .. } => self.lower_tuple_elems(elements),
 
             ExprKind::QualifiedName { module, name, .. } => {
-                // Dict.empty is a value, not a function -- emit maps:new()
-                if module == "Dict" && name == "empty" {
-                    return cerl_call("maps", "new", vec![]);
-                }
-
                 // When used as a bare reference (not in application position),
                 // emit a FunRef if it's a known imported function, otherwise a Var.
                 let qualified = format!("{}.{}", module, name);
@@ -1703,26 +1698,6 @@ impl<'a> Lowerer<'a> {
     /// Lower a qualified function call like `Math.abs x` to `call 'math':'abs'(X)`.
     /// For effectful imported functions, handler params and _ReturnK are threaded.
     fn lower_qualified_call(&mut self, module: &str, func_name: &str, args: &[&Expr]) -> CExpr {
-        // Builtin conversion functions
-        if let Some(ce) = self.lower_builtin_conversion(module, func_name, args) {
-            return ce;
-        }
-
-        // Dict builtins
-        if let Some(ce) = self.lower_builtin_dict(module, func_name, args) {
-            return ce;
-        }
-
-        // String builtins
-        if let Some(ce) = self.lower_builtin_string(module, func_name, args) {
-            return ce;
-        }
-
-        // Regex builtins
-        if let Some(ce) = self.lower_builtin_regex(module, func_name, args) {
-            return ce;
-        }
-
         let erlang_module = self
             .module_aliases
             .get(module)
@@ -1782,11 +1757,13 @@ impl<'a> Lowerer<'a> {
             arg_vars.push(rk_var);
         }
 
-        let call = CExpr::Call(
-            erlang_module,
-            func_name.to_string(),
-            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-        );
+        // Check if the function is an @external with a specific bridge module
+        let call_args: Vec<CExpr> = arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
+        let call = if let Some((erl_mod, erl_func, _)) = self.external_funs.get(func_name) {
+            CExpr::Call(erl_mod.clone(), erl_func.clone(), call_args)
+        } else {
+            CExpr::Call(erlang_module, func_name.to_string(), call_args)
+        };
 
         bindings.into_iter().rev().fold(call, |body, (var, val)| {
             CExpr::Let(var, Box::new(val), Box::new(body))

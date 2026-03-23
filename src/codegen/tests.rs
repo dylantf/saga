@@ -549,29 +549,21 @@ main () = {
 
 #[test]
 fn int_parse() {
-    let src = r#"main () = Int.parse "42""#;
-    let out = emit(src);
+    let src = "import Std.Int\nmain () = Int.parse \"42\"";
+    let out = emit_full(src);
     assert!(
-        out.contains("call 'string':'to_integer'"),
-        "expected string:to_integer\n{out}"
-    );
-    assert!(
-        out.contains("'undefined'"),
-        "expected undefined for None\n{out}"
+        out.contains("call 'std_int':'parse'"),
+        "expected std_int:parse\n{out}"
     );
 }
 
 #[test]
 fn float_parse() {
-    let src = r#"main () = Float.parse "2.5""#;
-    let out = emit(src);
+    let src = "import Std.Float\nmain () = Float.parse \"2.5\"";
+    let out = emit_full(src);
     assert!(
-        out.contains("call 'string':'to_float'"),
-        "expected string:to_float\n{out}"
-    );
-    assert!(
-        out.contains("'undefined'"),
-        "expected undefined for None\n{out}"
+        out.contains("call 'std_float':'parse'"),
+        "expected std_float:parse\n{out}"
     );
 }
 
@@ -579,7 +571,12 @@ fn float_parse() {
 
 #[test]
 fn dict_empty() {
-    assert_contains("main () = Dict.empty", "call 'maps':'new'");
+    let src = "import Std.Dict\nmain () = Dict.new ()";
+    let out = emit_full(src);
+    assert!(
+        out.contains("call 'std_dict':'new'") || out.contains("call 'std_dict_bridge':'new'"),
+        "expected dict new call\n{out}"
+    );
 }
 
 // Dict.put, Dict.remove, Dict.keys, Dict.values, Dict.size, Dict.from_list,
@@ -587,19 +584,11 @@ fn dict_empty() {
 
 #[test]
 fn dict_get() {
-    let src = r#"
-fun main : Unit -> Maybe Int
-main () = Dict.get "a" Dict.empty
-"#;
-    let out = emit(src);
+    let src = "import Std.Dict\nfun main : Unit -> Maybe Int\nmain () = Dict.get \"a\" (Dict.new ())";
+    let out = emit_full(src);
     assert!(
-        out.contains("call 'maps':'find'"),
-        "expected maps:find\n{out}"
-    );
-    assert!(out.contains("'ok'"), "expected ok atom for Some\n{out}");
-    assert!(
-        out.contains("'undefined'"),
-        "expected undefined for None\n{out}"
+        out.contains("call 'std_dict':'get'"),
+        "expected std_dict:get\n{out}"
     );
 }
 
@@ -649,7 +638,10 @@ fn external_fun_multi_param() {
 @external("erlang", "maps", "get")
 fun get : (key: a) -> (map: Dict a b) -> b
 
-main () = get "x" Dict.empty
+@external("erlang", "maps", "new")
+fun empty : Unit -> Dict a b
+
+main () = get "x" (empty ())
 "#;
     let out = emit(src);
     assert!(

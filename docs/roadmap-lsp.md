@@ -60,6 +60,12 @@ lock-free hover/goto/completion.
 - [ ] Rename symbol -- trait method names (needs tracking across trait def, impl methods, and call sites)
 - [ ] Rename symbol -- trait impl methods (no reference tracking back to trait method definition)
 
+## Phase 4.5: Documentation
+
+- [ ] Doc comments (`#@`) shown in hover (attach to functions, types, records, effects, handlers, traits)
+- [ ] Doc comments shown in completion detail/documentation field
+- [ ] Doc comments for stdlib modules surface on hover for imported names
+
 ## Phase 5: Polish
 
 - [ ] Formatter (`textDocument/formatting`)

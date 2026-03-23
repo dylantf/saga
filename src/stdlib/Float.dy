@@ -22,3 +22,6 @@ fun floor : (x: Float) -> Int
 
 pub @external("erlang", "erlang", "ceil")
 fun ceil : (x: Float) -> Int
+
+pub @external("erlang", "std_float_bridge", "parse")
+fun parse : (s: String) -> Maybe Float

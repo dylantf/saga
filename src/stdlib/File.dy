@@ -1,0 +1,41 @@
+module Std.File
+
+pub type FileError
+  = NotFound
+  | PermissionDenied
+  | IsDirectory
+  | NotDirectory
+  | NoSpace
+  | AlreadyExists
+  | Other(String)
+
+pub effect File {
+  fun read : String -> Result String FileError
+  fun write : String -> String -> Result Unit FileError
+  fun append : String -> String -> Result Unit FileError
+  fun delete : String -> Result Unit FileError
+  fun exists : String -> Bool
+}
+
+@external("erlang", "std_file_bridge", "read_file")
+fun read_file : (path: String) -> Result String FileError
+
+@external("erlang", "std_file_bridge", "write_file")
+fun write_file : (path: String) -> (content: String) -> Result Unit FileError
+
+@external("erlang", "std_file_bridge", "append_file")
+fun append_file : (path: String) -> (content: String) -> Result Unit FileError
+
+@external("erlang", "std_file_bridge", "delete_file")
+fun delete_file : (path: String) -> Result Unit FileError
+
+@external("erlang", "std_file_bridge", "file_exists")
+fun file_exists : (path: String) -> Bool
+
+pub handler fs for File {
+  read path = resume (read_file path)
+  write path content = resume (write_file path content)
+  append path content = resume (append_file path content)
+  delete path = resume (delete_file path)
+  exists path = resume (file_exists path)
+}

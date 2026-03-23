@@ -8,3 +8,14 @@ double x = add x x
 
 pub fun square : Int -> Int
 square x = x * x
+
+@external("erlang", "mathlib_bridge", "random_int")
+fun bridge_random_int : (min: Int) -> (max: Int) -> Int
+
+pub effect Rand {
+  fun random_int : (min: Int) -> (max: Int) -> Int
+}
+
+pub handler real_rand for Rand {
+  random_int min max = resume (bridge_random_int min max)
+}

@@ -75,6 +75,66 @@ keyfind(Key, List) ->
 fun keyfind (key: k) (list: List (k, v)) -> Maybe (k, v)
 ```
 
+## Bridge files
+
+When an `@external` call targets a module that doesn't exist in the Erlang standard library, you need a **bridge file**: a `.erl` file that implements the native side of the FFI.
+
+### How bridge files are discovered
+
+1. **Stdlib bridges** are embedded in the compiler binary via `include_str!` and written to the build directory automatically. These live in `src/stdlib/` with the naming convention `<Module>.bridge.erl` (e.g. `File.bridge.erl`).
+
+2. **User/library bridges** are discovered by scanning the project root for `.erl` files (skipping `_build/` and `tests/`). Any `.erl` file found is copied to the build directory and compiled alongside the generated `.core` files.
+
+### Writing a bridge file
+
+The `-module(name)` in your `.erl` file must match the module name referenced in `@external`. For example:
+
+```
+# File.dy
+@external("erlang", "dylang_file", "read_file")
+fun read_file : (path: String) -> Result String String
+```
+
+```erlang
+%% File.bridge.erl
+-module(dylang_file).
+-export([read_file/1]).
+
+read_file(Path) ->
+    case file:read_file(Path) of
+        {ok, Bin} -> {ok, Bin};
+        {error, Reason} -> {error, atom_to_binary(Reason)}
+    end.
+```
+
+### Type representation conventions
+
+Your bridge functions must return values that match how the compiler represents types at runtime on the BEAM:
+
+| Type | BEAM representation | Example |
+|------|-------------------|---------|
+| `Int` | Integer | `42` |
+| `Float` | Float | `3.14` |
+| `String` | Binary | `<<"hello">>` |
+| `Bool` | Atoms `true` / `false` | `true` |
+| `Unit` | Atom `unit` | `unit` |
+| `List a` | Erlang list | `[1, 2, 3]` |
+| `(a, b)` | Tuple | `{1, <<"hi">>}` |
+| `Ok v` | `{ok, V}` | `{ok, <<"contents">>}` |
+| `Err e` | `{error, E}` | `{error, <<"not found">>}` |
+| `Just v` | Bare value `V` | `<<"hello">>` |
+| `Nothing` | Atom `undefined` | `undefined` |
+| Custom variant `Foo x y` | `{module_Foo, X, Y}` | `{shapes_Circle, 5}` |
+| Custom nullary variant `Foo` | `{module_Foo}` (1-tuple) | `{std_file_NotFound}` |
+
+Key gotchas:
+- `Err` maps to the atom `error`, not `err`
+- `Nothing` / `None` is `undefined`, not `nil` or `none`
+- `Just` / `Some` is the bare unwrapped value, no tuple wrapper
+- `Unit` is the atom `unit`, not an empty tuple `{}`
+- Custom ADT constructors use the module prefix: `MyVariant` in module `Foo` becomes `foo_MyVariant`
+- Nullary custom constructors are still wrapped in a 1-tuple: `NotFound` becomes `{std_file_NotFound}`, not bare `std_file_NotFound`. This differs from prelude builtins like `True`/`False` which are bare atoms
+
 ## Open questions
 
 - Do we want `@external` on the same line or as a separate declaration?
