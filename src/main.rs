@@ -13,8 +13,9 @@ fn print_usage() {
     eprintln!("  dylang check            Typecheck project without building");
     eprintln!("  dylang check <file.dy>  Typecheck a single file");
     eprintln!("  dylang emit <file.dy>   Print generated Core Erlang to stdout");
-    eprintln!("  dylang test             Run tests (requires project.toml)");
-    eprintln!("  dylang test <pattern>   Run tests matching pattern");
+    eprintln!("  dylang test             Run all tests (requires project.toml)");
+    eprintln!("  dylang test <file>      Run a specific test file");
+    eprintln!("  dylang test <pattern>   Run test files matching pattern");
     eprintln!("  dylang install          Fetch and cache git dependencies");
 }
 

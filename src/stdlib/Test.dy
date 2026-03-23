@@ -1,7 +1,7 @@
 module Std.Test
 
 import Std.Base
-import Std.IO (print)
+import Std.IO (print, println)
 import Std.Process
 
 pub effect Assert {
@@ -52,7 +52,7 @@ test name body = {
 #@ Groups tests under a label. Nesting is tracked via enter_group/leave_group
 #@ Skips a named test. The body is never executed.
 pub fun skip : (name: String) -> (body: () -> Unit needs {Assert}) -> Unit needs {TestRunner}
-skip name body = skip_test! name
+skip name _ = skip_test! name
 
 #@ Groups tests under a label. Nesting is tracked via enter_group/leave_group
 #@ effects so the handler can control indentation.
@@ -69,7 +69,7 @@ describe name body = {
 pub handler test_handler for TestRunner {
   pass name = {
     let k = resume ()
-    fun state : {
+    fun state -> {
       let indent = make_indent state.depth
       println (indent <> "\x1b[32m✓\x1b[0m " <> name)
       k { state | passed: state.passed + 1 }
@@ -77,7 +77,7 @@ pub handler test_handler for TestRunner {
   }
   fail name msg = {
     let k = resume ()
-    fun state : {
+    fun state -> {
       let indent = make_indent state.depth
       println (indent <> "\x1b[31m✗\x1b[0m " <> name)
       println (indent <> "    " <> msg)
@@ -86,7 +86,7 @@ pub handler test_handler for TestRunner {
   }
   skip_test name = {
     let k = resume ()
-    fun state : {
+    fun state -> {
       let indent = make_indent state.depth
       println (indent <> "\x1b[33m○\x1b[0m " <> name <> " (skipped)")
       k { state | skipped: state.skipped + 1 }
@@ -94,7 +94,7 @@ pub handler test_handler for TestRunner {
   }
   enter_group name = {
     let k = resume ()
-    fun state : {
+    fun state -> {
       let indent = make_indent state.depth
       println (indent <> name)
       k { state | depth: state.depth + 1 }
@@ -102,7 +102,7 @@ pub handler test_handler for TestRunner {
   }
   leave_group () = {
     let k = resume ()
-    fun state : {
+    fun state -> {
       k { state | depth: state.depth - 1 }
     }
   }

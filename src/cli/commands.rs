@@ -144,7 +144,7 @@ pub fn cmd_emit(file: &str) {
     print!("{}", core_src);
 }
 
-pub fn cmd_test(_args: &[String]) {
+pub fn cmd_test(args: &[String]) {
     let project_root = super::find_project_root().unwrap_or_else(|| {
         eprintln!("No project.toml found. Tests require a project.");
         std::process::exit(1);
@@ -159,11 +159,46 @@ pub fn cmd_test(_args: &[String]) {
     }
 
     // Discover test files
-    let test_files: Vec<PathBuf> = discover_test_files(&tests_dir);
-    if test_files.is_empty() {
+    let all_test_files: Vec<PathBuf> = discover_test_files(&tests_dir);
+    if all_test_files.is_empty() {
         eprintln!("No test files found in {}", tests_dir.display());
         std::process::exit(1);
     }
+
+    // Filter test files if a pattern argument was provided
+    let filter = args.iter().find(|a| !a.starts_with('-'));
+    let test_files: Vec<PathBuf> = if let Some(pattern) = filter {
+        let pattern_path = PathBuf::from(pattern);
+
+        // If it's an exact file path (absolute or relative), use it directly
+        if pattern_path.is_file() {
+            vec![pattern_path.canonicalize().unwrap_or(pattern_path)]
+        } else {
+            // Try resolving relative to the tests directory
+            let in_tests_dir = tests_dir.join(pattern);
+            if in_tests_dir.is_file() {
+                vec![in_tests_dir]
+            } else {
+                // Substring match against file names (without extension)
+                let matched: Vec<PathBuf> = all_test_files
+                    .into_iter()
+                    .filter(|f| {
+                        let name = f.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                        let rel = f.strip_prefix(&project_root).unwrap_or(f).to_string_lossy();
+                        name.contains(pattern.as_str()) || rel.contains(pattern.as_str())
+                    })
+                    .collect();
+
+                if matched.is_empty() {
+                    eprintln!("No test files matching \"{}\"", pattern);
+                    std::process::exit(1);
+                }
+                matched
+            }
+        }
+    } else {
+        all_test_files
+    };
 
     // Build the main project first (compiles all non-test modules)
     let (build_dir, elaborated_modules, codegen_info) = build_project("test");
