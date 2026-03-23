@@ -116,7 +116,7 @@ impl Parser {
             Token::Import => self.parse_import_decl(),
             Token::Ident(s)
                 if self.test_mode
-                    && (s == "test" || s == "describe" || s == "skip")
+                    && (s == "test" || s == "describe" || s == "skip" || s == "only")
                     && matches!(
                         self.tokens.get(self.pos + 1).map(|t| &t.token),
                         Some(Token::String(_))

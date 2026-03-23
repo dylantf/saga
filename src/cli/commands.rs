@@ -262,7 +262,7 @@ pub fn cmd_test(args: &[String]) {
 }
 
 /// If a test file has no `main` function, synthesize one by wrapping all
-/// non-import declarations in `main () = Std.Test.run (fun () -> { ... })`.
+/// non-import declarations in `main () = run_collected (fun () -> { ... })`.
 /// Also auto-imports Std.Test if not already imported.
 fn inject_test_main(source: &str) -> String {
     // Check if there's already a main
@@ -277,14 +277,10 @@ fn inject_test_main(source: &str) -> String {
 
     let mut imports = Vec::new();
     let mut body = Vec::new();
-    let mut has_test_import = false;
 
     for line in source.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("import ") || trimmed.starts_with("module ") {
-            if trimmed.contains("Std.Test") {
-                has_test_import = true;
-            }
             imports.push(line.to_string());
         } else {
             body.push(line.to_string());
@@ -293,20 +289,14 @@ fn inject_test_main(source: &str) -> String {
 
     let mut result = String::new();
 
-    // Auto-import Std.Test.run if not already imported
-    if !has_test_import {
-        result.push_str("import Std.Test (run)\n");
-    } else {
-        // Ensure run is available even if user imported specific items
-        result.push_str("import Std.Test (run)\n");
-    }
+    result.push_str("import Std.Test (run_collected)\n");
 
     for line in &imports {
         result.push_str(line);
         result.push('\n');
     }
 
-    result.push_str("\nmain () = run (fun () -> {\n");
+    result.push_str("\nmain () = run_collected (fun () -> {\n");
     for line in &body {
         result.push_str(line);
         result.push('\n');
