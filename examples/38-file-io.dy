@@ -1,15 +1,29 @@
-import Std.File
+import Std.File (FileError)
 
 fun process : Unit -> Unit needs {File}
 process () = {
   let _ = File.write! "test_output.txt" "hello from dylang!"
+
   let result = File.read! "test_output.txt"
   case result {
     Ok content -> println content
-    Err e -> println ("error: " <> e)
+    Err e -> case e {
+      NotFound -> println "file not found"
+      PermissionDenied -> println "permission denied"
+      _ -> println "other error"
+    }
   }
+
   let _ = File.delete! "test_output.txt"
-  println $"file exists after delete: {File.exists! "test_output.txt"}"
+  println $"file exists after delete?: {File.exists! "test_output.txt"}"
+
+  # Reading a file that doesn't exist
+  let missing = File.read! "nonexistent.txt"
+  case missing {
+    Ok _ -> println "unexpected"
+    Err NotFound -> println "correctly got NotFound"
+    Err _ -> println "wrong error"
+  }
 }
 
 main () = process () with fs

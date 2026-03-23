@@ -124,14 +124,16 @@ Your bridge functions must return values that match how the compiler represents 
 | `Err e` | `{error, E}` | `{error, <<"not found">>}` |
 | `Just v` | Bare value `V` | `<<"hello">>` |
 | `Nothing` | Atom `undefined` | `undefined` |
-| Custom variant `Foo x y` | `{foo, X, Y}` | `{circle, 5}` |
+| Custom variant `Foo x y` | `{module_Foo, X, Y}` | `{shapes_Circle, 5}` |
+| Custom nullary variant `Foo` | `{module_Foo}` (1-tuple) | `{std_file_NotFound}` |
 
 Key gotchas:
 - `Err` maps to the atom `error`, not `err`
 - `Nothing` / `None` is `undefined`, not `nil` or `none`
 - `Just` / `Some` is the bare unwrapped value, no tuple wrapper
 - `Unit` is the atom `unit`, not an empty tuple `{}`
-- Custom ADT constructors are lowercased atoms: `MyVariant` becomes `my_variant` (with module prefix for non-local types)
+- Custom ADT constructors use the module prefix: `MyVariant` in module `Foo` becomes `foo_MyVariant`
+- Nullary custom constructors are still wrapped in a 1-tuple: `NotFound` becomes `{std_file_NotFound}`, not bare `std_file_NotFound`. This differs from prelude builtins like `True`/`False` which are bare atoms
 
 ## Open questions
 
