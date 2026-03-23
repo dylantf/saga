@@ -121,12 +121,14 @@ fn write_stdlib_bridges(build_dir: &Path) {
     }
 }
 
-/// Scan a project directory for .erl bridge files and copy them to the build directory.
-fn copy_project_bridges(project_root: &Path, build_dir: &Path) {
+/// Scan project and dependency directories for .erl bridge files and copy them to the build directory.
+fn copy_project_bridges(roots: &[&Path], build_dir: &Path) {
     let mut count = 0;
-    if let Err(e) = copy_bridges_from_dir(project_root, build_dir, &mut count) {
-        eprintln!("Error scanning for bridge files: {}", e);
-        std::process::exit(1);
+    for root in roots {
+        if let Err(e) = copy_bridges_from_dir(root, build_dir, &mut count) {
+            eprintln!("Error scanning for bridge files in {}: {}", root.display(), e);
+            std::process::exit(1);
+        }
     }
     if count > 0 {
         eprintln!("Copied {} bridge file(s)", count);
@@ -374,7 +376,14 @@ pub fn build_project(
 
     // Copy bridge (.erl) files into build dir
     write_stdlib_bridges(&build_dir);
-    copy_project_bridges(&project_root, &build_dir);
+    let mut bridge_roots: Vec<&Path> = vec![&project_root];
+    let dep_roots = config
+        .deps
+        .as_ref()
+        .map(|deps| project_config::dep_root_paths(&project_root, deps))
+        .unwrap_or_default();
+    bridge_roots.extend(dep_roots.iter().map(|p| p.as_path()));
+    copy_project_bridges(&bridge_roots, &build_dir);
 
     run_erlc(&build_dir);
     let codegen_info = result.codegen_info().clone();

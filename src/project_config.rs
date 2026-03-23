@@ -657,3 +657,19 @@ pub fn resolve_deps(
 
     Ok(())
 }
+
+/// Collect the root paths of all direct dependencies.
+pub fn dep_root_paths(
+    project_root: &Path,
+    deps: &HashMap<String, DepEntry>,
+) -> Vec<PathBuf> {
+    let lockfile = Lockfile::load(project_root);
+    let mut roots = Vec::new();
+    for (dep_name, dep_entry) in deps {
+        if let Ok(path) = resolve_dep_to_path(dep_name, dep_entry, project_root, lockfile.as_ref())
+        {
+            roots.push(path);
+        }
+    }
+    roots
+}

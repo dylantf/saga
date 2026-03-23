@@ -2,6 +2,9 @@ module Main
 
 import MathLib (add, double, square)
 
+fun roll_dice : Unit -> Int needs {Rand}
+roll_dice () = random_int! 1 6
+
 pub fun main : Unit -> Unit
 main () = {
   let result = add 3 4
@@ -12,4 +15,7 @@ main () = {
 
   let squared = square 6
   println (show squared)
+
+  let die = roll_dice () with real_rand
+  println $"rolled a {show die}"
 }
