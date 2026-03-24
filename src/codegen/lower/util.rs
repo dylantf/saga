@@ -272,21 +272,12 @@ pub(super) fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
     let mut arity = 0;
     let mut effects = BTreeSet::new();
     let mut current = ty;
-    loop {
-        match current {
-            Type::Arrow(_, ret) => {
-                arity += 1;
-                current = ret;
-            }
-            Type::EffArrow(_, ret, row) => {
-                arity += 1;
-                for (eff, _) in &row.effects {
-                    effects.insert(eff.clone());
-                }
-                current = ret;
-            }
-            _ => break,
+    while let Type::Fun(_, ret, row) = current {
+        arity += 1;
+        for (eff, _) in &row.effects {
+            effects.insert(eff.clone());
         }
+        current = ret;
     }
     (arity, effects.into_iter().collect())
 }
@@ -300,48 +291,26 @@ pub(super) fn param_absorbed_effects_from_type(
     let mut result = HashMap::new();
     let mut current = ty;
     let mut param_index = 0;
-    loop {
-        match current {
-            Type::Arrow(param, ret) => {
-                // Check if the parameter itself is an EffArrow
-                let effs = collect_effarrow_effects(param);
-                if !effs.is_empty() {
-                    result.insert(param_index, effs);
-                }
-                param_index += 1;
-                current = ret;
-            }
-            Type::EffArrow(param, ret, _) => {
-                let effs = collect_effarrow_effects(param);
-                if !effs.is_empty() {
-                    result.insert(param_index, effs);
-                }
-                param_index += 1;
-                current = ret;
-            }
-            _ => break,
+    while let Type::Fun(param, ret, _) = current {
+        let effs = collect_effarrow_effects(param);
+        if !effs.is_empty() {
+            result.insert(param_index, effs);
         }
+        param_index += 1;
+        current = ret;
     }
     result
 }
 
-/// Collect effect names from an EffArrow type (used for parameter types).
+/// Collect effect names from a Fun type (used for parameter types).
 fn collect_effarrow_effects(ty: &Type) -> Vec<String> {
     let mut effects = BTreeSet::new();
     let mut current = ty;
-    loop {
-        match current {
-            Type::EffArrow(_, ret, row) => {
-                for (eff, _) in &row.effects {
-                    effects.insert(eff.clone());
-                }
-                current = ret;
-            }
-            Type::Arrow(_, ret) => {
-                current = ret;
-            }
-            _ => break,
+    while let Type::Fun(_, ret, row) = current {
+        for (eff, _) in &row.effects {
+            effects.insert(eff.clone());
         }
+        current = ret;
     }
     effects.into_iter().collect()
 }

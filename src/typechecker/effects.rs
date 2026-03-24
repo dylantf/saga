@@ -3,47 +3,58 @@ use std::collections::HashSet;
 use crate::ast;
 use crate::token::Span;
 
-use super::{Checker, Diagnostic, EffectOpSig, Type};
+use super::{Checker, Diagnostic, EffectOpSig, EffectRow, Type};
 
 impl Checker {
     // --- Effect tracking ---
 
-    /// Collect effects for a callee from fun_effects and let_effect_bindings.
-    pub(crate) fn callee_effects(&self, name: &str) -> Vec<String> {
-        let mut effects = Vec::new();
-        if let Some(effs) = self.effect_state.fun_effects.get(name) {
-            effects.extend(effs.iter().cloned());
+    /// Check body effects against a declared effect row.
+    /// Returns Ok if all body effects are covered by the declared row.
+    /// Open rows (with tail) allow any extra effects through.
+    pub(crate) fn check_effects_via_row(
+        &mut self,
+        body_effs: &EffectRow,
+        declared_row: &EffectRow,
+        label: &str,
+        span: crate::token::Span,
+    ) -> Result<(), Diagnostic> {
+        if body_effs.is_empty() && declared_row.is_empty() {
+            return Ok(());
         }
-        if let Some(effs) = self.effect_state.let_bindings.get(name) {
-            effects.extend(effs.iter().cloned());
+        let declared = self.sub.apply_effect_row(declared_row);
+        // Open row: extras flow through the tail variable
+        if declared.tail.is_some() {
+            return Ok(());
         }
-        effects
-    }
-
-    /// Commit a callee's effects to current_effects.
-    pub(crate) fn commit_callee_effects(&mut self, name: &str) {
-        if let Some(effects) = self.effect_state.fun_effects.get(name).cloned() {
-            self.effect_state.current.extend(effects);
-        }
-        if let Some(effects) = self.effect_state.let_bindings.get(name).cloned() {
-            self.effect_state.current.extend(effects);
-        }
-        // If the function has a row variable in its needs clause that also
-        // appears in its type (i.e., linked to a parameter's effect row),
-        // resolve it through the substitution to find which effects flow through.
-        if let Some(Some(row_var_id)) = self.effect_state.fun_has_row_var.get(name) {
-            let resolved = self.sub.apply(&Type::Var(*row_var_id));
-            // After apply, the var either resolved to a concrete type (shouldn't
-            // happen for row vars) or chased to a final Var whose bindings live
-            // in row_map, not the type substitution.
-            if let Type::Var(id) = &resolved
-                && let Some(row) = self.sub.row_map.get(id)
-            {
-                let applied = self.sub.apply_effect_row(row);
-                for (eff, _) in &applied.effects {
-                    self.effect_state.current.insert(eff.clone());
-                }
+        // Closed row: every body effect must appear in declared
+        let mut undeclared = Vec::new();
+        for (eff_name, _) in &body_effs.effects {
+            if !declared.effects.iter().any(|(n, _)| n == eff_name) {
+                undeclared.push(eff_name.clone());
             }
+        }
+        if undeclared.is_empty() {
+            return Ok(());
+        }
+        undeclared.sort();
+        if declared.effects.is_empty() {
+            Err(Diagnostic::error_at(
+                span,
+                format!(
+                    "{} uses effects {{{}}} but has no 'needs' declaration",
+                    label,
+                    undeclared.join(", ")
+                ),
+            ))
+        } else {
+            Err(Diagnostic::error_at(
+                span,
+                format!(
+                    "{} uses effects {{{}}} not declared in its 'needs' clause",
+                    label,
+                    undeclared.join(", ")
+                ),
+            ))
         }
     }
 
@@ -105,7 +116,7 @@ impl Checker {
                     Type::Var(id) => {
                         vars.insert(*id);
                     }
-                    Type::Arrow(a, b) | Type::EffArrow(a, b, _) => {
+                    Type::Fun(a, b, _) => {
                         collect_vars(a, vars);
                         collect_vars(b, vars);
                     }
@@ -142,14 +153,14 @@ impl Checker {
             };
         }
         // Reuse cached mapping or create fresh vars
-        let mapping = if let Some(cached) = self.effect_state.type_param_cache.get(effect_name) {
+        let mapping = if let Some(cached) = self.effect_meta.type_param_cache.get(effect_name) {
             cached.clone()
         } else {
             let mapping: std::collections::HashMap<u32, Type> = type_params
                 .iter()
                 .map(|&old_id| (old_id, self.fresh_var()))
                 .collect();
-            self.effect_state.type_param_cache
+            self.effect_meta.type_param_cache
                 .insert(effect_name.to_string(), mapping.clone());
             mapping
         };

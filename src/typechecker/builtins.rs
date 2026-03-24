@@ -52,7 +52,7 @@ impl Checker {
             Scheme {
                 forall: vec![],
                 constraints: vec![],
-                ty: Type::Arrow(Box::new(Type::string()), Box::new(Type::Never)),
+                ty: Type::arrow(Type::string(), Type::Never),
             },
         );
 
@@ -62,7 +62,7 @@ impl Checker {
             Scheme {
                 forall: vec![],
                 constraints: vec![],
-                ty: Type::Arrow(Box::new(Type::unit()), Box::new(Type::Never)),
+                ty: Type::arrow(Type::unit(), Type::Never),
             },
         );
 
@@ -92,9 +92,9 @@ impl Checker {
             Scheme {
                 forall: vec![a_id],
                 constraints: vec![],
-                ty: Type::Arrow(
-                    Box::new(a),
-                    Box::new(Type::Arrow(Box::new(list_a.clone()), Box::new(list_a))),
+                ty: Type::arrow(
+                    a,
+                    Type::arrow(list_a.clone(), list_a),
                 ),
             },
         );

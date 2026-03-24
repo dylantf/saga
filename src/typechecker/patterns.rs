@@ -81,7 +81,7 @@ impl Checker {
                 let mut current = ctor_ty;
                 for arg_pat in args {
                     match current {
-                        Type::Arrow(param_ty, ret_ty) => {
+                        Type::Fun(param_ty, ret_ty, _) => {
                             self.bind_pattern(arg_pat, &param_ty)?;
                             current = *ret_ty;
                         }

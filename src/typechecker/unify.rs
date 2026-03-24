@@ -14,11 +14,7 @@ pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
                 ty.clone()
             }
         }
-        Type::Arrow(a, b) => Type::Arrow(
-            Box::new(rename_vars(a, names)),
-            Box::new(rename_vars(b, names)),
-        ),
-        Type::EffArrow(a, b, row) => Type::EffArrow(
+        Type::Fun(a, b, row) => Type::Fun(
             Box::new(rename_vars(a, names)),
             Box::new(rename_vars(b, names)),
             EffectRow {
@@ -56,11 +52,7 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
                 out.push(*id);
             }
         }
-        Type::Arrow(a, b) => {
-            collect_free_vars(a, out);
-            collect_free_vars(b, out);
-        }
-        Type::EffArrow(a, b, row) => {
+        Type::Fun(a, b, row) => {
             collect_free_vars(a, out);
             collect_free_vars(b, out);
             for (_, args) in &row.effects {
@@ -106,20 +98,9 @@ impl Checker {
             // Never (bottom) unifies with anything
             (Type::Never, _) | (_, Type::Never) => Ok(()),
 
-            (Type::Arrow(a1, a2), Type::Arrow(b1, b2)) => {
-                self.unify(a1, b1)?;
-                self.unify(a2, b2)
-            }
-            // Arrow is effect-agnostic: unifies with any EffArrow (effects are
-            // handled elsewhere via effect tracking, not unification).
-            (Type::Arrow(a1, a2), Type::EffArrow(b1, b2, _))
-            | (Type::EffArrow(a1, a2, _), Type::Arrow(b1, b2)) => {
-                self.unify(a1, b1)?;
-                self.unify(a2, b2)
-            }
-            (Type::EffArrow(a1, a2, row1), Type::EffArrow(b1, b2, row2)) => {
-                self.unify(a1, b1)?;
-                self.unify(a2, b2)?;
+            (Type::Fun(a1, b1, row1), Type::Fun(a2, b2, row2)) => {
+                self.unify(a1, a2)?;
+                self.unify(b1, b2)?;
                 self.unify_effect_rows(row1, row2)
             }
 
@@ -187,43 +168,26 @@ impl Checker {
             .collect();
 
         match (r1.tail_var_id(), r2.tail_var_id()) {
-            // Both closed: unmatched effects are an error
+            // Both closed: accept if one side is a subset of the other.
+            // This is symmetric (unification doesn't know direction), so it
+            // accepts both directions of effect subsumption. The directional
+            // check (effectful callback where pure expected = error) is
+            // enforced by check_callback_effect_subtype in infer.rs at
+            // function application sites.
             (None, None) => {
-                if extras1.is_empty() && extras2.is_empty() {
+                if extras1.is_empty() || extras2.is_empty() {
                     Ok(())
-                } else if r1.effects.is_empty() || r2.effects.is_empty() {
-                    // One side is pure (empty), the other has effects
-                    let mut effects: Vec<_> = extras1.iter().chain(extras2.iter())
-                        .map(|(n, _)| n.as_str())
-                        .collect();
-                    effects.sort();
-                    Err(Diagnostic::error(format!(
-                        "expected pure function but it uses effects {{{}}}",
-                        effects.join(", ")
-                    )))
                 } else {
-                    // Both have effects but they don't match
+                    // Both have unmatched effects -- genuinely incompatible
                     let mut extras: Vec<_> = extras1.iter().chain(extras2.iter())
                         .map(|(n, _)| n.as_str())
                         .collect();
                     extras.sort();
-                    let mut allowed: Vec<_> = r1.effects.iter()
-                        .filter(|(n, _)| r2.effects.iter().any(|(n2, _)| n2 == n))
-                        .map(|(n, _)| n.as_str())
-                        .collect();
-                    allowed.sort();
-                    if allowed.is_empty() {
-                        Err(Diagnostic::error(format!(
-                            "effect mismatch: {{{}}} not expected here",
-                            extras.join(", ")
-                        )))
-                    } else {
-                        Err(Diagnostic::error(format!(
-                            "effect mismatch: {{{}}} not expected (allowed: {{{}}})",
-                            extras.join(", "),
-                            allowed.join(", ")
-                        )))
-                    }
+                    extras.dedup();
+                    Err(Diagnostic::error(format!(
+                        "effect mismatch: {{{}}}",
+                        extras.join(", ")
+                    )))
                 }
             }
             // row1 is open: bind its tail to the extras from row2
@@ -296,12 +260,8 @@ impl Checker {
     pub(crate) fn replace_vars(&self, ty: &Type, mapping: &HashMap<u32, Type>) -> Type {
         match ty {
             Type::Var(id) => mapping.get(id).cloned().unwrap_or_else(|| ty.clone()),
-            Type::Arrow(a, b) => Type::Arrow(
-                Box::new(self.replace_vars(a, mapping)),
-                Box::new(self.replace_vars(b, mapping)),
-            ),
-            Type::EffArrow(a, b, row) => {
-                Type::EffArrow(
+            Type::Fun(a, b, row) => {
+                Type::Fun(
                     Box::new(self.replace_vars(a, mapping)),
                     Box::new(self.replace_vars(b, mapping)),
                     EffectRow {
@@ -339,7 +299,7 @@ impl Checker {
         // Collect effect type param vars that must not be generalized --
         // these are shared across ops of the same effect within a function scope.
         let effect_vars: HashSet<u32> = self
-            .effect_state
+            .effect_meta
             .type_param_cache
             .values()
             .flat_map(|mapping| {
@@ -456,7 +416,11 @@ impl Checker {
                         };
                         Box::new(Type::Var(id))
                     });
-                    Type::EffArrow(Box::new(a_ty), Box::new(b_ty), EffectRow { effects: effect_refs, tail })
+                    if effect_refs.is_empty() && tail.is_none() {
+                        Type::arrow(a_ty, b_ty)
+                    } else {
+                        Type::Fun(Box::new(a_ty), Box::new(b_ty), EffectRow { effects: effect_refs, tail })
+                    }
                 }
             }
             crate::ast::TypeExpr::Record { fields, .. } => {

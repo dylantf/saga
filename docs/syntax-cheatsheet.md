@@ -35,9 +35,11 @@ double x = x * 2
 # Function - unannotated (fully inferred)
 triple x = x * 3
 
-# Zero-arg function
-pub fun main : Unit -> Unit
-main () = print "hello"
+# Note: the minimum arity of a function is always 1! For parameterless functions,
+# they can take a Unit argument.
+pub fun foo : Unit -> Unit
+foo () = print "hello"
+# called with `foo ()`
 
 # Lambda
 fun x -> x + 1

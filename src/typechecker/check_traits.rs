@@ -26,11 +26,7 @@ impl Checker {
                     resolved
                 }
             }
-            Type::Arrow(a, b) => Type::Arrow(
-                Box::new(self.substitute_trait_param(trait_param_id, replacement, a)),
-                Box::new(self.substitute_trait_param(trait_param_id, replacement, b)),
-            ),
-            Type::EffArrow(a, b, row) => Type::EffArrow(
+            Type::Fun(a, b, row) => Type::Fun(
                 Box::new(self.substitute_trait_param(trait_param_id, replacement, a)),
                 Box::new(self.substitute_trait_param(trait_param_id, replacement, b)),
                 super::EffectRow {
@@ -103,7 +99,7 @@ impl Checker {
         for (method_name, param_types, return_type, trait_param_id) in &method_sigs {
             let mut fun_ty = return_type.clone();
             for pt in param_types.iter().rev() {
-                fun_ty = Type::Arrow(Box::new(pt.clone()), Box::new(fun_ty));
+                fun_ty = Type::arrow(pt.clone(), fun_ty);
             }
             let mut forall = Vec::new();
             super::collect_free_vars(&fun_ty, &mut forall);
@@ -243,7 +239,7 @@ impl Checker {
             let expected_return = self.substitute_trait_param(trait_param_id, &target, &trait_method.2);
 
             let saved_env = self.env.clone();
-            let body_scope = self.enter_effect_scope();
+            let body_scope = self.enter_scope();
 
             // Re-insert the trait's method schemes so that method calls inside
             // the impl body resolve to the trait signature, not to a user-defined
@@ -252,7 +248,7 @@ impl Checker {
             for (m_name, m_param_types, m_return_type, _) in &trait_info.methods {
                 let mut fun_ty = m_return_type.clone();
                 for pt in m_param_types.iter().rev() {
-                    fun_ty = Type::Arrow(Box::new(pt.clone()), Box::new(fun_ty));
+                    fun_ty = Type::arrow(pt.clone(), fun_ty);
                 }
                 let mut forall = Vec::new();
                 super::collect_free_vars(&fun_ty, &mut forall);
@@ -274,7 +270,7 @@ impl Checker {
             }
 
             // Infer body and check it matches the expected return type
-            let body_ty = self.infer_expr(body)?;
+            let (body_ty, body_effs) = self.infer_expr(body)?;
             self.unify_at(&body_ty, &expected_return, body.span)
                 .map_err(|e| {
                     Diagnostic::error_at(
@@ -287,29 +283,37 @@ impl Checker {
                 })?;
 
             // Check that body effects are covered by the impl's needs declaration
-            let scope_result = self.exit_effect_scope(body_scope);
-            let body_effects = scope_result.effects;
+            let scope_result = self.exit_scope(body_scope);
             let body_field_candidates = scope_result.field_candidates;
+            let body_effects: std::collections::HashSet<String> = body_effs
+                .effects.iter().map(|(n, _)| n.clone()).collect();
             if !body_effects.is_empty() || !declared_effects.is_empty() {
-                Self::check_undeclared_effects(
-                    &body_effects,
-                    &declared_effects,
-                    false,
-                    &format!(
+                let undeclared: Vec<String> = body_effects.difference(&declared_effects).cloned().collect();
+                if !undeclared.is_empty() {
+                    let mut sorted = undeclared;
+                    sorted.sort();
+                    let label = format!(
                         "impl {} for {}, method '{}'",
                         trait_name, target_type, method_name
-                    ),
-                    body.span,
-                )?;
+                    );
+                    if declared_effects.is_empty() {
+                        return Err(Diagnostic::error_at(
+                            body.span,
+                            format!("{} uses effects {{{}}} but has no 'needs' declaration", label, sorted.join(", ")),
+                        ));
+                    } else {
+                        return Err(Diagnostic::error_at(
+                            body.span,
+                            format!("{} uses effects {{{}}} not declared in its 'needs' clause", label, sorted.join(", ")),
+                        ));
+                    }
+                }
             }
 
             // Register effects so callers of this method know what they propagate.
             // Union with any effects already registered (from other impls of the same method).
             if !declared_effects.is_empty() {
-                self.effect_state.fun_effects
-                    .entry(method_name.clone())
-                    .or_default()
-                    .extend(declared_effects.iter().cloned());
+                self.effect_meta.known_funs.insert(method_name.clone());
             }
 
             // Check for unresolved field access ambiguities at end of method body

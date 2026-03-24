@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use crate::ast::{self, Expr};
 use crate::token::Span;
 
-use super::infer::extract_callee_name;
 use super::{Checker, Diagnostic, Scheme, Type};
 
 impl Checker {
@@ -16,7 +15,7 @@ impl Checker {
         handler: &ast::Handler,
         _with_span: Span,
         with_node_id: crate::ast::NodeId,
-    ) -> Result<Type, Diagnostic> {
+    ) -> Result<(Type, super::EffectRow), Diagnostic> {
         let handled = self.handler_handled_effects(handler);
 
         // Build op_name -> (arm_span, source_module) map for this handler and push onto the stack.
@@ -65,10 +64,10 @@ impl Checker {
             };
         self.lsp.with_arm_stacks.push(arm_stack_entry);
 
-        let ty = self.infer_with_inner(expr, handler, handled, with_node_id)?;
+        let result = self.infer_with_inner(expr, handler, handled, with_node_id)?;
         self.lsp.with_arm_stacks.pop();
 
-        Ok(ty)
+        Ok(result)
     }
 
     fn infer_with_inner(
@@ -77,45 +76,32 @@ impl Checker {
         handler: &ast::Handler,
         handled: HashSet<String>,
         with_node_id: crate::ast::NodeId,
-    ) -> Result<Type, Diagnostic> {
+    ) -> Result<(Type, super::EffectRow), Diagnostic> {
         // --- Scope 1: infer the inner expression with isolated effect tracking ---
-        let inner_scope = self.enter_effect_scope();
-        let expr_ty = self.infer_expr(expr)?;
-        let inner_result = self.exit_effect_scope(inner_scope);
+        let inner_scope = self.enter_scope();
+        let (expr_ty, inner_effs) = self.infer_expr(expr)?;
+        let inner_result = self.exit_scope(inner_scope);
 
-        // Unnecessary handler check: if the inner expression doesn't use any of
-        // the handled effects, the handler is unnecessary. Only emit when the
-        // callee is a known local function/binding.
-        if !handled.is_empty() && inner_result.effects.is_disjoint(&handled) {
-            let callee_name = extract_callee_name(expr);
-            let callee_effects_known = callee_name
-                .as_ref()
-                .map(|name| {
-                    self.effect_state.fun_effects.contains_key(name.as_str())
-                        || self.effect_state.let_bindings.contains_key(name.as_str())
-                })
-                .unwrap_or(false);
-            if callee_effects_known {
-                let mut effects: Vec<_> = handled.iter().cloned().collect();
-                effects.sort();
-                self.collected_diagnostics.push(Diagnostic::warning_at(
-                    expr.span,
-                    format!(
-                        "expression does not use effects {{{}}}; handler is unnecessary",
-                        effects.join(", ")
-                    ),
-                ));
-            }
+        // Unnecessary handler check: if the inner expression's effects don't
+        // overlap with handled effects, the handler is unnecessary.
+        if !handled.is_empty() && !inner_effs.effects.iter().any(|(n, _)| handled.contains(n)) {
+            let mut effects: Vec<_> = handled.iter().cloned().collect();
+            effects.sort();
+            self.collected_diagnostics.push(Diagnostic::warning_at(
+                expr.span,
+                format!(
+                    "expression does not use effects {{{}}}; handler is unnecessary",
+                    effects.join(", ")
+                ),
+            ));
         }
 
         // Save effect cache for handler where-clause enforcement (Named branch)
         // and type param cache inheritance (Inline branch).
         let inner_effect_cache = inner_result.effect_cache;
-        let mut unhandled = inner_result.effects;
-        for eff in &handled {
-            unhandled.remove(eff);
-        }
-        self.effect_state.current.extend(unhandled);
+
+        // Compute the remaining effect row (inner effects minus handled)
+        let remaining_effs = inner_effs.subtract(&handled);
 
         let with_span = expr.span;
         match handler {
@@ -169,12 +155,12 @@ impl Checker {
                             }
                         }
 
-                        Ok(self.sub.apply(&fresh_ret))
+                        Ok((self.sub.apply(&fresh_ret), remaining_effs.clone()))
                     } else {
-                        Ok(expr_ty)
+                        Ok((expr_ty, remaining_effs.clone()))
                     }
                 } else {
-                    Ok(expr_ty)
+                    Ok((expr_ty, remaining_effs.clone()))
                 }
             }
             ast::Handler::Inline {
@@ -191,11 +177,9 @@ impl Checker {
                     }
                 }
 
-                // --- Scope 2: handler arms with isolated effect tracking ---
-                let arms_scope = self.enter_effect_scope();
                 // Handler arms inherit the inner expression's effect cache so
                 // they see the same type param bindings (e.g. State s -> Int).
-                self.effect_state.type_param_cache = inner_effect_cache;
+                self.effect_meta.type_param_cache = inner_effect_cache;
 
                 // Compute answer_ty: infer return clause first if present,
                 // since arms need it for resume return type and body unification.
@@ -218,13 +202,14 @@ impl Checker {
                             .definitions
                             .push((param_id, param_name.clone(), *param_span));
                     }
-                    let ret_ty = self.infer_expr(&ret_arm.body)?;
+                    let (ret_ty, _effs) = self.infer_expr(&ret_arm.body)?;
                     self.env = saved_env;
                     ret_ty
                 } else {
                     expr_ty.clone()
                 };
 
+                let mut all_arm_effs = super::EffectRow::empty();
                 for arm in arms {
                     let op_sig = self.lookup_effect_op(&arm.op_name, None, arm.span).ok();
 
@@ -278,7 +263,10 @@ impl Checker {
                         }
                     }
 
-                    let arm_ty = self.infer_expr(&arm.body)?;
+                    let (arm_ty, arm_effs) = self.infer_expr(&arm.body)?;
+                    // Accumulate arm effects (minus handled) for propagation
+                    let unhandled_arm_effs = arm_effs.subtract(&handled);
+                    all_arm_effs = all_arm_effs.merge(&unhandled_arm_effs);
                     // Each arm must produce the answer type
                     self.unify_at(&arm_ty, &answer_ty, arm.span)?;
 
@@ -287,15 +275,7 @@ impl Checker {
                     self.env = saved_env;
                 }
 
-                let arms_result = self.exit_effect_scope(arms_scope);
-                // Propagate unhandled effects from handler arms to outer scope
-                let mut arm_effects = arms_result.effects;
-                for eff in &handled {
-                    arm_effects.remove(eff);
-                }
-                self.effect_state.current.extend(arm_effects);
-
-                Ok(answer_ty)
+                Ok((answer_ty, remaining_effs.merge(&all_arm_effs)))
             }
         }
     }
