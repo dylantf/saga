@@ -78,6 +78,22 @@ fn constructor_labels(program: &[Decl], constructor_name: &str) -> Option<Vec<St
     None
 }
 
+/// Format doc comment lines as markdown text.
+fn format_doc(doc: &[String]) -> Option<String> {
+    if doc.is_empty() {
+        return None;
+    }
+    Some(doc.join("\n"))
+}
+
+/// Prepend doc comments (as markdown) before a code block.
+fn with_doc(doc: &[String], code: &str) -> String {
+    match format_doc(doc) {
+        Some(doc_text) => format!("{}\n\n---\n\n```\n{}\n```", doc_text, code),
+        None => format!("```\n{}\n```", code),
+    }
+}
+
 /// Format a type/record/effect/trait definition summary for hover.
 /// Returns None if the name doesn't match any definition.
 pub fn type_definition_summary(
@@ -90,6 +106,7 @@ pub fn type_definition_summary(
         match decl {
             Decl::TypeDef {
                 name: def_name,
+                doc,
                 type_params,
                 variants,
                 ..
@@ -115,10 +132,11 @@ pub fn type_definition_summary(
                     }
                 }
                 lines.push("}".to_string());
-                return Some(lines.join("\n"));
+                return Some(with_doc(doc, &lines.join("\n")));
             }
             Decl::RecordDef {
                 name: def_name,
+                doc,
                 type_params,
                 fields,
                 ..
@@ -127,15 +145,17 @@ pub fn type_definition_summary(
                     .iter()
                     .map(|(fname, ty)| format!("  {}: {}", fname, format_type_expr(ty)))
                     .collect();
-                return Some(format!(
+                let code = format!(
                     "record {}{} {{\n{}\n}}",
                     name,
                     format_type_params(type_params),
                     field_strs.join(",\n")
-                ));
+                );
+                return Some(with_doc(doc, &code));
             }
             Decl::EffectDef {
                 name: def_name,
+                doc,
                 type_params,
                 operations,
                 ..
@@ -149,15 +169,17 @@ pub fn type_definition_summary(
                         )
                     })
                     .collect();
-                return Some(format!(
+                let code = format!(
                     "effect {}{} {{\n{}\n}}",
                     name,
                     format_type_params(type_params),
                     ops.join("\n")
-                ));
+                );
+                return Some(with_doc(doc, &code));
             }
             Decl::TraitDef {
                 name: def_name,
+                doc,
                 type_param,
                 supertraits,
                 methods,
@@ -173,55 +195,74 @@ pub fn type_definition_summary(
                     .iter()
                     .map(|m| format!("  {}", format_signature(&m.name, &m.params, &m.return_type)))
                     .collect();
-                return Some(format!(
+                let code = format!(
                     "trait {} {}{} {{\n{}\n}}",
                     name,
                     type_param,
                     supers,
                     method_strs.join("\n")
-                ));
+                );
+                return Some(with_doc(doc, &code));
             }
             _ => {}
         }
     }
 
-    // Check imported types via CheckResult
+    // Check imported types: prefer AST from cached module programs (preserves user-written
+    // type variable names), fall back to CheckResult data with prettified vars.
+    if let Some(source_module) = result.type_import_origins.get(name) {
+        if let Some(module_program) = result.programs().get(source_module) {
+            // Recurse into the module's AST -- this hits the Decl matching above
+            if let Some(summary) = type_definition_summary(result, name, module_program) {
+                return Some(summary);
+            }
+        }
+        // Also check per-module CheckResults for transitive imports
+        if let Some(module_result) = result.module_check_results().get(source_module)
+            && let Some(module_program) = module_result.programs().get(source_module)
+            && let Some(summary) = type_definition_summary(result, name, module_program)
+        {
+            return Some(summary);
+        }
+    }
+
     if let Some(info) = result.records.get(name) {
         let params = if info.type_params.is_empty() {
             String::new()
         } else {
             format!(" ({})", info.type_params.len())
         };
-        let field_strs: Vec<String> = info
-            .fields
+        let prettified = result.prettify_record(info);
+        let field_strs: Vec<String> = prettified
             .iter()
-            .map(|(fname, ty)| format!("  {}: {}", fname, result.sub.apply(ty)))
+            .map(|(fname, ty)| format!("  {}: {}", fname, ty))
             .collect();
-        return Some(format!(
+        let code = format!(
             "record {}{} {{\n{}\n}}",
             name,
             params,
             field_strs.join(",\n")
-        ));
+        );
+        let doc = result.imported_docs.get(name).map(|d| d.as_slice()).unwrap_or(&[]);
+        return Some(with_doc(doc, &code));
     }
 
     if let Some(info) = result.effects.get(name) {
-        let ops: Vec<String> = info
-            .ops
+        let prettified = result.prettify_effect(info);
+        let ops: Vec<String> = prettified
             .iter()
-            .map(|op| {
-                let params: Vec<String> = op
-                    .params
+            .map(|(op_name, params, ret)| {
+                let param_strs: Vec<String> = params
                     .iter()
-                    .map(|(label, ty)| {
-                        format_labeled_param(label, &format!("{}", result.sub.apply(ty)))
-                    })
+                    .map(|(label, ty)| format_labeled_param(label, &format!("{}", ty)))
                     .collect();
-                let ret = format!("{}", result.sub.apply(&op.return_type));
-                format!("  {}", join_signature(&op.name, &params, &ret))
+                let ret_str = format!("{}", ret);
+                format!("  {}", join_signature(op_name, &param_strs, &ret_str))
             })
             .collect();
-        return Some(format!("effect {} {{\n{}\n}}", name, ops.join("\n")));
+        let code = format!("effect {} {{\n{}\n}}", name, ops.join("\n"));
+        let doc = result.imported_docs.get(name).map(|d| d.as_slice()).unwrap_or(&[]);
+        return Some(with_doc(doc, &code));
     }
 
     None
@@ -262,6 +303,31 @@ fn labeled_type(labels: &[String], type_str: &str) -> String {
         .collect();
     let rest = parts[labels.len()..].join(" -> ");
     format!("{} -> {}", labeled.join(" -> "), rest)
+}
+
+/// Get doc comments for a named declaration.
+/// Checks local AST first, then falls back to imported docs from other modules.
+pub fn doc_for_name(program: &[Decl], name: &str, result: &CheckResult) -> Option<String> {
+    // Check local AST declarations
+    for decl in program {
+        let doc = match decl {
+            Decl::FunSignature { name: n, doc, .. } if n == name => doc,
+            Decl::TypeDef { name: n, doc, .. } if n == name => doc,
+            Decl::RecordDef { name: n, doc, .. } if n == name => doc,
+            Decl::EffectDef { name: n, doc, .. } if n == name => doc,
+            Decl::HandlerDef { name: n, doc, .. } if n == name => doc,
+            Decl::TraitDef { name: n, doc, .. } if n == name => doc,
+            _ => continue,
+        };
+        if !doc.is_empty() {
+            return format_doc(doc);
+        }
+    }
+    // Check imported docs from other modules
+    if let Some(doc) = result.imported_docs.get(name) {
+        return format_doc(doc);
+    }
+    None
 }
 
 /// Find a FunAnnotation for the given name and format it with labels.

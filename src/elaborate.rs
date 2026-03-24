@@ -400,6 +400,7 @@ impl Elaborator {
 
                 // Elaborate handler arm bodies (so print/show get dicts inserted)
                 Decl::HandlerDef {
+                    doc,
                     public,
                     name,
                     name_span,
@@ -437,6 +438,7 @@ impl Elaborator {
 
                     output.push(Decl::HandlerDef {
                         id: NodeId::fresh(),
+                        doc: doc.clone(),
                         public: *public,
                         name: name.clone(),
                         name_span: *name_span,

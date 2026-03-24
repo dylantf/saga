@@ -301,7 +301,8 @@ impl Backend {
 }
 
 /// Find an effect op signature from the AST (preserves original type param names).
-fn find_effect_op_signature(program: &[dylang::ast::Decl], op_name: &str) -> Option<String> {
+/// Returns (signature, doc_comments) for an effect operation.
+fn find_effect_op_signature(program: &[dylang::ast::Decl], op_name: &str) -> Option<(String, Vec<String>)> {
     for decl in program {
         if let dylang::ast::Decl::EffectDef { name: effect_name, operations, .. } = decl {
             for op in operations {
@@ -309,7 +310,7 @@ fn find_effect_op_signature(program: &[dylang::ast::Decl], op_name: &str) -> Opt
                     let sig = hover::format_signature(
                         &op.name, &op.params, &op.return_type,
                     );
-                    return Some(format!("{}.{}", effect_name, sig));
+                    return Some((format!("{}.{}", effect_name, sig), op.doc.clone()));
                 }
             }
         }
@@ -475,10 +476,15 @@ impl LanguageServer for Backend {
         // Handlers get special display: "handler name for Effect1, Effect2"
         if let Some(handler_info) = tc_result.handlers.get(&name) {
             let effects = handler_info.effects.join(", ");
+            let code = format!("handler {} for {}", name, effects);
+            let value = match hover::doc_for_name(program, &name, tc_result) {
+                Some(doc) => format!("{}\n\n---\n\n```dylang\n{}\n```", doc, code),
+                None => format!("```dylang\n{}\n```", code),
+            };
             return Ok(Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
-                    value: format!("```dylang\nhandler {} for {}\n```", name, effects),
+                    value,
                 }),
                 range: None,
             }));
@@ -486,9 +492,21 @@ impl LanguageServer for Backend {
 
         // Effect operation: show signature from the effect definition.
         // Prefer AST (has original type param names) over CheckResult (may have raw var IDs).
-        if let Some(sig) = find_effect_op_signature(program, &name)
-            .or_else(|| find_effect_op_signature_from_result(tc_result, &name))
-        {
+        if let Some((sig, doc)) = find_effect_op_signature(program, &name) {
+            let value = if doc.is_empty() {
+                format!("```dylang\n{}\n```", sig)
+            } else {
+                format!("{}\n\n---\n\n```dylang\n{}\n```", doc.join("\n"), sig)
+            };
+            return Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value,
+                }),
+                range: None,
+            }));
+        }
+        if let Some(sig) = find_effect_op_signature_from_result(tc_result, &name) {
             return Ok(Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
@@ -509,7 +527,7 @@ impl LanguageServer for Backend {
             return Ok(Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
-                    value: format!("```dylang\n{}\n```", summary),
+                    value: summary,
                 }),
                 range: None,
             }));
@@ -518,10 +536,15 @@ impl LanguageServer for Backend {
         if let Some(type_str) =
             hover::type_at_name(tc_result, &name, Some(&span), node_id.as_ref(), program)
         {
+            let code = format!("{}: {}", name, type_str);
+            let value = match hover::doc_for_name(program, &name, tc_result) {
+                Some(doc) => format!("{}\n\n---\n\n```dylang\n{}\n```", doc, code),
+                None => format!("```dylang\n{}\n```", code),
+            };
             return Ok(Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
-                    value: format!("```dylang\n{}: {}\n```", name, type_str),
+                    value,
                 }),
                 range: None,
             }));

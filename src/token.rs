@@ -84,6 +84,10 @@ pub enum Token {
     // Annotations
     At, // @
 
+    // Comments
+    Comment(String),    // # regular comment
+    DocComment(String), // #@ doc comment
+
     // End of statement/line
     Terminator,
 

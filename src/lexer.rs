@@ -187,14 +187,26 @@ impl Lexer {
         (spanned, token)
     }
 
-    fn skip_comment(&mut self) {
+    fn read_comment(&mut self) -> Token {
+        // Check for doc comment: #@
+        let is_doc = self.peek() == Some('@');
+        if is_doc {
+            self.advance(); // skip @
+        }
+        let mut text = String::new();
         while let Some(ch) = self.peek() {
             if ch == '\n' {
-                // Don't consume the newline, let next_token handle it
                 break;
             } else {
+                text.push(ch);
                 self.advance();
             }
+        }
+        let text = text.trim().to_string();
+        if is_doc {
+            Token::DocComment(text)
+        } else {
+            Token::Comment(text)
         }
     }
 
@@ -729,7 +741,12 @@ impl Lexer {
                     continue;
                 }
                 Some('#') => {
-                    self.skip_comment();
+                    self.advance(); // consume '#'
+                    let tok = self.read_comment();
+                    let (spanned, _) = self.emit(tok, start);
+                    tokens.push(spanned);
+                    // Don't update prev_token -- comments shouldn't affect
+                    // terminator insertion logic
                 }
                 Some('"') => {
                     let tok = if self.peek_next() == Some('"') && self.peek_ahead(2) == Some('"') {

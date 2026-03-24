@@ -6,12 +6,13 @@ handler abort_failure for Fail Never {
   fail msg = panic $"Error: {msg}"
 }
 
+#@ Converts a failure to a Result of the given type
 handler to_result for Fail a {
   fail x = Err x
   return val = Ok val
 }
 
-# Continues a failed call with a default value of 0
+#@ Continues a failed call with a default value of 0
 handler int_fallback for Fail Int {
   fail _ = resume 0
 }

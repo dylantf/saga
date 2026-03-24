@@ -205,6 +205,7 @@ impl Parser {
 
         Ok(Decl::RecordDef {
             id: NodeId::fresh(),
+            doc: vec![],
             public,
             name,
             name_span,
@@ -271,6 +272,7 @@ impl Parser {
 
         Ok(Decl::TypeDef {
             id: NodeId::fresh(),
+            doc: vec![],
             public,
             opaque,
             name,
@@ -349,6 +351,7 @@ impl Parser {
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::FunSignature {
             id: NodeId::fresh(),
+            doc: vec![],
             public,
             name,
             name_span,
@@ -439,6 +442,7 @@ impl Parser {
 
         let mut operations = Vec::new();
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let doc = self.collect_doc_comments();
             let op_start = self.tokens[self.pos].span;
             self.expect(Token::Fun)?;
             let op_name = self.expect_ident()?;
@@ -448,6 +452,7 @@ impl Parser {
             let op_end = self.tokens[self.pos - 1].span;
 
             operations.push(EffectOp {
+                doc,
                 name: op_name,
                 params,
                 return_type,
@@ -461,6 +466,7 @@ impl Parser {
 
         Ok(Decl::EffectDef {
             id: NodeId::fresh(),
+            doc: vec![],
             public,
             name,
             name_span,
@@ -597,6 +603,7 @@ impl Parser {
 
         Ok(Decl::HandlerDef {
             id: NodeId::fresh(),
+            doc: vec![],
             public,
             name,
             name_span,
@@ -653,6 +660,7 @@ impl Parser {
 
         let mut methods = Vec::new();
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let doc = self.collect_doc_comments();
             let method_start = self.tokens[self.pos].span;
             self.expect(Token::Fun)?;
             let method_name = self.expect_ident()?;
@@ -662,6 +670,7 @@ impl Parser {
             let method_end = self.tokens[self.pos - 1].span;
 
             methods.push(TraitMethod {
+                doc,
                 name: method_name,
                 params,
                 return_type,
@@ -675,6 +684,7 @@ impl Parser {
 
         Ok(Decl::TraitDef {
             id: NodeId::fresh(),
+            doc: vec![],
             public,
             name,
             name_span,
@@ -773,6 +783,7 @@ impl Parser {
 
         Ok(Decl::ImplDef {
             id: NodeId::fresh(),
+            doc: vec![],
             trait_name,
             trait_name_span,
             target_type,

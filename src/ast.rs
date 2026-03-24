@@ -55,6 +55,7 @@ pub enum Decl {
     /// `pub fun add : (a: Int) -> (b: Int) -> Int needs {Log} where {a: Show, Eq}`
     FunSignature {
         id: NodeId,
+        doc: Vec<String>,
         public: bool,
         name: String,
         name_span: Span,
@@ -93,6 +94,7 @@ pub enum Decl {
     /// `type Option a { Some(a), None }`
     TypeDef {
         id: NodeId,
+        doc: Vec<String>,
         public: bool,
         opaque: bool,
         name: String,
@@ -107,6 +109,7 @@ pub enum Decl {
     /// `record Box a { value: a }`
     RecordDef {
         id: NodeId,
+        doc: Vec<String>,
         public: bool,
         name: String,
         name_span: Span,
@@ -120,6 +123,7 @@ pub enum Decl {
     /// `effect State s { fun get () -> s; fun put (val: s) -> Unit }`
     EffectDef {
         id: NodeId,
+        doc: Vec<String>,
         public: bool,
         name: String,
         name_span: Span,
@@ -133,6 +137,7 @@ pub enum Decl {
     /// `handler show_store for Store a where {a: Show} { ... }`
     HandlerDef {
         id: NodeId,
+        doc: Vec<String>,
         public: bool,
         name: String,
         name_span: Span,
@@ -150,6 +155,7 @@ pub enum Decl {
     /// `trait Show a { fun show (x: a) -> String }`
     TraitDef {
         id: NodeId,
+        doc: Vec<String>,
         public: bool,
         name: String,
         name_span: Span,
@@ -163,6 +169,7 @@ pub enum Decl {
     /// `impl Store for Redis needs {Http, Fail} { ... }`
     ImplDef {
         id: NodeId,
+        doc: Vec<String>,
         trait_name: String,
         trait_name_span: Span,
         target_type: String,
@@ -678,6 +685,7 @@ pub struct CaseArm {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectOp {
+    pub doc: Vec<String>,
     pub name: String,
     pub params: Vec<(String, TypeExpr)>,
     pub return_type: TypeExpr,
@@ -719,6 +727,7 @@ pub enum Handler {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitMethod {
+    pub doc: Vec<String>,
     pub name: String,
     pub params: Vec<(String, TypeExpr)>,
     pub return_type: TypeExpr,

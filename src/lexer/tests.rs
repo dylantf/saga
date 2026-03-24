@@ -192,19 +192,44 @@ fn unexpected_character() {
 // --- Comments ---
 
 #[test]
-fn comment_skipped() {
-    assert_eq!(toks("# this is a comment"), vec![Eof]);
+fn comment_emitted() {
+    assert_eq!(
+        toks("# this is a comment"),
+        vec![Comment("this is a comment".into()), Eof]
+    );
 }
 
 #[test]
 fn comment_before_code() {
-    assert_eq!(toks("# comment\n42"), vec![Int(42), Eof]);
+    assert_eq!(
+        toks("# comment\n42"),
+        vec![Comment("comment".into()), Int(42), Eof]
+    );
 }
 
 #[test]
 fn inline_comment_after_code() {
     // "42" then newline-after-comment triggers terminator
-    assert_eq!(toks("42 # comment\n"), vec![Int(42), Terminator, Eof]);
+    assert_eq!(
+        toks("42 # comment\n"),
+        vec![Int(42), Comment("comment".into()), Terminator, Eof]
+    );
+}
+
+#[test]
+fn doc_comment() {
+    assert_eq!(
+        toks("#@ This is a doc comment"),
+        vec![DocComment("This is a doc comment".into()), Eof]
+    );
+}
+
+#[test]
+fn doc_comment_before_fun() {
+    assert_eq!(
+        toks("#@ Adds two numbers\nfun"),
+        vec![DocComment("Adds two numbers".into()), Fun, Eof]
+    );
 }
 
 // --- Terminators ---
