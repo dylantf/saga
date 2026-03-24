@@ -4,7 +4,7 @@ type PingMsg = Ping(Pid PongMsg)
 
 type PongMsg = Pong(Int)
 
-fun pong_server : (count: Int) -> Unit needs {Actor PingMsg}
+fun pong_server : (count: Int) -> Unit needs {Process, Actor PingMsg}
 pong_server count = {
   receive {
     Ping(sender) -> {
