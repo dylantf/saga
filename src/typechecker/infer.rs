@@ -1,7 +1,24 @@
 use crate::ast::{BinOp, CaseArm, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
 
-use super::{Checker, Diagnostic, Scheme, Type};
+use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
 use crate::token::Span;
+
+/// Extract effect names from a type by walking Fun nodes' effect rows.
+fn extract_effects_from_type(ty: &Type) -> Vec<String> {
+    let mut effects = Vec::new();
+    fn walk(ty: &Type, out: &mut Vec<String>) {
+        if let Type::Fun(_, ret, row) = ty {
+            for (name, _) in &row.effects {
+                if !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            walk(ret, out);
+        }
+    }
+    walk(ty, &mut effects);
+    effects
+}
 
 /// Walk an App chain to find the callee name at the root.
 /// e.g. `App(App(Var("f"), a), b)` -> Some("f")
@@ -61,18 +78,14 @@ impl Checker {
                     // outermost Arrow to EffArrow so spawn! can link type args.
                     if let Some(eff_constraints) =
                         self.effect_state.fun_type_constraints.get(name).cloned()
-                        && let Type::Arrow(a, b) = ty
+                        && let Type::Fun(a, b, _) = ty
                     {
                         let eff_refs: Vec<(String, Vec<Type>)> =
                             eff_constraints.into_iter().collect();
-                        ty = Type::EffArrow(a, b, super::EffectRow::closed(eff_refs));
+                        ty = Type::Fun(a, b, super::EffectRow::closed(eff_refs));
                     }
-                    // Only propagate effects for zero-arity functions (where the
-                    // Var reference itself is the full "call"). For functions that
-                    // take args, effects are committed when the App chain saturates.
-                    if !matches!(ty, Type::Arrow(_, _) | Type::EffArrow(_, _, _)) {
-                        self.commit_callee_effects(name);
-                    }
+                    // Effects are committed when the App chain saturates
+                    // via the type-directed path. No special handling for Var.
                     self.record_type(node_id, &ty);
                     // Record reference: this usage resolves to the definition
                     if let Some(def_id) = self.env.def_id(name) {
@@ -109,10 +122,15 @@ impl Checker {
                 let effects_before_arg = self.effect_state.current.clone();
                 let arg_ty = self.infer_expr(arg)?;
                 let ret_ty = self.fresh_var();
+                let eff_row_var = self.fresh_var();
                 if self
                     .unify_at(
                         &func_ty,
-                        &Type::Arrow(Box::new(arg_ty), Box::new(ret_ty.clone())),
+                        &Type::Fun(
+                            Box::new(arg_ty),
+                            Box::new(ret_ty.clone()),
+                            EffectRow { effects: vec![], tail: Some(Box::new(eff_row_var)) },
+                        ),
                         span,
                     )
                     .is_err()
@@ -136,9 +154,9 @@ impl Checker {
                 // without deeply applying the sub (which would chase row_map and
                 // merge row-bound effects into the declared list).
                 let func_shallow = self.sub.resolve_var(&func_ty);
-                if let Type::Arrow(p, _) | Type::EffArrow(p, _, _) = func_shallow {
+                if let Type::Fun(p, _, _) = func_shallow {
                     let param_shallow = self.sub.resolve_var(p);
-                    if let Type::EffArrow(_, _, row) = param_shallow {
+                    if let Type::Fun(_, _, row) = param_shallow {
                         let shallow = self.sub.apply_effect_row_shallow(row);
                         for (eff, _) in &shallow.effects {
                             if !effects_before_arg.contains(eff) {
@@ -147,13 +165,28 @@ impl Checker {
                         }
                     }
                 }
-                // Fully saturated call: if the return type is no longer an Arrow,
-                // walk the App chain to find the callee and commit its effects.
+                // Fully saturated call: if the return type is no longer a function,
+                // commit effects from the callee's effect row. Only commit for
+                // known locals (not callback parameters).
                 let resolved_ret = self.sub.apply(&ret_ty);
-                if !matches!(resolved_ret, Type::Arrow(_, _) | Type::EffArrow(_, _, _))
-                    && let Some(callee) = extract_callee_name(expr)
-                {
-                    self.commit_callee_effects(&callee);
+                if !matches!(resolved_ret, Type::Fun(_, _, _)) {
+                    let resolved_func = self.sub.apply(&func_ty);
+                    if let Type::Fun(_, _, row) = &resolved_func {
+                        let is_known_local = extract_callee_name(expr)
+                            .map(|callee| {
+                                self.effect_state.known_funs.contains(callee.as_str())
+                                    || self.effect_state
+                                        .known_let_bindings
+                                        .contains(callee.as_str())
+                            })
+                            .unwrap_or(false);
+                        if is_known_local {
+                            let applied_row = self.sub.apply_effect_row(row);
+                            for (eff, _) in &applied_row.effects {
+                                self.effect_state.current.insert(eff.clone());
+                            }
+                        }
+                    }
                 }
                 self.record_type(node_id, &ret_ty);
                 Ok(ret_ty)
@@ -305,10 +338,10 @@ impl Checker {
                 let mut ty = op_sig.return_type.clone();
                 if op_sig.params.is_empty() {
                     // Zero-param ops like `get! ()` still take a Unit argument
-                    ty = Type::Arrow(Box::new(Type::unit()), Box::new(ty));
+                    ty = Type::arrow(Type::unit(), ty);
                 } else {
                     for (_, param_ty) in op_sig.params.iter().rev() {
-                        ty = Type::Arrow(Box::new(param_ty.clone()), Box::new(ty));
+                        ty = Type::arrow(param_ty.clone(), ty);
                     }
                 }
                 Ok(ty)
@@ -500,14 +533,14 @@ impl Checker {
         // Build curried arrow: a -> b -> c -> ret
         let mut ty = body_ty;
         for param_ty in param_types.into_iter().rev() {
-            ty = Type::Arrow(Box::new(param_ty), Box::new(ty));
+            ty = Type::arrow(param_ty, ty);
         }
 
-        // If the lambda has effects, wrap the outermost arrow as EffArrow
+        // If the lambda has effects, wrap the outermost arrow as Fun with effect row
         if !eff_refs.is_empty()
-            && let Type::Arrow(a, b) = ty
+            && let Type::Fun(a, b, _) = ty
         {
-            ty = Type::EffArrow(a, b, super::EffectRow::closed(eff_refs));
+            ty = Type::Fun(a, b, super::EffectRow::closed(eff_refs));
         }
 
         Ok(ty)
@@ -626,15 +659,9 @@ impl Checker {
                         }
                     };
                     // Partial application of effectful function: if the result type
-                    // is still an Arrow, walk the RHS to find the callee and defer
-                    // its effects to this binding.
+                    // is still an Arrow, derive deferred effects from the resolved type.
                     let resolved_ty = self.sub.apply(&ty);
-                    let mut deferred_effects = Vec::new();
-                    if matches!(resolved_ty, Type::Arrow(_, _) | Type::EffArrow(_, _, _))
-                        && let Some(callee) = extract_callee_name(value)
-                    {
-                        deferred_effects.extend(self.callee_effects(&callee));
-                    }
+                    let deferred_effects = extract_effects_from_type(&resolved_ty);
                     if let Pat::Var {
                         id: pat_id,
                         name,
@@ -733,7 +760,7 @@ impl Checker {
                         // Build curried arrow type
                         let mut clause_ty = body_ty;
                         for param_ty in param_types.into_iter().rev() {
-                            clause_ty = Type::Arrow(Box::new(param_ty), Box::new(clause_ty));
+                            clause_ty = Type::arrow(param_ty, clause_ty);
                         }
                         self.unify_at(&fun_ty, &clause_ty, fun_span)?;
                         self.env = saved_env;
@@ -785,7 +812,7 @@ impl Checker {
         pat_id: NodeId,
         var_span: Span,
         ty: &Type,
-        mut deferred_effects: Vec<String>,
+        deferred_effects: Vec<String>,
     ) {
         let mut scheme = self.generalize(ty);
 
@@ -830,7 +857,7 @@ impl Checker {
             let resolved_ty = self.sub.apply(ty);
             let mut arity = 0usize;
             let mut t = &resolved_ty;
-            while let Type::Arrow(_, ret) | Type::EffArrow(_, ret, _) = t {
+            while let Type::Fun(_, ret, _) = t {
                 arity += 1;
                 t = ret;
             }
@@ -840,9 +867,9 @@ impl Checker {
 
         self.env
             .insert_with_def(name.to_string(), scheme, pat_id);
-        deferred_effects.sort();
-        self.effect_state.let_bindings
-            .insert(name.to_string(), deferred_effects);
+        if !deferred_effects.is_empty() {
+            self.effect_state.known_let_bindings.insert(name.to_string());
+        }
         self.lsp.node_spans.insert(pat_id, var_span);
         self.record_type_at_span(var_span, ty);
         self.lsp.definitions

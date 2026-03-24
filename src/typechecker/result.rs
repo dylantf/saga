@@ -159,13 +159,42 @@ impl Checker {
             traits: self.trait_state.traits.clone(),
             effects: self.effects.clone(),
             handlers: self.handlers.clone(),
-            fun_effects: self.effect_state.fun_effects.clone(),
+            fun_effects: {
+                let mut fun_effects = HashMap::new();
+                for name in &self.effect_state.known_funs {
+                    if let Some(scheme) = self.env.get(name) {
+                        let resolved = self.sub.apply(&scheme.ty);
+                        let mut effects = super::effects_from_type(&resolved);
+                        if effects.is_empty()
+                            && let Some(row) = self.effect_state.declared_effect_rows.get(name)
+                        {
+                            effects = row.effects.iter().map(|(n, _)| n.clone()).collect();
+                        }
+                        fun_effects.insert(name.clone(), effects);
+                    }
+                }
+                fun_effects
+            },
             type_at_node: self.lsp.type_at_node.clone(),
             type_at_span: self.lsp.type_at_span.clone(),
             handler_arm_targets: self.lsp.handler_arm_targets.clone(),
             effect_call_targets: self.lsp.effect_call_targets.clone(),
             let_dict_params: self.let_dict_params.clone(),
-            let_effect_bindings: self.effect_state.let_bindings.clone(),
+            let_effect_bindings: {
+                let mut let_effect_bindings = HashMap::new();
+                for name in &self.effect_state.known_let_bindings {
+                    if let Some(scheme) = self.env.get(name) {
+                        let resolved = self.sub.apply(&scheme.ty);
+                        let effects: HashSet<String> = super::effects_from_type(&resolved);
+                        if !effects.is_empty() {
+                            let mut sorted: Vec<String> = effects.into_iter().collect();
+                            sorted.sort();
+                            let_effect_bindings.insert(name.clone(), sorted);
+                        }
+                    }
+                }
+                let_effect_bindings
+            },
             records: self.records.clone(),
             references: self.lsp.references.clone(),
             node_spans: self.lsp.node_spans.clone(),

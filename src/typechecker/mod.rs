@@ -77,12 +77,10 @@ impl EffectRow {
 pub enum Type {
     /// Unification variable, solved during inference
     Var(u32),
-    /// Function type: a -> b
-    Arrow(Box<Type>, Box<Type>),
-    /// Function type with effect annotation: a -> b needs {Eff1, Eff2 T}
-    /// Used for HOF parameter types that declare which effects they absorb.
-    /// Each effect is (name, type_args), e.g. ("Actor", [CounterMsg]).
-    EffArrow(Box<Type>, Box<Type>, EffectRow),
+    /// Function type: a -> b with effect row.
+    /// Every function carries an effect row. Pure functions have an empty closed row.
+    /// Effectful functions have their effects listed, optionally with an open tail.
+    Fun(Box<Type>, Box<Type>, EffectRow),
     /// Named type constructor with args: Int = Con("Int", []), List a = Con("List", [a])
     Con(std::string::String, Vec<Type>),
     /// Anonymous record type: `{ street: String, city: String }`
@@ -97,6 +95,10 @@ pub enum Type {
 
 /// Convenience constructors for built-in types
 impl Type {
+    /// Pure function type: a -> b with empty closed effect row.
+    pub fn arrow(a: Type, b: Type) -> Type {
+        Type::Fun(Box::new(a), Box::new(b), EffectRow::closed(vec![]))
+    }
     pub fn con(name: &str) -> Type {
         Type::Con(name.into(), vec![])
     }
@@ -121,13 +123,9 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Var(id) => write!(f, "?{}", id),
-            Type::Arrow(a, b) => match a.as_ref() {
-                Type::Arrow(_, _) | Type::EffArrow(_, _, _) => write!(f, "({}) -> {}", a, b),
-                _ => write!(f, "{} -> {}", a, b),
-            },
-            Type::EffArrow(a, b, row) => {
+            Type::Fun(a, b, row) => {
                 match a.as_ref() {
-                    Type::Arrow(_, _) | Type::EffArrow(_, _, _) => write!(f, "({}) -> {}", a, b)?,
+                    Type::Fun(_, _, _) => write!(f, "({}) -> {}", a, b)?,
                     _ => write!(f, "{} -> {}", a, b)?,
                 }
                 if !row.effects.is_empty() || row.tail.is_some() {
@@ -203,8 +201,7 @@ impl Substitution {
                     ty.clone()
                 }
             }
-            Type::Arrow(a, b) => Type::Arrow(Box::new(self.apply(a)), Box::new(self.apply(b))),
-            Type::EffArrow(a, b, row) => Type::EffArrow(
+            Type::Fun(a, b, row) => Type::Fun(
                 Box::new(self.apply(a)),
                 Box::new(self.apply(b)),
                 self.apply_effect_row(row),
@@ -325,8 +322,7 @@ impl Substitution {
                     false
                 }
             }
-            Type::Arrow(a, b) => self.occurs(id, a) || self.occurs(id, b),
-            Type::EffArrow(a, b, row) => {
+            Type::Fun(a, b, row) => {
                 self.occurs(id, a)
                     || self.occurs(id, b)
                     || row.effects
@@ -477,11 +473,7 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                 out.push(*id);
             }
         }
-        Type::Arrow(a, b) => {
-            free_vars_in_type(a, bound, out);
-            free_vars_in_type(b, bound, out);
-        }
-        Type::EffArrow(a, b, row) => {
+        Type::Fun(a, b, row) => {
             free_vars_in_type(a, bound, out);
             free_vars_in_type(b, bound, out);
             for (_, args) in &row.effects {
@@ -741,19 +733,15 @@ pub(crate) struct EffectState {
     /// from original var IDs to fresh vars. Ensures all ops from the same effect
     /// share type params within a function scope.
     pub type_param_cache: HashMap<String, HashMap<u32, Type>>,
-    /// Known effect requirements for named functions: name -> set of effect names.
-    pub fun_effects: HashMap<String, HashSet<String>>,
+    /// Known local function names (for is_known_local checks in `with` validation).
+    pub known_funs: HashSet<String>,
     /// Annotation-provided effect type constraints: fn name -> [(effect_name, [concrete types])].
     pub fun_type_constraints: HashMap<String, Vec<(String, Vec<Type>)>>,
-    /// Deferred effects for let bindings that partially apply effectful functions.
-    /// name -> effect names. Used by the lowerer to register effectful local vars.
-    pub let_bindings: HashMap<String, Vec<String>>,
-    /// Functions with open effect rows (row variable in their `needs` clause).
-    /// Maps function name -> optional row variable ID. The ID is present when
-    /// the row variable also appears in a parameter type (so it gets unified
-    /// with caller-provided effects). It's None when the row var only appears
-    /// in the function's own needs clause.
-    pub fun_has_row_var: HashMap<String, Option<u32>>,
+    /// Declared effect rows from annotations (for zero-param functions whose types
+    /// can't carry EffectRow since they aren't arrow types).
+    pub declared_effect_rows: HashMap<String, EffectRow>,
+    /// Known let binding names that may carry deferred effects (for is_known_local checks).
+    pub known_let_bindings: HashSet<String>,
 }
 
 /// State accumulated during typechecking for IDE/LSP features: hover types,
@@ -1119,47 +1107,21 @@ impl Checker {
         result
     }
 
-    /// Check that all effects used in a body are covered by the declared `needs` set.
-    /// Returns an error if any undeclared effects are found.
-    /// `label` is used in the error message (e.g. "function 'foo'", "handler 'bar'").
-    pub(crate) fn check_undeclared_effects(
-        body_effects: &HashSet<String>,
-        declared_effects: &HashSet<String>,
-        has_row_var: bool,
-        label: &str,
-        span: Span,
-    ) -> Result<(), Diagnostic> {
-        // Open effect row: extra body effects flow through the row variable
-        if has_row_var {
-            return Ok(());
-        }
-        let undeclared: Vec<_> = body_effects.difference(declared_effects).collect();
-        if undeclared.is_empty() {
-            return Ok(());
-        }
-        let mut effects: Vec<_> = undeclared.into_iter().cloned().collect();
-        effects.sort();
-        if declared_effects.is_empty() {
-            Err(Diagnostic::error_at(
-                span,
-                format!(
-                    "{} uses effects {{{}}} but has no 'needs' declaration",
-                    label,
-                    effects.join(", ")
-                ),
-            ))
-        } else {
-            Err(Diagnostic::error_at(
-                span,
-                format!(
-                    "{} uses effects {{{}}} not declared in its 'needs' clause",
-                    label,
-                    effects.join(", ")
-                ),
-            ))
+}
+
+/// Extract all effect names from a type by walking Fun nodes' effect rows.
+pub fn effects_from_type(ty: &Type) -> HashSet<String> {
+    let mut effects = HashSet::new();
+    fn walk(ty: &Type, out: &mut HashSet<String>) {
+        if let Type::Fun(_, ret, row) = ty {
+            for (name, _) in &row.effects {
+                out.insert(name.clone());
+            }
+            walk(ret, out);
         }
     }
-
+    walk(ty, &mut effects);
+    effects
 }
 
 // Re-export from unify module so other files can use `super::collect_free_vars`

@@ -27,8 +27,8 @@ pub struct ModuleExports {
     pub(crate) handlers: HashMap<String, HandlerInfo>,
     /// Type name -> declared parameter count (for arity checking across modules).
     pub type_arity: HashMap<String, usize>,
-    /// Function name -> effect names from `needs` clause (for cross-module effect tracking).
-    pub fun_effects: HashMap<String, HashSet<String>>,
+    /// Names of effectful functions (for cross-module is_known_local checks).
+    pub effectful_funs: HashSet<String>,
     /// Definition-site NodeIds for exported bindings (for cross-module find-references).
     pub def_ids: HashMap<String, crate::ast::NodeId>,
 }
@@ -148,13 +148,12 @@ impl ModuleExports {
             }
         }
 
-        // Collect fun_effects for public functions
-        let mut fun_effects: HashMap<String, HashSet<String>> = HashMap::new();
-        for name in &pub_names {
-            if let Some(effs) = checker.effect_state.fun_effects.get(name) {
-                fun_effects.insert(name.clone(), effs.clone());
-            }
-        }
+        // Collect effectful function names for public functions
+        let effectful_funs: HashSet<String> = pub_names
+            .iter()
+            .filter(|name| checker.effect_state.known_funs.contains(name.as_str()))
+            .cloned()
+            .collect();
 
         ModuleExports {
             bindings,
@@ -165,7 +164,7 @@ impl ModuleExports {
             effects,
             handlers,
             type_arity,
-            fun_effects,
+            effectful_funs,
             def_ids,
         }
     }
@@ -220,10 +219,10 @@ pub struct ModuleCodegenInfo {
     pub trait_impl_dicts: Vec<TraitImplDict>,
 }
 
-/// Count the arity of a constructor from its type (number of Arrow/EffArrow levels).
+/// Count the arity of a constructor from its type (number of Fun levels).
 fn ctor_arity(ty: &Type) -> usize {
     match ty {
-        Type::Arrow(_, ret) | Type::EffArrow(_, ret, _) => 1 + ctor_arity(ret),
+        Type::Fun(_, ret, _) => 1 + ctor_arity(ret),
         _ => 0,
     }
 }
@@ -645,7 +644,7 @@ impl Checker {
             effects,
             handlers,
             type_arity,
-            fun_effects,
+            effectful_funs,
             def_ids,
         } = exports;
 
@@ -706,10 +705,10 @@ impl Checker {
         // Function effects (for cross-module `with` validation and effect propagation).
         // Register both qualified ("Logger.greet") and unqualified ("greet") forms
         // so both qualified calls and exposed imports are covered.
-        for (name, effs) in fun_effects {
+        for name in effectful_funs {
             let qualified = format!("{}.{}", prefix, name);
-            self.effect_state.fun_effects.entry(qualified).or_insert_with(|| effs.clone());
-            self.effect_state.fun_effects.entry(name.clone()).or_insert_with(|| effs.clone());
+            self.effect_state.known_funs.insert(qualified);
+            self.effect_state.known_funs.insert(name.clone());
         }
 
         // Bindings, type constructors, records (qualified + exposing)

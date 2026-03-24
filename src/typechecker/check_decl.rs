@@ -4,8 +4,19 @@ use crate::ast::{self, Decl};
 
 use super::result::CheckResult;
 use super::{
-    Checker, Diagnostic, EffectDefInfo, EffectOpSig, HandlerInfo, RecordInfo, Scheme, Span, Type,
+    Checker, Diagnostic, EffectDefInfo, EffectOpSig, EffectRow, HandlerInfo, RecordInfo, Scheme,
+    Span, Type,
 };
+
+/// Walk an arrow chain and return the EffectRow from the innermost Fun.
+fn innermost_effect_row(ty: &Type) -> Option<EffectRow> {
+    match ty {
+        Type::Fun(_, ret, row) => {
+            innermost_effect_row(ret).or_else(|| Some(row.clone()))
+        }
+        _ => None,
+    }
+}
 
 /// Annotations collected from FunAnnotation declarations:
 /// (name -> (type, span)) and (name -> where clause constraints).
@@ -106,9 +117,12 @@ impl Checker {
 
         // Validate that `main` does not declare effects (it's the top of the call stack,
         // there is no caller above to provide handlers)
-        if let Some(effects) = self.effect_state.fun_effects.get("main")
-            && !effects.is_empty()
-        {
+        let main_effects: Vec<String> = self.env.get("main")
+            .and_then(|s| innermost_effect_row(&self.sub.apply(&s.ty)))
+            .or_else(|| self.effect_state.declared_effect_rows.get("main").cloned())
+            .map(|r| r.effects.iter().map(|(n, _)| n.clone()).collect())
+            .unwrap_or_default();
+        if !main_effects.is_empty() {
             let span = program.iter().find_map(|d| {
                 if let Decl::FunSignature { name, span, .. } = d
                     && name == "main"
@@ -122,7 +136,7 @@ impl Checker {
                     span.unwrap_or(crate::token::Span { start: 0, end: 0 }),
                     format!(
                         "`main` cannot use `needs` -- it is the entry point and there is no caller to provide handlers for {{{}}}. Handle effects inside `main` using `with` instead.",
-                        effects.iter().cloned().collect::<Vec<_>>().join(", ")
+                        main_effects.join(", ")
                     ),
                 ));
         }
@@ -332,7 +346,7 @@ impl Checker {
                 let mut fun_ty = self.convert_type_expr(return_type, &mut params_list);
                 for (_, texpr) in params.iter().rev() {
                     let param_ty = self.convert_type_expr(texpr, &mut params_list);
-                    fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
+                    fun_ty = Type::arrow(param_ty, fun_ty);
                 }
 
                 if !effects.is_empty() {
@@ -404,28 +418,63 @@ impl Checker {
             {
                 let mut params_list: Vec<(String, u32)> = vec![];
                 let mut fun_ty = self.convert_type_expr(return_type, &mut params_list);
+
+                // Build effect row from the function's `needs` clause.
+                let fun_effect_row = if !effects.is_empty() || effect_row_var.is_some() {
+                    let effect_refs: Vec<(String, Vec<Type>)> = effects
+                        .iter()
+                        .map(|e| {
+                            let args = e
+                                .type_args
+                                .iter()
+                                .map(|te| self.convert_type_expr(te, &mut params_list))
+                                .collect();
+                            (e.name.clone(), args)
+                        })
+                        .collect();
+                    let tail = effect_row_var.as_ref().map(|(rv_name, _)| {
+                        let id = if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
+                            *id
+                        } else {
+                            let id = self.next_var;
+                            self.next_var += 1;
+                            params_list.push((rv_name.clone(), id));
+                            id
+                        };
+                        Box::new(Type::Var(id))
+                    });
+                    EffectRow { effects: effect_refs, tail }
+                } else {
+                    EffectRow::closed(vec![])
+                };
+
+                // Place effect row on the innermost arrow (first iteration).
+                let mut first_arrow = true;
                 for (_, texpr) in params.iter().rev() {
                     let param_ty = self.convert_type_expr(texpr, &mut params_list);
-                    fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
+                    if first_arrow {
+                        fun_ty = Type::Fun(
+                            Box::new(param_ty),
+                            Box::new(fun_ty),
+                            fun_effect_row.clone(),
+                        );
+                    } else {
+                        fun_ty = Type::arrow(param_ty, fun_ty);
+                    }
+                    first_arrow = false;
                 }
                 annotations.insert(name.clone(), (fun_ty.clone(), *span));
 
-                // Always register in fun_effects (even pure functions get an empty
-                // set) so the `with` validation can distinguish local declarations
-                // from imports/parameters.
-                self.effect_state.fun_effects.insert(
-                    name.clone(),
-                    effects.iter().map(|e| e.name.clone()).collect(),
-                );
-                if let Some((row_var_name, _)) = effect_row_var {
-                    // Store the row var ID if it appears in the type (so it gets
-                    // unified with caller args). None if it only appears in the
-                    // function's own needs clause.
-                    let id = params_list.iter()
-                        .find(|(n, _)| n == row_var_name)
-                        .map(|(_, id)| *id);
-                    self.effect_state.fun_has_row_var.insert(name.clone(), id);
+                // Store the declared effect row for the body check
+                // (needed for zero-param functions whose types can't carry it).
+                if !fun_effect_row.effects.is_empty() || fun_effect_row.tail.is_some() {
+                    self.effect_state.declared_effect_rows.insert(name.clone(), fun_effect_row);
                 }
+
+                // Always register in known_funs (even pure functions) so the
+                // `with` validation can distinguish local declarations
+                // from imports/parameters.
+                self.effect_state.known_funs.insert(name.clone());
                 if !effects.is_empty() {
                     let mut constraints = Vec::new();
                     for eff in effects {
@@ -504,14 +553,10 @@ impl Checker {
             } = decl
                 && !fun_vars.contains_key(name)
             {
-                // Register all functions in fun_effects (annotated ones are
-                // already registered with their declared effects; un-annotated
-                // ones get an empty set). This lets `with` validation distinguish
-                // local functions from imports.
-                self.effect_state
-                    .fun_effects
-                    .entry(name.clone())
-                    .or_default();
+                // Register all functions in known_funs (annotated ones are
+                // already registered; un-annotated ones are added here).
+                // This lets `with` validation distinguish local functions from imports.
+                self.effect_state.known_funs.insert(name.clone());
                 if annotations.contains_key(name) {
                     let var = self.fresh_var();
                     fun_vars.insert(name.clone(), var);
@@ -602,7 +647,7 @@ impl Checker {
             let mut ann_current = ann_ty.clone();
             for param_ty in &param_types {
                 match ann_current {
-                    Type::Arrow(ann_param, ann_ret) | Type::EffArrow(ann_param, ann_ret, _) => {
+                    Type::Fun(ann_param, ann_ret, _) => {
                         self.unify(param_ty, &ann_param)?;
                         ann_current = *ann_ret;
                     }
@@ -614,7 +659,7 @@ impl Checker {
             // Build the function type from annotation-constrained params and unify with pre-bound var
             let mut pre_ty = result_ty.clone();
             for param_ty in param_types.iter().rev() {
-                pre_ty = Type::Arrow(Box::new(param_ty.clone()), Box::new(pre_ty));
+                pre_ty = Type::arrow(param_ty.clone(), pre_ty);
             }
             self.unify(fun_var, &pre_ty)?;
         }
@@ -716,26 +761,31 @@ impl Checker {
             self.check_fun_exhaustiveness(name, clauses, &param_types)?;
         }
 
-        // Check effect requirements against declared needs
+        // Check effect requirements against declared needs via row unification
         let scope_result = self.exit_effect_scope(body_scope);
         let body_effects = scope_result.effects;
         let body_field_candidates = scope_result.field_candidates;
-        let declared_effects = self
-            .effect_state
-            .fun_effects
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
+
+        // Get declared row from annotation type, or from declared_effect_rows for
+        // zero-param functions, or empty for unannotated pure functions.
+        let declared_row = annotation
+            .and_then(|ann| innermost_effect_row(&self.sub.apply(ann)))
+            .or_else(|| self.effect_state.declared_effect_rows.get(name).cloned())
+            .unwrap_or_else(|| EffectRow::closed(vec![]));
+        let declared_effects: std::collections::HashSet<String> = declared_row
+            .effects
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect();
 
         if !body_effects.is_empty() || !declared_effects.is_empty() {
             let err_span = match clauses[0] {
                 Decl::FunBinding { span, .. } => *span,
                 _ => unreachable!(),
             };
-            Self::check_undeclared_effects(
+            self.check_effects_via_row(
                 &body_effects,
-                &declared_effects,
-                self.effect_state.fun_has_row_var.contains_key(name),
+                &declared_row,
                 &format!("function '{}'", name),
                 err_span,
             )?;
@@ -773,10 +823,32 @@ impl Checker {
             }
         }
 
-        // Build curried function type
+        // Build curried function type. Effect row comes from:
+        // 1. The annotation's EffectRow (for annotated functions)
+        // 2. The inferred body effects (for unannotated functions)
+        // 3. Empty row (for pure functions)
         let mut fun_ty = result_ty;
+        let effect_row = annotation
+            .and_then(|ann| innermost_effect_row(&self.sub.apply(ann)))
+            .or_else(|| {
+                if body_effects.is_empty() {
+                    None
+                } else {
+                    Some(self.build_body_effect_row(&body_effects))
+                }
+            });
+        let mut first_arrow = true;
         for param_ty in param_types.into_iter().rev() {
-            fun_ty = Type::Arrow(Box::new(param_ty), Box::new(fun_ty));
+            if first_arrow {
+                if let Some(ref row) = effect_row {
+                    fun_ty = Type::Fun(Box::new(param_ty), Box::new(fun_ty), row.clone());
+                } else {
+                    fun_ty = Type::arrow(param_ty, fun_ty);
+                }
+            } else {
+                fun_ty = Type::arrow(param_ty, fun_ty);
+            }
+            first_arrow = false;
         }
 
         // Unify with the pre-bound variable (resolves recursive uses)
@@ -1036,7 +1108,7 @@ impl Checker {
                 let mut ty = result_type.clone();
                 for (_, field) in variant.fields.iter().rev() {
                     let field_ty = self.convert_type_expr(field, &mut param_vars);
-                    ty = Type::Arrow(Box::new(field_ty), Box::new(ty));
+                    ty = Type::arrow(field_ty, ty);
                 }
                 ty
             };
@@ -1107,7 +1179,7 @@ impl Checker {
         // Constructor takes fields in order, returns the record type.
         let mut ctor_ty = result_type;
         for (_, field_ty) in field_types.iter().rev() {
-            ctor_ty = Type::Arrow(Box::new(field_ty.clone()), Box::new(ctor_ty));
+            ctor_ty = Type::arrow(field_ty.clone(), ctor_ty);
         }
         self.constructors.insert(
             name.into(),
@@ -1434,13 +1506,23 @@ impl Checker {
 
         if !body_effects.is_empty() || !declared_effects.is_empty() {
             let err_span = arms.first().map(|a| a.span).unwrap_or(*span);
-            Self::check_undeclared_effects(
-                &body_effects,
-                &declared_effects,
-                false,
-                &format!("handler '{}'", name),
-                err_span,
-            )?;
+            let undeclared: Vec<String> = body_effects.difference(&declared_effects).cloned().collect();
+            if !undeclared.is_empty() {
+                let mut sorted = undeclared;
+                sorted.sort();
+                let label = format!("handler '{}'", name);
+                if declared_effects.is_empty() {
+                    return Err(Diagnostic::error_at(
+                        err_span,
+                        format!("{} uses effects {{{}}} but has no 'needs' declaration", label, sorted.join(", ")),
+                    ));
+                } else {
+                    return Err(Diagnostic::error_at(
+                        err_span,
+                        format!("{} uses effects {{{}}} not declared in its 'needs' clause", label, sorted.join(", ")),
+                    ));
+                }
+            }
         }
 
         // Check that all operations from the handled effects are covered
@@ -1667,7 +1749,7 @@ impl Checker {
                             type_var_name: var_name,
                         });
                     }
-                    Type::Arrow(_, _) | Type::EffArrow(_, _, _) => {
+                    Type::Fun(_, _, _) => {
                         return Err(Diagnostic::error_at(
                             span,
                             format!("no impl of {} for function type", trait_name),

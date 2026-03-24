@@ -113,7 +113,7 @@ fn function_identity() {
     let ty = checker.sub.apply(&scheme.ty);
     // Should be ?a -> ?a (polymorphic)
     match ty {
-        Type::Arrow(a, b) => assert_eq!(a, b),
+        Type::Fun(a, b, _) => assert_eq!(a, b),
         _ => panic!("expected arrow type, got {}", ty),
     }
 }
@@ -136,7 +136,7 @@ fn lambda_simple() {
     let ty = infer_expr_type("fun x -> x + 1").unwrap();
     assert_eq!(
         ty,
-        Type::Arrow(Box::new(Type::int()), Box::new(Type::int()))
+        Type::arrow(Type::int(), Type::int())
     );
 }
 
@@ -222,7 +222,7 @@ fn recursive_function() {
     let ty = checker.sub.apply(&scheme.ty);
     assert_eq!(
         ty,
-        Type::Arrow(Box::new(Type::int()), Box::new(Type::int()))
+        Type::arrow(Type::int(), Type::int())
     );
 }
 
@@ -233,7 +233,7 @@ fn multi_clause_with_guards() {
     let ty = checker.sub.apply(&scheme.ty);
     assert_eq!(
         ty,
-        Type::Arrow(Box::new(Type::int()), Box::new(Type::int()))
+        Type::arrow(Type::int(), Type::int())
     );
 }
 
@@ -244,7 +244,7 @@ fn multi_clause_literal_patterns() {
     let ty = checker.sub.apply(&scheme.ty);
     assert_eq!(
         ty,
-        Type::Arrow(Box::new(Type::int()), Box::new(Type::int()))
+        Type::arrow(Type::int(), Type::int())
     );
 }
 
@@ -254,12 +254,12 @@ fn mutual_recursion() {
     let even_ty = checker.sub.apply(&checker.env.get("is_even").unwrap().ty);
     assert_eq!(
         even_ty,
-        Type::Arrow(Box::new(Type::int()), Box::new(Type::bool()))
+        Type::arrow(Type::int(), Type::bool())
     );
     let odd_ty = checker.sub.apply(&checker.env.get("is_odd").unwrap().ty);
     assert_eq!(
         odd_ty,
-        Type::Arrow(Box::new(Type::int()), Box::new(Type::bool()))
+        Type::arrow(Type::int(), Type::bool())
     );
 }
 
@@ -324,10 +324,7 @@ fn record_pattern() {
     let ty = checker.sub.apply(&checker.env.get("get_x").unwrap().ty);
     assert_eq!(
         ty,
-        Type::Arrow(
-            Box::new(Type::Con("Point".into(), vec![])),
-            Box::new(Type::int())
-        )
+        Type::arrow(Type::Con("Point".into(), vec![]), Type::int())
     );
 }
 
@@ -340,10 +337,7 @@ fn record_pattern_with_alias() {
     let ty = checker.sub.apply(&checker.env.get("get_name").unwrap().ty);
     assert_eq!(
         ty,
-        Type::Arrow(
-            Box::new(Type::Con("User".into(), vec![])),
-            Box::new(Type::string())
-        )
+        Type::arrow(Type::Con("User".into(), vec![]), Type::string())
     );
 }
 
@@ -392,7 +386,7 @@ fn polymorphic_record_pattern() {
     // unwrap : Box a -> a (polymorphic)
     let ty = checker.sub.apply(&scheme.ty);
     match &ty {
-        Type::Arrow(arg, ret) => {
+        Type::Fun(arg, ret, _) => {
             match arg.as_ref() {
                 Type::Con(name, params) => {
                     assert_eq!(name, "Box");
@@ -444,7 +438,7 @@ fn annotation_correct() {
     let ty = checker.sub.apply(&checker.env.get("fib").unwrap().ty);
     assert_eq!(
         ty,
-        Type::Arrow(Box::new(Type::int()), Box::new(Type::int()))
+        Type::arrow(Type::int(), Type::int())
     );
 }
 
@@ -466,10 +460,7 @@ fn annotation_multi_param() {
     let ty = checker.sub.apply(&checker.env.get("add").unwrap().ty);
     assert_eq!(
         ty,
-        Type::Arrow(
-            Box::new(Type::int()),
-            Box::new(Type::Arrow(Box::new(Type::int()), Box::new(Type::int())))
-        )
+        Type::arrow(Type::int(), Type::arrow(Type::int(), Type::int()))
     );
 }
 
@@ -480,7 +471,7 @@ fn annotation_constrains_polymorphism() {
     let ty = checker.sub.apply(&checker.env.get("myid").unwrap().ty);
     assert_eq!(
         ty,
-        Type::Arrow(Box::new(Type::int()), Box::new(Type::int()))
+        Type::arrow(Type::int(), Type::int())
     );
 }
 
@@ -491,7 +482,7 @@ fn annotation_polymorphic() {
     let scheme = checker.env.get("id").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
     match ty {
-        Type::Arrow(a, b) => assert_eq!(a, b),
+        Type::Fun(a, b, _) => assert_eq!(a, b),
         _ => panic!("expected arrow, got {}", ty),
     }
 }
@@ -706,7 +697,7 @@ fn trait_method_in_env() {
     let scheme = checker.env.get("greet").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
     match ty {
-        Type::Arrow(_, ret) => assert_eq!(*ret, Type::string()),
+        Type::Fun(_, ret, _) => assert_eq!(*ret, Type::string()),
         _ => panic!("expected arrow, got {}", ty),
     }
 }

@@ -185,16 +185,7 @@ impl<'a> Lowerer<'a> {
                 // Register Std exports so prelude-imported functions (e.g. fst, snd)
                 // resolve to cross-module calls without an explicit import in user code.
                 for (name, scheme) in &info.exports {
-                    let (base_arity, mut effects) = util::arity_and_effects_from_type(&scheme.ty);
-                    // Supplement with annotation-derived effects (needs clause)
-                    if let Some((_, ann_effs)) = info.fun_effects.iter().find(|(n, _)| n == name) {
-                        for eff in ann_effs {
-                            if !effects.contains(eff) {
-                                effects.push(eff.clone());
-                            }
-                        }
-                        effects.sort();
-                    }
+                    let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
                     // Count dict params from trait constraints (excluding operator-dispatched traits)
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
                     let expanded_arity =
@@ -301,19 +292,8 @@ impl<'a> Lowerer<'a> {
 
                     // Register imported functions with qualified keys
                     for (name, scheme) in &info.exports {
-                        let (base_arity, mut effects) =
+                        let (base_arity, effects) =
                             util::arity_and_effects_from_type(&scheme.ty);
-                        // Supplement with annotation-derived effects (needs clause)
-                        if let Some((_, ann_effs)) =
-                            info.fun_effects.iter().find(|(n, _)| n == name)
-                        {
-                            for eff in ann_effs {
-                                if !effects.contains(eff) {
-                                    effects.push(eff.clone());
-                                }
-                            }
-                            effects.sort();
-                        }
                         let dict_param_count = util::dict_param_count(&scheme.constraints);
                         let expanded_arity =
                             self.expanded_arity(base_arity, &effects) + dict_param_count;

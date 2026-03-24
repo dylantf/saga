@@ -91,8 +91,8 @@ impl Checker {
             let callee_effects_known = callee_name
                 .as_ref()
                 .map(|name| {
-                    self.effect_state.fun_effects.contains_key(name.as_str())
-                        || self.effect_state.let_bindings.contains_key(name.as_str())
+                    self.effect_state.known_funs.contains(name.as_str())
+                        || self.effect_state.known_let_bindings.contains(name.as_str())
                 })
                 .unwrap_or(false);
             if callee_effects_known {
