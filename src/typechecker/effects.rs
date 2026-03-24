@@ -8,36 +8,6 @@ use super::{Checker, Diagnostic, EffectOpSig, EffectRow, Type};
 impl Checker {
     // --- Effect tracking ---
 
-    /// Build an EffectRow from accumulated effect names, resolving type params
-    /// via the scope's type_param_cache.
-    pub(crate) fn build_body_effect_row(&self, body_effects: &HashSet<String>) -> EffectRow {
-        let mut effects: Vec<(String, Vec<Type>)> = Vec::new();
-        for eff_name in body_effects {
-            let type_args = if let Some(info) = self.effects.get(eff_name) {
-                if info.type_params.is_empty() {
-                    vec![]
-                } else if let Some(cache) = self.effect_state.type_param_cache.get(eff_name) {
-                    info.type_params
-                        .iter()
-                        .map(|orig_id| {
-                            cache
-                                .get(orig_id)
-                                .map(|t| self.sub.apply(t))
-                                .unwrap_or_else(|| Type::Var(*orig_id))
-                        })
-                        .collect()
-                } else {
-                    info.type_params.iter().map(|&id| Type::Var(id)).collect()
-                }
-            } else {
-                vec![]
-            };
-            effects.push((eff_name.clone(), type_args));
-        }
-        effects.sort_by(|(a, _), (b, _)| a.cmp(b));
-        EffectRow::closed(effects)
-    }
-
     /// Check body effects against a declared effect row.
     /// Returns Ok if all body effects are covered by the declared row.
     /// Open rows (with tail) allow any extra effects through.
@@ -184,14 +154,14 @@ impl Checker {
             };
         }
         // Reuse cached mapping or create fresh vars
-        let mapping = if let Some(cached) = self.effect_state.type_param_cache.get(effect_name) {
+        let mapping = if let Some(cached) = self.effect_meta.type_param_cache.get(effect_name) {
             cached.clone()
         } else {
             let mapping: std::collections::HashMap<u32, Type> = type_params
                 .iter()
                 .map(|&old_id| (old_id, self.fresh_var()))
                 .collect();
-            self.effect_state.type_param_cache
+            self.effect_meta.type_param_cache
                 .insert(effect_name.to_string(), mapping.clone());
             mapping
         };

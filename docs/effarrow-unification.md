@@ -1,6 +1,6 @@
 # Effect Type Unification
 
-Effects are integrated into the type system. Every function type carries an effect row.
+Effects are integrated into the type system. There is no string-based side-channel.
 
 ## Type Representation
 
@@ -11,6 +11,17 @@ Type::Fun(Box<Type>, Box<Type>, EffectRow)  // param -> return with effects
 Pure functions have `EffectRow::closed(vec![])`. There is no separate `Arrow` vs `EffArrow` distinction.
 
 `Type::arrow(a, b)` is a convenience constructor for pure functions.
+
+## Computation Types
+
+`infer_expr` returns `(Type, EffectRow)` -- both a value type and the effects the expression performs. Effects compose through:
+
+- **Sequencing**: block effects merge across statements
+- **Branching**: if/case effects merge across branches
+- **Application**: callee's effect row merges with argument effects
+- **Absorption**: effects declared on a HOF parameter type are subtracted
+- **Handlers**: `with` subtracts handled effects, adds handler arm effects
+- **Lambdas**: body effects go on the `Fun` type's row AND propagate to the enclosing scope
 
 ## Where Effects Live on Curried Functions
 
@@ -25,22 +36,29 @@ Partial application `greet "hi"` returns `Fun(String, Unit, {Log})` -- effects p
 
 ## Effect Subtyping
 
-A function with fewer effects can be used where more effects are allowed. In row unification, when both rows are closed and one side's extras are empty, unification succeeds. This means a pure function can be passed where an effectful callback is expected.
+A function with fewer effects can be used where more effects are allowed. In row unification, when both rows are closed and one side's extras are empty, unification succeeds. A pure function can be passed where an effectful callback is expected.
 
-## Removed Side-Channel
+## What Was Removed
 
-The following string-based tracking was removed:
+The entire string-based side-channel:
 
-- `fun_effects: HashMap<String, HashSet<String>>` -> `known_funs: HashSet<String>` (name-only)
-- `let_bindings: HashMap<String, Vec<String>>` -> `known_let_bindings: HashSet<String>` (name-only)
-- `fun_has_row_var: HashMap<String, Option<u32>>` -> deleted (open rows detected via `EffectRow.tail`)
-- `commit_callee_effects()` -> deleted (effects read from callee's `Fun` type)
-- `callee_effects()` -> deleted
-- `check_undeclared_effects()` -> replaced by `check_effects_via_row()`
+- `EffectState.current: HashSet<String>` -- replaced by `EffectRow` returned from `infer_expr`
+- `EffectState.fun_effects: HashMap<String, HashSet<String>>` -- replaced by `known_funs: HashSet<String>`
+- `EffectState.let_bindings: HashMap<String, Vec<String>>` -- replaced by `known_let_bindings: HashSet<String>`
+- `EffectState.fun_has_row_var: HashMap<String, Option<u32>>` -- deleted
+- `enter_effect_scope()` / `exit_effect_scope()` -- replaced by `enter_scope()` / `exit_scope()` (saves non-effect state only)
+- `EffectScope.effects` / `EffectScopeResult.effects` -- deleted
+- `commit_callee_effects()` -- deleted
+- `callee_effects()` -- deleted
+- `check_undeclared_effects()` -- replaced by `check_effects_via_row()`
+- `build_body_effect_row()` -- deleted
+- `ModuleExports.fun_effects` -- replaced by `effectful_funs: HashSet<String>`
+- Codegen supplement logic -- types are authoritative
 
-## What Remains
+## What Remains in EffectState
 
-- `current: HashSet<String>` accumulates effect names within a body scope. This is a computation-level tracker (effects are properties of computations, not values), checked against the declared `EffectRow` at function boundaries via `check_effects_via_row()`.
-- `known_funs` / `known_let_bindings` gate the type-directed effect commit at call sites, preventing callback parameter effects from being committed to the enclosing function.
-- `declared_effect_rows` stores the `EffectRow` from annotations for zero-param effectful functions whose types aren't arrows and thus can't carry the row.
-- `CheckResult.fun_effects` and `CheckResult.let_effect_bindings` are derived from resolved types at the boundary (for codegen).
+- `type_param_cache` -- ensures effect ops from the same effect share type vars within a scope
+- `fun_type_constraints` -- concrete type args from annotations like `needs {State Int}`
+- `declared_effect_rows` -- for zero-param effectful functions whose types can't carry `EffectRow`
+- `known_funs` / `known_let_bindings` -- name registries for the unnecessary handler warning
+- `CheckResult.fun_effects` and `let_effect_bindings` are derived from resolved types at the boundary

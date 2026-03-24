@@ -239,7 +239,7 @@ impl Checker {
             let expected_return = self.substitute_trait_param(trait_param_id, &target, &trait_method.2);
 
             let saved_env = self.env.clone();
-            let body_scope = self.enter_effect_scope();
+            let body_scope = self.enter_scope();
 
             // Re-insert the trait's method schemes so that method calls inside
             // the impl body resolve to the trait signature, not to a user-defined
@@ -270,7 +270,7 @@ impl Checker {
             }
 
             // Infer body and check it matches the expected return type
-            let body_ty = self.infer_expr(body)?;
+            let (body_ty, body_effs) = self.infer_expr(body)?;
             self.unify_at(&body_ty, &expected_return, body.span)
                 .map_err(|e| {
                     Diagnostic::error_at(
@@ -283,9 +283,10 @@ impl Checker {
                 })?;
 
             // Check that body effects are covered by the impl's needs declaration
-            let scope_result = self.exit_effect_scope(body_scope);
-            let body_effects = scope_result.effects;
+            let scope_result = self.exit_scope(body_scope);
             let body_field_candidates = scope_result.field_candidates;
+            let body_effects: std::collections::HashSet<String> = body_effs
+                .effects.iter().map(|(n, _)| n.clone()).collect();
             if !body_effects.is_empty() || !declared_effects.is_empty() {
                 let undeclared: Vec<String> = body_effects.difference(&declared_effects).cloned().collect();
                 if !undeclared.is_empty() {
@@ -312,7 +313,7 @@ impl Checker {
             // Register effects so callers of this method know what they propagate.
             // Union with any effects already registered (from other impls of the same method).
             if !declared_effects.is_empty() {
-                self.effect_state.known_funs.insert(method_name.clone());
+                self.effect_meta.known_funs.insert(method_name.clone());
             }
 
             // Check for unresolved field access ambiguities at end of method body

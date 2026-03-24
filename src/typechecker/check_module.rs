@@ -151,7 +151,7 @@ impl ModuleExports {
         // Collect effectful function names for public functions
         let effectful_funs: HashSet<String> = pub_names
             .iter()
-            .filter(|name| checker.effect_state.known_funs.contains(name.as_str()))
+            .filter(|name| checker.effect_meta.known_funs.contains(name.as_str()))
             .cloned()
             .collect();
 
@@ -707,8 +707,8 @@ impl Checker {
         // so both qualified calls and exposed imports are covered.
         for name in effectful_funs {
             let qualified = format!("{}.{}", prefix, name);
-            self.effect_state.known_funs.insert(qualified);
-            self.effect_state.known_funs.insert(name.clone());
+            self.effect_meta.known_funs.insert(qualified);
+            self.effect_meta.known_funs.insert(name.clone());
         }
 
         // Bindings, type constructors, records (qualified + exposing)

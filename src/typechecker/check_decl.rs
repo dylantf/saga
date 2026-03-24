@@ -119,7 +119,7 @@ impl Checker {
         // there is no caller above to provide handlers)
         let main_effects: Vec<String> = self.env.get("main")
             .and_then(|s| innermost_effect_row(&self.sub.apply(&s.ty)))
-            .or_else(|| self.effect_state.declared_effect_rows.get("main").cloned())
+            .or_else(|| self.effect_meta.declared_effect_rows.get("main").cloned())
             .map(|r| r.effects.iter().map(|(n, _)| n.clone()).collect())
             .unwrap_or_default();
         if !main_effects.is_empty() {
@@ -224,7 +224,7 @@ impl Checker {
                 span,
                 ..
             } => {
-                let ty = self.infer_expr(value)?;
+                let (ty, _effs) = self.infer_expr(value)?;
                 if let Some(ann) = annotation {
                     let ann_ty = self.convert_type_expr(ann, &mut vec![]);
                     self.unify_at(&ty, &ann_ty, *span)?;
@@ -468,13 +468,13 @@ impl Checker {
                 // Store the declared effect row for the body check
                 // (needed for zero-param functions whose types can't carry it).
                 if !fun_effect_row.effects.is_empty() || fun_effect_row.tail.is_some() {
-                    self.effect_state.declared_effect_rows.insert(name.clone(), fun_effect_row);
+                    self.effect_meta.declared_effect_rows.insert(name.clone(), fun_effect_row);
                 }
 
                 // Always register in known_funs (even pure functions) so the
                 // `with` validation can distinguish local declarations
                 // from imports/parameters.
-                self.effect_state.known_funs.insert(name.clone());
+                self.effect_meta.known_funs.insert(name.clone());
                 if !effects.is_empty() {
                     let mut constraints = Vec::new();
                     for eff in effects {
@@ -489,7 +489,7 @@ impl Checker {
                         }
                     }
                     if !constraints.is_empty() {
-                        self.effect_state
+                        self.effect_meta
                             .fun_type_constraints
                             .insert(name.clone(), constraints);
                     }
@@ -556,7 +556,7 @@ impl Checker {
                 // Register all functions in known_funs (annotated ones are
                 // already registered; un-annotated ones are added here).
                 // This lets `with` validation distinguish local functions from imports.
-                self.effect_state.known_funs.insert(name.clone());
+                self.effect_meta.known_funs.insert(name.clone());
                 if annotations.contains_key(name) {
                     let var = self.fresh_var();
                     fun_vars.insert(name.clone(), var);
@@ -677,10 +677,10 @@ impl Checker {
         let constraints_before = self.trait_state.pending_constraints.len();
 
         // Save and clear effect tracking and field candidate tracking for this function body
-        let body_scope = self.enter_effect_scope();
+        let body_scope = self.enter_scope();
 
         // Pre-populate effect type param cache from annotation constraints (e.g. needs {State Int})
-        if let Some(constraints) = self.effect_state.fun_type_constraints.get(name).cloned() {
+        if let Some(constraints) = self.effect_meta.fun_type_constraints.get(name).cloned() {
             for (effect_name, concrete_types) in &constraints {
                 if let Some(info) = self.effects.get(effect_name).cloned() {
                     let mapping: std::collections::HashMap<u32, Type> = info
@@ -689,13 +689,14 @@ impl Checker {
                         .zip(concrete_types.iter())
                         .map(|(&param_id, ty)| (param_id, ty.clone()))
                         .collect();
-                    self.effect_state
+                    self.effect_meta
                         .type_param_cache
                         .insert(effect_name.clone(), mapping);
                 }
             }
         }
 
+        let mut all_body_effs = EffectRow::empty();
         for clause in clauses {
             let Decl::FunBinding {
                 params,
@@ -733,12 +734,13 @@ impl Checker {
                         "Effect calls are not allowed in guard expressions".to_string(),
                     ));
                 }
-                let guard_ty = self.infer_expr(guard)?;
+                let (guard_ty, _effs) = self.infer_expr(guard)?;
                 self.unify_at(&guard_ty, &Type::bool(), guard.span)?;
             }
 
-            let body_ty = self.infer_expr(body)?;
+            let (body_ty, body_effs) = self.infer_expr(body)?;
             self.unify_at(&result_ty, &body_ty, body.span)?;
+            all_body_effs = all_body_effs.merge(&body_effs);
 
             self.env = saved_env;
         }
@@ -761,37 +763,37 @@ impl Checker {
             self.check_fun_exhaustiveness(name, clauses, &param_types)?;
         }
 
-        // Check effect requirements against declared needs via row unification
-        let scope_result = self.exit_effect_scope(body_scope);
-        let body_effects = scope_result.effects;
+        // Check effect requirements against declared needs via row comparison.
+        // Use the EffectRow returned by infer_expr (all_body_effs) instead of
+        // the scope-based HashSet accumulator.
+        let scope_result = self.exit_scope(body_scope);
         let body_field_candidates = scope_result.field_candidates;
 
-        // Get declared row from annotation type, or from declared_effect_rows for
-        // zero-param functions, or empty for unannotated pure functions.
         let declared_row = annotation
             .and_then(|ann| innermost_effect_row(&self.sub.apply(ann)))
-            .or_else(|| self.effect_state.declared_effect_rows.get(name).cloned())
+            .or_else(|| self.effect_meta.declared_effect_rows.get(name).cloned())
             .unwrap_or_else(|| EffectRow::closed(vec![]));
-        let declared_effects: std::collections::HashSet<String> = declared_row
-            .effects
-            .iter()
-            .map(|(n, _)| n.clone())
-            .collect();
 
-        if !body_effects.is_empty() || !declared_effects.is_empty() {
+        // Convert both to name sets for comparison
+        let body_effect_names: std::collections::HashSet<String> = all_body_effs
+            .effects.iter().map(|(n, _)| n.clone()).collect();
+        let declared_effects: std::collections::HashSet<String> = declared_row
+            .effects.iter().map(|(n, _)| n.clone()).collect();
+
+        if !body_effect_names.is_empty() || !declared_effects.is_empty() {
             let err_span = match clauses[0] {
                 Decl::FunBinding { span, .. } => *span,
                 _ => unreachable!(),
             };
             self.check_effects_via_row(
-                &body_effects,
+                &body_effect_names,
                 &declared_row,
                 &format!("function '{}'", name),
                 err_span,
             )?;
 
             // Check for effects declared but never used
-            let unused: Vec<_> = declared_effects.difference(&body_effects).collect();
+            let unused: Vec<_> = declared_effects.difference(&body_effect_names).collect();
             if !unused.is_empty() {
                 let span = annotation_span.expect("unused effects implies annotation exists");
                 let mut effects: Vec<_> = unused.into_iter().cloned().collect();
@@ -831,10 +833,10 @@ impl Checker {
         let effect_row = annotation
             .and_then(|ann| innermost_effect_row(&self.sub.apply(ann)))
             .or_else(|| {
-                if body_effects.is_empty() {
+                if all_body_effs.is_empty() {
                     None
                 } else {
-                    Some(self.build_body_effect_row(&body_effects))
+                    Some(all_body_effs.clone())
                 }
             });
         let mut first_arrow = true;
@@ -1278,7 +1280,7 @@ impl Checker {
         };
         let return_clause = return_clause.as_deref();
         // Save and clear effect/field tracking for this handler body
-        let body_scope = self.enter_effect_scope();
+        let body_scope = self.enter_scope();
 
         // Build type param bindings from handler's effect refs.
         // E.g. `handler counter for State Int` with effect State s:
@@ -1332,6 +1334,9 @@ impl Checker {
         // Fresh type variable for the handler's answer type.
         // Arms unify against this; the return clause (if any) constrains it later.
         let answer_ty = self.fresh_var();
+
+        // Accumulate effects from all handler arm bodies
+        let mut all_handler_effs = EffectRow::empty();
 
         // Validate that each arm's operation belongs to the handler's declared effects
         let mut seen_ops: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1429,7 +1434,8 @@ impl Checker {
                     .push((param_id, param_name.clone(), *param_span));
             }
 
-            let body_ty = self.infer_expr(&arm.body)?;
+            let (body_ty, arm_effs) = self.infer_expr(&arm.body)?;
+            all_handler_effs = all_handler_effs.merge(&arm_effs);
             // If the op returns Never (non-resumable), the arm body must also
             // be Never (i.e. diverge). Otherwise the handler would silently
             // produce a non-Never value with no way to continue the computation.
@@ -1479,7 +1485,8 @@ impl Checker {
                     .definitions
                     .push((param_id, param_name.clone(), *param_span));
             }
-            let ret_ty = self.infer_expr(&rc.body)?;
+            let (ret_ty, ret_effs) = self.infer_expr(&rc.body)?;
+            all_handler_effs = all_handler_effs.merge(&ret_effs);
             // Constrain answer_ty to match the return clause's body type
             if let Err(e) = self.unify(&answer_ty, &ret_ty) {
                 self.collected_diagnostics.push(e.with_span(rc.body.span));
@@ -1499,11 +1506,12 @@ impl Checker {
         };
 
         // Check effect requirements against declared needs
-        let scope_result = self.exit_effect_scope(body_scope);
-        let body_effects = scope_result.effects;
+        let _scope_result = self.exit_scope(body_scope);
         let declared_effects: std::collections::HashSet<String> =
             needs.iter().map(|e| e.name.clone()).collect();
 
+        let body_effects: std::collections::HashSet<String> = all_handler_effs
+            .effects.iter().map(|(n, _)| n.clone()).collect();
         if !body_effects.is_empty() || !declared_effects.is_empty() {
             let err_span = arms.first().map(|a| a.span).unwrap_or(*span);
             let undeclared: Vec<String> = body_effects.difference(&declared_effects).cloned().collect();

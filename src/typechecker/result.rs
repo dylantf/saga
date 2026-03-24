@@ -161,12 +161,12 @@ impl Checker {
             handlers: self.handlers.clone(),
             fun_effects: {
                 let mut fun_effects = HashMap::new();
-                for name in &self.effect_state.known_funs {
+                for name in &self.effect_meta.known_funs {
                     if let Some(scheme) = self.env.get(name) {
                         let resolved = self.sub.apply(&scheme.ty);
                         let mut effects = super::effects_from_type(&resolved);
                         if effects.is_empty()
-                            && let Some(row) = self.effect_state.declared_effect_rows.get(name)
+                            && let Some(row) = self.effect_meta.declared_effect_rows.get(name)
                         {
                             effects = row.effects.iter().map(|(n, _)| n.clone()).collect();
                         }
@@ -182,7 +182,7 @@ impl Checker {
             let_dict_params: self.let_dict_params.clone(),
             let_effect_bindings: {
                 let mut let_effect_bindings = HashMap::new();
-                for name in &self.effect_state.known_let_bindings {
+                for name in &self.effect_meta.known_let_bindings {
                     if let Some(scheme) = self.env.get(name) {
                         let resolved = self.sub.apply(&scheme.ty);
                         let effects: HashSet<String> = super::effects_from_type(&resolved);

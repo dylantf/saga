@@ -37,17 +37,17 @@ pub(super) fn extract_callee_name(expr: &Expr) -> Option<String> {
 impl Checker {
     // --- Expression inference ---
 
-    pub fn infer_expr(&mut self, expr: &Expr) -> Result<Type, Diagnostic> {
+    pub(crate) fn infer_expr(&mut self, expr: &Expr) -> Result<(Type, EffectRow), Diagnostic> {
         let span = expr.span;
         let node_id = expr.id;
         match &expr.kind {
-            ExprKind::Lit { value, .. } => Ok(match value {
+            ExprKind::Lit { value, .. } => Ok((match value {
                 Lit::Int(_) => Type::int(),
                 Lit::Float(_) => Type::float(),
                 Lit::String(_) => Type::string(),
                 Lit::Bool(_) => Type::bool(),
                 Lit::Unit => Type::unit(),
-            }),
+            }, EffectRow::empty())),
 
             ExprKind::Var { name, .. } => {
                 if let Some(scheme) = self.env.get(name) {
@@ -55,7 +55,7 @@ impl Checker {
                     // Propagate effect type params from callee's annotations.
                     // e.g. calling `counter` which has `needs {Actor CounterMsg}`
                     // populates the cache so lambdas can build typed EffArrows.
-                    if let Some(constraints) = self.effect_state.fun_type_constraints.get(name).cloned() {
+                    if let Some(constraints) = self.effect_meta.fun_type_constraints.get(name).cloned() {
                         for (effect_name, concrete_types) in &constraints {
                             if let Some(info) = self.effects.get(effect_name).cloned() {
                                 let mapping: std::collections::HashMap<u32, Type> = info
@@ -64,7 +64,7 @@ impl Checker {
                                     .zip(concrete_types.iter())
                                     .map(|(&param_id, ty)| (param_id, ty.clone()))
                                     .collect();
-                                self.effect_state.type_param_cache
+                                self.effect_meta.type_param_cache
                                     .insert(effect_name.clone(), mapping);
                             }
                         }
@@ -77,7 +77,7 @@ impl Checker {
                     // If this function has effect type constraints, convert the
                     // outermost Arrow to EffArrow so spawn! can link type args.
                     if let Some(eff_constraints) =
-                        self.effect_state.fun_type_constraints.get(name).cloned()
+                        self.effect_meta.fun_type_constraints.get(name).cloned()
                         && let Type::Fun(a, b, _) = ty
                     {
                         let eff_refs: Vec<(String, Vec<Type>)> =
@@ -91,7 +91,7 @@ impl Checker {
                     if let Some(def_id) = self.env.def_id(name) {
                         self.record_reference(node_id, span, def_id);
                     }
-                    Ok(ty)
+                    Ok((ty, EffectRow::empty()))
                 } else {
                     Err(Diagnostic::error_at(
                         span,
@@ -108,7 +108,7 @@ impl Checker {
                     if let Some(def_id) = self.lsp.constructor_def_ids.get(name).copied() {
                         self.record_reference(node_id, span, def_id);
                     }
-                    Ok(ty)
+                    Ok((ty, EffectRow::empty()))
                 } else {
                     Err(Diagnostic::error_at(
                         span,
@@ -118,9 +118,8 @@ impl Checker {
             }
 
             ExprKind::App { func, arg, .. } => {
-                let func_ty = self.infer_expr(func)?;
-                let effects_before_arg = self.effect_state.current.clone();
-                let arg_ty = self.infer_expr(arg)?;
+                let (func_ty, func_effs) = self.infer_expr(func)?;
+                let (arg_ty, arg_effs) = self.infer_expr(arg)?;
                 let ret_ty = self.fresh_var();
                 let eff_row_var = self.fresh_var();
                 if self
@@ -142,61 +141,38 @@ impl Checker {
                         format!("{} is not a function", display),
                     ));
                 }
-                // If the function declares its argument absorbs specific effects
-                // (via EffArrow on the parameter type), subtract those from current_effects.
-                // Only remove effects that the argument *introduced*, not effects the
-                // caller already had. This prevents spawn! from absorbing the caller's
-                // own Actor effect.
-                //
-                // Only absorb explicitly declared effects, not effects captured by
-                // a row variable (..e). Row-captured effects pass through to the
-                // caller. We use resolve_var to find the Arrow/EffArrow structure
-                // without deeply applying the sub (which would chase row_map and
-                // merge row-bound effects into the declared list).
+                let resolved_ret = self.sub.apply(&ret_ty);
+                self.record_type(node_id, &ret_ty);
+
+                // Build the returned EffectRow by merging func + arg + callee effects,
+                // then applying the same absorption as the current-based path.
+                let mut merged_effs = func_effs.merge(&arg_effs);
+                if !matches!(resolved_ret, Type::Fun(_, _, _)) {
+                    let resolved_func = self.sub.apply(&func_ty);
+                    if let Type::Fun(_, _, row) = &resolved_func {
+                        let applied_row = self.sub.apply_effect_row(row);
+                        merged_effs = merged_effs.merge(&applied_row);
+                    }
+                }
+                // Apply absorption: subtract effects declared on the parameter type
                 let func_shallow = self.sub.resolve_var(&func_ty);
                 if let Type::Fun(p, _, _) = func_shallow {
                     let param_shallow = self.sub.resolve_var(p);
                     if let Type::Fun(_, _, row) = param_shallow {
                         let shallow = self.sub.apply_effect_row_shallow(row);
-                        for (eff, _) in &shallow.effects {
-                            if !effects_before_arg.contains(eff) {
-                                self.effect_state.current.remove(eff);
-                            }
-                        }
+                        let absorbed: std::collections::HashSet<String> = shallow
+                            .effects.iter().map(|(n, _)| n.clone()).collect();
+                        merged_effs = merged_effs.subtract(&absorbed);
                     }
                 }
-                // Fully saturated call: if the return type is no longer a function,
-                // commit effects from the callee's effect row. Only commit for
-                // known locals (not callback parameters).
-                let resolved_ret = self.sub.apply(&ret_ty);
-                if !matches!(resolved_ret, Type::Fun(_, _, _)) {
-                    let resolved_func = self.sub.apply(&func_ty);
-                    if let Type::Fun(_, _, row) = &resolved_func {
-                        let is_known_local = extract_callee_name(expr)
-                            .map(|callee| {
-                                self.effect_state.known_funs.contains(callee.as_str())
-                                    || self.effect_state
-                                        .known_let_bindings
-                                        .contains(callee.as_str())
-                            })
-                            .unwrap_or(false);
-                        if is_known_local {
-                            let applied_row = self.sub.apply_effect_row(row);
-                            for (eff, _) in &applied_row.effects {
-                                self.effect_state.current.insert(eff.clone());
-                            }
-                        }
-                    }
-                }
-                self.record_type(node_id, &ret_ty);
-                Ok(ret_ty)
+                Ok((ret_ty, merged_effs))
             }
 
             ExprKind::BinOp {
                 op, left, right, ..
             } => {
-                let left_ty = self.infer_expr(left)?;
-                let right_ty = self.infer_expr(right)?;
+                let (left_ty, _left_effs) = self.infer_expr(left)?;
+                let (right_ty, _right_effs) = self.infer_expr(right)?;
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::IntDiv => {
                         self.unify_at(&left_ty, &right_ty, span)?;
@@ -206,12 +182,12 @@ impl Checker {
                             span,
                             node_id,
                         ));
-                        Ok(left_ty)
+                        Ok((left_ty, EffectRow::empty()))
                     }
                     BinOp::Mod => {
                         self.unify_at(&left_ty, &Type::int(), span)?;
                         self.unify_at(&right_ty, &Type::int(), span)?;
-                        Ok(Type::int())
+                        Ok((Type::int(), EffectRow::empty()))
                     }
                     BinOp::Eq | BinOp::NotEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
@@ -221,7 +197,7 @@ impl Checker {
                             span,
                             node_id,
                         ));
-                        Ok(Type::bool())
+                        Ok((Type::bool(), EffectRow::empty()))
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
@@ -231,26 +207,26 @@ impl Checker {
                             span,
                             node_id,
                         ));
-                        Ok(Type::bool())
+                        Ok((Type::bool(), EffectRow::empty()))
                     }
                     BinOp::And | BinOp::Or => {
                         self.unify_at(&left_ty, &Type::bool(), span)?;
                         self.unify_at(&right_ty, &Type::bool(), span)?;
-                        Ok(Type::bool())
+                        Ok((Type::bool(), EffectRow::empty()))
                     }
                     BinOp::Concat => {
                         self.unify_at(&Type::string(), &left_ty, span)?;
                         self.unify_at(&Type::string(), &right_ty, span)?;
-                        Ok(Type::string())
+                        Ok((Type::string(), EffectRow::empty()))
                     }
                 }
             }
 
             ExprKind::UnaryMinus { expr: inner, .. } => {
-                let ty = self.infer_expr(inner)?;
+                let (ty, _effs) = self.infer_expr(inner)?;
                 self.trait_state.pending_constraints
                     .push(("Num".into(), ty.clone(), span, node_id));
-                Ok(ty)
+                Ok((ty, EffectRow::empty()))
             }
 
             ExprKind::If {
@@ -259,23 +235,30 @@ impl Checker {
                 else_branch,
                 ..
             } => {
-                let cond_ty = self.infer_expr(cond)?;
+                let (cond_ty, cond_effs) = self.infer_expr(cond)?;
                 self.unify_at(&cond_ty, &Type::bool(), cond.span)?;
-                let then_ty = self.infer_expr(then_branch)?;
-                let else_ty = self.infer_expr(else_branch)?;
+                let (then_ty, then_effs) = self.infer_expr(then_branch)?;
+                let (else_ty, else_effs) = self.infer_expr(else_branch)?;
                 self.unify_at(&then_ty, &else_ty, span)?;
-                Ok(then_ty)
+                let mut merged_effs = cond_effs;
+                merged_effs.effects.extend(then_effs.effects);
+                merged_effs.effects.extend(else_effs.effects);
+                let mut seen = std::collections::HashSet::new();
+                merged_effs.effects.retain(|(name, _)| seen.insert(name.clone()));
+                Ok((then_ty, merged_effs))
             }
 
             ExprKind::Block { stmts, .. } => self.infer_block(stmts),
 
             ExprKind::Lambda { params, body, .. } => self.infer_lambda(params, body),
 
+
             ExprKind::Case {
                 scrutinee, arms, ..
             } => {
-                let scrut_ty = self.infer_expr(scrutinee)?;
+                let (scrut_ty, scrut_effs) = self.infer_expr(scrutinee)?;
                 let result_ty = self.fresh_var();
+                let mut merged_effs = scrut_effs;
 
                 for arm in arms {
                     let saved_env = self.env.clone();
@@ -286,7 +269,8 @@ impl Checker {
                         self.check_guard(guard)?;
                     }
 
-                    let body_ty = self.infer_expr(&arm.body)?;
+                    let (body_ty, body_effs) = self.infer_expr(&arm.body)?;
+                    merged_effs.effects.extend(body_effs.effects);
                     self.unify_at(&result_ty, &body_ty, arm.body.span)?;
 
                     self.env = saved_env;
@@ -294,32 +278,37 @@ impl Checker {
 
                 self.check_exhaustiveness(arms, &scrut_ty, span)?;
 
-                Ok(result_ty)
+                let mut seen = std::collections::HashSet::new();
+                merged_effs.effects.retain(|(name, _)| seen.insert(name.clone()));
+                Ok((result_ty, merged_effs))
             }
 
             ExprKind::RecordCreate { name, fields, .. } => {
-                self.infer_record_create(name, fields, span)
+                let ty = self.infer_record_create(name, fields, span)?;
+                Ok((ty, EffectRow::empty()))
             }
 
-            ExprKind::AnonRecordCreate { fields, .. } => self.infer_anon_record_create(fields),
+            ExprKind::AnonRecordCreate { fields, .. } => {
+                let ty = self.infer_anon_record_create(fields)?;
+                Ok((ty, EffectRow::empty()))
+            }
 
             ExprKind::FieldAccess {
                 expr: inner, field, ..
-            } => self.infer_field_access(inner, field, span),
+            } => {
+                let ty = self.infer_field_access(inner, field, span)?;
+                Ok((ty, EffectRow::empty()))
+            }
 
             ExprKind::RecordUpdate { record, fields, .. } => {
-                self.infer_record_update(record, fields, span)
+                let ty = self.infer_record_update(record, fields, span)?;
+                Ok((ty, EffectRow::empty()))
             }
 
             ExprKind::EffectCall {
                 name, qualifier, ..
             } => {
                 let op_sig = self.lookup_effect_op(name, qualifier.as_deref(), span)?;
-
-                // Track which effect this op belongs to
-                if let Some(effect_name) = self.effect_for_op(name, qualifier.as_deref()) {
-                    self.effect_state.current.insert(effect_name);
-                }
 
                 // Record call site -> handler arm for LSP go-to-def (level 1).
                 // Scan the with-stack innermost-first; first match wins (innermost shadows outer).
@@ -344,42 +333,50 @@ impl Checker {
                         ty = Type::arrow(param_ty.clone(), ty);
                     }
                 }
-                Ok(ty)
+                let eff_row = if let Some(effect_name) = self.effect_for_op(name, qualifier.as_deref()) {
+                    EffectRow::closed(vec![(effect_name.clone(), vec![])])
+                } else {
+                    EffectRow::empty()
+                };
+                Ok((ty, eff_row))
             }
 
             ExprKind::With {
                 expr: inner,
                 handler,
                 ..
-            } => self.infer_with(inner, handler, span, node_id),
+            } => {
+                let (ty, effs) = self.infer_with(inner, handler, span, node_id)?;
+                Ok((ty, effs))
+            }
 
             ExprKind::Resume { value, .. } => {
-                let val_ty = self.infer_expr(value)?;
+                let (val_ty, _effs) = self.infer_expr(value)?;
                 if let Some(expected) = &self.resume_type.clone() {
                     self.unify_at(&val_ty, expected, span)?;
                 }
                 // resume's return type is the answer type (what the with-expression produces)
                 if let Some(ret_ty) = &self.resume_return_type.clone() {
-                    Ok(ret_ty.clone())
+                    Ok((ret_ty.clone(), EffectRow::empty()))
                 } else {
                     let ty = self.fresh_var();
-                    Ok(ty)
+                    Ok((ty, EffectRow::empty()))
                 }
             }
 
             ExprKind::Tuple { elements, .. } => {
                 let tys: Vec<Type> = elements
                     .iter()
-                    .map(|e| self.infer_expr(e))
+                    .map(|e| self.infer_expr(e).map(|(ty, _effs)| ty))
                     .collect::<Result<_, _>>()?;
-                Ok(Type::Con("Tuple".into(), tys))
+                Ok((Type::Con("Tuple".into(), tys), EffectRow::empty()))
             }
 
             ExprKind::QualifiedName { module, name, .. } => {
                 // Empty name means incomplete module access (e.g. `Math.`).
                 // Return a fresh type var so inference can continue.
                 if name.is_empty() {
-                    return Ok(self.fresh_var());
+                    return Ok((self.fresh_var(), EffectRow::empty()));
                 }
                 let key = format!("{}.{}", module, name);
                 match self.env.get(&key).cloned() {
@@ -392,7 +389,7 @@ impl Checker {
                         if let Some(def_id) = self.env.def_id(&key) {
                             self.record_reference(node_id, span, def_id);
                         }
-                        Ok(ty)
+                        Ok((ty, EffectRow::empty()))
                     }
                     None => Err(Diagnostic::error_at(
                         span,
@@ -409,19 +406,22 @@ impl Checker {
             } => {
                 let result_ty = self.fresh_var();
                 let saved_env = self.env.clone();
+                let mut merged_effs = EffectRow::empty();
 
                 // Type-check each binding in sequence; env accumulates bound vars.
                 // Also collect the inferred types for exhaustiveness checking later.
                 let mut binding_types: Vec<Type> = Vec::new();
                 for (pat, expr) in bindings {
-                    let expr_ty = self.infer_expr(expr)?;
+                    let (expr_ty, expr_effs) = self.infer_expr(expr)?;
+                    merged_effs.effects.extend(expr_effs.effects);
                     self.bind_pattern(pat, &expr_ty)?;
                     binding_types.push(expr_ty);
                 }
 
                 // Success expression runs in do-block scope; its type is the
                 // success-path return type.
-                let success_ty = self.infer_expr(success)?;
+                let (success_ty, success_effs) = self.infer_expr(success)?;
+                merged_effs.effects.extend(success_effs.effects);
                 self.unify_at(&result_ty, &success_ty, success.span)?;
 
                 // Restore env so else arms only see the outer scope
@@ -433,7 +433,8 @@ impl Checker {
                     let arm_saved = self.env.clone();
                     let scrutinee_ty = self.fresh_var();
                     self.bind_pattern(&arm.pattern, &scrutinee_ty)?;
-                    let body_ty = self.infer_expr(&arm.body)?;
+                    let (body_ty, body_effs) = self.infer_expr(&arm.body)?;
+                    merged_effs.effects.extend(body_effs.effects);
                     self.unify_at(&result_ty, &body_ty, arm.body.span)?;
                     self.env = arm_saved;
                 }
@@ -444,27 +445,31 @@ impl Checker {
 
                 // do-block bindings must not leak into the surrounding scope
                 self.env = saved_env;
-                Ok(result_ty)
+                let mut seen = std::collections::HashSet::new();
+                merged_effs.effects.retain(|(name, _)| seen.insert(name.clone()));
+                Ok((result_ty, merged_effs))
             }
 
             ExprKind::Receive {
                 arms, after_clause, ..
-            } => self.infer_receive(
-                arms,
-                after_clause.as_ref().map(|(t, b)| (t.as_ref(), b.as_ref())),
-                span,
-            ),
+            } => {
+                self.infer_receive(
+                    arms,
+                    after_clause.as_ref().map(|(t, b)| (t.as_ref(), b.as_ref())),
+                    span,
+                )
+            }
 
             ExprKind::Ascription {
                 expr: inner,
                 type_expr,
                 ..
             } => {
-                let inferred = self.infer_expr(inner)?;
+                let (inferred, _effs) = self.infer_expr(inner)?;
                 let ann_ty = self.convert_type_expr(type_expr, &mut vec![]);
                 self.unify_at(&inferred, &ann_ty, span)?;
                 self.record_type(node_id, &ann_ty);
-                Ok(ann_ty)
+                Ok((ann_ty, EffectRow::empty()))
             }
 
             ExprKind::DictMethodAccess { .. }
@@ -483,16 +488,16 @@ impl Checker {
                 "Effect calls are not allowed in guard expressions".to_string(),
             ));
         }
-        let guard_ty = self.infer_expr(guard)?;
+        let (guard_ty, _effs) = self.infer_expr(guard)?;
         self.unify_at(&guard_ty, &Type::bool(), guard.span)
     }
 
-    fn infer_lambda(&mut self, params: &[Pat], body: &Expr) -> Result<Type, Diagnostic> {
+    fn infer_lambda(&mut self, params: &[Pat], body: &Expr) -> Result<(Type, EffectRow), Diagnostic> {
         let saved_env = self.env.clone();
-        let scope = self.enter_effect_scope();
-        // Lambda inherits the outer effect cache so effect ops (e.g. get!)
-        // resolve type params from the enclosing function's annotations.
-        self.effect_state.type_param_cache = scope.effect_cache.clone();
+        // Save and clear type_param_cache, then inherit the outer cache so
+        // effect ops (e.g. get!) resolve type params from enclosing annotations.
+        let saved_cache = self.effect_meta.type_param_cache.clone();
+        self.effect_meta.type_param_cache = saved_cache.clone();
 
         let mut param_types = Vec::new();
         for pat in params {
@@ -501,34 +506,11 @@ impl Checker {
             param_types.push(ty);
         }
 
-        let body_ty = self.infer_expr(body)?;
+        let (body_ty, body_effs) = self.infer_expr(body)?;
         self.env = saved_env;
 
-        // Build effect type args from the lambda's cache before exiting scope
-        let lambda_effects: Vec<String> = self.effect_state.current.iter().cloned().collect();
-        let eff_refs: Vec<(String, Vec<Type>)> = lambda_effects
-            .iter()
-            .map(|name| {
-                let args = if let Some(cache) = self.effect_state.type_param_cache.get(name) {
-                    if let Some(info) = self.effects.get(name) {
-                        info.type_params
-                            .iter()
-                            .filter_map(|pid| cache.get(pid).cloned())
-                            .collect()
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    vec![]
-                };
-                (name.clone(), args)
-            })
-            .collect();
-
-        let result = self.exit_effect_scope(scope);
-        // Lambda effects propagate to enclosing scope (the enclosing function
-        // needs them for its `needs` declaration checking).
-        self.effect_state.current.extend(result.effects);
+        // Restore the type_param_cache
+        self.effect_meta.type_param_cache = saved_cache;
 
         // Build curried arrow: a -> b -> c -> ret
         let mut ty = body_ty;
@@ -536,14 +518,16 @@ impl Checker {
             ty = Type::arrow(param_ty, ty);
         }
 
-        // If the lambda has effects, wrap the outermost arrow as Fun with effect row
-        if !eff_refs.is_empty()
+        // If the lambda has effects, wrap the outermost arrow with the effect row
+        let propagated_effs = body_effs.clone();
+        if !body_effs.effects.is_empty()
             && let Type::Fun(a, b, _) = ty
         {
-            ty = Type::Fun(a, b, super::EffectRow::closed(eff_refs));
+            ty = Type::Fun(a, b, body_effs);
         }
 
-        Ok(ty)
+        // Lambda effects propagate to the enclosing function's effect check.
+        Ok((ty, propagated_effs))
     }
 
     fn infer_receive(
@@ -551,10 +535,10 @@ impl Checker {
         arms: &[CaseArm],
         after_clause: Option<(&Expr, &Expr)>,
         span: Span,
-    ) -> Result<Type, Diagnostic> {
+    ) -> Result<(Type, EffectRow), Diagnostic> {
         // Look up Actor effect's message type from the effect type param cache
         let msg_ty = match (
-            self.effect_state.type_param_cache.get("Actor"),
+            self.effect_meta.type_param_cache.get("Actor"),
             self.effects.get("Actor"),
         ) {
             (Some(cache), Some(info)) => {
@@ -610,24 +594,24 @@ impl Checker {
                 self.check_guard(guard)?;
             }
 
-            let body_ty = self.infer_expr(&arm.body)?;
+            let (body_ty, _body_effs) = self.infer_expr(&arm.body)?;
             self.unify_at(&result_ty, &body_ty, arm.body.span)?;
             self.env = saved_env;
         }
 
         if let Some((timeout, body)) = after_clause {
-            let timeout_ty = self.infer_expr(timeout)?;
+            let (timeout_ty, _timeout_effs) = self.infer_expr(timeout)?;
             self.unify_at(&timeout_ty, &Type::int(), timeout.span)?;
-            let body_ty = self.infer_expr(body)?;
+            let (body_ty, _body_effs) = self.infer_expr(body)?;
             self.unify_at(&result_ty, &body_ty, body.span)?;
         }
 
-        self.effect_state.current.insert("Actor".to_string());
-        Ok(result_ty)
+        Ok((result_ty, EffectRow::closed(vec![("Actor".to_string(), vec![])])))
     }
 
-    pub(crate) fn infer_block(&mut self, stmts: &[Stmt]) -> Result<Type, Diagnostic> {
+    pub(crate) fn infer_block(&mut self, stmts: &[Stmt]) -> Result<(Type, EffectRow), Diagnostic> {
         let mut last_ty = Type::unit();
+        let mut merged_effs = EffectRow::empty();
         let mut errors: Vec<Diagnostic> = Vec::new();
         let mut i = 0;
         while i < stmts.len() {
@@ -640,7 +624,8 @@ impl Checker {
                     ..
                 } => {
                     let ty = match self.infer_expr(value) {
-                        Ok(ty) => {
+                        Ok((ty, val_effs)) => {
+                            merged_effs.effects.extend(val_effs.effects);
                             if let Some(ann) = annotation {
                                 let ann_ty = self.convert_type_expr(ann, &mut vec![]);
                                 if let Err(e) = self.unify_at(&ty, &ann_ty, *span) {
@@ -753,10 +738,10 @@ impl Checker {
                             param_types.push(ty);
                         }
                         if let Some(g) = guard {
-                            let guard_ty = self.infer_expr(g)?;
+                            let (guard_ty, _guard_effs) = self.infer_expr(g)?;
                             self.unify_at(&guard_ty, &Type::bool(), g.span)?;
                         }
-                        let body_ty = self.infer_expr(body)?;
+                        let (body_ty, _body_effs) = self.infer_expr(body)?;
                         // Build curried arrow type
                         let mut clause_ty = body_ty;
                         for param_ty in param_types.into_iter().rev() {
@@ -773,7 +758,8 @@ impl Checker {
                 }
                 Stmt::Expr(expr) => {
                     match self.infer_expr(expr) {
-                        Ok(ty) => {
+                        Ok((ty, expr_effs)) => {
+                            merged_effs.effects.extend(expr_effs.effects);
                             // Warn if a non-unit value is discarded (not last statement).
                             // Deferred: the type may still contain unresolved variables.
                             if i + 1 < stmts.len() {
@@ -799,7 +785,9 @@ impl Checker {
             self.collected_diagnostics.extend(errors);
             Err(first)
         } else {
-            Ok(last_ty)
+            let mut seen = std::collections::HashSet::new();
+            merged_effs.effects.retain(|(name, _)| seen.insert(name.clone()));
+            Ok((last_ty, merged_effs))
         }
     }
 
@@ -868,7 +856,7 @@ impl Checker {
         self.env
             .insert_with_def(name.to_string(), scheme, pat_id);
         if !deferred_effects.is_empty() {
-            self.effect_state.known_let_bindings.insert(name.to_string());
+            self.effect_meta.known_let_bindings.insert(name.to_string());
         }
         self.lsp.node_spans.insert(pat_id, var_span);
         self.record_type_at_span(var_span, ty);

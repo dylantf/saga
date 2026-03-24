@@ -59,6 +59,16 @@ impl EffectRow {
         EffectRow { effects, tail: None }
     }
 
+    /// Empty closed row (pure -- no effects).
+    pub fn empty() -> Self {
+        EffectRow { effects: vec![], tail: None }
+    }
+
+    /// True if this is a closed row with no effects.
+    pub fn is_empty(&self) -> bool {
+        self.effects.is_empty() && self.tail.is_none()
+    }
+
     pub fn tail_var_id(&self) -> Option<u32> {
         match &self.tail {
             Some(ty) => match ty.as_ref() {
@@ -67,6 +77,27 @@ impl EffectRow {
             },
             None => None,
         }
+    }
+
+    /// Merge two closed effect rows (union of effects by name).
+    /// Used to combine effects from subexpressions in blocks, branches, etc.
+    pub fn merge(&self, other: &EffectRow) -> EffectRow {
+        let mut effects = self.effects.clone();
+        for (name, args) in &other.effects {
+            if !effects.iter().any(|(n, _)| n == name) {
+                effects.push((name.clone(), args.clone()));
+            }
+        }
+        EffectRow { effects, tail: None }
+    }
+
+    /// Remove handled effects by name.
+    pub fn subtract(&self, handled: &std::collections::HashSet<String>) -> EffectRow {
+        let effects = self.effects.iter()
+            .filter(|(name, _)| !handled.contains(name))
+            .cloned()
+            .collect();
+        EffectRow { effects, tail: self.tail.clone() }
     }
 }
 
@@ -677,8 +708,8 @@ pub struct Checker {
     pub(crate) resume_type: Option<Type>,
     /// Context for resume return typing: when inside a handler arm, the answer type of the with-expression
     pub(crate) resume_return_type: Option<Type>,
-    /// Effect tracking state (current effects, caches, annotations).
-    pub(crate) effect_state: EffectState,
+    /// Metadata for effect inference (instantiation caches, declared rows, name registries).
+    pub(crate) effect_meta: EffectMeta,
     /// Trait system state (definitions, impls, constraints, where bounds).
     pub(crate) trait_state: TraitState,
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
@@ -724,11 +755,11 @@ pub(crate) struct TraitState {
     pub where_bound_var_names: HashMap<u32, String>,
 }
 
-/// Effect tracking state accumulated during inference.
+/// Metadata for effect inference: instantiation caches, declared effect rows,
+/// and name registries. Does not track effect accumulation (that flows through
+/// the EffectRow returned by infer_expr).
 #[derive(Clone, Default)]
-pub(crate) struct EffectState {
-    /// Effects used in the current function body (accumulated during inference).
-    pub current: HashSet<String>,
+pub(crate) struct EffectMeta {
     /// Per-scope cache of instantiated effect type params: effect name -> mapping
     /// from original var IDs to fresh vars. Ensures all ops from the same effect
     /// share type params within a function scope.
@@ -806,20 +837,17 @@ pub struct ModuleContext {
 /// Per-variable record candidate narrowing: var_id -> (candidate record names, span).
 pub(crate) type FieldCandidates = HashMap<u32, (Vec<String>, Span)>;
 
-/// Snapshot of effect-related inference state, saved when entering an isolated
-/// scope (function body, lambda, with-expression, handler arm) and restored on
-/// exit. Prevents effect tracking from leaking between scopes.
-pub(crate) struct EffectScope {
-    pub(crate) effects: HashSet<String>,
+/// Snapshot of inference state saved when entering an isolated scope (function
+/// body, lambda, with-expression, handler arm) and restored on exit.
+pub(crate) struct InferScope {
     pub(crate) effect_cache: HashMap<String, HashMap<u32, Type>>,
     pub(crate) field_candidates: FieldCandidates,
     resume_type: Option<Type>,
     resume_return_type: Option<Type>,
 }
 
-/// What accumulated inside an EffectScope while it was active.
-pub(crate) struct EffectScopeResult {
-    pub effects: HashSet<String>,
+/// What accumulated inside an InferScope while it was active.
+pub(crate) struct InferScopeResult {
     pub effect_cache: HashMap<String, HashMap<u32, Type>>,
     pub field_candidates: FieldCandidates,
 }
@@ -842,7 +870,7 @@ impl Checker {
             handlers: HashMap::new(),
             resume_type: None,
             resume_return_type: None,
-            effect_state: EffectState::default(),
+            effect_meta: EffectMeta::default(),
             trait_state: TraitState::default(),
             field_candidates: HashMap::new(),
             modules: ModuleContext::default(),
@@ -1074,27 +1102,25 @@ impl Checker {
         (fields, result_ty)
     }
 
-    /// Enter an isolated effect scope. Saves and clears current_effects,
+    /// Enter an isolated inference scope. Saves and clears
     /// effect_type_param_cache, field_candidates, resume_type, and
-    /// resume_return_type. Call `exit_effect_scope` to restore and collect
+    /// resume_return_type. Call `exit_scope` to restore and collect
     /// what the scope accumulated.
-    pub(crate) fn enter_effect_scope(&mut self) -> EffectScope {
-        EffectScope {
-            effects: std::mem::take(&mut self.effect_state.current),
-            effect_cache: std::mem::take(&mut self.effect_state.type_param_cache),
+    pub(crate) fn enter_scope(&mut self) -> InferScope {
+        InferScope {
+            effect_cache: std::mem::take(&mut self.effect_meta.type_param_cache),
             field_candidates: std::mem::take(&mut self.field_candidates),
             resume_type: self.resume_type.take(),
             resume_return_type: self.resume_return_type.take(),
         }
     }
 
-    /// Exit an effect scope, restoring saved state and returning what
+    /// Exit an inference scope, restoring saved state and returning what
     /// accumulated during the scope's lifetime.
-    pub(crate) fn exit_effect_scope(&mut self, scope: EffectScope) -> EffectScopeResult {
-        let result = EffectScopeResult {
-            effects: std::mem::replace(&mut self.effect_state.current, scope.effects),
+    pub(crate) fn exit_scope(&mut self, scope: InferScope) -> InferScopeResult {
+        let result = InferScopeResult {
             effect_cache: std::mem::replace(
-                &mut self.effect_state.type_param_cache,
+                &mut self.effect_meta.type_param_cache,
                 scope.effect_cache,
             ),
             field_candidates: std::mem::replace(
