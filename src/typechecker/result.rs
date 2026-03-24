@@ -164,12 +164,7 @@ impl Checker {
                 for name in &self.effect_meta.known_funs {
                     if let Some(scheme) = self.env.get(name) {
                         let resolved = self.sub.apply(&scheme.ty);
-                        let mut effects = super::effects_from_type(&resolved);
-                        if effects.is_empty()
-                            && let Some(row) = self.effect_meta.declared_effect_rows.get(name)
-                        {
-                            effects = row.effects.iter().map(|(n, _)| n.clone()).collect();
-                        }
+                        let effects = super::effects_from_type(&resolved);
                         fun_effects.insert(name.clone(), effects);
                     }
                 }

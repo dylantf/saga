@@ -13,13 +13,12 @@ impl Checker {
     /// Open rows (with tail) allow any extra effects through.
     pub(crate) fn check_effects_via_row(
         &mut self,
-        body_effects: &HashSet<String>,
+        body_effs: &EffectRow,
         declared_row: &EffectRow,
         label: &str,
         span: crate::token::Span,
     ) -> Result<(), Diagnostic> {
-        if body_effects.is_empty() && declared_row.effects.is_empty() && declared_row.tail.is_none()
-        {
+        if body_effs.is_empty() && declared_row.is_empty() {
             return Ok(());
         }
         let declared = self.sub.apply_effect_row(declared_row);
@@ -29,7 +28,7 @@ impl Checker {
         }
         // Closed row: every body effect must appear in declared
         let mut undeclared = Vec::new();
-        for eff_name in body_effects {
+        for (eff_name, _) in &body_effs.effects {
             if !declared.effects.iter().any(|(n, _)| n == eff_name) {
                 undeclared.push(eff_name.clone());
             }

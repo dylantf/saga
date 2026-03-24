@@ -3632,7 +3632,7 @@ fn effect_row_var_basic_hof() {
     // HOF with open effect row: lambda with extra effects is accepted.
     // The extra Log effect propagates through ..e to the caller.
     check(
-        "effect Assert {\n  fun assert_ok : (ok: Bool) -> Unit\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: () -> Unit needs {Assert, ..e}) -> Unit needs {..e}\nrun f = f () with { assert_ok ok = () }\nfun caller : Unit needs {Log}\ncaller = run (fun () -> {\n  assert_ok! True\n  log! \"hello\"\n})",
+        "effect Assert {\n  fun assert_ok : (ok: Bool) -> Unit\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: () -> Unit needs {Assert, ..e}) -> Unit needs {..e}\nrun f = f () with { assert_ok ok = () }\nfun caller : Unit -> Unit needs {Log}\ncaller () = run (fun () -> {\n  assert_ok! True\n  log! \"hello\"\n})",
     )
     .unwrap();
 }
@@ -3651,7 +3651,7 @@ fn effect_row_var_propagation() {
     // Extra effects from the lambda propagate through the row variable
     // to the caller's needs clause
     check(
-        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run_with_fail : (f: () -> Int needs {Fail, ..e}) -> Int needs {..e}\nrun_with_fail f = f () with { fail msg = 0 }\nfun caller : Int needs {Log}\ncaller = run_with_fail (fun () -> {\n  log! \"hello\"\n  fail! \"oops\"\n})",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run_with_fail : (f: () -> Int needs {Fail, ..e}) -> Int needs {..e}\nrun_with_fail f = f () with { fail msg = 0 }\nfun caller : Unit -> Int needs {Log}\ncaller () = run_with_fail (fun () -> {\n  log! \"hello\"\n  fail! \"oops\"\n})",
     )
     .unwrap();
 }
@@ -3707,6 +3707,187 @@ fn effect_row_var_handler_not_unnecessary() {
     // flagged as unnecessary (the string-based tracking can't see row-bound effects)
     check(
         "effect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: () -> Unit needs {..e}) -> Unit needs {..e}\nrun f = f ()\nmain () = run (fun () -> log! \"hello\") with { log msg = () }",
+    )
+    .unwrap();
+}
+
+// --- Comprehensive effect flow tests ---
+
+#[test]
+fn effect_propagation_through_chain() {
+    // Effects propagate through a chain: a -> b -> c
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         fun c : Unit -> Unit needs {Log}\nc () = log! \"from c\"\n\
+         fun b : Unit -> Unit needs {Log}\nb () = c ()\n\
+         fun a : Unit -> Unit needs {Log}\na () = b ()",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_propagation_missing_needs_in_chain() {
+    // b calls c which needs Log, but b doesn't declare Log
+    let result = check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         fun c : Unit -> Unit needs {Log}\nc () = log! \"from c\"\n\
+         fun b : Unit -> Unit\nb () = c ()",
+    );
+    assert!(result.is_err());
+    assert!(result.err().unwrap().message.contains("Log"));
+}
+
+#[test]
+fn handler_subtracts_effect_from_chain() {
+    // a calls b which needs Log, handles it -- no needs on a
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         fun b : Unit -> Unit needs {Log}\nb () = log! \"hello\"\n\
+         fun a : Unit -> Unit\na () = b () with { log msg = () }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn handler_partial_subtraction() {
+    // Handler handles Log but not Fail -- Fail propagates
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun work : Unit -> Unit needs {Log, Fail}\n\
+         work () = { log! \"start\"\n  fail! \"oops\" }\n\
+         fun caller : Unit -> Unit needs {Fail}\n\
+         caller () = work () with { log msg = () }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn handler_partial_subtraction_missing_needs() {
+    // Handler handles Log but not Fail, caller doesn't declare Fail
+    let result = check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun work : Unit -> Unit needs {Log, Fail}\n\
+         work () = { log! \"start\"\n  fail! \"oops\" }\n\
+         fun caller : Unit -> Unit\n\
+         caller () = work () with { log msg = () }",
+    );
+    assert!(result.is_err());
+    assert!(result.err().unwrap().message.contains("Fail"));
+}
+
+#[test]
+fn hof_absorption_basic() {
+    // HOF takes callback with Fail, handles it -- caller doesn't need Fail
+    check(
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun try_it : (f: () -> String needs {Fail}) -> String\n\
+         try_it f = f () with { fail msg = \"err\" }\n\
+         fun caller : Unit -> String\ncaller () = try_it (fun () -> fail! \"boom\")",
+    )
+    .unwrap();
+}
+
+#[test]
+fn hof_absorption_pure_callback_accepted() {
+    // Pure callback passed where effectful callback expected (effect subtyping)
+    check(
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun try_it : (f: () -> String needs {Fail}) -> String\n\
+         try_it f = f () with { fail msg = \"err\" }\n\
+         fun caller : Unit -> String\ncaller () = try_it (fun () -> \"hello\")",
+    )
+    .unwrap();
+}
+
+#[test]
+fn row_var_propagation_extra_effects() {
+    // Open row: extra effects from callback propagate through ..e
+    check(
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         fun run : (f: () -> Unit needs {Fail, ..e}) -> Unit needs {..e}\n\
+         run f = f () with { fail msg = () }\n\
+         fun caller : Unit -> Unit needs {Log}\n\
+         caller () = run (fun () -> { fail! \"x\"\n  log! \"y\" })",
+    )
+    .unwrap();
+}
+
+#[test]
+fn unnecessary_handler_warning_fires() {
+    // Handler for Log on expression that doesn't use Log
+    let checker = check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         fun pure_fn : Unit -> Int\npure_fn () = 42\n\
+         fun caller : Unit -> Int\n\
+         caller () = pure_fn () with { log msg = { ()\n  0 } }",
+    )
+    .unwrap();
+    let warnings: Vec<_> = checker.collected_diagnostics.iter()
+        .filter(|d| d.message.contains("unnecessary"))
+        .collect();
+    assert!(!warnings.is_empty(), "expected unnecessary handler warning");
+}
+
+#[test]
+fn no_unnecessary_handler_warning_when_used() {
+    // Handler for Log on expression that uses Log -- no warning
+    let checker = check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         fun greet : Unit -> Unit needs {Log}\ngreet () = log! \"hello\"\n\
+         fun caller : Unit -> Unit\n\
+         caller () = greet () with { log msg = () }",
+    )
+    .unwrap();
+    let warnings: Vec<_> = checker.collected_diagnostics.iter()
+        .filter(|d| d.message.contains("unnecessary"))
+        .collect();
+    assert!(warnings.is_empty(), "unexpected warning: {:?}", warnings);
+}
+
+#[test]
+fn effect_in_if_branches_merge() {
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun work : (x: Bool) -> Unit needs {Log, Fail}\n\
+         work x = if x then log! \"yes\" else fail! \"no\"",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_in_case_arms_merge() {
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun work : (x: Int) -> Unit needs {Log, Fail}\n\
+         work x = case x {\n  0 -> log! \"zero\"\n  _ -> fail! \"nonzero\"\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_in_block_statements_merge() {
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun work : Unit -> Unit needs {Log, Fail}\n\
+         work () = {\n  log! \"start\"\n  fail! \"end\"\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn partial_application_preserves_effects() {
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         fun greet : (name: String) -> (greeting: String) -> Unit needs {Log}\n\
+         greet name greeting = log! (name <> greeting)\n\
+         fun caller : Unit -> Unit needs {Log}\n\
+         caller () = {\n  let f = greet \"hello\"\n  f \"world\"\n}",
     )
     .unwrap();
 }

@@ -1,25 +1,126 @@
-# Effect Implementation Plan: CPS Transform to Core Erlang
+# Effect Implementation
 
-## Core Idea
-
-All effects are implemented via CPS (Continuation-Passing Style) transform at compile time. There is **one mechanism** for all effects — resumable, non-resumable, and multishot. No `throw`/`catch`, no process spawning for control flow.
-
-Every effect call captures "everything after this point" as a closure (`K`) and passes it to the handler. The handler decides what to do:
-
-- **Resume:** call `K(value)` — computation continues
-- **Abort:** don't call `K` — computation is abandoned, handler's return value is the result
-- **Multishot:** call `K` multiple times — each call runs an independent copy of the rest of the computation (free on BEAM since closures are immutable)
+Two layers: the **type system** tracks which effects a computation performs (compile time, zero runtime cost), and the **CPS transform** compiles effectful code to Core Erlang (runtime mechanism).
 
 ---
 
-## CPS Transform
+## Type System
 
-### Effect calls become continuation-passing
+### Type Representation
 
-A function like:
+Every function type carries an effect row:
+
+```rust
+Type::Fun(Box<Type>, Box<Type>, EffectRow)  // param -> return with effects
+```
+
+`EffectRow` has a list of known effects and an optional row variable tail:
+
+```rust
+struct EffectRow {
+    effects: Vec<(String, Vec<Type>)>,  // e.g. [("Log", []), ("State", [Int])]
+    tail: Option<Box<Type>>,             // None = closed, Some(Var) = open (..e)
+}
+```
+
+Pure functions have `EffectRow::empty()` (closed, no effects). `Type::arrow(a, b)` is a convenience constructor for pure function types.
+
+### Where Effects Live on Curried Functions
+
+Effects go on the **innermost** arrow (closest to the return type):
 
 ```
-fun do_work () -> Int needs {Log}
+fun greet : String -> String -> Unit needs {Log}
+=> Fun(String, Fun(String, Unit, {Log}), {})
+```
+
+Partial application `greet "hi"` returns `Fun(String, Unit, {Log})` -- effects are preserved until full saturation.
+
+### Computation Types
+
+`infer_expr` returns `(Type, EffectRow)` -- a value type and the effects the expression performs. This is the core mechanism: effects flow as return values from inference, not in a side-channel.
+
+How effects compose at each expression form:
+
+| Expression | Value type | Effect row |
+|---|---|---|
+| Literal, Var, Constructor | the value's type | empty |
+| `log! "hello"` (effect call) | op return type | `{Log}` |
+| `f x` (application) | return type | func_effs + arg_effs + callee_row (at saturation) |
+| `{ a; b; c }` (block) | type of `c` | merge of all statement effects |
+| `if c then a else b` | unified branch type | merge of cond + both branches |
+| `case x { ... }` | unified arm type | merge of scrutinee + all arms |
+| `fun x -> body` (lambda) | `Fun(param, body_ty, body_effs)` | body_effs (propagates to enclosing scope) |
+| `expr with handler` | handler result type | inner_effs - handled + arm_effs |
+
+### Effect Subtyping
+
+A function with fewer effects can be used where more are allowed. When unifying two closed effect rows, if one side's unmatched effects are empty, unification succeeds. This means a pure function can be passed where an effectful callback is expected.
+
+### Absorption
+
+When a HOF parameter declares effects (e.g. `f: () -> a needs {Fail}`), calling the HOF with an effectful lambda doesn't propagate those effects to the caller. The parameter's declared effects are **absorbed** -- subtracted from the merged effect row.
+
+The absorption logic uses `resolve_var` (not full `apply`) on the parameter type to read only the statically declared effects, not effects captured by a row variable (`..e`). This ensures row-captured effects propagate to the caller while explicitly declared effects are absorbed.
+
+### Row Polymorphism
+
+Open effect rows (`..e`) allow functions to be polymorphic over effects:
+
+```
+fun run : (f: () -> Unit needs {Fail, ..e}) -> Unit needs {..e}
+run f = f () with { fail msg = () }
+```
+
+The row variable `..e` captures any extra effects from the callback and forwards them to the caller. In unification, when one row is open and the other has extras, the tail variable binds to the extras.
+
+### Handler Effect Subtraction
+
+`expr with { log msg = ... }` infers the inner expression to get `(ty, inner_effs)`, then subtracts handled effects from `inner_effs` via `EffectRow::subtract`. Handler arm bodies' effects are merged with the remaining effects.
+
+### Function Body Checking
+
+After inferring all clauses of a function body, the accumulated `EffectRow` (merged across clauses) is checked against the declared `needs` row from the annotation. This uses `check_effects_via_row`: if the declared row is open, any extras are allowed; if closed, undeclared effects are an error.
+
+### Key Files
+
+- `typechecker/mod.rs` -- `Type::Fun`, `EffectRow` (with `empty`, `merge`, `subtract`), `EffectMeta`, `effects_from_type`
+- `typechecker/infer.rs` -- `infer_expr` returns `(Type, EffectRow)`, App absorption logic, lambda effect propagation
+- `typechecker/effects.rs` -- `check_effects_via_row`, effect op lookup/instantiation
+- `typechecker/handlers.rs` -- `infer_with`/`infer_with_inner`, handler subtraction
+- `typechecker/check_decl.rs` -- `collect_annotations` (builds EffectRow on innermost arrow), `check_fun_clauses` (body effect check), `innermost_effect_row` helper
+- `typechecker/unify.rs` -- `unify_effect_rows` (row matching, tail binding)
+
+### EffectMeta
+
+Metadata for effect inference (not effect tracking):
+
+- `type_param_cache` -- ensures ops from the same effect (e.g. `get!` and `put!` from `State s`) share type vars within a scope
+- `fun_type_constraints` -- concrete type args from annotations like `needs {State Int}`
+- `known_funs` / `known_let_bindings` -- name registries used by codegen to derive `CheckResult.fun_effects` and `let_effect_bindings` from resolved types
+
+### Codegen Boundary
+
+`CheckResult.fun_effects` and `CheckResult.let_effect_bindings` are derived from resolved types at the `to_result` boundary by walking each known function/binding's type scheme and extracting effect names via `effects_from_type`. The codegen never reads effect data from the typechecker's internal state directly.
+
+---
+
+## CPS Transform (Codegen)
+
+### Core Idea
+
+All effects are implemented via CPS (Continuation-Passing Style) transform at compile time. There is **one mechanism** for all effects -- resumable, non-resumable, and multishot. No `throw`/`catch`, no process spawning for control flow.
+
+Every effect call captures "everything after this point" as a closure (`K`) and passes it to the handler. The handler decides what to do:
+
+- **Resume:** call `K(value)` -- computation continues
+- **Abort:** don't call `K` -- computation is abandoned, handler's return value is the result
+- **Multishot:** call `K` multiple times -- each call runs an independent copy of the rest of the computation (free on BEAM since closures are immutable)
+
+### Effect Calls Become Continuation-Passing
+
+```
+fun do_work : Unit -> Int needs {Log}
 do_work () = {
   log! "starting"
   let x = 10 + 20
@@ -39,9 +140,7 @@ Transforms to Core Erlang where each `op!` call passes a continuation:
         fun (_) -> X))
 ```
 
-The key transform: everything after an effect call becomes the body of a `fun` that is passed as the last argument to the handler.
-
-### Handler representation
+### Handler Representation
 
 A handler is a function that receives `(op_name, args..., K)`:
 
@@ -56,7 +155,7 @@ A handler is a function that receives `(op_name, args..., K)`:
   {'Err', Reason}       % don't call K = abort
 ```
 
-### `with` attaches the handler
+### `with` Attaches the Handler
 
 ```
 do_work () with console_log
@@ -70,145 +169,43 @@ apply 'do_work'/1('console_log'/3)
 
 The effectful function takes its handler(s) as extra parameter(s).
 
----
+### Handler Stacking (Multiple Effects)
 
-## Handler Stacking (Multiple Effects)
-
-When a function needs multiple effects:
-
-```
-fun run () -> Unit needs {Log, Fail}
-```
-
-It takes multiple handler parameters. `with` passes them:
-
-```
-run () with { console_log, to_result }
-```
-
-Becomes:
+When a function needs multiple effects, it takes multiple handler parameters. `with` passes them:
 
 ```erlang
+% run () with { console_log, to_result }
 apply 'run'/2('console_log'/3, 'to_result_fail'/3)
 ```
 
-Each effect call in the body routes to the correct handler based on which effect the operation belongs to (known at compile time from effect declarations).
+Each effect call routes to the correct handler based on which effect the operation belongs to (known at compile time from effect declarations).
 
----
+### The `return` Clause
 
-## The `return` Clause
+`return value -> Ok(value)` wraps the computation's final value on success. The CPS transform wraps the innermost continuation's return value through the `return` clause function. If `fail!` is called, the handler returns `Err(reason)` directly without calling `K`.
 
-The `return value -> Ok(value)` clause wraps the computation's final value when it completes successfully (without the effect triggering an abort).
+### Non-Resumable Effects
 
-In CPS, this means wrapping the computation body so its final result passes through the return clause:
+No special mechanism needed. A non-resumable handler simply doesn't call `K`. The continuation closure sits unreferenced on the heap and gets garbage collected. Same calling convention as resumable handlers.
 
-```
-{ computation } with to_result
-```
+### Multishot Continuations
 
-Where `to_result` has `return value -> Ok(value)`, the final value of the computation is wrapped in `Ok(...)`. If `fail!` is called, the handler returns `Err(reason)` directly without calling `K`.
+On BEAM, multishot is essentially free. `K` is an immutable closure on the heap. Calling it multiple times is just calling a function multiple times -- no stack copying, no special machinery.
 
-Implementation: the CPS transform wraps the innermost continuation's return value through the `return` clause function.
+### BEAM-Native Effects
 
----
+Some effects (Actor, Process, Monitor, Link, Timer) bypass CPS and are lowered to direct BEAM calls. These are filtered out of `ModuleCodegenInfo.fun_effects` during codegen info collection and handled by `build_beam_native_op_fun` in the lowerer.
 
-## Non-Resumable Effects (Fail, Abort, etc.)
+### Key Files
 
-**No special mechanism needed.** A non-resumable handler simply doesn't call `K`:
+- `codegen/lower/mod.rs` -- `Lowerer`, `FunInfo`, `fun_effects()`, `expanded_arity()`
+- `codegen/lower/effects.rs` -- `lower_effect_call`, `lower_with`, `build_op_handler_fun`, `build_beam_native_op_fun`
+- `codegen/lower/init.rs` -- populates `FunInfo` from type schemes via `arity_and_effects_from_type`
+- `codegen/lower/util.rs` -- `arity_and_effects_from_type`, `param_absorbed_effects_from_type`
 
-```erlang
-fun (_Op, Reason, _K) ->
-  {'Err', Reason}
-```
+### Optimization Opportunities
 
-The continuation closure `K` is never invoked. It sits unreferenced on the heap and gets garbage collected. The handler's return value (`Err(Reason)`) becomes the result of the entire `with` expression.
-
-There is no stack unwinding, no `throw`/`catch`, no special control flow. It's the same calling convention as resumable handlers — the only difference is one line of code (the `apply K(...)` call) being present or absent.
-
-**Do NOT implement non-resumable effects via Erlang's throw/catch.** This creates two separate control flow mechanisms that interact poorly and prevents a unified implementation.
-
----
-
-## Multishot Continuations
-
-On BEAM, multishot is essentially free. `K` is an immutable closure on the heap. Calling it multiple times is just calling a function multiple times — no stack copying, no special machinery.
-
-```erlang
-% handler all_choices for Choose {
-%   choose options -> flat_map (fun opt -> resume opt) options
-%   return value -> [value]
-% }
-'all_choices'/3 = fun (_Op, Options, K) ->
-  call 'lists':'flatmap'(fun (Opt) -> apply K(Opt) end, Options)
-```
-
-Each `apply K(Opt)` runs the entire rest of the computation independently. The type system already allows this (no linearity check on `resume`).
-
----
-
-## Stack Depth Consideration
-
-When `resume` is in tail position (the common case), BEAM's tail call optimization applies:
-
-```erlang
-% log msg -> { print msg; resume () }
-fun (_Op, Msg, K) ->
-  call 'io':'format'("~s~n", [Msg]),
-  apply K('unit')              % tail call -- no stack growth
-```
-
-When the handler does work after resume, it's NOT in tail position:
-
-```erlang
-% invalid err -> { let (v, errs) = resume (); (v, err :: errs) }
-fun (_Op, Err, K) ->
-  let Result = apply K('unit') in    % not tail position
-  let {V, Errs} = Result in
-  {V, [Err | Errs]}
-```
-
-Stack depth is proportional to the number of effect calls in the non-tail case. On BEAM this is fine (per-process stacks grow as needed). This is the same tradeoff as any non-tail-recursive function — the user should put `resume` in tail position when possible.
-
----
-
-## Implementation Order
-
-**Start with a resumable effect (Log), not Fail.** If you start with Fail, you'll be tempted to use `throw`/`catch` because it's the obvious shortcut. If you start with Log, you're forced to build CPS properly because there's no shortcut for "print a message and continue." Once CPS works for Log, Fail falls out for free as a handler that doesn't call `K`.
-
-Suggested order:
-
-1. **Log effect** — simplest resumable effect, validates the CPS transform works
-2. **Multiple effect calls in sequence** — validates continuation chaining
-3. **Fail effect** — validates non-resumable (just don't call `K`)
-4. **`return` clause** — validates success-path wrapping (`to_result`)
-5. **Handler stacking** — multiple handlers on one `with` block
-6. **Named handlers** — `handler foo for Eff { ... }` compiled to module-level functions
-7. **Effect propagation** — effectful functions called from other effectful functions (handler parameters threaded through)
-8. **Multishot** — should work automatically if the above is correct, just verify
-
----
-
-## Processes Are Not the Effect Mechanism (But Handlers Can Spawn Them)
-
-The CPS transform is the effect mechanism. Processes are never used to *implement* the handler/continuation plumbing itself. However, individual handlers are free to spawn processes in their body — this is how `Async` and `Actor` effects work. The handler receives `K` via CPS like any other handler, but internally spawns a BEAM process to do real concurrent work:
-
-```erlang
-% Async handler: spawn! creates a real process
-'async_handler'/3 = fun ('spawn', Thunk, K) ->
-  let Pid = call 'erlang':'spawn'(Thunk) in
-  apply K(Pid);
-('await', Pid, K) ->
-  % selective receive
-  apply K(Result)
-```
-
-The effect call/handler/continuation mechanism is always CPS. The handler's *body* may use processes when appropriate, but that's an implementation detail of specific handlers, not the effect system itself.
-
----
-
-## Optimization Opportunities
-
-- **Inlining:** When the handler is statically known (`with console_log` right there in the source), the compiler can inline the handler body directly, eliminating the closure allocation and indirect call entirely
-- **Dead effect elimination:** If a handled effect is never actually called in the computation, the handler can be stripped
-- **Pure functions (no `needs`):** No CPS transform at all — compiled as normal Core Erlang functions with zero overhead
-- **Effect row polymorphism (`..e`):** Row variables are a type-checking concept only. They're fully resolved before codegen, so the CPS transform sees concrete effect sets. No runtime cost.
+- **Inlining:** When the handler is statically known, inline the handler body directly, eliminating closure allocation
+- **Dead effect elimination:** If a handled effect is never called, strip the handler
+- **Pure functions:** No CPS transform at all -- compiled as normal Core Erlang functions with zero overhead
+- **Row polymorphism:** Row variables are resolved before codegen. No runtime cost.

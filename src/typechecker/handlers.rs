@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use crate::ast::{self, Expr};
 use crate::token::Span;
 
-use super::infer::extract_callee_name;
 use super::{Checker, Diagnostic, Scheme, Type};
 
 impl Checker {
@@ -83,29 +82,18 @@ impl Checker {
         let (expr_ty, inner_effs) = self.infer_expr(expr)?;
         let inner_result = self.exit_scope(inner_scope);
 
-        // Unnecessary handler check: if the inner expression doesn't use any of
-        // the handled effects, the handler is unnecessary. Only emit when the
-        // callee is a known local function/binding.
+        // Unnecessary handler check: if the inner expression's effects don't
+        // overlap with handled effects, the handler is unnecessary.
         if !handled.is_empty() && !inner_effs.effects.iter().any(|(n, _)| handled.contains(n)) {
-            let callee_name = extract_callee_name(expr);
-            let callee_effects_known = callee_name
-                .as_ref()
-                .map(|name| {
-                    self.effect_meta.known_funs.contains(name.as_str())
-                        || self.effect_meta.known_let_bindings.contains(name.as_str())
-                })
-                .unwrap_or(false);
-            if callee_effects_known {
-                let mut effects: Vec<_> = handled.iter().cloned().collect();
-                effects.sort();
-                self.collected_diagnostics.push(Diagnostic::warning_at(
-                    expr.span,
-                    format!(
-                        "expression does not use effects {{{}}}; handler is unnecessary",
-                        effects.join(", ")
-                    ),
-                ));
-            }
+            let mut effects: Vec<_> = handled.iter().cloned().collect();
+            effects.sort();
+            self.collected_diagnostics.push(Diagnostic::warning_at(
+                expr.span,
+                format!(
+                    "expression does not use effects {{{}}}; handler is unnecessary",
+                    effects.join(", ")
+                ),
+            ));
         }
 
         // Save effect cache for handler where-clause enforcement (Named branch)

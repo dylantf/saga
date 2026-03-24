@@ -119,7 +119,6 @@ impl Checker {
         // there is no caller above to provide handlers)
         let main_effects: Vec<String> = self.env.get("main")
             .and_then(|s| innermost_effect_row(&self.sub.apply(&s.ty)))
-            .or_else(|| self.effect_meta.declared_effect_rows.get("main").cloned())
             .map(|r| r.effects.iter().map(|(n, _)| n.clone()).collect())
             .unwrap_or_default();
         if !main_effects.is_empty() {
@@ -448,7 +447,7 @@ impl Checker {
                     EffectRow::closed(vec![])
                 };
 
-                // Place effect row on the innermost arrow (first iteration).
+                // Place effect row on the innermost arrow.
                 let mut first_arrow = true;
                 for (_, texpr) in params.iter().rev() {
                     let param_ty = self.convert_type_expr(texpr, &mut params_list);
@@ -465,11 +464,6 @@ impl Checker {
                 }
                 annotations.insert(name.clone(), (fun_ty.clone(), *span));
 
-                // Store the declared effect row for the body check
-                // (needed for zero-param functions whose types can't carry it).
-                if !fun_effect_row.effects.is_empty() || fun_effect_row.tail.is_some() {
-                    self.effect_meta.declared_effect_rows.insert(name.clone(), fun_effect_row);
-                }
 
                 // Always register in known_funs (even pure functions) so the
                 // `with` validation can distinguish local declarations
@@ -771,28 +765,25 @@ impl Checker {
 
         let declared_row = annotation
             .and_then(|ann| innermost_effect_row(&self.sub.apply(ann)))
-            .or_else(|| self.effect_meta.declared_effect_rows.get(name).cloned())
             .unwrap_or_else(|| EffectRow::closed(vec![]));
 
-        // Convert both to name sets for comparison
-        let body_effect_names: std::collections::HashSet<String> = all_body_effs
-            .effects.iter().map(|(n, _)| n.clone()).collect();
-        let declared_effects: std::collections::HashSet<String> = declared_row
-            .effects.iter().map(|(n, _)| n.clone()).collect();
-
-        if !body_effect_names.is_empty() || !declared_effects.is_empty() {
+        if !all_body_effs.is_empty() || !declared_row.is_empty() {
             let err_span = match clauses[0] {
                 Decl::FunBinding { span, .. } => *span,
                 _ => unreachable!(),
             };
             self.check_effects_via_row(
-                &body_effect_names,
+                &all_body_effs,
                 &declared_row,
                 &format!("function '{}'", name),
                 err_span,
             )?;
 
             // Check for effects declared but never used
+            let body_effect_names: std::collections::HashSet<String> = all_body_effs
+                .effects.iter().map(|(n, _)| n.clone()).collect();
+            let declared_effects: std::collections::HashSet<String> = declared_row
+                .effects.iter().map(|(n, _)| n.clone()).collect();
             let unused: Vec<_> = declared_effects.difference(&body_effect_names).collect();
             if !unused.is_empty() {
                 let span = annotation_span.expect("unused effects implies annotation exists");

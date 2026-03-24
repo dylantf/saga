@@ -290,20 +290,6 @@ impl Substitution {
         current
     }
 
-    /// Apply the substitution to effect type args only, without chasing row
-    /// variable bindings. Used for effect absorption where we only want the
-    /// explicitly declared effects, not effects captured by a row variable.
-    pub fn apply_effect_row_shallow(&self, row: &EffectRow) -> EffectRow {
-        EffectRow {
-            effects: row.effects.iter()
-                .map(|(name, args)| {
-                    (name.clone(), args.iter().map(|t| self.apply(t)).collect())
-                })
-                .collect(),
-            tail: row.tail.as_ref().map(|t| Box::new(self.apply(t))),
-        }
-    }
-
     /// Bind a row variable to an effect row, with occurs check.
     pub(crate) fn bind_row(&mut self, id: u32, row: EffectRow) -> Result<(), Diagnostic> {
         if let Some(tail_id) = row.tail_var_id()
@@ -768,9 +754,6 @@ pub(crate) struct EffectMeta {
     pub known_funs: HashSet<String>,
     /// Annotation-provided effect type constraints: fn name -> [(effect_name, [concrete types])].
     pub fun_type_constraints: HashMap<String, Vec<(String, Vec<Type>)>>,
-    /// Declared effect rows from annotations (for zero-param functions whose types
-    /// can't carry EffectRow since they aren't arrow types).
-    pub declared_effect_rows: HashMap<String, EffectRow>,
     /// Known let binding names that may carry deferred effects (for is_known_local checks).
     pub known_let_bindings: HashSet<String>,
 }

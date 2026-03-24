@@ -3,37 +3,6 @@ use crate::ast::{BinOp, CaseArm, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
 use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
 use crate::token::Span;
 
-/// Extract effect names from a type by walking Fun nodes' effect rows.
-fn extract_effects_from_type(ty: &Type) -> Vec<String> {
-    let mut effects = Vec::new();
-    fn walk(ty: &Type, out: &mut Vec<String>) {
-        if let Type::Fun(_, ret, row) = ty {
-            for (name, _) in &row.effects {
-                if !out.contains(name) {
-                    out.push(name.clone());
-                }
-            }
-            walk(ret, out);
-        }
-    }
-    walk(ty, &mut effects);
-    effects
-}
-
-/// Walk an App chain to find the callee name at the root.
-/// e.g. `App(App(Var("f"), a), b)` -> Some("f")
-///       `App(QualifiedName("M", "f"), a)` -> Some("M.f")
-/// Returns None if the callee isn't a Var or QualifiedName.
-pub(super) fn extract_callee_name(expr: &Expr) -> Option<String> {
-    match &expr.kind {
-        ExprKind::Var { name, .. } => Some(name.clone()),
-        ExprKind::QualifiedName { module, name, .. } => Some(format!("{}.{}", module, name)),
-        ExprKind::App { func, .. } => extract_callee_name(func),
-        ExprKind::With { expr, .. } => extract_callee_name(expr),
-        _ => None,
-    }
-}
-
 impl Checker {
     // --- Expression inference ---
 
@@ -144,9 +113,29 @@ impl Checker {
                 let resolved_ret = self.sub.apply(&ret_ty);
                 self.record_type(node_id, &ret_ty);
 
-                // Build the returned EffectRow by merging func + arg + callee effects,
-                // then applying the same absorption as the current-based path.
+                // Build the returned EffectRow: func + arg + (if saturated) callee.
                 let mut merged_effs = func_effs.merge(&arg_effs);
+
+                // Absorption: if the function's parameter type is itself a Fun
+                // with a declared effect row (e.g. `f: () -> a needs {Fail}`),
+                // subtract those declared effects. The parameter's effects are
+                // the function's responsibility, not the caller's.
+                //
+                // We use resolve_var (not full apply) to get the parameter type
+                // structure without chasing row_map, so only the statically
+                // declared effects are subtracted -- not effects captured by a
+                // row variable (..e) which should propagate to the caller.
+                let func_shallow = self.sub.resolve_var(&func_ty);
+                if let Type::Fun(p, _, _) = func_shallow {
+                    let param_shallow = self.sub.resolve_var(p);
+                    if let Type::Fun(_, _, row) = param_shallow {
+                        let absorbed: std::collections::HashSet<String> = row
+                            .effects.iter().map(|(n, _)| n.clone()).collect();
+                        merged_effs = merged_effs.subtract(&absorbed);
+                    }
+                }
+
+                // Saturated call: add the callee's own effect row
                 if !matches!(resolved_ret, Type::Fun(_, _, _)) {
                     let resolved_func = self.sub.apply(&func_ty);
                     if let Type::Fun(_, _, row) = &resolved_func {
@@ -154,17 +143,7 @@ impl Checker {
                         merged_effs = merged_effs.merge(&applied_row);
                     }
                 }
-                // Apply absorption: subtract effects declared on the parameter type
-                let func_shallow = self.sub.resolve_var(&func_ty);
-                if let Type::Fun(p, _, _) = func_shallow {
-                    let param_shallow = self.sub.resolve_var(p);
-                    if let Type::Fun(_, _, row) = param_shallow {
-                        let shallow = self.sub.apply_effect_row_shallow(row);
-                        let absorbed: std::collections::HashSet<String> = shallow
-                            .effects.iter().map(|(n, _)| n.clone()).collect();
-                        merged_effs = merged_effs.subtract(&absorbed);
-                    }
-                }
+
                 Ok((ret_ty, merged_effs))
             }
 
@@ -643,10 +622,10 @@ impl Checker {
                             Type::Error
                         }
                     };
-                    // Partial application of effectful function: if the result type
-                    // is still an Arrow, derive deferred effects from the resolved type.
+                    // Check if this let binding carries deferred effects (partial
+                    // application of an effectful function).
                     let resolved_ty = self.sub.apply(&ty);
-                    let deferred_effects = extract_effects_from_type(&resolved_ty);
+                    let has_deferred_effects = !super::effects_from_type(&resolved_ty).is_empty();
                     if let Pat::Var {
                         id: pat_id,
                         name,
@@ -655,7 +634,7 @@ impl Checker {
                     } = pattern
                     {
                         self.generalize_let_binding(
-                            name, *pat_id, *var_span, &ty, deferred_effects,
+                            name, *pat_id, *var_span, &ty, has_deferred_effects,
                         );
                     } else {
                         if let Err(e) = self.bind_pattern(pattern, &ty) {
@@ -800,7 +779,7 @@ impl Checker {
         pat_id: NodeId,
         var_span: Span,
         ty: &Type,
-        deferred_effects: Vec<String>,
+        has_deferred_effects: bool,
     ) {
         let mut scheme = self.generalize(ty);
 
@@ -855,7 +834,7 @@ impl Checker {
 
         self.env
             .insert_with_def(name.to_string(), scheme, pat_id);
-        if !deferred_effects.is_empty() {
+        if has_deferred_effects {
             self.effect_meta.known_let_bindings.insert(name.to_string());
         }
         self.lsp.node_spans.insert(pat_id, var_span);
