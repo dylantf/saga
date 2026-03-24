@@ -144,6 +144,41 @@ pub fn cmd_emit(file: &str) {
     print!("{}", core_src);
 }
 
+pub fn cmd_fmt(args: &[String]) {
+    let write_mode = args.contains(&"--write".to_string());
+    let file = args.iter().find(|a| a.ends_with(".dy"));
+
+    let Some(file) = file else {
+        eprintln!("Usage: dylang fmt [--write] <file.dy>");
+        std::process::exit(1);
+    };
+
+    let source = fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Error reading {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let tokens = dylang::lexer::Lexer::new(&source).lex().unwrap_or_else(|e| {
+        eprintln!("Lex error in {}: {:?}", file, e);
+        std::process::exit(1);
+    });
+    let mut parser = dylang::parser::Parser::new(tokens);
+    let program = parser.parse_program().unwrap_or_else(|e| {
+        eprintln!("Parse error in {}: {} at {:?}", file, e.message, e.span);
+        std::process::exit(1);
+    });
+
+    let formatted = dylang::formatter::format(&program, 80);
+
+    if write_mode {
+        fs::write(file, &formatted).unwrap_or_else(|e| {
+            eprintln!("Error writing {}: {}", file, e);
+            std::process::exit(1);
+        });
+    } else {
+        print!("{}", formatted);
+    }
+}
+
 pub fn cmd_test(args: &[String]) {
     let project_root = super::find_project_root().unwrap_or_else(|| {
         eprintln!("No project.toml found. Tests require a project.");

@@ -148,12 +148,22 @@ impl Checker {
                     }
                 }
 
-                // Saturated call: add the callee's own effect row
+                // Saturated call: add the callee's own effect row, but only
+                // for known local functions/let bindings. Callback parameters
+                // carry their effects on their type; those effects are the
+                // *caller's* responsibility, not the current function's.
                 if !matches!(resolved_ret, Type::Fun(_, _, _)) {
-                    let resolved_func = self.sub.apply(&func_ty);
-                    if let Type::Fun(_, _, row) = &resolved_func {
-                        let applied_row = self.sub.apply_effect_row(row);
-                        merged_effs = merged_effs.merge(&applied_row);
+                    let callee_name = Self::extract_root_callee(func);
+                    let is_known_local = callee_name.as_ref().is_some_and(|n| {
+                        self.effect_meta.known_funs.contains(n.as_str())
+                            || self.effect_meta.known_let_bindings.contains(n.as_str())
+                    });
+                    if is_known_local || callee_name.is_none() {
+                        let resolved_func = self.sub.apply(&func_ty);
+                        if let Type::Fun(_, _, row) = &resolved_func {
+                            let applied_row = self.sub.apply_effect_row(row);
+                            merged_effs = merged_effs.merge(&applied_row);
+                        }
                     }
                 }
 
@@ -163,8 +173,9 @@ impl Checker {
             ExprKind::BinOp {
                 op, left, right, ..
             } => {
-                let (left_ty, _left_effs) = self.infer_expr(left)?;
-                let (right_ty, _right_effs) = self.infer_expr(right)?;
+                let (left_ty, left_effs) = self.infer_expr(left)?;
+                let (right_ty, right_effs) = self.infer_expr(right)?;
+                let operand_effs = left_effs.merge(&right_effs);
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::IntDiv => {
                         self.unify_at(&left_ty, &right_ty, span)?;
@@ -174,12 +185,12 @@ impl Checker {
                             span,
                             node_id,
                         ));
-                        Ok((left_ty, EffectRow::empty()))
+                        Ok((left_ty, operand_effs))
                     }
                     BinOp::Mod => {
                         self.unify_at(&left_ty, &Type::int(), span)?;
                         self.unify_at(&right_ty, &Type::int(), span)?;
-                        Ok((Type::int(), EffectRow::empty()))
+                        Ok((Type::int(), operand_effs))
                     }
                     BinOp::Eq | BinOp::NotEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
@@ -189,7 +200,7 @@ impl Checker {
                             span,
                             node_id,
                         ));
-                        Ok((Type::bool(), EffectRow::empty()))
+                        Ok((Type::bool(), operand_effs))
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
@@ -199,26 +210,26 @@ impl Checker {
                             span,
                             node_id,
                         ));
-                        Ok((Type::bool(), EffectRow::empty()))
+                        Ok((Type::bool(), operand_effs))
                     }
                     BinOp::And | BinOp::Or => {
                         self.unify_at(&left_ty, &Type::bool(), span)?;
                         self.unify_at(&right_ty, &Type::bool(), span)?;
-                        Ok((Type::bool(), EffectRow::empty()))
+                        Ok((Type::bool(), operand_effs))
                     }
                     BinOp::Concat => {
                         self.unify_at(&Type::string(), &left_ty, span)?;
                         self.unify_at(&Type::string(), &right_ty, span)?;
-                        Ok((Type::string(), EffectRow::empty()))
+                        Ok((Type::string(), operand_effs))
                     }
                 }
             }
 
             ExprKind::UnaryMinus { expr: inner, .. } => {
-                let (ty, _effs) = self.infer_expr(inner)?;
+                let (ty, effs) = self.infer_expr(inner)?;
                 self.trait_state.pending_constraints
                     .push(("Num".into(), ty.clone(), span, node_id));
-                Ok((ty, EffectRow::empty()))
+                Ok((ty, effs))
             }
 
             ExprKind::If {
@@ -343,25 +354,30 @@ impl Checker {
             }
 
             ExprKind::Resume { value, .. } => {
-                let (val_ty, _effs) = self.infer_expr(value)?;
+                let (val_ty, val_effs) = self.infer_expr(value)?;
                 if let Some(expected) = &self.resume_type.clone() {
                     self.unify_at(&val_ty, expected, span)?;
                 }
                 // resume's return type is the answer type (what the with-expression produces)
                 if let Some(ret_ty) = &self.resume_return_type.clone() {
-                    Ok((ret_ty.clone(), EffectRow::empty()))
+                    Ok((ret_ty.clone(), val_effs))
                 } else {
                     let ty = self.fresh_var();
-                    Ok((ty, EffectRow::empty()))
+                    Ok((ty, val_effs))
                 }
             }
 
             ExprKind::Tuple { elements, .. } => {
+                let mut merged_effs = EffectRow::empty();
                 let tys: Vec<Type> = elements
                     .iter()
-                    .map(|e| self.infer_expr(e).map(|(ty, _effs)| ty))
-                    .collect::<Result<_, _>>()?;
-                Ok((Type::Con("Tuple".into(), tys), EffectRow::empty()))
+                    .map(|e| {
+                        let (ty, effs) = self.infer_expr(e)?;
+                        merged_effs.effects.extend(effs.effects);
+                        Ok(ty)
+                    })
+                    .collect::<Result<_, Diagnostic>>()?;
+                Ok((Type::Con("Tuple".into(), tys), merged_effs))
             }
 
             ExprKind::QualifiedName { module, name, .. } => {
@@ -457,11 +473,11 @@ impl Checker {
                 type_expr,
                 ..
             } => {
-                let (inferred, _effs) = self.infer_expr(inner)?;
+                let (inferred, effs) = self.infer_expr(inner)?;
                 let ann_ty = self.convert_type_expr(type_expr, &mut vec![]);
                 self.unify_at(&inferred, &ann_ty, span)?;
                 self.record_type(node_id, &ann_ty);
-                Ok((ann_ty, EffectRow::empty()))
+                Ok((ann_ty, effs))
             }
 
             ExprKind::DictMethodAccess { .. }
@@ -563,6 +579,7 @@ impl Checker {
         };
 
         let result_ty = self.fresh_var();
+        let mut merged_effs = EffectRow::empty();
 
         for arm in arms {
             let saved_env = self.env.clone();
@@ -597,19 +614,23 @@ impl Checker {
                 self.check_guard(guard)?;
             }
 
-            let (body_ty, _body_effs) = self.infer_expr(&arm.body)?;
+            let (body_ty, body_effs) = self.infer_expr(&arm.body)?;
             self.unify_at(&result_ty, &body_ty, arm.body.span)?;
+            merged_effs.effects.extend(body_effs.effects);
             self.env = saved_env;
         }
 
         if let Some((timeout, body)) = after_clause {
-            let (timeout_ty, _timeout_effs) = self.infer_expr(timeout)?;
+            let (timeout_ty, timeout_effs) = self.infer_expr(timeout)?;
             self.unify_at(&timeout_ty, &Type::int(), timeout.span)?;
-            let (body_ty, _body_effs) = self.infer_expr(body)?;
+            let (body_ty, body_effs) = self.infer_expr(body)?;
             self.unify_at(&result_ty, &body_ty, body.span)?;
+            merged_effs.effects.extend(timeout_effs.effects);
+            merged_effs.effects.extend(body_effs.effects);
         }
 
-        Ok((result_ty, EffectRow::closed(vec![("Actor".to_string(), vec![])])))
+        merged_effs.effects.push(("Actor".to_string(), vec![]));
+        Ok((result_ty, merged_effs))
     }
 
     pub(crate) fn infer_block(&mut self, stmts: &[Stmt]) -> Result<(Type, EffectRow), Diagnostic> {
@@ -744,11 +765,15 @@ impl Checker {
                             let (guard_ty, _guard_effs) = self.infer_expr(g)?;
                             self.unify_at(&guard_ty, &Type::bool(), g.span)?;
                         }
-                        let (body_ty, _body_effs) = self.infer_expr(body)?;
-                        // Build curried arrow type
+                        let (body_ty, body_effs) = self.infer_expr(body)?;
+                        // Build curried arrow type with effects on innermost arrow
                         let mut clause_ty = body_ty;
-                        for param_ty in param_types.into_iter().rev() {
-                            clause_ty = Type::arrow(param_ty, clause_ty);
+                        for (i, param_ty) in param_types.into_iter().rev().enumerate() {
+                            if i == 0 && !body_effs.effects.is_empty() {
+                                clause_ty = Type::Fun(Box::new(param_ty), Box::new(clause_ty), body_effs.clone());
+                            } else {
+                                clause_ty = Type::arrow(param_ty, clause_ty);
+                            }
                         }
                         self.unify_at(&fun_ty, &clause_ty, fun_span)?;
                         self.env = saved_env;
@@ -871,6 +896,15 @@ impl Checker {
     /// the expected parameter's effect row. When both rows are closed, the
     /// argument's effects must be a subset of the parameter's effects.
     ///
+    /// Walk App chain to find the root callee name (e.g. `f x y` -> `f`).
+    fn extract_root_callee(expr: &Expr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Var { name, .. } => Some(name.clone()),
+            ExprKind::App { func, .. } => Self::extract_root_callee(func),
+            _ => None,
+        }
+    }
+
     /// This enforces directional effect subtyping at call sites: a pure
     /// function can be passed where an effectful callback is expected, but
     /// NOT the reverse.
