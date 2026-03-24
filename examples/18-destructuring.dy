@@ -7,6 +7,8 @@ type Shape
   = Circle(Float)
   | Rect(Float, Float)
 
+type Wrapped a = Wrapped(a)
+
 impl Show for Point {
   show p = $"({p.x}, {p.y})"
 }
@@ -34,15 +36,28 @@ main () = {
   let Point { x, y } = origin
   println $"origin: ({x}, {y})"
 
-  # Let with constructors
-  let Circle(r) = Circle(5.0)
-  println $"radius: {r}"
+  # Let with single-constructor types (irrefutable)
+  let Wrapped(inner) = Wrapped(42)
+  println $"inner: {inner}"
 
-  # Let with list cons
-  let h :: t = [1, 2, 3, 4, 5]
-  println $"head: {h}"
-  println $"tail: {debug t}"
+  # Case for multi-constructor types
+  let shape = Circle 10.0
+  let r2 = case shape {
+    Circle(r) -> r
+    Rect(w, h) -> w * h
+  }
+  println $"r2: {r2}"
 
+  # Let with list cons (case needed since list could be empty)
+  let items = [1, 2, 3, 4, 5]
+  case items {
+    h :: t -> {
+      println $"head: {h}"
+      println $"tail: {debug t}"
+    }
+    [] -> println "empty"
+ 
+ }
   # Nested destructuring
   let ((a, b), (c, d)) = ((1, 2), (3, 4))
   println $"sum: {a + b + c + d}"

@@ -2,7 +2,7 @@ import Std.Actor
 
 type WorkerMsg = Go | Crash
 
-fun worker : Unit -> Unit needs {Process, Actor WorkerMsg}
+fun worker : Unit -> Unit needs {Actor WorkerMsg}
 worker () = receive {
   Go -> {
     println "Worker doing work..."
@@ -20,7 +20,7 @@ supervisor () = {
   send! pid Crash
 
   receive {
-    Down(dead_pid, reason) -> println $"Child exited: {reason}"
+    Down(_dead_pid, reason) -> println $"Child exited: {reason}"
     after 3000 -> println "No exit received"
   }
 }

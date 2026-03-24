@@ -1,3 +1,4 @@
+import Std.Result
 import Std.Fail
 import Std.Supervisor (supervised)
 
@@ -5,14 +6,7 @@ import Std.Supervisor (supervised)
 fun unreliable : Unit -> Int needs {Fail String}
 unreliable () = fail! "something went wrong"
 
-# A computation that succeeds
-fun reliable : Unit -> Int needs {Fail String}
-reliable () = 42
-
 main () = {
   let r1 = supervised 3 (fun () -> unreliable ())
   println $"unreliable: {debug r1}"
-
-  let r2 = supervised 3 (fun () -> reliable ())
-  println $"reliable: {debug r2}"
 }

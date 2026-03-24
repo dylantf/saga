@@ -59,7 +59,7 @@ main () = {
   let result = {
     safe_div 100 4
   } with {
-    fail msg = 0 - 1
+    fail _ = 0 - 1
   }
   println ("safe_div result: " <> show result)
 

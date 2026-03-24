@@ -5,7 +5,7 @@ type CounterMsg
   | GetCount(Pid Int)
   | Stop
 
-fun counter : (count: Int) -> Unit needs {Process, Actor CounterMsg}
+fun counter : (count: Int) -> Unit needs {Actor CounterMsg}
 counter count = {
   receive {
     Increment(n) -> counter (count + n)
