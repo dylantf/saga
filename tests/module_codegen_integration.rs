@@ -46,9 +46,10 @@ fn emit_from_program(
 /// without re-parsing (which would assign different NodeIds).
 fn typecheck_source(source: &str, checker: &mut typechecker::Checker) -> Vec<dylang::ast::Decl> {
     let tokens = lexer::Lexer::new(source).lex().expect("lex error");
-    let program = parser::Parser::new(tokens)
+    let mut program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
+    dylang::desugar::desugar_program(&mut program);
     let result = checker.check_program(&program);
     assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());
     program
@@ -70,6 +71,7 @@ fn make_project_checker() -> typechecker::Checker {
         .parse_program()
         .expect("prelude parse error");
     dylang::derive::expand_derives(&mut prelude_program);
+    dylang::desugar::desugar_program(&mut prelude_program);
     let result = checker.check_program(&prelude_program);
     assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
     checker
@@ -221,7 +223,8 @@ double x = x * 2
 main () = add 1 2
 ";
     let tokens = lexer::Lexer::new(src).lex().unwrap();
-    let program = parser::Parser::new(tokens).parse_program().unwrap();
+    let mut program = parser::Parser::new(tokens).parse_program().unwrap();
+    dylang::desugar::desugar_program(&mut program);
     let out = codegen::emit_module("test", &program);
 
     let export_line = out.lines().next().unwrap();

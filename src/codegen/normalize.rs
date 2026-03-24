@@ -412,6 +412,17 @@ impl Normalizer {
             | ExprKind::QualifiedName { .. }
             | ExprKind::DictRef { .. } => expr.clone(),
             ExprKind::Ascription { expr: inner, .. } => self.walk_expr(inner, lifted),
+
+            ExprKind::Pipe { .. }
+            | ExprKind::PipeBack { .. }
+            | ExprKind::ComposeForward { .. }
+            | ExprKind::ComposeBack { .. }
+            | ExprKind::Cons { .. }
+            | ExprKind::ListLit { .. }
+            | ExprKind::StringInterp { .. }
+            | ExprKind::ListComprehension { .. } => {
+                unreachable!("surface syntax should be desugared before normalization")
+            }
         }
     }
 

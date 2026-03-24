@@ -87,58 +87,41 @@ impl Parser {
                 break;
             }
 
-            // Remember operator kind before consuming
-            let desugar = match self.peek() {
-                Token::PipeBack => Desugar::PipeBack,
-                Token::DoubleColon => Desugar::Cons,
-                Token::ComposeForward => Desugar::ComposeForward,
-                Token::ComposeBack => Desugar::ComposeBack,
-                _ => Desugar::None,
+            // Remember which sugar operator we have before consuming
+            let sugar = match self.peek() {
+                Token::Pipe => Some(SugarOp::Pipe),
+                Token::PipeBack => Some(SugarOp::PipeBack),
+                Token::DoubleColon => Some(SugarOp::Cons),
+                Token::ComposeForward => Some(SugarOp::ComposeForward),
+                Token::ComposeBack => Some(SugarOp::ComposeBack),
+                _ => None,
             };
             self.advance(); // consume operator
             // :: is right-associative (recurse at same bp); everything else is left-associative
-            let is_cons = matches!(desugar, Desugar::Cons);
+            let is_cons = matches!(sugar, Some(SugarOp::Cons));
             let right = self.parse_expr(if is_cons { bp } else { bp + 1 })?;
 
             let span = left.span.to(right.span);
-            left = match op {
-                // x :: xs  →  Cons x xs  (right-associative)
-                None if is_cons => {
-                    let cons = Expr { id: self.next_id(), span, kind: ExprKind::Constructor {
-                        name: "Cons".to_string(),
-                    }};
-                    let app1 = Expr { id: self.next_id(), span, kind: ExprKind::App {
-                        func: Box::new(cons),
-                        arg: Box::new(left),
-                    }};
-                    Expr { id: self.next_id(), span, kind: ExprKind::App {
-                        func: Box::new(app1),
-                        arg: Box::new(right),
-                    }}
-                }
-                // f >> g  →  fun x -> g (f x)
-                None if matches!(desugar, Desugar::ComposeForward) => {
-                    self.desugar_compose(left, right, span)
-                }
-                // f << g  →  fun x -> f (g x)
-                None if matches!(desugar, Desugar::ComposeBack) => {
-                    self.desugar_compose(right, left, span)
-                }
-                // |> forward pipe: `x |> f` becomes `App(f, x)`
-                // <| backward pipe: `f <| x` becomes `App(f, x)`
-                None if matches!(desugar, Desugar::PipeBack) => Expr { id: self.next_id(), span, kind: ExprKind::App {
-                    func: Box::new(left),
-                    arg: Box::new(right),
+            left = match (op, sugar) {
+                (None, Some(SugarOp::Pipe)) => Expr { id: self.next_id(), span, kind: ExprKind::Pipe {
+                    left: Box::new(left), right: Box::new(right),
                 }},
-                None => Expr { id: self.next_id(), span, kind: ExprKind::App {
-                    func: Box::new(right),
-                    arg: Box::new(left),
+                (None, Some(SugarOp::PipeBack)) => Expr { id: self.next_id(), span, kind: ExprKind::PipeBack {
+                    left: Box::new(left), right: Box::new(right),
                 }},
-                Some(op) => Expr { id: self.next_id(), span, kind: ExprKind::BinOp {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
+                (None, Some(SugarOp::ComposeForward)) => Expr { id: self.next_id(), span, kind: ExprKind::ComposeForward {
+                    left: Box::new(left), right: Box::new(right),
                 }},
+                (None, Some(SugarOp::ComposeBack)) => Expr { id: self.next_id(), span, kind: ExprKind::ComposeBack {
+                    left: Box::new(left), right: Box::new(right),
+                }},
+                (None, Some(SugarOp::Cons)) => Expr { id: self.next_id(), span, kind: ExprKind::Cons {
+                    head: Box::new(left), tail: Box::new(right),
+                }},
+                (Some(op), _) => Expr { id: self.next_id(), span, kind: ExprKind::BinOp {
+                    op, left: Box::new(left), right: Box::new(right),
+                }},
+                (None, None) => unreachable!(),
             };
         }
 
@@ -398,64 +381,27 @@ impl Parser {
             }}),
             Token::InterpolatedString(parts) => {
                 use crate::token::InterpPart;
-                // Desugar to a chain of `<>` concatenations.
-                // Each hole becomes `show(expr)`, each literal stays as a string.
-                // Adds a trailing Eof so sub-parsers can terminate cleanly.
-                let mut segments: Vec<Expr> = Vec::new();
+                // Preserve as StringInterp; desugared later to show/concat chain.
+                let mut string_parts: Vec<StringPart> = Vec::new();
                 for part in parts {
                     match part {
                         InterpPart::Literal(s) => {
                             if !s.is_empty() {
-                                segments.push(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
-                                    value: Lit::String(s),
-                                }});
+                                string_parts.push(StringPart::Lit(s));
                             }
                         }
                         InterpPart::Hole(mut tokens) => {
-                            // Use the last token's end position + 1 for the desugared
-                            // `show` call so it doesn't collide with a user-written `show`
-                            // inside the hole (which would share the first token's span).
-                            let show_span = tokens
-                                .last()
-                                .map(|t| Span {
-                                    start: t.span.end + 1,
-                                    end: t.span.end + 2,
-                                })
-                                .unwrap_or(span);
-                            // Span covering the entire hole for the wrapping App node,
-                            // so LSP traversal can reach expressions inside interpolation.
-                            let app_span = match (tokens.first(), tokens.last()) {
-                                (Some(first), Some(last)) => Span {
-                                    start: first.span.start,
-                                    end: last.span.end,
-                                },
-                                _ => span,
-                            };
                             tokens.push(crate::token::Spanned {
                                 token: crate::token::Token::Eof,
                                 span,
                             });
-
                             let mut sub = crate::parser::Parser::new(tokens);
                             let hole_expr = sub.parse_expr(0)?;
-                            segments.push(Expr { id: self.next_id(), span: app_span, kind: ExprKind::App {
-                                func: Box::new(Expr { id: self.next_id(), span: show_span, kind: ExprKind::Var {
-                                    name: "show".to_string(),
-                                }}),
-                                arg: Box::new(hole_expr),
-                            }});
+                            string_parts.push(StringPart::Expr(hole_expr));
                         }
                     }
                 }
-                // Fold into a left-associative `<>` chain; empty string if no parts.
-                let init = segments.into_iter().reduce(|left, right| Expr { id: self.next_id(), span, kind: ExprKind::BinOp {
-                    op: BinOp::Concat,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }});
-                Ok(init.unwrap_or(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
-                    value: Lit::String(String::new()),
-                }}))
+                Ok(Expr { id: self.next_id(), span, kind: ExprKind::StringInterp { parts: string_parts }})
             }
             Token::Ident(ref i)
                 if self.test_mode
@@ -595,8 +541,8 @@ impl Parser {
                 if matches!(self.peek(), Token::RBracket) {
                     let end = self.tokens[self.pos].span;
                     self.advance();
-                    return Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Constructor {
-                        name: "Nil".to_string(),
+                    return Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::ListLit {
+                        elements: vec![],
                     }});
                 }
 
@@ -608,7 +554,10 @@ impl Parser {
                     let qualifiers = self.parse_comprehension_qualifiers()?;
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBracket)?;
-                    return Ok(self.desugar_comprehension(first, &qualifiers, span.to(end)));
+                    return Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::ListComprehension {
+                        body: Box::new(first),
+                        qualifiers,
+                    }});
                 }
 
                 // Normal list literal
@@ -622,26 +571,7 @@ impl Parser {
                 }
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBracket)?;
-
-                // Build from right to left: Nil, then wrap each element
-                let mut result = Expr { id: self.next_id(), span: end, kind: ExprKind::Constructor {
-                    name: "Nil".to_string(),
-                }};
-                for elem in elements.into_iter().rev() {
-                    let elem_span = elem.span;
-                    let cons = Expr { id: self.next_id(), span: elem_span, kind: ExprKind::Constructor {
-                        name: "Cons".to_string(),
-                    }};
-                    let app1 = Expr { id: self.next_id(), span: elem_span, kind: ExprKind::App {
-                        func: Box::new(cons),
-                        arg: Box::new(elem),
-                    }};
-                    result = Expr { id: self.next_id(), span: elem_span.to(end), kind: ExprKind::App {
-                        func: Box::new(app1),
-                        arg: Box::new(result),
-                    }};
-                }
-                Ok(result)
+                Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::ListLit { elements }})
             }
 
             Token::Fun => {
@@ -1046,130 +976,13 @@ impl Parser {
         Ok(qualifiers)
     }
 
-    /// Recursively desugar list comprehension qualifiers into nested
-    /// flat_map / if-then-else / let expressions.
-    fn desugar_comprehension(
-        &mut self,
-        body: Expr,
-        qualifiers: &[ComprehensionQualifier],
-        span: Span,
-    ) -> Expr {
-        if qualifiers.is_empty() {
-            // Base case: [e] ==> Cons(e, Nil)
-            return self.make_singleton_list(body, span);
-        }
-
-        match &qualifiers[0] {
-            ComprehensionQualifier::Generator(pat, source) => {
-                // [e | p <- l, Q] ==> flat_map (fun p -> [e | Q]) l
-                let inner = self.desugar_comprehension(body, &qualifiers[1..], span);
-                let lambda = Expr { id: self.next_id(), span, kind: ExprKind::Lambda {
-                    params: vec![pat.clone()],
-                    body: Box::new(inner),
-                }};
-                let flat_map = Expr { id: self.next_id(), span, kind: ExprKind::QualifiedName {
-                    module: "List".to_string(),
-                    name: "flat_map".to_string(),
-                }};
-                let app1 = Expr { id: self.next_id(), span, kind: ExprKind::App {
-                    func: Box::new(flat_map),
-                    arg: Box::new(lambda),
-                }};
-                Expr { id: self.next_id(), span, kind: ExprKind::App {
-                    func: Box::new(app1),
-                    arg: Box::new(source.clone()),
-                }}
-            }
-            ComprehensionQualifier::Guard(guard) => {
-                // [e | g, Q] ==> if g then [e | Q] else []
-                let then_branch = self.desugar_comprehension(body, &qualifiers[1..], span);
-                let else_branch = Expr { id: self.next_id(), span, kind: ExprKind::Constructor {
-                    name: "Nil".to_string(),
-                }};
-                Expr { id: self.next_id(), span, kind: ExprKind::If {
-                    cond: Box::new(guard.clone()),
-                    then_branch: Box::new(then_branch),
-                    else_branch: Box::new(else_branch),
-                }}
-            }
-            ComprehensionQualifier::Let(pat, value) => {
-                // [e | let p = v, Q] ==> { let p = v; [e | Q] }
-                let inner = self.desugar_comprehension(body, &qualifiers[1..], span);
-                Expr { id: self.next_id(), span, kind: ExprKind::Block {
-                    stmts: vec![
-                        Stmt::Let {
-                            pattern: pat.clone(),
-                            annotation: None,
-                            value: value.clone(),
-                            assert: false,
-                            span,
-                        },
-                        Stmt::Expr(inner),
-                    ],
-                }}
-            }
-        }
-    }
-
-    /// Desugar `first >> second` into `fun _x -> second (first _x)`.
-    /// Both forward and backward compose call this with args in the right order.
-    fn desugar_compose(&mut self, first: Expr, second: Expr, span: Span) -> Expr {
-        let param = Pat::Var {
-            id: NodeId::fresh(),
-            name: "_x".to_string(),
-            span,
-        };
-        let arg = Expr { id: self.next_id(), span, kind: ExprKind::Var {
-            name: "_x".to_string(),
-        }};
-        let inner = Expr { id: self.next_id(), span, kind: ExprKind::App {
-            func: Box::new(first),
-            arg: Box::new(arg),
-        }};
-        let body = Expr { id: self.next_id(), span, kind: ExprKind::App {
-            func: Box::new(second),
-            arg: Box::new(inner),
-        }};
-        Expr { id: self.next_id(), span, kind: ExprKind::Lambda {
-            params: vec![param],
-            body: Box::new(body),
-        }}
-    }
-
-    /// Build Cons(elem, Nil) -- a singleton list.
-    fn make_singleton_list(&mut self, elem: Expr, span: Span) -> Expr {
-        let nil = Expr { id: self.next_id(), span, kind: ExprKind::Constructor {
-            name: "Nil".to_string(),
-        }};
-        let cons = Expr { id: self.next_id(), span, kind: ExprKind::Constructor {
-            name: "Cons".to_string(),
-        }};
-        let app1 = Expr { id: self.next_id(), span, kind: ExprKind::App {
-            func: Box::new(cons),
-            arg: Box::new(elem),
-        }};
-        Expr { id: self.next_id(), span, kind: ExprKind::App {
-            func: Box::new(app1),
-            arg: Box::new(nil),
-        }}
-    }
 }
 
-/// Tracks which desugared operator is being parsed.
-enum Desugar {
-    None,
+/// Tracks which sugar operator is being parsed.
+enum SugarOp {
+    Pipe,
     PipeBack,
     Cons,
     ComposeForward,
     ComposeBack,
-}
-
-/// A qualifier in a list comprehension.
-enum ComprehensionQualifier {
-    /// `pat <- expr` -- draw elements from a list
-    Generator(Pat, Expr),
-    /// `expr` -- boolean guard/filter
-    Guard(Expr),
-    /// `let pat = expr` -- local binding
-    Let(Pat, Expr),
 }

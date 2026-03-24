@@ -691,6 +691,56 @@ fn format_expr(expr: &Expr) -> Doc {
             docs![Doc::text("("), format_expr(expr), Doc::text(" : "), format_type_expr(type_expr), Doc::text(")")]
         }
 
+        ExprKind::Pipe { left, right } => {
+            docs![format_expr(left), Doc::hardline(), Doc::text("|> "), format_expr(right)]
+        }
+        ExprKind::PipeBack { left, right } => {
+            docs![format_expr(left), Doc::text(" <| "), format_expr(right)]
+        }
+        ExprKind::ComposeForward { left, right } => {
+            docs![format_expr(left), Doc::text(" >> "), format_expr(right)]
+        }
+        ExprKind::ComposeBack { left, right } => {
+            docs![format_expr(left), Doc::text(" << "), format_expr(right)]
+        }
+        ExprKind::Cons { head, tail } => {
+            docs![format_expr(head), Doc::text(" :: "), format_expr(tail)]
+        }
+        ExprKind::ListLit { elements } => {
+            if elements.is_empty() {
+                Doc::text("[]")
+            } else {
+                let elem_docs: Vec<Doc> = elements.iter().map(format_expr).collect();
+                docs![Doc::text("["), Doc::join(Doc::text(", "), elem_docs), Doc::text("]")]
+            }
+        }
+        ExprKind::StringInterp { parts } => {
+            let mut s = String::from("$\"");
+            for part in parts {
+                match part {
+                    StringPart::Lit(text) => s.push_str(text),
+                    StringPart::Expr(_) => s.push_str("{...}"), // TODO: format expr inside
+                }
+            }
+            s.push('"');
+            Doc::text(s)
+        }
+        ExprKind::ListComprehension { body, qualifiers } => {
+            let mut parts = vec![Doc::text("["), format_expr(body), Doc::text(" | ")];
+            let qual_docs: Vec<Doc> = qualifiers.iter().map(|q| match q {
+                ComprehensionQualifier::Generator(pat, expr) => {
+                    docs![format_pat(pat), Doc::text(" <- "), format_expr(expr)]
+                }
+                ComprehensionQualifier::Guard(expr) => format_expr(expr),
+                ComprehensionQualifier::Let(pat, expr) => {
+                    docs![Doc::text("let "), format_pat(pat), Doc::text(" = "), format_expr(expr)]
+                }
+            }).collect();
+            parts.push(Doc::join(Doc::text(", "), qual_docs));
+            parts.push(Doc::text("]"));
+            docs_from_vec(parts)
+        }
+
         // Elaboration-only -- shouldn't appear in formatter input
         ExprKind::DictMethodAccess { .. }
         | ExprKind::DictRef { .. }

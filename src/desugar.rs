@@ -1,0 +1,386 @@
+//! Desugaring pass: transforms surface syntax AST into core AST.
+//!
+//! Runs after parsing and derive expansion, before typechecking.
+//! Transforms sugar-preserving AST nodes into the forms the typechecker expects:
+//!
+//! - `Pipe { left, right }` → `App(right, left)`
+//! - `PipeBack { left, right }` → `App(left, right)`
+//! - `ComposeForward { left, right }` → `fun _x -> right (left _x)`
+//! - `ComposeBack { left, right }` → `fun _x -> left (right _x)`
+//! - `Cons { head, tail }` → `App(App(Constructor("Cons"), head), tail)`
+//! - `ListLit { elements }` → nested `Cons`/`Nil` chain
+//! - `StringInterp { parts }` → `show(expr) <> literal <> ...`
+//! - `ListComprehension { body, qualifiers }` → `flat_map`/`if`/`let`
+
+use crate::ast::*;
+use crate::token::Span;
+
+/// Desugar all surface syntax in a program, in place.
+#[allow(clippy::ptr_arg)]
+pub fn desugar_program(program: &mut Vec<Decl>) {
+    for decl in program.iter_mut() {
+        desugar_decl(decl);
+    }
+}
+
+fn desugar_decl(decl: &mut Decl) {
+    match decl {
+        Decl::FunBinding { body, guard, .. } => {
+            desugar_expr(body);
+            if let Some(g) = guard {
+                desugar_expr(g);
+            }
+        }
+        Decl::Let { value, .. } => {
+            desugar_expr(value);
+        }
+        Decl::HandlerDef { arms, recovered_arms, return_clause, .. } => {
+            for arm in arms.iter_mut().chain(recovered_arms.iter_mut()) {
+                desugar_expr(&mut arm.body);
+            }
+            if let Some(rc) = return_clause {
+                desugar_expr(&mut rc.body);
+            }
+        }
+        Decl::ImplDef { methods, .. } => {
+            for (_, _, _, body) in methods.iter_mut() {
+                desugar_expr(body);
+            }
+        }
+        // Declarations without expression bodies
+        Decl::FunSignature { .. }
+        | Decl::TypeDef { .. }
+        | Decl::RecordDef { .. }
+        | Decl::EffectDef { .. }
+        | Decl::TraitDef { .. }
+        | Decl::Import { .. }
+        | Decl::ModuleDecl { .. }
+        | Decl::DictConstructor { .. } => {}
+    }
+}
+
+fn desugar_expr(expr: &mut Expr) {
+    // First, recurse into sub-expressions (bottom-up)
+    match &mut expr.kind {
+        ExprKind::App { func, arg } => {
+            desugar_expr(func);
+            desugar_expr(arg);
+        }
+        ExprKind::BinOp { left, right, .. } => {
+            desugar_expr(left);
+            desugar_expr(right);
+        }
+        ExprKind::UnaryMinus { expr: inner } => desugar_expr(inner),
+        ExprKind::If { cond, then_branch, else_branch } => {
+            desugar_expr(cond);
+            desugar_expr(then_branch);
+            desugar_expr(else_branch);
+        }
+        ExprKind::Case { scrutinee, arms } => {
+            desugar_expr(scrutinee);
+            for arm in arms {
+                if let Some(g) = &mut arm.guard {
+                    desugar_expr(g);
+                }
+                desugar_expr(&mut arm.body);
+            }
+        }
+        ExprKind::Block { stmts } => {
+            for stmt in stmts {
+                desugar_stmt(stmt);
+            }
+        }
+        ExprKind::Lambda { body, .. } => desugar_expr(body),
+        ExprKind::FieldAccess { expr: inner, .. } => desugar_expr(inner),
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+            for (_, _, val) in fields {
+                desugar_expr(val);
+            }
+        }
+        ExprKind::RecordUpdate { record, fields, .. } => {
+            desugar_expr(record);
+            for (_, _, val) in fields {
+                desugar_expr(val);
+            }
+        }
+        ExprKind::EffectCall { args, .. } => {
+            for arg in args {
+                desugar_expr(arg);
+            }
+        }
+        ExprKind::With { expr: inner, handler } => {
+            desugar_expr(inner);
+            desugar_handler(handler);
+        }
+        ExprKind::Resume { value } => desugar_expr(value),
+        ExprKind::Tuple { elements } => {
+            for e in elements {
+                desugar_expr(e);
+            }
+        }
+        ExprKind::Do { bindings, success, else_arms } => {
+            for (_, e) in bindings {
+                desugar_expr(e);
+            }
+            desugar_expr(success);
+            for arm in else_arms {
+                if let Some(g) = &mut arm.guard {
+                    desugar_expr(g);
+                }
+                desugar_expr(&mut arm.body);
+            }
+        }
+        ExprKind::Receive { arms, after_clause } => {
+            for arm in arms {
+                if let Some(g) = &mut arm.guard {
+                    desugar_expr(g);
+                }
+                desugar_expr(&mut arm.body);
+            }
+            if let Some((timeout, body)) = after_clause {
+                desugar_expr(timeout);
+                desugar_expr(body);
+            }
+        }
+        ExprKind::Ascription { expr: inner, .. } => desugar_expr(inner),
+
+        // Sugar nodes: recurse into children before transforming
+        ExprKind::Pipe { left, right }
+        | ExprKind::PipeBack { left, right }
+        | ExprKind::ComposeForward { left, right }
+        | ExprKind::ComposeBack { left, right }
+        | ExprKind::Cons { head: left, tail: right } => {
+            desugar_expr(left);
+            desugar_expr(right);
+        }
+        ExprKind::ListLit { elements } => {
+            for e in elements {
+                desugar_expr(e);
+            }
+        }
+        ExprKind::StringInterp { parts } => {
+            for part in parts {
+                if let StringPart::Expr(e) = part {
+                    desugar_expr(e);
+                }
+            }
+        }
+        ExprKind::ListComprehension { body, qualifiers } => {
+            desugar_expr(body);
+            for q in qualifiers {
+                match q {
+                    ComprehensionQualifier::Generator(_, e) | ComprehensionQualifier::Let(_, e) => desugar_expr(e),
+                    ComprehensionQualifier::Guard(e) => desugar_expr(e),
+                }
+            }
+        }
+
+        // Leaves
+        ExprKind::Lit { .. }
+        | ExprKind::Var { .. }
+        | ExprKind::Constructor { .. }
+        | ExprKind::QualifiedName { .. }
+        | ExprKind::DictMethodAccess { .. }
+        | ExprKind::DictRef { .. }
+        | ExprKind::ForeignCall { .. } => {}
+    }
+
+    // Now transform the current node if it's a sugar form
+    let span = expr.span;
+    match &mut expr.kind {
+        ExprKind::Pipe { .. } => {
+            // x |> f  →  App(f, x)
+            let ExprKind::Pipe { left, right } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            expr.kind = ExprKind::App {
+                func: right,
+                arg: left,
+            };
+        }
+        ExprKind::PipeBack { .. } => {
+            // f <| x  →  App(f, x)
+            let ExprKind::PipeBack { left, right } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            expr.kind = ExprKind::App {
+                func: left,
+                arg: right,
+            };
+        }
+        ExprKind::ComposeForward { .. } => {
+            // f >> g  →  fun _x -> g (f _x)
+            let ExprKind::ComposeForward { left, right } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            expr.kind = desugar_compose(*left, *right, span);
+        }
+        ExprKind::ComposeBack { .. } => {
+            // f << g  →  fun _x -> f (g _x)
+            let ExprKind::ComposeBack { left, right } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            expr.kind = desugar_compose(*right, *left, span);
+        }
+        ExprKind::Cons { .. } => {
+            // x :: xs  →  App(App(Cons, x), xs)
+            let ExprKind::Cons { head, tail } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            let cons = Expr::synth(span, ExprKind::Constructor { name: "Cons".into() });
+            let app1 = Expr::synth(span, ExprKind::App { func: Box::new(cons), arg: head });
+            expr.kind = ExprKind::App { func: Box::new(app1), arg: tail };
+        }
+        ExprKind::ListLit { .. } => {
+            let ExprKind::ListLit { elements } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            if elements.is_empty() {
+                expr.kind = ExprKind::Constructor { name: "Nil".into() };
+            } else {
+                // Build from right to left: Nil, then wrap each element
+                let mut result = Expr::synth(span, ExprKind::Constructor { name: "Nil".into() });
+                for elem in elements.into_iter().rev() {
+                    let elem_span = elem.span;
+                    let cons = Expr::synth(elem_span, ExprKind::Constructor { name: "Cons".into() });
+                    let app1 = Expr::synth(elem_span, ExprKind::App { func: Box::new(cons), arg: Box::new(elem) });
+                    result = Expr::synth(elem_span.to(span), ExprKind::App { func: Box::new(app1), arg: Box::new(result) });
+                }
+                *expr = result;
+            }
+        }
+        ExprKind::StringInterp { .. } => {
+            let ExprKind::StringInterp { parts } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            let mut segments: Vec<Expr> = Vec::new();
+            for part in parts {
+                match part {
+                    StringPart::Lit(s) => {
+                        if !s.is_empty() {
+                            segments.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(s) }));
+                        }
+                    }
+                    StringPart::Expr(hole_expr) => {
+                        // Wrap in show(expr)
+                        let show = Expr::synth(span, ExprKind::Var { name: "show".into() });
+                        segments.push(Expr::synth(span, ExprKind::App {
+                            func: Box::new(show),
+                            arg: Box::new(hole_expr),
+                        }));
+                    }
+                }
+            }
+            // Fold into left-associative <> chain
+            let result = segments.into_iter().reduce(|left, right| {
+                Expr::synth(span, ExprKind::BinOp {
+                    op: BinOp::Concat,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                })
+            });
+            expr.kind = result.map(|e| e.kind).unwrap_or(ExprKind::Lit { value: Lit::String(String::new()) });
+        }
+        ExprKind::ListComprehension { .. } => {
+            let ExprKind::ListComprehension { body, qualifiers } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            *expr = desugar_comprehension(*body, &qualifiers, span);
+        }
+        _ => {}
+    }
+}
+
+fn desugar_stmt(stmt: &mut Stmt) {
+    match stmt {
+        Stmt::Let { value, .. } => desugar_expr(value),
+        Stmt::LetFun { body, guard, .. } => {
+            desugar_expr(body);
+            if let Some(g) = guard {
+                desugar_expr(g);
+            }
+        }
+        Stmt::Expr(e) => desugar_expr(e),
+    }
+}
+
+fn desugar_handler(handler: &mut Handler) {
+    match handler {
+        Handler::Named(..) => {}
+        Handler::Inline { arms, return_clause, .. } => {
+            for arm in arms {
+                desugar_expr(&mut arm.body);
+            }
+            if let Some(rc) = return_clause {
+                desugar_expr(&mut rc.body);
+            }
+        }
+    }
+}
+
+// --- Desugaring helpers ---
+
+/// `first >> second` → `fun _x -> second (first _x)`
+fn desugar_compose(first: Expr, second: Expr, span: Span) -> ExprKind {
+    let param = Pat::Var {
+        id: NodeId::fresh(),
+        name: "_x".into(),
+        span,
+    };
+    let arg = Expr::synth(span, ExprKind::Var { name: "_x".into() });
+    let inner = Expr::synth(span, ExprKind::App { func: Box::new(first), arg: Box::new(arg) });
+    let body = Expr::synth(span, ExprKind::App { func: Box::new(second), arg: Box::new(inner) });
+    ExprKind::Lambda {
+        params: vec![param],
+        body: Box::new(body),
+    }
+}
+
+/// Build Cons(elem, Nil) -- a singleton list.
+fn make_singleton_list(elem: Expr, span: Span) -> Expr {
+    let nil = Expr::synth(span, ExprKind::Constructor { name: "Nil".into() });
+    let cons = Expr::synth(span, ExprKind::Constructor { name: "Cons".into() });
+    let app1 = Expr::synth(span, ExprKind::App { func: Box::new(cons), arg: Box::new(elem) });
+    Expr::synth(span, ExprKind::App { func: Box::new(app1), arg: Box::new(nil) })
+}
+
+/// Recursively desugar list comprehension qualifiers.
+fn desugar_comprehension(body: Expr, qualifiers: &[ComprehensionQualifier], span: Span) -> Expr {
+    if qualifiers.is_empty() {
+        // Base case: [e] ==> Cons(e, Nil)
+        return make_singleton_list(body, span);
+    }
+
+    match &qualifiers[0] {
+        ComprehensionQualifier::Generator(pat, source) => {
+            // [e | p <- l, Q] ==> flat_map (fun p -> [e | Q]) l
+            let inner = desugar_comprehension(body, &qualifiers[1..], span);
+            let lambda = Expr::synth(span, ExprKind::Lambda {
+                params: vec![pat.clone()],
+                body: Box::new(inner),
+            });
+            let flat_map = Expr::synth(span, ExprKind::QualifiedName {
+                module: "List".into(),
+                name: "flat_map".into(),
+            });
+            let app1 = Expr::synth(span, ExprKind::App {
+                func: Box::new(flat_map),
+                arg: Box::new(lambda),
+            });
+            Expr::synth(span, ExprKind::App {
+                func: Box::new(app1),
+                arg: Box::new(source.clone()),
+            })
+        }
+        ComprehensionQualifier::Guard(guard) => {
+            // [e | g, Q] ==> if g then [e | Q] else []
+            let then_branch = desugar_comprehension(body, &qualifiers[1..], span);
+            let else_branch = Expr::synth(span, ExprKind::Constructor { name: "Nil".into() });
+            Expr::synth(span, ExprKind::If {
+                cond: Box::new(guard.clone()),
+                then_branch: Box::new(then_branch),
+                else_branch: Box::new(else_branch),
+            })
+        }
+        ComprehensionQualifier::Let(pat, value) => {
+            // [e | let p = v, Q] ==> { let p = v; [e | Q] }
+            let inner = desugar_comprehension(body, &qualifiers[1..], span);
+            Expr::synth(span, ExprKind::Block {
+                stmts: vec![
+                    Stmt::Let {
+                        pattern: pat.clone(),
+                        annotation: None,
+                        value: value.clone(),
+                        assert: false,
+                        span,
+                    },
+                    Stmt::Expr(inner),
+                ],
+            })
+        }
+    }
+}

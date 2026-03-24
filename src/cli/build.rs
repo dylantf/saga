@@ -1,4 +1,6 @@
-use dylang::{ast, codegen, derive, elaborate, lexer, parser, project_config, typechecker};
+use dylang::{
+    ast, codegen, derive, desugar, elaborate, lexer, parser, project_config, typechecker,
+};
 use project_config::ProjectConfig;
 
 use std::collections::HashMap;
@@ -46,6 +48,7 @@ pub fn parse_and_typecheck_inner(
         }
     };
     derive::expand_derives(&mut program);
+    desugar::desugar_program(&mut program);
     let result = checker.check_program(&program);
     for w in result.warnings() {
         print_tc_diagnostic(source, source_path, w);
@@ -83,9 +86,7 @@ pub fn emit_module(
 }
 
 /// Typecheck and elaborate Std modules. Returns their elaborated programs.
-pub fn compile_std_modules(
-    result: &typechecker::CheckResult,
-) -> HashMap<String, ast::Program> {
+pub fn compile_std_modules(result: &typechecker::CheckResult) -> HashMap<String, ast::Program> {
     let mut elaborated_modules = HashMap::new();
 
     for (module_name, mod_result) in result.module_check_results() {
@@ -106,12 +107,30 @@ pub fn compile_std_modules(
 /// Returns embedded stdlib bridge (.erl) files as (filename, source) pairs.
 fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("std_file_bridge.erl", include_str!("../stdlib/File.bridge.erl")),
-        ("std_dict_bridge.erl", include_str!("../stdlib/Dict.bridge.erl")),
-        ("std_string_bridge.erl", include_str!("../stdlib/String.bridge.erl")),
-        ("std_int_bridge.erl", include_str!("../stdlib/Int.bridge.erl")),
-        ("std_float_bridge.erl", include_str!("../stdlib/Float.bridge.erl")),
-        ("std_regex_bridge.erl", include_str!("../stdlib/Regex.bridge.erl")),
+        (
+            "std_file_bridge.erl",
+            include_str!("../stdlib/File.bridge.erl"),
+        ),
+        (
+            "std_dict_bridge.erl",
+            include_str!("../stdlib/Dict.bridge.erl"),
+        ),
+        (
+            "std_string_bridge.erl",
+            include_str!("../stdlib/String.bridge.erl"),
+        ),
+        (
+            "std_int_bridge.erl",
+            include_str!("../stdlib/Int.bridge.erl"),
+        ),
+        (
+            "std_float_bridge.erl",
+            include_str!("../stdlib/Float.bridge.erl"),
+        ),
+        (
+            "std_regex_bridge.erl",
+            include_str!("../stdlib/Regex.bridge.erl"),
+        ),
     ]
 }
 
@@ -131,7 +150,11 @@ fn copy_project_bridges(roots: &[&Path], build_dir: &Path) {
     let mut count = 0;
     for root in roots {
         if let Err(e) = copy_bridges_from_dir(root, build_dir, &mut count) {
-            eprintln!("Error scanning for bridge files in {}: {}", root.display(), e);
+            eprintln!(
+                "Error scanning for bridge files in {}: {}",
+                root.display(),
+                e
+            );
             std::process::exit(1);
         }
     }
@@ -140,18 +163,16 @@ fn copy_project_bridges(roots: &[&Path], build_dir: &Path) {
     }
 }
 
-fn copy_bridges_from_dir(
-    dir: &Path,
-    build_dir: &Path,
-    count: &mut usize,
-) -> Result<(), String> {
-    let entries =
-        fs::read_dir(dir).map_err(|e| format!("cannot read {}: {}", dir.display(), e))?;
+fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("cannot read {}: {}", dir.display(), e))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("read_dir error: {}", e))?;
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "_build" || n == "tests") {
+            if path
+                .file_name()
+                .is_some_and(|n| n == "_build" || n == "tests")
+            {
                 continue;
             }
             copy_bridges_from_dir(&path, build_dir, count)?;
@@ -159,7 +180,12 @@ fn copy_bridges_from_dir(
             let filename = path.file_name().unwrap();
             let dest = build_dir.join(filename);
             fs::copy(&path, &dest).map_err(|e| {
-                format!("cannot copy {} to {}: {}", path.display(), dest.display(), e)
+                format!(
+                    "cannot copy {} to {}: {}",
+                    path.display(),
+                    dest.display(),
+                    e
+                )
             })?;
             *count += 1;
         }
@@ -283,10 +309,7 @@ pub fn build_project(
                 if module_map.contains_key(exposed) {
                     checker.typecheck_import_by_name(exposed);
                 } else {
-                    eprintln!(
-                        "Error: exposed module '{}' not found in project",
-                        exposed
-                    );
+                    eprintln!("Error: exposed module '{}' not found in project", exposed);
                     std::process::exit(1);
                 }
             }
@@ -341,6 +364,7 @@ pub fn build_project(
                 })
         };
         derive::expand_derives(&mut program);
+        desugar::desugar_program(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
         let mod_result = mod_checker.check_program(&program);

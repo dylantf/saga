@@ -3,13 +3,14 @@ use super::emit_module;
 use super::{emit_module_with_context, CodegenContext};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
-use crate::{derive, elaborate, typechecker};
+use crate::{derive, desugar, elaborate, typechecker};
 
 /// Parse `src` and emit Core Erlang for a single-file script module.
 /// Skips typechecking and elaboration — only tests basic lowering.
 fn emit(src: &str) -> String {
     let tokens = Lexer::new(src).lex().expect("lex error");
-    let program = Parser::new(tokens).parse_program().expect("parse error");
+    let mut program = Parser::new(tokens).parse_program().expect("parse error");
+    desugar::desugar_program(&mut program);
     emit_module("_script", &program)
 }
 
@@ -18,6 +19,7 @@ fn emit_full(src: &str) -> String {
     let tokens = Lexer::new(src).lex().expect("lex error");
     let mut program = Parser::new(tokens).parse_program().expect("parse error");
     derive::expand_derives(&mut program);
+    desugar::desugar_program(&mut program);
 
     let mut checker = typechecker::Checker::with_prelude(None).expect("prelude error");
     let result = checker.check_program(&program);

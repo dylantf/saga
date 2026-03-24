@@ -458,6 +458,7 @@ impl Checker {
                 )
             })?;
         crate::derive::expand_derives(&mut program);
+        crate::desugar::desugar_program(&mut program);
 
         // Cache the parsed program so the build step can skip re-parsing
         self.modules
@@ -487,6 +488,7 @@ impl Checker {
                     .parse_program()
                     .expect("prelude parse error");
                 crate::derive::expand_derives(&mut prelude_program);
+                crate::desugar::desugar_program(&mut prelude_program);
                 snapshot
                     .check_program_inner(&prelude_program)
                     .expect("prelude type errors");

@@ -365,17 +365,13 @@ fn application_binds_tighter_than_binop() {
 
 #[test]
 fn forward_pipe() {
-    // x |> f desugars to App(f, x)
     let expr = parse_expr("x |> f");
     match expr {
-        Expr {
-            kind: ExprKind::App { func, arg, .. },
-            ..
-        } => {
-            assert!(matches!(*func, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
-            assert!(matches!(*arg, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
+        Expr { kind: ExprKind::Pipe { left, right }, .. } => {
+            assert!(matches!(*left, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
+            assert!(matches!(*right, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
         }
-        _ => panic!("expected App from pipe, got {:?}", expr),
+        _ => panic!("expected Pipe, got {:?}", expr),
     }
 }
 
@@ -401,64 +397,34 @@ fn type_ascription_lower_than_pipe() {
     // `x |> f : Int` should parse as `(x |> f) : Int`
     let expr = parse_expr("x |> f : Int");
     match expr {
-        Expr {
-            kind: ExprKind::Ascription { expr, .. },
-            ..
-        } => {
-            assert!(matches!(
-                *expr,
-                Expr {
-                    kind: ExprKind::App { .. },
-                    ..
-                }
-            ));
+        Expr { kind: ExprKind::Ascription { expr, .. }, .. } => {
+            assert!(matches!(*expr, Expr { kind: ExprKind::Pipe { .. }, .. }));
         }
-        _ => panic!("expected Ascription wrapping App, got {:?}", expr),
+        _ => panic!("expected Ascription wrapping Pipe, got {:?}", expr),
     }
 }
 
 #[test]
 fn backward_pipe() {
-    // f <| x desugars to App(f, x)
     let expr = parse_expr("f <| x");
     match expr {
-        Expr {
-            kind: ExprKind::App { func, arg, .. },
-            ..
-        } => {
-            assert!(matches!(*func, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
-            assert!(matches!(*arg, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
+        Expr { kind: ExprKind::PipeBack { left, right }, .. } => {
+            assert!(matches!(*left, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
+            assert!(matches!(*right, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
         }
-        _ => panic!("expected App from backward pipe, got {:?}", expr),
+        _ => panic!("expected PipeBack, got {:?}", expr),
     }
 }
 
 #[test]
 fn cons_operator_expr() {
-    // x :: xs  desugars to  App(App(Cons, x), xs)
     let expr = parse_expr("x :: xs");
     match expr {
-        Expr {
-            kind: ExprKind::App { func, arg, .. },
-            ..
-        } => {
-            assert!(matches!(*arg, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "xs"));
-            match *func {
-                Expr {
-                    kind: ExprKind::App { func, arg, .. },
-                    ..
-                } => {
-                    assert!(
-                        matches!(*func, Expr { kind: ExprKind::Constructor { name, .. }, .. } if name == "Cons")
-                    );
-                    assert!(
-                        matches!(*arg, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x")
-                    );
-                }
-                _ => panic!("expected inner App"),
-            }
+        Expr { kind: ExprKind::Cons { head, tail }, .. } => {
+            assert!(matches!(*head, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
+            assert!(matches!(*tail, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "xs"));
         }
-        _ => panic!("expected App from ::, got {:?}", expr),
+        _ => panic!("expected Cons, got {:?}", expr),
     }
 }
 
@@ -466,22 +432,13 @@ fn cons_operator_expr() {
 fn cons_operator_right_associative() {
     // 1 :: 2 :: xs  =>  Cons(1, Cons(2, xs))
     let expr = parse_expr("1 :: 2 :: xs");
-    // Outer: App(App(Cons, 1), <inner>)
     match expr {
-        Expr {
-            kind: ExprKind::App { arg, .. },
-            ..
-        } => {
-            // arg is Cons(2, xs)
-            assert!(matches!(
-                *arg,
-                Expr {
-                    kind: ExprKind::App { .. },
-                    ..
-                }
-            ));
+        Expr { kind: ExprKind::Cons { head, tail }, .. } => {
+            assert!(matches!(*head, Expr { kind: ExprKind::Lit { value: Lit::Int(1), .. }, .. }));
+            // tail is Cons(2, xs)
+            assert!(matches!(*tail, Expr { kind: ExprKind::Cons { .. }, .. }));
         }
-        _ => panic!("expected App, got {:?}", expr),
+        _ => panic!("expected Cons, got {:?}", expr),
     }
 }
 
@@ -2241,54 +2198,62 @@ fn private_fun_annotation() {
 
 #[test]
 fn interp_empty() {
-    // $"" → ""
+    // $"" → StringInterp with no parts
     let expr = parse_expr(r#"$"""#);
-    assert!(
-        matches!(expr, Expr { kind: ExprKind::Lit { value: Lit::String(s), .. }, .. } if s.is_empty())
-    );
+    assert!(matches!(expr, Expr { kind: ExprKind::StringInterp { ref parts, .. }, .. } if parts.is_empty()));
 }
 
 #[test]
 fn interp_no_holes() {
-    // $"hello" → "hello"
+    // $"hello" → StringInterp with one literal part
     let expr = parse_expr(r#"$"hello""#);
-    assert!(
-        matches!(expr, Expr { kind: ExprKind::Lit { value: Lit::String(s), .. }, .. } if s == "hello")
-    );
+    match expr {
+        Expr { kind: ExprKind::StringInterp { parts, .. }, .. } => {
+            assert_eq!(parts.len(), 1);
+            assert!(matches!(&parts[0], StringPart::Lit(s) if s == "hello"));
+        }
+        other => panic!("expected StringInterp, got {:?}", other),
+    }
 }
 
 #[test]
 fn interp_single_hole() {
-    // $"{x}" → show(x)
+    // $"{x}" → StringInterp with one Expr part
     let expr = parse_expr(r#"$"{x}""#);
-    assert!(matches!(
-        expr,
-        Expr { kind: ExprKind::App { func, arg, .. }, .. }
-        if matches!(func.as_ref(), Expr { kind: ExprKind::Var { name, .. }, .. } if name == "show")
-        && matches!(arg.as_ref(), Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x")
-    ));
+    match expr {
+        Expr { kind: ExprKind::StringInterp { parts, .. }, .. } => {
+            assert_eq!(parts.len(), 1);
+            assert!(matches!(&parts[0], StringPart::Expr(e) if matches!(&e.kind, ExprKind::Var { name, .. } if name == "x")));
+        }
+        other => panic!("expected StringInterp, got {:?}", other),
+    }
 }
 
 #[test]
 fn interp_literal_and_hole() {
-    // $"hello {name}" → "hello " <> show(name)
+    // $"hello {name}" → StringInterp with literal + expr
     let expr = parse_expr(r#"$"hello {name}""#);
-    assert!(matches!(
-        expr,
-        Expr { kind: ExprKind::BinOp { op: BinOp::Concat, left, right, .. }, .. }
-        if matches!(left.as_ref(), Expr { kind: ExprKind::Lit { value: Lit::String(s), .. }, .. } if s == "hello ")
-        && matches!(right.as_ref(), Expr { kind: ExprKind::App { func, .. }, .. }
-            if matches!(func.as_ref(), Expr { kind: ExprKind::Var { name, .. }, .. } if name == "show"))
-    ));
+    match expr {
+        Expr { kind: ExprKind::StringInterp { parts, .. }, .. } => {
+            assert_eq!(parts.len(), 2);
+            assert!(matches!(&parts[0], StringPart::Lit(s) if s == "hello "));
+            assert!(matches!(&parts[1], StringPart::Expr(e) if matches!(&e.kind, ExprKind::Var { name, .. } if name == "name")));
+        }
+        other => panic!("expected StringInterp, got {:?}", other),
+    }
 }
 
 #[test]
 fn interp_escaped_braces() {
-    // $"\{" → "{"
+    // $"\{" → StringInterp with literal "{"
     let expr = parse_expr("$\"\\{\"");
-    assert!(
-        matches!(expr, Expr { kind: ExprKind::Lit { value: Lit::String(s), .. }, .. } if s == "{")
-    );
+    match expr {
+        Expr { kind: ExprKind::StringInterp { parts, .. }, .. } => {
+            assert_eq!(parts.len(), 1);
+            assert!(matches!(&parts[0], StringPart::Lit(s) if s == "{"));
+        }
+        other => panic!("expected StringInterp, got {:?}", other),
+    }
 }
 
 #[test]
@@ -2301,191 +2266,78 @@ fn interp_pipe_in_hole() {
 
 #[test]
 fn list_comprehension_simple_generator() {
-    // [x | x <- xs] ==> flat_map (fun x -> Cons(x, Nil)) xs
     let expr = parse_expr("[x | x <- xs]");
     match expr {
-        Expr {
-            kind: ExprKind::App { func, arg, .. },
-            ..
-        } => {
-            // arg should be `xs`
-            assert!(matches!(*arg, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "xs"));
-            // func should be `flat_map (fun x -> ...)`
-            match *func {
-                Expr {
-                    kind: ExprKind::App { func, arg, .. },
-                    ..
-                } => {
-                    assert!(
-                        matches!(*func, Expr { kind: ExprKind::QualifiedName { module, name, .. }, .. } if module == "List" && name == "flat_map")
-                    );
-                    assert!(matches!(
-                        *arg,
-                        Expr {
-                            kind: ExprKind::Lambda { .. },
-                            ..
-                        }
-                    ));
-                }
-                other => panic!("expected App(flat_map, lambda), got {:?}", other),
-            }
+        Expr { kind: ExprKind::ListComprehension { body, qualifiers }, .. } => {
+            assert!(matches!(*body, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
+            assert_eq!(qualifiers.len(), 1);
+            assert!(matches!(&qualifiers[0], ComprehensionQualifier::Generator(
+                Pat::Var { name, .. }, _
+            ) if name == "x"));
         }
-        other => panic!("expected App, got {:?}", other),
+        other => panic!("expected ListComprehension, got {:?}", other),
     }
 }
 
 #[test]
 fn list_comprehension_with_guard() {
-    // [x | x <- xs, x > 0] ==> flat_map (fun x -> if x > 0 then [x] else []) xs
     let expr = parse_expr("[x | x <- xs, x > 0]");
     match expr {
-        Expr {
-            kind: ExprKind::App { func, .. },
-            ..
-        } => {
-            match *func {
-                Expr {
-                    kind: ExprKind::App { arg: lambda, .. },
-                    ..
-                } => {
-                    match *lambda {
-                        Expr {
-                            kind: ExprKind::Lambda { body, .. },
-                            ..
-                        } => {
-                            // body should be an If expression (the guard)
-                            assert!(matches!(
-                                *body,
-                                Expr {
-                                    kind: ExprKind::If { .. },
-                                    ..
-                                }
-                            ));
-                        }
-                        other => panic!("expected Lambda, got {:?}", other),
-                    }
-                }
-                other => panic!("expected App, got {:?}", other),
-            }
+        Expr { kind: ExprKind::ListComprehension { qualifiers, .. }, .. } => {
+            assert_eq!(qualifiers.len(), 2);
+            assert!(matches!(&qualifiers[0], ComprehensionQualifier::Generator(..)));
+            assert!(matches!(&qualifiers[1], ComprehensionQualifier::Guard(..)));
         }
-        other => panic!("expected App, got {:?}", other),
+        other => panic!("expected ListComprehension, got {:?}", other),
     }
 }
 
 #[test]
 fn list_comprehension_nested_generators() {
-    // [x + y | x <- xs, y <- ys] ==> flat_map (fun x -> flat_map (fun y -> [x+y]) ys) xs
     let expr = parse_expr("[x + y | x <- xs, y <- ys]");
     match expr {
-        Expr {
-            kind: ExprKind::App { func, arg, .. },
-            ..
-        } => {
-            assert!(matches!(*arg, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "xs"));
-            match *func {
-                Expr {
-                    kind:
-                        ExprKind::App {
-                            func, arg: lambda, ..
-                        },
-                    ..
-                } => {
-                    assert!(
-                        matches!(*func, Expr { kind: ExprKind::QualifiedName { module, name, .. }, .. } if module == "List" && name == "flat_map")
-                    );
-                    match *lambda {
-                        Expr {
-                            kind: ExprKind::Lambda { body, .. },
-                            ..
-                        } => {
-                            // body should be another flat_map call
-                            assert!(matches!(
-                                *body,
-                                Expr {
-                                    kind: ExprKind::App { .. },
-                                    ..
-                                }
-                            ));
-                        }
-                        other => panic!("expected Lambda, got {:?}", other),
-                    }
-                }
-                other => panic!("expected App, got {:?}", other),
-            }
+        Expr { kind: ExprKind::ListComprehension { qualifiers, .. }, .. } => {
+            assert_eq!(qualifiers.len(), 2);
+            assert!(matches!(&qualifiers[0], ComprehensionQualifier::Generator(
+                Pat::Var { name, .. }, _
+            ) if name == "x"));
+            assert!(matches!(&qualifiers[1], ComprehensionQualifier::Generator(
+                Pat::Var { name, .. }, _
+            ) if name == "y"));
         }
-        other => panic!("expected App, got {:?}", other),
+        other => panic!("expected ListComprehension, got {:?}", other),
     }
 }
 
 #[test]
 fn list_comprehension_with_let() {
-    // [y | x <- xs, let y = x + 1] ==> flat_map (fun x -> { let y = x + 1; [y] }) xs
     let expr = parse_expr("[y | x <- xs, let y = x + 1]");
     match expr {
-        Expr {
-            kind: ExprKind::App { func, .. },
-            ..
-        } => match *func {
-            Expr {
-                kind: ExprKind::App { arg: lambda, .. },
-                ..
-            } => match *lambda {
-                Expr {
-                    kind: ExprKind::Lambda { body, .. },
-                    ..
-                } => {
-                    assert!(matches!(
-                        *body,
-                        Expr {
-                            kind: ExprKind::Block { .. },
-                            ..
-                        }
-                    ));
-                }
-                other => panic!("expected Lambda, got {:?}", other),
-            },
-            other => panic!("expected App, got {:?}", other),
-        },
-        other => panic!("expected App, got {:?}", other),
+        Expr { kind: ExprKind::ListComprehension { qualifiers, .. }, .. } => {
+            assert_eq!(qualifiers.len(), 2);
+            assert!(matches!(&qualifiers[0], ComprehensionQualifier::Generator(..)));
+            assert!(matches!(&qualifiers[1], ComprehensionQualifier::Let(..)));
+        }
+        other => panic!("expected ListComprehension, got {:?}", other),
     }
 }
 
 #[test]
 fn empty_list_still_works() {
     let expr = parse_expr("[]");
-    assert!(matches!(expr, Expr { kind: ExprKind::Constructor { name, .. }, .. } if name == "Nil"));
+    assert!(matches!(expr, Expr { kind: ExprKind::ListLit { ref elements, .. }, .. } if elements.is_empty()));
 }
 
 #[test]
 fn normal_list_still_works() {
-    // [1, 2] should still desugar to Cons(1, Cons(2, Nil))
     let expr = parse_expr("[1, 2]");
     match expr {
-        Expr {
-            kind: ExprKind::App { func, arg, .. },
-            ..
-        } => {
-            // arg is Cons(2, Nil)
-            assert!(matches!(
-                *arg,
-                Expr {
-                    kind: ExprKind::App { .. },
-                    ..
-                }
-            ));
-            match *func {
-                Expr {
-                    kind: ExprKind::App { func, .. },
-                    ..
-                } => {
-                    assert!(
-                        matches!(*func, Expr { kind: ExprKind::Constructor { name, .. }, .. } if name == "Cons")
-                    );
-                }
-                other => panic!("expected App(Cons, ...), got {:?}", other),
-            }
+        Expr { kind: ExprKind::ListLit { elements, .. }, .. } => {
+            assert_eq!(elements.len(), 2);
+            assert!(matches!(&elements[0], Expr { kind: ExprKind::Lit { value: Lit::Int(1) }, .. }));
+            assert!(matches!(&elements[1], Expr { kind: ExprKind::Lit { value: Lit::Int(2) }, .. }));
         }
-        other => panic!("expected App, got {:?}", other),
+        other => panic!("expected ListLit, got {:?}", other),
     }
 }
 
@@ -2499,77 +2351,25 @@ fn list_comprehension_map_transform() {
 
 #[test]
 fn compose_forward() {
-    // f >> g  →  fun _x -> g (f _x)
     let expr = parse_expr("f >> g");
     match expr {
-        Expr {
-            kind: ExprKind::Lambda { params, body, .. },
-            ..
-        } => {
-            assert_eq!(params.len(), 1);
-            assert!(matches!(&params[0], Pat::Var { name, .. } if name == "_x"));
-            // body = g (f _x)
-            match *body {
-                Expr {
-                    kind: ExprKind::App { func, arg, .. },
-                    ..
-                } => {
-                    assert!(
-                        matches!(*func, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g")
-                    );
-                    match *arg {
-                        Expr {
-                            kind: ExprKind::App { func, arg, .. },
-                            ..
-                        } => {
-                            assert!(
-                                matches!(*func, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f")
-                            );
-                            assert!(
-                                matches!(*arg, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "_x")
-                            );
-                        }
-                        other => panic!("expected App(f, _x), got {:?}", other),
-                    }
-                }
-                other => panic!("expected App(g, ...), got {:?}", other),
-            }
+        Expr { kind: ExprKind::ComposeForward { left, right }, .. } => {
+            assert!(matches!(*left, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
+            assert!(matches!(*right, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g"));
         }
-        other => panic!("expected Lambda, got {:?}", other),
+        other => panic!("expected ComposeForward, got {:?}", other),
     }
 }
 
 #[test]
 fn compose_backward() {
-    // f << g  →  fun _x -> f (g _x)
     let expr = parse_expr("f << g");
     match expr {
-        Expr {
-            kind: ExprKind::Lambda { body, .. },
-            ..
-        } => match *body {
-            Expr {
-                kind: ExprKind::App { func, arg, .. },
-                ..
-            } => {
-                assert!(
-                    matches!(*func, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f")
-                );
-                match *arg {
-                    Expr {
-                        kind: ExprKind::App { func, .. },
-                        ..
-                    } => {
-                        assert!(
-                            matches!(*func, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g")
-                        );
-                    }
-                    other => panic!("expected App(g, _x), got {:?}", other),
-                }
-            }
-            other => panic!("expected App(f, ...), got {:?}", other),
-        },
-        other => panic!("expected Lambda, got {:?}", other),
+        Expr { kind: ExprKind::ComposeBack { left, right }, .. } => {
+            assert!(matches!(*left, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
+            assert!(matches!(*right, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g"));
+        }
+        other => panic!("expected ComposeBack, got {:?}", other),
     }
 }
 

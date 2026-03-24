@@ -469,6 +469,17 @@ impl Checker {
             | ExprKind::ForeignCall { .. } => {
                 unreachable!("elaboration-only construct in typechecker")
             }
+
+            ExprKind::Pipe { .. }
+            | ExprKind::PipeBack { .. }
+            | ExprKind::ComposeForward { .. }
+            | ExprKind::ComposeBack { .. }
+            | ExprKind::Cons { .. }
+            | ExprKind::ListLit { .. }
+            | ExprKind::StringInterp { .. }
+            | ExprKind::ListComprehension { .. } => {
+                unreachable!("surface syntax should be desugared before typechecking")
+            }
         }
     }
 

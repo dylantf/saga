@@ -1058,6 +1058,17 @@ impl Elaborator {
 
             // Elaboration-only variants (shouldn't appear in input)
             ExprKind::DictMethodAccess { .. } | ExprKind::DictRef { .. } => expr.clone(),
+
+            ExprKind::Pipe { .. }
+            | ExprKind::PipeBack { .. }
+            | ExprKind::ComposeForward { .. }
+            | ExprKind::ComposeBack { .. }
+            | ExprKind::Cons { .. }
+            | ExprKind::ListLit { .. }
+            | ExprKind::StringInterp { .. }
+            | ExprKind::ListComprehension { .. } => {
+                unreachable!("surface syntax should be desugared before elaboration")
+            }
         }
     }
 

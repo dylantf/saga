@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod codegen;
 pub mod derive;
+pub mod desugar;
 pub mod elaborate;
 pub mod formatter;
 pub mod lexer;

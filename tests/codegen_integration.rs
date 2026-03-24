@@ -1,4 +1,4 @@
-use dylang::{codegen, elaborate, lexer, parser, typechecker};
+use dylang::{codegen, desugar, elaborate, lexer, parser, typechecker};
 
 /// Load prelude (which imports Std + stdlib) into a checker.
 fn bootstrap() -> typechecker::Checker {
@@ -7,9 +7,10 @@ fn bootstrap() -> typechecker::Checker {
     let prelude_tokens = lexer::Lexer::new(prelude_src)
         .lex()
         .expect("prelude lex error");
-    let prelude_program = parser::Parser::new(prelude_tokens)
+    let mut prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
+    desugar::desugar_program(&mut prelude_program);
     let result = checker.check_program(&prelude_program);
     assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
     checker
@@ -17,9 +18,10 @@ fn bootstrap() -> typechecker::Checker {
 
 fn emit(src: &str) -> String {
     let tokens = lexer::Lexer::new(src).lex().expect("lex error");
-    let program = parser::Parser::new(tokens)
+    let mut program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
+    desugar::desugar_program(&mut program);
     codegen::emit_module("_script", &program)
 }
 
@@ -38,9 +40,10 @@ fn emit_elaborated_with_std(src: &str) -> String {
 
 fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
     let tokens = lexer::Lexer::new(src).lex().expect("lex error");
-    let program = parser::Parser::new(tokens)
+    let mut program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
+    desugar::desugar_program(&mut program);
     let mut checker = bootstrap();
     let result = checker.check_program(&program);
     assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());

@@ -346,6 +346,35 @@ pub enum ExprKind {
         type_expr: TypeExpr,
     },
 
+    // --- Surface syntax (desugared before typechecking) ---
+
+    /// `x |> f` -- forward pipe (desugars to App(f, x))
+    Pipe { left: Box<Expr>, right: Box<Expr> },
+
+    /// `f <| x` -- backward pipe (desugars to App(f, x))
+    PipeBack { left: Box<Expr>, right: Box<Expr> },
+
+    /// `f >> g` -- forward compose (desugars to fun x -> g (f x))
+    ComposeForward { left: Box<Expr>, right: Box<Expr> },
+
+    /// `f << g` -- backward compose (desugars to fun x -> f (g x))
+    ComposeBack { left: Box<Expr>, right: Box<Expr> },
+
+    /// `x :: xs` -- cons (desugars to App(App(Constructor("Cons"), x), xs))
+    Cons { head: Box<Expr>, tail: Box<Expr> },
+
+    /// `[1, 2, 3]` or `[]` -- list literal (desugars to nested Cons/Nil)
+    ListLit { elements: Vec<Expr> },
+
+    /// `$"hello {name}"` -- interpolated string (desugars to show/concat chain)
+    StringInterp { parts: Vec<StringPart> },
+
+    /// `[expr | qualifiers]` -- list comprehension (desugars to flat_map/if/let)
+    ListComprehension {
+        body: Box<Expr>,
+        qualifiers: Vec<ComprehensionQualifier>,
+    },
+
     // --- Elaboration-only (never produced by the parser) ---
     /// Extract a method from a dictionary tuple (does not apply it).
     /// Lowered to `erlang:element(method_index+1, dict)`.
@@ -419,6 +448,22 @@ impl Expr {
                         .is_some_and(|(t, b)| t.contains_resume() || b.contains_resume())
             }
             ExprKind::Ascription { expr, .. } => expr.contains_resume(),
+            ExprKind::Pipe { left, right }
+            | ExprKind::PipeBack { left, right }
+            | ExprKind::ComposeForward { left, right }
+            | ExprKind::ComposeBack { left, right }
+            | ExprKind::Cons { head: left, tail: right } => {
+                left.contains_resume() || right.contains_resume()
+            }
+            ExprKind::ListLit { elements } => elements.iter().any(|e| e.contains_resume()),
+            ExprKind::StringInterp { parts } => parts.iter().any(|p| matches!(p, StringPart::Expr(e) if e.contains_resume())),
+            ExprKind::ListComprehension { body, qualifiers } => {
+                body.contains_resume()
+                    || qualifiers.iter().any(|q| match q {
+                        ComprehensionQualifier::Generator(_, e) | ComprehensionQualifier::Let(_, e) => e.contains_resume(),
+                        ComprehensionQualifier::Guard(e) => e.contains_resume(),
+                    })
+            }
             ExprKind::ForeignCall { args, .. } => args.iter().any(|e| e.contains_resume()),
             ExprKind::DictMethodAccess { dict, .. } => dict.contains_resume(),
             ExprKind::Lit { .. }
@@ -664,6 +709,26 @@ pub enum BinOp {
     And,      // &&
     Or,       // ||
     Concat,   // <>
+}
+
+/// A part of an interpolated string (`$"hello {name}"`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StringPart {
+    /// Literal text between holes.
+    Lit(String),
+    /// `{expr}` -- the raw expression inside the hole (before show wrapping).
+    Expr(Expr),
+}
+
+/// A qualifier in a list comprehension (`[expr | qualifiers]`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComprehensionQualifier {
+    /// `pat <- expr` -- generator
+    Generator(Pat, Expr),
+    /// `expr` -- guard (boolean filter)
+    Guard(Expr),
+    /// `let pat = expr` -- let binding
+    Let(Pat, Expr),
 }
 
 /// A constructor in a type definition, e.g. Some(a) or None

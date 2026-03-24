@@ -8,6 +8,7 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
     let mut parser = Parser::new(tokens);
     let mut program = parser.parse_program().expect("parse error");
     crate::derive::expand_derives(&mut program);
+    crate::desugar::desugar_program(&mut program);
     let mut checker = Checker::new();
     // Load prelude (which imports Std first, then stdlib modules)
     let prelude_src = include_str!("../stdlib/prelude.dy");
@@ -16,6 +17,7 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
         .parse_program()
         .expect("prelude parse error");
     crate::derive::expand_derives(&mut prelude_program);
+    crate::desugar::desugar_program(&mut prelude_program);
     checker
         .check_program_inner(&prelude_program)
         .map_err(|e| e.into_iter().next().unwrap())?;

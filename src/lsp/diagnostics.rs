@@ -1,6 +1,6 @@
 use tower_lsp::lsp_types::*;
 
-use dylang::{ast, derive, lexer, parser, typechecker};
+use dylang::{ast, derive, desugar, lexer, parser, typechecker};
 
 use crate::line_index::LineIndex;
 
@@ -79,6 +79,7 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckSnapshot {
     };
 
     derive::expand_derives(&mut program);
+    desugar::desugar_program(&mut program);
 
     let tc_result = checker.check_program(&program);
     let diagnostics = tc_result.diagnostics.iter()
