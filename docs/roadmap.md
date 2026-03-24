@@ -40,8 +40,11 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Let / function / lambda inference
 - [x] If/else, case/match, records, ADTs, lists, cons, pipe, concat, blocks
 - [x] Effects: EffectDef, EffectCall, HandlerDef, With, Resume, return clauses
-- [x] `needs` effect set tracking (direct calls, propagation, `with` subtraction, HOF absorption)
-- [x] `Type::EffArrow` for annotated callback parameters
+- [x] `needs` effect tracking (direct calls, propagation, `with` subtraction, HOF absorption)
+- [x] Computation types: `infer_expr` returns `(Type, EffectRow)`, effects flow through the type system
+- [x] Effect rows on all function types (`Type::Fun` carries `EffectRow`)
+- [x] Effect subtyping (pure function accepted where effectful callback expected)
+- [x] Directional callback effect checking (`check_callback_effect_subtype`)
 - [x] Disallow effect invocations in guard expressions
 - [x] Prelude substitution leak: module checkers started at `next_var: 0`, causing var ID
       collisions with the parent checker. Imported scheme types resolved through the parent's
@@ -281,6 +284,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 - [ ] Span representation is inconsistent across the AST: some nodes use named `span: Span` fields, others use `(String, Span)` tuples, others embed spans in parent structs. Consider standardizing, e.g. a `Name { value: String, span: Span }` struct for the common "identifier with location" pattern.
 - [ ] Remove `emit` usage in integration tests. It skips typechecking and therefore elaboration cannot be performed. It should be replaced with emit_elaborated usage instead.
+- [ ] Union-find for substitution: replace `HashMap<u32, Type>` with union-find + path compression. Drop-in replacement inside `Substitution`, no interface changes. Current recursive follow-through is O(path length) per application; union-find makes it nearly O(1) amortized. Not urgent but avoids scaling issues as programs grow.
 
 ## Out of Scope (?)
 
