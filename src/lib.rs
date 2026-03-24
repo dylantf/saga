@@ -2,6 +2,7 @@ pub mod ast;
 pub mod codegen;
 pub mod derive;
 pub mod elaborate;
+pub mod formatter;
 pub mod lexer;
 pub mod parser;
 pub mod project_config;
