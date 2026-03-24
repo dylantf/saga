@@ -791,6 +791,8 @@ pub(crate) struct LspState {
     pub type_references: Vec<(Span, String)>,
     /// Import origins for type names: type_name -> source module name.
     pub type_import_origins: HashMap<String, String>,
+    /// Doc comments from imported declarations: name -> doc lines.
+    pub imported_docs: HashMap<String, Vec<String>>,
 }
 
 /// Module system state: caches, project root, and import tracking.

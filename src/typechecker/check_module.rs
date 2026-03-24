@@ -31,6 +31,8 @@ pub struct ModuleExports {
     pub effectful_funs: HashSet<String>,
     /// Definition-site NodeIds for exported bindings (for cross-module find-references).
     pub def_ids: HashMap<String, crate::ast::NodeId>,
+    /// Doc comments for exported declarations: name -> doc lines.
+    pub doc_comments: HashMap<String, Vec<String>>,
 }
 
 impl ModuleExports {
@@ -155,6 +157,23 @@ impl ModuleExports {
             .cloned()
             .collect();
 
+        // Collect doc comments from all public declarations
+        let mut doc_comments: HashMap<String, Vec<String>> = HashMap::new();
+        for decl in program {
+            let (name, doc) = match decl {
+                Decl::FunSignature { public: true, name, doc, .. } => (name, doc),
+                Decl::TypeDef { public: true, name, doc, .. } => (name, doc),
+                Decl::RecordDef { public: true, name, doc, .. } => (name, doc),
+                Decl::EffectDef { public: true, name, doc, .. } => (name, doc),
+                Decl::HandlerDef { public: true, name, doc, .. } => (name, doc),
+                Decl::TraitDef { public: true, name, doc, .. } => (name, doc),
+                _ => continue,
+            };
+            if !doc.is_empty() {
+                doc_comments.insert(name.clone(), doc.clone());
+            }
+        }
+
         ModuleExports {
             bindings,
             type_constructors,
@@ -166,6 +185,7 @@ impl ModuleExports {
             type_arity,
             effectful_funs,
             def_ids,
+            doc_comments,
         }
     }
 }
@@ -646,6 +666,7 @@ impl Checker {
             type_arity,
             effectful_funs,
             def_ids,
+            doc_comments,
         } = exports;
 
         // Traits and their methods (unqualified, so impl bodies can reference them)
@@ -709,6 +730,11 @@ impl Checker {
             let qualified = format!("{}.{}", prefix, name);
             self.effect_meta.known_funs.insert(qualified);
             self.effect_meta.known_funs.insert(name.clone());
+        }
+
+        // Doc comments for imported declarations
+        for (name, doc) in doc_comments {
+            self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
         }
 
         // Bindings, type constructors, records (qualified + exposing)

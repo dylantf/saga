@@ -467,6 +467,7 @@ pub fn normalize_effects(program: &Program) -> Program {
             },
             Decl::HandlerDef {
                 id,
+                doc,
                 public,
                 name,
                 name_span,
@@ -497,6 +498,7 @@ pub fn normalize_effects(program: &Program) -> Program {
                 });
                 Decl::HandlerDef {
                     id: *id,
+                    doc: doc.clone(),
                     public: *public,
                     name: name.clone(),
                     name_span: *name_span,

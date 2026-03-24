@@ -5,6 +5,21 @@ mod decl;
 mod expr;
 mod pat;
 
+/// Attach doc comments to a declaration node (if it supports them).
+fn set_decl_doc(decl: &mut Decl, doc: Vec<String>) {
+    match decl {
+        Decl::FunSignature { doc: d, .. }
+        | Decl::TypeDef { doc: d, .. }
+        | Decl::RecordDef { doc: d, .. }
+        | Decl::EffectDef { doc: d, .. }
+        | Decl::HandlerDef { doc: d, .. }
+        | Decl::TraitDef { doc: d, .. }
+        | Decl::ImplDef { doc: d, .. } => *d = doc,
+        // FunBinding, Let, Import, ModuleDecl, DictConstructor don't carry docs
+        _ => {}
+    }
+}
+
 pub struct Parser {
     pub(super) tokens: Vec<Spanned>,
     pub(super) pos: usize,
@@ -96,9 +111,29 @@ impl Parser {
     }
 
     pub(super) fn skip_terminators(&mut self) {
-        while matches!(self.peek(), Token::Terminator) {
+        while matches!(self.peek(), Token::Terminator | Token::Comment(_)) {
             self.advance();
         }
+    }
+
+    /// Drain consecutive `#@` doc comment tokens, skipping terminators and
+    /// regular comments between them. Returns the collected doc lines.
+    pub(super) fn collect_doc_comments(&mut self) -> Vec<String> {
+        let mut docs = Vec::new();
+        loop {
+            match self.peek() {
+                Token::DocComment(_) => {
+                    if let Token::DocComment(text) = self.advance() {
+                        docs.push(text);
+                    }
+                }
+                Token::Terminator | Token::Comment(_) => {
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+        docs
     }
 
     // Determines whether the next token can start a primary expression.
@@ -144,7 +179,12 @@ impl Parser {
         self.skip_terminators();
         let mut decls = Vec::new();
         while !matches!(self.peek(), Token::Eof) {
-            decls.push(self.parse_decl()?);
+            let doc = self.collect_doc_comments();
+            let mut decl = self.parse_decl()?;
+            if !doc.is_empty() {
+                set_decl_doc(&mut decl, doc);
+            }
+            decls.push(decl);
             self.skip_terminators();
         }
         Ok(decls)

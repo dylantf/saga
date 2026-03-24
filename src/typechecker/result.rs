@@ -8,8 +8,11 @@ use std::collections::{HashMap, HashSet};
 
 use super::{
     Checker, Diagnostic, EffectDefInfo, HandlerInfo, ModuleContext, Scheme, Severity, Substitution,
-    TraitEvidence, TraitInfo, TypeEnv,
+    TraitEvidence, TraitInfo, Type, TypeEnv,
 };
+
+/// Prettified effect op: (op_name, [(label, type)], return_type).
+pub type PrettifiedOp = (String, Vec<(String, Type)>, Type);
 
 /// The public output of typechecking. Downstream consumers (elaborator, lowerer,
 /// LSP) read from this instead of reaching into Checker internals.
@@ -63,6 +66,8 @@ pub struct CheckResult {
     pub type_import_origins: HashMap<String, String>,
     /// Constructor name -> definition NodeId (for symbol index).
     pub constructor_def_ids: HashMap<String, crate::ast::NodeId>,
+    /// Doc comments from imported declarations: name -> doc lines.
+    pub imported_docs: HashMap<String, Vec<String>>,
 }
 
 impl CheckResult {
@@ -140,6 +145,90 @@ impl CheckResult {
             .collect();
         super::rename_vars(&resolved, &names)
     }
+
+    /// Prettify record field types with consistent variable naming.
+    /// Returns field `(name, type)` pairs with free vars renamed to a, b, c, ...
+    pub fn prettify_record(
+        &self,
+        info: &super::RecordInfo,
+    ) -> Vec<(String, super::Type)> {
+        let resolved: Vec<(String, super::Type)> = info
+            .fields
+            .iter()
+            .map(|(name, ty)| (name.clone(), self.sub.apply(ty)))
+            .collect();
+
+        let mut vars = Vec::new();
+        for (_, ty) in &resolved {
+            super::collect_free_vars(ty, &mut vars);
+        }
+        if vars.is_empty() {
+            return resolved;
+        }
+
+        let names: std::collections::HashMap<u32, String> = vars
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, ((b'a' + i as u8) as char).to_string()))
+            .collect();
+
+        resolved
+            .into_iter()
+            .map(|(name, ty)| (name, super::rename_vars(&ty, &names)))
+            .collect()
+    }
+
+    /// Prettify all types in an effect definition with consistent variable naming.
+    /// Returns `(params, return_type)` pairs for each op, with free vars renamed to a, b, c, ...
+    pub fn prettify_effect(
+        &self,
+        info: &super::EffectDefInfo,
+    ) -> Vec<PrettifiedOp> {
+        // Resolve all types through substitution first
+        let resolved_ops: Vec<PrettifiedOp> = info
+            .ops
+            .iter()
+            .map(|op| {
+                let params: Vec<(String, super::Type)> = op
+                    .params
+                    .iter()
+                    .map(|(label, ty)| (label.clone(), self.sub.apply(ty)))
+                    .collect();
+                let ret = self.sub.apply(&op.return_type);
+                (op.name.clone(), params, ret)
+            })
+            .collect();
+
+        // Collect all free vars across all ops for consistent naming
+        let mut vars = Vec::new();
+        for (_, params, ret) in &resolved_ops {
+            for (_, ty) in params {
+                super::collect_free_vars(ty, &mut vars);
+            }
+            super::collect_free_vars(ret, &mut vars);
+        }
+        if vars.is_empty() {
+            return resolved_ops;
+        }
+
+        let names: std::collections::HashMap<u32, String> = vars
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, ((b'a' + i as u8) as char).to_string()))
+            .collect();
+
+        resolved_ops
+            .into_iter()
+            .map(|(name, params, ret)| {
+                let params = params
+                    .into_iter()
+                    .map(|(label, ty)| (label, super::rename_vars(&ty, &names)))
+                    .collect();
+                let ret = super::rename_vars(&ret, &names);
+                (name, params, ret)
+            })
+            .collect()
+    }
 }
 
 impl Checker {
@@ -197,6 +286,7 @@ impl Checker {
             type_references: self.lsp.type_references.clone(),
             type_import_origins: self.lsp.type_import_origins.clone(),
             constructor_def_ids: self.lsp.constructor_def_ids.clone(),
+            imported_docs: self.lsp.imported_docs.clone(),
         }
     }
 }

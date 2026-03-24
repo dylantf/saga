@@ -95,6 +95,7 @@ fn derive_record_stringify(
 
     Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
+        doc: vec![],
         trait_name: trait_name.into(),
         target_type: record_name.into(),
         type_params: type_params.to_vec(),
@@ -335,6 +336,7 @@ fn derive_stringify(
 
     Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
+        doc: vec![],
         trait_name: trait_name.into(),
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
@@ -517,6 +519,7 @@ fn derive_ord(
 
     Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
+        doc: vec![],
         trait_name: "Ord".into(),
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
@@ -630,6 +633,7 @@ fn derive_marker_trait(
 
     Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
+        doc: vec![],
         trait_name: trait_name.into(),
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
@@ -699,6 +703,7 @@ fn derive_enum(
 
     Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
+        doc: vec![],
         trait_name: "Enum".into(),
         target_type: type_name.into(),
         type_params: vec![],
