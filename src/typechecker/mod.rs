@@ -696,6 +696,9 @@ pub struct Checker {
     pub(crate) resume_return_type: Option<Type>,
     /// Metadata for effect inference (instantiation caches, declared rows, name registries).
     pub(crate) effect_meta: EffectMeta,
+    /// Effect accumulator: effects from the current scope are pushed here automatically
+    /// during inference. Isolation scopes (handlers, lambdas) save/restore this field.
+    pub(crate) effect_row: EffectRow,
     /// Trait system state (definitions, impls, constraints, where bounds).
     pub(crate) trait_state: TraitState,
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
@@ -741,20 +744,22 @@ pub(crate) struct TraitState {
     pub where_bound_var_names: HashMap<u32, String>,
 }
 
-/// Metadata for effect inference: instantiation caches, declared effect rows,
-/// and name registries. Does not track effect accumulation (that flows through
-/// the EffectRow returned by infer_expr).
+/// Metadata for effect inference: instantiation caches and name registries.
+/// Effect accumulation lives on Checker.effect_row.
 #[derive(Clone, Default)]
 pub(crate) struct EffectMeta {
     /// Per-scope cache of instantiated effect type params: effect name -> mapping
     /// from original var IDs to fresh vars. Ensures all ops from the same effect
     /// share type params within a function scope.
     pub type_param_cache: HashMap<String, HashMap<u32, Type>>,
-    /// Known local function names (for is_known_local checks in `with` validation).
+    /// Registry of locally defined function names. Not used for effect tracking
+    /// (the accumulator + absorption handle that). Only read at the CheckResult
+    /// boundary to build fun_effects for codegen. See docs/remove-known-funs-registry.md.
     pub known_funs: HashSet<String>,
     /// Annotation-provided effect type constraints: fn name -> [(effect_name, [concrete types])].
     pub fun_type_constraints: HashMap<String, Vec<(String, Vec<Type>)>>,
-    /// Known let binding names that may carry deferred effects (for is_known_local checks).
+    /// Registry of let bindings with deferred effects. Same story as known_funs:
+    /// only read at the CheckResult boundary for codegen, not for effect tracking.
     pub known_let_bindings: HashSet<String>,
 }
 
@@ -856,6 +861,7 @@ impl Checker {
             resume_type: None,
             resume_return_type: None,
             effect_meta: EffectMeta::default(),
+            effect_row: EffectRow::empty(),
             trait_state: TraitState::default(),
             field_candidates: HashMap::new(),
             modules: ModuleContext::default(),
@@ -1088,6 +1094,29 @@ impl Checker {
         (fields, result_ty)
     }
 
+    /// Push effects onto the accumulator. This is the primary way effects
+    /// are recorded during inference -- callers don't need to handle EffectRow returns.
+    pub(crate) fn emit_effects(&mut self, effs: &EffectRow) {
+        self.effect_row.effects.extend(effs.effects.clone());
+    }
+
+    /// Push a single named effect onto the accumulator.
+    pub(crate) fn emit_effect(&mut self, name: String, args: Vec<Type>) {
+        self.effect_row.effects.push((name, args));
+    }
+
+    /// Save the current effect accumulator and start a fresh one.
+    /// Returns the saved EffectRow so the caller can restore it later.
+    pub(crate) fn save_effects(&mut self) -> EffectRow {
+        std::mem::replace(&mut self.effect_row, EffectRow::empty())
+    }
+
+    /// Restore a previously saved effect accumulator, returning what
+    /// accumulated since the save.
+    pub(crate) fn restore_effects(&mut self, saved: EffectRow) -> EffectRow {
+        std::mem::replace(&mut self.effect_row, saved)
+    }
+
     /// Enter an isolated inference scope. Saves and clears
     /// effect_type_param_cache, field_candidates, resume_type, and
     /// resume_return_type. Call `exit_scope` to restore and collect
@@ -1134,6 +1163,18 @@ pub fn effects_from_type(ty: &Type) -> HashSet<String> {
     }
     walk(ty, &mut effects);
     effects
+}
+
+/// Collect effect names from a callback parameter type's effect rows.
+/// For `() -> a needs {Fail, Log}`, collects `{"Fail", "Log"}`.
+/// Only collects from closed-row effects (not row variables).
+pub fn collect_callback_effects(ty: &Type, out: &mut HashSet<String>) {
+    if let Type::Fun(_, ret, row) = ty {
+        for (name, _) in &row.effects {
+            out.insert(name.clone());
+        }
+        collect_callback_effects(ret, out);
+    }
 }
 
 // Re-export from unify module so other files can use `super::collect_free_vars`

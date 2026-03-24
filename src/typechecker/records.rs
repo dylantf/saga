@@ -35,7 +35,7 @@ impl Checker {
                     let _ = self.infer_expr(fexpr);
                 }
                 Some((_, expected_ty)) => match self.infer_expr(fexpr) {
-                    Ok((actual, _effs)) => {
+                    Ok(actual) => {
                         if let Err(e) = self.unify_at(expected_ty, &actual, fexpr.span) {
                             self.collected_diagnostics.push(e);
                         }
@@ -75,7 +75,7 @@ impl Checker {
     ) -> Result<Type, Diagnostic> {
         let mut typed_fields: Vec<(String, Type)> = Vec::new();
         for (fname, _fspan, fexpr) in fields {
-            let (ty, _effs) = self.infer_expr(fexpr)?;
+            let ty = self.infer_expr(fexpr)?;
             typed_fields.push((fname.clone(), ty));
         }
         typed_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -88,7 +88,7 @@ impl Checker {
         fields: &[(String, Span, Expr)],
         span: Span,
     ) -> Result<Type, Diagnostic> {
-        let (rec_ty, _effs) = self.infer_expr(record)?;
+        let rec_ty = self.infer_expr(record)?;
         let mut resolved = self.sub.apply(&rec_ty);
 
         if matches!(&resolved, Type::Var(_))
@@ -125,7 +125,7 @@ impl Checker {
                                 format!("unknown field '{}' on record {}", fname, name),
                             )
                         })?;
-                    let (actual, _effs) = self.infer_expr(fexpr)?;
+                    let actual = self.infer_expr(fexpr)?;
                     self.unify_at(&expected.1, &actual, fexpr.span)?;
                 }
                 Ok(self.sub.apply(&result_ty))
@@ -139,7 +139,7 @@ impl Checker {
                                 format!("unknown field '{}' on anonymous record", fname),
                             )
                         })?;
-                    let (actual, _effs) = self.infer_expr(fexpr)?;
+                    let actual = self.infer_expr(fexpr)?;
                     self.unify_at(expected_ty, &actual, fexpr.span)?;
                 }
                 Ok(self.sub.apply(&resolved))
@@ -157,7 +157,7 @@ impl Checker {
         field: &str,
         span: Span,
     ) -> Result<Type, Diagnostic> {
-        let (expr_ty, _effs) = self.infer_expr(record_expr)?;
+        let expr_ty = self.infer_expr(record_expr)?;
 
         // Empty field name means incomplete field access (e.g. `record.`).
         // The parser recovered, so we still have the receiver's type recorded.

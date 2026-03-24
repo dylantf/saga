@@ -240,6 +240,7 @@ impl Checker {
 
             let saved_env = self.env.clone();
             let body_scope = self.enter_scope();
+            let trait_saved_effs = self.save_effects();
 
             // Re-insert the trait's method schemes so that method calls inside
             // the impl body resolve to the trait signature, not to a user-defined
@@ -270,7 +271,7 @@ impl Checker {
             }
 
             // Infer body and check it matches the expected return type
-            let (body_ty, body_effs) = self.infer_expr(body)?;
+            let body_ty = self.infer_expr(body)?;
             self.unify_at(&body_ty, &expected_return, body.span)
                 .map_err(|e| {
                     Diagnostic::error_at(
@@ -283,6 +284,7 @@ impl Checker {
                 })?;
 
             // Check that body effects are covered by the impl's needs declaration
+            let body_effs = self.restore_effects(trait_saved_effs);
             let scope_result = self.exit_scope(body_scope);
             let body_field_candidates = scope_result.field_candidates;
             let body_effects: std::collections::HashSet<String> = body_effs

@@ -223,7 +223,7 @@ impl Checker {
                 span,
                 ..
             } => {
-                let (ty, _effs) = self.infer_expr(value)?;
+                let ty = self.infer_expr(value)?;
                 if let Some(ann) = annotation {
                     let ann_ty = self.convert_type_expr(ann, &mut vec![]);
                     self.unify_at(&ty, &ann_ty, *span)?;
@@ -702,7 +702,8 @@ impl Checker {
             }
         }
 
-        let mut all_body_effs = EffectRow::empty();
+        // Save effects and start fresh for this function body
+        let saved_effs = self.save_effects();
         for clause in clauses {
             let Decl::FunBinding {
                 params,
@@ -740,16 +741,43 @@ impl Checker {
                         "Effect calls are not allowed in guard expressions".to_string(),
                     ));
                 }
-                let (guard_ty, _effs) = self.infer_expr(guard)?;
+                let guard_saved = self.save_effects();
+                let guard_ty = self.infer_expr(guard)?;
+                self.restore_effects(guard_saved);
                 self.unify_at(&guard_ty, &Type::bool(), guard.span)?;
             }
 
-            let (body_ty, body_effs) = self.infer_expr(body)?;
+            let body_ty = self.infer_expr(body)?;
             self.unify_at(&result_ty, &body_ty, body.span)?;
-            all_body_effs = all_body_effs.merge(&body_effs);
 
             self.env = saved_env;
         }
+        // Collect accumulated effects and restore outer scope
+        let all_body_effs = self.restore_effects(saved_effs);
+
+        // Absorption (boundary half): when a function directly calls a callback
+        // parameter like `f ()` in `run_state init f = (f (), init)`, the callee's
+        // effect row is emitted to the accumulator. But those effects belong to the
+        // *caller* of run_state, not run_state itself. We subtract effects declared
+        // on any callback parameter types.
+        //
+        // There is a second absorption site in infer.rs App (call-site half) that
+        // handles the inverse case: passing a lambda to a HOF like `try_it (fun () -> ...)`.
+        // Both are needed because they fire at different points in inference:
+        // - Call-site: lambda effects propagate immediately during lambda inference,
+        //   before the boundary runs. Only the App knows the HOF's parameter type.
+        // - Boundary: direct callback calls emit effects from the callee's type.
+        //   Only the boundary knows which params are callback parameters.
+        let mut absorbed = std::collections::HashSet::new();
+        for pt in &param_types {
+            let resolved = self.sub.apply(pt);
+            super::collect_callback_effects(&resolved, &mut absorbed);
+        }
+        let all_body_effs = if absorbed.is_empty() {
+            all_body_effs
+        } else {
+            all_body_effs.subtract(&absorbed)
+        };
 
         // Check exhaustiveness of function clause patterns (multi-column Maranget)
         if clauses.len() > 1
@@ -770,8 +798,7 @@ impl Checker {
         }
 
         // Check effect requirements against declared needs via row comparison.
-        // Use the EffectRow returned by infer_expr (all_body_effs) instead of
-        // the scope-based HashSet accumulator.
+        // all_body_effs was accumulated on self.effect_row during body inference.
         let scope_result = self.exit_scope(body_scope);
         let body_field_candidates = scope_result.field_candidates;
 
@@ -1338,8 +1365,8 @@ impl Checker {
         // Arms unify against this; the return clause (if any) constrains it later.
         let answer_ty = self.fresh_var();
 
-        // Accumulate effects from all handler arm bodies
-        let mut all_handler_effs = EffectRow::empty();
+        // Save effects and start fresh for handler body checking
+        let handler_saved_effs = self.save_effects();
 
         // Validate that each arm's operation belongs to the handler's declared effects
         let mut seen_ops: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1437,8 +1464,7 @@ impl Checker {
                     .push((param_id, param_name.clone(), *param_span));
             }
 
-            let (body_ty, arm_effs) = self.infer_expr(&arm.body)?;
-            all_handler_effs = all_handler_effs.merge(&arm_effs);
+            let body_ty = self.infer_expr(&arm.body)?;
             // If the op returns Never (non-resumable), the arm body must also
             // be Never (i.e. diverge). Otherwise the handler would silently
             // produce a non-Never value with no way to continue the computation.
@@ -1488,8 +1514,7 @@ impl Checker {
                     .definitions
                     .push((param_id, param_name.clone(), *param_span));
             }
-            let (ret_ty, ret_effs) = self.infer_expr(&rc.body)?;
-            all_handler_effs = all_handler_effs.merge(&ret_effs);
+            let ret_ty = self.infer_expr(&rc.body)?;
             // Constrain answer_ty to match the return clause's body type
             if let Err(e) = self.unify(&answer_ty, &ret_ty) {
                 self.collected_diagnostics.push(e.with_span(rc.body.span));
@@ -1508,7 +1533,8 @@ impl Checker {
             Some((frozen.clone(), frozen))
         };
 
-        // Check effect requirements against declared needs
+        // Collect accumulated handler effects and restore outer scope
+        let all_handler_effs = self.restore_effects(handler_saved_effs);
         let _scope_result = self.exit_scope(body_scope);
         let declared_effects: std::collections::HashSet<String> =
             needs.iter().map(|e| e.name.clone()).collect();

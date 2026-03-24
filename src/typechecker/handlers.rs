@@ -15,15 +15,13 @@ impl Checker {
         handler: &ast::Handler,
         _with_span: Span,
         with_node_id: crate::ast::NodeId,
-    ) -> Result<(Type, super::EffectRow), Diagnostic> {
+    ) -> Result<Type, Diagnostic> {
         let handled = self.handler_handled_effects(handler);
 
-        // Build op_name -> (arm_span, source_module) map for this handler and push onto the stack.
-        // This lets EffectCall inference record which arm handles each call (for LSP go-to-def).
+        // Build op_name -> (arm_span, source_module) map for LSP go-to-def
         let arm_stack_entry: std::collections::HashMap<String, (Span, Option<String>)> =
             match handler {
                 ast::Handler::Named(name, handler_span) => {
-                    // Record reference to the handler definition
                     if let Some(def_id) = self.env.def_id(name) {
                         let usage_id = crate::ast::NodeId::fresh();
                         self.record_reference(usage_id, *handler_span, def_id);
@@ -42,7 +40,6 @@ impl Checker {
                 ast::Handler::Inline { named, arms, .. } => {
                     let mut map = std::collections::HashMap::new();
                     for n in named {
-                        // Record reference to each named handler
                         if let Some(def_id) = self.env.def_id(n) {
                             let usage_id = crate::ast::NodeId::fresh();
                             self.record_reference(usage_id, _with_span, def_id);
@@ -76,14 +73,15 @@ impl Checker {
         handler: &ast::Handler,
         handled: HashSet<String>,
         with_node_id: crate::ast::NodeId,
-    ) -> Result<(Type, super::EffectRow), Diagnostic> {
+    ) -> Result<Type, Diagnostic> {
         // --- Scope 1: infer the inner expression with isolated effect tracking ---
         let inner_scope = self.enter_scope();
-        let (expr_ty, inner_effs) = self.infer_expr(expr)?;
+        let saved_effs = self.save_effects();
+        let expr_ty = self.infer_expr(expr)?;
+        let inner_effs = self.restore_effects(saved_effs);
         let inner_result = self.exit_scope(inner_scope);
 
-        // Unnecessary handler check: if the inner expression's effects don't
-        // overlap with handled effects, the handler is unnecessary.
+        // Unnecessary handler check
         if !handled.is_empty() && !inner_effs.effects.iter().any(|(n, _)| handled.contains(n)) {
             let mut effects: Vec<_> = handled.iter().cloned().collect();
             effects.sort();
@@ -96,11 +94,9 @@ impl Checker {
             ));
         }
 
-        // Save effect cache for handler where-clause enforcement (Named branch)
-        // and type param cache inheritance (Inline branch).
         let inner_effect_cache = inner_result.effect_cache;
 
-        // Compute the remaining effect row (inner effects minus handled)
+        // Remaining effects: inner minus handled
         let remaining_effs = inner_effs.subtract(&handled);
 
         let with_span = expr.span;
@@ -114,9 +110,6 @@ impl Checker {
                 }
                 if let Some(handler_info) = self.handlers.get(name).cloned() {
                     if let Some((param_ty, ret_ty)) = &handler_info.return_type {
-                        // Instantiate fresh type vars for each usage site so
-                        // polymorphic handlers (e.g. `handler h for Fail a`)
-                        // don't leak type bindings between different uses.
                         let mapping: std::collections::HashMap<u32, Type> = handler_info
                             .forall
                             .iter()
@@ -126,17 +119,12 @@ impl Checker {
                         let fresh_ret = self.replace_vars(ret_ty, &mapping);
                         self.unify_at(&fresh_param, &expr_ty, with_span)?;
 
-                        // Enforce handler where clause constraints at the usage site.
-                        // Use the inner expression's effect cache to find what each
-                        // effect type param resolved to, then push pending constraints.
                         for ((effect_name, param_idx), trait_names) in
                             &handler_info.where_constraints
                         {
                             if let Some(effect_info) = self.effects.get(effect_name).cloned()
                                 && let Some(&param_var_id) = effect_info.type_params.get(*param_idx)
                             {
-                                // The effect cache stores the fresh var IDs used at the call site.
-                                // Resolve through the cache first, then through substitution.
                                 let ty = if let Some(cache) = inner_effect_cache.get(effect_name)
                                     && let Some(cached_ty) = cache.get(&param_var_id)
                                 {
@@ -155,12 +143,16 @@ impl Checker {
                             }
                         }
 
-                        Ok((self.sub.apply(&fresh_ret), remaining_effs.clone()))
+                        // Emit remaining effects to the outer accumulator
+                        self.emit_effects(&remaining_effs);
+                        Ok(self.sub.apply(&fresh_ret))
                     } else {
-                        Ok((expr_ty, remaining_effs.clone()))
+                        self.emit_effects(&remaining_effs);
+                        Ok(expr_ty)
                     }
                 } else {
-                    Ok((expr_ty, remaining_effs.clone()))
+                    self.emit_effects(&remaining_effs);
+                    Ok(expr_ty)
                 }
             }
             ast::Handler::Inline {
@@ -177,12 +169,8 @@ impl Checker {
                     }
                 }
 
-                // Handler arms inherit the inner expression's effect cache so
-                // they see the same type param bindings (e.g. State s -> Int).
                 self.effect_meta.type_param_cache = inner_effect_cache;
 
-                // Compute answer_ty: infer return clause first if present,
-                // since arms need it for resume return type and body unification.
                 let answer_ty = if let Some(ret_arm) = return_clause {
                     let saved_env = self.env.clone();
                     if let Some((param_name, param_span)) = ret_arm.params.first() {
@@ -202,14 +190,14 @@ impl Checker {
                             .definitions
                             .push((param_id, param_name.clone(), *param_span));
                     }
-                    let (ret_ty, _effs) = self.infer_expr(&ret_arm.body)?;
+                    // Return clause effects accumulate on the outer scope
+                    let ret_ty = self.infer_expr(&ret_arm.body)?;
                     self.env = saved_env;
                     ret_ty
                 } else {
                     expr_ty.clone()
                 };
 
-                let mut all_arm_effs = super::EffectRow::empty();
                 for arm in arms {
                     let op_sig = self.lookup_effect_op(&arm.op_name, None, arm.span).ok();
 
@@ -263,11 +251,13 @@ impl Checker {
                         }
                     }
 
-                    let (arm_ty, arm_effs) = self.infer_expr(&arm.body)?;
-                    // Accumulate arm effects (minus handled) for propagation
+                    // Arm body: isolate to subtract handled, keep unhandled
+                    let saved_effs = self.save_effects();
+                    let arm_ty = self.infer_expr(&arm.body)?;
+                    let arm_effs = self.restore_effects(saved_effs);
                     let unhandled_arm_effs = arm_effs.subtract(&handled);
-                    all_arm_effs = all_arm_effs.merge(&unhandled_arm_effs);
-                    // Each arm must produce the answer type
+                    self.emit_effects(&unhandled_arm_effs);
+
                     self.unify_at(&arm_ty, &answer_ty, arm.span)?;
 
                     self.resume_type = saved_resume;
@@ -275,7 +265,9 @@ impl Checker {
                     self.env = saved_env;
                 }
 
-                Ok((answer_ty, remaining_effs.merge(&all_arm_effs)))
+                // Emit remaining effects from the inner expression
+                self.emit_effects(&remaining_effs);
+                Ok(answer_ty)
             }
         }
     }
