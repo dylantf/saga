@@ -89,6 +89,7 @@ impl Checker {
             ExprKind::App { func, arg, .. } => {
                 let (func_ty, func_effs) = self.infer_expr(func)?;
                 let (arg_ty, arg_effs) = self.infer_expr(arg)?;
+                let arg_ty_pre = arg_ty.clone(); // Save before move for effect subtype check
                 let ret_ty = self.fresh_var();
                 let eff_row_var = self.fresh_var();
                 if self
@@ -110,6 +111,18 @@ impl Checker {
                         format!("{} is not a function", display),
                     ));
                 }
+
+                // Effect subtyping check: when passing a function-typed argument,
+                // its effects must be a subset of the parameter's expected effects.
+                // This prevents effectful callbacks from being silently accepted
+                // where pure (or less-effectful) callbacks are expected.
+                {
+                    let resolved_func = self.sub.apply(&func_ty);
+                    if let Type::Fun(param, _, _) = &resolved_func {
+                        self.check_callback_effect_subtype(&arg_ty_pre, param, arg.span)?;
+                    }
+                }
+
                 let resolved_ret = self.sub.apply(&ret_ty);
                 self.record_type(node_id, &ret_ty);
 
@@ -841,5 +854,58 @@ impl Checker {
         self.record_type_at_span(var_span, ty);
         self.lsp.definitions
             .push((pat_id, name.to_string(), var_span));
+    }
+
+    /// Check that a function-typed argument's effect row is compatible with
+    /// the expected parameter's effect row. When both rows are closed, the
+    /// argument's effects must be a subset of the parameter's effects.
+    ///
+    /// This enforces directional effect subtyping at call sites: a pure
+    /// function can be passed where an effectful callback is expected, but
+    /// NOT the reverse.
+    fn check_callback_effect_subtype(
+        &self,
+        actual_arg: &Type,
+        expected_param: &Type,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let actual = self.sub.apply(actual_arg);
+        let expected = self.sub.apply(expected_param);
+        if let (Type::Fun(_, _, actual_row), Type::Fun(_, _, expected_row)) = (&actual, &expected) {
+            let actual_row = self.sub.apply_effect_row(actual_row);
+            let expected_row = self.sub.apply_effect_row(expected_row);
+            // Only check when both rows are closed (open rows accept any extras)
+            if actual_row.tail.is_none() && expected_row.tail.is_none() {
+                let mut extra_effects: Vec<&str> = actual_row
+                    .effects
+                    .iter()
+                    .filter(|(n, _)| !expected_row.effects.iter().any(|(en, _)| en == n))
+                    .map(|(n, _)| n.as_str())
+                    .collect();
+                if !extra_effects.is_empty() {
+                    extra_effects.sort();
+                    let msg = if expected_row.effects.is_empty() {
+                        format!(
+                            "effectful function (uses {{{}}}) passed where a pure callback is expected",
+                            extra_effects.join(", ")
+                        )
+                    } else {
+                        let mut expected_names: Vec<&str> = expected_row
+                            .effects
+                            .iter()
+                            .map(|(n, _)| n.as_str())
+                            .collect();
+                        expected_names.sort();
+                        format!(
+                            "function uses effects {{{}}} not allowed by callback parameter (allows {{{}}})",
+                            extra_effects.join(", "),
+                            expected_names.join(", ")
+                        )
+                    };
+                    return Err(Diagnostic::error_at(span, msg));
+                }
+            }
+        }
+        Ok(())
     }
 }

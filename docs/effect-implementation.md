@@ -55,7 +55,12 @@ How effects compose at each expression form:
 
 ### Effect Subtyping
 
-A function with fewer effects can be used where more are allowed. When unifying two closed effect rows, if one side's unmatched effects are empty, unification succeeds. This means a pure function can be passed where an effectful callback is expected.
+A function with fewer effects can be used where more are allowed. Effect row unification is symmetric (accepting either direction of subset), but at function application sites, a directional check enforces that a callback argument's effects are a subset of the parameter's expected effects. This means:
+
+- A pure function can be passed where an effectful callback is expected (covariant).
+- An effectful function CANNOT be passed where a pure callback is expected (caught by `check_callback_effect_subtype` in `infer.rs`).
+
+The directional check runs after unification succeeds, comparing the resolved argument type's effect row against the resolved parameter type's effect row. Open rows (with `..e` tail) are exempt since they accept extra effects by design.
 
 ### Absorption
 

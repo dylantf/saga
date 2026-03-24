@@ -639,10 +639,14 @@ impl Checker {
         // Also unify the pre-bound var so recursive calls see the correct type.
         if let Some(ann_ty) = annotation {
             let mut ann_current = ann_ty.clone();
+            // Collect effect rows from each arrow in the annotation so we can
+            // preserve them in the pre-type (including row variables like ..e).
+            let mut ann_effect_rows = Vec::new();
             for param_ty in &param_types {
                 match ann_current {
-                    Type::Fun(ann_param, ann_ret, _) => {
+                    Type::Fun(ann_param, ann_ret, ann_row) => {
                         self.unify(param_ty, &ann_param)?;
+                        ann_effect_rows.push(ann_row);
                         ann_current = *ann_ret;
                     }
                     _ => break,
@@ -650,10 +654,18 @@ impl Checker {
             }
             self.unify(&result_ty, &ann_current)?;
 
-            // Build the function type from annotation-constrained params and unify with pre-bound var
+            // Build the function type from annotation-constrained params and unify
+            // with pre-bound var. Use the annotation's effect rows to preserve row
+            // variables (..e) instead of creating pure arrows that would cause the
+            // row variable to be bound to empty during later unification.
             let mut pre_ty = result_ty.clone();
-            for param_ty in param_types.iter().rev() {
-                pre_ty = Type::arrow(param_ty.clone(), pre_ty);
+            for (i, param_ty) in param_types.iter().rev().enumerate() {
+                let row_idx = param_types.len() - 1 - i;
+                if let Some(row) = ann_effect_rows.get(row_idx) {
+                    pre_ty = Type::Fun(Box::new(param_ty.clone()), Box::new(pre_ty), row.clone());
+                } else {
+                    pre_ty = Type::arrow(param_ty.clone(), pre_ty);
+                }
             }
             self.unify(fun_var, &pre_ty)?;
         }

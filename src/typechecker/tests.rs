@@ -3891,3 +3891,133 @@ fn partial_application_preserves_effects() {
     )
     .unwrap();
 }
+
+#[test]
+fn nested_handlers_scope_isolation() {
+    // Inner handler handles Fail, outer handler handles Log.
+    // Effects from inner handler arms don't leak to the outer scope.
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun work : Unit -> Unit needs {Log, Fail}\n\
+         work () = { log! \"start\"\n  fail! \"oops\" }\n\
+         fun outer : Unit -> Unit\n\
+         outer () = {\n\
+           work () with {\n\
+             log msg = (),\n\
+             fail msg = (),\n\
+           }\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn nested_handlers_inner_arm_uses_outer_effect() {
+    // Inner handler arm uses an effect that the outer handler handles.
+    // The arm's Log effect should propagate out of the inner handler
+    // and be caught by the outer handler.
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun work : Unit -> Unit needs {Fail}\n\
+         work () = fail! \"oops\"\n\
+         fun outer : Unit -> Unit\n\
+         outer () = {\n\
+           work () with { fail msg = log! \"caught\" }\n\
+         } with { log msg = () }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn nested_handlers_unhandled_arm_effect_propagates() {
+    // Inner handler arm uses Log, no outer handler -- caller must declare it
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun work : Unit -> Unit needs {Fail}\n\
+         work () = fail! \"oops\"\n\
+         fun caller : Unit -> Unit needs {Log}\n\
+         caller () = work () with { fail msg = log! \"caught\" }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn nested_handlers_unhandled_arm_effect_error() {
+    // Inner handler arm uses Log, no handler for it, caller doesn't declare it
+    let result = check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun work : Unit -> Unit needs {Fail}\n\
+         work () = fail! \"oops\"\n\
+         fun caller : Unit -> Unit\n\
+         caller () = work () with { fail msg = log! \"caught\" }",
+    );
+    assert!(result.is_err());
+    assert!(result.err().unwrap().message.contains("Log"));
+}
+
+// --- Effect subtyping (directional) tests ---
+
+#[test]
+fn effectful_callback_where_pure_expected_is_error() {
+    // Passing an effectful lambda where a pure callback is expected should fail,
+    // even when the caller declares the effect in its own needs clause.
+    let result = check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         fun apply_pure : (f: Int -> Int) -> Int\n\
+         apply_pure f = f 42\n\
+         fun caller : Unit -> Int needs {Log}\n\
+         caller () = apply_pure (fun x -> { log! \"hi\"\n  x })",
+    );
+    assert!(result.is_err(), "effectful callback should be rejected by pure parameter");
+    let msg = result.err().unwrap().message;
+    assert!(msg.contains("Log"), "error should mention the disallowed effect: {}", msg);
+}
+
+#[test]
+fn effectful_callback_where_fewer_effects_expected_is_error() {
+    // Callback has Log + Fail but parameter only allows Fail
+    let result = check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun try_it : (f: () -> Int needs {Fail}) -> Int\n\
+         try_it f = f () with { fail msg = 0 }\n\
+         fun caller : Unit -> Int needs {Log}\n\
+         caller () = try_it (fun () -> { log! \"hi\"\n  fail! \"oops\" })",
+    );
+    assert!(result.is_err(), "callback with extra effects should be rejected");
+    let msg = result.err().unwrap().message;
+    assert!(msg.contains("Log"), "error should mention Log: {}", msg);
+}
+
+#[test]
+fn pure_callback_where_effectful_expected_still_works() {
+    // A pure lambda passed where an effectful callback is expected should still work
+    // (effect subtyping: pure is a subtype of effectful)
+    check(
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         fun try_it : (f: () -> Int needs {Fail}) -> Int\n\
+         try_it f = f () with { fail msg = 0 }\n\
+         fun caller : Unit -> Int\n\
+         caller () = try_it (fun () -> 42)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn open_row_callback_accepts_extra_effects() {
+    // With an open row (..e), extra effects from the callback should propagate
+    // through the row variable, not trigger a subtype error
+    check(
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         fun run : (f: () -> Unit needs {Fail, ..e}) -> Unit needs {..e}\n\
+         run f = f () with { fail msg = () }\n\
+         fun caller : Unit -> Unit needs {Log}\n\
+         caller () = run (fun () -> { fail! \"x\"\n  log! \"y\" })",
+    )
+    .unwrap();
+}

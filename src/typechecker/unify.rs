@@ -168,15 +168,14 @@ impl Checker {
             .collect();
 
         match (r1.tail_var_id(), r2.tail_var_id()) {
-            // Both closed: a function with fewer effects can be used where
-            // more effects are allowed (effect subtyping). Only error if
-            // BOTH sides have unmatched effects (genuinely incompatible).
+            // Both closed: accept if one side is a subset of the other.
+            // This is symmetric (unification doesn't know direction), so it
+            // accepts both directions of effect subsumption. The directional
+            // check (effectful callback where pure expected = error) is
+            // enforced by check_callback_effect_subtype in infer.rs at
+            // function application sites.
             (None, None) => {
                 if extras1.is_empty() || extras2.is_empty() {
-                    // One side is a subset of the other -- OK.
-                    // A pure function satisfies any effect requirement.
-                    // A function with effects satisfies a pure requirement
-                    // only if it has no extras (handled by extras1.is_empty()).
                     Ok(())
                 } else {
                     // Both have unmatched effects -- genuinely incompatible
