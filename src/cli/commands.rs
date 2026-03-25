@@ -162,7 +162,7 @@ pub fn cmd_fmt(args: &[String]) {
         std::process::exit(1);
     });
     let mut parser = dylang::parser::Parser::new(tokens);
-    let program = parser.parse_program().unwrap_or_else(|e| {
+    let program = parser.parse_program_annotated().unwrap_or_else(|e| {
         eprintln!("Parse error in {}: {} at {:?}", file, e.message, e.span);
         std::process::exit(1);
     });

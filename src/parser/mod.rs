@@ -5,21 +5,6 @@ mod decl;
 mod expr;
 mod pat;
 
-/// Attach doc comments to a declaration node (if it supports them).
-fn set_decl_doc(decl: &mut Decl, doc: Vec<String>) {
-    match decl {
-        Decl::FunSignature { doc: d, .. }
-        | Decl::TypeDef { doc: d, .. }
-        | Decl::RecordDef { doc: d, .. }
-        | Decl::EffectDef { doc: d, .. }
-        | Decl::HandlerDef { doc: d, .. }
-        | Decl::TraitDef { doc: d, .. }
-        | Decl::ImplDef { doc: d, .. } => *d = doc,
-        // FunBinding, Let, Import, ModuleDecl, DictConstructor don't carry docs
-        _ => {}
-    }
-}
-
 pub struct Parser {
     pub(super) tokens: Vec<Spanned>,
     pub(super) pos: usize,
@@ -111,7 +96,10 @@ impl Parser {
     }
 
     pub(super) fn skip_terminators(&mut self) {
-        while matches!(self.peek(), Token::Terminator | Token::Comment(_)) {
+        while matches!(
+            self.peek(),
+            Token::Terminator | Token::Comment(_) | Token::BlankLine
+        ) {
             self.advance();
         }
     }
@@ -127,13 +115,64 @@ impl Parser {
                         docs.push(text);
                     }
                 }
-                Token::Terminator | Token::Comment(_) => {
+                Token::Terminator | Token::Comment(_) | Token::BlankLine => {
                     self.advance();
                 }
                 _ => break,
             }
         }
         docs
+    }
+
+    /// Collect trivia tokens (blank lines, comments, doc comments) between declarations.
+    /// Used by `parse_program_annotated` to preserve formatting info.
+    fn collect_trivia(&mut self) -> Vec<Trivia> {
+        let mut trivia = Vec::new();
+        let mut blank_count: u32 = 0;
+        loop {
+            match self.peek() {
+                Token::BlankLine => {
+                    blank_count += 1;
+                    self.advance();
+                }
+                Token::Comment(_) => {
+                    if blank_count > 0 {
+                        trivia.push(Trivia::BlankLines(blank_count));
+                        blank_count = 0;
+                    }
+                    if let Token::Comment(text) = self.advance() {
+                        trivia.push(Trivia::Comment(text));
+                    }
+                }
+                Token::DocComment(_) => {
+                    if blank_count > 0 {
+                        trivia.push(Trivia::BlankLines(blank_count));
+                        blank_count = 0;
+                    }
+                    if let Token::DocComment(text) = self.advance() {
+                        trivia.push(Trivia::DocComment(text));
+                    }
+                }
+                Token::Terminator => {
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+        if blank_count > 0 {
+            trivia.push(Trivia::BlankLines(blank_count));
+        }
+        trivia
+    }
+
+    /// Check if the very next token is a comment on the same line (trailing comment).
+    fn collect_trailing_comment(&mut self) -> Option<String> {
+        if let Token::Comment(_) = self.peek()
+            && let Token::Comment(text) = self.advance()
+        {
+            return Some(text);
+        }
+        None
     }
 
     // Determines whether the next token can start a primary expression.
@@ -186,6 +225,23 @@ impl Parser {
             }
             decls.push(decl);
             self.skip_terminators();
+        }
+        Ok(decls)
+    }
+
+    /// Parse a program, preserving comments and blank lines as trivia on each declaration.
+    pub fn parse_program_annotated(&mut self) -> Result<AnnotatedProgram, ParseError> {
+        let mut leading = self.collect_trivia();
+        let mut decls = Vec::new();
+        while !matches!(self.peek(), Token::Eof) {
+            let decl = self.parse_decl()?;
+            let trailing = self.collect_trailing_comment();
+            decls.push(Annotated {
+                node: decl,
+                leading_trivia: std::mem::take(&mut leading),
+                trailing_comment: trailing,
+            });
+            leading = self.collect_trivia();
         }
         Ok(decls)
     }

@@ -4,6 +4,63 @@ use crate::token::Span;
 
 pub type Program = Vec<Decl>;
 
+// --- Trivia (for formatter) ---
+
+/// A piece of trivia (comment or blank line) attached to an AST node.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Trivia {
+    BlankLines(u32),
+    Comment(String),
+    DocComment(String),
+}
+
+/// An AST node wrapped with leading trivia and an optional trailing comment.
+#[derive(Debug, Clone)]
+pub struct Annotated<T> {
+    pub node: T,
+    pub leading_trivia: Vec<Trivia>,
+    pub trailing_comment: Option<String>,
+}
+
+pub type AnnotatedProgram = Vec<Annotated<Decl>>;
+
+/// Strip trivia annotations, returning plain declarations.
+/// Transfers `Trivia::DocComment` items into each decl's `doc` field.
+pub fn strip_annotations(annotated: AnnotatedProgram) -> Program {
+    annotated
+        .into_iter()
+        .map(|ann| {
+            let mut decl = ann.node;
+            let docs: Vec<String> = ann
+                .leading_trivia
+                .into_iter()
+                .filter_map(|t| match t {
+                    Trivia::DocComment(text) => Some(text),
+                    _ => None,
+                })
+                .collect();
+            if !docs.is_empty() {
+                set_decl_doc(&mut decl, docs);
+            }
+            decl
+        })
+        .collect()
+}
+
+/// Attach doc comments to a declaration node (if it supports them).
+pub fn set_decl_doc(decl: &mut Decl, doc: Vec<String>) {
+    match decl {
+        Decl::FunSignature { doc: d, .. }
+        | Decl::TypeDef { doc: d, .. }
+        | Decl::RecordDef { doc: d, .. }
+        | Decl::EffectDef { doc: d, .. }
+        | Decl::HandlerDef { doc: d, .. }
+        | Decl::TraitDef { doc: d, .. }
+        | Decl::ImplDef { doc: d, .. } => *d = doc,
+        _ => {}
+    }
+}
+
 static NEXT_NODE_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Unique identifier for an expression node. Every node (parsed or synthetic)

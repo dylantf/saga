@@ -90,6 +90,8 @@ pub enum Token {
 
     // End of statement/line
     Terminator,
+    /// An empty line in the source (consecutive newline after a Terminator/Comment/BlankLine)
+    BlankLine,
 
     // End of file
     Eof,

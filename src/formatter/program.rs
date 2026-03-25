@@ -1,36 +1,77 @@
 use crate::ast::*;
 use super::Doc;
-use super::helpers::{format_doc_comment, docs_from_vec};
+use super::helpers::docs_from_vec;
 use super::type_expr::*;
 use super::expr::format_expr;
 use super::decl::*;
 
-/// Format an entire program (list of declarations).
-pub fn format_program(decls: &[Decl]) -> Doc {
-    let docs: Vec<Doc> = decls
-        .iter()
-        .filter_map(format_decl)
-        .collect();
-    Doc::join(Doc::hardline(), docs)
+/// Format leading trivia into Doc nodes, to be placed after a hardline separator.
+/// The caller provides the hardline; trivia items add additional lines as needed.
+fn format_trivia(trivia: &[Trivia]) -> Doc {
+    let mut parts = Vec::new();
+    for item in trivia {
+        match item {
+            Trivia::BlankLines(_) => {
+                // Normalize to a single blank line (one extra hardline beyond the separator)
+                parts.push(Doc::hardline());
+            }
+            Trivia::Comment(text) => {
+                parts.push(Doc::text(format!("# {}", text)));
+                parts.push(Doc::hardline());
+            }
+            Trivia::DocComment(text) => {
+                parts.push(Doc::text(format!("#@ {}", text)));
+                parts.push(Doc::hardline());
+            }
+        }
+    }
+    docs_from_vec(parts)
 }
 
-/// Format a single declaration. Returns None for elaboration-only nodes.
-fn format_decl(decl: &Decl) -> Option<Doc> {
-    Some(match decl {
+/// Format an entire program (list of annotated declarations).
+pub fn format_program(decls: &[Annotated<Decl>]) -> Doc {
+    let mut result = Doc::Nil;
+    let mut first = true;
+    for ann in decls {
+        if matches!(ann.node, Decl::DictConstructor { .. }) {
+            continue;
+        }
+
+        if first {
+            // First declaration: emit leading trivia without separator
+            result = result.append(format_trivia(&ann.leading_trivia));
+        } else {
+            // Newline to end previous declaration
+            result = result.append(Doc::hardline());
+            // Leading trivia (blank lines, comments) between declarations
+            result = result.append(format_trivia(&ann.leading_trivia));
+        }
+        first = false;
+
+        // The declaration itself
+        result = result.append(format_decl(&ann.node));
+
+        // Trailing comment
+        if let Some(ref comment) = ann.trailing_comment {
+            result = result.append(Doc::text(format!(" # {}", comment)));
+        }
+    }
+    result
+}
+
+/// Format a single declaration.
+fn format_decl(decl: &Decl) -> Doc {
+    match decl {
         Decl::ModuleDecl { path, .. } => {
             Doc::text(format!("module {}", path.join(".")))
         }
         Decl::Import { module_path, alias, exposing, .. } => {
             format_import(module_path, alias, exposing)
         }
-        Decl::FunSignature { doc, public, name, params, return_type, effects, effect_row_var, where_clause, annotations, .. } => {
+        Decl::FunSignature { public, name, params, return_type, effects, effect_row_var, where_clause, annotations, .. } => {
             let mut parts = Vec::new();
             for ann in annotations {
                 parts.push(format_annotation(ann));
-                parts.push(Doc::hardline());
-            }
-            if !doc.is_empty() {
-                parts.push(format_doc_comment(doc));
                 parts.push(Doc::hardline());
             }
             if *public {
@@ -73,6 +114,6 @@ fn format_decl(decl: &Decl) -> Option<Doc> {
         Decl::ImplDef { doc, trait_name, target_type, type_params, where_clause, needs, methods, .. } => {
             format_impl_def(doc, trait_name, target_type, type_params, where_clause, needs, methods)
         }
-        Decl::DictConstructor { .. } => return None,
-    })
+        Decl::DictConstructor { .. } => Doc::Nil,
+    }
 }

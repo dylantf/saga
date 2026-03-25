@@ -737,6 +737,23 @@ impl Lexer {
                         let (spanned, tok) = self.emit(Token::Terminator, start);
                         tokens.push(spanned);
                         prev_token = Some(tok);
+                    } else if self.nesting == 0 {
+                        // Emit BlankLine for empty lines. Check last emitted token (not prev_token)
+                        // since comments don't update prev_token.
+                        // Comments consume their trailing \n, so a \n after a Comment means a blank line.
+                        let last = tokens.last().map(|s| &s.token);
+                        let is_blank = matches!(
+                            last,
+                            Some(Token::Terminator)
+                                | Some(Token::Comment(_))
+                                | Some(Token::DocComment(_))
+                                | Some(Token::BlankLine)
+                        );
+                        if is_blank {
+                            let (spanned, _) = self.emit(Token::BlankLine, start);
+                            tokens.push(spanned);
+                            // Don't update prev_token -- BlankLine shouldn't affect terminator logic
+                        }
                     }
                     continue;
                 }
@@ -745,8 +762,20 @@ impl Lexer {
                     let tok = self.read_comment();
                     let (spanned, _) = self.emit(tok, start);
                     tokens.push(spanned);
-                    // Don't update prev_token -- comments shouldn't affect
-                    // terminator insertion logic
+                    // Consume the trailing newline as part of the comment so it
+                    // doesn't trigger a spurious BlankLine on the next iteration.
+                    // But if a Terminator would have been emitted for this \n, emit it now.
+                    if self.peek() == Some('\n') {
+                        let nl_start = self.pos;
+                        self.advance();
+                        if self.should_emit_terminator(&prev_token) {
+                            let (spanned, tok) = self.emit(Token::Terminator, nl_start);
+                            tokens.push(spanned);
+                            prev_token = Some(tok);
+                        }
+                    }
+                    // Don't update prev_token for comments -- they shouldn't affect
+                    // terminator insertion logic for the *next* line
                 }
                 Some('"') => {
                     let tok = if self.peek_next() == Some('"') && self.peek_ahead(2) == Some('"') {

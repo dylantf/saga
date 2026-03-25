@@ -19,7 +19,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Let destructuring (`let (x, y) = ...`, `let Point { x } = ...`, `let h :: t = ...`)
 - [x] String interpolation (`$"hello {name}"`)
 - [x] `panic` and `todo` builtins (halt immediately, return `Never`)
-- [ ] Assertions/single-arm matching + let binding sugar + panic? (Sugar for Result.unwrap)
+- [ ] Multiple matches on one pattern, e.g. `case foo { A | B -> C }. Means changing guard syntax to if/when
 
 ## Effects / Handlers
 

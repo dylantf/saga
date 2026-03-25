@@ -303,9 +303,12 @@ fn nested_parens_suppress_terminators() {
 }
 
 #[test]
-fn multiple_blank_lines_single_terminator() {
-    // After a terminator, more newlines shouldn't produce more terminators
-    assert_eq!(toks("42\n\n\n"), vec![Int(42), Terminator, Eof]);
+fn multiple_blank_lines_emit_blank_line_tokens() {
+    // After a terminator, additional newlines emit BlankLine tokens
+    assert_eq!(
+        toks("42\n\n\n"),
+        vec![Int(42), Terminator, BlankLine, BlankLine, Eof]
+    );
 }
 
 #[test]
