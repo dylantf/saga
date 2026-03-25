@@ -27,8 +27,12 @@ pub(super) fn mangle_ctor_atom(name: &str, constructor_modules: &HashMap<String,
         // Other(String) stays as-is (tuple form)
         _ => {}
     }
-    if let Some(module) = constructor_modules.get(name) {
-        format!("{}_{}", module, name)
+    // Strip module qualification (e.g. "Std.File.NotFound" -> "NotFound")
+    // so qualified constructors in user code resolve to the same mangled
+    // atom as the defining module uses.
+    let bare = name.rsplit('.').next().unwrap_or(name);
+    if let Some(module) = constructor_modules.get(bare) {
+        format!("{}_{}", module, bare)
     } else {
         name.to_string()
     }

@@ -8,6 +8,7 @@ pub type FileError
   | NoSpace
   | AlreadyExists
   | Other(String)
+  deriving (Debug)
 
 pub effect File {
   fun read : String -> Result String FileError

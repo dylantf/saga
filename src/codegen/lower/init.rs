@@ -400,27 +400,26 @@ impl<'a> Lowerer<'a> {
                     } => {
                         if let Some((erl_module, erl_func)) = extract_external(annotations) {
                             let arity = params.len();
-                            // Always register qualified form
                             let qualified_key = format!("{}.{}", prefix, name);
                             self.external_funs.entry(qualified_key).or_insert((
                                 erl_module.clone(),
                                 erl_func.clone(),
                                 arity,
                             ));
-                            // Register unqualified form only for exposed names
-                            if is_exposed(name) {
-                                self.external_funs.entry(name.clone()).or_insert((
-                                    erl_module.clone(),
-                                    erl_func.clone(),
-                                    arity,
-                                ));
-                                self.fun_info.entry(name.clone()).or_insert(FunInfo {
-                                    arity,
-                                    effects: Vec::new(),
-                                    param_absorbed_effects: HashMap::new(),
-                                    import_origin: None,
-                                });
-                            }
+                            // Always register the bare name for external functions
+                            // from elaborated modules: handler bodies reference
+                            // private externals by bare name when inlined.
+                            self.external_funs.entry(name.clone()).or_insert((
+                                erl_module.clone(),
+                                erl_func.clone(),
+                                arity,
+                            ));
+                            self.fun_info.entry(name.clone()).or_insert(FunInfo {
+                                arity,
+                                effects: Vec::new(),
+                                param_absorbed_effects: HashMap::new(),
+                                import_origin: None,
+                            });
                         }
                     }
                     _ => {}
