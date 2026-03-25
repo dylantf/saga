@@ -139,6 +139,7 @@ pub fn cmd_emit(file: &str) {
         codegen_info: result.codegen_info().clone(),
         elaborated_modules: HashMap::new(),
         let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
     };
     let core_src = codegen::emit_module_with_context("_script", &elaborated, &ctx);
     print!("{}", core_src);
@@ -157,10 +158,12 @@ pub fn cmd_fmt(args: &[String]) {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let tokens = dylang::lexer::Lexer::new(&source).lex().unwrap_or_else(|e| {
-        eprintln!("Lex error in {}: {:?}", file, e);
-        std::process::exit(1);
-    });
+    let tokens = dylang::lexer::Lexer::new(&source)
+        .lex()
+        .unwrap_or_else(|e| {
+            eprintln!("Lex error in {}: {:?}", file, e);
+            std::process::exit(1);
+        });
     let mut parser = dylang::parser::Parser::new(tokens);
     let program = parser.parse_program_annotated().unwrap_or_else(|e| {
         eprintln!("Parse error in {}: {} at {:?}", file, e.message, e.span);
@@ -264,6 +267,7 @@ pub fn cmd_test(args: &[String]) {
             codegen_info: all_codegen.clone(),
             elaborated_modules: test_std_modules.clone(),
             let_effect_bindings: HashMap::new(),
+            prelude_imports: result.prelude_imports.clone(),
         };
         for (name, elab) in &test_std_modules {
             if !all_modules.contains_key(name) {
@@ -283,6 +287,7 @@ pub fn cmd_test(args: &[String]) {
             codegen_info: all_codegen,
             elaborated_modules: all_modules.clone(),
             let_effect_bindings: result.let_effect_bindings.clone(),
+            prelude_imports: result.prelude_imports.clone(),
         };
         let core_src = codegen::emit_module_with_context("_test", &elaborated, &test_ctx);
         let core_path = build_dir.join("_test.core");

@@ -71,6 +71,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         codegen_info: result.codegen_info().clone(),
         elaborated_modules,
         let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
     };
     codegen::emit_module_with_context("_script", &elaborated, &ctx)
 }

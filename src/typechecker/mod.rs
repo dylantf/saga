@@ -723,6 +723,8 @@ pub struct Checker {
     pub(crate) allow_bodyless_annotations: bool,
     /// Set to the module name when checking a module file; None for the main file.
     pub(crate) current_module: Option<String>,
+    /// Import declarations from the prelude (passed through to lowerer).
+    pub prelude_imports: Vec<crate::ast::Decl>,
 }
 
 /// Trait system state: definitions, impl registry, deferred constraints, where bounds.
@@ -870,6 +872,7 @@ impl Checker {
             lsp: LspState::default(),
             allow_bodyless_annotations: false,
             current_module: None,
+            prelude_imports: Vec::new(),
         };
         checker.register_builtins();
         checker
@@ -919,6 +922,13 @@ impl Checker {
         checker
             .check_program_inner(&prelude_program)
             .map_err(|errs| errs.into_iter().next().unwrap())?;
+
+        // Save the prelude's import declarations so the lowerer can register
+        // only the names the prelude actually exposes.
+        checker.prelude_imports = prelude_program
+            .into_iter()
+            .filter(|d| matches!(d, crate::ast::Decl::Import { .. }))
+            .collect();
 
         checker.modules.prelude_snapshot = Some(Box::new(checker.clone()));
         Ok(checker)

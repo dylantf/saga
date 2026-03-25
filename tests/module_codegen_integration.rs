@@ -37,6 +37,7 @@ fn emit_from_program(
         codegen_info: result.codegen_info().clone(),
         elaborated_modules: std::collections::HashMap::new(),
         let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
     };
     codegen::emit_module_with_context(module_name, &elaborated, &ctx)
 }
@@ -72,6 +73,11 @@ fn make_project_checker() -> typechecker::Checker {
         .expect("prelude parse error");
     dylang::derive::expand_derives(&mut prelude_program);
     dylang::desugar::desugar_program(&mut prelude_program);
+    checker.prelude_imports = prelude_program
+        .iter()
+        .filter(|d| matches!(d, dylang::ast::Decl::Import { .. }))
+        .cloned()
+        .collect();
     let result = checker.check_program(&prelude_program);
     assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
     checker

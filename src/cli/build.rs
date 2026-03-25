@@ -393,6 +393,7 @@ pub fn build_project(
         codegen_info: result.codegen_info().clone(),
         elaborated_modules: elaborated_modules.clone(),
         let_effect_bindings: HashMap::new(),
+        prelude_imports: result.prelude_imports.clone(),
     };
     for (module_name, elaborated) in &elaborated_modules {
         let erlang_name = if module_name == "Main" {
@@ -451,6 +452,7 @@ pub fn build_script(file: &str, profile: &str) -> PathBuf {
         codegen_info: result.codegen_info().clone(),
         elaborated_modules: elaborated_modules.clone(),
         let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
     };
     for (module_name, elaborated) in &elaborated_modules {
         emit_module(module_name, elaborated, &ctx, &build_dir);

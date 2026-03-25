@@ -279,7 +279,8 @@ impl<'a> Lowerer<'a> {
                         // Additional clause: just add to existing group
                         group.2.push((params, guard, body));
                     } else {
-                        // First clause: register fun_info (overrides any pre-registration)
+                        // First clause: register fun_info and clear any imported
+                        // external_funs entry so local definitions take priority.
                         self.fun_info.insert(
                             name.clone(),
                             FunInfo {
@@ -289,6 +290,7 @@ impl<'a> Lowerer<'a> {
                                 import_origin: None,
                             },
                         );
+                        self.external_funs.remove(name.as_str());
                         clause_groups.push((name.clone(), arity, vec![(params, guard, body)]));
                     }
                 }
@@ -1773,7 +1775,6 @@ impl<'a> Lowerer<'a> {
         let call = if let Some((erl_mod, erl_func, _)) = self
             .external_funs
             .get(&qualified)
-            .or_else(|| self.external_funs.get(func_name))
         {
             CExpr::Call(erl_mod.clone(), erl_func.clone(), call_args)
         } else {

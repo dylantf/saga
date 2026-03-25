@@ -34,6 +34,7 @@ fn emit_full(src: &str) -> String {
         codegen_info: result.codegen_info().clone(),
         elaborated_modules: std::collections::HashMap::new(),
         let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
     };
     emit_module_with_context("_script", &elaborated, &ctx)
 }

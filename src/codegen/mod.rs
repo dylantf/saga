@@ -17,6 +17,9 @@ pub struct CodegenContext {
     pub elaborated_modules: HashMap<String, ast::Program>,
     /// Deferred effects for let bindings that partially apply effectful functions.
     pub let_effect_bindings: HashMap<String, Vec<String>>,
+    /// Import declarations from the prelude, so the lowerer registers
+    /// only the names the prelude actually exposes (not all Std exports).
+    pub prelude_imports: Vec<ast::Decl>,
 }
 
 pub fn emit_module(module_name: &str, program: &ast::Program) -> String {
