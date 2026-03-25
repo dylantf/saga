@@ -1,0 +1,107 @@
+use crate::ast::*;
+use crate::token::Span;
+use crate::docs;
+use super::Doc;
+
+pub fn format_type_expr(ty: &TypeExpr) -> Doc {
+    match ty {
+        TypeExpr::Named { name, .. } => Doc::text(name),
+        TypeExpr::Var { name, .. } => Doc::text(name),
+        TypeExpr::App { func, arg, .. } => {
+            let arg_doc = match arg.as_ref() {
+                TypeExpr::App { .. } => docs![Doc::text("("), format_type_expr(arg), Doc::text(")")],
+                _ => format_type_expr(arg),
+            };
+            docs![format_type_expr(func), Doc::text(" "), arg_doc]
+        }
+        TypeExpr::Arrow { from, to, effects, effect_row_var, .. } => {
+            let from_doc = match from.as_ref() {
+                TypeExpr::Arrow { .. } => docs![Doc::text("("), format_type_expr(from), Doc::text(")")],
+                _ => format_type_expr(from),
+            };
+            let mut d = docs![from_doc, Doc::text(" -> "), format_type_expr(to)];
+            if !effects.is_empty() || effect_row_var.is_some() {
+                d = d.append(Doc::text(" needs {"));
+                let mut eff_parts: Vec<String> = effects.iter().map(format_effect_ref_str).collect();
+                if let Some((var, _)) = effect_row_var {
+                    eff_parts.push(format!("..{}", var));
+                }
+                d = d.append(Doc::text(eff_parts.join(", "))).append(Doc::text("}"));
+            }
+            d
+        }
+        TypeExpr::Record { fields, .. } => {
+            let field_docs: Vec<Doc> = fields.iter().map(|(name, ty)| {
+                docs![Doc::text(format!("{}: ", name)), format_type_expr(ty)]
+            }).collect();
+            docs![Doc::text("{ "), Doc::join(Doc::text(", "), field_docs), Doc::text(" }")]
+        }
+    }
+}
+
+/// Format a function type signature: params -> return_type [needs {...}]
+pub fn format_fun_type(
+    params: &[(String, TypeExpr)], return_type: &TypeExpr,
+    effects: &[EffectRef], effect_row_var: &Option<(String, Span)>,
+) -> Doc {
+    let mut parts: Vec<Doc> = params.iter().map(|(label, ty)| {
+        if label.starts_with('_') {
+            format_type_expr(ty)
+        } else {
+            docs![Doc::text(format!("({}: ", label)), format_type_expr(ty), Doc::text(")")]
+        }
+    }).collect();
+    parts.push(format_type_expr(return_type));
+
+    let mut d = Doc::join(Doc::text(" -> "), parts);
+
+    if !effects.is_empty() || effect_row_var.is_some() {
+        d = d.append(Doc::text(" needs {"));
+        let mut eff_parts: Vec<String> = effects.iter().map(format_effect_ref_str).collect();
+        if let Some((var, _)) = effect_row_var {
+            eff_parts.push(format!("..{}", var));
+        }
+        d = d.append(Doc::text(eff_parts.join(", "))).append(Doc::text("}"));
+    }
+    d
+}
+
+pub fn format_effect_ref_str(e: &EffectRef) -> String {
+    if e.type_args.is_empty() {
+        e.name.clone()
+    } else {
+        let args: Vec<String> = e.type_args.iter().map(format_type_expr_str).collect();
+        format!("{} {}", e.name, args.join(" "))
+    }
+}
+
+/// Simple string-based type formatting (for contexts where we need a String, not a Doc).
+pub fn format_type_expr_str(ty: &TypeExpr) -> String {
+    match ty {
+        TypeExpr::Named { name, .. } | TypeExpr::Var { name, .. } => name.clone(),
+        TypeExpr::App { func, arg, .. } => {
+            let arg_str = match arg.as_ref() {
+                TypeExpr::App { .. } | TypeExpr::Arrow { .. } => format!("({})", format_type_expr_str(arg)),
+                _ => format_type_expr_str(arg),
+            };
+            format!("{} {}", format_type_expr_str(func), arg_str)
+        }
+        TypeExpr::Arrow { from, to, .. } => {
+            format!("{} -> {}", format_type_expr_str(from), format_type_expr_str(to))
+        }
+        TypeExpr::Record { fields, .. } => {
+            let fs: Vec<String> = fields.iter()
+                .map(|(n, t)| format!("{}: {}", n, format_type_expr_str(t)))
+                .collect();
+            format!("{{ {} }}", fs.join(", "))
+        }
+    }
+}
+
+pub fn format_where_clause(bounds: &[TraitBound]) -> Doc {
+    let bound_strs: Vec<String> = bounds.iter().map(|b| {
+        let traits: Vec<&str> = b.traits.iter().map(|(n, _)| n.as_str()).collect();
+        format!("{}: {}", b.type_var, traits.join(" + "))
+    }).collect();
+    Doc::text(format!("where {{{}}}", bound_strs.join(", ")))
+}

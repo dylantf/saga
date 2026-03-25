@@ -1,0 +1,49 @@
+use crate::ast::*;
+use crate::docs;
+use super::Doc;
+use super::helpers::format_lit;
+
+pub fn format_pat(pat: &Pat) -> Doc {
+    match pat {
+        Pat::Wildcard { .. } => Doc::text("_"),
+        Pat::Var { name, .. } => Doc::text(name),
+        Pat::Lit { value, .. } => format_lit(value),
+        Pat::Constructor { name, args, .. } => {
+            if args.is_empty() {
+                Doc::text(name)
+            } else {
+                let arg_docs: Vec<Doc> = args.iter().map(format_pat).collect();
+                docs![Doc::text(format!("{}(", name)), Doc::join(Doc::text(", "), arg_docs), Doc::text(")")]
+            }
+        }
+        Pat::Record { name, fields, as_name, .. } => {
+            let field_docs: Vec<Doc> = fields.iter().map(|(fname, alias)| {
+                match alias {
+                    Some(p) => docs![Doc::text(format!("{}: ", fname)), format_pat(p)],
+                    None => Doc::text(fname),
+                }
+            }).collect();
+            let mut d = docs![Doc::text(format!("{} {{ ", name)), Doc::join(Doc::text(", "), field_docs), Doc::text(" }")];
+            if let Some(a) = as_name {
+                d = d.append(Doc::text(format!(" as {}", a)));
+            }
+            d
+        }
+        Pat::AnonRecord { fields, .. } => {
+            let field_docs: Vec<Doc> = fields.iter().map(|(fname, alias)| {
+                match alias {
+                    Some(p) => docs![Doc::text(format!("{}: ", fname)), format_pat(p)],
+                    None => Doc::text(fname),
+                }
+            }).collect();
+            docs![Doc::text("{ "), Doc::join(Doc::text(", "), field_docs), Doc::text(" }")]
+        }
+        Pat::Tuple { elements, .. } => {
+            let elem_docs: Vec<Doc> = elements.iter().map(format_pat).collect();
+            docs![Doc::text("("), Doc::join(Doc::text(", "), elem_docs), Doc::text(")")]
+        }
+        Pat::StringPrefix { prefix, rest, .. } => {
+            docs![Doc::text(format!("\"{}\" <> ", prefix)), format_pat(rest)]
+        }
+    }
+}
