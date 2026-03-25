@@ -1471,22 +1471,7 @@ impl Checker {
             }
 
             let body_ty = self.infer_expr(&arm.body)?;
-            // If the op returns Never (non-resumable), the arm body must also
-            // be Never (i.e. diverge). Otherwise the handler would silently
-            // produce a non-Never value with no way to continue the computation.
-            if matches!(op_sig.return_type, Type::Never) {
-                let resolved = self.sub.apply(&body_ty);
-                if !matches!(resolved, Type::Never | Type::Error) {
-                    let display_ty = self.prettify_type(&body_ty);
-                    self.collected_diagnostics.push(Diagnostic::error_at(
-                        arm.span,
-                        format!(
-                            "non-resumable handler arm must diverge (return Never), but returns `{}`",
-                            display_ty
-                        ),
-                    ));
-                }
-            } else if let Err(e) = self.unify(&answer_ty, &body_ty) {
+            if let Err(e) = self.unify(&answer_ty, &body_ty) {
                 self.collected_diagnostics.push(e.with_span(arm.span));
             }
             self.resume_type = saved_resume;
@@ -1689,7 +1674,7 @@ impl Checker {
             }
             for (trait_name, ty, span, node_id) in constraints {
                 let resolved = self.sub.apply(&ty);
-                if matches!(resolved, Type::Error | Type::Never) {
+                if matches!(resolved, Type::Error) {
                     continue;
                 }
                 match &resolved {
@@ -1805,7 +1790,7 @@ impl Checker {
                         ));
                     }
                     // Error/Never type: skip trait checking
-                    Type::Error | Type::Never => {}
+                    Type::Error => {}
                 }
             }
         }

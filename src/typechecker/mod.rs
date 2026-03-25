@@ -119,9 +119,6 @@ pub enum Type {
     Record(Vec<(std::string::String, Type)>),
     /// Error recovery type: unifies with everything, suppresses cascading errors.
     Error,
-    /// Bottom type: the type of expressions that never produce a value (panic, exit).
-    /// Unifies with any type.
-    Never,
 }
 
 /// Convenience constructors for built-in types
@@ -202,7 +199,6 @@ impl std::fmt::Display for Type {
                 write!(f, " }}")
             }
             Type::Error => write!(f, "<error>"),
-            Type::Never => write!(f, "Never"),
         }
     }
 }
@@ -247,7 +243,7 @@ impl Substitution {
                     .collect(),
             ),
             Type::Error => Type::Error,
-            Type::Never => Type::Never,
+
         }
     }
 
@@ -348,7 +344,7 @@ impl Substitution {
             }
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
             Type::Record(fields) => fields.iter().any(|(_, ty)| self.occurs(id, ty)),
-            Type::Error | Type::Never => false,
+            Type::Error => false,
         }
     }
 }
@@ -512,7 +508,7 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                 free_vars_in_type(ty, bound, out);
             }
         }
-        Type::Error | Type::Never => {}
+        Type::Error => {}
     }
 }
 
@@ -998,7 +994,7 @@ impl Checker {
                 PendingWarning::DiscardedValue { span, ty } => {
                     let resolved = self.sub.apply(&ty);
                     let is_unit = matches!(&resolved, Type::Con(n, args) if n == "Unit" && args.is_empty());
-                    if !is_unit && !matches!(resolved, Type::Var(_) | Type::Error | Type::Never) {
+                    if !is_unit && !matches!(resolved, Type::Var(_) | Type::Error) {
                         let display_ty = self.prettify_type(&ty);
                         self.collected_diagnostics.push(Diagnostic::warning_at(
                             span,

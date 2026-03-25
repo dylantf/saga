@@ -340,7 +340,7 @@ fn effect_in_if_branch_threads_outer_k() {
     // NOT an identity function.
     let src = "
 effect Fail {
-  fun fail : (msg: String) -> Never
+  fun fail : (msg: String) -> a
 }
 
 fun process : Unit -> Unit needs {Fail}
@@ -367,7 +367,7 @@ fn effect_in_case_branch_threads_outer_k() {
     // Same issue but with case expressions instead of if.
     let src = "
 effect Fail {
-  fun fail : (msg: String) -> Never
+  fun fail : (msg: String) -> a
 }
 
 fun dispatch : (n: Int) -> Int needs {Fail}
@@ -393,7 +393,7 @@ fn nested_if_effect_threads_k_recursively() {
     // Nested if/case: K should be threaded through multiple levels.
     let src = "
 effect Fail {
-  fun fail : (msg: String) -> Never
+  fun fail : (msg: String) -> a
 }
 
 fun deep : (a: Bool) -> (b: Bool) -> Int needs {Fail}
@@ -416,7 +416,7 @@ fn effect_in_if_branch_k_not_identity() {
     // the rest of the block.
     let src = "
 effect Fail {
-  fun fail : (msg: String) -> Never
+  fun fail : (msg: String) -> a
 }
 
 fun process : Unit -> Int needs {Fail}

@@ -2,10 +2,6 @@ effect Fail a {
   fun fail : (msg: String) -> a
 }
 
-handler abort_failure for Fail Never {
-  fail msg = panic $"Error: {msg}"
-}
-
 #@ Converts a failure to a Result of the given type
 handler to_result for Fail a {
   fail x = Err x

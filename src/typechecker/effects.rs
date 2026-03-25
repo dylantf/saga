@@ -130,7 +130,7 @@ impl Checker {
                             collect_vars(ty, vars);
                         }
                     }
-                    Type::Error | Type::Never => {}
+                    Type::Error => {}
                 }
             }
             for (_, t) in &op.params {

@@ -40,7 +40,7 @@ pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
                 .collect(),
         ),
         Type::Error => Type::Error,
-        Type::Never => Type::Never,
+
     }
 }
 
@@ -74,7 +74,7 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
                 collect_free_vars(ty, out);
             }
         }
-        Type::Error | Type::Never => {}
+        Type::Error => {}
     }
 }
 
@@ -91,12 +91,8 @@ impl Checker {
             // Error type unifies with anything (suppresses cascading errors)
             (Type::Error, _) | (_, Type::Error) => Ok(()),
 
-            // Var bindings before Never so that variables get bound to Never
             (Type::Var(id), _) => self.sub.bind(*id, &b),
             (_, Type::Var(id)) => self.sub.bind(*id, &a),
-
-            // Never (bottom) unifies with anything
-            (Type::Never, _) | (_, Type::Never) => Ok(()),
 
             (Type::Fun(a1, b1, row1), Type::Fun(a2, b2, row2)) => {
                 self.unify(a1, a2)?;
@@ -288,7 +284,7 @@ impl Checker {
                     .collect(),
             ),
             Type::Error => Type::Error,
-            Type::Never => Type::Never,
+    
         }
     }
 
@@ -330,10 +326,6 @@ impl Checker {
         params: &mut Vec<(String, u32)>,
     ) -> Type {
         match texpr {
-            crate::ast::TypeExpr::Named { name, span } if name == "Never" => {
-                self.lsp.type_references.push((*span, name.clone()));
-                Type::Never
-            }
             crate::ast::TypeExpr::Named { name, span } => {
                 // Record type reference for find-references (skip type variables/params)
                 if name.starts_with(|c: char| c.is_uppercase()) {

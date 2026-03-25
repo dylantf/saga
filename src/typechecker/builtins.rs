@@ -46,25 +46,33 @@ impl Checker {
         // Ord impls for primitives are defined in Std.Int, Std.Float, Std.String
         // (they provide real dict constructors for `compare`).
 
-        // panic : String -> Never (crashes at runtime)
-        self.env.insert(
-            "panic".into(),
-            Scheme {
-                forall: vec![],
-                constraints: vec![],
-                ty: Type::arrow(Type::string(), Type::Never),
-            },
-        );
+        // panic : forall a. String -> a (crashes at runtime)
+        {
+            let a_id = self.next_var;
+            self.next_var += 1;
+            self.env.insert(
+                "panic".into(),
+                Scheme {
+                    forall: vec![a_id],
+                    constraints: vec![],
+                    ty: Type::arrow(Type::string(), Type::Var(a_id)),
+                },
+            );
+        }
 
-        // todo : Unit -> Never (type hole, crashes at runtime with "not implemented")
-        self.env.insert(
-            "todo".into(),
-            Scheme {
-                forall: vec![],
-                constraints: vec![],
-                ty: Type::arrow(Type::unit(), Type::Never),
-            },
-        );
+        // todo : forall a. Unit -> a (type hole, crashes at runtime with "not implemented")
+        {
+            let a_id = self.next_var;
+            self.next_var += 1;
+            self.env.insert(
+                "todo".into(),
+                Scheme {
+                    forall: vec![a_id],
+                    constraints: vec![],
+                    ty: Type::arrow(Type::unit(), Type::Var(a_id)),
+                },
+            );
+        }
 
         // List constructors
         let a = self.fresh_var();
