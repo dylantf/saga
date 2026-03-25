@@ -35,16 +35,16 @@ fn desugar_decl(decl: &mut Decl) {
             desugar_expr(value);
         }
         Decl::HandlerDef { arms, recovered_arms, return_clause, .. } => {
-            for arm in arms.iter_mut().chain(recovered_arms.iter_mut()) {
-                desugar_expr(&mut arm.body);
+            for ann_arm in arms.iter_mut().chain(recovered_arms.iter_mut()) {
+                desugar_expr(&mut ann_arm.node.body);
             }
             if let Some(rc) = return_clause {
                 desugar_expr(&mut rc.body);
             }
         }
         Decl::ImplDef { methods, .. } => {
-            for (_, _, _, body) in methods.iter_mut() {
-                desugar_expr(body);
+            for ann_method in methods.iter_mut() {
+                desugar_expr(&mut ann_method.node.body);
             }
         }
         // Declarations without expression bodies
@@ -78,16 +78,16 @@ fn desugar_expr(expr: &mut Expr) {
         }
         ExprKind::Case { scrutinee, arms } => {
             desugar_expr(scrutinee);
-            for arm in arms {
-                if let Some(g) = &mut arm.guard {
+            for ann_arm in arms {
+                if let Some(g) = &mut ann_arm.node.guard {
                     desugar_expr(g);
                 }
-                desugar_expr(&mut arm.body);
+                desugar_expr(&mut ann_arm.node.body);
             }
         }
         ExprKind::Block { stmts } => {
-            for stmt in stmts {
-                desugar_stmt(stmt);
+            for ann_stmt in stmts {
+                desugar_stmt(&mut ann_stmt.node);
             }
         }
         ExprKind::Lambda { body, .. } => desugar_expr(body),
@@ -123,19 +123,19 @@ fn desugar_expr(expr: &mut Expr) {
                 desugar_expr(e);
             }
             desugar_expr(success);
-            for arm in else_arms {
-                if let Some(g) = &mut arm.guard {
+            for ann_arm in else_arms {
+                if let Some(g) = &mut ann_arm.node.guard {
                     desugar_expr(g);
                 }
-                desugar_expr(&mut arm.body);
+                desugar_expr(&mut ann_arm.node.body);
             }
         }
         ExprKind::Receive { arms, after_clause } => {
-            for arm in arms {
-                if let Some(g) = &mut arm.guard {
+            for ann_arm in arms {
+                if let Some(g) = &mut ann_arm.node.guard {
                     desugar_expr(g);
                 }
-                desugar_expr(&mut arm.body);
+                desugar_expr(&mut ann_arm.node.body);
             }
             if let Some((timeout, body)) = after_clause {
                 desugar_expr(timeout);
@@ -292,8 +292,8 @@ fn desugar_handler(handler: &mut Handler) {
     match handler {
         Handler::Named(..) => {}
         Handler::Inline { arms, return_clause, .. } => {
-            for arm in arms {
-                desugar_expr(&mut arm.body);
+            for ann_arm in arms {
+                desugar_expr(&mut ann_arm.node.body);
             }
             if let Some(rc) = return_clause {
                 desugar_expr(&mut rc.body);
@@ -371,14 +371,14 @@ fn desugar_comprehension(body: Expr, qualifiers: &[ComprehensionQualifier], span
             let inner = desugar_comprehension(body, &qualifiers[1..], span);
             Expr::synth(span, ExprKind::Block {
                 stmts: vec![
-                    Stmt::Let {
+                    Annotated::bare(Stmt::Let {
                         pattern: pat.clone(),
                         annotation: None,
                         value: value.clone(),
                         assert: false,
                         span,
-                    },
-                    Stmt::Expr(inner),
+                    }),
+                    Annotated::bare(Stmt::Expr(inner)),
                 ],
             })
         }

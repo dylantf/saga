@@ -73,7 +73,7 @@ impl ModuleExports {
                     if *opaque {
                         type_constructors.insert(name.clone(), vec![]);
                     } else {
-                        let ctors: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                        let ctors: Vec<String> = variants.iter().map(|v| v.node.name.clone()).collect();
                         type_constructors.insert(name.clone(), ctors);
                     }
                 }
@@ -938,8 +938,8 @@ fn collect_codegen_info(
                 let ops = operations
                     .iter()
                     .map(|op| EffectOpDef {
-                        name: op.name.clone(),
-                        param_count: op.params.len(),
+                        name: op.node.name.clone(),
+                        param_count: op.node.params.len(),
                     })
                     .collect();
                 effect_defs.push(EffectDef {
@@ -954,7 +954,7 @@ fn collect_codegen_info(
                 fields,
                 ..
             } => {
-                let field_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                let field_names: Vec<String> = fields.iter().map(|f| f.node.0.clone()).collect();
                 record_fields.push((name.clone(), field_names));
             }
             Decl::HandlerDef {
@@ -1053,7 +1053,7 @@ pub(super) fn public_names_for_tc(
                 names.insert(name.clone());
                 if !opaque {
                     for v in variants {
-                        names.insert(v.name.clone());
+                        names.insert(v.node.name.clone());
                     }
                 }
             }
@@ -1073,7 +1073,7 @@ pub(super) fn public_names_for_tc(
                 ..
             } => {
                 for m in methods {
-                    names.insert(m.name.clone());
+                    names.insert(m.node.name.clone());
                 }
             }
             _ => {}

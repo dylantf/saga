@@ -1103,7 +1103,10 @@ impl<'a> Lowerer<'a> {
                 )
             }
 
-            ExprKind::Block { stmts, .. } => self.lower_block(stmts),
+            ExprKind::Block { stmts, .. } => {
+                let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
+                self.lower_block(&stmts)
+            }
 
             ExprKind::Lambda { params, body, .. } => {
                 let all_simple = params.iter().all(|p| {
@@ -1218,7 +1221,8 @@ impl<'a> Lowerer<'a> {
             } => {
                 let scrut_var = self.fresh();
                 let scrut_ce = self.lower_expr(scrutinee);
-                let arms_ce = self.lower_case_arms(&scrut_var, arms);
+                let arms: Vec<_> = arms.iter().map(|a| a.node.clone()).collect();
+                let arms_ce = self.lower_case_arms(&scrut_var, &arms);
                 CExpr::Let(
                     scrut_var.clone(),
                     Box::new(scrut_ce),
@@ -1233,7 +1237,7 @@ impl<'a> Lowerer<'a> {
                 // there is no scrutinee variable to fall through to.
                 let lowered_arms: Vec<CArm> = arms
                     .iter()
-                    .map(|arm| {
+                    .map(|annotated| { let arm = &annotated.node;
                         // System message patterns: bind a raw reason variable
                         // and wrap the body with a conversion case.
                         let (pat, reason_wrapper) = if let Pat::Constructor { name, args, .. } =
@@ -1558,7 +1562,10 @@ impl<'a> Lowerer<'a> {
                 success,
                 else_arms,
                 ..
-            } => self.lower_do(bindings, success, else_arms),
+            } => {
+                let else_arms: Vec<_> = else_arms.iter().map(|a| a.node.clone()).collect();
+                self.lower_do(bindings, success, &else_arms)
+            }
 
             // --- Elaboration-only constructs ---
             ExprKind::DictMethodAccess {

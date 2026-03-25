@@ -40,6 +40,35 @@ pub fn format_doc_comment(doc: &[String]) -> Doc {
     Doc::join(Doc::hardline(), lines)
 }
 
+/// Format trivia (blank lines, comments, doc comments) into Doc nodes.
+pub fn format_trivia(trivia: &[Trivia]) -> Doc {
+    let mut parts = Vec::new();
+    for item in trivia {
+        match item {
+            Trivia::BlankLines(_) => {
+                parts.push(Doc::hardline());
+            }
+            Trivia::Comment(text) => {
+                parts.push(Doc::text(format!("# {}", text)));
+                parts.push(Doc::hardline());
+            }
+            Trivia::DocComment(text) => {
+                parts.push(Doc::text(format!("#@ {}", text)));
+                parts.push(Doc::hardline());
+            }
+        }
+    }
+    docs_from_vec(parts)
+}
+
+/// Format a trailing comment (if any) as ` # text`.
+pub fn format_trailing(comment: &Option<String>) -> Doc {
+    match comment {
+        Some(text) => Doc::text(format!(" # {}", text)),
+        None => Doc::Nil,
+    }
+}
+
 /// Concatenate a Vec<Doc> into a single Doc.
 pub fn docs_from_vec(docs: Vec<Doc>) -> Doc {
     let mut result = Doc::Nil;

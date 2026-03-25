@@ -45,7 +45,7 @@ pub fn collect_code_actions(
             let handled: HashSet<&str> = arms
                 .iter()
                 .chain(recovered_arms.iter())
-                .map(|a| a.op_name.as_str())
+                .map(|a| a.node.op_name.as_str())
                 .collect();
 
             // Collect all missing ops across all effects
@@ -73,7 +73,7 @@ pub fn collect_code_actions(
 
             // Detect indentation from existing arms, or default to 2 spaces
             let indent = if let Some(first_arm) = arms.first() {
-                let (_, col) = line_index.offset_to_line_col(first_arm.span.start, source);
+                let (_, col) = line_index.offset_to_line_col(first_arm.node.span.start, source);
                 " ".repeat(col)
             } else {
                 "  ".to_string()

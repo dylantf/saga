@@ -29,10 +29,10 @@ impl Normalizer {
 
     /// Normalize a block's statements: lift nested effect calls to their own
     /// `let` bindings so they appear at statement level.
-    fn normalize_stmts(&mut self, stmts: &[Stmt]) -> Vec<Stmt> {
+    fn normalize_stmts(&mut self, stmts: &[Annotated<Stmt>]) -> Vec<Annotated<Stmt>> {
         let mut result = Vec::new();
-        for stmt in stmts {
-            match stmt {
+        for ann_stmt in stmts {
+            match &ann_stmt.node {
                 Stmt::Let {
                     pattern,
                     annotation,
@@ -44,14 +44,14 @@ impl Normalizer {
                     // At statement level, effect calls are fine (lower_block handles them).
                     // We only need to lift effect calls nested *inside* the value.
                     let new_value = self.normalize_top(value, &mut lifted);
-                    result.extend(lifted);
-                    result.push(Stmt::Let {
+                    result.extend(lifted.into_iter().map(Annotated::bare));
+                    result.push(Annotated::bare(Stmt::Let {
                         pattern: pattern.clone(),
                         annotation: annotation.clone(),
                         value: new_value,
                         assert: *assert,
                         span: *span,
-                    });
+                    }));
                 }
                 Stmt::LetFun {
                     id,
@@ -64,7 +64,7 @@ impl Normalizer {
                 } => {
                     let new_body = self.normalize_expr(body);
                     let new_guard = guard.as_ref().map(|g| Box::new(self.normalize_expr(g)));
-                    result.push(Stmt::LetFun {
+                    result.push(Annotated::bare(Stmt::LetFun {
                         id: *id,
                         name: name.clone(),
                         name_span: *name_span,
@@ -72,13 +72,13 @@ impl Normalizer {
                         guard: new_guard,
                         body: new_body,
                         span: *span,
-                    });
+                    }));
                 }
                 Stmt::Expr(e) => {
                     let mut lifted = Vec::new();
                     let new_expr = self.normalize_top(e, &mut lifted);
-                    result.extend(lifted);
-                    result.push(Stmt::Expr(new_expr));
+                    result.extend(lifted.into_iter().map(Annotated::bare));
+                    result.push(Annotated::bare(Stmt::Expr(new_expr)));
                 }
             }
         }
@@ -214,12 +214,12 @@ impl Normalizer {
                 let new_scrut = self.normalize_and_lift(scrutinee, lifted);
                 let new_arms = arms
                     .iter()
-                    .map(|arm| CaseArm {
-                        pattern: arm.pattern.clone(),
-                        guard: arm.guard.as_ref().map(|g| self.normalize_expr(g)),
-                        body: self.normalize_expr(&arm.body),
-                        span: arm.span,
-                    })
+                    .map(|ann| Annotated::bare(CaseArm {
+                        pattern: ann.node.pattern.clone(),
+                        guard: ann.node.guard.as_ref().map(|g| self.normalize_expr(g)),
+                        body: self.normalize_expr(&ann.node.body),
+                        span: ann.node.span,
+                    }))
                     .collect();
                 Expr::synth(span, ExprKind::Case {
                     scrutinee: Box::new(new_scrut),
@@ -343,12 +343,12 @@ impl Normalizer {
                     success: Box::new(self.normalize_expr(success)),
                     else_arms: else_arms
                         .iter()
-                        .map(|arm| CaseArm {
-                            pattern: arm.pattern.clone(),
-                            guard: arm.guard.as_ref().map(|g| self.normalize_expr(g)),
-                            body: self.normalize_expr(&arm.body),
-                            span: arm.span,
-                        })
+                        .map(|ann| Annotated::bare(CaseArm {
+                            pattern: ann.node.pattern.clone(),
+                            guard: ann.node.guard.as_ref().map(|g| self.normalize_expr(g)),
+                            body: self.normalize_expr(&ann.node.body),
+                            span: ann.node.span,
+                        }))
                         .collect(),
                 })
             }
@@ -390,12 +390,12 @@ impl Normalizer {
             } => Expr::synth(span, ExprKind::Receive {
                 arms: arms
                     .iter()
-                    .map(|arm| CaseArm {
-                        pattern: arm.pattern.clone(),
-                        guard: arm.guard.as_ref().map(|g| self.normalize_expr(g)),
-                        body: self.normalize_expr(&arm.body),
-                        span: arm.span,
-                    })
+                    .map(|ann| Annotated::bare(CaseArm {
+                        pattern: ann.node.pattern.clone(),
+                        guard: ann.node.guard.as_ref().map(|g| self.normalize_expr(g)),
+                        body: self.normalize_expr(&ann.node.body),
+                        span: ann.node.span,
+                    }))
                     .collect(),
                 after_clause: after_clause.as_ref().map(|(timeout, body)| {
                     (
@@ -435,9 +435,10 @@ impl Normalizer {
             new_expr
         } else {
             // Wrap in a block with the lifted bindings.
-            lifted.push(Stmt::Expr(new_expr));
+            let mut stmts: Vec<Annotated<Stmt>> = lifted.into_iter().map(Annotated::bare).collect();
+            stmts.push(Annotated::bare(Stmt::Expr(new_expr)));
             Expr::synth(expr.span, ExprKind::Block {
-                stmts: lifted,
+                stmts,
             })
         }
     }
@@ -492,12 +493,12 @@ pub fn normalize_effects(program: &Program) -> Program {
             } => {
                 let new_arms = arms
                     .iter()
-                    .map(|arm| HandlerArm {
-                        op_name: arm.op_name.clone(),
-                        params: arm.params.clone(),
-                        body: Box::new(normalizer.normalize_expr(&arm.body)),
-                        span: arm.span,
-                    })
+                    .map(|ann| Annotated::bare(HandlerArm {
+                        op_name: ann.node.op_name.clone(),
+                        params: ann.node.params.clone(),
+                        body: Box::new(normalizer.normalize_expr(&ann.node.body)),
+                        span: ann.node.span,
+                    }))
                     .collect();
                 let new_return = return_clause.as_ref().map(|rc| {
                     Box::new(HandlerArm {

@@ -1,5 +1,5 @@
 use super::Doc;
-use super::helpers::{docs_from_vec, format_binop};
+use super::helpers::{docs_from_vec, format_binop, format_trivia, format_trailing};
 use super::pat::format_pat;
 use super::type_expr::format_type_expr;
 use crate::ast::*;
@@ -55,8 +55,10 @@ pub fn format_expr(expr: &Expr) -> Doc {
 
         ExprKind::Case { scrutinee, arms } => {
             let mut parts = vec![Doc::text("case "), format_expr(scrutinee), Doc::text(" {")];
-            for arm in arms {
+            for ann in arms {
+                let arm = &ann.node;
                 parts.push(Doc::hardline());
+                parts.push(format_trivia(&ann.leading_trivia));
                 parts.push(Doc::text("  "));
                 parts.push(format_pat(&arm.pattern));
                 if let Some(g) = &arm.guard {
@@ -65,6 +67,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 }
                 parts.push(Doc::text(" -> "));
                 parts.push(format_expr(&arm.body));
+                parts.push(format_trailing(&ann.trailing_comment));
             }
             parts.push(Doc::hardline());
             parts.push(Doc::text("}"));
@@ -73,15 +76,17 @@ pub fn format_expr(expr: &Expr) -> Doc {
 
         ExprKind::Block { stmts } => {
             if stmts.len() == 1
-                && let Stmt::Expr(e) = &stmts[0]
+                && let Stmt::Expr(e) = &stmts[0].node
             {
                 return format_expr(e);
             }
             let mut parts = vec![Doc::text("{")];
-            for stmt in stmts {
+            for ann in stmts {
                 parts.push(Doc::hardline());
+                parts.push(format_trivia(&ann.leading_trivia));
                 parts.push(Doc::text("  "));
-                parts.push(format_stmt(stmt));
+                parts.push(format_stmt(&ann.node));
+                parts.push(format_trailing(&ann.trailing_comment));
             }
             parts.push(Doc::hardline());
             parts.push(Doc::text("}"));
@@ -173,12 +178,15 @@ pub fn format_expr(expr: &Expr) -> Doc {
             parts.push(format_expr(success));
             parts.push(Doc::hardline());
             parts.push(Doc::text("} else {"));
-            for arm in else_arms {
+            for ann in else_arms {
+                let arm = &ann.node;
                 parts.push(Doc::hardline());
+                parts.push(format_trivia(&ann.leading_trivia));
                 parts.push(Doc::text("  "));
                 parts.push(format_pat(&arm.pattern));
                 parts.push(Doc::text(" -> "));
                 parts.push(format_expr(&arm.body));
+                parts.push(format_trailing(&ann.trailing_comment));
             }
             parts.push(Doc::hardline());
             parts.push(Doc::text("}"));
@@ -187,8 +195,10 @@ pub fn format_expr(expr: &Expr) -> Doc {
 
         ExprKind::Receive { arms, after_clause } => {
             let mut parts = vec![Doc::text("receive {")];
-            for arm in arms {
+            for ann in arms {
+                let arm = &ann.node;
                 parts.push(Doc::hardline());
+                parts.push(format_trivia(&ann.leading_trivia));
                 parts.push(Doc::text("  "));
                 parts.push(format_pat(&arm.pattern));
                 if let Some(g) = &arm.guard {
@@ -197,6 +207,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 }
                 parts.push(Doc::text(" -> "));
                 parts.push(format_expr(&arm.body));
+                parts.push(format_trailing(&ann.trailing_comment));
             }
             if let Some((timeout, body)) = after_clause {
                 parts.push(Doc::hardline());
@@ -339,10 +350,12 @@ fn format_handler(handler: &Handler) -> Doc {
                 parts.push(Doc::hardline());
                 parts.push(Doc::text(format!("  {},", name)));
             }
-            for arm in arms {
+            for ann in arms {
                 parts.push(Doc::hardline());
-                parts.push(format_handler_arm(arm));
+                parts.push(format_trivia(&ann.leading_trivia));
+                parts.push(format_handler_arm(&ann.node));
                 parts.push(Doc::text(","));
+                parts.push(format_trailing(&ann.trailing_comment));
             }
             if let Some(rc) = return_clause {
                 parts.push(Doc::hardline());

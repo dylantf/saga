@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, CaseArm, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
+use crate::ast::{Annotated, BinOp, CaseArm, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
 
 use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
 use crate::token::Span;
@@ -237,6 +237,7 @@ impl Checker {
                 let result_ty = self.fresh_var();
 
                 for arm in arms {
+                    let arm = &arm.node;
                     let saved_env = self.env.clone();
                     self.bind_pattern(&arm.pattern, &scrut_ty)?;
 
@@ -379,6 +380,7 @@ impl Checker {
                 self.env = saved_env.clone();
 
                 for arm in else_arms {
+                    let arm = &arm.node;
                     let arm_saved = self.env.clone();
                     let scrutinee_ty = self.fresh_var();
                     self.bind_pattern(&arm.pattern, &scrutinee_ty)?;
@@ -487,7 +489,7 @@ impl Checker {
 
     fn infer_receive(
         &mut self,
-        arms: &[CaseArm],
+        arms: &[Annotated<CaseArm>],
         after_clause: Option<(&Expr, &Expr)>,
         span: Span,
     ) -> Result<Type, Diagnostic> {
@@ -516,6 +518,7 @@ impl Checker {
         let result_ty = self.fresh_var();
 
         for arm in arms {
+            let arm = &arm.node;
             let saved_env = self.env.clone();
 
             if let Pat::Constructor {
@@ -564,12 +567,12 @@ impl Checker {
         Ok(result_ty)
     }
 
-    pub(crate) fn infer_block(&mut self, stmts: &[Stmt]) -> Result<Type, Diagnostic> {
+    pub(crate) fn infer_block(&mut self, stmts: &[Annotated<Stmt>]) -> Result<Type, Diagnostic> {
         let mut last_ty = Type::unit();
         let mut errors: Vec<Diagnostic> = Vec::new();
         let mut i = 0;
         while i < stmts.len() {
-            match &stmts[i] {
+            match &stmts[i].node {
                 Stmt::Let {
                     pattern,
                     annotation,
@@ -641,7 +644,7 @@ impl Checker {
                             guard,
                             body,
                             ..
-                        } = &stmts[i]
+                        } = &stmts[i].node
                         {
                             if *n != fun_name {
                                 break;

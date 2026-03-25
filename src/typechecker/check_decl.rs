@@ -268,7 +268,8 @@ impl Checker {
                     variants,
                     ..
                 } => {
-                    self.register_type_def(name, type_params, variants)
+                    let plain_variants: Vec<_> = variants.iter().map(|a| &a.node).collect();
+                    self.register_type_def(name, type_params, &plain_variants)
                         .map_err(|e| vec![e])?;
                 }
                 Decl::RecordDef {
@@ -278,7 +279,8 @@ impl Checker {
                     fields,
                     ..
                 } => {
-                    self.register_record_def(name, type_params, fields, *id)
+                    let plain_fields: Vec<_> = fields.iter().map(|a| &a.node).collect();
+                    self.register_record_def(name, type_params, &plain_fields, *id)
                         .map_err(|e| vec![e])?;
                 }
                 Decl::EffectDef {
@@ -287,7 +289,8 @@ impl Checker {
                     operations,
                     ..
                 } => {
-                    self.register_effect_def(name, type_params, operations)
+                    let plain_ops: Vec<_> = operations.iter().map(|a| &a.node).collect();
+                    self.register_effect_def(name, type_params, &plain_ops)
                         .map_err(|e| vec![e])?;
                 }
                 Decl::TraitDef {
@@ -297,7 +300,8 @@ impl Checker {
                     methods,
                     ..
                 } => {
-                    self.register_trait_def(name, type_param, supertraits, methods)
+                    let plain_methods: Vec<_> = methods.iter().map(|a| &a.node).collect();
+                    self.register_trait_def(name, type_param, supertraits, &plain_methods)
                         .map_err(|e| vec![e])?;
                 }
                 _ => {}
@@ -599,13 +603,14 @@ impl Checker {
                 for eff in needs {
                     self.record_effect_ref(eff);
                 }
+                let plain_methods: Vec<_> = methods.iter().map(|a| a.node.clone()).collect();
                 self.register_impl(
                     trait_name,
                     target_type,
                     type_params,
                     where_clause,
                     needs,
-                    methods,
+                    &plain_methods,
                     *span,
                 )
                 .map_err(|e| vec![e])?;
@@ -1113,7 +1118,7 @@ impl Checker {
         &mut self,
         name: &str,
         type_params: &[String],
-        variants: &[ast::TypeConstructor],
+        variants: &[&ast::TypeConstructor],
     ) -> Result<(), Diagnostic> {
         // Create fresh type variables for the type parameters
         let mut param_vars: Vec<(String, u32)> = type_params
@@ -1176,7 +1181,7 @@ impl Checker {
         &mut self,
         name: &str,
         type_params: &[String],
-        fields: &[(String, ast::TypeExpr)],
+        fields: &[&(String, ast::TypeExpr)],
         def_id: crate::ast::NodeId,
     ) -> Result<(), Diagnostic> {
         // Create fresh type variables for declared type parameters (same as register_type_def)
@@ -1238,7 +1243,7 @@ impl Checker {
         &mut self,
         name: &str,
         effect_type_params: &[String],
-        operations: &[ast::EffectOp],
+        operations: &[&ast::EffectOp],
     ) -> Result<(), Diagnostic> {
         // Create fresh vars for the effect's type params, shared across all operations.
         // E.g. for `effect State s { get () -> s; put (val: s) -> Unit }`,
@@ -1372,7 +1377,8 @@ impl Checker {
         let mut seen_ops: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut arm_spans: std::collections::HashMap<String, Span> =
             std::collections::HashMap::new();
-        for arm in arms {
+        for arm_ann in arms {
+            let arm = &arm_ann.node;
             if !seen_ops.insert(arm.op_name.clone()) {
                 return Err(Diagnostic::error_at(
                     arm.span,
@@ -1542,7 +1548,7 @@ impl Checker {
         let body_effects: std::collections::HashSet<String> = all_handler_effs
             .effects.iter().map(|(n, _)| n.clone()).collect();
         if !body_effects.is_empty() || !declared_effects.is_empty() {
-            let err_span = arms.first().map(|a| a.span).unwrap_or(*span);
+            let err_span = arms.first().map(|a| a.node.span).unwrap_or(*span);
             let undeclared: Vec<String> = body_effects.difference(&declared_effects).cloned().collect();
             if !undeclared.is_empty() {
                 let mut sorted = undeclared;
@@ -1565,7 +1571,7 @@ impl Checker {
         // Check that all operations from the handled effects are covered
         if !self.allow_bodyless_annotations {
             let handled_ops: std::collections::HashSet<&str> =
-                arms.iter().map(|a| a.op_name.as_str()).collect();
+                arms.iter().map(|a| a.node.op_name.as_str()).collect();
             for effect_ref in effect_names {
                 if let Some(info) = self.effects.get(&effect_ref.name) {
                     let missing: Vec<_> = info

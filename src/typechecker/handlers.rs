@@ -54,7 +54,7 @@ impl Checker {
                         }
                     }
                     for arm in arms {
-                        map.insert(arm.op_name.clone(), (arm.span, None));
+                        map.insert(arm.node.op_name.clone(), (arm.node.span, None));
                     }
                     map
                 }
@@ -199,6 +199,7 @@ impl Checker {
                 };
 
                 for arm in arms {
+                    let arm = &arm.node;
                     let op_sig = self.lookup_effect_op(&arm.op_name, None, arm.span).ok();
 
                     let saved_env = self.env.clone();

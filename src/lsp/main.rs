@@ -306,6 +306,7 @@ fn find_effect_op_signature(program: &[dylang::ast::Decl], op_name: &str) -> Opt
     for decl in program {
         if let dylang::ast::Decl::EffectDef { name: effect_name, operations, .. } = decl {
             for op in operations {
+                let op = &op.node;
                 if op.name == op_name {
                     let sig = hover::format_signature(
                         &op.name, &op.params, &op.return_type,

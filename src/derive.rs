@@ -61,7 +61,7 @@ fn generate_record_derive(
     trait_name: &str,
     record_name: &str,
     type_params: &[String],
-    fields: &[(String, TypeExpr)],
+    fields: &[Annotated<(String, TypeExpr)>],
     span: Span,
 ) -> Decl {
     match trait_name {
@@ -76,13 +76,14 @@ fn derive_record_stringify(
     method_name: &str,
     record_name: &str,
     type_params: &[String],
-    fields: &[(String, TypeExpr)],
+    fields: &[Annotated<(String, TypeExpr)>],
     span: Span,
 ) -> Decl {
     let param_name = "__val".to_string();
     let param_var = Expr::synth(span, ExprKind::Var { name: param_name.clone() });
 
-    let body = build_record_debug_expr(method_name, record_name, fields, &param_var, span);
+    let plain_fields: Vec<(String, TypeExpr)> = fields.iter().map(|a| a.node.clone()).collect();
+    let body = build_record_debug_expr(method_name, record_name, &plain_fields, &param_var, span);
 
     // Each type param needs the same trait (same as ADT derive)
     let where_clause: Vec<TraitBound> = type_params
@@ -101,12 +102,12 @@ fn derive_record_stringify(
         type_params: type_params.to_vec(),
         where_clause,
         needs: vec![],
-        methods: vec![(
-            method_name.into(),
-            Span { start: 0, end: 0 },
-            vec![Pat::Var { id: NodeId::fresh(), name: param_name, span }],
+        methods: vec![Annotated::bare(ImplMethod {
+            name: method_name.into(),
+            name_span: Span { start: 0, end: 0 },
+            params: vec![Pat::Var { id: NodeId::fresh(), name: param_name, span }],
             body,
-        )],
+        })],
         span,
     }
 }
@@ -174,7 +175,7 @@ fn generate_derive(
     trait_name: &str,
     type_name: &str,
     type_params: &[String],
-    variants: &[TypeConstructor],
+    variants: &[Annotated<TypeConstructor>],
     span: Span,
 ) -> Option<Decl> {
     match trait_name {
@@ -193,17 +194,18 @@ fn derive_stringify(
     method_name: &str,
     type_name: &str,
     type_params: &[String],
-    variants: &[TypeConstructor],
+    variants: &[Annotated<TypeConstructor>],
     span: Span,
 ) -> Decl {
-    let arms: Vec<CaseArm> = variants
+    let arms: Vec<Annotated<CaseArm>> = variants
         .iter()
-        .map(|variant| {
+        .map(|ann_variant| {
+            let variant = &ann_variant.node;
             let ctor_name = &variant.name;
 
             if variant.fields.is_empty() {
                 // `Ctor -> "Ctor"`
-                CaseArm {
+                Annotated::bare(CaseArm {
                     pattern: Pat::Constructor {
                         id: NodeId::fresh(),
                         name: ctor_name.clone(),
@@ -218,7 +220,7 @@ fn derive_stringify(
                         },
                     ),
                     span,
-                }
+                })
             } else {
                 // Generate field variable names
                 let field_vars: Vec<String> = (0..variant.fields.len())
@@ -301,12 +303,12 @@ fn derive_stringify(
                     })
                     .unwrap();
 
-                CaseArm {
+                Annotated::bare(CaseArm {
                     pattern,
                     guard: None,
                     body,
                     span,
-                }
+                })
             }
         })
         .collect();
@@ -342,16 +344,16 @@ fn derive_stringify(
         type_params: type_params.to_vec(),
         where_clause,
         needs: vec![],
-        methods: vec![(
-            method_name.into(),
-            Span { start: 0, end: 0 },
-            vec![Pat::Var {
+        methods: vec![Annotated::bare(ImplMethod {
+            name: method_name.into(),
+            name_span: Span { start: 0, end: 0 },
+            params: vec![Pat::Var {
                 id: NodeId::fresh(),
                 name: scrutinee_name,
                 span,
             }],
             body,
-        )],
+        })],
         span,
     }
 }
@@ -361,16 +363,17 @@ fn derive_stringify(
 fn derive_ord(
     type_name: &str,
     type_params: &[String],
-    variants: &[TypeConstructor],
+    variants: &[Annotated<TypeConstructor>],
     span: Span,
 ) -> Decl {
     let x = "__x".to_string();
     let y = "__y".to_string();
 
     // Build same-constructor arms: (A(a0,a1), A(b0,b1)) -> field-by-field compare
-    let mut arms: Vec<CaseArm> = variants
+    let mut arms: Vec<Annotated<CaseArm>> = variants
         .iter()
-        .map(|variant| {
+        .map(|ann_variant| {
+            let variant = &ann_variant.node;
             let ctor = &variant.name;
             let arity = variant.fields.len();
 
@@ -417,12 +420,12 @@ fn derive_ord(
                 build_field_compare(&a_vars, &b_vars, span)
             };
 
-            CaseArm {
+            Annotated::bare(CaseArm {
                 pattern,
                 guard: None,
                 body,
                 span,
-            }
+            })
         })
         .collect();
 
@@ -436,11 +439,12 @@ fn derive_ord(
                     arms: variants
                         .iter()
                         .enumerate()
-                        .map(|(i, v)| {
+                        .map(|(i, ann_v)| {
+                            let v = &ann_v.node;
                             let wildcards: Vec<Pat> = (0..v.fields.len())
                                 .map(|_| Pat::Wildcard { id: NodeId::fresh(), span })
                                 .collect();
-                            CaseArm {
+                            Annotated::bare(CaseArm {
                                 pattern: Pat::Constructor {
                                     id: NodeId::fresh(),
                                     name: v.name.clone(),
@@ -455,7 +459,7 @@ fn derive_ord(
                                     },
                                 ),
                                 span,
-                            }
+                            })
                         })
                         .collect(),
                 },
@@ -482,12 +486,12 @@ fn derive_ord(
             },
         );
 
-        arms.push(CaseArm {
+        arms.push(Annotated::bare(CaseArm {
             pattern: Pat::Wildcard { id: NodeId::fresh(), span },
             guard: None,
             body: compare_indices,
             span,
-        });
+        }));
     }
 
     let body = Expr::synth(
@@ -525,12 +529,12 @@ fn derive_ord(
         type_params: type_params.to_vec(),
         where_clause,
         needs: vec![],
-        methods: vec![(
-            "compare".into(),
-            Span { start: 0, end: 0 },
-            vec![Pat::Var { id: NodeId::fresh(), name: x, span }, Pat::Var { id: NodeId::fresh(), name: y, span }],
+        methods: vec![Annotated::bare(ImplMethod {
+            name: "compare".into(),
+            name_span: Span { start: 0, end: 0 },
+            params: vec![Pat::Var { id: NodeId::fresh(), name: x, span }, Pat::Var { id: NodeId::fresh(), name: y, span }],
             body,
-        )],
+        })],
         span,
     }
 }
@@ -584,7 +588,7 @@ fn build_field_compare(a_vars: &[String], b_vars: &[String], span: Span) -> Expr
                 ExprKind::Case {
                     scrutinee: Box::new(cmp_call),
                     arms: vec![
-                        CaseArm {
+                        Annotated::bare(CaseArm {
                             pattern: Pat::Constructor {
                                 id: NodeId::fresh(),
                                 name: "Eq".into(),
@@ -594,8 +598,8 @@ fn build_field_compare(a_vars: &[String], b_vars: &[String], span: Span) -> Expr
                             guard: None,
                             body: result,
                             span,
-                        },
-                        CaseArm {
+                        }),
+                        Annotated::bare(CaseArm {
                             pattern: Pat::Var {
                                 id: NodeId::fresh(),
                                 name: other_var.clone(),
@@ -604,7 +608,7 @@ fn build_field_compare(a_vars: &[String], b_vars: &[String], span: Span) -> Expr
                             guard: None,
                             body: Expr::synth(span, ExprKind::Var { name: other_var }),
                             span,
-                        },
+                        }),
                     ],
                 },
             );
@@ -648,10 +652,11 @@ fn derive_marker_trait(
 /// Only valid for types with all nullary constructors.
 fn derive_enum(
     type_name: &str,
-    variants: &[TypeConstructor],
+    variants: &[Annotated<TypeConstructor>],
     span: Span,
 ) -> Decl {
-    for v in variants {
+    for ann_v in variants {
+        let v = &ann_v.node;
         if !v.fields.is_empty() {
             panic!(
                 "cannot derive Enum for `{}`: constructor `{}` has fields (Enum requires all nullary constructors)",
@@ -664,28 +669,28 @@ fn derive_enum(
     let to_enum_param = "__val".to_string();
     let to_enum_body = Expr::synth(span, ExprKind::Case {
         scrutinee: Box::new(Expr::synth(span, ExprKind::Var { name: to_enum_param.clone() })),
-        arms: variants.iter().enumerate().map(|(i, v)| {
-            CaseArm {
-                pattern: Pat::Constructor { id: NodeId::fresh(), name: v.name.clone(), args: vec![], span },
+        arms: variants.iter().enumerate().map(|(i, ann_v)| {
+            Annotated::bare(CaseArm {
+                pattern: Pat::Constructor { id: NodeId::fresh(), name: ann_v.node.name.clone(), args: vec![], span },
                 guard: None,
                 body: Expr::synth(span, ExprKind::Lit { value: Lit::Int(i as i64) }),
                 span,
-            }
+            })
         }).collect(),
     });
 
     // from_enum n = case n { 0 -> Red | 1 -> Green | 2 -> Blue | _ -> panic "invalid enum index" }
     let from_enum_param = "__n".to_string();
-    let mut from_enum_arms: Vec<CaseArm> = variants.iter().enumerate().map(|(i, v)| {
-        CaseArm {
+    let mut from_enum_arms: Vec<Annotated<CaseArm>> = variants.iter().enumerate().map(|(i, ann_v)| {
+        Annotated::bare(CaseArm {
             pattern: Pat::Lit { id: NodeId::fresh(), value: Lit::Int(i as i64), span },
             guard: None,
-            body: Expr::synth(span, ExprKind::Constructor { name: v.name.clone() }),
+            body: Expr::synth(span, ExprKind::Constructor { name: ann_v.node.name.clone() }),
             span,
-        }
+        })
     }).collect();
     // Wildcard arm: panic on invalid index
-    from_enum_arms.push(CaseArm {
+    from_enum_arms.push(Annotated::bare(CaseArm {
         pattern: Pat::Wildcard { id: NodeId::fresh(), span },
         guard: None,
         body: Expr::synth(span, ExprKind::App {
@@ -695,7 +700,7 @@ fn derive_enum(
             })),
         }),
         span,
-    });
+    }));
     let from_enum_body = Expr::synth(span, ExprKind::Case {
         scrutinee: Box::new(Expr::synth(span, ExprKind::Var { name: from_enum_param.clone() })),
         arms: from_enum_arms,
@@ -710,18 +715,18 @@ fn derive_enum(
         where_clause: vec![],
         needs: vec![],
         methods: vec![
-            (
-                "to_enum".into(),
-                Span { start: 0, end: 0 },
-                vec![Pat::Var { id: NodeId::fresh(), name: to_enum_param, span }],
-                to_enum_body,
-            ),
-            (
-                "from_enum".into(),
-                Span { start: 0, end: 0 },
-                vec![Pat::Var { id: NodeId::fresh(), name: from_enum_param, span }],
-                from_enum_body,
-            ),
+            Annotated::bare(ImplMethod {
+                name: "to_enum".into(),
+                name_span: Span { start: 0, end: 0 },
+                params: vec![Pat::Var { id: NodeId::fresh(), name: to_enum_param, span }],
+                body: to_enum_body,
+            }),
+            Annotated::bare(ImplMethod {
+                name: "from_enum".into(),
+                name_span: Span { start: 0, end: 0 },
+                params: vec![Pat::Var { id: NodeId::fresh(), name: from_enum_param, span }],
+                body: from_enum_body,
+            }),
         ],
         span,
     }

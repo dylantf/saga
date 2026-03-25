@@ -1,4 +1,4 @@
-use dylang::ast::{CaseArm, Decl, EffectRef, Expr, ExprKind, NodeId, Pat, Stmt, TraitBound, TypeExpr};
+use dylang::ast::{self, Annotated, CaseArm, Decl, EffectRef, Expr, ExprKind, NodeId, Pat, Stmt, TraitBound, TypeExpr};
 use dylang::token::Span;
 
 type Found = Option<(String, Span, Option<NodeId>)>;
@@ -44,8 +44,9 @@ fn find_in_effect_refs(effects: &[EffectRef], offset: usize) -> Found {
 }
 
 /// Search case/receive arms (pattern + optional guard + body).
-fn find_in_arms(arms: &[CaseArm], offset: usize) -> Found {
-    for arm in arms {
+fn find_in_arms(arms: &[Annotated<CaseArm>], offset: usize) -> Found {
+    for arm_ann in arms {
+        let arm = &arm_ann.node;
         if let Some(r) = find_in_pat(&arm.pattern, offset) {
             return Some(r);
         }
@@ -134,7 +135,8 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             if !contains(span, offset) {
                 return None;
             }
-            for arm in arms.iter().chain(recovered_arms.iter()) {
+            for arm_ann in arms.iter().chain(recovered_arms.iter()) {
+                let arm = &arm_ann.node;
                 if contains(&arm.span, offset) {
                     let op_name_end = arm.span.start + arm.op_name.len();
                     if offset >= arm.span.start && offset <= op_name_end {
@@ -191,7 +193,8 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             if let Some(r) = find_in_effect_refs(needs, offset) {
                 return Some(r);
             }
-            for (method_name, method_span, params, body) in methods {
+            for method in methods {
+                let ast::ImplMethod { name: method_name, name_span: method_span, params, body } = &method.node;
                 if let Some(r) = find_in_params_body(params, body, offset) {
                     return Some(r);
                 }
@@ -227,6 +230,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                 return None;
             }
             for variant in variants {
+                let variant = &variant.node;
                 if contains_ident(&variant.span, offset) {
                     return Some((variant.name.clone(), variant.span, Some(variant.id)));
                 }
@@ -244,6 +248,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                 return None;
             }
             for op in operations {
+                let op = &op.node;
                 if contains(&op.span, offset)
                     && let Some(r) = find_in_typed_params(&op.params, offset)
                         .or_else(|| find_in_type_expr(&op.return_type, offset))
@@ -263,7 +268,8 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             if !contains(span, offset) {
                 return None;
             }
-            find_in_typed_params(fields, offset).or_else(|| {
+            let fields: Vec<_> = fields.iter().map(|f| f.node.clone()).collect();
+            find_in_typed_params(&fields, offset).or_else(|| {
                 contains_ident(name_span, offset).then(|| (name.clone(), *name_span, None))
             })
         }
@@ -284,6 +290,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                 }
             }
             for method in methods {
+                let method = &method.node;
                 if contains(&method.span, offset)
                     && let Some(r) = find_in_typed_params(&method.params, offset)
                         .or_else(|| find_in_type_expr(&method.return_type, offset))
@@ -329,7 +336,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
         }
         ExprKind::UnaryMinus { expr, .. } => find_in_expr(expr, offset),
         ExprKind::Lambda { params, body, .. } => find_in_params_body(params, body, offset),
-        ExprKind::Block { stmts, .. } => stmts.iter().find_map(|s| find_in_stmt(s, offset)),
+        ExprKind::Block { stmts, .. } => stmts.iter().find_map(|s| find_in_stmt(&s.node, offset)),
         ExprKind::If {
             cond,
             then_branch,
@@ -370,7 +377,10 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
                     return_clause,
                     ..
                 } => {
-                    for arm in arms.iter().chain(return_clause.iter().map(|r| r.as_ref())) {
+                    let all_arms: Vec<&dylang::ast::HandlerArm> = arms.iter().map(|a| &a.node)
+                        .chain(return_clause.iter().map(|r| r.as_ref()))
+                        .collect();
+                    for arm in &all_arms {
                         if contains(&arm.span, offset) {
                             if contains(&arm.body.span, offset) {
                                 return find_in_expr(&arm.body, offset);

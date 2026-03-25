@@ -67,7 +67,7 @@ impl Checker {
         name: &str,
         type_param: &str,
         supertraits: &[(String, crate::token::Span)],
-        methods: &[ast::TraitMethod],
+        methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
         let mut method_sigs = Vec::new();
 
@@ -144,7 +144,7 @@ impl Checker {
         type_params: &[String],
         where_clause: &[ast::TraitBound],
         needs: &[ast::EffectRef],
-        methods: &[(String, Span, Vec<ast::Pat>, ast::Expr)],
+        methods: &[ast::ImplMethod],
         span: Span,
     ) -> Result<(), Diagnostic> {
         // Check the trait exists
@@ -153,7 +153,7 @@ impl Checker {
         })?;
 
         // Check all required methods are provided
-        let provided: Vec<&str> = methods.iter().map(|(n, _, _, _)| n.as_str()).collect();
+        let provided: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
         for (required_name, _, _, _) in &trait_info.methods {
             if !provided.contains(&required_name.as_str()) {
                 return Err(Diagnostic::error_at(
@@ -223,7 +223,8 @@ impl Checker {
         let declared_effects: std::collections::HashSet<String> =
             needs.iter().map(|e| e.name.clone()).collect();
 
-        for (method_name, _method_span, params, body) in methods {
+        for m in methods {
+            let (method_name, params, body) = (&m.name, &m.params, &m.body);
             let trait_method = trait_info
                 .methods
                 .iter()

@@ -647,7 +647,8 @@ impl<'a> Lowerer<'a> {
             } => {
                 let scrut_var = self.fresh();
                 let scrut_ce = self.lower_expr(scrutinee);
-                let reordered = Self::reorder_maybe_arms(arms);
+                let arms: Vec<_> = arms.iter().map(|a| a.node.clone()).collect();
+                let reordered = Self::reorder_maybe_arms(&arms);
                 let arms_ce: Vec<CArm> = reordered
                     .iter()
                     .map(|arm| {
@@ -668,7 +669,10 @@ impl<'a> Lowerer<'a> {
                     Box::new(CExpr::Case(Box::new(CExpr::Var(scrut_var)), arms_ce)),
                 )
             }
-            ExprKind::Block { stmts, .. } => self.lower_block_with_k(stmts, k_var),
+            ExprKind::Block { stmts, .. } => {
+                let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
+                self.lower_block_with_k(&stmts, k_var)
+            }
             _ => {
                 // Not a branching expression: apply K to the result
                 let v = self.fresh();

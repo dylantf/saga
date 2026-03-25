@@ -1,30 +1,97 @@
-# # Option 1 (optional leading bar for multiline, no braces)
-# type Color = Red | Green | Blue
+# comment 1: file-level leading comment
 
-# type Color =
-#   | Red
-#   | Green
-#   | Blue
-#   deriving (Enum)
+module Test
 
+# comment 2: before import
+import Std.List
 
+# comment 3: between imports
+import Std.Test (describe, test) # comment 4: trailing on import
 
-# # Option 2 (optional bars for multiline, always braces)
-# type Color { Red | Green | Blue }
+# comment 5: before let binding
+let x = 42 # comment 6: trailing on let
 
-# type Color {
-#   Red
-#   Green
-#   Blue
-# } deriving (Enum)
+# comment 7: before type def
+type Shape
+  = Circle(Float)
+  | Rect(Float, Float) # comment 8: trailing on variant
+  | Point
 
+# comment 9: before record
+record User {
+  name : String,
+  age : Int,
+}
 
+# comment 10: before effect
+effect Log {
+  # comment 11: before first op
+  fun log : (msg: String) -> Unit # comment 12: trailing on op
+  # comment 13: after last op
+}
 
+# comment 14: before trait
+trait Show a {
+  fun show : a -> String # comment 15: trailing on trait method
+}
 
+# comment 16: before impl
+impl Show for User {
+  show u = u.name # comment 17: trailing on impl method
+}
 
+# comment 18: before handler
+handler console for Log {
+  # comment 19: before handler arm
+  log msg = {
+    # comment 20: inside handler body block
+    println msg # comment 21: trailing in block
+    resume ()
+  }
+  # comment 22: after handler arm
+}
 
+# comment 23: before fun signature
+fun process : String -> Unit needs {Log}
 
+# comment 24: before fun binding
+process path = {
+  # comment 25: first stmt in block
+  let result = path <> "!" # comment 26: trailing on let stmt
 
+  # comment 27: after blank line in block
+  log! result
+}
 
+add x y = x + y
+double x = x * 2
 
+# comment 28: before case usage
+dispatch shape = case shape {
+  # comment 29: before first case arm
+  Circle(r) -> r # comment 30: trailing on case arm
 
+  # comment 31: blank line + comment between arms
+  Rect(w, h) -> w * h
+  Point -> 0.0
+  # comment 32: after last case arm
+}
+
+# comment 33: before fun with inline handler
+run_it () =
+  process "hello" with {
+    log msg = { println msg; resume () }, # comment 34: trailing on inline handler arm
+  }
+
+# comment 35: before if-then-else
+pick x = if x > 0 then x else -x # comment 36: Trailing on if-then-else
+
+# comment 37: before lambda usage
+apply_fn f x = f x
+
+# comment 38: before pipe chain
+piped x = x
+  |> add 1 # comment 39: trailing on mid-pipe segment
+  |> double
+
+# comment 40: last comment in file

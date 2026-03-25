@@ -525,7 +525,7 @@ fn block_single_expr() {
         } => {
             assert_eq!(stmts.len(), 1);
             assert!(matches!(
-                stmts[0],
+                stmts[0].node,
                 Stmt::Expr(Expr {
                     kind: ExprKind::Lit {
                         value: Lit::Int(42),
@@ -549,10 +549,10 @@ fn block_with_let() {
         } => {
             assert_eq!(stmts.len(), 2);
             assert!(
-                matches!(&stmts[0], Stmt::Let { pattern: Pat::Var { name, .. }, .. } if name == "x")
+                matches!(&stmts[0].node, Stmt::Let { pattern: Pat::Var { name, .. }, .. } if name == "x")
             );
             assert!(matches!(
-                &stmts[1],
+                &stmts[1].node,
                 Stmt::Expr(Expr {
                     kind: ExprKind::BinOp { op: BinOp::Add, .. },
                     ..
@@ -641,7 +641,7 @@ fn pattern_negative_in_case() {
         } => {
             assert_eq!(arms.len(), 3);
             assert!(matches!(
-                &arms[0].pattern,
+                &arms[0].node.pattern,
                 Pat::Lit {
                     value: Lit::Int(-1),
                     ..
@@ -686,7 +686,7 @@ fn pattern_string_prefix_in_case() {
         } => {
             assert_eq!(arms.len(), 2);
             assert!(
-                matches!(&arms[0].pattern, Pat::StringPrefix { prefix, .. } if prefix == "[ERROR]: ")
+                matches!(&arms[0].node.pattern, Pat::StringPrefix { prefix, .. } if prefix == "[ERROR]: ")
             );
         }
         _ => panic!("expected Case"),
@@ -1073,10 +1073,10 @@ fn type_def_simple() {
             assert_eq!(name, "Option");
             assert_eq!(type_params, &vec!["a".to_string()]);
             assert_eq!(variants.len(), 2);
-            assert_eq!(variants[0].name, "Just");
-            assert_eq!(variants[0].fields.len(), 1);
-            assert_eq!(variants[1].name, "Nothing");
-            assert!(variants[1].fields.is_empty());
+            assert_eq!(variants[0].node.name, "Just");
+            assert_eq!(variants[0].node.fields.len(), 1);
+            assert_eq!(variants[1].node.name, "Nothing");
+            assert!(variants[1].node.fields.is_empty());
         }
         _ => panic!("expected TypeDef, got {:?}", decls[0]),
     }
@@ -1093,9 +1093,9 @@ fn case_simple() {
             ..
         } => {
             assert_eq!(arms.len(), 2);
-            assert!(arms[0].guard.is_none());
-            assert!(matches!(&arms[0].pattern, Pat::Constructor { name, .. } if name == "Just"));
-            assert!(matches!(&arms[1].pattern, Pat::Constructor { name, .. } if name == "Nothing"));
+            assert!(arms[0].node.guard.is_none());
+            assert!(matches!(&arms[0].node.pattern, Pat::Constructor { name, .. } if name == "Just"));
+            assert!(matches!(&arms[1].node.pattern, Pat::Constructor { name, .. } if name == "Nothing"));
         }
         _ => panic!("expected Case, got {:?}", expr),
     }
@@ -1110,9 +1110,9 @@ fn case_with_guard() {
             ..
         } => {
             assert_eq!(arms.len(), 2);
-            assert!(arms[0].guard.is_some());
-            assert!(arms[1].guard.is_none());
-            assert!(matches!(&arms[1].pattern, Pat::Wildcard { .. }));
+            assert!(arms[0].node.guard.is_some());
+            assert!(arms[1].node.guard.is_none());
+            assert!(matches!(&arms[1].node.pattern, Pat::Wildcard { .. }));
         }
         _ => panic!("expected Case, got {:?}", expr),
     }
@@ -1375,7 +1375,7 @@ fn block_single_expr_still_works() {
         } => {
             assert_eq!(stmts.len(), 1);
             assert!(matches!(
-                &stmts[0],
+                &stmts[0].node,
                 Stmt::Expr(Expr {
                     kind: ExprKind::Lit {
                         value: Lit::Int(42),
@@ -1490,10 +1490,10 @@ fn record_def_simple() {
         Decl::RecordDef { name, fields, .. } => {
             assert_eq!(name, "User");
             assert_eq!(fields.len(), 2);
-            assert_eq!(fields[0].0, "name");
-            assert!(matches!(&fields[0].1, TypeExpr::Named { name: n, .. } if n == "String"));
-            assert_eq!(fields[1].0, "age");
-            assert!(matches!(&fields[1].1, TypeExpr::Named { name: n, .. } if n == "Int"));
+            assert_eq!(fields[0].node.0, "name");
+            assert!(matches!(&fields[0].node.1, TypeExpr::Named { name: n, .. } if n == "String"));
+            assert_eq!(fields[1].node.0, "age");
+            assert!(matches!(&fields[1].node.1, TypeExpr::Named { name: n, .. } if n == "Int"));
         }
         _ => panic!("expected RecordDef, got {:?}", decls[0]),
     }
@@ -1519,7 +1519,7 @@ fn record_def_with_type_app() {
     match &decls[0] {
         Decl::RecordDef { fields, .. } => {
             assert_eq!(fields.len(), 1);
-            assert!(matches!(&fields[0].1, TypeExpr::App { .. }));
+            assert!(matches!(&fields[0].node.1, TypeExpr::App { .. }));
         }
         _ => panic!("expected RecordDef, got {:?}", decls[0]),
     }
@@ -1539,8 +1539,8 @@ fn record_def_with_type_params() {
             assert_eq!(name, "Box");
             assert_eq!(type_params, &["a"]);
             assert_eq!(fields.len(), 1);
-            assert_eq!(fields[0].0, "value");
-            assert!(matches!(&fields[0].1, TypeExpr::Var { name: v, .. } if v == "a"));
+            assert_eq!(fields[0].node.0, "value");
+            assert!(matches!(&fields[0].node.1, TypeExpr::Var { name: v, .. } if v == "a"));
         }
         _ => panic!("expected RecordDef, got {:?}", decls[0]),
     }
@@ -1577,10 +1577,10 @@ fn effect_def_single_op() {
         } => {
             assert_eq!(name, "Log");
             assert_eq!(operations.len(), 1);
-            assert_eq!(operations[0].name, "log");
-            assert_eq!(operations[0].params.len(), 2);
-            assert_eq!(operations[0].params[0].0, "level");
-            assert_eq!(operations[0].params[1].0, "msg");
+            assert_eq!(operations[0].node.name, "log");
+            assert_eq!(operations[0].node.params.len(), 2);
+            assert_eq!(operations[0].node.params[0].0, "level");
+            assert_eq!(operations[0].node.params[1].0, "msg");
         }
         _ => panic!("expected EffectDef, got {:?}", decls[0]),
     }
@@ -1598,9 +1598,9 @@ fn effect_def_multiple_ops() {
         } => {
             assert_eq!(name, "Http");
             assert_eq!(operations.len(), 2);
-            assert_eq!(operations[0].name, "get");
-            assert_eq!(operations[1].name, "post");
-            assert_eq!(operations[1].params.len(), 2);
+            assert_eq!(operations[0].node.name, "get");
+            assert_eq!(operations[1].node.name, "post");
+            assert_eq!(operations[1].node.params.len(), 2);
         }
         _ => panic!("expected EffectDef, got {:?}", decls[0]),
     }
@@ -1623,8 +1623,8 @@ fn handler_def_simple() {
             assert_eq!(name, "console_log");
             assert_eq!(effect_names(effects), vec!["Log"]);
             assert_eq!(arms.len(), 1);
-            assert_eq!(arms[0].op_name, "log");
-            let param_names: Vec<&str> = arms[0].params.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(arms[0].node.op_name, "log");
+            let param_names: Vec<&str> = arms[0].node.params.iter().map(|(n, _)| n.as_str()).collect();
             assert_eq!(param_names, vec!["level", "msg"]);
             assert!(return_clause.is_none());
         }
@@ -1647,7 +1647,7 @@ fn handler_def_with_return_clause() {
         } => {
             assert_eq!(name, "to_result");
             assert_eq!(arms.len(), 1);
-            assert_eq!(arms[0].op_name, "fail");
+            assert_eq!(arms[0].node.op_name, "fail");
             assert!(return_clause.is_some());
             let rc = return_clause.as_ref().unwrap();
             let rc_names: Vec<&str> = rc.params.iter().map(|(n, _)| n.as_str()).collect();
@@ -1690,7 +1690,7 @@ fn handler_def_with_needs() {
             assert_eq!(effect_names(effects), vec!["Billing"]);
             assert_eq!(effect_names(needs), vec!["Log", "Http"]);
             assert_eq!(arms.len(), 1);
-            assert_eq!(arms[0].op_name, "charge");
+            assert_eq!(arms[0].node.op_name, "charge");
         }
         _ => panic!("expected HandlerDef, got {:?}", decls[0]),
     }
@@ -1877,8 +1877,8 @@ fn with_inline_handler() {
             } => {
                 assert!(named.is_empty());
                 assert_eq!(arms.len(), 1);
-                assert_eq!(arms[0].op_name, "log");
-                let param_names: Vec<&str> = arms[0].params.iter().map(|(n, _)| n.as_str()).collect();
+                assert_eq!(arms[0].node.op_name, "log");
+                let param_names: Vec<&str> = arms[0].node.params.iter().map(|(n, _)| n.as_str()).collect();
                 assert_eq!(param_names, vec!["level", "msg"]);
                 assert!(return_clause.is_none());
             }
@@ -1899,7 +1899,7 @@ fn with_mixed_handlers() {
             Handler::Inline { named, arms, .. } => {
                 assert_eq!(named, &["console_log"]);
                 assert_eq!(arms.len(), 1);
-                assert_eq!(arms[0].op_name, "get");
+                assert_eq!(arms[0].node.op_name, "get");
             }
             _ => panic!("expected Inline handler, got {:?}", handler),
         },
@@ -1978,8 +1978,8 @@ fn trait_def_simple() {
             assert_eq!(type_param, "a");
             assert!(supertraits.is_empty());
             assert_eq!(methods.len(), 1);
-            assert_eq!(methods[0].name, "show");
-            assert_eq!(methods[0].params.len(), 1);
+            assert_eq!(methods[0].node.name, "show");
+            assert_eq!(methods[0].node.params.len(), 1);
         }
         _ => panic!("expected TraitDef, got {:?}", decls[0]),
     }
@@ -2002,8 +2002,8 @@ fn trait_def_with_supertraits() {
             let st_names: Vec<&str> = supertraits.iter().map(|(n, _)| n.as_str()).collect();
             assert_eq!(st_names, &["Eq"]);
             assert_eq!(methods.len(), 1);
-            assert_eq!(methods[0].name, "compare");
-            assert_eq!(methods[0].params.len(), 2);
+            assert_eq!(methods[0].node.name, "compare");
+            assert_eq!(methods[0].node.params.len(), 2);
         }
         _ => panic!("expected TraitDef, got {:?}", decls[0]),
     }
@@ -2025,8 +2025,8 @@ fn impl_def_simple() {
             assert_eq!(trait_name, "Show");
             assert_eq!(target_type, "User");
             assert_eq!(methods.len(), 1);
-            assert_eq!(methods[0].0, "show");
-            assert_eq!(methods[0].2.len(), 1);
+            assert_eq!(methods[0].node.name, "show");
+            assert_eq!(methods[0].node.params.len(), 1);
         }
         _ => panic!("expected ImplDef, got {:?}", decls[0]),
     }
@@ -2048,7 +2048,7 @@ fn impl_def_with_needs() {
             assert_eq!(target_type, "Redis");
             assert_eq!(effect_names(needs), vec!["Http", "Fail"]);
             assert_eq!(methods.len(), 1);
-            assert_eq!(methods[0].0, "get");
+            assert_eq!(methods[0].node.name, "get");
         }
         _ => panic!("expected ImplDef, got {:?}", decls[0]),
     }
@@ -2395,8 +2395,8 @@ fn effect_def_with_type_params() {
             assert_eq!(name, "State");
             assert_eq!(type_params, &["s"]);
             assert_eq!(operations.len(), 2);
-            assert_eq!(operations[0].name, "get");
-            assert_eq!(operations[1].name, "put");
+            assert_eq!(operations[0].node.name, "get");
+            assert_eq!(operations[1].node.name, "put");
         }
         _ => panic!("expected EffectDef"),
     }
@@ -2692,8 +2692,8 @@ fn receive_with_guard() {
             ..
         } => {
             assert_eq!(arms.len(), 2);
-            assert!(arms[0].guard.is_some());
-            assert!(arms[1].guard.is_none());
+            assert!(arms[0].node.guard.is_some());
+            assert!(arms[1].node.guard.is_none());
         }
         _ => panic!("expected Receive, got {:?}", expr),
     }

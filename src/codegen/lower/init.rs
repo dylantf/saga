@@ -42,7 +42,7 @@ impl<'a> Lowerer<'a> {
         for decl in program {
             match decl {
                 Decl::RecordDef { name, fields, .. } => {
-                    let field_names = fields.iter().map(|(n, _)| n.clone()).collect();
+                    let field_names = fields.iter().map(|a| a.node.0.clone()).collect();
                     self.record_fields.insert(name.clone(), field_names);
                     // Register record as a constructor for atom mangling
                     self.constructor_modules
@@ -52,7 +52,7 @@ impl<'a> Lowerer<'a> {
                     // Register all constructors for atom mangling
                     for variant in variants {
                         self.constructor_modules
-                            .insert(variant.name.clone(), module_name.to_string());
+                            .insert(variant.node.name.clone(), module_name.to_string());
                     }
                     let _ = name; // type name not needed here
                 }
@@ -61,8 +61,8 @@ impl<'a> Lowerer<'a> {
                 } => {
                     let mut ops = HashMap::new();
                     for op in operations {
-                        ops.insert(op.name.clone(), op.params.len());
-                        self.op_to_effect.insert(op.name.clone(), name.clone());
+                        ops.insert(op.node.name.clone(), op.node.params.len());
+                        self.op_to_effect.insert(op.node.name.clone(), name.clone());
                     }
                     self.effect_defs.insert(name.clone(), EffectInfo { ops });
                 }
@@ -77,7 +77,7 @@ impl<'a> Lowerer<'a> {
                         name.clone(),
                         HandlerInfo {
                             effects: effects.iter().map(|e| e.name.clone()).collect(),
-                            arms: arms.clone(),
+                            arms: arms.iter().map(|a| a.node.clone()).collect(),
                             return_clause: return_clause.clone(),
                             source_module: Some(module_name.to_string()),
                         },
@@ -228,7 +228,7 @@ impl<'a> Lowerer<'a> {
                                     .entry(name.clone())
                                     .or_insert(HandlerInfo {
                                         effects: effects.iter().map(|e| e.name.clone()).collect(),
-                                        arms: arms.clone(),
+                                        arms: arms.iter().map(|a| a.node.clone()).collect(),
                                         return_clause: return_clause.clone(),
                                         source_module: Some(mod_name.clone()),
                                     });
@@ -378,7 +378,7 @@ impl<'a> Lowerer<'a> {
                                                 .iter()
                                                 .map(|e| e.name.clone())
                                                 .collect(),
-                                            arms: arms.clone(),
+                                            arms: arms.iter().map(|a| a.node.clone()).collect(),
                                             return_clause: return_clause.clone(),
                                             source_module: Some(module_name.clone()),
                                         });
@@ -443,7 +443,8 @@ impl<'a> Lowerer<'a> {
     ) {
         for decl in program {
             if let Decl::RecordDef { fields, .. } = decl {
-                for (_, type_expr) in fields {
+                for a in fields {
+                    let (_, type_expr) = &a.node;
                     Self::collect_anon_records_from_type_expr(type_expr, record_fields);
                 }
             }
@@ -509,7 +510,7 @@ impl<'a> Lowerer<'a> {
             }
             ast::ExprKind::Block { stmts, .. } => {
                 for stmt in stmts {
-                    match stmt {
+                    match &stmt.node {
                         ast::Stmt::Expr(e) | ast::Stmt::Let { value: e, .. } => {
                             Self::collect_anon_records_from_expr(e, record_fields);
                         }
@@ -538,7 +539,7 @@ impl<'a> Lowerer<'a> {
             } => {
                 Self::collect_anon_records_from_expr(scrutinee, record_fields);
                 for arm in arms {
-                    Self::collect_anon_records_from_expr(&arm.body, record_fields);
+                    Self::collect_anon_records_from_expr(&arm.node.body, record_fields);
                 }
             }
             ast::ExprKind::Lambda { body, .. } => {

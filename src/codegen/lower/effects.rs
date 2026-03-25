@@ -415,11 +415,11 @@ impl<'a> Lowerer<'a> {
                     }
                 }
 
-                all_arms.extend(arms.iter().cloned());
+                all_arms.extend(arms.iter().map(|a| a.node.clone()));
 
                 // Determine effects from inline arms
                 for arm in arms {
-                    if let Some(eff) = self.op_to_effect.get(&arm.op_name)
+                    if let Some(eff) = self.op_to_effect.get(&arm.node.op_name)
                         && !handled_effects.contains(eff)
                     {
                         handled_effects.push(eff.clone());

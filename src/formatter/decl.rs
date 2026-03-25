@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::token::Span;
 use crate::docs;
 use super::Doc;
-use super::helpers::{format_doc_comment, format_lit_raw, docs_from_vec};
+use super::helpers::{format_doc_comment, format_lit_raw, docs_from_vec, format_trivia, format_trailing};
 use super::type_expr::*;
 use super::expr::format_expr;
 use super::pat::format_pat;
@@ -45,7 +45,7 @@ pub fn format_fun_binding(name: &str, params: &[Pat], guard: &Option<Box<Expr>>,
 
 pub fn format_type_def(
     doc: &[String], public: bool, opaque: bool, name: &str,
-    type_params: &[String], variants: &[TypeConstructor], deriving: &[String],
+    type_params: &[String], variants: &[Annotated<TypeConstructor>], deriving: &[String],
 ) -> Doc {
     let mut parts = Vec::new();
     if !doc.is_empty() {
@@ -68,7 +68,13 @@ pub fn format_type_def(
 
     parts.push(Doc::text(header));
 
-    for (i, variant) in variants.iter().enumerate() {
+    for (i, ann) in variants.iter().enumerate() {
+        let variant = &ann.node;
+        // Leading trivia for this variant (comments between variants)
+        if !ann.leading_trivia.is_empty() {
+            parts.push(Doc::hardline());
+            parts.push(format_trivia(&ann.leading_trivia));
+        }
         let prefix = if i == 0 { "\n  = " } else { "\n  | " };
         parts.push(Doc::text(prefix));
         parts.push(Doc::text(&variant.name));
@@ -83,6 +89,8 @@ pub fn format_type_def(
             parts.push(Doc::join(Doc::text(", "), fields));
             parts.push(Doc::text(")"));
         }
+        // Trailing comment on variant
+        parts.push(format_trailing(&ann.trailing_comment));
     }
 
     if !deriving.is_empty() {
@@ -94,7 +102,7 @@ pub fn format_type_def(
 
 pub fn format_record_def(
     doc: &[String], public: bool, name: &str,
-    type_params: &[String], fields: &[(String, TypeExpr)], deriving: &[String],
+    type_params: &[String], fields: &[Annotated<(String, TypeExpr)>], deriving: &[String],
 ) -> Doc {
     let mut parts = Vec::new();
     if !doc.is_empty() {
@@ -115,11 +123,14 @@ pub fn format_record_def(
     header.push_str(" {");
     parts.push(Doc::text(header));
 
-    let field_docs: Vec<Doc> = fields.iter().map(|(fname, ty)| {
-        docs![Doc::text(format!("  {} : ", fname)), format_type_expr(ty), Doc::text(",")]
-    }).collect();
+    for ann in fields {
+        let (fname, ty) = &ann.node;
+        parts.push(Doc::hardline());
+        parts.push(format_trivia(&ann.leading_trivia));
+        parts.push(docs![Doc::text(format!("  {} : ", fname)), format_type_expr(ty), Doc::text(",")]);
+        parts.push(format_trailing(&ann.trailing_comment));
+    }
 
-    parts.push(Doc::nest(0, Doc::join(Doc::hardline(), field_docs)));
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));
 
@@ -132,7 +143,7 @@ pub fn format_record_def(
 
 pub fn format_effect_def(
     doc: &[String], public: bool, name: &str,
-    type_params: &[String], operations: &[EffectOp],
+    type_params: &[String], operations: &[Annotated<EffectOp>],
 ) -> Doc {
     let mut parts = Vec::new();
     if !doc.is_empty() {
@@ -153,14 +164,13 @@ pub fn format_effect_def(
     header.push_str(" {");
     parts.push(Doc::text(header));
 
-    for op in operations {
+    for ann in operations {
+        let op = &ann.node;
         parts.push(Doc::hardline());
-        if !op.doc.is_empty() {
-            parts.push(format_doc_comment(&op.doc));
-            parts.push(Doc::hardline());
-        }
+        parts.push(format_trivia(&ann.leading_trivia));
         parts.push(Doc::text(format!("  fun {} : ", op.name)));
         parts.push(format_fun_type(&op.params, &op.return_type, &[], &None));
+        parts.push(format_trailing(&ann.trailing_comment));
     }
 
     parts.push(Doc::hardline());
@@ -170,7 +180,7 @@ pub fn format_effect_def(
 
 pub fn format_trait_def(
     doc: &[String], public: bool, name: &str, type_param: &str,
-    supertraits: &[(String, Span)], methods: &[TraitMethod],
+    supertraits: &[(String, Span)], methods: &[Annotated<TraitMethod>],
 ) -> Doc {
     let mut parts = Vec::new();
     if !doc.is_empty() {
@@ -195,14 +205,13 @@ pub fn format_trait_def(
 
     parts.push(Doc::text(" {"));
 
-    for method in methods {
+    for ann in methods {
+        let method = &ann.node;
         parts.push(Doc::hardline());
-        if !method.doc.is_empty() {
-            parts.push(format_doc_comment(&method.doc));
-            parts.push(Doc::hardline());
-        }
+        parts.push(format_trivia(&ann.leading_trivia));
         parts.push(Doc::text(format!("  fun {} : ", method.name)));
         parts.push(format_fun_type(&method.params, &method.return_type, &[], &None));
+        parts.push(format_trailing(&ann.trailing_comment));
     }
 
     parts.push(Doc::hardline());
@@ -214,7 +223,7 @@ pub fn format_trait_def(
 pub fn format_handler_def(
     doc: &[String], public: bool, name: &str,
     effects: &[EffectRef], needs: &[EffectRef], where_clause: &[TraitBound],
-    arms: &[HandlerArm], return_clause: &Option<Box<HandlerArm>>,
+    arms: &[Annotated<HandlerArm>], return_clause: &Option<Box<HandlerArm>>,
 ) -> Doc {
     let mut parts = Vec::new();
     if !doc.is_empty() {
@@ -244,9 +253,11 @@ pub fn format_handler_def(
 
     parts.push(Doc::text(" {"));
 
-    for arm in arms {
+    for ann in arms {
         parts.push(Doc::hardline());
-        parts.push(format_handler_arm(arm));
+        parts.push(format_trivia(&ann.leading_trivia));
+        parts.push(format_handler_arm(&ann.node));
+        parts.push(format_trailing(&ann.trailing_comment));
     }
     if let Some(rc) = return_clause {
         parts.push(Doc::hardline());
@@ -270,7 +281,7 @@ fn format_handler_arm(arm: &HandlerArm) -> Doc {
 pub fn format_impl_def(
     doc: &[String], trait_name: &str, target_type: &str,
     type_params: &[String], where_clause: &[TraitBound], needs: &[EffectRef],
-    methods: &[(String, Span, Vec<Pat>, Expr)],
+    methods: &[Annotated<ImplMethod>],
 ) -> Doc {
     let mut parts = Vec::new();
     if !doc.is_empty() {
@@ -296,9 +307,12 @@ pub fn format_impl_def(
 
     parts.push(Doc::text(" {"));
 
-    for (method_name, _, params, body) in methods {
+    for ann in methods {
+        let ImplMethod { name: method_name, params, body, .. } = &ann.node;
         parts.push(Doc::hardline());
+        parts.push(format_trivia(&ann.leading_trivia));
         parts.push(format_fun_binding(method_name, params, &None, body));
+        parts.push(format_trailing(&ann.trailing_comment));
     }
 
     parts.push(Doc::hardline());

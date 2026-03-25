@@ -15,6 +15,7 @@ pub enum Trivia {
 }
 
 /// An AST node wrapped with leading trivia and an optional trailing comment.
+/// PartialEq compares the inner node only (trivia is formatting metadata).
 #[derive(Debug, Clone)]
 pub struct Annotated<T> {
     pub node: T,
@@ -22,7 +23,38 @@ pub struct Annotated<T> {
     pub trailing_comment: Option<String>,
 }
 
+impl<T: PartialEq> PartialEq for Annotated<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.node == other.node
+    }
+}
+
+impl<T> Annotated<T> {
+    /// Wrap a node with no trivia.
+    pub fn bare(node: T) -> Self {
+        Annotated {
+            node,
+            leading_trivia: Vec::new(),
+            trailing_comment: None,
+        }
+    }
+}
+
+/// Strip `Annotated` wrappers from a vec, returning just the inner nodes.
+pub fn strip_vec<T>(items: Vec<Annotated<T>>) -> Vec<T> {
+    items.into_iter().map(|a| a.node).collect()
+}
+
 pub type AnnotatedProgram = Vec<Annotated<Decl>>;
+
+/// A method implementation inside an `impl` block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImplMethod {
+    pub name: String,
+    pub name_span: Span,
+    pub params: Vec<Pat>,
+    pub body: Expr,
+}
 
 /// Strip trivia annotations, returning plain declarations.
 /// Transfers `Trivia::DocComment` items into each decl's `doc` field.
@@ -157,7 +189,7 @@ pub enum Decl {
         name: String,
         name_span: Span,
         type_params: Vec<String>,
-        variants: Vec<TypeConstructor>,
+        variants: Vec<Annotated<TypeConstructor>>,
         deriving: Vec<String>,
         span: Span,
     },
@@ -171,7 +203,7 @@ pub enum Decl {
         name: String,
         name_span: Span,
         type_params: Vec<String>,
-        fields: Vec<(String, TypeExpr)>,
+        fields: Vec<Annotated<(String, TypeExpr)>>,
         deriving: Vec<String>,
         span: Span,
     },
@@ -185,7 +217,7 @@ pub enum Decl {
         name: String,
         name_span: Span,
         type_params: Vec<String>,
-        operations: Vec<EffectOp>,
+        operations: Vec<Annotated<EffectOp>>,
         span: Span,
     },
 
@@ -201,9 +233,9 @@ pub enum Decl {
         effects: Vec<EffectRef>,
         needs: Vec<EffectRef>,
         where_clause: Vec<TraitBound>,
-        arms: Vec<HandlerArm>,
+        arms: Vec<Annotated<HandlerArm>>,
         /// Partially parsed arms from error recovery (for LSP hover, not typechecked).
-        recovered_arms: Vec<HandlerArm>,
+        recovered_arms: Vec<Annotated<HandlerArm>>,
         /// `return value = Ok(value)` clause
         return_clause: Option<Box<HandlerArm>>,
         span: Span,
@@ -218,7 +250,7 @@ pub enum Decl {
         name_span: Span,
         type_param: String,
         supertraits: Vec<(String, Span)>,
-        methods: Vec<TraitMethod>,
+        methods: Vec<Annotated<TraitMethod>>,
         span: Span,
     },
 
@@ -234,7 +266,7 @@ pub enum Decl {
         type_params: Vec<String>,
         where_clause: Vec<TraitBound>,
         needs: Vec<EffectRef>,
-        methods: Vec<(String, Span, Vec<Pat>, Expr)>,
+        methods: Vec<Annotated<ImplMethod>>,
         span: Span,
     },
 
@@ -333,11 +365,11 @@ pub enum ExprKind {
     /// `case expr { Pat -> Expr, ... }`
     Case {
         scrutinee: Box<Expr>,
-        arms: Vec<CaseArm>,
+        arms: Vec<Annotated<CaseArm>>,
     },
 
     /// `{ stmt1; stmt2; expr }`
-    Block { stmts: Vec<Stmt> },
+    Block { stmts: Vec<Annotated<Stmt>> },
 
     /// `fun x -> x + 1`
     Lambda { params: Vec<Pat>, body: Box<Expr> },
@@ -387,12 +419,12 @@ pub enum ExprKind {
     Do {
         bindings: Vec<(Pat, Expr)>,
         success: Box<Expr>,
-        else_arms: Vec<CaseArm>,
+        else_arms: Vec<Annotated<CaseArm>>,
     },
 
     /// `receive { Pat -> body, after N -> timeout_body }`
     Receive {
-        arms: Vec<CaseArm>,
+        arms: Vec<Annotated<CaseArm>>,
         /// Optional (timeout_expr, timeout_body)
         after_clause: Option<(Box<Expr>, Box<Expr>)>,
     },
@@ -454,7 +486,7 @@ impl Expr {
     pub fn contains_resume(&self) -> bool {
         match &self.kind {
             ExprKind::Resume { .. } => true,
-            ExprKind::Block { stmts, .. } => stmts.iter().any(|s| s.contains_resume()),
+            ExprKind::Block { stmts, .. } => stmts.iter().any(|s| s.node.contains_resume()),
             ExprKind::If {
                 cond,
                 then_branch,
@@ -467,7 +499,7 @@ impl Expr {
             }
             ExprKind::Case {
                 scrutinee, arms, ..
-            } => scrutinee.contains_resume() || arms.iter().any(|a| a.body.contains_resume()),
+            } => scrutinee.contains_resume() || arms.iter().any(|a| a.node.body.contains_resume()),
             ExprKind::Lambda { body, .. } => body.contains_resume(),
             ExprKind::App { func, arg, .. } => func.contains_resume() || arg.contains_resume(),
             ExprKind::BinOp { left, right, .. } => {
@@ -493,13 +525,13 @@ impl Expr {
             } => {
                 bindings.iter().any(|(_, e)| e.contains_resume())
                     || success.contains_resume()
-                    || else_arms.iter().any(|a| a.body.contains_resume())
+                    || else_arms.iter().any(|a| a.node.body.contains_resume())
             }
             ExprKind::EffectCall { args, .. } => args.iter().any(|e| e.contains_resume()),
             ExprKind::Receive {
                 arms, after_clause, ..
             } => {
-                arms.iter().any(|a| a.body.contains_resume())
+                arms.iter().any(|a| a.node.body.contains_resume())
                     || after_clause
                         .as_ref()
                         .is_some_and(|(t, b)| t.contains_resume() || b.contains_resume())
@@ -841,7 +873,7 @@ pub enum Handler {
         /// Named handler references (e.g. `h1, h2`)
         named: Vec<String>,
         /// Inline handler arms (e.g. `op args = body`)
-        arms: Vec<HandlerArm>,
+        arms: Vec<Annotated<HandlerArm>>,
         /// `return value = Ok(value)` clause
         return_clause: Option<Box<HandlerArm>>,
     },

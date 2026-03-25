@@ -189,7 +189,8 @@ impl Elaborator {
         for decl in program {
             match decl {
                 Decl::TraitDef { name, methods, .. } => {
-                    for (idx, method) in methods.iter().enumerate() {
+                    for (idx, ann) in methods.iter().enumerate() {
+                        let method = &ann.node;
                         if let Some((existing_trait, _)) = self.trait_methods.get(&method.name) {
                             panic!(
                                 "trait method `{}` is defined in both `{}` and `{}`",
@@ -307,9 +308,10 @@ impl Elaborator {
                     let mut ordered_methods = Vec::new();
                     if let Some(ref info) = trait_info {
                         for (trait_method_name, _, _, _) in &info.methods {
-                            if let Some((_, _, params, body)) =
-                                methods.iter().find(|(n, _, _, _)| n == trait_method_name)
+                            if let Some(ann) =
+                                methods.iter().find(|ann| ann.node.name == *trait_method_name)
                             {
+                                let ImplMethod { params, body, .. } = &ann.node;
                                 let elab_body = self.elaborate_expr(body);
                                 ordered_methods.push(Expr::synth(
                                     *span,
@@ -416,13 +418,16 @@ impl Elaborator {
                     // reference trait dicts (e.g. `show entity` -> `__dict_Show_a`)
                     let saved = self.setup_dict_params(where_clause);
 
-                    let elab_arms: Vec<HandlerArm> = arms
+                    let elab_arms: Vec<Annotated<HandlerArm>> = arms
                         .iter()
-                        .map(|arm| HandlerArm {
-                            op_name: arm.op_name.clone(),
-                            params: arm.params.clone(),
-                            body: Box::new(self.elaborate_expr(&arm.body)),
-                            span: arm.span,
+                        .map(|ann| {
+                            let arm = &ann.node;
+                            Annotated::bare(HandlerArm {
+                                op_name: arm.op_name.clone(),
+                                params: arm.params.clone(),
+                                body: Box::new(self.elaborate_expr(&arm.body)),
+                                span: arm.span,
+                            })
                         })
                         .collect();
                     let elab_return = return_clause.as_ref().map(|rc| {
@@ -726,11 +731,14 @@ impl Elaborator {
                     scrutinee: Box::new(self.elaborate_expr(scrutinee)),
                     arms: arms
                         .iter()
-                        .map(|arm| CaseArm {
-                            pattern: arm.pattern.clone(),
-                            guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
-                            body: self.elaborate_expr(&arm.body),
-                            span: arm.span,
+                        .map(|ann| {
+                            let arm = &ann.node;
+                            Annotated::bare(CaseArm {
+                                pattern: arm.pattern.clone(),
+                                guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
+                                body: self.elaborate_expr(&arm.body),
+                                span: arm.span,
+                            })
                         })
                         .collect(),
                 },
@@ -741,7 +749,9 @@ impl Elaborator {
                 ExprKind::Block {
                     stmts: stmts
                         .iter()
-                        .map(|s| match s {
+                        .map(|ann| {
+                            let s = &ann.node;
+                            Annotated::bare(match s {
                             Stmt::Let {
                                 pattern,
                                 annotation,
@@ -854,7 +864,7 @@ impl Elaborator {
                                 span: *span,
                             },
                             Stmt::Expr(e) => Stmt::Expr(self.elaborate_expr(e)),
-                        })
+                        })})
                         .collect(),
                 },
             ),
@@ -928,11 +938,14 @@ impl Elaborator {
                     success: Box::new(self.elaborate_expr(success)),
                     else_arms: else_arms
                         .iter()
-                        .map(|arm| CaseArm {
-                            pattern: arm.pattern.clone(),
-                            guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
-                            body: self.elaborate_expr(&arm.body),
-                            span: arm.span,
+                        .map(|ann| {
+                            let arm = &ann.node;
+                            Annotated::bare(CaseArm {
+                                pattern: arm.pattern.clone(),
+                                guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
+                                body: self.elaborate_expr(&arm.body),
+                                span: arm.span,
+                            })
                         })
                         .collect(),
                 },
@@ -986,11 +999,11 @@ impl Elaborator {
                 // capture them from the enclosing scope.
                 if let Handler::Named(handler_name, _) = handler.as_ref() {
                     if let Some(dict_param_info) = self.handler_dict_params.get(handler_name).cloned() {
-                        let mut stmts: Vec<Stmt> = Vec::new();
+                        let mut stmts: Vec<Annotated<Stmt>> = Vec::new();
                         for (trait_name, type_var) in &dict_param_info {
                             let dict_var = format!("__dict_{}_{}", trait_name, type_var);
                             if let Some(dict_expr) = self.resolve_dict(trait_name, node_id, span) {
-                                stmts.push(Stmt::Let {
+                                stmts.push(Annotated::bare(Stmt::Let {
                                     pattern: Pat::Var {
                                         id: NodeId::fresh(),
                                         name: dict_var,
@@ -1000,13 +1013,13 @@ impl Elaborator {
                                     value: dict_expr,
                                     assert: false,
                                     span,
-                                });
+                                }));
                             }
                         }
                         if stmts.is_empty() {
                             with_expr
                         } else {
-                            stmts.push(Stmt::Expr(with_expr));
+                            stmts.push(Annotated::bare(Stmt::Expr(with_expr)));
                             Expr::synth(span, ExprKind::Block { stmts })
                         }
                     } else {
@@ -1038,11 +1051,14 @@ impl Elaborator {
                 ExprKind::Receive {
                     arms: arms
                         .iter()
-                        .map(|arm| CaseArm {
-                            pattern: arm.pattern.clone(),
-                            guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
-                            body: self.elaborate_expr(&arm.body),
-                            span: arm.span,
+                        .map(|ann| {
+                            let arm = &ann.node;
+                            Annotated::bare(CaseArm {
+                                pattern: arm.pattern.clone(),
+                                guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
+                                body: self.elaborate_expr(&arm.body),
+                                span: arm.span,
+                            })
                         })
                         .collect(),
                     after_clause: after_clause.as_ref().map(|(timeout, body)| {
@@ -1083,11 +1099,14 @@ impl Elaborator {
                 named: named.clone(),
                 arms: arms
                     .iter()
-                    .map(|arm| HandlerArm {
-                        op_name: arm.op_name.clone(),
-                        params: arm.params.clone(),
-                        body: Box::new(self.elaborate_expr(&arm.body)),
-                        span: arm.span,
+                    .map(|ann| {
+                        let arm = &ann.node;
+                        Annotated::bare(HandlerArm {
+                            op_name: arm.op_name.clone(),
+                            params: arm.params.clone(),
+                            body: Box::new(self.elaborate_expr(&arm.body)),
+                            span: arm.span,
+                        })
                     })
                     .collect(),
                 return_clause: return_clause.as_ref().map(|arm| {

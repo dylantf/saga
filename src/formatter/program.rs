@@ -1,32 +1,9 @@
 use crate::ast::*;
 use super::Doc;
-use super::helpers::docs_from_vec;
+use super::helpers::{docs_from_vec, format_trivia, format_trailing};
 use super::type_expr::*;
 use super::expr::format_expr;
 use super::decl::*;
-
-/// Format leading trivia into Doc nodes, to be placed after a hardline separator.
-/// The caller provides the hardline; trivia items add additional lines as needed.
-fn format_trivia(trivia: &[Trivia]) -> Doc {
-    let mut parts = Vec::new();
-    for item in trivia {
-        match item {
-            Trivia::BlankLines(_) => {
-                // Normalize to a single blank line (one extra hardline beyond the separator)
-                parts.push(Doc::hardline());
-            }
-            Trivia::Comment(text) => {
-                parts.push(Doc::text(format!("# {}", text)));
-                parts.push(Doc::hardline());
-            }
-            Trivia::DocComment(text) => {
-                parts.push(Doc::text(format!("#@ {}", text)));
-                parts.push(Doc::hardline());
-            }
-        }
-    }
-    docs_from_vec(parts)
-}
 
 /// Format an entire program (list of annotated declarations).
 pub fn format_program(decls: &[Annotated<Decl>]) -> Doc {
@@ -52,9 +29,7 @@ pub fn format_program(decls: &[Annotated<Decl>]) -> Doc {
         result = result.append(format_decl(&ann.node));
 
         // Trailing comment
-        if let Some(ref comment) = ann.trailing_comment {
-            result = result.append(Doc::text(format!(" # {}", comment)));
-        }
+        result = result.append(format_trailing(&ann.trailing_comment));
     }
     result
 }

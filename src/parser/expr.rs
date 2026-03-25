@@ -55,9 +55,18 @@ impl Parser {
         let mut left = self.parse_application()?;
 
         loop {
-            // Allow |> to continue an expression across a newline
-            if matches!(self.peek(), Token::Terminator) && matches!(self.peek_at(1), Token::Pipe) {
-                self.advance(); // skip newline
+            // Allow |> to continue an expression across a newline,
+            // skipping over any comments/blank lines in between.
+            if matches!(self.peek(), Token::Terminator | Token::Comment(_) | Token::BlankLine) {
+                let mut offset = 0;
+                while matches!(self.peek_at(offset), Token::Terminator | Token::Comment(_) | Token::BlankLine) {
+                    offset += 1;
+                }
+                if matches!(self.peek_at(offset), Token::Pipe) {
+                    for _ in 0..offset {
+                        self.advance();
+                    }
+                }
             }
 
             let (op, bp) = match self.peek() {
@@ -279,7 +288,7 @@ impl Parser {
     pub(super) fn parse_handler_ref(&mut self) -> Result<Handler, ParseError> {
         if matches!(self.peek(), Token::LBrace) {
             self.advance(); // consume '{'
-            self.skip_terminators();
+            let mut leading_trivia = self.collect_trivia();
 
             let mut named = Vec::new();
             let mut arms = Vec::new();
@@ -331,11 +340,16 @@ impl Parser {
                         self.expect(Token::Eq)?;
                         let body = self.parse_expr(0)?;
                         let arm_end = body.span;
-                        arms.push(HandlerArm {
-                            op_name: name,
-                            params,
-                            body: Box::new(body),
-                            span: arm_start.to(arm_end),
+                        let trailing_comment = self.collect_trailing_comment();
+                        arms.push(Annotated {
+                            node: HandlerArm {
+                                op_name: name,
+                                params,
+                                body: Box::new(body),
+                                span: arm_start.to(arm_end),
+                            },
+                            leading_trivia: std::mem::take(&mut leading_trivia),
+                            trailing_comment,
                         });
                     }
                 }
@@ -343,7 +357,7 @@ impl Parser {
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
                 }
-                self.skip_terminators();
+                leading_trivia = self.collect_trivia();
             }
             self.expect(Token::RBrace)?;
 
@@ -634,9 +648,10 @@ impl Parser {
                     });
                 }
 
-                let mut stmts: Vec<Stmt> = Vec::new();
+                let mut stmts: Vec<Annotated<Stmt>> = Vec::new();
+                let mut leading_trivia = self.collect_trivia();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                    if matches!(self.peek(), Token::Let) {
+                    let stmt = if matches!(self.peek(), Token::Let) {
                         let let_start = self.tokens[self.pos].span;
                         self.advance(); // consume 'let'
                         let is_assert = matches!(self.peek(), Token::Ident(s) if s == "assert");
@@ -666,7 +681,7 @@ impl Parser {
                             self.expect(Token::Eq)?;
                             let body = self.parse_expr(0)?;
                             let stmt_span = let_start.to(body.span);
-                            stmts.push(Stmt::LetFun {
+                            Stmt::LetFun {
                                 id: NodeId::fresh(),
                                 name: fun_name,
                                 name_span: fn_name_span,
@@ -674,7 +689,7 @@ impl Parser {
                                 guard,
                                 body,
                                 span: stmt_span,
-                            });
+                            }
                         } else {
                             let annotation = if matches!(self.peek(), Token::Colon)
                                 && matches!(pattern, Pat::Var { .. })
@@ -687,18 +702,24 @@ impl Parser {
                             self.expect(Token::Eq)?;
                             let value = self.parse_expr(0)?;
                             let stmt_span = let_start.to(value.span);
-                            stmts.push(Stmt::Let {
+                            Stmt::Let {
                                 pattern,
                                 annotation,
                                 value,
                                 assert: is_assert,
                                 span: stmt_span,
-                            });
+                            }
                         }
                     } else {
-                        stmts.push(Stmt::Expr(self.parse_expr(0)?));
-                    }
-                    self.skip_terminators();
+                        Stmt::Expr(self.parse_expr(0)?)
+                    };
+                    let trailing_comment = self.collect_trailing_comment();
+                    stmts.push(Annotated {
+                        node: stmt,
+                        leading_trivia,
+                        trailing_comment,
+                    });
+                    leading_trivia = self.collect_trivia();
                 }
                 let end_span = self.tokens[self.pos].span; // the RBrace
                 self.expect(Token::RBrace)?;
@@ -731,7 +752,7 @@ impl Parser {
                 let scrutinee = self.parse_expr(0)?;
                 self.no_brace_app = false;
                 self.expect(Token::LBrace)?;
-                self.skip_terminators();
+                let mut leading_trivia = self.collect_trivia();
 
                 let mut branches = Vec::new();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
@@ -748,16 +769,21 @@ impl Parser {
                     self.expect(Token::Arrow)?;
                     let body = self.parse_expr(0)?;
                     let end_span = body.span.end;
-                    branches.push(CaseArm {
-                        pattern,
-                        guard,
-                        body,
-                        span: Span {
-                            start: arm_start.start,
-                            end: end_span,
+                    let trailing_comment = self.collect_trailing_comment();
+                    branches.push(Annotated {
+                        node: CaseArm {
+                            pattern,
+                            guard,
+                            body,
+                            span: Span {
+                                start: arm_start.start,
+                                end: end_span,
+                            },
                         },
+                        leading_trivia,
+                        trailing_comment,
                     });
-                    self.skip_terminators();
+                    leading_trivia = self.collect_trivia();
                 }
 
                 let end = self.tokens[self.pos].span; // the RBrace
@@ -771,7 +797,7 @@ impl Parser {
 
             Token::Receive => {
                 self.expect(Token::LBrace)?;
-                self.skip_terminators();
+                let mut leading_trivia = self.collect_trivia();
 
                 let mut branches = Vec::new();
                 let mut after_clause = None;
@@ -784,7 +810,8 @@ impl Parser {
                         self.expect(Token::Arrow)?;
                         let body = self.parse_expr(0)?;
                         after_clause = Some((Box::new(timeout), Box::new(body)));
-                        self.skip_terminators();
+                        let _trailing = self.collect_trailing_comment();
+                        let _trivia = self.collect_trivia();
                         break; // after must be last
                     }
 
@@ -801,16 +828,21 @@ impl Parser {
                     self.expect(Token::Arrow)?;
                     let body = self.parse_expr(0)?;
                     let end_span = body.span.end;
-                    branches.push(CaseArm {
-                        pattern,
-                        guard,
-                        body,
-                        span: Span {
-                            start: arm_start.start,
-                            end: end_span,
+                    let trailing_comment = self.collect_trailing_comment();
+                    branches.push(Annotated {
+                        node: CaseArm {
+                            pattern,
+                            guard,
+                            body,
+                            span: Span {
+                                start: arm_start.start,
+                                end: end_span,
+                            },
                         },
+                        leading_trivia,
+                        trailing_comment,
                     });
-                    self.skip_terminators();
+                    leading_trivia = self.collect_trivia();
                 }
 
                 let end = self.tokens[self.pos].span;
@@ -889,7 +921,7 @@ impl Parser {
                 self.skip_terminators();
                 self.expect(Token::Else)?;
                 self.expect(Token::LBrace)?;
-                self.skip_terminators();
+                let mut leading_trivia = self.collect_trivia();
 
                 let mut else_arms = Vec::new();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
@@ -898,16 +930,21 @@ impl Parser {
                     self.expect(Token::Arrow)?;
                     let body = self.parse_expr(0)?;
                     let end_span = body.span.end;
-                    else_arms.push(CaseArm {
-                        pattern,
-                        guard: None,
-                        body,
-                        span: Span {
-                            start: arm_start.start,
-                            end: end_span,
+                    let trailing_comment = self.collect_trailing_comment();
+                    else_arms.push(Annotated {
+                        node: CaseArm {
+                            pattern,
+                            guard: None,
+                            body,
+                            span: Span {
+                                start: arm_start.start,
+                                end: end_span,
+                            },
                         },
+                        leading_trivia,
+                        trailing_comment,
                     });
-                    self.skip_terminators();
+                    leading_trivia = self.collect_trivia();
                 }
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;

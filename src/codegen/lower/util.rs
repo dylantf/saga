@@ -207,8 +207,8 @@ pub(super) fn has_nested_effect_call(expr: &Expr) -> bool {
             else_branch,
             ..
         } => branch_has_effect(then_branch) || branch_has_effect(else_branch),
-        ExprKind::Case { arms, .. } => arms.iter().any(|arm| branch_has_effect(&arm.body)),
-        ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match s {
+        ExprKind::Case { arms, .. } => arms.iter().any(|arm| branch_has_effect(&arm.node.body)),
+        ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match &s.node {
             Stmt::Expr(e) => branch_has_effect(e),
             Stmt::Let { value, .. } => branch_has_effect(value),
             Stmt::LetFun { body, .. } => branch_has_effect(body),
