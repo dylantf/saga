@@ -367,9 +367,10 @@ fn application_binds_tighter_than_binop() {
 fn forward_pipe() {
     let expr = parse_expr("x |> f");
     match expr {
-        Expr { kind: ExprKind::Pipe { left, right }, .. } => {
-            assert!(matches!(*left, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
-            assert!(matches!(*right, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
+        Expr { kind: ExprKind::Pipe { ref segments }, .. } => {
+            assert_eq!(segments.len(), 2);
+            assert!(matches!(segments[0].node, Expr { kind: ExprKind::Var { ref name, .. }, .. } if name == "x"));
+            assert!(matches!(segments[1].node, Expr { kind: ExprKind::Var { ref name, .. }, .. } if name == "f"));
         }
         _ => panic!("expected Pipe, got {:?}", expr),
     }
@@ -408,9 +409,10 @@ fn type_ascription_lower_than_pipe() {
 fn backward_pipe() {
     let expr = parse_expr("f <| x");
     match expr {
-        Expr { kind: ExprKind::PipeBack { left, right }, .. } => {
-            assert!(matches!(*left, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
-            assert!(matches!(*right, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
+        Expr { kind: ExprKind::PipeBack { segments }, .. } => {
+            assert_eq!(segments.len(), 2);
+            assert!(matches!(&segments[0].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
+            assert!(matches!(&segments[1].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
         }
         _ => panic!("expected PipeBack, got {:?}", expr),
     }
@@ -2354,9 +2356,10 @@ fn list_comprehension_map_transform() {
 fn compose_forward() {
     let expr = parse_expr("f >> g");
     match expr {
-        Expr { kind: ExprKind::ComposeForward { left, right }, .. } => {
-            assert!(matches!(*left, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
-            assert!(matches!(*right, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g"));
+        Expr { kind: ExprKind::ComposeForward { segments }, .. } => {
+            assert_eq!(segments.len(), 2);
+            assert!(matches!(&segments[0].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
+            assert!(matches!(&segments[1].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g"));
         }
         other => panic!("expected ComposeForward, got {:?}", other),
     }
@@ -2366,9 +2369,10 @@ fn compose_forward() {
 fn compose_backward() {
     let expr = parse_expr("f << g");
     match expr {
-        Expr { kind: ExprKind::ComposeBack { left, right }, .. } => {
-            assert!(matches!(*left, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
-            assert!(matches!(*right, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g"));
+        Expr { kind: ExprKind::ComposeBack { segments }, .. } => {
+            assert_eq!(segments.len(), 2);
+            assert!(matches!(&segments[0].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
+            assert!(matches!(&segments[1].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g"));
         }
         other => panic!("expected ComposeBack, got {:?}", other),
     }

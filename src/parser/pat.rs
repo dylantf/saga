@@ -137,7 +137,6 @@ impl Parser {
                 } else if matches!(self.peek(), Token::LBrace) {
                     // Record pattern: User { name, age: a }
                     self.advance(); // consume '{'
-                    self.skip_terminators();
                     let mut fields = Vec::new();
                     while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                         let field_name = self.expect_ident()?;
@@ -151,8 +150,7 @@ impl Parser {
                         if matches!(self.peek(), Token::Comma) {
                             self.advance();
                         }
-                        self.skip_terminators();
-                    }
+                        }
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
                     Ok(Pat::Record {
@@ -184,7 +182,6 @@ impl Parser {
             }
             Token::LBrace => {
                 // Anonymous record pattern: { field, field: pat, ... }
-                self.skip_terminators();
                 let mut fields = Vec::new();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                     let field_name = self.expect_ident()?;
@@ -198,7 +195,6 @@ impl Parser {
                     if matches!(self.peek(), Token::Comma) {
                         self.advance();
                     }
-                    self.skip_terminators();
                 }
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;

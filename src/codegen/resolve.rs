@@ -584,13 +584,21 @@ fn resolve_expr(
         => {}
 
         // Sugar nodes should be desugared before this pass
-        ExprKind::Pipe { left, right, .. }
-        | ExprKind::PipeBack { left, right, .. }
-        | ExprKind::ComposeForward { left, right, .. }
-        | ExprKind::ComposeBack { left, right, .. }
-        | ExprKind::Cons { head: left, tail: right, .. } => {
-            resolve_expr(left, scope, qualified_scope, map);
-            resolve_expr(right, scope, qualified_scope, map);
+        ExprKind::Pipe { segments } => {
+            for seg in segments {
+                resolve_expr(&seg.node, scope, qualified_scope, map);
+            }
+        }
+        ExprKind::PipeBack { segments }
+        | ExprKind::ComposeForward { segments }
+        | ExprKind::ComposeBack { segments } => {
+            for seg in segments {
+                resolve_expr(&seg.node, scope, qualified_scope, map);
+            }
+        }
+        ExprKind::Cons { head, tail, .. } => {
+            resolve_expr(head, scope, qualified_scope, map);
+            resolve_expr(tail, scope, qualified_scope, map);
         }
         ExprKind::ListLit { elements, .. } => {
             for e in elements {

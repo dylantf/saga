@@ -89,12 +89,16 @@ apply_fn f x = f x
 
 # comment 38: before pipe chain
 piped x = x
-  |> add 1 # comment 39: trailing on mid-pipe segment
+  # comment 39: before first pipe
+  |> add 1 # comment 40: trailing on mid-pipe segment
+  # comment 41: between pipes
   |> double
+  # comment 42: after pipe
+# comment 43: after complete pipe expression
 
 main () = {
   println "Hello world"
 }
 
-# comment 40: last comment in file
+# comment 44: last comment in file
 

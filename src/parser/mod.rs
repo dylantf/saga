@@ -95,81 +95,20 @@ impl Parser {
         }
     }
 
-    pub(super) fn skip_terminators(&mut self) {
-        while matches!(self.peek(), Token::Terminator | Token::BlankLine) {
-            self.advance();
-        }
+    /// Take the leading trivia from the token at the given position.
+    pub(super) fn take_leading_trivia(&mut self, pos: usize) -> Vec<Trivia> {
+        std::mem::take(&mut self.tokens[pos].leading_trivia)
     }
 
-    /// Drain consecutive `#@` doc comment tokens, skipping terminators and
-    /// regular comments between them. Returns the collected doc lines.
-    pub(super) fn collect_doc_comments(&mut self) -> Vec<String> {
-        let mut docs = Vec::new();
-        loop {
-            match self.peek() {
-                Token::DocComment(_) => {
-                    if let Token::DocComment(text) = self.advance() {
-                        docs.push(text);
-                    }
-                }
-                Token::Terminator | Token::Comment(_) | Token::BlankLine => {
-                    self.advance();
-                }
-                _ => break,
-            }
-        }
-        docs
+    /// Take the trailing comment from the token at the given position.
+    pub(super) fn take_trailing_comment(&mut self, pos: usize) -> Option<String> {
+        self.tokens[pos].trailing_comment.take()
     }
 
-    /// Collect trivia tokens (blank lines, comments, doc comments) between declarations.
-    /// Used by `parse_program_annotated` to preserve formatting info.
-    fn collect_trivia(&mut self) -> Vec<Trivia> {
-        let mut trivia = Vec::new();
-        let mut blank_count: u32 = 0;
-        loop {
-            match self.peek() {
-                Token::BlankLine => {
-                    blank_count += 1;
-                    self.advance();
-                }
-                Token::Comment(_) => {
-                    if blank_count > 0 {
-                        trivia.push(Trivia::BlankLines(blank_count));
-                        blank_count = 0;
-                    }
-                    if let Token::Comment(text) = self.advance() {
-                        trivia.push(Trivia::Comment(text));
-                    }
-                }
-                Token::DocComment(_) => {
-                    if blank_count > 0 {
-                        trivia.push(Trivia::BlankLines(blank_count));
-                        blank_count = 0;
-                    }
-                    if let Token::DocComment(text) = self.advance() {
-                        trivia.push(Trivia::DocComment(text));
-                    }
-                }
-                Token::Terminator => {
-                    self.advance();
-                }
-                _ => break,
-            }
-        }
-        if blank_count > 0 {
-            trivia.push(Trivia::BlankLines(blank_count));
-        }
-        trivia
-    }
-
-    /// Check if the very next token is a comment on the same line (trailing comment).
-    fn collect_trailing_comment(&mut self) -> Option<String> {
-        if let Token::Comment(_) = self.peek()
-            && let Token::Comment(text) = self.advance()
-        {
-            return Some(text);
-        }
-        None
+    /// Check if the next token is on a new line (at top-level nesting).
+    /// Used to stop greedy parsing at line boundaries.
+    pub(super) fn next_on_new_line(&self) -> bool {
+        self.tokens[self.pos].preceded_by_newline
     }
 
     // Determines whether the next token can start a primary expression.
@@ -218,21 +157,23 @@ impl Parser {
 
     /// Parse a program, preserving comments and blank lines as trivia on each declaration.
     pub fn parse_program_annotated(&mut self) -> Result<AnnotatedProgram, ParseError> {
-        let mut leading = self.collect_trivia();
         let mut decls = Vec::new();
         while !matches!(self.peek(), Token::Eof) {
+            let start = self.pos;
             let decl = self.parse_decl()?;
-            let trailing = self.collect_trailing_comment();
+            let leading = self.take_leading_trivia(start);
+            let trailing = self.take_trailing_comment(self.pos - 1);
             decls.push(Annotated {
                 node: decl,
-                leading_trivia: std::mem::take(&mut leading),
+                leading_trivia: leading,
                 trailing_comment: trailing,
             });
-            leading = self.collect_trivia();
         }
+        // EOF token's leading trivia = comments at end of file
+        let trailing = self.take_leading_trivia(self.pos);
         Ok(AnnotatedProgram {
             declarations: decls,
-            trailing_trivia: leading, // any trivia after the last decl
+            trailing_trivia: trailing,
         })
     }
 }

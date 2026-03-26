@@ -6,6 +6,17 @@ use crate::ast::*;
 use crate::docs;
 use crate::token::Span;
 
+fn format_binary_chain(segments: &[Annotated<Expr>], op: &str) -> Doc {
+    let mut parts: Vec<Doc> = Vec::new();
+    for (i, seg) in segments.iter().enumerate() {
+        if i > 0 {
+            parts.push(Doc::text(op));
+        }
+        parts.push(format_expr(&seg.node));
+    }
+    docs_from_vec(parts)
+}
+
 pub fn format_expr(expr: &Expr) -> Doc {
     match &expr.kind {
         ExprKind::Lit { value } => super::helpers::format_lit(value),
@@ -249,26 +260,44 @@ pub fn format_expr(expr: &Expr) -> Doc {
         }
 
         // --- Surface syntax sugar ---
-        ExprKind::Pipe { .. } => {
-            // Flatten left-nested pipe chain: a |> b |> c is Pipe(Pipe(a, b), c)
-            let mut segments = Vec::new();
-            collect_pipe_chain(expr, &mut segments);
-            let head = format_expr(segments[0]);
-            let mut parts = vec![head];
-            for seg in &segments[1..] {
-                parts.push(Doc::line());
-                parts.push(docs![Doc::text("|> "), format_expr(seg)]);
+        ExprKind::Pipe { segments } => {
+            let has_trivia = segments.iter().any(|s| {
+                s.trailing_comment.is_some() || !s.leading_trivia.is_empty()
+            });
+            let mut parts = Vec::new();
+            for (i, seg) in segments.iter().enumerate() {
+                if i == 0 {
+                    // Head segment
+                    parts.push(format_expr(&seg.node));
+                    parts.push(format_trailing(&seg.trailing_comment));
+                } else {
+                    // Pipe segment: leading trivia, |>, expr, trailing comment
+                    if has_trivia {
+                        parts.push(Doc::hardline());
+                    } else {
+                        parts.push(Doc::line());
+                    }
+                    if !seg.leading_trivia.is_empty() {
+                        parts.push(format_trivia(&seg.leading_trivia));
+                    }
+                    parts.push(docs![Doc::text("|> "), format_expr(&seg.node)]);
+                    parts.push(format_trailing(&seg.trailing_comment));
+                }
             }
-            Doc::group(docs_from_vec(parts))
+            if has_trivia {
+                docs_from_vec(parts)
+            } else {
+                Doc::group(docs_from_vec(parts))
+            }
         }
-        ExprKind::PipeBack { left, right } => {
-            docs![format_expr(left), Doc::text(" <| "), format_expr(right)]
+        ExprKind::PipeBack { segments } => {
+            format_binary_chain(segments, " <| ")
         }
-        ExprKind::ComposeForward { left, right } => {
-            docs![format_expr(left), Doc::text(" >> "), format_expr(right)]
+        ExprKind::ComposeForward { segments } => {
+            format_binary_chain(segments, " >> ")
         }
-        ExprKind::ComposeBack { left, right } => {
-            docs![format_expr(left), Doc::text(" << "), format_expr(right)]
+        ExprKind::ComposeBack { segments } => {
+            format_binary_chain(segments, " << ")
         }
         ExprKind::Cons { head, tail } => {
             docs![format_expr(head), Doc::text(" :: "), format_expr(tail)]
@@ -435,14 +464,3 @@ pub fn format_stmt(stmt: &Stmt) -> Doc {
     }
 }
 
-/// Flatten a left-nested pipe chain into a list of segments.
-/// `a |> b |> c` (= Pipe(Pipe(a, b), c)) becomes [a, b, c].
-fn collect_pipe_chain<'a>(expr: &'a Expr, segments: &mut Vec<&'a Expr>) {
-    match &expr.kind {
-        ExprKind::Pipe { left, right } => {
-            collect_pipe_chain(left, segments);
-            segments.push(right);
-        }
-        _ => segments.push(expr),
-    }
-}

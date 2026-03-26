@@ -1,5 +1,6 @@
 use super::*;
 use crate::token::Token::*;
+use crate::token::Trivia;
 
 fn toks(source: &str) -> Vec<Token> {
     Lexer::new(source)
@@ -8,6 +9,10 @@ fn toks(source: &str) -> Vec<Token> {
         .into_iter()
         .map(|s| s.token)
         .collect()
+}
+
+fn lex(source: &str) -> Vec<Spanned> {
+    Lexer::new(source).lex().unwrap()
 }
 
 // --- Literals ---
@@ -189,91 +194,70 @@ fn unexpected_character() {
     assert!(result.is_err());
 }
 
-// --- Comments ---
+// --- Comments as trivia ---
 
 #[test]
-fn comment_emitted() {
+fn comment_on_own_line_is_leading_trivia() {
+    let tokens = lex("# comment\n42");
+    // Only significant tokens: Int(42), Eof
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens[0].token, Int(42));
+    assert_eq!(tokens[0].leading_trivia, vec![Trivia::Comment("comment".into())]);
+}
+
+#[test]
+fn inline_comment_is_trailing() {
+    let tokens = lex("42 # comment\n");
+    assert_eq!(tokens[0].token, Int(42));
+    assert_eq!(tokens[0].trailing_comment, Some("comment".into()));
+}
+
+#[test]
+fn doc_comment_is_leading_trivia() {
+    let tokens = lex("#@ This is a doc comment\nfun");
+    assert_eq!(tokens[0].token, Fun);
     assert_eq!(
-        toks("# this is a comment"),
-        vec![Comment("this is a comment".into()), Eof]
+        tokens[0].leading_trivia,
+        vec![Trivia::DocComment("This is a doc comment".into())]
     );
 }
 
 #[test]
-fn comment_before_code() {
-    assert_eq!(
-        toks("# comment\n42"),
-        vec![Comment("comment".into()), Int(42), Eof]
-    );
+fn comment_at_end_of_file_is_eof_leading_trivia() {
+    let tokens = lex("# comment");
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].token, Eof);
+    assert_eq!(tokens[0].leading_trivia, vec![Trivia::Comment("comment".into())]);
+}
+
+// --- Newlines produce no tokens (no Terminator) ---
+
+#[test]
+fn newlines_produce_no_extra_tokens() {
+    // Only significant tokens remain in the stream
+    assert_eq!(toks("42\n"), vec![Int(42), Eof]);
+    assert_eq!(toks("3.144\n"), vec![Float(3.144), Eof]);
+    assert_eq!(toks("\"hi\"\n"), vec![String("hi".into()), Eof]);
+    assert_eq!(toks("True\n"), vec![True, Eof]);
+    assert_eq!(toks("foo\n"), vec![Ident("foo".into()), Eof]);
 }
 
 #[test]
-fn inline_comment_after_code() {
-    // "42" then newline-after-comment triggers terminator
-    assert_eq!(
-        toks("42 # comment\n"),
-        vec![Int(42), Comment("comment".into()), Terminator, Eof]
-    );
-}
-
-#[test]
-fn doc_comment() {
-    assert_eq!(
-        toks("#@ This is a doc comment"),
-        vec![DocComment("This is a doc comment".into()), Eof]
-    );
-}
-
-#[test]
-fn doc_comment_before_fun() {
-    assert_eq!(
-        toks("#@ Adds two numbers\nfun"),
-        vec![DocComment("Adds two numbers".into()), Fun, Eof]
-    );
-}
-
-// --- Terminators ---
-
-#[test]
-fn terminator_after_expression_ending_tokens() {
-    assert_eq!(toks("42\n"), vec![Int(42), Terminator, Eof]);
-    assert_eq!(toks("3.144\n"), vec![Float(3.144), Terminator, Eof]);
-    assert_eq!(toks("\"hi\"\n"), vec![String("hi".into()), Terminator, Eof]);
-    assert_eq!(toks("True\n"), vec![True, Terminator, Eof]);
-    assert_eq!(toks("False\n"), vec![False, Terminator, Eof]);
-    assert_eq!(toks("foo\n"), vec![Ident("foo".into()), Terminator, Eof]);
-    assert_eq!(
-        toks("Foo\n"),
-        vec![UpperIdent("Foo".into()), Terminator, Eof]
-    );
-}
-
-#[test]
-fn terminator_after_closing_delimiters() {
-    assert_eq!(toks("()\n"), vec![LParen, RParen, Terminator, Eof]);
-    assert_eq!(toks("}\n"), vec![RBrace, Terminator, Eof]);
-}
-
-#[test]
-fn no_terminator_after_operators() {
+fn no_extra_tokens_after_operators() {
     assert_eq!(toks("+\n42"), vec![Plus, Int(42), Eof]);
     assert_eq!(toks("=\n42"), vec![Eq, Int(42), Eof]);
     assert_eq!(toks("->\nInt"), vec![Arrow, UpperIdent("Int".into()), Eof]);
 }
 
 #[test]
-fn no_terminator_after_keywords() {
+fn no_extra_tokens_after_keywords() {
     assert_eq!(toks("let\nx"), vec![Let, Ident("x".into()), Eof]);
     assert_eq!(toks("if\nx"), vec![If, Ident("x".into()), Eof]);
 }
 
 #[test]
-fn no_terminator_after_opening_delimiters() {
+fn no_extra_tokens_inside_parens() {
     assert_eq!(toks("(\n42\n)"), vec![LParen, Int(42), RParen, Eof]);
-}
-
-#[test]
-fn no_terminator_inside_parens() {
     assert_eq!(
         toks("(foo\nbar)"),
         vec![
@@ -284,10 +268,6 @@ fn no_terminator_inside_parens() {
             Eof
         ]
     );
-}
-
-#[test]
-fn nested_parens_suppress_terminators() {
     assert_eq!(
         toks("((x\ny))"),
         vec![
@@ -302,17 +282,21 @@ fn nested_parens_suppress_terminators() {
     );
 }
 
+// --- Blank lines as trivia ---
+
 #[test]
-fn multiple_blank_lines_emit_blank_line_tokens() {
-    // After a terminator, additional newlines emit BlankLine tokens
-    assert_eq!(
-        toks("42\n\n\n"),
-        vec![Int(42), Terminator, BlankLine, BlankLine, Eof]
-    );
+fn blank_lines_are_leading_trivia() {
+    let tokens = lex("42\n\n\n");
+    // Int(42), Eof
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens[0].token, Int(42));
+    // The blank lines are leading trivia on the Eof token
+    assert_eq!(tokens[1].token, Eof);
+    assert_eq!(tokens[1].leading_trivia, vec![Trivia::BlankLines(2)]);
 }
 
 #[test]
-fn leading_newlines_no_terminator() {
+fn leading_newlines_no_extra_tokens() {
     assert_eq!(toks("\n\n42"), vec![Int(42), Eof]);
 }
 
@@ -327,7 +311,6 @@ fn two_statements() {
             Ident("x".into()),
             Eq,
             Int(1),
-            Terminator,
             Let,
             Ident("y".into()),
             Eq,
@@ -381,7 +364,7 @@ fn pipe_expression() {
 
 #[test]
 fn spans_are_correct() {
-    let tokens = Lexer::new("ab cd").lex().unwrap();
+    let tokens = lex("ab cd");
     assert_eq!(tokens[0].span, Span { start: 0, end: 2 });
     assert_eq!(tokens[1].span, Span { start: 3, end: 5 });
 }
@@ -391,7 +374,7 @@ fn spans_are_byte_offsets() {
     // "小明" is 6 bytes (2 chars x 3 bytes each), so the token after it
     // should start at byte offset 9 (quote + 6 bytes + quote + space).
     let src = "\"小明\" ab";
-    let tokens = Lexer::new(src).lex().unwrap();
+    let tokens = lex(src);
     // String token: bytes 0..8 (quote + 6 bytes + quote)
     assert_eq!(tokens[0].span, Span { start: 0, end: 8 });
     // Ident "ab": bytes 9..11
@@ -486,11 +469,13 @@ fn multiline_string_blank_lines() {
 }
 
 #[test]
-fn multiline_string_no_terminator_for_inner_newlines() {
-    // Newlines inside the multiline string should not produce Terminator tokens
+fn multiline_string_no_extra_tokens_for_inner_newlines() {
+    // Newlines inside the multiline string should not produce extra tokens
     let src = "\"\"\"\n    hello\n    world\n    \"\"\"";
     let tokens = toks(src);
-    assert!(!tokens.contains(&Terminator));
+    // Should just be String + Eof
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens[0], String("hello\nworld".into()));
 }
 
 // --- Raw multiline strings ---

@@ -1,18 +1,9 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::token::Span;
+pub use crate::token::Trivia;
 
 pub type Program = Vec<Decl>;
-
-// --- Trivia (for formatter) ---
-
-/// A piece of trivia (comment or blank line) attached to an AST node.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Trivia {
-    BlankLines(u32),
-    Comment(String),
-    DocComment(String),
-}
 
 /// An AST node wrapped with leading trivia and an optional trailing comment.
 /// PartialEq compares the inner node only (trivia is formatting metadata).
@@ -464,17 +455,21 @@ pub enum ExprKind {
 
     // --- Surface syntax (desugared before typechecking) ---
 
-    /// `x |> f` -- forward pipe (desugars to App(f, x))
-    Pipe { left: Box<Expr>, right: Box<Expr> },
+    /// `x |> f |> g` -- forward pipe chain.
+    /// Stored as a flat list of annotated segments: [x, f, g].
+    /// Each segment carries leading trivia (comments before `|>`) and
+    /// a trailing comment (comment at end of that segment, before the next `|>`).
+    /// The first segment's leading trivia comes from the head expression.
+    Pipe { segments: Vec<Annotated<Expr>> },
 
-    /// `f <| x` -- backward pipe (desugars to App(f, x))
-    PipeBack { left: Box<Expr>, right: Box<Expr> },
+    /// `f <| x` -- backward pipe chain (desugars to App(f, x))
+    PipeBack { segments: Vec<Annotated<Expr>> },
 
-    /// `f >> g` -- forward compose (desugars to fun x -> g (f x))
-    ComposeForward { left: Box<Expr>, right: Box<Expr> },
+    /// `f >> g` -- forward compose chain (desugars to fun x -> g (f x))
+    ComposeForward { segments: Vec<Annotated<Expr>> },
 
-    /// `f << g` -- backward compose (desugars to fun x -> f (g x))
-    ComposeBack { left: Box<Expr>, right: Box<Expr> },
+    /// `f << g` -- backward compose chain (desugars to fun x -> f (g x))
+    ComposeBack { segments: Vec<Annotated<Expr>> },
 
     /// `x :: xs` -- cons (desugars to App(App(Constructor("Cons"), x), xs))
     Cons { head: Box<Expr>, tail: Box<Expr> },
@@ -564,12 +559,16 @@ impl Expr {
                         .is_some_and(|(t, b)| t.contains_resume() || b.contains_resume())
             }
             ExprKind::Ascription { expr, .. } => expr.contains_resume(),
-            ExprKind::Pipe { left, right }
-            | ExprKind::PipeBack { left, right }
-            | ExprKind::ComposeForward { left, right }
-            | ExprKind::ComposeBack { left, right }
-            | ExprKind::Cons { head: left, tail: right } => {
-                left.contains_resume() || right.contains_resume()
+            ExprKind::Pipe { segments } => {
+                segments.iter().any(|s| s.node.contains_resume())
+            }
+            ExprKind::PipeBack { segments }
+            | ExprKind::ComposeForward { segments }
+            | ExprKind::ComposeBack { segments } => {
+                segments.iter().any(|s| s.node.contains_resume())
+            }
+            ExprKind::Cons { head, tail } => {
+                head.contains_resume() || tail.contains_resume()
             }
             ExprKind::ListLit { elements } => elements.iter().any(|e| e.contains_resume()),
             ExprKind::StringInterp { parts } => parts.iter().any(|p| matches!(p, StringPart::Expr(e) if e.contains_resume())),

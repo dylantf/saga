@@ -3,10 +3,10 @@
 //! Runs after parsing and derive expansion, before typechecking.
 //! Transforms sugar-preserving AST nodes into the forms the typechecker expects:
 //!
-//! - `Pipe { left, right }` → `App(right, left)`
-//! - `PipeBack { left, right }` → `App(left, right)`
-//! - `ComposeForward { left, right }` → `fun _x -> right (left _x)`
-//! - `ComposeBack { left, right }` → `fun _x -> left (right _x)`
+//! - `Pipe { segments: [a, b, c] }` → `App(c, App(b, a))`
+//! - `PipeBack { segments: [a, b, c] }` → `App(App(a, b), c)`
+//! - `ComposeForward { segments: [f, g] }` → `fun _x -> g (f _x)`
+//! - `ComposeBack { segments: [f, g] }` → `fun _x -> f (g _x)`
 //! - `Cons { head, tail }` → `App(App(Constructor("Cons"), head), tail)`
 //! - `ListLit { elements }` → nested `Cons`/`Nil` chain
 //! - `StringInterp { parts }` → `show(expr) <> literal <> ...`
@@ -145,13 +145,21 @@ fn desugar_expr(expr: &mut Expr) {
         ExprKind::Ascription { expr: inner, .. } => desugar_expr(inner),
 
         // Sugar nodes: recurse into children before transforming
-        ExprKind::Pipe { left, right }
-        | ExprKind::PipeBack { left, right }
-        | ExprKind::ComposeForward { left, right }
-        | ExprKind::ComposeBack { left, right }
-        | ExprKind::Cons { head: left, tail: right } => {
-            desugar_expr(left);
-            desugar_expr(right);
+        ExprKind::Pipe { segments } => {
+            for seg in segments {
+                desugar_expr(&mut seg.node);
+            }
+        }
+        ExprKind::PipeBack { segments }
+        | ExprKind::ComposeForward { segments }
+        | ExprKind::ComposeBack { segments } => {
+            for seg in segments {
+                desugar_expr(&mut seg.node);
+            }
+        }
+        ExprKind::Cons { head, tail } => {
+            desugar_expr(head);
+            desugar_expr(tail);
         }
         ExprKind::ListLit { elements } => {
             for e in elements {
@@ -189,30 +197,64 @@ fn desugar_expr(expr: &mut Expr) {
     let span = expr.span;
     match &mut expr.kind {
         ExprKind::Pipe { .. } => {
-            // x |> f  →  App(f, x)
-            let ExprKind::Pipe { left, right } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
-            expr.kind = ExprKind::App {
-                func: right,
-                arg: left,
-            };
+            // [a, b, c] → App(c, App(b, a))
+            let ExprKind::Pipe { segments } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            let mut iter = segments.into_iter();
+            let mut acc = iter.next().unwrap().node;
+            for seg in iter {
+                let func = seg.node;
+                let app_span = acc.span.to(func.span);
+                acc = Expr {
+                    id: NodeId::fresh(),
+                    span: app_span,
+                    kind: ExprKind::App {
+                        func: Box::new(func),
+                        arg: Box::new(acc),
+                    },
+                };
+            }
+            *expr = acc;
         }
         ExprKind::PipeBack { .. } => {
-            // f <| x  →  App(f, x)
-            let ExprKind::PipeBack { left, right } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
-            expr.kind = ExprKind::App {
-                func: left,
-                arg: right,
-            };
+            // [a, b, c] from a <| b <| c → App(App(a, b), c)
+            let ExprKind::PipeBack { segments } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            let mut iter = segments.into_iter();
+            let mut acc = iter.next().unwrap().node;
+            for seg in iter {
+                let arg = seg.node;
+                let app_span = acc.span.to(arg.span);
+                acc = Expr {
+                    id: NodeId::fresh(),
+                    span: app_span,
+                    kind: ExprKind::App {
+                        func: Box::new(acc),
+                        arg: Box::new(arg),
+                    },
+                };
+            }
+            *expr = acc;
         }
         ExprKind::ComposeForward { .. } => {
-            // f >> g  →  fun _x -> g (f _x)
-            let ExprKind::ComposeForward { left, right } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
-            expr.kind = desugar_compose(*left, *right, span);
+            // [f, g, h] from f >> g >> h → fold left: acc >> next = fun _x -> next(acc(_x))
+            let ExprKind::ComposeForward { segments } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            let mut iter = segments.into_iter();
+            let mut acc = iter.next().unwrap().node;
+            for seg in iter {
+                let next = seg.node;
+                acc = Expr::synth(span, desugar_compose(acc, next, span));
+            }
+            *expr = acc;
         }
         ExprKind::ComposeBack { .. } => {
-            // f << g  →  fun _x -> f (g _x)
-            let ExprKind::ComposeBack { left, right } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
-            expr.kind = desugar_compose(*right, *left, span);
+            // [f, g, h] from f << g << h → fold left: acc << next = fun _x -> acc(next(_x))
+            let ExprKind::ComposeBack { segments } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            let mut iter = segments.into_iter();
+            let mut acc = iter.next().unwrap().node;
+            for seg in iter {
+                let next = seg.node;
+                acc = Expr::synth(span, desugar_compose(next, acc, span));
+            }
+            *expr = acc;
         }
         ExprKind::Cons { .. } => {
             // x :: xs  →  App(App(Cons, x), xs)

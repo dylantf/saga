@@ -15,7 +15,6 @@ impl Parser {
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
                 }
-                self.skip_terminators();
                 continue;
             }
             let field_name = self.expect_ident()?;
@@ -37,7 +36,6 @@ impl Parser {
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
             }
-            self.skip_terminators();
         }
         Ok(fields)
     }
@@ -55,40 +53,29 @@ impl Parser {
         let mut left = self.parse_application()?;
 
         loop {
-            // Allow |> to continue an expression across a newline,
-            // skipping over any comments/blank lines in between.
-            if matches!(self.peek(), Token::Terminator | Token::Comment(_) | Token::BlankLine) {
-                let mut offset = 0;
-                while matches!(self.peek_at(offset), Token::Terminator | Token::Comment(_) | Token::BlankLine) {
-                    offset += 1;
-                }
-                if matches!(self.peek_at(offset), Token::Pipe) {
-                    for _ in 0..offset {
-                        self.advance();
-                    }
-                }
-            }
-
+            // Operators on a new line (at top-level nesting) do not continue the expression,
+            // except for |> which explicitly supports multi-line piping.
+            let on_new_line = self.next_on_new_line();
             let (op, bp) = match self.peek() {
-                Token::Pipe => (None, 1),           // desugars to App(right, left)
-                Token::PipeBack => (None, 1),       // desugars to App(left, right)
-                Token::ComposeForward => (None, 1), // f >> g  →  fun x -> g (f x)
-                Token::ComposeBack => (None, 1),    // f << g  →  fun x -> f (g x)
-                Token::DoubleColon => (None, 1),    // desugars to Cons(left, right), right-assoc
-                Token::Or => (Some(BinOp::Or), 2),
-                Token::And => (Some(BinOp::And), 3),
-                Token::EqEq => (Some(BinOp::Eq), 4),
-                Token::NotEq => (Some(BinOp::NotEq), 4),
-                Token::Lt => (Some(BinOp::Lt), 5),
-                Token::Gt => (Some(BinOp::Gt), 5),
-                Token::LtEq => (Some(BinOp::LtEq), 5),
-                Token::GtEq => (Some(BinOp::GtEq), 5),
-                Token::Concat => (Some(BinOp::Concat), 6),
-                Token::Plus => (Some(BinOp::Add), 6),
-                Token::Minus => (Some(BinOp::Sub), 6),
-                Token::Star => (Some(BinOp::Mul), 7),
-                Token::Slash => (Some(BinOp::FloatDiv), 7),
-                Token::Modulo => (Some(BinOp::Mod), 7),
+                Token::Pipe => (None, 1),           // desugars to App(right, left) — continues across lines
+                Token::PipeBack if !on_new_line => (None, 1),
+                Token::ComposeForward if !on_new_line => (None, 1),
+                Token::ComposeBack if !on_new_line => (None, 1),
+                Token::DoubleColon if !on_new_line => (None, 1),
+                Token::Or if !on_new_line => (Some(BinOp::Or), 2),
+                Token::And if !on_new_line => (Some(BinOp::And), 3),
+                Token::EqEq if !on_new_line => (Some(BinOp::Eq), 4),
+                Token::NotEq if !on_new_line => (Some(BinOp::NotEq), 4),
+                Token::Lt if !on_new_line => (Some(BinOp::Lt), 5),
+                Token::Gt if !on_new_line => (Some(BinOp::Gt), 5),
+                Token::LtEq if !on_new_line => (Some(BinOp::LtEq), 5),
+                Token::GtEq if !on_new_line => (Some(BinOp::GtEq), 5),
+                Token::Concat if !on_new_line => (Some(BinOp::Concat), 6),
+                Token::Plus if !on_new_line => (Some(BinOp::Add), 6),
+                Token::Minus if !on_new_line => (Some(BinOp::Sub), 6),
+                Token::Star if !on_new_line => (Some(BinOp::Mul), 7),
+                Token::Slash if !on_new_line => (Some(BinOp::FloatDiv), 7),
+                Token::Modulo if !on_new_line => (Some(BinOp::Mod), 7),
                 _ => break,
             };
 
@@ -96,13 +83,59 @@ impl Parser {
                 break;
             }
 
+            // For |>, collect a flat pipe chain with full trivia per segment.
+            if matches!(self.peek(), Token::Pipe) {
+                // First segment is `left` (no pipe-specific trivia, it gets decl-level trivia)
+                let mut segments = vec![Annotated::bare(left)];
+                while matches!(self.peek(), Token::Pipe) {
+                    // Capture trailing comment from end of previous segment
+                    let trailing = self.tokens[self.pos - 1].trailing_comment.take();
+                    if let Some(comment) = trailing
+                        && let Some(last) = segments.last_mut()
+                    {
+                        last.trailing_comment = Some(comment);
+                    }
+                    // Capture leading trivia on the |> token
+                    let leading = self.take_leading_trivia(self.pos);
+                    self.advance(); // consume |>
+                    let seg = self.parse_expr(bp + 1)?;
+                    segments.push(Annotated {
+                        node: seg,
+                        leading_trivia: leading,
+                        trailing_comment: None,
+                    });
+                }
+                let start_span = segments.first().unwrap().node.span;
+                let end_span = segments.last().unwrap().node.span;
+                left = Expr { id: self.next_id(), span: start_span.to(end_span), kind: ExprKind::Pipe { segments }};
+                continue;
+            }
+
+            // For <|, >>, << collect flat chain like |>
+            if matches!(self.peek(), Token::PipeBack | Token::ComposeForward | Token::ComposeBack) {
+                let chain_token = self.peek().clone();
+                let mut segments = vec![Annotated::bare(left)];
+                while self.peek() == &chain_token {
+                    self.advance(); // consume operator
+                    let seg = self.parse_expr(bp + 1)?;
+                    segments.push(Annotated::bare(seg));
+                }
+                let start_span = segments.first().unwrap().node.span;
+                let end_span = segments.last().unwrap().node.span;
+                let span = start_span.to(end_span);
+                let kind = match chain_token {
+                    Token::PipeBack => ExprKind::PipeBack { segments },
+                    Token::ComposeForward => ExprKind::ComposeForward { segments },
+                    Token::ComposeBack => ExprKind::ComposeBack { segments },
+                    _ => unreachable!(),
+                };
+                left = Expr { id: self.next_id(), span, kind };
+                continue;
+            }
+
             // Remember which sugar operator we have before consuming
             let sugar = match self.peek() {
-                Token::Pipe => Some(SugarOp::Pipe),
-                Token::PipeBack => Some(SugarOp::PipeBack),
                 Token::DoubleColon => Some(SugarOp::Cons),
-                Token::ComposeForward => Some(SugarOp::ComposeForward),
-                Token::ComposeBack => Some(SugarOp::ComposeBack),
                 _ => None,
             };
             self.advance(); // consume operator
@@ -112,30 +145,18 @@ impl Parser {
 
             let span = left.span.to(right.span);
             left = match (op, sugar) {
-                (None, Some(SugarOp::Pipe)) => Expr { id: self.next_id(), span, kind: ExprKind::Pipe {
-                    left: Box::new(left), right: Box::new(right),
-                }},
-                (None, Some(SugarOp::PipeBack)) => Expr { id: self.next_id(), span, kind: ExprKind::PipeBack {
-                    left: Box::new(left), right: Box::new(right),
-                }},
-                (None, Some(SugarOp::ComposeForward)) => Expr { id: self.next_id(), span, kind: ExprKind::ComposeForward {
-                    left: Box::new(left), right: Box::new(right),
-                }},
-                (None, Some(SugarOp::ComposeBack)) => Expr { id: self.next_id(), span, kind: ExprKind::ComposeBack {
-                    left: Box::new(left), right: Box::new(right),
-                }},
                 (None, Some(SugarOp::Cons)) => Expr { id: self.next_id(), span, kind: ExprKind::Cons {
                     head: Box::new(left), tail: Box::new(right),
                 }},
                 (Some(op), _) => Expr { id: self.next_id(), span, kind: ExprKind::BinOp {
                     op, left: Box::new(left), right: Box::new(right),
                 }},
-                (None, None) => unreachable!(),
+                _ => unreachable!(),
             };
         }
 
         // `with` has lowest precedence — checked after all binary ops
-        if matches!(self.peek(), Token::With) {
+        if matches!(self.peek(), Token::With) && !self.next_on_new_line() {
             self.advance();
             let handler = self.parse_handler_ref()?;
             let end = self.tokens[self.pos - 1].span;
@@ -147,7 +168,7 @@ impl Parser {
         }
 
         // Type ascription: `expr : Type` — lowest precedence, only at top level
-        if min_bp == 0 && matches!(self.peek(), Token::Colon) {
+        if min_bp == 0 && matches!(self.peek(), Token::Colon) && !self.next_on_new_line() {
             self.advance(); // consume ':'
             let type_expr = self.parse_type_expr()?;
             let end = self.tokens[self.pos - 1].span;
@@ -166,7 +187,7 @@ impl Parser {
     fn parse_application(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_postfix()?;
 
-        while self.can_start_primary() {
+        while self.can_start_primary() && !self.next_on_new_line() {
             let arg = self.parse_postfix()?;
             let span = expr.span.to(arg.span);
             expr = Expr { id: self.next_id(), span, kind: ExprKind::App {
@@ -241,7 +262,6 @@ impl Parser {
                     && matches!(self.peek(), Token::LBrace)
                 {
                     self.advance(); // consume '{'
-                    self.skip_terminators();
                     let fields = self.parse_record_fields()?;
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
@@ -288,13 +308,13 @@ impl Parser {
     pub(super) fn parse_handler_ref(&mut self) -> Result<Handler, ParseError> {
         if matches!(self.peek(), Token::LBrace) {
             self.advance(); // consume '{'
-            let mut leading_trivia = self.collect_trivia();
 
             let mut named = Vec::new();
             let mut arms = Vec::new();
             let mut return_clause = None;
 
             while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                let start = self.pos;
                 let arm_start = self.tokens[self.pos].span;
 
                 if matches!(self.peek(), Token::Return) {
@@ -313,13 +333,13 @@ impl Parser {
                     }));
                 } else {
                     // Could be a named handler ref or an inline arm.
-                    // Named ref: just an ident followed by `,` or `}` or newline
+                    // Named ref: just an ident followed by `,` or `}`
                     // Inline arm: ident [params...] = body
                     let name = self.expect_ident()?;
 
                     if matches!(
                         self.peek(),
-                        Token::Comma | Token::RBrace | Token::Terminator
+                        Token::Comma | Token::RBrace
                     ) {
                         named.push(name);
                     } else {
@@ -340,7 +360,7 @@ impl Parser {
                         self.expect(Token::Eq)?;
                         let body = self.parse_expr(0)?;
                         let arm_end = body.span;
-                        let trailing_comment = self.collect_trailing_comment();
+                        let trailing_comment = self.take_trailing_comment(self.pos - 1);
                         arms.push(Annotated {
                             node: HandlerArm {
                                 op_name: name,
@@ -348,7 +368,7 @@ impl Parser {
                                 body: Box::new(body),
                                 span: arm_start.to(arm_end),
                             },
-                            leading_trivia: std::mem::take(&mut leading_trivia),
+                            leading_trivia: self.take_leading_trivia(start),
                             trailing_comment,
                         });
                     }
@@ -356,16 +376,23 @@ impl Parser {
 
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
+                    // Transfer trailing comment from comma to the last arm
+                    if let Some(comment) = self.tokens[self.pos - 1].trailing_comment.take()
+                        && let Some(last_arm) = arms.last_mut()
+                        && last_arm.trailing_comment.is_none()
+                    {
+                        last_arm.trailing_comment = Some(comment);
+                    }
                 }
-                leading_trivia = self.collect_trivia();
             }
+            let dangling_trivia = self.take_leading_trivia(self.pos);
             self.expect(Token::RBrace)?;
 
             Ok(Handler::Inline {
                 named,
                 arms,
                 return_clause,
-                dangling_trivia: leading_trivia,
+                dangling_trivia,
             })
         } else {
             // Single named handler: `with console_log`
@@ -409,6 +436,9 @@ impl Parser {
                             tokens.push(crate::token::Spanned {
                                 token: crate::token::Token::Eof,
                                 span,
+                                leading_trivia: Vec::new(),
+                                trailing_comment: None,
+                                preceded_by_newline: false,
                             });
                             let mut sub = crate::parser::Parser::new(tokens);
                             let hole_expr = sub.parse_expr(0)?;
@@ -478,7 +508,6 @@ impl Parser {
                 if matches!(self.peek(), Token::LBrace) {
                     // Record create: User { name: "Dylan", age: 30 }
                     self.advance(); // consume '{'
-                    self.skip_terminators();
                     let fields = self.parse_record_fields()?;
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
@@ -606,8 +635,6 @@ impl Parser {
             }
 
             Token::LBrace => {
-                self.skip_terminators();
-
                 // Check for record update: { expr | field: val, ... }
                 // We don't start with `let`, so try parsing an expression,
                 // then check if the next token is `|`
@@ -619,7 +646,6 @@ impl Parser {
                         && matches!(self.peek(), Token::Bar)
                     {
                         self.advance(); // consume '|'
-                        self.skip_terminators();
                         let fields = self.parse_record_fields()?;
                         let end = self.tokens[self.pos].span;
                         self.expect(Token::RBrace)?;
@@ -650,8 +676,8 @@ impl Parser {
                 }
 
                 let mut stmts: Vec<Annotated<Stmt>> = Vec::new();
-                let mut leading_trivia = self.collect_trivia();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                    let start = self.pos;
                     let stmt = if matches!(self.peek(), Token::Let) {
                         let let_start = self.tokens[self.pos].span;
                         self.advance(); // consume 'let'
@@ -714,29 +740,27 @@ impl Parser {
                     } else {
                         Stmt::Expr(self.parse_expr(0)?)
                     };
-                    let trailing_comment = self.collect_trailing_comment();
+                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
                     stmts.push(Annotated {
                         node: stmt,
-                        leading_trivia,
+                        leading_trivia: self.take_leading_trivia(start),
                         trailing_comment,
                     });
-                    leading_trivia = self.collect_trivia();
                 }
+                let dangling_trivia = self.take_leading_trivia(self.pos);
                 let end_span = self.tokens[self.pos].span; // the RBrace
                 self.expect(Token::RBrace)?;
                 Ok(Expr { id: self.next_id(), span: span.to(end_span), kind: ExprKind::Block {
                     stmts,
-                    dangling_trivia: leading_trivia,
+                    dangling_trivia,
                 }})
             }
 
             Token::If => {
                 let cond = self.parse_expr(0)?;
-                self.skip_terminators();
                 self.expect(Token::Then)?;
 
                 let then_branch = self.parse_expr(0)?;
-                self.skip_terminators();
                 self.expect(Token::Else)?;
 
                 let else_branch = self.parse_expr(0)?;
@@ -754,10 +778,10 @@ impl Parser {
                 let scrutinee = self.parse_expr(0)?;
                 self.no_brace_app = false;
                 self.expect(Token::LBrace)?;
-                let mut leading_trivia = self.collect_trivia();
 
                 let mut branches = Vec::new();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                    let start = self.pos;
                     let arm_start = self.tokens[self.pos].span;
                     let pattern = self.parse_pattern()?;
 
@@ -771,7 +795,7 @@ impl Parser {
                     self.expect(Token::Arrow)?;
                     let body = self.parse_expr(0)?;
                     let end_span = body.span.end;
-                    let trailing_comment = self.collect_trailing_comment();
+                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
                     branches.push(Annotated {
                         node: CaseArm {
                             pattern,
@@ -782,25 +806,24 @@ impl Parser {
                                 end: end_span,
                             },
                         },
-                        leading_trivia,
+                        leading_trivia: self.take_leading_trivia(start),
                         trailing_comment,
                     });
-                    leading_trivia = self.collect_trivia();
                 }
 
+                let dangling_trivia = self.take_leading_trivia(self.pos);
                 let end = self.tokens[self.pos].span; // the RBrace
                 self.expect(Token::RBrace)?;
 
                 Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Case {
                     scrutinee: Box::new(scrutinee),
                     arms: branches,
-                    dangling_trivia: leading_trivia,
+                    dangling_trivia,
                 }})
             }
 
             Token::Receive => {
                 self.expect(Token::LBrace)?;
-                let mut leading_trivia = self.collect_trivia();
 
                 let mut branches = Vec::new();
                 let mut after_clause = None;
@@ -813,11 +836,10 @@ impl Parser {
                         self.expect(Token::Arrow)?;
                         let body = self.parse_expr(0)?;
                         after_clause = Some((Box::new(timeout), Box::new(body)));
-                        let _trailing = self.collect_trailing_comment();
-                        let _trivia = self.collect_trivia();
                         break; // after must be last
                     }
 
+                    let start = self.pos;
                     let arm_start = self.tokens[self.pos].span;
                     let pattern = self.parse_pattern()?;
 
@@ -831,7 +853,7 @@ impl Parser {
                     self.expect(Token::Arrow)?;
                     let body = self.parse_expr(0)?;
                     let end_span = body.span.end;
-                    let trailing_comment = self.collect_trailing_comment();
+                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
                     branches.push(Annotated {
                         node: CaseArm {
                             pattern,
@@ -842,19 +864,19 @@ impl Parser {
                                 end: end_span,
                             },
                         },
-                        leading_trivia,
+                        leading_trivia: self.take_leading_trivia(start),
                         trailing_comment,
                     });
-                    leading_trivia = self.collect_trivia();
                 }
 
+                let dangling_trivia = self.take_leading_trivia(self.pos);
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;
 
                 Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Receive {
                     arms: branches,
                     after_clause,
-                    dangling_trivia: leading_trivia,
+                    dangling_trivia,
                 }})
             }
 
@@ -890,7 +912,6 @@ impl Parser {
             // do...else block: `do { Pat <- expr ... SuccessExpr } else { Pat -> expr ... }`
             Token::Do => {
                 self.expect(Token::LBrace)?;
-                self.skip_terminators();
 
                 let mut bindings = Vec::new();
                 // Parse bindings (`Pat <- expr`) until we find the success expression
@@ -909,32 +930,29 @@ impl Parser {
                             self.advance(); // consume `<-`
                             let expr = self.parse_expr(0)?;
                             bindings.push((pat, expr));
-                            self.skip_terminators();
                         }
                         _ => {
                             // Not a binding -- restore and parse as success expression
                             self.pos = saved_pos;
                             let success = self.parse_expr(0)?;
-                            self.skip_terminators();
                             break success;
                         }
                     }
                 };
                 self.expect(Token::RBrace)?;
 
-                self.skip_terminators();
                 self.expect(Token::Else)?;
                 self.expect(Token::LBrace)?;
-                let mut leading_trivia = self.collect_trivia();
 
                 let mut else_arms = Vec::new();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                    let start = self.pos;
                     let arm_start = self.tokens[self.pos].span;
                     let pattern = self.parse_pattern()?;
                     self.expect(Token::Arrow)?;
                     let body = self.parse_expr(0)?;
                     let end_span = body.span.end;
-                    let trailing_comment = self.collect_trailing_comment();
+                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
                     else_arms.push(Annotated {
                         node: CaseArm {
                             pattern,
@@ -945,11 +963,11 @@ impl Parser {
                                 end: end_span,
                             },
                         },
-                        leading_trivia,
+                        leading_trivia: self.take_leading_trivia(start),
                         trailing_comment,
                     });
-                    leading_trivia = self.collect_trivia();
                 }
+                let dangling_trivia = self.take_leading_trivia(self.pos);
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;
 
@@ -957,7 +975,7 @@ impl Parser {
                     bindings,
                     success: Box::new(success),
                     else_arms,
-                    dangling_trivia: leading_trivia,
+                    dangling_trivia,
                 }})
             }
 
@@ -1022,9 +1040,5 @@ impl Parser {
 
 /// Tracks which sugar operator is being parsed.
 enum SugarOp {
-    Pipe,
-    PipeBack,
     Cons,
-    ComposeForward,
-    ComposeBack,
 }
