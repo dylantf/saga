@@ -55,10 +55,12 @@ Pre-computes two lookup tables consumed by the lowerer:
 **ConstructorAtoms** (`HashMap<String, String>`): Maps constructor names to their mangled Erlang atoms. Handles BEAM convention overrides (Ok->ok, Err->error, Nothing->undefined, True->true, etc.), module-prefixed mangling (NotFound -> std_file_NotFound), and qualified forms (Std.File.NotFound -> std_file_NotFound).
 
 **ResolutionMap** (`HashMap<NodeId, ResolvedName>`): Maps each `Var`, `QualifiedName`, and `DictRef` AST node to its resolved target:
-- `LocalFun { name, arity }` - top-level function in the current module
-- `ImportedFun { erlang_mod, name, arity }` - function from another module
+- `LocalFun { name, arity, effects }` - top-level function in the current module
+- `ImportedFun { erlang_mod, name, arity, effects }` - function from another module
 - `ExternalFun { erlang_mod, erlang_func, arity }` - `@external` FFI function
 - Not in map = local variable (function param, let binding, lambda param)
+
+Each resolved name carries its effect requirements so the lowerer can determine CPS threading without a separate lookup.
 
 Resolution is per-Var-node. Whether a name appears bare (`to_list`) or as a call head (`to_list t`), the same NodeId gets the same resolution. The lowerer reads the head Var's resolution to decide between `call` (cross-module) and `apply` (local).
 
@@ -74,11 +76,17 @@ Converts the elaborated AST into a Core Erlang AST (`CModule`). This is the most
 
 The lowerer consumes:
 - `CodegenContext.modules` (all `CompiledModule` bundles)
-- `constructor_atoms` from the resolver
-- `resolved` (merged resolution map) from the resolver
+- `constructor_atoms` from the resolver (constructor name -> Erlang atom)
+- `resolved` (merged resolution map) from the resolver (NodeId -> call target)
 - `fun_info` (arity, effects, param absorbed effects) built during `init_module`
 
-What the lowerer does NOT do (any more):
+**Name resolution vs CPS are cleanly separated:**
+- The `ResolutionMap` (from `resolve.rs`) answers "what does this name refer to?" for every `Var`, `QualifiedName`, and `DictRef` node. It carries the target module, function name, arity, and effects. The lowerer reads it via `self.resolved.get(&node_id)`.
+- `FunInfo` (from `init_module`) tracks CPS metadata for local functions: expanded arity (including handler params), effect requirements, and per-parameter absorbed effects. This is NOT name resolution -- it's about how to thread handler parameters and return continuations.
+- `module_aliases` maps source-level module names to Erlang atom names (e.g. "List" -> "std_list"). Used as a fallback in `lower_qualified_call` for unresolved qualified names.
+- `effect_defs`, `handler_defs`, `op_to_effect` handle dynamic effect dispatch (which handler params are in scope depends on the `with` block, not static resolution).
+
+What the lowerer does NOT do:
 - Name resolution. All name -> module mapping is done by the resolver.
 - Constructor mangling. All constructor -> atom mapping is done by the resolver.
 

@@ -134,15 +134,18 @@ fn module_name_to_erlang(path: &[String]) -> String {
 /// How a name resolves at a particular Var or QualifiedName usage site.
 #[derive(Debug, Clone)]
 pub enum ResolvedName {
-    /// A local variable binding (function param, let binding, lambda param).
-    LocalVar,
     /// A top-level function defined in the current module.
-    LocalFun { name: String, arity: usize },
+    LocalFun {
+        name: String,
+        arity: usize,
+        effects: Vec<String>,
+    },
     /// A function imported from another module (non-external).
     ImportedFun {
         erlang_mod: String,
         name: String,
         arity: usize,
+        effects: Vec<String>,
     },
     /// An @external function (maps to a specific Erlang module:function).
     ExternalFun {
@@ -159,8 +162,8 @@ pub type ResolutionMap = HashMap<NodeId, ResolvedName>;
 #[derive(Debug, Clone)]
 #[allow(clippy::enum_variant_names)]
 enum ScopedName {
-    LocalFun { name: String, arity: usize },
-    ImportedFun { erlang_mod: String, name: String, arity: usize },
+    LocalFun { name: String, arity: usize, effects: Vec<String> },
+    ImportedFun { erlang_mod: String, name: String, arity: usize, effects: Vec<String> },
     ExternalFun { erlang_mod: String, erlang_func: String, arity: usize },
 }
 
@@ -215,13 +218,15 @@ pub fn resolve_names(
         );
     }
 
-    // Register local functions (overrides externals with same name)
+    // Register local functions (overrides externals with same name).
+    // Effects for local functions are tracked by the lowerer's fun_info (from init_module).
     for (name, arity) in &local_funs {
         scope.insert(
             name.clone(),
             ScopedName::LocalFun {
                 name: name.clone(),
                 arity: *arity,
+                effects: Vec::new(),
             },
         );
     }
@@ -266,6 +271,13 @@ pub fn resolve_names(
                 })
                 .collect();
 
+            // Build effect lookup for this module
+            let fun_effects_map: HashMap<&str, &Vec<String>> = info
+                .fun_effects
+                .iter()
+                .map(|(n, effs)| (n.as_str(), effs))
+                .collect();
+
             // Register exported functions
             for (name, scheme) in &info.exports {
                 let qualified = format!("{}.{}", alias, name);
@@ -275,6 +287,11 @@ pub fn resolve_names(
                 let dict_params =
                     crate::codegen::lower::util::dict_param_count(&scheme.constraints);
                 let expanded_arity = arity + dict_params;
+                let effects = fun_effects_map
+                    .get(name.as_str())
+                    .cloned()
+                    .cloned()
+                    .unwrap_or_default();
 
                 // Check if this is an @external function
                 let scoped = if let Some((erl_mod, erl_func, ext_arity)) = ext_map.get(name) {
@@ -288,6 +305,7 @@ pub fn resolve_names(
                         erlang_mod: erlang_mod.clone(),
                         name: name.clone(),
                         arity: expanded_arity,
+                        effects,
                     }
                 };
 
@@ -324,6 +342,7 @@ pub fn resolve_names(
                 erlang_mod: erlang_mod.clone(),
                 name: d.dict_name.clone(),
                 arity: d.arity,
+                effects: Vec::new(),
             });
         }
     }
@@ -583,18 +602,21 @@ fn resolve_expr(
 
 fn scoped_to_resolved(scoped: &ScopedName) -> ResolvedName {
     match scoped {
-        ScopedName::LocalFun { name, arity } => ResolvedName::LocalFun {
+        ScopedName::LocalFun { name, arity, effects } => ResolvedName::LocalFun {
             name: name.clone(),
             arity: *arity,
+            effects: effects.clone(),
         },
         ScopedName::ImportedFun {
             erlang_mod,
             name,
             arity,
+            effects,
         } => ResolvedName::ImportedFun {
             erlang_mod: erlang_mod.clone(),
             name: name.clone(),
             arity: *arity,
+            effects: effects.clone(),
         },
         ScopedName::ExternalFun {
             erlang_mod,

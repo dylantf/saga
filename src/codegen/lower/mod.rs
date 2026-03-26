@@ -45,29 +45,35 @@ struct EffectInfo {
 }
 
 /// All information about a top-level function needed by the lowerer.
-/// A single struct replaces separate `top_level_funs`, `fun_effects`,
-/// `param_absorbed_effects`, and `imported_names` maps.
+/// CPS metadata for a function. Used by the lowerer to determine how to
+/// thread handler parameters and return continuations through effectful calls.
+/// This is NOT name resolution -- name resolution is handled by the ResolutionMap.
+/// FunInfo only tracks arity/effects needed for CPS transformation.
 #[derive(Debug, Clone, Default)]
 struct FunInfo {
     /// Exported arity (including handler params). 0 if not yet known (set by FunBinding).
     arity: usize,
-    /// Effect names from `needs` clause (sorted).
+    /// Effect names from `needs` clause (sorted). Used to determine which
+    /// handler params to thread through at call sites.
     effects: Vec<String>,
-    /// For EffArrow params: param_index -> absorbed effects.
+    /// For EffArrow params: param_index -> absorbed effects. Used to inject
+    /// handler params into lambdas passed to effectful higher-order functions.
     param_absorbed_effects: HashMap<usize, Vec<String>>,
 }
 
 pub struct Lowerer<'a> {
     counter: usize,
-    /// Cross-module codegen context (codegen info, elaborated modules, effect bindings).
+    /// Cross-module codegen context (compiled modules, effect bindings, prelude imports).
     ctx: &'a super::CodegenContext,
-    /// Maps module alias/name used in source -> Erlang module atom name.
+    /// Maps module alias -> Erlang module atom (e.g. "List" -> "std_list").
+    /// Used by lower_qualified_call as a fallback for unresolved qualified names.
     module_aliases: HashMap<String, String>,
     /// Names declared as `pub` in the current module (for export filtering).
     pub_names: std::collections::HashSet<String>,
     /// Maps record name -> ordered field names (from RecordDef declarations).
     record_fields: HashMap<String, Vec<String>>,
-    /// All top-level function info: name -> FunInfo.
+    /// CPS metadata for top-level functions. Populated from FunBinding/FunSignature
+    /// during init_module. NOT used for name resolution (that's the ResolutionMap).
     fun_info: HashMap<String, FunInfo>,
     /// Maps effect name -> EffectInfo (op names and param counts).
     effect_defs: HashMap<String, EffectInfo>,
@@ -213,6 +219,21 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Emit a call expression using the resolution map, falling back to old lookup maps.
+    /// Get a function's effects from the resolution map, falling back to fun_info.
+    fn resolved_effects(&self, node_id: crate::ast::NodeId, name: &str) -> Option<Vec<String>> {
+        use super::resolve::ResolvedName;
+        match self.resolved.get(&node_id) {
+            Some(ResolvedName::ImportedFun { effects, .. })
+            | Some(ResolvedName::LocalFun { effects, .. })
+                if !effects.is_empty() =>
+            {
+                Some(effects.clone())
+            }
+            Some(ResolvedName::ExternalFun { .. }) => None,
+            _ => self.fun_effects(name).cloned(),
+        }
+    }
+
     /// Emit a function call using the resolution map.
     fn emit_call(
         &self,
@@ -648,6 +669,7 @@ impl<'a> Lowerer<'a> {
                         erlang_mod,
                         name: erl_name,
                         arity,
+                        ..
                     }) => CExpr::Call(
                         "erlang".to_string(),
                         "make_fun".to_string(),
@@ -670,7 +692,7 @@ impl<'a> Lowerer<'a> {
                             CExpr::Lit(CLit::Int(*arity as i64)),
                         ],
                     ),
-                    Some(ResolvedName::LocalFun { name, arity }) => {
+                    Some(ResolvedName::LocalFun { name, arity, .. }) => {
                         CExpr::FunRef(name.clone(), *arity)
                     }
                     _ => {
@@ -786,7 +808,7 @@ impl<'a> Lowerer<'a> {
                 // takes N+M where M is the number of handler params. We thread
                 // the caller's handler params through automatically.
                 if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
-                    let callee_effects = self.fun_effects(func_name).cloned();
+                    let callee_effects = self.resolved_effects(head_expr.id, func_name);
                     let callee_ops = callee_effects
                         .as_ref()
                         .map(|effs| self.effect_handler_ops(effs))
@@ -1433,27 +1455,36 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Tuple { elements, .. } => self.lower_tuple_elems(elements),
 
-            ExprKind::QualifiedName { module, name, .. } => {
-                // When used as a bare reference (not in application position),
-                // emit a FunRef if it's a known imported function, otherwise a Var.
-                let qualified = format!("{}.{}", module, name);
-                if let Some(arity) = self.fun_arity(&qualified) {
-                    let erlang_module = self
-                        .module_aliases
-                        .get(module.as_str())
-                        .cloned()
-                        .unwrap_or_else(|| module.to_lowercase());
-                    // In Core Erlang, referencing an external function as a value
-                    // is done with: fun 'module':'name'/arity
-                    CExpr::Call(
-                        "erlang".to_string(),
-                        "make_fun".to_string(),
-                        vec![
-                            CExpr::Lit(CLit::Atom(erlang_module)),
-                            CExpr::Lit(CLit::Atom(name.clone())),
-                            CExpr::Lit(CLit::Int(arity as i64)),
-                        ],
-                    )
+            ExprKind::QualifiedName { module: _, name, .. } => {
+                use super::resolve::ResolvedName;
+                if let Some(resolved) = self.resolved.get(&expr.id) {
+                    match resolved {
+                        ResolvedName::ImportedFun { erlang_mod, name: erl_name, arity, .. } => {
+                            CExpr::Call(
+                                "erlang".to_string(),
+                                "make_fun".to_string(),
+                                vec![
+                                    CExpr::Lit(CLit::Atom(erlang_mod.clone())),
+                                    CExpr::Lit(CLit::Atom(erl_name.clone())),
+                                    CExpr::Lit(CLit::Int(*arity as i64)),
+                                ],
+                            )
+                        }
+                        ResolvedName::ExternalFun { erlang_mod, erlang_func, arity } => {
+                            CExpr::Call(
+                                "erlang".to_string(),
+                                "make_fun".to_string(),
+                                vec![
+                                    CExpr::Lit(CLit::Atom(erlang_mod.clone())),
+                                    CExpr::Lit(CLit::Atom(erlang_func.clone())),
+                                    CExpr::Lit(CLit::Int(*arity as i64)),
+                                ],
+                            )
+                        }
+                        ResolvedName::LocalFun { name, arity, .. } => {
+                            CExpr::FunRef(name.clone(), *arity)
+                        }
+                    }
                 } else {
                     CExpr::Var(core_var(name))
                 }
@@ -1657,6 +1688,7 @@ impl<'a> Lowerer<'a> {
                         erlang_mod,
                         name: erl_name,
                         arity,
+                        ..
                     }) => {
                         if *arity == 0 {
                             CExpr::Call(erlang_mod.clone(), erl_name.clone(), vec![])
@@ -1747,7 +1779,7 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|| module.to_lowercase());
 
         let qualified = format!("{}.{}", module, func_name);
-        let callee_effects = self.fun_effects(&qualified).cloned();
+        let callee_effects = self.resolved_effects(head.id, &qualified);
         let callee_ops = callee_effects
             .as_ref()
             .map(|effs| self.effect_handler_ops(effs))
