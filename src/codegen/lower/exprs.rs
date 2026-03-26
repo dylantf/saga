@@ -850,21 +850,46 @@ impl<'a> Lowerer<'a> {
             let fail_var = self.fresh();
             let val_ce = self.lower_expr(expr);
 
-            let case_expr = CExpr::Case(
-                Box::new(CExpr::Var(scrut_var.clone())),
-                vec![
-                    CArm {
-                        pat: lower_pat(pat, &self.record_fields, &self.constructor_modules),
-                        guard: None,
-                        body: inner,
-                    },
-                    CArm {
-                        pat: CPat::Var(fail_var.clone()),
-                        guard: None,
-                        body: CExpr::Case(Box::new(CExpr::Var(fail_var)), else_arms_ce.clone()),
-                    },
-                ],
-            );
+            let success_pat = lower_pat(pat, &self.record_fields, &self.constructor_modules);
+            // If the success pattern is a catch-all (e.g. Just(x) lowers to a
+            // bare variable), put the else arms first so they get a chance to
+            // match before the catch-all swallows everything.
+            let is_catchall = matches!(success_pat, CPat::Var(_));
+            let success_arm = CArm {
+                pat: success_pat,
+                guard: None,
+                body: inner,
+            };
+            let mut else_with_fallthrough: Vec<CArm> = else_arms_ce.clone();
+            else_with_fallthrough.push(CArm {
+                pat: CPat::Var(fail_var.clone()),
+                guard: None,
+                body: CExpr::Var(fail_var),
+            });
+            let fail_arm = CArm {
+                pat: CPat::Var(self.fresh()),
+                guard: None,
+                body: CExpr::Case(
+                    Box::new(CExpr::Var(scrut_var.clone())),
+                    else_with_fallthrough,
+                ),
+            };
+            let arms = if is_catchall {
+                // Else arms first, then success as fallback
+                let mut arms: Vec<CArm> = else_arms_ce
+                    .iter()
+                    .map(|arm| CArm {
+                        pat: arm.pat.clone(),
+                        guard: arm.guard.clone(),
+                        body: arm.body.clone(),
+                    })
+                    .collect();
+                arms.push(success_arm);
+                arms
+            } else {
+                vec![success_arm, fail_arm]
+            };
+            let case_expr = CExpr::Case(Box::new(CExpr::Var(scrut_var.clone())), arms);
             inner = CExpr::Let(scrut_var, Box::new(val_ce), Box::new(case_expr));
         }
 

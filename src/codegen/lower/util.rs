@@ -10,9 +10,16 @@ use std::collections::{BTreeSet, HashMap};
 /// Maybe:  Nothing -> "undefined" (Just is special-cased structurally, not here)
 /// Module types: Circle -> "shapes_Circle"
 /// Prelude builtins: True -> "True", False -> "False"
-pub(super) fn mangle_ctor_atom(name: &str, constructor_modules: &HashMap<String, String>) -> String {
+pub(super) fn mangle_ctor_atom(
+    name: &str,
+    constructor_modules: &HashMap<String, String>,
+) -> String {
+    // Strip module qualification (e.g. "Std.File.NotFound" -> "NotFound")
+    // so qualified constructors in user code resolve to the same mangled
+    // atom as the defining module uses.
+    let bare = name.rsplit('.').next().unwrap_or(name);
     // BEAM convention overrides for Result, Maybe, Bool, and ExitReason
-    match name {
+    match bare {
         "Ok" => return "ok".to_string(),
         "Err" => return "error".to_string(),
         "Nothing" => return "undefined".to_string(),
@@ -27,14 +34,10 @@ pub(super) fn mangle_ctor_atom(name: &str, constructor_modules: &HashMap<String,
         // Other(String) stays as-is (tuple form)
         _ => {}
     }
-    // Strip module qualification (e.g. "Std.File.NotFound" -> "NotFound")
-    // so qualified constructors in user code resolve to the same mangled
-    // atom as the defining module uses.
-    let bare = name.rsplit('.').next().unwrap_or(name);
     if let Some(module) = constructor_modules.get(bare) {
         format!("{}_{}", module, bare)
     } else {
-        name.to_string()
+        bare.to_string()
     }
 }
 
@@ -229,7 +232,9 @@ fn branch_has_effect(expr: &Expr) -> bool {
 /// Recursively collect all effect names from `needs` clauses in a TypeExpr.
 pub(super) fn collect_type_effects(ty: &TypeExpr) -> BTreeSet<String> {
     match ty {
-        TypeExpr::Arrow { from, to, effects, .. } => {
+        TypeExpr::Arrow {
+            from, to, effects, ..
+        } => {
             let mut effs: BTreeSet<String> = effects.iter().map(|e| e.name.clone()).collect();
             effs.extend(collect_type_effects(from));
             effs.extend(collect_type_effects(to));
@@ -289,9 +294,7 @@ pub(super) fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
 /// Extract per-parameter absorbed effects from a function type.
 /// Returns a map of param_index -> sorted effect names for parameters
 /// that have EffArrow types (i.e., callbacks that carry effects).
-pub(super) fn param_absorbed_effects_from_type(
-    ty: &Type,
-) -> HashMap<usize, Vec<String>> {
+pub(super) fn param_absorbed_effects_from_type(ty: &Type) -> HashMap<usize, Vec<String>> {
     let mut result = HashMap::new();
     let mut current = ty;
     let mut param_index = 0;

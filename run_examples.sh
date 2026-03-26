@@ -1,6 +1,12 @@
-rm -rf examples/_build && \
-for f in examples/*.dy; \
-do result=$(cargo run --bin dylang -- run "$f" 2>&1); rc=$?; \
-if [ $rc -ne 0 ]; then echo "FAIL: $f"; \
-echo "$result" | tail -5; echo; else echo "OK: $f"; fi; \
+#!/usr/bin/env bash
+cargo build --bin dylang 2>&1
+
+for f in examples/*.dy; do
+  name=$(basename "$f")
+  [ "$name" = "scratch.dy" ] && continue
+
+  rm -rf examples/_build
+  echo "=== $name ==="
+  cargo run --quiet --bin dylang -- run "$f" 2>&1
+  echo
 done
