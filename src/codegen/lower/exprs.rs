@@ -46,7 +46,7 @@ impl<'a> Lowerer<'a> {
         let mut result = Vec::new();
 
         for (i, arm) in arms.iter().enumerate() {
-            let pat = lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules);
+            let pat = lower_pat(&arm.pattern, &self.record_fields, &self.constructor_atoms);
 
             match &arm.guard {
                 None => {
@@ -168,7 +168,7 @@ impl<'a> Lowerer<'a> {
                     vars.push(var.clone());
                     bindings.push((var, val));
                 }
-                let atom = mangle_ctor_atom(name, &self.constructor_modules);
+                let atom = mangle_ctor_atom(name, &self.constructor_atoms);
                 let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
                 elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
                 let tuple = CExpr::Tuple(elems);
@@ -274,7 +274,7 @@ impl<'a> Lowerer<'a> {
             return (var, body);
         }
         let tmp = self.fresh();
-        let cpat = lower_pat(pat, &self.record_fields, &self.constructor_modules);
+        let cpat = lower_pat(pat, &self.record_fields, &self.constructor_atoms);
         let mut arms = vec![CArm {
             pat: cpat,
             guard: None,
@@ -321,7 +321,7 @@ impl<'a> Lowerer<'a> {
                     }
                     // Terminal effectful function call: pass current_return_k as _ReturnK
                     // so abort-style handlers skip the return clause wrapping.
-                    if let Some((name, _)) = collect_fun_call(e)
+                    if let Some((name, _, _)) = collect_fun_call(e)
                         && (self.is_effectful(name)
                             || self.current_effectful_vars.contains_key(name))
                     {
@@ -410,7 +410,7 @@ impl<'a> Lowerer<'a> {
                                     pats::lower_pat(
                                         p,
                                         &self.record_fields,
-                                        &self.constructor_modules,
+                                        &self.constructor_atoms,
                                     )
                                 })
                                 .collect();
@@ -500,7 +500,7 @@ impl<'a> Lowerer<'a> {
                         Stmt::LetFun { .. } => unreachable!(),
                     };
                     let is_effectful_call = collect_fun_call(value_expr)
-                        .map(|(name, _)| {
+                        .map(|(name, _, _)| {
                             self.is_effectful(name)
                                 || self.current_effectful_vars.contains_key(name)
                         })
@@ -653,7 +653,7 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .map(|arm| {
                         let pat =
-                            lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules);
+                            lower_pat(&arm.pattern, &self.record_fields, &self.constructor_atoms);
                         let guard_ce = arm.guard.as_ref().map(|g| self.lower_expr(g));
                         let body_ce = self.lower_branch_with_k(&arm.body, k_var);
                         CArm {
@@ -703,7 +703,7 @@ impl<'a> Lowerer<'a> {
                 Some(CExpr::Var(k_var.to_string())),
             )
         } else if collect_fun_call(expr)
-            .map(|(name, _)| {
+            .map(|(name, _, _)| {
                 self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
             })
             .unwrap_or(false)
@@ -774,7 +774,7 @@ impl<'a> Lowerer<'a> {
                     // rest of the block as _ReturnK so CPS chains correctly
                     // (e.g. state-threading handlers need real continuations).
                     let is_effectful_call = collect_fun_call(value_expr)
-                        .map(|(name, _)| {
+                        .map(|(name, _, _)| {
                             self.is_effectful(name)
                                 || self.current_effectful_vars.contains_key(name)
                         })
@@ -836,7 +836,7 @@ impl<'a> Lowerer<'a> {
         let else_arms_ce: Vec<CArm> = else_arms
             .iter()
             .map(|arm| CArm {
-                pat: lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules),
+                pat: lower_pat(&arm.pattern, &self.record_fields, &self.constructor_atoms),
                 guard: arm.guard.as_ref().map(|g| self.lower_expr(g)),
                 body: self.lower_expr(&arm.body),
             })
@@ -850,7 +850,7 @@ impl<'a> Lowerer<'a> {
             let fail_var = self.fresh();
             let val_ce = self.lower_expr(expr);
 
-            let success_pat = lower_pat(pat, &self.record_fields, &self.constructor_modules);
+            let success_pat = lower_pat(pat, &self.record_fields, &self.constructor_atoms);
             // If the success pattern is a catch-all (e.g. Just(x) lowers to a
             // bare variable), put the else arms first so they get a chance to
             // match before the catch-all swallows everything.

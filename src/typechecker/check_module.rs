@@ -237,6 +237,9 @@ pub struct ModuleCodegenInfo {
     pub type_constructors: Vec<(String, Vec<String>)>,
     /// Trait impl dicts exported by this module.
     pub trait_impl_dicts: Vec<TraitImplDict>,
+    /// External function mappings: (dylang_name, erlang_module, erlang_func, arity).
+    /// Includes both public and private externals (private ones are needed for handler inlining).
+    pub external_funs: Vec<(String, String, String, usize)>,
 }
 
 /// Count the arity of a constructor from its type (number of Fun levels).
@@ -918,6 +921,7 @@ fn collect_codegen_info(
     let mut handler_defs = Vec::new();
     let mut fun_effects = Vec::new();
     let mut trait_impl_dicts = Vec::new();
+    let mut external_funs = Vec::new();
 
     // Erlang module name: "Foo.Bar" -> "foo_bar"
     let erlang_module = module_name
@@ -986,6 +990,27 @@ fn collect_codegen_info(
                     fun_effects.push((name.clone(), sorted));
                 }
             }
+            Decl::FunSignature {
+                name,
+                params,
+                annotations,
+                ..
+            } => {
+                // Collect @external annotations for both public and private functions.
+                // Private externals are needed for handler body inlining.
+                if let Some(ext) = annotations.iter().find(|a| a.name == "external")
+                    && ext.args.len() >= 3
+                    && let (crate::ast::Lit::String(erl_mod), crate::ast::Lit::String(erl_func)) =
+                        (&ext.args[1], &ext.args[2])
+                {
+                    external_funs.push((
+                        name.clone(),
+                        erl_mod.clone(),
+                        erl_func.clone(),
+                        params.len(),
+                    ));
+                }
+            }
             Decl::ImplDef {
                 trait_name,
                 target_type,
@@ -1027,6 +1052,7 @@ fn collect_codegen_info(
         fun_effects,
         type_constructors: exports.type_constructors.clone().into_iter().collect(),
         trait_impl_dicts,
+        external_funs,
     }
 }
 

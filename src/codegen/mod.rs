@@ -1,6 +1,7 @@
 pub mod cerl;
 pub mod lower;
 pub mod normalize;
+pub mod resolve;
 #[cfg(test)]
 mod tests;
 
@@ -33,6 +34,11 @@ pub fn emit_module_with_context(
     ctx: &CodegenContext,
 ) -> String {
     let program = normalize::normalize_effects(program);
-    let cmod = lower::Lowerer::new(ctx).lower_module(module_name, &program);
+    let constructor_atoms =
+        resolve::build_constructor_atoms(module_name, &program, &ctx.codegen_info);
+    let resolution_map =
+        resolve::resolve_names(&program, &ctx.codegen_info, &ctx.prelude_imports);
+    let cmod = lower::Lowerer::new(ctx, constructor_atoms, resolution_map)
+        .lower_module(module_name, &program);
     cerl::print_module(&cmod)
 }

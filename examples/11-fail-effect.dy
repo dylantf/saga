@@ -2,8 +2,8 @@ effect Fail a {
   fun fail : (msg: String) -> a
 }
 
-handler abort for Fail Int {
-  fail _ = 0
+handler abort for Fail a {
+  fail _ = panic "nooooo"
 }
 
 #@ Converts a failure to a Result of the given type

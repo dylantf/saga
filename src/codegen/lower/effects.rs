@@ -263,7 +263,7 @@ impl<'a> Lowerer<'a> {
         // If so, pass the return clause as _ReturnK parameter instead of
         // wrapping externally. This prevents abort values from being wrapped.
         let is_direct_effectful_call = collect_fun_call(expr)
-            .map(|(name, _)| {
+            .map(|(name, _, _)| {
                 self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
             })
             .unwrap_or(false);

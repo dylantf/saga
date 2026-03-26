@@ -3,42 +3,23 @@ use crate::codegen::cerl::{CExpr, CLit};
 use crate::typechecker::Type;
 use std::collections::{BTreeSet, HashMap};
 
-/// Map a constructor name to its Erlang atom, applying BEAM convention
-/// overrides for Result/Maybe and module-prefix mangling for user types.
-///
-/// Result: Ok -> "ok", Err -> "error"
-/// Maybe:  Nothing -> "undefined" (Just is special-cased structurally, not here)
-/// Module types: Circle -> "shapes_Circle"
-/// Prelude builtins: True -> "True", False -> "False"
+/// Look up a constructor's mangled Erlang atom from the pre-computed table.
+/// Falls back to the bare name if not found.
 pub(super) fn mangle_ctor_atom(
     name: &str,
-    constructor_modules: &HashMap<String, String>,
+    constructor_atoms: &HashMap<String, String>,
 ) -> String {
-    // Strip module qualification (e.g. "Std.File.NotFound" -> "NotFound")
-    // so qualified constructors in user code resolve to the same mangled
-    // atom as the defining module uses.
-    let bare = name.rsplit('.').next().unwrap_or(name);
-    // BEAM convention overrides for Result, Maybe, Bool, and ExitReason
-    match bare {
-        "Ok" => return "ok".to_string(),
-        "Err" => return "error".to_string(),
-        "Nothing" => return "undefined".to_string(),
-        "True" => return "true".to_string(),
-        "False" => return "false".to_string(),
-        // Just is handled structurally (bare value, no tag) -- not here
-        // ExitReason constructors map to Erlang exit reason atoms
-        "Normal" => return "normal".to_string(),
-        "Shutdown" => return "shutdown".to_string(),
-        "Killed" => return "killed".to_string(),
-        "Noproc" => return "noproc".to_string(),
-        // Other(String) stays as-is (tuple form)
-        _ => {}
+    if let Some(atom) = constructor_atoms.get(name) {
+        return atom.clone();
     }
-    if let Some(module) = constructor_modules.get(bare) {
-        format!("{}_{}", module, bare)
-    } else {
-        bare.to_string()
+    // For qualified names not in the table, try the bare name
+    if let Some(bare) = name.rsplit('.').next()
+        && bare != name
+        && let Some(atom) = constructor_atoms.get(bare)
+    {
+        return atom.clone();
     }
+    name.to_string()
 }
 
 pub(super) fn lower_lit(lit: &Lit) -> CLit {
@@ -106,8 +87,9 @@ pub(super) fn pat_binding_var(pat: &Pat) -> Option<String> {
 }
 
 /// Peel a chain of App nodes to find a named-function head (Var) and its arguments.
-/// Returns `Some((func_name, args))` if the head is a Var, `None` otherwise.
-pub(super) fn collect_fun_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
+/// Returns `Some((func_name, head_expr, args))` if the head is a Var, `None` otherwise.
+/// The head_expr is the Var node itself (for NodeId-based resolution lookup).
+pub(super) fn collect_fun_call(expr: &Expr) -> Option<(&str, &Expr, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
@@ -118,7 +100,7 @@ pub(super) fn collect_fun_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
             }
             ExprKind::Var { name, .. } => {
                 args.reverse();
-                return Some((name.as_str(), args));
+                return Some((name.as_str(), current, args));
             }
             _ => return None,
         }
@@ -126,8 +108,8 @@ pub(super) fn collect_fun_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
 }
 
 /// Like `collect_fun_call`, but for qualified names (`Module.func arg1 arg2`).
-/// Returns `Some((module, func_name, args))` if the head is a QualifiedName.
-pub(super) fn collect_qualified_call(expr: &Expr) -> Option<(&str, &str, Vec<&Expr>)> {
+/// Returns `Some((module, func_name, head_expr, args))` if the head is a QualifiedName.
+pub(super) fn collect_qualified_call(expr: &Expr) -> Option<(&str, &str, &Expr, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
@@ -138,7 +120,7 @@ pub(super) fn collect_qualified_call(expr: &Expr) -> Option<(&str, &str, Vec<&Ex
             }
             ExprKind::QualifiedName { module, name, .. } => {
                 args.reverse();
-                return Some((module.as_str(), name.as_str(), args));
+                return Some((module.as_str(), name.as_str(), current, args));
             }
             _ => return None,
         }
@@ -267,7 +249,7 @@ pub(super) fn module_name_to_erlang(path: &[String]) -> String {
 
 /// Count dictionary parameters from trait constraints.
 /// Excludes operator-dispatched traits (Num, Eq) which use BIF dispatch instead.
-pub(super) fn dict_param_count(constraints: &[(String, u32)]) -> usize {
+pub fn dict_param_count(constraints: &[(String, u32)]) -> usize {
     constraints
         .iter()
         .filter(|(trait_name, _)| trait_name != "Num" && trait_name != "Eq")
@@ -277,7 +259,7 @@ pub(super) fn dict_param_count(constraints: &[(String, u32)]) -> usize {
 /// Derive base arity and effect names from a typechecker `Type`.
 /// Returns `(base_param_count, sorted_effect_names)`.
 /// The expanded arity (for codegen) is: base + effects.len() + if effects is non-empty { 1 } else { 0 }.
-pub(super) fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
+pub fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
     let mut arity = 0;
     let mut effects = BTreeSet::new();
     let mut current = ty;

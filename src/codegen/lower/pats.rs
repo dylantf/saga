@@ -24,24 +24,24 @@ pub(super) fn lower_params(params: &[Pat]) -> Vec<String> {
 pub(super) fn lower_pat(
     pat: &Pat,
     record_fields: &HashMap<String, Vec<String>>,
-    constructor_modules: &HashMap<String, String>,
+    constructor_atoms: &HashMap<String, String>,
 ) -> CPat {
     match pat {
         Pat::Wildcard { .. } => CPat::Wildcard,
         Pat::Var { name, .. } => CPat::Var(core_var(name)),
         Pat::Lit { value, .. } => CPat::Lit(lower_lit(value)),
         Pat::Tuple { elements, .. } => {
-            CPat::Tuple(elements.iter().map(|p| lower_pat(p, record_fields, constructor_modules)).collect())
+            CPat::Tuple(elements.iter().map(|p| lower_pat(p, record_fields, constructor_atoms)).collect())
         }
         Pat::Constructor { name, args, .. } => match name.as_str() {
             "Cons" if args.len() == 2 => CPat::Cons(
-                Box::new(lower_pat(&args[0], record_fields, constructor_modules)),
-                Box::new(lower_pat(&args[1], record_fields, constructor_modules)),
+                Box::new(lower_pat(&args[0], record_fields, constructor_atoms)),
+                Box::new(lower_pat(&args[1], record_fields, constructor_atoms)),
             ),
             "Nil" if args.is_empty() => CPat::Nil,
             // Just(v) -> bare variable pattern (the value itself, no tuple)
             "Just" if args.len() == 1 => {
-                lower_pat(&args[0], record_fields, constructor_modules)
+                lower_pat(&args[0], record_fields, constructor_atoms)
             }
             // Nothing -> match the atom 'undefined'
             "Nothing" if args.is_empty() => {
@@ -56,15 +56,15 @@ pub(super) fn lower_pat(
             "Killed" if args.is_empty() => CPat::Lit(CLit::Atom("killed".to_string())),
             "Noproc" if args.is_empty() => CPat::Lit(CLit::Atom("noproc".to_string())),
             _ => {
-                let atom = mangle_ctor_atom(name, constructor_modules);
+                let atom = mangle_ctor_atom(name, constructor_atoms);
                 let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
-                elems.extend(args.iter().map(|p| lower_pat(p, record_fields, constructor_modules)));
+                elems.extend(args.iter().map(|p| lower_pat(p, record_fields, constructor_atoms)));
                 CPat::Tuple(elems)
             }
         }
         Pat::Record { name, fields, as_name, .. } => {
             // Records are tagged tuples in declared field order.
-            let atom = mangle_ctor_atom(name, constructor_modules);
+            let atom = mangle_ctor_atom(name, constructor_atoms);
             let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
             if let Some(order) = record_fields.get(name) {
                 let field_map: HashMap<&str, Option<&Pat>> = fields
@@ -73,7 +73,7 @@ pub(super) fn lower_pat(
                     .collect();
                 for field_name in order {
                     match field_map.get(field_name.as_str()) {
-                        Some(Some(p)) => elems.push(lower_pat(p, record_fields, constructor_modules)),
+                        Some(Some(p)) => elems.push(lower_pat(p, record_fields, constructor_atoms)),
                         // Field without alias: bind to a var named after the field
                         Some(None) => elems.push(CPat::Var(core_var(field_name))),
                         None => elems.push(CPat::Wildcard),
@@ -82,7 +82,7 @@ pub(super) fn lower_pat(
             } else {
                 for (_, alias) in fields {
                     match alias {
-                        Some(p) => elems.push(lower_pat(p, record_fields, constructor_modules)),
+                        Some(p) => elems.push(lower_pat(p, record_fields, constructor_atoms)),
                         None => elems.push(CPat::Wildcard),
                     }
                 }
@@ -105,7 +105,7 @@ pub(super) fn lower_pat(
                 .collect();
             for field_name in &sorted_fields {
                 match field_map.get(field_name) {
-                    Some(Some(p)) => elems.push(lower_pat(p, record_fields, constructor_modules)),
+                    Some(Some(p)) => elems.push(lower_pat(p, record_fields, constructor_atoms)),
                     Some(None) => elems.push(CPat::Var(core_var(field_name))),
                     None => elems.push(CPat::Wildcard),
                 }
@@ -118,7 +118,7 @@ pub(super) fn lower_pat(
             // "abc" <> rest  =>  [97 | [98 | [99 | Rest]]]
             // Expand the prefix string into a cons chain of character codes,
             // with the rest pattern as the tail.
-            let tail = lower_pat(rest, record_fields, constructor_modules);
+            let tail = lower_pat(rest, record_fields, constructor_atoms);
             prefix.chars().rev().fold(tail, |acc, ch| {
                 CPat::Cons(Box::new(CPat::Lit(CLit::Int(ch as i64))), Box::new(acc))
             })

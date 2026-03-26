@@ -44,17 +44,9 @@ impl<'a> Lowerer<'a> {
                 Decl::RecordDef { name, fields, .. } => {
                     let field_names = fields.iter().map(|a| a.node.0.clone()).collect();
                     self.record_fields.insert(name.clone(), field_names);
-                    // Register record as a constructor for atom mangling
-                    self.constructor_modules
-                        .insert(name.clone(), module_name.to_string());
                 }
-                Decl::TypeDef { name, variants, .. } => {
-                    // Register all constructors for atom mangling
-                    for variant in variants {
-                        self.constructor_modules
-                            .insert(variant.node.name.clone(), module_name.to_string());
-                    }
-                    let _ = name; // type name not needed here
+                Decl::TypeDef { .. } => {
+                    // Constructor atom mangling is handled by resolve::build_constructor_atoms
                 }
                 Decl::EffectDef {
                     name, operations, ..
@@ -197,12 +189,6 @@ impl<'a> Lowerer<'a> {
                         param_absorbed_effects: HashMap::new(),
                         import_origin: None,
                     });
-                }
-                for (_type_name, ctors) in &info.type_constructors {
-                    for ctor in ctors {
-                        self.constructor_modules
-                            .insert(ctor.clone(), erlang_name.clone());
-                    }
                 }
                 // Register Std handler bodies and external functions from elaborated programs
                 if let Some(elab_program) = self.ctx.elaborated_modules.get(mod_name) {
@@ -348,14 +334,6 @@ impl<'a> Lowerer<'a> {
         // Register imported record field orders
         for (rec_name, fields) in &info.record_fields {
             self.record_fields.insert(rec_name.clone(), fields.clone());
-        }
-
-        // Register imported constructors for atom mangling
-        for (_type_name, ctors) in &info.type_constructors {
-            for ctor in ctors {
-                self.constructor_modules
-                    .insert(ctor.clone(), erlang_name.clone());
-            }
         }
 
         // Register imported trait impl dicts for cross-module calls
