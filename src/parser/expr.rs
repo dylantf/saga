@@ -365,6 +365,7 @@ impl Parser {
                 named,
                 arms,
                 return_clause,
+                dangling_trivia: leading_trivia,
             })
         } else {
             // Single named handler: `with console_log`
@@ -725,6 +726,7 @@ impl Parser {
                 self.expect(Token::RBrace)?;
                 Ok(Expr { id: self.next_id(), span: span.to(end_span), kind: ExprKind::Block {
                     stmts,
+                    dangling_trivia: leading_trivia,
                 }})
             }
 
@@ -792,6 +794,7 @@ impl Parser {
                 Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Case {
                     scrutinee: Box::new(scrutinee),
                     arms: branches,
+                    dangling_trivia: leading_trivia,
                 }})
             }
 
@@ -851,6 +854,7 @@ impl Parser {
                 Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Receive {
                     arms: branches,
                     after_clause,
+                    dangling_trivia: leading_trivia,
                 }})
             }
 
@@ -953,6 +957,7 @@ impl Parser {
                     bindings,
                     success: Box::new(success),
                     else_arms,
+                    dangling_trivia: leading_trivia,
                 }})
             }
 

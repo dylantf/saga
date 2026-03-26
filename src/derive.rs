@@ -109,6 +109,7 @@ fn derive_record_stringify(
             body,
         })],
         span,
+        dangling_trivia: vec![],
     }
 }
 
@@ -324,6 +325,7 @@ fn derive_stringify(
                 },
             )),
             arms,
+            dangling_trivia: vec![],
         },
     );
 
@@ -355,6 +357,7 @@ fn derive_stringify(
             body,
         })],
         span,
+        dangling_trivia: vec![],
     }
 }
 
@@ -462,6 +465,7 @@ fn derive_ord(
                             })
                         })
                         .collect(),
+                    dangling_trivia: vec![],
                 },
             )
         };
@@ -507,6 +511,7 @@ fn derive_ord(
                 },
             )),
             arms,
+            dangling_trivia: vec![],
         },
     );
 
@@ -536,6 +541,7 @@ fn derive_ord(
             body,
         })],
         span,
+        dangling_trivia: vec![],
     }
 }
 
@@ -610,6 +616,7 @@ fn build_field_compare(a_vars: &[String], b_vars: &[String], span: Span) -> Expr
                             span,
                         }),
                     ],
+                    dangling_trivia: vec![],
                 },
             );
         }
@@ -645,6 +652,7 @@ fn derive_marker_trait(
         needs: vec![],
         methods: vec![],
         span,
+        dangling_trivia: vec![],
     }
 }
 
@@ -677,6 +685,7 @@ fn derive_enum(
                 span,
             })
         }).collect(),
+        dangling_trivia: vec![],
     });
 
     // from_enum n = case n { 0 -> Red | 1 -> Green | 2 -> Blue | _ -> panic "invalid enum index" }
@@ -704,6 +713,7 @@ fn derive_enum(
     let from_enum_body = Expr::synth(span, ExprKind::Case {
         scrutinee: Box::new(Expr::synth(span, ExprKind::Var { name: from_enum_param.clone() })),
         arms: from_enum_arms,
+        dangling_trivia: vec![],
     });
 
     Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
@@ -729,5 +739,6 @@ fn derive_enum(
             }),
         ],
         span,
+        dangling_trivia: vec![],
     }
 }

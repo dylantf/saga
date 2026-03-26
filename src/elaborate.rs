@@ -454,6 +454,7 @@ impl Elaborator {
                         recovered_arms: vec![],
                         return_clause: elab_return,
                         span: *span,
+                        dangling_trivia: vec![],
                     });
                 }
 
@@ -725,9 +726,10 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Case { scrutinee, arms } => Expr::synth(
+            ExprKind::Case { scrutinee, arms, .. } => Expr::synth(
                 span,
                 ExprKind::Case {
+                    dangling_trivia: vec![],
                     scrutinee: Box::new(self.elaborate_expr(scrutinee)),
                     arms: arms
                         .iter()
@@ -744,9 +746,10 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Block { stmts } => Expr::synth(
+            ExprKind::Block { stmts, .. } => Expr::synth(
                 span,
                 ExprKind::Block {
+                    dangling_trivia: vec![],
                     stmts: stmts
                         .iter()
                         .map(|ann| {
@@ -928,9 +931,11 @@ impl Elaborator {
                 bindings,
                 success,
                 else_arms,
+                ..
             } => Expr::synth(
                 span,
                 ExprKind::Do {
+                    dangling_trivia: vec![],
                     bindings: bindings
                         .iter()
                         .map(|(p, e)| (p.clone(), self.elaborate_expr(e)))
@@ -1020,7 +1025,7 @@ impl Elaborator {
                             with_expr
                         } else {
                             stmts.push(Annotated::bare(Stmt::Expr(with_expr)));
-                            Expr::synth(span, ExprKind::Block { stmts })
+                            Expr::synth(span, ExprKind::Block { stmts, dangling_trivia: vec![] })
                         }
                     } else {
                         with_expr
@@ -1046,9 +1051,10 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Receive { arms, after_clause } => Expr::synth(
+            ExprKind::Receive { arms, after_clause, .. } => Expr::synth(
                 span,
                 ExprKind::Receive {
+                    dangling_trivia: vec![],
                     arms: arms
                         .iter()
                         .map(|ann| {
@@ -1095,7 +1101,9 @@ impl Elaborator {
                 named,
                 arms,
                 return_clause,
+                ..
             } => Handler::Inline {
+                dangling_trivia: vec![],
                 named: named.clone(),
                 arms: arms
                     .iter()

@@ -398,6 +398,7 @@ impl<'a> Lowerer<'a> {
                 named,
                 arms,
                 return_clause,
+                ..
             } => {
                 let mut all_arms = Vec::new();
                 let mut resolved_return = return_clause.clone();

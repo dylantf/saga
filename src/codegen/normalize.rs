@@ -210,6 +210,7 @@ impl Normalizer {
             ExprKind::Case {
                 scrutinee,
                 arms,
+                ..
             } => {
                 let new_scrut = self.normalize_and_lift(scrutinee, lifted);
                 let new_arms = arms
@@ -224,14 +225,16 @@ impl Normalizer {
                 Expr::synth(span, ExprKind::Case {
                     scrutinee: Box::new(new_scrut),
                     arms: new_arms,
+                    dangling_trivia: vec![],
                 })
             }
 
             // Block: recursively normalize the block's statements.
-            ExprKind::Block { stmts } => {
+            ExprKind::Block { stmts, .. } => {
                 let new_stmts = self.normalize_stmts(stmts);
                 Expr::synth(span, ExprKind::Block {
                     stmts: new_stmts,
+                    dangling_trivia: vec![],
                 })
             }
 
@@ -333,6 +336,7 @@ impl Normalizer {
                 bindings,
                 success,
                 else_arms,
+                ..
             } => {
                 let new_bindings = bindings
                     .iter()
@@ -341,6 +345,7 @@ impl Normalizer {
                 Expr::synth(span, ExprKind::Do {
                     bindings: new_bindings,
                     success: Box::new(self.normalize_expr(success)),
+                    dangling_trivia: vec![],
                     else_arms: else_arms
                         .iter()
                         .map(|ann| Annotated::bare(CaseArm {
@@ -387,6 +392,7 @@ impl Normalizer {
             ExprKind::Receive {
                 arms,
                 after_clause,
+                ..
             } => Expr::synth(span, ExprKind::Receive {
                 arms: arms
                     .iter()
@@ -397,6 +403,7 @@ impl Normalizer {
                         span: ann.node.span,
                     }))
                     .collect(),
+                dangling_trivia: vec![],
                 after_clause: after_clause.as_ref().map(|(timeout, body)| {
                     (
                         Box::new(self.normalize_expr(timeout)),
@@ -439,6 +446,7 @@ impl Normalizer {
             stmts.push(Annotated::bare(Stmt::Expr(new_expr)));
             Expr::synth(expr.span, ExprKind::Block {
                 stmts,
+                dangling_trivia: vec![],
             })
         }
     }
@@ -490,6 +498,7 @@ pub fn normalize_effects(program: &Program) -> Program {
                 recovered_arms: _,
                 return_clause,
                 span,
+                ..
             } => {
                 let new_arms = arms
                     .iter()
@@ -521,6 +530,7 @@ pub fn normalize_effects(program: &Program) -> Program {
                     recovered_arms: vec![],
                     return_clause: new_return,
                     span: *span,
+                    dangling_trivia: vec![],
                 }
             }
             other => other.clone(),

@@ -53,7 +53,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
             ]
         }
 
-        ExprKind::Case { scrutinee, arms } => {
+        ExprKind::Case { scrutinee, arms, dangling_trivia } => {
             let mut parts = vec![Doc::text("case "), format_expr(scrutinee), Doc::text(" {")];
             for ann in arms {
                 let arm = &ann.node;
@@ -69,13 +69,17 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 parts.push(format_expr(&arm.body));
                 parts.push(format_trailing(&ann.trailing_comment));
             }
+            if !dangling_trivia.is_empty() {
+                parts.push(Doc::hardline());
+                parts.push(format_trivia(dangling_trivia));
+            }
             parts.push(Doc::hardline());
             parts.push(Doc::text("}"));
             docs_from_vec(parts)
         }
 
-        ExprKind::Block { stmts } => {
-            if stmts.len() == 1
+        ExprKind::Block { stmts, dangling_trivia } => {
+            if stmts.len() == 1 && dangling_trivia.is_empty()
                 && let Stmt::Expr(e) = &stmts[0].node
             {
                 return format_expr(e);
@@ -87,6 +91,10 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 parts.push(Doc::text("  "));
                 parts.push(format_stmt(&ann.node));
                 parts.push(format_trailing(&ann.trailing_comment));
+            }
+            if !dangling_trivia.is_empty() {
+                parts.push(Doc::hardline());
+                parts.push(format_trivia(dangling_trivia));
             }
             parts.push(Doc::hardline());
             parts.push(Doc::text("}"));
@@ -164,6 +172,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
             bindings,
             success,
             else_arms,
+            dangling_trivia,
         } => {
             let mut parts = vec![Doc::text("do {")];
             for (pat, expr) in bindings {
@@ -188,12 +197,16 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 parts.push(format_expr(&arm.body));
                 parts.push(format_trailing(&ann.trailing_comment));
             }
+            if !dangling_trivia.is_empty() {
+                parts.push(Doc::hardline());
+                parts.push(format_trivia(dangling_trivia));
+            }
             parts.push(Doc::hardline());
             parts.push(Doc::text("}"));
             docs_from_vec(parts)
         }
 
-        ExprKind::Receive { arms, after_clause } => {
+        ExprKind::Receive { arms, after_clause, dangling_trivia } => {
             let mut parts = vec![Doc::text("receive {")];
             for ann in arms {
                 let arm = &ann.node;
@@ -215,6 +228,10 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 parts.push(format_expr(timeout));
                 parts.push(Doc::text(" -> "));
                 parts.push(format_expr(body));
+            }
+            if !dangling_trivia.is_empty() {
+                parts.push(Doc::hardline());
+                parts.push(format_trivia(dangling_trivia));
             }
             parts.push(Doc::hardline());
             parts.push(Doc::text("}"));
@@ -343,7 +360,7 @@ fn format_handler(handler: &Handler) -> Doc {
             named,
             arms,
             return_clause,
-            ..
+            dangling_trivia,
         } => {
             let mut parts = vec![Doc::text("{")];
             for name in named {
@@ -361,6 +378,10 @@ fn format_handler(handler: &Handler) -> Doc {
                 parts.push(Doc::hardline());
                 parts.push(format_handler_arm(rc));
                 parts.push(Doc::text(","));
+            }
+            if !dangling_trivia.is_empty() {
+                parts.push(Doc::hardline());
+                parts.push(format_trivia(dangling_trivia));
             }
             parts.push(Doc::hardline());
             parts.push(Doc::text("}"));

@@ -45,7 +45,13 @@ pub fn strip_vec<T>(items: Vec<Annotated<T>>) -> Vec<T> {
     items.into_iter().map(|a| a.node).collect()
 }
 
-pub type AnnotatedProgram = Vec<Annotated<Decl>>;
+/// A program with trivia annotations preserved for formatting.
+#[derive(Debug, Clone)]
+pub struct AnnotatedProgram {
+    pub declarations: Vec<Annotated<Decl>>,
+    /// Comments/blank lines after the last declaration (end of file)
+    pub trailing_trivia: Vec<Trivia>,
+}
 
 /// A method implementation inside an `impl` block.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +66,7 @@ pub struct ImplMethod {
 /// Transfers `Trivia::DocComment` items into each decl's `doc` field.
 pub fn strip_annotations(annotated: AnnotatedProgram) -> Program {
     annotated
+        .declarations
         .into_iter()
         .map(|ann| {
             let mut decl = ann.node;
@@ -205,6 +212,8 @@ pub enum Decl {
         type_params: Vec<String>,
         fields: Vec<Annotated<(String, TypeExpr)>>,
         deriving: Vec<String>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
         span: Span,
     },
 
@@ -218,6 +227,8 @@ pub enum Decl {
         name_span: Span,
         type_params: Vec<String>,
         operations: Vec<Annotated<EffectOp>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
         span: Span,
     },
 
@@ -238,6 +249,8 @@ pub enum Decl {
         recovered_arms: Vec<Annotated<HandlerArm>>,
         /// `return value = Ok(value)` clause
         return_clause: Option<Box<HandlerArm>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
         span: Span,
     },
 
@@ -251,6 +264,8 @@ pub enum Decl {
         type_param: String,
         supertraits: Vec<(String, Span)>,
         methods: Vec<Annotated<TraitMethod>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
         span: Span,
     },
 
@@ -267,6 +282,8 @@ pub enum Decl {
         where_clause: Vec<TraitBound>,
         needs: Vec<EffectRef>,
         methods: Vec<Annotated<ImplMethod>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
         span: Span,
     },
 
@@ -366,10 +383,16 @@ pub enum ExprKind {
     Case {
         scrutinee: Box<Expr>,
         arms: Vec<Annotated<CaseArm>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
     },
 
     /// `{ stmt1; stmt2; expr }`
-    Block { stmts: Vec<Annotated<Stmt>> },
+    Block {
+        stmts: Vec<Annotated<Stmt>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
+    },
 
     /// `fun x -> x + 1`
     Lambda { params: Vec<Pat>, body: Box<Expr> },
@@ -420,6 +443,8 @@ pub enum ExprKind {
         bindings: Vec<(Pat, Expr)>,
         success: Box<Expr>,
         else_arms: Vec<Annotated<CaseArm>>,
+        /// Comments before the closing `}` of the else block
+        dangling_trivia: Vec<Trivia>,
     },
 
     /// `receive { Pat -> body, after N -> timeout_body }`
@@ -427,6 +452,8 @@ pub enum ExprKind {
         arms: Vec<Annotated<CaseArm>>,
         /// Optional (timeout_expr, timeout_body)
         after_clause: Option<(Box<Expr>, Box<Expr>)>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
     },
 
     /// `(expr : Type)` -- inline type annotation / ascription
@@ -876,6 +903,8 @@ pub enum Handler {
         arms: Vec<Annotated<HandlerArm>>,
         /// `return value = Ok(value)` clause
         return_clause: Option<Box<HandlerArm>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
     },
 }
 

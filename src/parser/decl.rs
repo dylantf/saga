@@ -216,6 +216,7 @@ impl Parser {
             type_params,
             fields,
             deriving,
+            dangling_trivia: leading_trivia,
             span: start.to(end),
         })
     }
@@ -250,6 +251,7 @@ impl Parser {
         });
 
         loop {
+            let save = self.pos;
             leading_trivia = self.collect_trivia();
             if matches!(self.peek(), Token::Bar) {
                 self.advance();
@@ -262,13 +264,24 @@ impl Parser {
                     leading_trivia,
                     trailing_comment,
                 });
+            } else if matches!(self.peek(), Token::Deriving) {
+                // deriving follows the last variant - don't restore
+                break;
             } else {
+                // No more variants - restore pos so the trivia can be
+                // collected by parse_program_annotated as the next decl's leading trivia
+                self.pos = save;
                 break;
             }
         }
 
         // Parse optional `deriving (Show, Eq, ...)`
         let mut deriving = Vec::new();
+        let save_deriving = self.pos;
+        self.collect_trivia(); // skip past trivia to check for deriving
+        if !matches!(self.peek(), Token::Deriving) {
+            self.pos = save_deriving; // no deriving, restore so trivia goes to next decl
+        }
         if matches!(self.peek(), Token::Deriving) {
             self.advance(); // consume 'deriving'
             self.expect(Token::LParen)?;
@@ -487,6 +500,7 @@ impl Parser {
             doc: vec![],
             public,
             name,
+            dangling_trivia: leading_trivia,
             name_span,
             type_params,
             operations,
@@ -642,6 +656,7 @@ impl Parser {
             arms,
             recovered_arms,
             return_clause,
+            dangling_trivia: leading_trivia,
             span: start.to(end),
         })
     }
@@ -724,6 +739,7 @@ impl Parser {
             type_param,
             supertraits,
             methods,
+            dangling_trivia: leading_trivia,
             span: start.to(end),
         })
     }
@@ -830,6 +846,7 @@ impl Parser {
             where_clause,
             needs,
             methods,
+            dangling_trivia: leading_trivia,
             span: start.to(end),
         })
     }

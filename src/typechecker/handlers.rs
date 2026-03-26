@@ -159,6 +159,7 @@ impl Checker {
                 named,
                 arms,
                 return_clause,
+                ..
             } => {
                 for name in named {
                     if !self.handlers.contains_key(name) && self.env.get(name).is_none() {

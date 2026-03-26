@@ -76,7 +76,7 @@ fn desugar_expr(expr: &mut Expr) {
             desugar_expr(then_branch);
             desugar_expr(else_branch);
         }
-        ExprKind::Case { scrutinee, arms } => {
+        ExprKind::Case { scrutinee, arms, .. } => {
             desugar_expr(scrutinee);
             for ann_arm in arms {
                 if let Some(g) = &mut ann_arm.node.guard {
@@ -85,7 +85,7 @@ fn desugar_expr(expr: &mut Expr) {
                 desugar_expr(&mut ann_arm.node.body);
             }
         }
-        ExprKind::Block { stmts } => {
+        ExprKind::Block { stmts, .. } => {
             for ann_stmt in stmts {
                 desugar_stmt(&mut ann_stmt.node);
             }
@@ -118,7 +118,7 @@ fn desugar_expr(expr: &mut Expr) {
                 desugar_expr(e);
             }
         }
-        ExprKind::Do { bindings, success, else_arms } => {
+        ExprKind::Do { bindings, success, else_arms, .. } => {
             for (_, e) in bindings {
                 desugar_expr(e);
             }
@@ -130,7 +130,7 @@ fn desugar_expr(expr: &mut Expr) {
                 desugar_expr(&mut ann_arm.node.body);
             }
         }
-        ExprKind::Receive { arms, after_clause } => {
+        ExprKind::Receive { arms, after_clause, .. } => {
             for ann_arm in arms {
                 if let Some(g) = &mut ann_arm.node.guard {
                     desugar_expr(g);
@@ -370,6 +370,7 @@ fn desugar_comprehension(body: Expr, qualifiers: &[ComprehensionQualifier], span
             // [e | let p = v, Q] ==> { let p = v; [e | Q] }
             let inner = desugar_comprehension(body, &qualifiers[1..], span);
             Expr::synth(span, ExprKind::Block {
+                dangling_trivia: vec![],
                 stmts: vec![
                     Annotated::bare(Stmt::Let {
                         pattern: pat.clone(),

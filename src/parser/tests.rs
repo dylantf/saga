@@ -1874,6 +1874,7 @@ fn with_inline_handler() {
                 named,
                 arms,
                 return_clause,
+                ..
             } => {
                 assert!(named.is_empty());
                 assert_eq!(arms.len(), 1);

@@ -96,10 +96,7 @@ impl Parser {
     }
 
     pub(super) fn skip_terminators(&mut self) {
-        while matches!(
-            self.peek(),
-            Token::Terminator | Token::Comment(_) | Token::BlankLine
-        ) {
+        while matches!(self.peek(), Token::Terminator | Token::BlankLine) {
             self.advance();
         }
     }
@@ -215,18 +212,8 @@ impl Parser {
     // --- Program ---
 
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
-        self.skip_terminators();
-        let mut decls = Vec::new();
-        while !matches!(self.peek(), Token::Eof) {
-            let doc = self.collect_doc_comments();
-            let mut decl = self.parse_decl()?;
-            if !doc.is_empty() {
-                set_decl_doc(&mut decl, doc);
-            }
-            decls.push(decl);
-            self.skip_terminators();
-        }
-        Ok(decls)
+        let annotated = self.parse_program_annotated()?;
+        Ok(strip_annotations(annotated))
     }
 
     /// Parse a program, preserving comments and blank lines as trivia on each declaration.
@@ -243,7 +230,10 @@ impl Parser {
             });
             leading = self.collect_trivia();
         }
-        Ok(decls)
+        Ok(AnnotatedProgram {
+            declarations: decls,
+            trailing_trivia: leading, // any trivia after the last decl
+        })
     }
 }
 

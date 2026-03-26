@@ -103,6 +103,7 @@ pub fn format_type_def(
 pub fn format_record_def(
     doc: &[String], public: bool, name: &str,
     type_params: &[String], fields: &[Annotated<(String, TypeExpr)>], deriving: &[String],
+    dangling: &[Trivia],
 ) -> Doc {
     let mut parts = Vec::new();
     if !doc.is_empty() {
@@ -131,6 +132,10 @@ pub fn format_record_def(
         parts.push(format_trailing(&ann.trailing_comment));
     }
 
+    if !dangling.is_empty() {
+        parts.push(Doc::hardline());
+        parts.push(format_trivia(dangling));
+    }
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));
 
@@ -144,6 +149,7 @@ pub fn format_record_def(
 pub fn format_effect_def(
     doc: &[String], public: bool, name: &str,
     type_params: &[String], operations: &[Annotated<EffectOp>],
+    dangling: &[Trivia],
 ) -> Doc {
     let mut parts = Vec::new();
     if !doc.is_empty() {
@@ -173,6 +179,10 @@ pub fn format_effect_def(
         parts.push(format_trailing(&ann.trailing_comment));
     }
 
+    if !dangling.is_empty() {
+        parts.push(Doc::hardline());
+        parts.push(format_trivia(dangling));
+    }
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));
     docs_from_vec(parts)
@@ -181,6 +191,7 @@ pub fn format_effect_def(
 pub fn format_trait_def(
     doc: &[String], public: bool, name: &str, type_param: &str,
     supertraits: &[(String, Span)], methods: &[Annotated<TraitMethod>],
+    dangling: &[Trivia],
 ) -> Doc {
     let mut parts = Vec::new();
     if !doc.is_empty() {
@@ -214,6 +225,10 @@ pub fn format_trait_def(
         parts.push(format_trailing(&ann.trailing_comment));
     }
 
+    if !dangling.is_empty() {
+        parts.push(Doc::hardline());
+        parts.push(format_trivia(dangling));
+    }
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));
     docs_from_vec(parts)
@@ -224,6 +239,7 @@ pub fn format_handler_def(
     doc: &[String], public: bool, name: &str,
     effects: &[EffectRef], needs: &[EffectRef], where_clause: &[TraitBound],
     arms: &[Annotated<HandlerArm>], return_clause: &Option<Box<HandlerArm>>,
+    dangling: &[Trivia],
 ) -> Doc {
     let mut parts = Vec::new();
     if !doc.is_empty() {
@@ -264,6 +280,10 @@ pub fn format_handler_def(
         parts.push(format_handler_arm(rc));
     }
 
+    if !dangling.is_empty() {
+        parts.push(Doc::hardline());
+        parts.push(format_trivia(dangling));
+    }
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));
     docs_from_vec(parts)
@@ -281,7 +301,7 @@ fn format_handler_arm(arm: &HandlerArm) -> Doc {
 pub fn format_impl_def(
     doc: &[String], trait_name: &str, target_type: &str,
     type_params: &[String], where_clause: &[TraitBound], needs: &[EffectRef],
-    methods: &[Annotated<ImplMethod>],
+    methods: &[Annotated<ImplMethod>], dangling: &[Trivia],
 ) -> Doc {
     let mut parts = Vec::new();
     if !doc.is_empty() {
@@ -315,6 +335,10 @@ pub fn format_impl_def(
         parts.push(format_trailing(&ann.trailing_comment));
     }
 
+    if !dangling.is_empty() {
+        parts.push(Doc::hardline());
+        parts.push(format_trivia(dangling));
+    }
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));
     docs_from_vec(parts)

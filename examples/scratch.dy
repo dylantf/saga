@@ -1,7 +1,5 @@
 # comment 1: file-level leading comment
 
-module Test
-
 # comment 2: before import
 import Std.List
 
@@ -94,4 +92,9 @@ piped x = x
   |> add 1 # comment 39: trailing on mid-pipe segment
   |> double
 
+main () = {
+  println "Hello world"
+}
+
 # comment 40: last comment in file
+

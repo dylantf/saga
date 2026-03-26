@@ -6,10 +6,10 @@ use super::expr::format_expr;
 use super::decl::*;
 
 /// Format an entire program (list of annotated declarations).
-pub fn format_program(decls: &[Annotated<Decl>]) -> Doc {
+pub fn format_program(program: &AnnotatedProgram) -> Doc {
     let mut result = Doc::Nil;
     let mut first = true;
-    for ann in decls {
+    for ann in &program.declarations {
         if matches!(ann.node, Decl::DictConstructor { .. }) {
             continue;
         }
@@ -31,6 +31,15 @@ pub fn format_program(decls: &[Annotated<Decl>]) -> Doc {
         // Trailing comment
         result = result.append(format_trailing(&ann.trailing_comment));
     }
+
+    // Trailing trivia at end of file
+    if !program.trailing_trivia.is_empty() {
+        if !first {
+            result = result.append(Doc::hardline());
+        }
+        result = result.append(format_trivia(&program.trailing_trivia));
+    }
+
     result
 }
 
@@ -74,20 +83,20 @@ fn format_decl(decl: &Decl) -> Doc {
         Decl::TypeDef { doc, public, opaque, name, type_params, variants, deriving, .. } => {
             format_type_def(doc, *public, *opaque, name, type_params, variants, deriving)
         }
-        Decl::RecordDef { doc, public, name, type_params, fields, deriving, .. } => {
-            format_record_def(doc, *public, name, type_params, fields, deriving)
+        Decl::RecordDef { doc, public, name, type_params, fields, deriving, dangling_trivia, .. } => {
+            format_record_def(doc, *public, name, type_params, fields, deriving, dangling_trivia)
         }
-        Decl::EffectDef { doc, public, name, type_params, operations, .. } => {
-            format_effect_def(doc, *public, name, type_params, operations)
+        Decl::EffectDef { doc, public, name, type_params, operations, dangling_trivia, .. } => {
+            format_effect_def(doc, *public, name, type_params, operations, dangling_trivia)
         }
-        Decl::TraitDef { doc, public, name, type_param, supertraits, methods, .. } => {
-            format_trait_def(doc, *public, name, type_param, supertraits, methods)
+        Decl::TraitDef { doc, public, name, type_param, supertraits, methods, dangling_trivia, .. } => {
+            format_trait_def(doc, *public, name, type_param, supertraits, methods, dangling_trivia)
         }
-        Decl::HandlerDef { doc, public, name, effects, needs, where_clause, arms, return_clause, .. } => {
-            format_handler_def(doc, *public, name, effects, needs, where_clause, arms, return_clause)
+        Decl::HandlerDef { doc, public, name, effects, needs, where_clause, arms, return_clause, dangling_trivia, .. } => {
+            format_handler_def(doc, *public, name, effects, needs, where_clause, arms, return_clause, dangling_trivia)
         }
-        Decl::ImplDef { doc, trait_name, target_type, type_params, where_clause, needs, methods, .. } => {
-            format_impl_def(doc, trait_name, target_type, type_params, where_clause, needs, methods)
+        Decl::ImplDef { doc, trait_name, target_type, type_params, where_clause, needs, methods, dangling_trivia, .. } => {
+            format_impl_def(doc, trait_name, target_type, type_params, where_clause, needs, methods, dangling_trivia)
         }
         Decl::DictConstructor { .. } => Doc::Nil,
     }
