@@ -33,9 +33,16 @@ fn emit_from_program(
     }).unwrap_or_default();
     let result = checker.to_result();
     let elaborated = elaborate::elaborate_module(program, &result, &original_module_name);
+    // Populate modules with codegen_info so the resolver can find dicts/exports
+    let mut modules = std::collections::HashMap::new();
+    for (name, info) in result.codegen_info().iter() {
+        modules.insert(name.clone(), codegen::CompiledModule {
+            codegen_info: info.clone(),
+            ..Default::default()
+        });
+    }
     let ctx = codegen::CodegenContext {
-        codegen_info: result.codegen_info().clone(),
-        elaborated_modules: std::collections::HashMap::new(),
+        modules,
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };

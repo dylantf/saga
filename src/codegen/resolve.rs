@@ -313,13 +313,24 @@ pub fn resolve_names(
         }
     }
 
-    // Step 3: Register external functions from all codegen_info modules.
-    // These are needed for handler bodies that reference private @external
-    // functions. We scan the elaborated_modules for FunSignature + @external.
-    // For now, we register them from the same import loop data.
-    // TODO: move to codegen_info.handler_externals once that field exists.
+    // Step 3: Register trait impl dicts from all modules.
+    // The elaborator generates DictRef nodes that reference dicts from any module,
+    // not just explicitly imported ones.
+    for (mod_name, info) in codegen_info {
+        let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
+        let erlang_mod = module_name_to_erlang(&mod_path);
+        for d in &info.trait_impl_dicts {
+            scope.entry(d.dict_name.clone()).or_insert(ScopedName::ImportedFun {
+                erlang_mod: erlang_mod.clone(),
+                name: d.dict_name.clone(),
+                arity: d.arity,
+            });
+        }
+    }
 
-    // Step 4: Walk the AST and resolve every Var and QualifiedName node
+    // Step 4: Walk the AST and resolve every Var and QualifiedName node.
+    // Resolution maps from imported modules are merged in by the caller
+    // (emit_module_with_context), so we only need to walk our own program.
     let mut map = ResolutionMap::new();
     resolve_program(program, &scope, &qualified_scope, &mut map);
 
@@ -362,6 +373,11 @@ fn resolve_decl(
         Decl::ImplDef { methods, .. } => {
             for method in methods {
                 resolve_expr(&method.node.body, scope, qualified_scope, map);
+            }
+        }
+        Decl::DictConstructor { methods, .. } => {
+            for method in methods {
+                resolve_expr(method, scope, qualified_scope, map);
             }
         }
         _ => {}

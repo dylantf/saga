@@ -9,14 +9,17 @@ use super::{EffectInfo, FunInfo, HandlerInfo, Lowerer};
 
 /// Extract the (module, func) pair from an `@external("runtime", "module", "func")` annotation.
 pub fn extract_external(annotations: &[ast::Annotation]) -> Option<(String, String)> {
-    annotations.iter().find(|a| a.name == "external").and_then(|a| {
-        if a.args.len() >= 3
-            && let (ast::Lit::String(module), ast::Lit::String(func)) = (&a.args[1], &a.args[2])
-        {
-            return Some((module.clone(), func.clone()));
-        }
-        None
-    })
+    annotations
+        .iter()
+        .find(|a| a.name == "external")
+        .and_then(|a| {
+            if a.args.len() >= 3
+                && let (ast::Lit::String(module), ast::Lit::String(func)) = (&a.args[1], &a.args[2])
+            {
+                return Some((module.clone(), func.clone()));
+            }
+            None
+        })
 }
 
 /// Staging area for FunSignature data consumed by FunBinding.
@@ -86,13 +89,9 @@ impl<'a> Lowerer<'a> {
                     if *public {
                         self.pub_names.insert(name.clone());
                     }
-                    if let Some((erl_module, erl_func)) = extract_external(annotations) {
-                        // @external function
+                    if let Some((_erl_module, _erl_func)) = extract_external(annotations) {
+                        // @external function: resolution handled by resolve.rs
                         let real_arity = params.len();
-                        self.external_funs.insert(
-                            name.clone(),
-                            (erl_module, erl_func, real_arity),
-                        );
                         let mut sorted_effects = Vec::new();
                         if !effects.is_empty() {
                             sorted_effects = effects.iter().map(|e| e.name.clone()).collect();
@@ -105,7 +104,6 @@ impl<'a> Lowerer<'a> {
                                 arity: expanded_arity,
                                 effects: sorted_effects,
                                 param_absorbed_effects: HashMap::new(),
-                                import_origin: None,
                             },
                         );
                     } else {
@@ -141,7 +139,8 @@ impl<'a> Lowerer<'a> {
         // so they're available even when not explicitly imported by user code. The
         // elaborator resolves dicts from all tc_codegen_info entries (not just direct
         // imports), so the lowerer must match that scope.
-        for (mod_name, info) in &self.ctx.codegen_info {
+        for (mod_name, compiled) in &self.ctx.modules {
+            let info = &compiled.codegen_info;
             let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
             let erlang_name = util::module_name_to_erlang(&mod_path);
             for d in &info.trait_impl_dicts {
@@ -149,7 +148,6 @@ impl<'a> Lowerer<'a> {
                     arity: d.arity,
                     effects: Vec::new(),
                     param_absorbed_effects: HashMap::new(),
-                    import_origin: Some((erlang_name.clone(), d.dict_name.clone())),
                 });
             }
             if mod_name.starts_with("Std.") {
@@ -187,11 +185,10 @@ impl<'a> Lowerer<'a> {
                         arity: expanded_arity,
                         effects,
                         param_absorbed_effects: HashMap::new(),
-                        import_origin: None,
                     });
                 }
                 // Register Std handler bodies and external functions from elaborated programs
-                if let Some(elab_program) = self.ctx.elaborated_modules.get(mod_name) {
+                if let Some(elab_program) = self.ctx.elaborated_module(mod_name) {
                     for decl in elab_program {
                         match decl {
                             Decl::HandlerDef {
@@ -210,21 +207,8 @@ impl<'a> Lowerer<'a> {
                                         source_module: Some(mod_name.clone()),
                                     });
                             }
-                            Decl::FunSignature {
-                                name,
-                                params,
-                                annotations,
-                                ..
-                            } => {
-                                if let Some((erl_module, erl_func)) = extract_external(annotations) {
-                                    let arity = params.len();
-                                    let qualified_key = format!("{}.{}", alias, name);
-                                    self.external_funs.entry(qualified_key).or_insert((
-                                        erl_module.clone(),
-                                        erl_func.clone(),
-                                        arity,
-                                    ));
-                                }
+                            Decl::FunSignature { .. } => {
+                                // External resolution handled by resolve.rs
                             }
                             _ => {}
                         }
@@ -271,10 +255,10 @@ impl<'a> Lowerer<'a> {
         self.module_aliases
             .insert(prefix.clone(), erlang_name.clone());
 
-        let Some(info) = self.ctx.codegen_info.get(&module_name) else {
+        let Some(compiled) = self.ctx.modules.get(&module_name) else {
             return;
         };
-        let info = info.clone();
+        let info = compiled.codegen_info.clone();
 
         // Determine which names are exposed unqualified.
         // None = glob import (all exports), Some(list) = specific names.
@@ -292,8 +276,7 @@ impl<'a> Lowerer<'a> {
         for (name, scheme) in &info.exports {
             let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
             let dict_param_count = util::dict_param_count(&scheme.constraints);
-            let expanded_arity =
-                self.expanded_arity(base_arity, &effects) + dict_param_count;
+            let expanded_arity = self.expanded_arity(base_arity, &effects) + dict_param_count;
             let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
 
             // Always register qualified form
@@ -304,7 +287,6 @@ impl<'a> Lowerer<'a> {
                     arity: expanded_arity,
                     effects: effects.clone(),
                     param_absorbed_effects: param_effs.clone(),
-                    import_origin: None,
                 },
             );
 
@@ -314,7 +296,6 @@ impl<'a> Lowerer<'a> {
                     arity: expanded_arity,
                     effects,
                     param_absorbed_effects: param_effs,
-                    import_origin: Some((erlang_name.clone(), name.clone())),
                 });
             }
         }
@@ -342,12 +323,11 @@ impl<'a> Lowerer<'a> {
                 arity: d.arity,
                 effects: Vec::new(),
                 param_absorbed_effects: HashMap::new(),
-                import_origin: Some((erlang_name.clone(), d.dict_name.clone())),
             });
         }
 
         // Register imported handler bodies and external functions from elaborated programs
-        if let Some(elab_program) = self.ctx.elaborated_modules.get(&module_name) {
+        if let Some(elab_program) = self.ctx.elaborated_module(&module_name) {
             let elab_program = elab_program.clone();
             for edecl in &elab_program {
                 match edecl {
@@ -361,44 +341,14 @@ impl<'a> Lowerer<'a> {
                         self.handler_defs
                             .entry(name.clone())
                             .or_insert(HandlerInfo {
-                                effects: effects
-                                    .iter()
-                                    .map(|e| e.name.clone())
-                                    .collect(),
+                                effects: effects.iter().map(|e| e.name.clone()).collect(),
                                 arms: arms.iter().map(|a| a.node.clone()).collect(),
                                 return_clause: return_clause.clone(),
                                 source_module: Some(module_name.clone()),
                             });
                     }
-                    Decl::FunSignature {
-                        name,
-                        params,
-                        annotations,
-                        ..
-                    } => {
-                        if let Some((erl_module, erl_func)) = extract_external(annotations) {
-                            let arity = params.len();
-                            let qualified_key = format!("{}.{}", prefix, name);
-                            self.external_funs.entry(qualified_key).or_insert((
-                                erl_module.clone(),
-                                erl_func.clone(),
-                                arity,
-                            ));
-                            // Always register the bare name for external functions
-                            // from elaborated modules: handler bodies reference
-                            // private externals by bare name when inlined.
-                            self.external_funs.entry(name.clone()).or_insert((
-                                erl_module.clone(),
-                                erl_func.clone(),
-                                arity,
-                            ));
-                            self.fun_info.entry(name.clone()).or_insert(FunInfo {
-                                arity,
-                                effects: Vec::new(),
-                                param_absorbed_effects: HashMap::new(),
-                                import_origin: None,
-                            });
-                        }
+                    Decl::FunSignature { .. } => {
+                        // External function resolution handled by resolve.rs
                     }
                     _ => {}
                 }

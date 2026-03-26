@@ -12,7 +12,11 @@ fn bootstrap() -> typechecker::Checker {
         .expect("prelude parse error");
     desugar::desugar_program(&mut prelude_program);
     let result = checker.check_program(&prelude_program);
-    assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
+    assert!(
+        !result.has_errors(),
+        "prelude typecheck error: {:?}",
+        result.errors()
+    );
     checker
 }
 
@@ -46,7 +50,11 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
     desugar::desugar_program(&mut program);
     let mut checker = bootstrap();
     let result = checker.check_program(&program);
-    assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());
+    assert!(
+        !result.has_errors(),
+        "typecheck error: {:?}",
+        result.errors()
+    );
     let elaborated = elaborate::elaborate(&program, &result);
 
     let elaborated_modules = if include_std_modules {
@@ -67,9 +75,31 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         std::collections::HashMap::new()
     };
 
+    let codegen_info_map = result.codegen_info();
+    let prelude_imports = &result.prelude_imports;
+    let mut modules = std::collections::HashMap::new();
+    // Always include codegen_info for all modules (needed for resolver to find dicts/exports)
+    for (name, info) in codegen_info_map.iter() {
+        modules.insert(
+            name.clone(),
+            codegen::CompiledModule {
+                codegen_info: info.clone(),
+                elaborated: Vec::new(),
+                resolution: codegen::resolve::ResolutionMap::new(),
+            },
+        );
+    }
+    // Overlay elaborated modules with their resolution maps
+    for (name, elab) in elaborated_modules {
+        let normalized = codegen::normalize::normalize_effects(&elab);
+        let resolution =
+            codegen::resolve::resolve_names(&normalized, codegen_info_map, prelude_imports);
+        let entry = modules.entry(name.clone()).or_default();
+        entry.elaborated = elab;
+        entry.resolution = resolution;
+    }
     let ctx = codegen::CodegenContext {
-        codegen_info: result.codegen_info().clone(),
-        elaborated_modules,
+        modules,
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
