@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::token::Span;
+use crate::token::{Span, StringKind};
 pub use crate::token::Trivia;
 
 pub type Program = Vec<Decl>;
@@ -485,7 +485,7 @@ pub enum ExprKind {
     ListLit { elements: Vec<Expr> },
 
     /// `$"hello {name}"` -- interpolated string (desugars to show/concat chain)
-    StringInterp { parts: Vec<StringPart> },
+    StringInterp { parts: Vec<StringPart>, kind: StringKind },
 
     /// `[expr | qualifiers]` -- list comprehension (desugars to flat_map/if/let)
     ListComprehension {
@@ -574,7 +574,7 @@ impl Expr {
             }
             ExprKind::Cons { head, tail } => head.contains_resume() || tail.contains_resume(),
             ExprKind::ListLit { elements } => elements.iter().any(|e| e.contains_resume()),
-            ExprKind::StringInterp { parts } => parts
+            ExprKind::StringInterp { parts, .. } => parts
                 .iter()
                 .any(|p| matches!(p, StringPart::Expr(e) if e.contains_resume())),
             ExprKind::ListComprehension { body, qualifiers } => {
@@ -810,7 +810,7 @@ impl PartialEq for TypeExpr {
 pub enum Lit {
     Int(String, i64),
     Float(String, f64),
-    String(String),
+    String(String, StringKind),
     Bool(bool),
     Unit,
 }

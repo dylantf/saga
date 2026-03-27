@@ -25,7 +25,7 @@ impl Parser {
             self.advance(); // consume <>
             match pat {
                 Pat::Lit {
-                    value: Lit::String(prefix),
+                    value: Lit::String(prefix, _),
                     ..
                 } => {
                     let rest = self.parse_pattern()?;
@@ -95,7 +95,7 @@ impl Parser {
                 | Token::UpperIdent(_)
                 | Token::Int(..)
                 | Token::Float(..)
-                | Token::String(_)
+                | Token::String(..)
                 | Token::True
                 | Token::False
                 | Token::LParen
@@ -225,9 +225,9 @@ impl Parser {
                     })
                 }
             },
-            Token::String(s) => Ok(Pat::Lit {
+            Token::String(s, kind) => Ok(Pat::Lit {
                 id: NodeId::fresh(),
-                value: Lit::String(s),
+                value: Lit::String(s, kind),
                 span,
             }),
             Token::Int(s, n) => Ok(Pat::Lit {

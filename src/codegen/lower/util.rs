@@ -29,7 +29,7 @@ pub(super) fn lower_lit(lit: &Lit) -> CLit {
         Lit::Bool(true) => CLit::Atom("true".to_string()),
         Lit::Bool(false) => CLit::Atom("false".to_string()),
         Lit::Unit => CLit::Atom("unit".to_string()),
-        Lit::String(s) => CLit::Str(s.clone()),
+        Lit::String(s, _) => CLit::Str(s.clone()),
     }
 }
 

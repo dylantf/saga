@@ -13,7 +13,7 @@
 //! - `ListComprehension { body, qualifiers }` → `flat_map`/`if`/`let`
 
 use crate::ast::*;
-use crate::token::Span;
+use crate::token::{Span, StringKind};
 
 /// Desugar all surface syntax in a program, in place.
 #[allow(clippy::ptr_arg)]
@@ -166,7 +166,7 @@ fn desugar_expr(expr: &mut Expr) {
                 desugar_expr(e);
             }
         }
-        ExprKind::StringInterp { parts } => {
+        ExprKind::StringInterp { parts, .. } => {
             for part in parts {
                 if let StringPart::Expr(e) = part {
                     desugar_expr(e);
@@ -280,13 +280,13 @@ fn desugar_expr(expr: &mut Expr) {
             }
         }
         ExprKind::StringInterp { .. } => {
-            let ExprKind::StringInterp { parts } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            let ExprKind::StringInterp { parts, .. } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
             let mut segments: Vec<Expr> = Vec::new();
             for part in parts {
                 match part {
                     StringPart::Lit(s) => {
                         if !s.is_empty() {
-                            segments.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(s) }));
+                            segments.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(s, StringKind::Normal) }));
                         }
                     }
                     StringPart::Expr(hole_expr) => {
@@ -307,7 +307,7 @@ fn desugar_expr(expr: &mut Expr) {
                     right: Box::new(right),
                 })
             });
-            expr.kind = result.map(|e| e.kind).unwrap_or(ExprKind::Lit { value: Lit::String(String::new()) });
+            expr.kind = result.map(|e| e.kind).unwrap_or(ExprKind::Lit { value: Lit::String(String::new(), StringKind::Normal) });
         }
         ExprKind::ListComprehension { .. } => {
             let ExprKind::ListComprehension { body, qualifiers } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };

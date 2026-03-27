@@ -1,6 +1,6 @@
 use super::{ParseError, Parser};
 use crate::ast::*;
-use crate::token::{Span, Token};
+use crate::token::{Span, StringKind, Token};
 
 impl Parser {
     /// Parse record fields: `field: expr, field2: expr2, ...`
@@ -508,14 +508,14 @@ impl Parser {
                     value: Lit::Float(s, f),
                 },
             }),
-            Token::String(s) => Ok(Expr {
+            Token::String(s, kind) => Ok(Expr {
                 id: self.next_id(),
                 span,
                 kind: ExprKind::Lit {
-                    value: Lit::String(s),
+                    value: Lit::String(s, kind),
                 },
             }),
-            Token::InterpolatedString(parts) => {
+            Token::InterpolatedString(parts, kind) => {
                 use crate::token::InterpPart;
                 // Preserve as StringInterp; desugared later to show/concat chain.
                 let mut string_parts: Vec<StringPart> = Vec::new();
@@ -545,13 +545,14 @@ impl Parser {
                     span,
                     kind: ExprKind::StringInterp {
                         parts: string_parts,
+                        kind,
                     },
                 })
             }
             Token::Ident(ref i)
                 if self.test_mode
                     && (i == "test" || i == "describe" || i == "skip" || i == "only")
-                    && matches!(self.peek(), Token::String(_)) =>
+                    && matches!(self.peek(), Token::String(..)) =>
             {
                 // Desugar: test "name" { body } -> test "name" (fun () -> { body })
                 //          describe "name" { body } -> describe "name" (fun () -> { body })
@@ -583,7 +584,7 @@ impl Parser {
                     id: self.next_id(),
                     span: name_span,
                     kind: ExprKind::Lit {
-                        value: Lit::String(name_str),
+                        value: Lit::String(name_str, StringKind::Normal),
                     },
                 };
                 let app1 = Expr {

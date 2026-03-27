@@ -3,9 +3,9 @@ pub enum Token {
     // Literals (source text, parsed value)
     Int(String, i64),
     Float(String, f64),
-    String(String),
+    String(String, StringKind),
     /// `$"hello {name}"` -- pre-tokenized interpolated string
-    InterpolatedString(Vec<InterpPart>),
+    InterpolatedString(Vec<InterpPart>, StringKind),
 
     // Identifiers
     Ident(String),
@@ -86,6 +86,31 @@ pub enum Token {
 
     // End of file
     Eof,
+}
+
+/// Distinguishes the syntactic form of a string literal so the formatter can
+/// round-trip the original delimiters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringKind {
+    /// `"..."`
+    Normal,
+    /// `"""..."""`
+    Multiline,
+    /// `@"..."`
+    Raw,
+    /// `@"""..."""`
+    RawMultiline,
+    /// `$"..."`
+    Interpolated,
+    /// `$"""..."""`
+    InterpolatedMultiline,
+}
+
+impl StringKind {
+    /// True for triple-quoted variants that use `"""` delimiters.
+    pub fn is_multiline(self) -> bool {
+        matches!(self, StringKind::Multiline | StringKind::RawMultiline | StringKind::InterpolatedMultiline)
+    }
 }
 
 /// Byte offset span in source code

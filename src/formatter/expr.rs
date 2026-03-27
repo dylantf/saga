@@ -3,6 +3,7 @@ use super::helpers::{docs_from_vec, format_binop, format_trivia, format_trivia_d
 use super::pat::format_pat;
 use super::type_expr::format_type_expr;
 use crate::ast::*;
+use crate::token::StringKind;
 use crate::docs;
 use crate::token::Span;
 
@@ -383,23 +384,8 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 format_comma_list(Doc::text("["), "]", elem_docs)
             }
         }
-        ExprKind::StringInterp { parts } => {
-            let mut s = String::from("$\"");
-            for part in parts {
-                match part {
-                    StringPart::Lit(text) => s.push_str(text),
-                    StringPart::Expr(expr) => {
-                        let expr_doc = format_expr(expr);
-                        let rendered = super::pretty(10000, &expr_doc);
-                        let rendered = rendered.trim_end();
-                        s.push('{');
-                        s.push_str(rendered);
-                        s.push('}');
-                    }
-                }
-            }
-            s.push('"');
-            Doc::text(s)
+        ExprKind::StringInterp { parts, kind } => {
+            format_interp_string(parts, *kind)
         }
         ExprKind::ListComprehension { body, qualifiers } => {
             let mut parts = vec![Doc::text("["), format_expr(body), Doc::text(" | ")];
@@ -569,4 +555,96 @@ pub fn format_stmt(stmt: &Stmt) -> Doc {
         }
         Stmt::Expr(expr) => format_expr(expr),
     }
+}
+
+/// Format an interpolated string, choosing single-line or triple-quoted form.
+fn format_interp_string(parts: &[StringPart], kind: StringKind) -> Doc {
+    match kind {
+        StringKind::InterpolatedMultiline => format_interp_multiline(parts),
+        _ => format_interp_single_line(parts),
+    }
+}
+
+/// Format a single-line interpolated string: `$"text {expr} text"`.
+fn format_interp_single_line(parts: &[StringPart]) -> Doc {
+    let mut s = String::from("$\"");
+    for part in parts {
+        match part {
+            StringPart::Lit(text) => s.push_str(&escape_interp_string(text)),
+            StringPart::Expr(expr) => {
+                let expr_doc = format_expr(expr);
+                let rendered = super::pretty(10000, &expr_doc);
+                let rendered = rendered.trim_end();
+                s.push('{');
+                s.push_str(rendered);
+                s.push('}');
+            }
+        }
+    }
+    s.push('"');
+    Doc::text(s)
+}
+
+/// Escape special characters in interpolated string literal segments.
+fn escape_interp_string(s: &str) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            ch => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Format a multiline interpolated string: `$"""\n  text {expr}\n  """`.
+fn format_interp_multiline(parts: &[StringPart]) -> Doc {
+    // Build the full text content (with {expr} rendered inline) then split into lines.
+    // We need to handle Doc construction line-by-line.
+    //
+    // Approach: walk parts, split literal text at newlines. Each line becomes a
+    // HardLine + Doc::text(...). Expression holes are rendered inline on their
+    // current line.
+    let mut inner = Vec::new();
+    let mut current_line = String::new();
+
+    for part in parts {
+        match part {
+            StringPart::Lit(text) => {
+                let mut first = true;
+                for segment in text.split('\n') {
+                    if !first {
+                        // Emit current line and start new one
+                        inner.push(Doc::hardline());
+                        if !current_line.is_empty() {
+                            inner.push(Doc::text(std::mem::take(&mut current_line)));
+                        }
+                    }
+                    current_line.push_str(segment);
+                    first = false;
+                }
+            }
+            StringPart::Expr(expr) => {
+                let expr_doc = format_expr(expr);
+                let rendered = super::pretty(10000, &expr_doc);
+                let rendered = rendered.trim_end();
+                current_line.push('{');
+                current_line.push_str(rendered);
+                current_line.push('}');
+            }
+        }
+    }
+
+    // Emit remaining line content
+    inner.push(Doc::hardline());
+    if !current_line.is_empty() {
+        inner.push(Doc::text(current_line));
+    }
+    inner.push(Doc::hardline());
+    inner.push(Doc::text("\"\"\""));
+
+    Doc::text("$\"\"\"").append(Doc::nest(2, docs_from_vec(inner)))
 }

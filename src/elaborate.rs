@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::ast::*;
-use crate::token::Span;
+use crate::token::{Span, StringKind};
 use crate::typechecker::{CheckResult, TraitEvidence, TraitInfo, Type};
 
 /// Elaborate a program using typechecker results.
@@ -1403,7 +1403,7 @@ impl Elaborator {
                     body: Box::new(Expr::synth(
                         s,
                         ExprKind::Lit {
-                            value: Lit::String("()".into()),
+                            value: Lit::String("()".into(), StringKind::Normal),
                         },
                     )),
                 },
@@ -1443,7 +1443,7 @@ impl Elaborator {
         let mut result = Expr::synth(
             s,
             ExprKind::Lit {
-                value: Lit::String("(".into()),
+                value: Lit::String("(".into(), StringKind::Normal),
             },
         );
         for (i, part) in parts.into_iter().enumerate() {
@@ -1456,7 +1456,7 @@ impl Elaborator {
                         right: Box::new(Expr::synth(
                             s,
                             ExprKind::Lit {
-                                value: Lit::String(", ".into()),
+                                value: Lit::String(", ".into(), StringKind::Normal),
                             },
                         )),
                     },
@@ -1479,7 +1479,7 @@ impl Elaborator {
                 right: Box::new(Expr::synth(
                     s,
                     ExprKind::Lit {
-                        value: Lit::String(")".into()),
+                        value: Lit::String(")".into(), StringKind::Normal),
                     },
                 )),
             },

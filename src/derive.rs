@@ -3,6 +3,7 @@
 //! impls are validated like any hand-written impl.
 
 use crate::ast::*;
+use crate::token::StringKind;
 use crate::token::Span;
 
 /// Expand all `deriving` clauses in a program, appending synthetic `ImplDef`
@@ -135,7 +136,7 @@ fn build_record_debug_expr(
         }
         prefix.push_str(field_name);
         prefix.push_str(": ");
-        parts.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(prefix.clone()) }));
+        parts.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(prefix.clone(), StringKind::Normal) }));
         prefix.clear();
 
         let field_access = Expr::synth(span, ExprKind::FieldAccess {
@@ -158,7 +159,7 @@ fn build_record_debug_expr(
         }
     }
 
-    parts.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(" }".into()) }));
+    parts.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(" }".into(), StringKind::Normal) }));
 
     parts
         .into_iter()
@@ -217,7 +218,7 @@ fn derive_stringify(
                     body: Expr::synth(
                         span,
                         ExprKind::Lit {
-                            value: Lit::String(ctor_name.clone()),
+                            value: Lit::String(ctor_name.clone(), StringKind::Normal),
                         },
                     ),
                     span,
@@ -258,7 +259,7 @@ fn derive_stringify(
                     parts.push(Expr::synth(
                         span,
                         ExprKind::Lit {
-                            value: Lit::String(prefix.clone()),
+                            value: Lit::String(prefix.clone(), StringKind::Normal),
                         },
                     ));
                     prefix.clear();
@@ -286,7 +287,7 @@ fn derive_stringify(
                 parts.push(Expr::synth(
                     span,
                     ExprKind::Lit {
-                        value: Lit::String(")".into()),
+                        value: Lit::String(")".into(), StringKind::Normal),
                     },
                 ));
 
@@ -705,7 +706,7 @@ fn derive_enum(
         body: Expr::synth(span, ExprKind::App {
             func: Box::new(Expr::synth(span, ExprKind::Var { name: "panic".into() })),
             arg: Box::new(Expr::synth(span, ExprKind::Lit {
-                value: Lit::String(format!("invalid enum index for {}", type_name)),
+                value: Lit::String(format!("invalid enum index for {}", type_name), StringKind::Normal),
             })),
         }),
         span,

@@ -14,7 +14,7 @@ pub fn extract_external(annotations: &[ast::Annotation]) -> Option<(String, Stri
         .find(|a| a.name == "external")
         .and_then(|a| {
             if a.args.len() >= 3
-                && let (ast::Lit::String(module), ast::Lit::String(func)) = (&a.args[1], &a.args[2])
+                && let (ast::Lit::String(module, _), ast::Lit::String(func, _)) = (&a.args[1], &a.args[2])
             {
                 return Some((module.clone(), func.clone()));
             }

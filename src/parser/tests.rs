@@ -2,6 +2,7 @@ use super::*;
 use crate::ast::Handler;
 use crate::lexer::Lexer;
 use crate::token::Span;
+use crate::token::StringKind;
 
 /// Extract effect names from a slice of EffectRef for test assertions
 fn effect_names(refs: &[crate::ast::EffectRef]) -> Vec<&str> {
@@ -52,7 +53,7 @@ fn literal_float() {
 fn literal_string() {
     let expr = parse_expr("\"hello\"");
     assert!(
-        matches!(expr, Expr { kind: ExprKind::Lit { value: Lit::String(s), .. }, .. } if s == "hello")
+        matches!(expr, Expr { kind: ExprKind::Lit { value: Lit::String(s, _), .. }, .. } if s == "hello")
     );
 }
 
@@ -660,7 +661,7 @@ fn pattern_string_literal() {
     assert!(matches!(
         pat,
         Pat::Lit {
-            value: Lit::String(s),
+            value: Lit::String(s, _),
             ..
         } if s == "hello"
     ));
@@ -1203,7 +1204,7 @@ fn record_create_simple() {
             assert_eq!(fields.len(), 2);
             assert_eq!(fields[0].0, "name");
             assert!(
-                matches!(&fields[0].2, Expr { kind: ExprKind::Lit { value: Lit::String(s), .. }, .. } if s == "Dylan")
+                matches!(&fields[0].2, Expr { kind: ExprKind::Lit { value: Lit::String(s, _), .. }, .. } if s == "Dylan")
             );
             assert_eq!(fields[1].0, "age");
             assert!(matches!(
@@ -1746,7 +1747,7 @@ fn effect_call_simple() {
                 _ => panic!("expected EffectCall, got {:?}", func),
             }
             assert!(
-                matches!(arg.as_ref(), Expr { kind: ExprKind::Lit { value: Lit::String(s), .. }, .. } if s == "hello")
+                matches!(arg.as_ref(), Expr { kind: ExprKind::Lit { value: Lit::String(s, _), .. }, .. } if s == "hello")
             );
         }
         _ => panic!("expected App(EffectCall, _), got {:?}", expr),
@@ -2535,9 +2536,9 @@ fn external_fun_basic() {
             assert_eq!(annotations.len(), 1);
             assert_eq!(annotations[0].name, "external");
             assert_eq!(annotations[0].args, vec![
-                Lit::String("erlang".to_string()),
-                Lit::String("lists".to_string()),
-                Lit::String("reverse".to_string()),
+                Lit::String("erlang".to_string(), StringKind::Normal),
+                Lit::String("lists".to_string(), StringKind::Normal),
+                Lit::String("reverse".to_string(), StringKind::Normal),
             ]);
         }
         _ => panic!("expected FunSignature with @external"),

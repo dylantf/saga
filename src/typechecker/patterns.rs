@@ -31,7 +31,7 @@ impl Checker {
                 let lit_ty = match value {
                     Lit::Int(..) => Type::int(),
                     Lit::Float(..) => Type::float(),
-                    Lit::String(_) => Type::string(),
+                    Lit::String(..) => Type::string(),
                     Lit::Bool(_) => Type::bool(),
                     Lit::Unit => Type::unit(),
                 };

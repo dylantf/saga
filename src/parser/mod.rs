@@ -94,7 +94,7 @@ impl Parser {
 
     pub(super) fn expect_string(&mut self) -> Result<String, ParseError> {
         match self.advance() {
-            Token::String(s) => Ok(s),
+            Token::String(s, _) => Ok(s),
             tok => Err(ParseError {
                 message: format!("expected string literal, got {:?}", tok),
                 span: self.tokens[self.pos - 1].span,
@@ -145,8 +145,8 @@ impl Parser {
             self.peek(),
             Token::Int(..)
                 | Token::Float(..)
-                | Token::String(_)
-                | Token::InterpolatedString(_)
+                | Token::String(..)
+                | Token::InterpolatedString(..)
                 | Token::True
                 | Token::False
                 | Token::Ident(_)

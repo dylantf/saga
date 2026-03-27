@@ -422,7 +422,7 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
                 normalize_expr(e);
             }
         }
-        ExprKind::StringInterp { parts } => {
+        ExprKind::StringInterp { parts, .. } => {
             for part in parts.iter_mut() {
                 if let StringPart::Expr(e) = part {
                     normalize_expr(e);
@@ -1095,6 +1095,81 @@ fn idempotent_scratch_file() {
     assert_eq!(first, second, "Formatter is not idempotent");
 }
 
+// --- Triple-quoted / multiline strings ---
+
+#[test]
+fn multiline_string_preserved() {
+    let src = "let x = \"\"\"\n  hello\n  world\n  \"\"\"";
+    let result = fmt80(src);
+    assert!(result.contains("\"\"\""), "should contain triple quotes: {}", result);
+    assert!(result.contains("hello"), "should contain content: {}", result);
+    assert!(result.contains("world"), "should contain content: {}", result);
+    // Idempotent
+    let second = fmt80(&result);
+    assert_eq!(result, second, "multiline string not idempotent");
+}
+
+#[test]
+fn multiline_string_in_function() {
+    let src = "main () = {\n  let poem = \"\"\"\n    Roses are red,\n    Violets are blue,\n    \"\"\"\n  poem\n}";
+    let result = fmt80(src);
+    assert!(result.contains("\"\"\""), "should preserve triple quotes: {}", result);
+    assert!(result.contains("Roses are red,"), "should preserve content: {}", result);
+    let second = fmt80(&result);
+    assert_eq!(result, second, "multiline string in function not idempotent");
+}
+
+#[test]
+fn raw_string_preserved() {
+    let src = "let path = @\"C:\\Users\\dylan\"";
+    let result = fmt80(src);
+    assert!(result.contains("@\""), "should contain raw string prefix: {}", result);
+    assert!(result.contains("C:\\Users\\dylan"), "should preserve backslashes: {}", result);
+    let second = fmt80(&result);
+    assert_eq!(result, second, "raw string not idempotent");
+}
+
+#[test]
+fn raw_multiline_string_preserved() {
+    let src = "let x = @\"\"\"\n  \\d+\n  \\s*\n  \"\"\"";
+    let result = fmt80(src);
+    assert!(result.contains("@\"\"\""), "should contain raw triple quotes: {}", result);
+    assert!(result.contains("\\d+"), "should preserve raw content: {}", result);
+    let second = fmt80(&result);
+    assert_eq!(result, second, "raw multiline string not idempotent");
+}
+
+#[test]
+fn interpolated_string_preserved() {
+    let src = "let x = $\"hello {name}\"";
+    let result = fmt80(src);
+    assert!(result.contains("$\""), "should contain interp prefix: {}", result);
+    assert!(result.contains("{name}"), "should contain hole: {}", result);
+    let second = fmt80(&result);
+    assert_eq!(result, second, "interpolated string not idempotent");
+}
+
+#[test]
+fn interpolated_multiline_string_preserved() {
+    let src = "let x = $\"\"\"\n  x = {show x}\n  y = {show y}\n  \"\"\"";
+    let result = fmt80(src);
+    assert!(result.contains("$\"\"\""), "should contain interp triple quotes: {}", result);
+    assert!(result.contains("{show x}"), "should contain hole: {}", result);
+    let second = fmt80(&result);
+    assert_eq!(result, second, "interpolated multiline string not idempotent");
+}
+
+#[test]
+fn escaped_quote_in_string_preserved() {
+    let src = "let x = \"hello \\\"world\\\"\"";
+    let result = fmt80(src);
+    assert!(result.contains("\\\""), "should escape quotes: {}", result);
+    // Must not produce triple-quote """
+    assert!(!result.contains("\"\"\""), "should not produce triple quotes: {}", result);
+    let second = fmt80(&result);
+    assert_eq!(result, second, "escaped quotes not idempotent");
+}
+
 // --- Round-trip: all .dy files format cleanly, idempotently, and preserve AST ---
 
 fn collect_dy_files() -> Vec<std::path::PathBuf> {
@@ -1116,18 +1191,15 @@ fn collect_dy_files() -> Vec<std::path::PathBuf> {
 /// Files with known formatter bugs that prevent clean round-tripping.
 /// Each entry documents why so we can remove it when fixed.
 ///
-/// - Triple-quoted strings (`"""`) not preserved (13-strings, String.dy)
 /// - `()` printed as `Unit` in type exprs (14-fail-to-result, 25-state-effect, Async.dy)
 /// - `(a, b)` printed as `Tuple a b` in return types (25-state-effect)
 /// - `pub opaque` loses `pub` keyword (Async.dy)
 /// - Deriving clause placement on multi-line type defs (28-deriving)
 /// - Comment indentation stripped (36-sync-actor)
-/// - Escaped quotes in strings `"\""` become `"""` (String.dy)
 /// - Handler arm zero-arg ops lose `()` params (25-state-effect)
 /// - Formatted output doesn't re-parse (20-validation-applicative, 29-actors,
 ///   32-monitor, 33-timer, 34-link, Dict.dy, Test.dy)
 const KNOWN_FAILING: &[&str] = &[
-    "13-strings.dy",
     "14-fail-to-result.dy",
     "20-validation-applicative.dy",
     "25-state-effect.dy",
@@ -1139,7 +1211,6 @@ const KNOWN_FAILING: &[&str] = &[
     "36-sync-actor.dy",
     "Async.dy",
     "Dict.dy",
-    "String.dy",
     "Test.dy",
 ];
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::token::StringKind;
 use crate::token::Token::*;
 use crate::token::Trivia;
 
@@ -63,12 +64,12 @@ fn integer_then_dot_ident() {
 
 #[test]
 fn string_simple() {
-    assert_eq!(toks(r#""hello""#), vec![String("hello".into()), Eof]);
+    assert_eq!(toks(r#""hello""#), vec![String("hello".into(), StringKind::Normal), Eof]);
 }
 
 #[test]
 fn string_escape_sequences() {
-    assert_eq!(toks(r#""\n\t\\\"""#), vec![String("\n\t\\\"".into()), Eof]);
+    assert_eq!(toks(r#""\n\t\\\"""#), vec![String("\n\t\\\"".into(), StringKind::Normal), Eof]);
 }
 
 #[test]
@@ -237,7 +238,7 @@ fn newlines_produce_no_extra_tokens() {
     // Only significant tokens remain in the stream
     assert_eq!(toks("42\n"), vec![Int("42".into(), 42), Eof]);
     assert_eq!(toks("3.144\n"), vec![Float("3.144".into(), 3.144), Eof]);
-    assert_eq!(toks("\"hi\"\n"), vec![String("hi".into()), Eof]);
+    assert_eq!(toks("\"hi\"\n"), vec![String("hi".into(), StringKind::Normal), Eof]);
     assert_eq!(toks("True\n"), vec![True, Eof]);
     assert_eq!(toks("foo\n"), vec![Ident("foo".into()), Eof]);
 }
@@ -387,7 +388,7 @@ fn spans_are_byte_offsets() {
 
 #[test]
 fn raw_string_simple() {
-    assert_eq!(toks(r#"@"hello""#), vec![String("hello".into()), Eof]);
+    assert_eq!(toks(r#"@"hello""#), vec![String("hello".into(), StringKind::Raw), Eof]);
 }
 
 #[test]
@@ -395,13 +396,13 @@ fn raw_string_no_escapes() {
     // \n and \t should be literal backslash + letter, not escape sequences
     assert_eq!(
         toks(r#"@"hello\nworld\t""#),
-        vec![String("hello\\nworld\\t".into()), Eof]
+        vec![String("hello\\nworld\\t".into(), StringKind::Raw), Eof]
     );
 }
 
 #[test]
 fn raw_string_empty() {
-    assert_eq!(toks(r#"@"""#), vec![String("".into()), Eof]);
+    assert_eq!(toks(r#"@"""#), vec![String("".into(), StringKind::Raw), Eof]);
 }
 
 #[test]
@@ -416,19 +417,19 @@ fn raw_string_unterminated() {
 #[test]
 fn multiline_string_basic() {
     let src = "\"\"\"\n    hello\n    world\n    \"\"\"";
-    assert_eq!(toks(src), vec![String("hello\nworld".into()), Eof]);
+    assert_eq!(toks(src), vec![String("hello\nworld".into(), StringKind::Multiline), Eof]);
 }
 
 #[test]
 fn multiline_string_empty() {
-    assert_eq!(toks("\"\"\"\"\"\""), vec![String("".into()), Eof]);
+    assert_eq!(toks("\"\"\"\"\"\""), vec![String("".into(), StringKind::Multiline), Eof]);
 }
 
 #[test]
 fn multiline_string_single_line() {
     assert_eq!(
         toks("\"\"\"hello\"\"\""),
-        vec![String("hello".into()), Eof]
+        vec![String("hello".into(), StringKind::Multiline), Eof]
     );
 }
 
@@ -438,7 +439,7 @@ fn multiline_string_escapes() {
     let src = "\"\"\"\n    hello\\tworld\n    \"\"\"";
     assert_eq!(
         toks(src),
-        vec![String("hello\tworld".into()), Eof]
+        vec![String("hello\tworld".into(), StringKind::Multiline), Eof]
     );
 }
 
@@ -455,7 +456,7 @@ fn multiline_string_preserves_relative_indent() {
     let src = "\"\"\"\n        deep\n    shallow\n    \"\"\"";
     assert_eq!(
         toks(src),
-        vec![String("    deep\nshallow".into()), Eof]
+        vec![String("    deep\nshallow".into(), StringKind::Multiline), Eof]
     );
 }
 
@@ -464,7 +465,7 @@ fn multiline_string_blank_lines() {
     let src = "\"\"\"\n    hello\n\n    world\n    \"\"\"";
     assert_eq!(
         toks(src),
-        vec![String("hello\n\nworld".into()), Eof]
+        vec![String("hello\n\nworld".into(), StringKind::Multiline), Eof]
     );
 }
 
@@ -475,7 +476,7 @@ fn multiline_string_no_extra_tokens_for_inner_newlines() {
     let tokens = toks(src);
     // Should just be String + Eof
     assert_eq!(tokens.len(), 2);
-    assert_eq!(tokens[0], String("hello\nworld".into()));
+    assert_eq!(tokens[0], String("hello\nworld".into(), StringKind::Multiline));
 }
 
 // --- Raw multiline strings ---
@@ -486,13 +487,13 @@ fn raw_multiline_string_basic() {
     // \n should be literal backslash-n, not a newline
     assert_eq!(
         toks(src),
-        vec![String("hello\\nworld".into()), Eof]
+        vec![String("hello\\nworld".into(), StringKind::RawMultiline), Eof]
     );
 }
 
 #[test]
 fn raw_multiline_string_empty() {
-    assert_eq!(toks("@\"\"\"\"\"\""), vec![String("".into()), Eof]);
+    assert_eq!(toks("@\"\"\"\"\"\""), vec![String("".into(), StringKind::RawMultiline), Eof]);
 }
 
 #[test]
@@ -512,8 +513,8 @@ fn multiline_interp_basic() {
     let src = "$\"\"\"\n    hello {name}\n    \"\"\"";
     let tokens = toks(src);
     // Should produce InterpolatedString with stripped indentation
-    assert!(matches!(&tokens[0], InterpolatedString(_)));
-    if let InterpolatedString(parts) = &tokens[0] {
+    assert!(matches!(&tokens[0], InterpolatedString(_, _)));
+    if let InterpolatedString(parts, _) = &tokens[0] {
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0], InterpPart::Literal("hello ".into()));
         // parts[1] is a Hole containing the `name` tokens

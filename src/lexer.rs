@@ -1,4 +1,4 @@
-use crate::token::{InterpPart, Span, Spanned, Token, Trivia};
+use crate::token::{InterpPart, Span, Spanned, StringKind, Token, Trivia};
 
 /// Strip leading indentation from a multiline string based on the column of the closing `"""`.
 /// - The first element (empty string from newline after opening `"""`) is removed.
@@ -324,7 +324,7 @@ impl Lexer {
                 }
                 Some('"') => {
                     self.advance(); // consume closing "
-                    return Ok(Token::String(s));
+                    return Ok(Token::String(s, StringKind::Normal));
                 }
                 Some('\\') => {
                     self.advance(); // consume backslash
@@ -380,7 +380,7 @@ impl Lexer {
                     if !literal.is_empty() {
                         parts.push(InterpPart::Literal(literal));
                     }
-                    return Ok(Token::InterpolatedString(parts));
+                    return Ok(Token::InterpolatedString(parts, StringKind::Interpolated));
                 }
                 Some('\\') => {
                     self.advance();
@@ -491,7 +491,7 @@ impl Lexer {
                 }
                 Some('"') => {
                     self.advance();
-                    return Ok(Token::String(s));
+                    return Ok(Token::String(s, StringKind::Raw));
                 }
                 Some(ch) => {
                     s.push(ch);
@@ -518,7 +518,7 @@ impl Lexer {
                     self.advance(); // "
                     self.advance(); // "
                     self.advance(); // "
-                    return Ok(Token::String(strip_indentation(&s, close_col)));
+                    return Ok(Token::String(strip_indentation(&s, close_col), StringKind::RawMultiline));
                 }
                 Some(ch) => {
                     s.push(ch);
@@ -545,7 +545,7 @@ impl Lexer {
                     self.advance(); // "
                     self.advance(); // "
                     self.advance(); // "
-                    return Ok(Token::String(strip_indentation(&s, close_col)));
+                    return Ok(Token::String(strip_indentation(&s, close_col), StringKind::Multiline));
                 }
                 Some('\\') => {
                     self.advance();
@@ -606,7 +606,7 @@ impl Lexer {
                     }
                     // Apply indentation stripping to literal parts
                     strip_indentation_interp(&mut parts, close_col);
-                    return Ok(Token::InterpolatedString(parts));
+                    return Ok(Token::InterpolatedString(parts, StringKind::InterpolatedMultiline));
                 }
                 Some('\\') => {
                     self.advance();

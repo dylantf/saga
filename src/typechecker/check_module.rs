@@ -1000,7 +1000,7 @@ fn collect_codegen_info(
                 // Private externals are needed for handler body inlining.
                 if let Some(ext) = annotations.iter().find(|a| a.name == "external")
                     && ext.args.len() >= 3
-                    && let (crate::ast::Lit::String(erl_mod), crate::ast::Lit::String(erl_func)) =
+                    && let (crate::ast::Lit::String(erl_mod, _), crate::ast::Lit::String(erl_func, _)) =
                         (&ext.args[1], &ext.args[2])
                 {
                     external_funs.push((

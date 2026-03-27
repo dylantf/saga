@@ -88,6 +88,9 @@ fn is_block_like(expr: &Expr) -> bool {
         | ExprKind::Case { .. }
         | ExprKind::Do { .. }
         | ExprKind::Receive { .. } => true,
+        // Multiline strings handle their own layout with hardlines
+        ExprKind::Lit { value: Lit::String(_, kind), .. } => kind.is_multiline(),
+        ExprKind::StringInterp { kind, .. } => kind.is_multiline(),
         // Pipes are not block-like — they break after = like other expressions
         ExprKind::Pipe { .. } => false,
         // with expressions where the handler is inline are block-like

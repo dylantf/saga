@@ -357,7 +357,7 @@ fn format_spat(pat: &SPat) -> String {
         SPat::Literal(lit) => match lit {
             Lit::Int(s, _) => s.clone(),
             Lit::Float(s, _) => s.clone(),
-            Lit::String(s) => format!("\"{}\"", s),
+            Lit::String(s, _) => format!("\"{}\"", s),
             Lit::Bool(b) => b.to_string(),
             Lit::Unit => "()".into(),
         },

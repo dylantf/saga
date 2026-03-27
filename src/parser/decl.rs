@@ -132,7 +132,7 @@ impl Parser {
                     && (s == "test" || s == "describe" || s == "skip" || s == "only")
                     && matches!(
                         self.tokens.get(self.pos + 1).map(|t| &t.token),
-                        Some(Token::String(_))
+                        Some(Token::String(..))
                     ) =>
             {
                 // Top-level test/describe: parse as expression (desugar triggers in parse_primary)
@@ -397,7 +397,7 @@ impl Parser {
                         self.expect(Token::Comma)?;
                     }
                     let lit = match self.advance() {
-                        Token::String(s) => Lit::String(s),
+                        Token::String(s, kind) => Lit::String(s, kind),
                         Token::Int(s, n) => Lit::Int(s, n),
                         Token::Float(s, f) => Lit::Float(s, f),
                         Token::True => Lit::Bool(true),
