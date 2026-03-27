@@ -1,6 +1,5 @@
 use super::Doc;
 use super::decl::*;
-use super::expr::format_expr;
 use super::helpers::{docs_from_vec, format_trailing, format_trivia};
 use super::type_expr::*;
 use crate::ast::*;
@@ -104,12 +103,11 @@ fn format_decl(decl: &Decl) -> Doc {
             value,
             ..
         } => {
-            let mut d = Doc::text(format!("let {}", name));
+            let mut lhs = Doc::text(format!("let {}", name));
             if let Some(ty) = annotation {
-                d = d.append(Doc::text(" : ")).append(format_type_expr(ty));
+                lhs = lhs.append(Doc::text(" : ")).append(format_type_expr(ty));
             }
-            d = d.append(Doc::text(" = ")).append(format_expr(value));
-            d
+            format_binding(lhs, value)
         }
         Decl::TypeDef {
             doc,

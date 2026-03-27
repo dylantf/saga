@@ -102,7 +102,18 @@ piped x = x
 
 main () = {
   println "Hello world"
+
+  let _single_line_pipe = 1 |> add 2 |> add 3
+
+  let _multi_line_pipe = 
+    1
+    |> add 2
+    |> add 3
+
+  let _long_pipe = 1 |> add 2 |> add 3 |> add 4 |> add 5 |> add 6 |> add 7 |> add 8
+
+  let _longer_pipe = 1 |> add 2 |> add 3 |> add 4 |> add 5 |> add 6 |> add 7 |> add 8 |> add 9 |> add 10
 }
 
-# comment 44: last comment in file
+# comment 9999: last comment in file
 

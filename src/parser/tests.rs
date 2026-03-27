@@ -367,7 +367,7 @@ fn application_binds_tighter_than_binop() {
 fn forward_pipe() {
     let expr = parse_expr("x |> f");
     match expr {
-        Expr { kind: ExprKind::Pipe { ref segments }, .. } => {
+        Expr { kind: ExprKind::Pipe { ref segments, .. }, .. } => {
             assert_eq!(segments.len(), 2);
             assert!(matches!(segments[0].node, Expr { kind: ExprKind::Var { ref name, .. }, .. } if name == "x"));
             assert!(matches!(segments[1].node, Expr { kind: ExprKind::Var { ref name, .. }, .. } if name == "f"));

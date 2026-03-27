@@ -87,7 +87,12 @@ impl Parser {
             if matches!(self.peek(), Token::Pipe) {
                 // First segment is `left` (no pipe-specific trivia, it gets decl-level trivia)
                 let mut segments = vec![Annotated::bare(left)];
+                let mut multiline = false;
                 while matches!(self.peek(), Token::Pipe) {
+                    // Track if any |> is on a new line
+                    if self.tokens[self.pos].preceded_by_newline {
+                        multiline = true;
+                    }
                     // Capture trailing comment from end of previous segment
                     let trailing = self.tokens[self.pos - 1].trailing_comment.take();
                     if let Some(comment) = trailing
@@ -122,7 +127,7 @@ impl Parser {
                 }
                 let start_span = segments.first().unwrap().node.span;
                 let end_span = segments.last().unwrap().node.span;
-                left = Expr { id: self.next_id(), span: start_span.to(end_span), kind: ExprKind::Pipe { segments }};
+                left = Expr { id: self.next_id(), span: start_span.to(end_span), kind: ExprKind::Pipe { segments, multiline }};
                 continue;
             }
 

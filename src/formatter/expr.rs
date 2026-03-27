@@ -275,8 +275,8 @@ pub fn format_expr(expr: &Expr) -> Doc {
         }
 
         // --- Surface syntax sugar ---
-        ExprKind::Pipe { segments } => {
-            let has_trivia = segments.iter().any(|s| {
+        ExprKind::Pipe { segments, multiline } => {
+            let force_multiline = *multiline || segments.iter().any(|s| {
                 s.trailing_comment.is_some()
                     || !s.leading_trivia.is_empty()
                     || !s.trailing_trivia.is_empty()
@@ -288,7 +288,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
             // Tail segments (indented via nest)
             let mut tail = Doc::Nil;
             for seg in &segments[1..] {
-                if has_trivia {
+                if force_multiline {
                     tail = tail.append(Doc::hardline());
                 } else {
                     tail = tail.append(Doc::line());
@@ -306,7 +306,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
             }
 
             let result = docs![head, Doc::nest(2, tail)];
-            if has_trivia {
+            if force_multiline {
                 result
             } else {
                 Doc::group(result)
@@ -460,11 +460,11 @@ pub fn format_stmt(stmt: &Stmt) -> Doc {
             ..
         } => {
             let kw = if *assert { "let! " } else { "let " };
-            let mut d = Doc::text(kw).append(format_pat(pattern));
+            let mut lhs = Doc::text(kw).append(format_pat(pattern));
             if let Some(ty) = annotation {
-                d = d.append(Doc::text(" : ")).append(format_type_expr(ty));
+                lhs = lhs.append(Doc::text(" : ")).append(format_type_expr(ty));
             }
-            d.append(Doc::text(" = ")).append(format_expr(value))
+            super::decl::format_binding(lhs, value)
         }
         Stmt::LetFun {
             name,
@@ -473,14 +473,14 @@ pub fn format_stmt(stmt: &Stmt) -> Doc {
             body,
             ..
         } => {
-            let mut d = Doc::text(format!("let {}", name));
+            let mut lhs = Doc::text(format!("let {}", name));
             for p in params {
-                d = d.append(Doc::text(" ")).append(format_pat(p));
+                lhs = lhs.append(Doc::text(" ")).append(format_pat(p));
             }
             if let Some(g) = guard {
-                d = d.append(Doc::text(" | ")).append(format_expr(g));
+                lhs = lhs.append(Doc::text(" | ")).append(format_expr(g));
             }
-            d.append(Doc::text(" = ")).append(format_expr(body))
+            super::decl::format_binding(lhs, body)
         }
         Stmt::Expr(expr) => format_expr(expr),
     }

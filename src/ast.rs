@@ -464,7 +464,12 @@ pub enum ExprKind {
     /// Each segment carries leading trivia (comments before `|>`) and
     /// a trailing comment (comment at end of that segment, before the next `|>`).
     /// The first segment's leading trivia comes from the head expression.
-    Pipe { segments: Vec<Annotated<Expr>> },
+    Pipe {
+        segments: Vec<Annotated<Expr>>,
+        /// True if any `|>` was on a new line in the source — the user
+        /// intended multi-line layout, so the formatter should preserve it.
+        multiline: bool,
+    },
 
     /// `f <| x` -- backward pipe chain (desugars to App(f, x))
     PipeBack { segments: Vec<Annotated<Expr>> },
@@ -563,7 +568,7 @@ impl Expr {
                         .is_some_and(|(t, b)| t.contains_resume() || b.contains_resume())
             }
             ExprKind::Ascription { expr, .. } => expr.contains_resume(),
-            ExprKind::Pipe { segments } => {
+            ExprKind::Pipe { segments, .. } => {
                 segments.iter().any(|s| s.node.contains_resume())
             }
             ExprKind::PipeBack { segments }

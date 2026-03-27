@@ -46,15 +46,54 @@ pub fn format_fun_binding(
     guard: &Option<Box<Expr>>,
     body: &Expr,
 ) -> Doc {
-    let mut d = Doc::text(name.to_string());
+    let mut lhs = Doc::text(name.to_string());
     for p in params {
-        d = d.append(Doc::text(" ")).append(format_pat(p));
+        lhs = lhs.append(Doc::text(" ")).append(format_pat(p));
     }
     if let Some(g) = guard {
-        d = d.append(Doc::text(" | ")).append(format_expr(g));
+        lhs = lhs.append(Doc::text(" | ")).append(format_expr(g));
     }
-    d = d.append(Doc::text(" = ")).append(format_expr(body));
-    d
+    format_binding(lhs, body)
+}
+
+/// Format `lhs = body` with smart line-breaking.
+/// Block-like bodies (blocks, case, etc.) stay on the `=` line since they
+/// handle their own multi-line layout. Other bodies break after `=` when
+/// the whole thing doesn't fit on one line.
+pub fn format_binding(lhs: Doc, body: &Expr) -> Doc {
+    let body_doc = format_expr(body);
+    if is_block_like(body) {
+        // { and case stay on the = line; the body handles its own breaking
+        docs![lhs, Doc::text(" = "), body_doc]
+    } else {
+        // Try one line; break after = if too long
+        Doc::group(docs![
+            lhs,
+            Doc::text(" ="),
+            Doc::nest(2, docs![Doc::line(), body_doc])
+        ])
+    }
+}
+
+/// Is this expression "block-like" — handles its own multi-line layout?
+/// These should stay on the `=` line rather than breaking after `=`.
+fn is_block_like(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Block { .. }
+        | ExprKind::Case { .. }
+        | ExprKind::Do { .. }
+        | ExprKind::Receive { .. } => true,
+        // Pipes that are forced multi-line (user linebreaks or trivia)
+        // stay on the = line to avoid double-indentation
+        ExprKind::Pipe { segments, multiline } => *multiline || segments.iter().any(|s| {
+            s.trailing_comment.is_some()
+                || !s.leading_trivia.is_empty()
+                || !s.trailing_trivia.is_empty()
+        }),
+        // with expressions where the handler is inline are block-like
+        ExprKind::With { handler, .. } => matches!(handler.as_ref(), Handler::Inline { .. }),
+        _ => false,
+    }
 }
 
 pub fn format_type_def(

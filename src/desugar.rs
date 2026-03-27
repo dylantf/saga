@@ -145,7 +145,7 @@ fn desugar_expr(expr: &mut Expr) {
         ExprKind::Ascription { expr: inner, .. } => desugar_expr(inner),
 
         // Sugar nodes: recurse into children before transforming
-        ExprKind::Pipe { segments } => {
+        ExprKind::Pipe { segments, .. } => {
             for seg in segments {
                 desugar_expr(&mut seg.node);
             }
@@ -198,7 +198,7 @@ fn desugar_expr(expr: &mut Expr) {
     match &mut expr.kind {
         ExprKind::Pipe { .. } => {
             // [a, b, c] → App(c, App(b, a))
-            let ExprKind::Pipe { segments } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            let ExprKind::Pipe { segments, .. } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
             let mut iter = segments.into_iter();
             let mut acc = iter.next().unwrap().node;
             for seg in iter {
