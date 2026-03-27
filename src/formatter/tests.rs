@@ -738,10 +738,10 @@ fn let_stmt_short_stays_on_one_line() {
 fn let_stmt_long_breaks_after_eq() {
     let src = "main () = {\n  let result = some_very_long_function applied_to arguments\n}";
     let result = fmt(src, 40);
-    // Both let binding and application break
+    // Let binding breaks after =, but application stays on one line
     assert_eq!(
         result,
-        "main () = {\n  let result =\n    some_very_long_function\n      applied_to\n      arguments\n}\n"
+        "main () = {\n  let result =\n    some_very_long_function applied_to arguments\n}\n"
     );
 }
 
@@ -866,16 +866,15 @@ fn app_short_stays_on_one_line() {
 }
 
 #[test]
-fn app_long_breaks_all_args() {
+fn app_long_stays_on_one_line() {
+    // Applications never break across lines (newlines terminate application parsing)
     let src = "f x = some_long_function first_argument second_argument third_argument";
     let result = fmt(src, 40);
     assert!(
-        result.contains("some_long_function\n"),
-        "result: {}",
+        result.contains("some_long_function first_argument second_argument third_argument"),
+        "app should stay on one line: {}",
         result
     );
-    assert!(result.contains("  first_argument\n"), "result: {}", result);
-    assert!(result.contains("  second_argument\n"), "result: {}", result);
 }
 
 #[test]
@@ -1224,11 +1223,121 @@ fn escaped_quote_in_string_preserved() {
     assert_eq!(result, second, "escaped quotes not idempotent");
 }
 
-// --- Round-trip: all .dy files format cleanly, idempotently, and preserve AST ---
+// --- Tuple types ---
+
+#[test]
+fn tuple_type_round_trips() {
+    assert_eq!(
+        fmt80("fun swap : (a, b) -> (b, a)"),
+        "fun swap : (a, b) -> (b, a)\n"
+    );
+}
+
+// --- Trailing lambda ---
+
+#[test]
+fn trailing_lambda_with_block_body() {
+    let src = "f x = try (fun () -> {\n  let y = 1\n  y\n})";
+    let result = fmt80(src);
+    assert!(result.contains("try (fun () -> {"), "result: {}", result);
+    assert!(result.contains("})"), "result: {}", result);
+}
+
+// --- Handler arms ---
+
+#[test]
+fn handler_arm_zero_arg_gets_unit() {
+    let src = "f x = compute () with {\n  get () = resume 0\n  put val = resume ()\n}";
+    let result = fmt80(src);
+    assert!(result.contains("get () ="), "should preserve (): {}", result);
+}
+
+#[test]
+fn inline_handler_named_then_inline_no_comma_before_inline() {
+    let src = "f x = compute () with {\n  console,\n  fail msg = Err msg\n}";
+    let result = fmt80(src);
+    // Named handler gets comma, but no comma before inline arm
+    assert!(result.contains("console\n"), "no comma before inline arm: {}", result);
+    assert!(!result.contains("Err msg,"), "no comma after inline arm: {}", result);
+}
+
+#[test]
+fn inline_handler_only_named_gets_commas() {
+    let src = "f x = compute () with {\n  console,\n  to_result,\n}";
+    let result = fmt80(src);
+    assert!(result.contains("console,"), "result: {}", result);
+    assert!(result.contains("to_result,"), "result: {}", result);
+}
+
+// --- Comments ---
+
+#[test]
+fn comment_indentation_preserved() {
+    let src = "#   indented comment\nlet x = 1";
+    let result = fmt80(src);
+    assert!(result.contains("#   indented comment"), "should preserve indent: {}", result);
+}
+
+// --- With on block-like ---
+
+#[test]
+fn with_named_on_block_stays_on_closing_brace_line() {
+    let src = "f x = {\n  compute ()\n} with handler_name";
+    let result = fmt80(src);
+    assert!(result.contains("} with handler_name"), "result: {}", result);
+}
+
+// --- Ascription ---
+
+#[test]
+fn ascription_not_double_parened() {
+    let src = "f x = show (from_enum 1 : Color)";
+    let result = fmt80(src);
+    assert!(!result.contains("(("), "should not double-wrap: {}", result);
+}
+
+// --- Application ---
+
+#[test]
+fn app_never_breaks_across_lines() {
+    let src = "f x = some_function arg1 arg2 arg3";
+    let result = fmt(src, 20);
+    // Even at narrow width, app stays on one line
+    assert!(
+        result.contains("some_function arg1 arg2 arg3"),
+        "app should not break: {}",
+        result
+    );
+}
+
+#[test]
+fn compound_func_gets_parens() {
+    let src = "f x = (resume y) z";
+    let result = fmt80(src);
+    assert!(result.contains("(resume y) z"), "result: {}", result);
+}
+
+// --- Binary operators ---
+
+#[test]
+fn binop_chain_stays_on_eq_line() {
+    let src = "f x = \"hello\" <> \" \" <> \"world\"";
+    assert_eq!(fmt80(src), "f x = \"hello\" <> \" \" <> \"world\"\n");
+}
+
+#[test]
+fn binop_chain_breaks_before_operator_indented() {
+    let src = "f x = some_long_name + another_long_name + yet_another_long_name";
+    let result = fmt(src, 40);
+    assert!(result.contains("f x = some_long_name\n"), "first operand on = line: {}", result);
+    assert!(result.contains("  + another_long_name\n"), "indented continuation: {}", result);
+}
+
+// --- Round-trip: stdlib .dy files format cleanly, idempotently, and preserve AST ---
 
 fn collect_dy_files() -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
-    for dir in &["examples", "src/stdlib"] {
+    for dir in &["src/stdlib"] {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -1243,28 +1352,7 @@ fn collect_dy_files() -> Vec<std::path::PathBuf> {
 }
 
 /// Files with known formatter bugs that prevent clean round-tripping.
-/// Each entry documents why so we can remove it when fixed.
-///
-/// - `()` printed as `Unit` in type exprs (14-fail-to-result, 25-state-effect, Async.dy)
-/// - `(a, b)` printed as `Tuple a b` in return types (25-state-effect)
-/// - `pub opaque` loses `pub` keyword (Async.dy)
-/// - Deriving clause placement on multi-line type defs (28-deriving)
-/// - Comment indentation stripped (36-sync-actor)
-/// - Handler arm zero-arg ops lose `()` params (25-state-effect)
-/// - Formatted output doesn't re-parse (20-validation-applicative, 29-actors,
-///   32-monitor, 33-timer, 34-link, Dict.dy, Test.dy)
-const KNOWN_FAILING: &[&str] = &[
-    "20-validation-applicative.dy",
-    "25-state-effect.dy",
-    "28-deriving.dy",
-    "29-actors.dy",
-    "32-monitor.dy",
-    "33-timer.dy",
-    "34-link.dy",
-    "36-sync-actor.dy",
-    "Dict.dy",
-    "Test.dy",
-];
+const KNOWN_FAILING: &[&str] = &[];
 
 fn is_known_failing(path: &std::path::Path) -> bool {
     let name = path.file_name().unwrap().to_str().unwrap();

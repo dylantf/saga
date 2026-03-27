@@ -94,8 +94,10 @@ pub(super) fn is_block_like(expr: &Expr) -> bool {
             ..
         } => kind.is_multiline(),
         ExprKind::StringInterp { kind, .. } => kind.is_multiline(),
-        // Pipes are not block-like — they break after = like other expressions
+        // Pipes and binop chains stay on the = line — they handle their own
+        // multi-line layout like `x |> f |> g` or `"a" <> "b" <> "c"`
         ExprKind::Pipe { .. } => false,
+        ExprKind::BinOp { .. } => true,
         // with expressions where the handler is inline are block-like
         ExprKind::With { handler, .. } => matches!(handler.as_ref(), Handler::Inline { .. }),
         _ => false,
@@ -132,18 +134,22 @@ pub fn format_type_def(
 
     parts.push(Doc::text(header));
 
-    // Variants use nest(2) so = / | prefixes are indented
-    let mut variant_body = Doc::Nil;
+    let deriving_doc = if !deriving.is_empty() {
+        Doc::text(format!(" deriving ({})", deriving.join(", ")))
+    } else {
+        Doc::Nil
+    };
+
+    // Format each variant
+    let mut variant_docs: Vec<Doc> = Vec::new();
     for (i, ann) in variants.iter().enumerate() {
         let variant = &ann.node;
+        let mut vdoc = Doc::Nil;
         if !ann.leading_trivia.is_empty() {
-            variant_body = variant_body.append(Doc::hardline());
-            variant_body = variant_body.append(format_trivia(&ann.leading_trivia));
+            vdoc = vdoc.append(format_trivia(&ann.leading_trivia));
         }
         let prefix = if i == 0 { "= " } else { "| " };
-        variant_body = variant_body.append(Doc::hardline());
-        variant_body = variant_body.append(Doc::text(prefix));
-        variant_body = variant_body.append(Doc::text(&variant.name));
+        vdoc = vdoc.append(Doc::text(prefix)).append(Doc::text(&variant.name));
         if !variant.fields.is_empty() {
             let fields: Vec<Doc> = variant
                 .fields
@@ -153,17 +159,37 @@ pub fn format_type_def(
                     None => format_type_expr(ty),
                 })
                 .collect();
-            variant_body = variant_body.append(Doc::text("("));
-            variant_body = variant_body.append(Doc::join(Doc::text(", "), fields));
-            variant_body = variant_body.append(Doc::text(")"));
+            vdoc = vdoc.append(Doc::text("("));
+            vdoc = vdoc.append(Doc::join(Doc::text(", "), fields));
+            vdoc = vdoc.append(Doc::text(")"));
         }
-        variant_body = variant_body.append(format_trailing(&ann.trailing_comment));
+        vdoc = vdoc.append(format_trailing(&ann.trailing_comment));
+        variant_docs.push(vdoc);
     }
-    parts.push(Doc::nest(2, variant_body));
 
-    if !deriving.is_empty() {
-        parts.push(Doc::text(format!(" deriving ({})", deriving.join(", "))));
+    // Try flat: `type Name = A | B | C deriving (...)`
+    // Broken:  `type Name\n  = A\n  | B\n  | C\n  deriving (...)`
+    let mut flat_variants = Doc::text(" ");
+    for (i, vd) in variant_docs.iter().enumerate() {
+        if i > 0 {
+            flat_variants = flat_variants.append(Doc::text(" "));
+        }
+        flat_variants = flat_variants.append(vd.clone());
     }
+    flat_variants = flat_variants.append(deriving_doc.clone());
+
+    let mut broken_variants = Doc::Nil;
+    for vd in &variant_docs {
+        broken_variants = broken_variants.append(Doc::hardline()).append(vd.clone());
+    }
+    if !deriving.is_empty() {
+        broken_variants = broken_variants.append(Doc::hardline()).append(deriving_doc);
+    }
+
+    parts.push(Doc::group(Doc::if_break(
+        Doc::nest(2, broken_variants),
+        flat_variants,
+    )));
 
     docs_from_vec(parts)
 }

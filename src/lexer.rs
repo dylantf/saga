@@ -204,7 +204,13 @@ impl Lexer {
                 self.advance();
             }
         }
-        (text.trim().to_string(), is_doc)
+        // Strip at most one leading space after # (preserve further indentation)
+        let text = if text.starts_with(' ') {
+            text[1..].trim_end().to_string()
+        } else {
+            text.trim_end().to_string()
+        };
+        (text, is_doc)
     }
 
     fn read_number(&mut self) -> Token {

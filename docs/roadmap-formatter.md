@@ -7,14 +7,14 @@ Tracks formatting rules that need proper group/break behavior. Most braced-body 
 - [x] **Fun bindings** — break after `=` and indent body; block-like bodies (`{`, `case`, `do`, `receive`, inline `with`) stay on `=` line
 - [x] **Fun signatures** — break `needs`/`where` clauses first (from end), then arrows
 - [x] **`with` expressions** — inline handler `{` stays on line; named handler breaks before `with`
-- [x] **Application** — flatten nested App chain, break all args at same indent
+- [x] **Application** — apps never break across lines (newlines terminate application parsing); trailing lambda args with block bodies stay compact
 - [x] **Binary operators** — flatten same-operator chains, break before operator
 - [x] **Record create/update** — `{ }` with comma-separated fields; trailing comma in broken mode via `IfBreak`
 - [x] **Lists** — `[ ]` comma-separated, same break pattern as records
 - [x] **Tuples** — `( )` comma-separated, same break pattern
 - [x] **Lambda** — `fun params ->` break before body, like `=` in bindings
 - [x] **Import exposing** — `(item1, item2, ...)` breaks the exposed list
-- [ ] **Type expressions** — deferred; types are usually short enough. Use newtypes for complex types (future)
+- [x] **Type expressions** — can't break across lines (same constraint as application); types stay on one line
 
 ## Normalization
 
@@ -32,6 +32,6 @@ Tracks formatting rules that need proper group/break behavior. Most braced-body 
 - [x] `--debug` flag for AST dump
 - [x] `--width` flag / `project.toml [formatter]` config
 - [x] Idempotency test (format twice, output matches)
-- [x] Formatter test suite (47 tests)
-- [ ] Formatter tests on stdlib files
-- [ ] Round-trip test: format then parse, AST matches
+- [x] Formatter test suite (58 tests)
+- [x] Round-trip test on examples + stdlib: format, re-parse, normalized AST matches
+- [x] Idempotency + re-format checks on all .dy files

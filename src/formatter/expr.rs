@@ -82,7 +82,16 @@ pub fn format_expr(expr: &Expr) -> Doc {
         ExprKind::App { .. } => {
             // Flatten nested App chain: App(App(App(f, a), b), c) -> [f, a, b, c]
             let (func, args) = flatten_app(expr);
-            let func_doc = format_expr(func);
+            // Wrap the function in parens if it's a compound expression
+            // (e.g. `(resume x) y` must keep parens to avoid becoming `resume x y`)
+            let func_doc = match &func.kind {
+                ExprKind::Var { .. }
+                | ExprKind::Constructor { .. }
+                | ExprKind::QualifiedName { .. }
+                | ExprKind::FieldAccess { .. }
+                | ExprKind::EffectCall { .. } => format_expr(func),
+                _ => format_expr_atom(func),
+            };
 
             // Check if the last arg is a lambda with a block-like body.
             // If so, treat it as a "trailing lambda": keep `(fun params -> {`
@@ -108,19 +117,19 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 return docs![prefix, Doc::text(" "), lhs, body_doc, Doc::text(")")];
             }
 
-            let arg_docs: Vec<Doc> = args.iter().map(|a| format_expr_atom(a)).collect();
-
-            // flat: `func arg1 arg2 arg3`
-            // broken: `func\n  arg1\n  arg2\n  arg3`
-            let mut tail = Doc::Nil;
-            for arg in arg_docs {
-                tail = tail.append(Doc::line()).append(arg);
+            // Applications never break across lines — newlines terminate
+            // application parsing, so breaking would change semantics.
+            // Users can wrap in parens to force multi-line if needed.
+            let mut d = func_doc;
+            for a in &args {
+                d = d.append(Doc::text(" ")).append(format_expr_atom(a));
             }
-            Doc::group(docs![func_doc, Doc::nest(2, tail)])
+            d
         }
 
         ExprKind::BinOp { op, .. } => {
             // Flatten same-operator chains: (a + b) + c -> [a, b, c]
+            // Break before operator: keeps operators aligned on the left.
             let (operands, chain_op) = flatten_binop(expr, op);
             let op_str = format_binop(chain_op);
 
@@ -132,7 +141,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
                     .append(Doc::text(format!("{} ", op_str)))
                     .append(format_expr(operand));
             }
-            Doc::group(docs![first, tail])
+            Doc::group(docs![first, Doc::nest(2, tail)])
         }
 
         ExprKind::UnaryMinus { expr } => {
@@ -256,6 +265,11 @@ pub fn format_expr(expr: &Expr) -> Doc {
             match handler.as_ref() {
                 // Inline handler: always break the block, but keep expr with { on same line
                 Handler::Inline { .. } => {
+                    docs![expr_doc, Doc::text(" with "), handler_doc]
+                }
+                // Named handler: if expr is block-like (ends with `}`), `with` must stay
+                // on the `}` line or it won't parse.
+                Handler::Named(..) if is_block_like(expr) => {
                     docs![expr_doc, Doc::text(" with "), handler_doc]
                 }
                 // Named handler: try one line, break before with if too long
@@ -462,7 +476,8 @@ pub fn format_expr_atom(expr: &Expr) -> Doc {
         | ExprKind::Tuple { .. }
         | ExprKind::Block { .. }
         | ExprKind::StringInterp { .. }
-        | ExprKind::ListLit { .. } => format_expr(expr),
+        | ExprKind::ListLit { .. }
+        | ExprKind::Ascription { .. } => format_expr(expr),
         _ => docs![Doc::text("("), format_expr(expr), Doc::text(")")],
     }
 }
@@ -553,8 +568,13 @@ fn format_handler(handler: &Handler) -> Doc {
 
 fn format_handler_arm(arm: &HandlerArm) -> Doc {
     let mut d = Doc::text(&arm.op_name);
-    for (param, _) in &arm.params {
-        d = d.append(Doc::text(format!(" {}", param)));
+    if arm.params.is_empty() {
+        // Zero-arg effect ops need explicit () in handler arms
+        d = d.append(Doc::text(" ()"));
+    } else {
+        for (param, _) in &arm.params {
+            d = d.append(Doc::text(format!(" {}", param)));
+        }
     }
     d = d.append(Doc::text(" = ")).append(format_expr(&arm.body));
     d

@@ -55,29 +55,30 @@ impl Parser {
         let mut left = self.parse_application()?;
 
         loop {
-            // Operators on a new line (at top-level nesting) do not continue the expression,
-            // except for |> which explicitly supports multi-line piping.
-            let on_new_line = self.next_on_new_line();
+            // Binary operators continue across lines — an operator token at the
+            // start of a line is unambiguous (it can't begin a new statement).
+            // For `-`, this means `foo\n-bar` is subtraction, not `foo` then `(-bar)`.
+            // Use `(-bar)` for unary negation as a separate expression.
             let (op, bp) = match self.peek() {
-                Token::Pipe => (None, 1), // desugars to App(right, left) — continues across lines
-                Token::PipeBack if !on_new_line => (None, 1),
-                Token::ComposeForward if !on_new_line => (None, 1),
-                Token::ComposeBack if !on_new_line => (None, 1),
-                Token::DoubleColon if !on_new_line => (None, 1),
-                Token::Or if !on_new_line => (Some(BinOp::Or), 2),
-                Token::And if !on_new_line => (Some(BinOp::And), 3),
-                Token::EqEq if !on_new_line => (Some(BinOp::Eq), 4),
-                Token::NotEq if !on_new_line => (Some(BinOp::NotEq), 4),
-                Token::Lt if !on_new_line => (Some(BinOp::Lt), 5),
-                Token::Gt if !on_new_line => (Some(BinOp::Gt), 5),
-                Token::LtEq if !on_new_line => (Some(BinOp::LtEq), 5),
-                Token::GtEq if !on_new_line => (Some(BinOp::GtEq), 5),
-                Token::Concat if !on_new_line => (Some(BinOp::Concat), 6),
-                Token::Plus if !on_new_line => (Some(BinOp::Add), 6),
-                Token::Minus if !on_new_line => (Some(BinOp::Sub), 6),
-                Token::Star if !on_new_line => (Some(BinOp::Mul), 7),
-                Token::Slash if !on_new_line => (Some(BinOp::FloatDiv), 7),
-                Token::Modulo if !on_new_line => (Some(BinOp::Mod), 7),
+                Token::Pipe => (None, 1),
+                Token::PipeBack => (None, 1),
+                Token::ComposeForward => (None, 1),
+                Token::ComposeBack => (None, 1),
+                Token::DoubleColon => (None, 1),
+                Token::Or => (Some(BinOp::Or), 2),
+                Token::And => (Some(BinOp::And), 3),
+                Token::EqEq => (Some(BinOp::Eq), 4),
+                Token::NotEq => (Some(BinOp::NotEq), 4),
+                Token::Lt => (Some(BinOp::Lt), 5),
+                Token::Gt => (Some(BinOp::Gt), 5),
+                Token::LtEq => (Some(BinOp::LtEq), 5),
+                Token::GtEq => (Some(BinOp::GtEq), 5),
+                Token::Concat => (Some(BinOp::Concat), 6),
+                Token::Plus => (Some(BinOp::Add), 6),
+                Token::Minus => (Some(BinOp::Sub), 6),
+                Token::Star => (Some(BinOp::Mul), 7),
+                Token::Slash => (Some(BinOp::FloatDiv), 7),
+                Token::Modulo => (Some(BinOp::Mod), 7),
                 _ => break,
             };
 
