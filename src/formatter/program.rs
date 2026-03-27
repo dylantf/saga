@@ -7,9 +7,10 @@ use crate::docs;
 
 /// Format an entire program (list of annotated declarations).
 pub fn format_program(program: &AnnotatedProgram) -> Doc {
+    let decls = sort_imports(&program.declarations);
     let mut result = Doc::Nil;
     let mut first = true;
-    for ann in &program.declarations {
+    for ann in &decls {
         if matches!(ann.node, Decl::DictConstructor { .. }) {
             continue;
         }
@@ -47,6 +48,57 @@ pub fn format_program(program: &AnnotatedProgram) -> Doc {
     }
 
     result
+}
+
+/// Sort imports: Std.* first (sorted), then everything else (sorted).
+/// Non-import declarations keep their original order.
+fn sort_imports(decls: &[Annotated<Decl>]) -> Vec<Annotated<Decl>> {
+    // Find the range of contiguous imports (they must stay grouped together)
+    let mut result = decls.to_vec();
+
+    // Collect indices of all import declarations
+    let import_indices: Vec<usize> = result
+        .iter()
+        .enumerate()
+        .filter(|(_, ann)| matches!(ann.node, Decl::Import { .. }))
+        .map(|(i, _)| i)
+        .collect();
+
+    if import_indices.len() <= 1 {
+        return result;
+    }
+
+    // Extract imports, sort them, put them back
+    let mut imports: Vec<Annotated<Decl>> = import_indices
+        .iter()
+        .map(|&i| result[i].clone())
+        .collect();
+
+    imports.sort_by(|a, b| {
+        let path_a = import_path(&a.node);
+        let path_b = import_path(&b.node);
+        let a_is_std = path_a.first() == Some(&"Std".to_string());
+        let b_is_std = path_b.first() == Some(&"Std".to_string());
+        match (a_is_std, b_is_std) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => path_a.cmp(path_b),
+        }
+    });
+
+    // Put sorted imports back at their original positions
+    for (slot, import) in import_indices.iter().zip(imports) {
+        result[*slot] = import;
+    }
+
+    result
+}
+
+fn import_path(decl: &Decl) -> &[String] {
+    match decl {
+        Decl::Import { module_path, .. } => module_path,
+        _ => &[],
+    }
 }
 
 /// Format a single declaration.

@@ -20,10 +20,15 @@ pub fn format_import(
         d = d.append(Doc::text(format!(" as {}", a)));
     }
     if let Some(items) = exposing {
-        d = d
-            .append(Doc::text(" ("))
-            .append(Doc::text(items.join(", ")))
-            .append(Doc::text(")"));
+        let item_docs: Vec<Doc> = items.iter().map(|i| Doc::text(i.as_str())).collect();
+        let items_joined = Doc::join(docs![Doc::text(","), Doc::line()], item_docs);
+        d = Doc::group(docs![
+            d,
+            Doc::text(" ("),
+            Doc::nest(2, docs![Doc::softline(), items_joined]),
+            Doc::softline(),
+            Doc::text(")")
+        ]);
     }
     d
 }
@@ -83,10 +88,8 @@ fn is_block_like(expr: &Expr) -> bool {
         | ExprKind::Case { .. }
         | ExprKind::Do { .. }
         | ExprKind::Receive { .. } => true,
-        // Pipes stay on the = line — they handle their own line-breaking
-        // via group/nest internally, so nesting them under a binding break
-        // would cause double-indentation
-        ExprKind::Pipe { .. } => true,
+        // Pipes are not block-like — they break after = like other expressions
+        ExprKind::Pipe { .. } => false,
         // with expressions where the handler is inline are block-like
         ExprKind::With { handler, .. } => matches!(handler.as_ref(), Handler::Inline { .. }),
         _ => false,

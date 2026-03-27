@@ -4,32 +4,34 @@ Tracks formatting rules that need proper group/break behavior. Most braced-body 
 
 ## Line-break rules
 
-- [x] **Fun bindings** — `name params = body` should break after `=` and indent body when too long
-- [x] **Fun signatures** — `fun name : A -> B -> C needs {E}` break on arrows or after `:`
-- [ ] **`with` expressions** — break handler side first (into braced block), then expression side
-- [ ] **Application** — `func arg1 arg2 arg3` break arguments when too long
-- [ ] **Binary operators** — `a + b * c + d` break before operator when too long
-- [ ] **Record create/update** — `Name { field: val, field: val }` break to multi-line fields
-- [ ] **Lists** — `[a, b, c, d]` break to multi-line elements
-- [ ] **Tuples** — `(a, b, c)` break to multi-line elements
-- [ ] **Lambda** — `fun x y -> body` break before body
-- [ ] **Import exposing** — `import Foo (a, b, c, d, e)` break the exposed list
-- [ ] **Type expressions** — `Map String (List (Option Int))` break complex nested types
+- [x] **Fun bindings** — break after `=` and indent body; block-like bodies (`{`, `case`, `do`, `receive`, inline `with`) stay on `=` line
+- [x] **Fun signatures** — break `needs`/`where` clauses first (from end), then arrows
+- [x] **`with` expressions** — inline handler `{` stays on line; named handler breaks before `with`
+- [x] **Application** — flatten nested App chain, break all args at same indent
+- [x] **Binary operators** — flatten same-operator chains, break before operator
+- [x] **Record create/update** — `{ }` with comma-separated fields; trailing comma in broken mode via `IfBreak`
+- [x] **Lists** — `[ ]` comma-separated, same break pattern as records
+- [x] **Tuples** — `( )` comma-separated, same break pattern
+- [x] **Lambda** — `fun params ->` break before body, like `=` in bindings
+- [x] **Import exposing** — `(item1, item2, ...)` breaks the exposed list
+- [ ] **Type expressions** — deferred; types are usually short enough. Use newtypes for complex types (future)
 
 ## Normalization
 
-- [ ] **Blank lines** — collapse multiple consecutive blank lines to one
-- [ ] **Trailing whitespace** — already handled by the Doc pretty-printer
-- [ ] **EOF newline** — already handled
+- [x] **Import sorting** — `Std.*` first (sorted), then everything else (sorted)
+- [x] **Blank lines** — collapse multiple consecutive blank lines to one
+- [x] **Trailing whitespace** — handled by Doc pretty-printer
+- [x] **EOF newline** — handled
 
 ## Infrastructure
 
-- [x] Wadler-Lindig Doc algebra with Nest/Group
+- [x] Wadler-Lindig Doc algebra with Nest/Group/IfBreak
 - [x] Token-level trivia attachment
 - [x] Trailing trivia splitting (blank line = paragraph break)
-- [x] Source-preserving numeric literals
+- [x] Source-preserving numeric literals (`Lit::Int(String, i64)`, `Lit::Float(String, f64)`)
 - [x] `--debug` flag for AST dump
 - [x] `--width` flag / `project.toml [formatter]` config
-- [ ] Idempotency test (format twice, output matches)
-- [ ] Formatter test suite on stdlib files
+- [x] Idempotency test (format twice, output matches)
+- [x] Formatter test suite (47 tests)
+- [ ] Formatter tests on stdlib files
 - [ ] Round-trip test: format then parse, AST matches

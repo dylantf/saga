@@ -6,6 +6,37 @@ use crate::ast::*;
 use crate::docs;
 use crate::token::Span;
 
+/// Flatten a left-nested BinOp chain of the same operator.
+/// `(a + b) + c` with op=Add -> ([a, b, c], Add)
+/// Stops flattening when the operator changes (respects precedence).
+fn flatten_binop<'a>(expr: &'a Expr, op: &'a BinOp) -> (Vec<&'a Expr>, &'a BinOp) {
+    let mut operands = Vec::new();
+    let mut current = expr;
+    while let ExprKind::BinOp { op: ref curr_op, ref left, ref right } = current.kind {
+        if curr_op == op {
+            operands.push(right.as_ref());
+            current = left.as_ref();
+        } else {
+            break;
+        }
+    }
+    operands.push(current);
+    operands.reverse();
+    (operands, op)
+}
+
+/// Flatten a left-nested App chain into (func, [arg1, arg2, ...]).
+fn flatten_app(expr: &Expr) -> (&Expr, Vec<&Expr>) {
+    let mut args = Vec::new();
+    let mut current = expr;
+    while let ExprKind::App { func, arg } = &current.kind {
+        args.push(arg.as_ref());
+        current = func;
+    }
+    args.reverse();
+    (current, args)
+}
+
 fn format_binary_chain(segments: &[Annotated<Expr>], op: &str) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     for (i, seg) in segments.iter().enumerate() {
@@ -42,24 +73,35 @@ pub fn format_expr(expr: &Expr) -> Doc {
         ExprKind::Constructor { name } => Doc::text(name),
         ExprKind::QualifiedName { module, name } => Doc::text(format!("{}.{}", module, name)),
 
-        ExprKind::App { func, arg } => {
+        ExprKind::App { .. } => {
+            // Flatten nested App chain: App(App(App(f, a), b), c) -> [f, a, b, c]
+            let (func, args) = flatten_app(expr);
             let func_doc = format_expr(func);
-            let arg_doc = match &arg.kind {
-                ExprKind::App { .. } | ExprKind::BinOp { .. } => {
-                    docs![Doc::text("("), format_expr(arg), Doc::text(")")]
-                }
-                _ => format_expr(arg),
-            };
-            docs![func_doc, Doc::text(" "), arg_doc]
+            let arg_docs: Vec<Doc> = args.iter().map(|a| format_expr_atom(a)).collect();
+
+            // flat: `func arg1 arg2 arg3`
+            // broken: `func\n  arg1\n  arg2\n  arg3`
+            let mut tail = Doc::Nil;
+            for arg in arg_docs {
+                tail = tail.append(Doc::line()).append(arg);
+            }
+            Doc::group(docs![func_doc, Doc::nest(2, tail)])
         }
 
-        ExprKind::BinOp { op, left, right } => {
-            let op_str = format_binop(op);
-            docs![
-                format_expr(left),
-                Doc::text(format!(" {} ", op_str)),
-                format_expr(right)
-            ]
+        ExprKind::BinOp { op, .. } => {
+            // Flatten same-operator chains: (a + b) + c -> [a, b, c]
+            let (operands, chain_op) = flatten_binop(expr, op);
+            let op_str = format_binop(chain_op);
+
+            let first = format_expr(operands[0]);
+            let mut tail = Doc::Nil;
+            for operand in &operands[1..] {
+                tail = tail
+                    .append(Doc::line())
+                    .append(Doc::text(format!("{} ", op_str)))
+                    .append(format_expr(operand));
+            }
+            Doc::group(docs![first, tail])
         }
 
         ExprKind::UnaryMinus { expr } => {
@@ -125,15 +167,19 @@ pub fn format_expr(expr: &Expr) -> Doc {
         }
 
         ExprKind::Lambda { params, body } => {
-            let mut d = Doc::text("fun ");
+            let mut lhs = Doc::text("fun ");
             for (i, p) in params.iter().enumerate() {
                 if i > 0 {
-                    d = d.append(Doc::text(" "));
+                    lhs = lhs.append(Doc::text(" "));
                 }
-                d = d.append(format_pat(p));
+                lhs = lhs.append(format_pat(p));
             }
-            d = d.append(Doc::text(" -> ")).append(format_expr(body));
-            d
+            lhs = lhs.append(Doc::text(" ->"));
+            let body_doc = format_expr(body);
+            Doc::group(docs![
+                lhs,
+                Doc::nest(2, docs![Doc::line(), body_doc])
+            ])
         }
 
         ExprKind::FieldAccess { expr, field } => {
@@ -148,13 +194,10 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 .iter()
                 .map(|(name, _, val)| docs![Doc::text(format!("{}: ", name)), format_expr(val)])
                 .collect();
-            Doc::group(docs![
-                Doc::text("{ "),
-                format_expr(record),
-                Doc::text(" | "),
-                Doc::join(Doc::text(", "), field_docs),
-                Doc::text(" }"),
-            ])
+            // flat: { u | age: 31, name: "New" }
+            // broken: { u |\n  age: 31,\n  name: "New"\n}
+            let opener = docs![Doc::text("{ "), format_expr(record), Doc::text(" |")];
+            format_comma_list_spaced(opener, "}", field_docs)
         }
 
         ExprKind::EffectCall {
@@ -175,7 +218,19 @@ pub fn format_expr(expr: &Expr) -> Doc {
         ExprKind::With { expr, handler } => {
             let expr_doc = format_expr(expr);
             let handler_doc = format_handler(handler);
-            docs![expr_doc, Doc::text(" with "), handler_doc]
+            match handler.as_ref() {
+                // Inline handler: always break the block, but keep expr with { on same line
+                Handler::Inline { .. } => {
+                    docs![expr_doc, Doc::text(" with "), handler_doc]
+                }
+                // Named handler: try one line, break before with if too long
+                Handler::Named(..) => {
+                    Doc::group(docs![
+                        expr_doc,
+                        Doc::nest(2, docs![Doc::line(), Doc::text("with "), handler_doc])
+                    ])
+                }
+            }
         }
 
         ExprKind::Resume { value } => {
@@ -184,11 +239,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
 
         ExprKind::Tuple { elements } => {
             let elem_docs: Vec<Doc> = elements.iter().map(format_expr).collect();
-            docs![
-                Doc::text("("),
-                Doc::join(Doc::text(", "), elem_docs),
-                Doc::text(")")
-            ]
+            format_comma_list(Doc::text("("), ")", elem_docs)
         }
 
         ExprKind::Do {
@@ -281,11 +332,11 @@ pub fn format_expr(expr: &Expr) -> Doc {
                     || !s.leading_trivia.is_empty()
                     || !s.trailing_trivia.is_empty()
             });
-            // Head segment (not indented)
+            // Head segment
             let mut head = format_expr(&segments[0].node);
             head = head.append(format_trailing(&segments[0].trailing_comment));
 
-            // Tail segments (indented via nest)
+            // Tail segments — same indent level as head (no extra nest)
             let mut tail = Doc::Nil;
             for seg in &segments[1..] {
                 if force_multiline {
@@ -305,7 +356,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 }
             }
 
-            let result = docs![head, Doc::nest(2, tail)];
+            let result = docs![head, tail];
             if force_multiline {
                 result
             } else {
@@ -329,11 +380,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 Doc::text("[]")
             } else {
                 let elem_docs: Vec<Doc> = elements.iter().map(format_expr).collect();
-                docs![
-                    Doc::text("["),
-                    Doc::join(Doc::text(", "), elem_docs),
-                    Doc::text("]")
-                ]
+                format_comma_list(Doc::text("["), "]", elem_docs)
             }
         }
         ExprKind::StringInterp { parts } => {
@@ -341,7 +388,14 @@ pub fn format_expr(expr: &Expr) -> Doc {
             for part in parts {
                 match part {
                     StringPart::Lit(text) => s.push_str(text),
-                    StringPart::Expr(_) => s.push_str("{...}"), // TODO: format expr inside
+                    StringPart::Expr(expr) => {
+                        let expr_doc = format_expr(expr);
+                        let rendered = super::pretty(10000, &expr_doc);
+                        let rendered = rendered.trim_end();
+                        s.push('{');
+                        s.push_str(rendered);
+                        s.push('}');
+                    }
                 }
             }
             s.push('"');
@@ -386,7 +440,9 @@ pub fn format_expr_atom(expr: &Expr) -> Doc {
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
         | ExprKind::Tuple { .. }
-        | ExprKind::Block { .. } => format_expr(expr),
+        | ExprKind::Block { .. }
+        | ExprKind::StringInterp { .. }
+        | ExprKind::ListLit { .. } => format_expr(expr),
         _ => docs![Doc::text("("), format_expr(expr), Doc::text(")")],
     }
 }
@@ -396,12 +452,41 @@ fn format_record_create(name: Option<&String>, fields: &[(String, Span, Expr)]) 
         .iter()
         .map(|(fname, _, val)| docs![Doc::text(format!("{}: ", fname)), format_expr(val)])
         .collect();
-    let mut d = match name {
-        Some(n) => Doc::text(format!("{} {{ ", n)),
-        None => Doc::text("{ "),
+    let opener = match name {
+        Some(n) => Doc::text(format!("{} {{", n)),
+        None => Doc::text("{"),
     };
-    d = d.append(Doc::join(Doc::text(", "), field_docs));
-    d.append(Doc::text(" }"))
+    // flat: Name { a: 1, b: 2 }
+    // broken: Name {\n  a: 1,\n  b: 2,\n}
+    format_comma_list_spaced(opener, "}", field_docs)
+}
+
+/// Format a delimited, comma-separated list with group/break.
+/// Flat: `open item1, item2 close`
+/// Broken: `open\n  item1,\n  item2,\nclose`
+/// Format a delimited, comma-separated list with group/break.
+/// When `spaced` is true (records): flat has spaces inside: `{ a, b }`
+/// When `spaced` is false (lists, tuples): flat has no spaces: `[a, b]`
+fn format_comma_list(open: Doc, close: &str, items: Vec<Doc>) -> Doc {
+    format_comma_list_inner(open, close, items, false)
+}
+
+fn format_comma_list_spaced(open: Doc, close: &str, items: Vec<Doc>) -> Doc {
+    format_comma_list_inner(open, close, items, true)
+}
+
+fn format_comma_list_inner(open: Doc, close: &str, items: Vec<Doc>, spaced: bool) -> Doc {
+    let fields_joined = Doc::join(docs![Doc::text(","), Doc::line()], items);
+    let trailing_comma = Doc::if_break(Doc::text(","), Doc::Nil);
+    // Spaced (records): `{ a, b }` flat, `{\n  a,\n  b,\n}` broken
+    // Unspaced (lists, tuples): `[a, b]` flat, `[\n  a,\n  b,\n]` broken
+    let pad = if spaced { Doc::line() } else { Doc::softline() };
+    Doc::group(docs![
+        open,
+        Doc::nest(2, docs![pad.clone(), fields_joined, trailing_comma]),
+        pad,
+        Doc::text(close)
+    ])
 }
 
 fn format_handler(handler: &Handler) -> Doc {

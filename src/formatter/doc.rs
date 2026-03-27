@@ -21,6 +21,9 @@ pub enum Doc {
     /// Try to lay out the inner document on a single line (flat mode).
     /// If it doesn't fit, fall back to break mode.
     Group(Box<Doc>),
+    /// Emit `broken` in break mode, `flat` in flat mode.
+    /// Useful for trailing commas, trailing separators, etc.
+    IfBreak { broken: Box<Doc>, flat: Box<Doc> },
 }
 
 // --- Constructors ---
@@ -60,6 +63,11 @@ impl Doc {
     /// Try to fit the inner document on one line.
     pub fn group(doc: Doc) -> Doc {
         Doc::Group(Box::new(doc))
+    }
+
+    /// Emit `broken` in break mode, `flat` in flat mode.
+    pub fn if_break(broken: Doc, flat: Doc) -> Doc {
+        Doc::IfBreak { broken: Box::new(broken), flat: Box::new(flat) }
     }
 
     /// Concatenate a sequence of docs with a separator between each pair.
@@ -150,6 +158,10 @@ pub fn pretty(width: usize, doc: &Doc) -> String {
                     stack.push((indent, Mode::Break, inner));
                 }
             }
+            Doc::IfBreak { broken, flat } => match mode {
+                Mode::Break => stack.push((indent, mode, broken)),
+                Mode::Flat => stack.push((indent, mode, flat)),
+            },
         }
     }
 
@@ -210,6 +222,10 @@ fn fits(remaining: isize, initial: &[(usize, Mode, &Doc)]) -> bool {
                 // When measuring fit, assume flat
                 stack.push((indent, Mode::Flat, inner));
             }
+            Doc::IfBreak { broken, flat } => match mode {
+                Mode::Break => stack.push((indent, mode, broken)),
+                Mode::Flat => stack.push((indent, mode, flat)),
+            },
         }
     }
 
