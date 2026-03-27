@@ -39,7 +39,7 @@ fn try_parse_normalized(source: &str) -> Option<Vec<Decl>> {
 const S: Span = Span { start: 0, end: 0 };
 const NID: NodeId = NodeId(0);
 
-fn normalize_decls(decls: &mut Vec<Decl>) {
+fn normalize_decls(decls: &mut [Decl]) {
     // Sort imports the same way the formatter does (Std.* first, then rest, each sorted)
     // so that import reordering doesn't cause false AST diffs.
     let import_end = decls
@@ -264,10 +264,7 @@ fn normalize_decl(d: &mut Decl) {
             *span = S;
         }
         Decl::DictConstructor {
-            id,
-            methods,
-            span,
-            ..
+            id, methods, span, ..
         } => {
             *id = NID;
             *span = S;
@@ -338,9 +335,7 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
                 normalize_expr(e);
             }
         }
-        ExprKind::RecordUpdate {
-            record, fields, ..
-        } => {
+        ExprKind::RecordUpdate { record, fields, .. } => {
             normalize_expr(record);
             for (_, s, e) in fields.iter_mut() {
                 *s = S;
@@ -433,8 +428,7 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
             normalize_expr(body);
             for q in qualifiers.iter_mut() {
                 match q {
-                    ComprehensionQualifier::Generator(p, e)
-                    | ComprehensionQualifier::Let(p, e) => {
+                    ComprehensionQualifier::Generator(p, e) | ComprehensionQualifier::Let(p, e) => {
                         normalize_pat(p);
                         normalize_expr(e);
                     }
@@ -465,9 +459,7 @@ fn normalize_pat(p: &mut Pat) {
             *id = NID;
             *span = S;
         }
-        Pat::Constructor {
-            id, args, span, ..
-        } => {
+        Pat::Constructor { id, args, span, .. } => {
             *id = NID;
             *span = S;
             for a in args.iter_mut() {
@@ -496,20 +488,14 @@ fn normalize_pat(p: &mut Pat) {
                 }
             }
         }
-        Pat::Tuple {
-            id,
-            elements,
-            span,
-        } => {
+        Pat::Tuple { id, elements, span } => {
             *id = NID;
             *span = S;
             for e in elements.iter_mut() {
                 normalize_pat(e);
             }
         }
-        Pat::StringPrefix {
-            id, rest, span, ..
-        } => {
+        Pat::StringPrefix { id, rest, span, .. } => {
             *id = NID;
             *span = S;
             normalize_pat(rest);
@@ -883,7 +869,11 @@ fn app_short_stays_on_one_line() {
 fn app_long_breaks_all_args() {
     let src = "f x = some_long_function first_argument second_argument third_argument";
     let result = fmt(src, 40);
-    assert!(result.contains("some_long_function\n"), "result: {}", result);
+    assert!(
+        result.contains("some_long_function\n"),
+        "result: {}",
+        result
+    );
     assert!(result.contains("  first_argument\n"), "result: {}", result);
     assert!(result.contains("  second_argument\n"), "result: {}", result);
 }
@@ -916,10 +906,7 @@ fn record_create_long_breaks_fields() {
 
 #[test]
 fn record_update_short_stays_on_one_line() {
-    assert_eq!(
-        fmt80("f u = { u | age: 31 }"),
-        "f u = { u | age: 31 }\n"
-    );
+    assert_eq!(fmt80("f u = { u | age: 31 }"), "f u = { u | age: 31 }\n");
 }
 
 #[test]
@@ -976,7 +963,11 @@ fn binop_short_stays_on_one_line() {
 fn binop_long_breaks_before_operator() {
     let src = "f x = some_long_name + another_long_name + yet_another_long_name + final_name";
     let result = fmt(src, 40);
-    assert!(result.contains("\n+ another_long_name") || result.contains("\n  + another_long_name"), "result: {}", result);
+    assert!(
+        result.contains("\n+ another_long_name") || result.contains("\n  + another_long_name"),
+        "result: {}",
+        result
+    );
 }
 
 #[test]
@@ -999,7 +990,11 @@ fn with_named_handler_short_stays_on_one_line() {
 fn with_named_handler_long_breaks_before_with() {
     let src = "f x = some_very_long_function_call x y z with some_long_handler_name";
     let result = fmt(src, 50);
-    assert!(result.contains("with some_long_handler_name"), "result: {}", result);
+    assert!(
+        result.contains("with some_long_handler_name"),
+        "result: {}",
+        result
+    );
     // with breaks to its own line (indented under the expression)
     assert!(result.contains("\n"), "should be multi-line: {}", result);
 }
@@ -1015,10 +1010,7 @@ fn with_inline_handler_braces_on_same_line() {
 
 #[test]
 fn lambda_short_stays_on_one_line() {
-    assert_eq!(
-        fmt80("f x = fun y -> y + 1"),
-        "f x = fun y -> y + 1\n"
-    );
+    assert_eq!(fmt80("f x = fun y -> y + 1"), "f x = fun y -> y + 1\n");
 }
 
 #[test]
@@ -1068,7 +1060,11 @@ fn imports_sorted_std_first() {
 fn imports_already_sorted_unchanged() {
     let src = "import Std.List\nimport Std.Test (describe, test)\nimport MyModule";
     let result = fmt80(src);
-    assert!(result.starts_with("import Std.List\nimport Std.Test"), "result: {}", result);
+    assert!(
+        result.starts_with("import Std.List\nimport Std.Test"),
+        "result: {}",
+        result
+    );
 }
 
 // --- Blank line normalization ---
@@ -1101,9 +1097,21 @@ fn idempotent_scratch_file() {
 fn multiline_string_preserved() {
     let src = "let x = \"\"\"\n  hello\n  world\n  \"\"\"";
     let result = fmt80(src);
-    assert!(result.contains("\"\"\""), "should contain triple quotes: {}", result);
-    assert!(result.contains("hello"), "should contain content: {}", result);
-    assert!(result.contains("world"), "should contain content: {}", result);
+    assert!(
+        result.contains("\"\"\""),
+        "should contain triple quotes: {}",
+        result
+    );
+    assert!(
+        result.contains("hello"),
+        "should contain content: {}",
+        result
+    );
+    assert!(
+        result.contains("world"),
+        "should contain content: {}",
+        result
+    );
     // Idempotent
     let second = fmt80(&result);
     assert_eq!(result, second, "multiline string not idempotent");
@@ -1113,18 +1121,37 @@ fn multiline_string_preserved() {
 fn multiline_string_in_function() {
     let src = "main () = {\n  let poem = \"\"\"\n    Roses are red,\n    Violets are blue,\n    \"\"\"\n  poem\n}";
     let result = fmt80(src);
-    assert!(result.contains("\"\"\""), "should preserve triple quotes: {}", result);
-    assert!(result.contains("Roses are red,"), "should preserve content: {}", result);
+    assert!(
+        result.contains("\"\"\""),
+        "should preserve triple quotes: {}",
+        result
+    );
+    assert!(
+        result.contains("Roses are red,"),
+        "should preserve content: {}",
+        result
+    );
     let second = fmt80(&result);
-    assert_eq!(result, second, "multiline string in function not idempotent");
+    assert_eq!(
+        result, second,
+        "multiline string in function not idempotent"
+    );
 }
 
 #[test]
 fn raw_string_preserved() {
     let src = "let path = @\"C:\\Users\\dylan\"";
     let result = fmt80(src);
-    assert!(result.contains("@\""), "should contain raw string prefix: {}", result);
-    assert!(result.contains("C:\\Users\\dylan"), "should preserve backslashes: {}", result);
+    assert!(
+        result.contains("@\""),
+        "should contain raw string prefix: {}",
+        result
+    );
+    assert!(
+        result.contains("C:\\Users\\dylan"),
+        "should preserve backslashes: {}",
+        result
+    );
     let second = fmt80(&result);
     assert_eq!(result, second, "raw string not idempotent");
 }
@@ -1133,8 +1160,16 @@ fn raw_string_preserved() {
 fn raw_multiline_string_preserved() {
     let src = "let x = @\"\"\"\n  \\d+\n  \\s*\n  \"\"\"";
     let result = fmt80(src);
-    assert!(result.contains("@\"\"\""), "should contain raw triple quotes: {}", result);
-    assert!(result.contains("\\d+"), "should preserve raw content: {}", result);
+    assert!(
+        result.contains("@\"\"\""),
+        "should contain raw triple quotes: {}",
+        result
+    );
+    assert!(
+        result.contains("\\d+"),
+        "should preserve raw content: {}",
+        result
+    );
     let second = fmt80(&result);
     assert_eq!(result, second, "raw multiline string not idempotent");
 }
@@ -1143,7 +1178,11 @@ fn raw_multiline_string_preserved() {
 fn interpolated_string_preserved() {
     let src = "let x = $\"hello {name}\"";
     let result = fmt80(src);
-    assert!(result.contains("$\""), "should contain interp prefix: {}", result);
+    assert!(
+        result.contains("$\""),
+        "should contain interp prefix: {}",
+        result
+    );
     assert!(result.contains("{name}"), "should contain hole: {}", result);
     let second = fmt80(&result);
     assert_eq!(result, second, "interpolated string not idempotent");
@@ -1153,10 +1192,21 @@ fn interpolated_string_preserved() {
 fn interpolated_multiline_string_preserved() {
     let src = "let x = $\"\"\"\n  x = {show x}\n  y = {show y}\n  \"\"\"";
     let result = fmt80(src);
-    assert!(result.contains("$\"\"\""), "should contain interp triple quotes: {}", result);
-    assert!(result.contains("{show x}"), "should contain hole: {}", result);
+    assert!(
+        result.contains("$\"\"\""),
+        "should contain interp triple quotes: {}",
+        result
+    );
+    assert!(
+        result.contains("{show x}"),
+        "should contain hole: {}",
+        result
+    );
     let second = fmt80(&result);
-    assert_eq!(result, second, "interpolated multiline string not idempotent");
+    assert_eq!(
+        result, second,
+        "interpolated multiline string not idempotent"
+    );
 }
 
 #[test]
@@ -1165,7 +1215,11 @@ fn escaped_quote_in_string_preserved() {
     let result = fmt80(src);
     assert!(result.contains("\\\""), "should escape quotes: {}", result);
     // Must not produce triple-quote """
-    assert!(!result.contains("\"\"\""), "should not produce triple quotes: {}", result);
+    assert!(
+        !result.contains("\"\"\""),
+        "should not produce triple quotes: {}",
+        result
+    );
     let second = fmt80(&result);
     assert_eq!(result, second, "escaped quotes not idempotent");
 }
@@ -1178,7 +1232,7 @@ fn collect_dy_files() -> Vec<std::path::PathBuf> {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "dy") {
+                if path.extension().is_some_and(|e| e == "dy") {
                     files.push(path);
                 }
             }
@@ -1200,7 +1254,6 @@ fn collect_dy_files() -> Vec<std::path::PathBuf> {
 /// - Formatted output doesn't re-parse (20-validation-applicative, 29-actors,
 ///   32-monitor, 33-timer, 34-link, Dict.dy, Test.dy)
 const KNOWN_FAILING: &[&str] = &[
-    "14-fail-to-result.dy",
     "20-validation-applicative.dy",
     "25-state-effect.dy",
     "28-deriving.dy",
@@ -1209,7 +1262,6 @@ const KNOWN_FAILING: &[&str] = &[
     "33-timer.dy",
     "34-link.dy",
     "36-sync-actor.dy",
-    "Async.dy",
     "Dict.dy",
     "Test.dy",
 ];
@@ -1265,7 +1317,11 @@ fn round_trip_all_dy_files() {
         }
     }
 
-    assert!(failures.is_empty(), "Round-trip failures:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "Round-trip failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// Verify that known-failing files still fail (so we remove them from the list when fixed).
@@ -1309,4 +1365,3 @@ fn known_failing_files_still_fail() {
         unexpectedly_passing.join("\n")
     );
 }
-

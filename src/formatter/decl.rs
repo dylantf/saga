@@ -82,14 +82,17 @@ pub fn format_binding(lhs: Doc, body: &Expr) -> Doc {
 
 /// Is this expression "block-like" — handles its own multi-line layout?
 /// These should stay on the `=` line rather than breaking after `=`.
-fn is_block_like(expr: &Expr) -> bool {
+pub(super) fn is_block_like(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Block { .. }
         | ExprKind::Case { .. }
         | ExprKind::Do { .. }
         | ExprKind::Receive { .. } => true,
         // Multiline strings handle their own layout with hardlines
-        ExprKind::Lit { value: Lit::String(_, kind), .. } => kind.is_multiline(),
+        ExprKind::Lit {
+            value: Lit::String(_, kind),
+            ..
+        } => kind.is_multiline(),
         ExprKind::StringInterp { kind, .. } => kind.is_multiline(),
         // Pipes are not block-like — they break after = like other expressions
         ExprKind::Pipe { .. } => false,

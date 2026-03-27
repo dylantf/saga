@@ -1,11 +1,14 @@
 use super::Doc;
-use super::helpers::{docs_from_vec, format_binop, format_trivia, format_trivia_dangling, format_trailing};
+use super::decl::is_block_like;
+use super::helpers::{
+    docs_from_vec, format_binop, format_trailing, format_trivia, format_trivia_dangling,
+};
 use super::pat::format_pat;
 use super::type_expr::format_type_expr;
 use crate::ast::*;
-use crate::token::StringKind;
 use crate::docs;
 use crate::token::Span;
+use crate::token::StringKind;
 
 /// Flatten a left-nested BinOp chain of the same operator.
 /// `(a + b) + c` with op=Add -> ([a, b, c], Add)
@@ -13,7 +16,12 @@ use crate::token::Span;
 fn flatten_binop<'a>(expr: &'a Expr, op: &'a BinOp) -> (Vec<&'a Expr>, &'a BinOp) {
     let mut operands = Vec::new();
     let mut current = expr;
-    while let ExprKind::BinOp { op: ref curr_op, ref left, ref right } = current.kind {
+    while let ExprKind::BinOp {
+        op: ref curr_op,
+        ref left,
+        ref right,
+    } = current.kind
+    {
         if curr_op == op {
             operands.push(right.as_ref());
             current = left.as_ref();
@@ -52,10 +60,7 @@ fn format_binary_chain(segments: &[Annotated<Expr>], op: &str) -> Doc {
 /// Build a nested body for a braced block: each item gets a hardline before it,
 /// trivia is emitted inline, and dangling trivia omits its trailing hardline.
 /// The result should be wrapped in `Doc::nest(indent, body)`.
-fn format_braced_body(
-    items: &[Doc],
-    dangling_trivia: &[Trivia],
-) -> Doc {
+fn format_braced_body(items: &[Doc], dangling_trivia: &[Trivia]) -> Doc {
     let mut body = Doc::Nil;
     for item in items {
         body = body.append(item.clone());
@@ -78,6 +83,31 @@ pub fn format_expr(expr: &Expr) -> Doc {
             // Flatten nested App chain: App(App(App(f, a), b), c) -> [f, a, b, c]
             let (func, args) = flatten_app(expr);
             let func_doc = format_expr(func);
+
+            // Check if the last arg is a lambda with a block-like body.
+            // If so, treat it as a "trailing lambda": keep `(fun params -> {`
+            // on the same line as the call, with the block body indented from
+            // the call site, not nested inside the arg list.
+            if let Some((last, rest)) = args.split_last()
+                && let ExprKind::Lambda { params, body } = &last.kind
+                && is_block_like(body)
+            {
+                let mut prefix = func_doc;
+                for a in rest {
+                    prefix = prefix.append(Doc::text(" ")).append(format_expr_atom(a));
+                }
+                let mut lhs = Doc::text("(fun ");
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        lhs = lhs.append(Doc::text(" "));
+                    }
+                    lhs = lhs.append(format_pat(p));
+                }
+                lhs = lhs.append(Doc::text(" -> "));
+                let body_doc = format_expr(body);
+                return docs![prefix, Doc::text(" "), lhs, body_doc, Doc::text(")")];
+            }
+
             let arg_docs: Vec<Doc> = args.iter().map(|a| format_expr_atom(a)).collect();
 
             // flat: `func arg1 arg2 arg3`
@@ -113,19 +143,21 @@ pub fn format_expr(expr: &Expr) -> Doc {
             cond,
             then_branch,
             else_branch,
-        } => {
-            Doc::group(docs![
-                Doc::text("if "),
-                format_expr(cond),
-                Doc::text(" then "),
-                format_expr(then_branch),
-                Doc::line(),
-                Doc::text("else "),
-                format_expr(else_branch),
-            ])
-        }
+        } => Doc::group(docs![
+            Doc::text("if "),
+            format_expr(cond),
+            Doc::text(" then "),
+            format_expr(then_branch),
+            Doc::line(),
+            Doc::text("else "),
+            format_expr(else_branch),
+        ]),
 
-        ExprKind::Case { scrutinee, arms, dangling_trivia } => {
+        ExprKind::Case {
+            scrutinee,
+            arms,
+            dangling_trivia,
+        } => {
             let mut body_items = Vec::new();
             for ann in arms {
                 let arm = &ann.node;
@@ -135,7 +167,9 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 if let Some(g) = &arm.guard {
                     arm_doc = arm_doc.append(Doc::text(" | ")).append(format_expr(g));
                 }
-                arm_doc = arm_doc.append(Doc::text(" -> ")).append(format_expr(&arm.body));
+                arm_doc = arm_doc
+                    .append(Doc::text(" -> "))
+                    .append(format_expr(&arm.body));
                 body_items.push(arm_doc);
                 body_items.push(format_trailing(&ann.trailing_comment));
             }
@@ -150,7 +184,10 @@ pub fn format_expr(expr: &Expr) -> Doc {
             ]
         }
 
-        ExprKind::Block { stmts, dangling_trivia } => {
+        ExprKind::Block {
+            stmts,
+            dangling_trivia,
+        } => {
             let mut body_items = Vec::new();
             for ann in stmts {
                 body_items.push(Doc::hardline());
@@ -177,10 +214,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
             }
             lhs = lhs.append(Doc::text(" ->"));
             let body_doc = format_expr(body);
-            Doc::group(docs![
-                lhs,
-                Doc::nest(2, docs![Doc::line(), body_doc])
-            ])
+            Doc::group(docs![lhs, Doc::nest(2, docs![Doc::line(), body_doc])])
         }
 
         ExprKind::FieldAccess { expr, field } => {
@@ -225,12 +259,10 @@ pub fn format_expr(expr: &Expr) -> Doc {
                     docs![expr_doc, Doc::text(" with "), handler_doc]
                 }
                 // Named handler: try one line, break before with if too long
-                Handler::Named(..) => {
-                    Doc::group(docs![
-                        expr_doc,
-                        Doc::nest(2, docs![Doc::line(), Doc::text("with "), handler_doc])
-                    ])
-                }
+                Handler::Named(..) => Doc::group(docs![
+                    expr_doc,
+                    Doc::nest(2, docs![Doc::line(), Doc::text("with "), handler_doc])
+                ]),
             }
         }
 
@@ -284,7 +316,11 @@ pub fn format_expr(expr: &Expr) -> Doc {
             ]
         }
 
-        ExprKind::Receive { arms, after_clause, dangling_trivia } => {
+        ExprKind::Receive {
+            arms,
+            after_clause,
+            dangling_trivia,
+        } => {
             let mut body_items = Vec::new();
             for ann in arms {
                 let arm = &ann.node;
@@ -294,7 +330,9 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 if let Some(g) = &arm.guard {
                     arm_doc = arm_doc.append(Doc::text(" | ")).append(format_expr(g));
                 }
-                arm_doc = arm_doc.append(Doc::text(" -> ")).append(format_expr(&arm.body));
+                arm_doc = arm_doc
+                    .append(Doc::text(" -> "))
+                    .append(format_expr(&arm.body));
                 body_items.push(arm_doc);
                 body_items.push(format_trailing(&ann.trailing_comment));
             }
@@ -327,12 +365,16 @@ pub fn format_expr(expr: &Expr) -> Doc {
         }
 
         // --- Surface syntax sugar ---
-        ExprKind::Pipe { segments, multiline } => {
-            let force_multiline = *multiline || segments.iter().any(|s| {
-                s.trailing_comment.is_some()
-                    || !s.leading_trivia.is_empty()
-                    || !s.trailing_trivia.is_empty()
-            });
+        ExprKind::Pipe {
+            segments,
+            multiline,
+        } => {
+            let force_multiline = *multiline
+                || segments.iter().any(|s| {
+                    s.trailing_comment.is_some()
+                        || !s.leading_trivia.is_empty()
+                        || !s.trailing_trivia.is_empty()
+                });
             // Head segment
             let mut head = format_expr(&segments[0].node);
             head = head.append(format_trailing(&segments[0].trailing_comment));
@@ -364,15 +406,9 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 Doc::group(result)
             }
         }
-        ExprKind::PipeBack { segments } => {
-            format_binary_chain(segments, " <| ")
-        }
-        ExprKind::ComposeForward { segments } => {
-            format_binary_chain(segments, " >> ")
-        }
-        ExprKind::ComposeBack { segments } => {
-            format_binary_chain(segments, " << ")
-        }
+        ExprKind::PipeBack { segments } => format_binary_chain(segments, " <| "),
+        ExprKind::ComposeForward { segments } => format_binary_chain(segments, " >> "),
+        ExprKind::ComposeBack { segments } => format_binary_chain(segments, " << "),
         ExprKind::Cons { head, tail } => {
             docs![format_expr(head), Doc::text(" :: "), format_expr(tail)]
         }
@@ -384,9 +420,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 format_comma_list(Doc::text("["), "]", elem_docs)
             }
         }
-        ExprKind::StringInterp { parts, kind } => {
-            format_interp_string(parts, *kind)
-        }
+        ExprKind::StringInterp { parts, kind } => format_interp_string(parts, *kind),
         ExprKind::ListComprehension { body, qualifiers } => {
             let mut parts = vec![Doc::text("["), format_expr(body), Doc::text(" | ")];
             let qual_docs: Vec<Doc> = qualifiers
