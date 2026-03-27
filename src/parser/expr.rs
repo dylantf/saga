@@ -389,6 +389,27 @@ impl Parser {
             let mut arms = Vec::new();
             let mut return_clause = None;
 
+            // Phase 1: Parse comma-separated named handler refs.
+            // Named refs must come before inline arms.
+            while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                // A named ref is an ident followed by `,` or `}`
+                if matches!(self.peek(), Token::Ident(_))
+                    && matches!(
+                        self.peek_at(1),
+                        Token::Comma | Token::RBrace
+                    )
+                {
+                    let name = self.expect_ident()?;
+                    named.push(name);
+                    if matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            // Phase 2: Parse inline handler arms (newline-separated, commas optional).
             while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                 let start = self.pos;
                 let arm_start = self.tokens[self.pos].span;
@@ -408,46 +429,49 @@ impl Parser {
                         span: arm_start.to(arm_end),
                     }));
                 } else {
-                    // Could be a named handler ref or an inline arm.
-                    // Named ref: just an ident followed by `,` or `}`
-                    // Inline arm: ident [params...] = body
                     let name = self.expect_ident()?;
 
                     if matches!(self.peek(), Token::Comma | Token::RBrace) {
-                        named.push(name);
-                    } else {
-                        // Inline arm: op params = body
-                        let mut params = Vec::new();
-                        while !matches!(self.peek(), Token::Eq | Token::Eof) {
-                            // Skip `()` unit params (zero-param effect ops)
-                            if matches!(self.peek(), Token::LParen)
-                                && matches!(self.peek_at(1), Token::RParen)
-                            {
-                                self.advance(); // consume '('
-                                self.advance(); // consume ')'
-                                continue;
-                            }
-                            let pspan = self.tokens[self.pos].span;
-                            params.push((self.expect_ident()?, pspan));
-                        }
-                        self.expect(Token::Eq)?;
-                        let body = self.parse_expr(0)?;
-                        let arm_end = body.span;
-                        let trailing_comment = self.take_trailing_comment(self.pos - 1);
-                        arms.push(Annotated {
-                            node: HandlerArm {
-                                op_name: name,
-                                params,
-                                body: Box::new(body),
-                                span: arm_start.to(arm_end),
-                            },
-                            leading_trivia: self.take_leading_trivia(start),
-                            trailing_comment,
-                            trailing_trivia: vec![],
+                        // Named ref after inline arms
+                        return Err(ParseError {
+                            message: "named handler refs must come before inline handler arms"
+                                .to_string(),
+                            span: arm_start,
                         });
                     }
+
+                    // Inline arm: op params = body
+                    let mut params = Vec::new();
+                    while !matches!(self.peek(), Token::Eq | Token::Eof) {
+                        // Skip `()` unit params (zero-param effect ops)
+                        if matches!(self.peek(), Token::LParen)
+                            && matches!(self.peek_at(1), Token::RParen)
+                        {
+                            self.advance(); // consume '('
+                            self.advance(); // consume ')'
+                            continue;
+                        }
+                        let pspan = self.tokens[self.pos].span;
+                        params.push((self.expect_ident()?, pspan));
+                    }
+                    self.expect(Token::Eq)?;
+                    let body = self.parse_expr(0)?;
+                    let arm_end = body.span;
+                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
+                    arms.push(Annotated {
+                        node: HandlerArm {
+                            op_name: name,
+                            params,
+                            body: Box::new(body),
+                            span: arm_start.to(arm_end),
+                        },
+                        leading_trivia: self.take_leading_trivia(start),
+                        trailing_comment,
+                        trailing_trivia: vec![],
+                    });
                 }
 
+                // Commas between inline arms are optional
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
                     // Transfer trailing comment from comma to the last arm

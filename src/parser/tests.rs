@@ -1911,6 +1911,47 @@ fn with_mixed_handlers() {
     }
 }
 
+#[test]
+fn with_inline_arms_single_line_comma_separated() {
+    let expr = parse_expr("run () with { fail msg = Err msg, return value = Ok value }");
+    match &expr {
+        Expr {
+            kind: ExprKind::With { handler, .. },
+            ..
+        } => match handler.as_ref() {
+            Handler::Inline { named, arms, return_clause, .. } => {
+                assert!(named.is_empty());
+                assert_eq!(arms.len(), 1);
+                assert_eq!(arms[0].node.op_name, "fail");
+                assert!(return_clause.is_some());
+                assert_eq!(return_clause.as_ref().unwrap().op_name, "return");
+            }
+            _ => panic!("expected Inline handler, got {:?}", handler),
+        },
+        _ => panic!("expected With, got {:?}", expr),
+    }
+}
+
+#[test]
+fn with_inline_arms_multiline_no_commas() {
+    let expr = parse_expr("run () with {\n  fail msg = Err msg\n  return value = Ok value\n}");
+    match &expr {
+        Expr {
+            kind: ExprKind::With { handler, .. },
+            ..
+        } => match handler.as_ref() {
+            Handler::Inline { named, arms, return_clause, .. } => {
+                assert!(named.is_empty());
+                assert_eq!(arms.len(), 1);
+                assert_eq!(arms[0].node.op_name, "fail");
+                assert!(return_clause.is_some());
+            }
+            _ => panic!("expected Inline handler, got {:?}", handler),
+        },
+        _ => panic!("expected With, got {:?}", expr),
+    }
+}
+
 // --- Where clause on annotations ---
 
 #[test]
