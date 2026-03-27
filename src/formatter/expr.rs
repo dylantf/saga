@@ -519,21 +519,26 @@ fn format_handler(handler: &Handler) -> Doc {
             dangling_trivia,
         } => {
             let mut body_items = Vec::new();
-            for name in named {
+            let has_inline = !arms.is_empty() || return_clause.is_some();
+            for (i, name) in named.iter().enumerate() {
                 body_items.push(Doc::hardline());
-                body_items.push(Doc::text(format!("{},", name)));
+                // Comma after named handlers, except the last one before inline arms
+                let needs_comma = i < named.len() - 1 || !has_inline;
+                if needs_comma {
+                    body_items.push(Doc::text(format!("{},", name)));
+                } else {
+                    body_items.push(Doc::text(name));
+                }
             }
             for ann in arms {
                 body_items.push(Doc::hardline());
                 body_items.push(format_trivia(&ann.leading_trivia));
                 body_items.push(format_handler_arm(&ann.node));
-                body_items.push(Doc::text(","));
                 body_items.push(format_trailing(&ann.trailing_comment));
             }
             if let Some(rc) = return_clause {
                 body_items.push(Doc::hardline());
                 body_items.push(format_handler_arm(rc));
-                body_items.push(Doc::text(","));
             }
             let body = format_braced_body(&body_items, dangling_trivia);
             docs![
