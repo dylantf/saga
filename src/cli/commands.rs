@@ -158,12 +158,23 @@ pub fn cmd_emit(file: &str) {
 pub fn cmd_fmt(args: &[String]) {
     let write_mode = args.contains(&"--write".to_string());
     let debug_mode = args.contains(&"--debug".to_string());
+    let cli_width = args
+        .windows(2)
+        .find(|w| w[0] == "--width")
+        .and_then(|w| w[1].parse().ok());
     let file = args.iter().find(|a| a.ends_with(".dy"));
 
     let Some(file) = file else {
-        eprintln!("Usage: dylang fmt [--write] [--debug] <file.dy>");
+        eprintln!("Usage: dylang fmt [--write] [--debug] [--width N] <file.dy>");
         std::process::exit(1);
     };
+
+    // CLI --width overrides project.toml [formatter] width
+    let width = cli_width.unwrap_or_else(|| {
+        super::find_project_root()
+            .map(|root| ProjectConfig::load(&root).formatter.width)
+            .unwrap_or(dylang::formatter::DEFAULT_WIDTH)
+    });
 
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Error reading {}: {}", file, e);
@@ -186,7 +197,7 @@ pub fn cmd_fmt(args: &[String]) {
         return;
     }
 
-    let formatted = dylang::formatter::format(&program, 80);
+    let formatted = dylang::formatter::format(&program, width);
 
     if write_mode {
         fs::write(file, &formatted).unwrap_or_else(|e| {
