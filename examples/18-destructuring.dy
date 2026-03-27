@@ -3,8 +3,8 @@ record Point {
   y: Int,
 }
 
-type Shape
-  = Circle(Float)
+type Shape =
+  | Circle(Float)
   | Rect(Float, Float)
 
 type Wrapped a = Wrapped(a)

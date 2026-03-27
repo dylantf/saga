@@ -1,7 +1,7 @@
 module Std.File
 
-pub type FileError
-  = NotFound
+pub type FileError =
+  | NotFound
   | PermissionDenied
   | IsDirectory
   | NotDirectory

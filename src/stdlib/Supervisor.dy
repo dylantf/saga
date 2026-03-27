@@ -15,6 +15,6 @@ supervised 0 f = {
 supervised n f = {
   f () with {
     return value = Ok value
-    fail reason = supervised (n - 1) f
+    fail _reason = supervised (n - 1) f
   }
 }

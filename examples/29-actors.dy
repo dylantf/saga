@@ -1,7 +1,7 @@
 import Std.Actor
 
-type CounterMsg
-  = Increment(Int)
+type CounterMsg =
+  | Increment(Int)
   | GetCount(Pid Int)
   | Stop
 

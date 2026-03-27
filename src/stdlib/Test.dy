@@ -12,8 +12,8 @@ pub effect Assert {
 
 type TestMode = Normal | OnlyMode | SkipMode
 
-type TestEntry 
-  = TestCase(String, TestMode) 
+type TestEntry  =
+  | TestCase(String, TestMode) 
   | GroupStart(String) 
   | GroupEnd
 

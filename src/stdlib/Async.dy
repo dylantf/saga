@@ -18,7 +18,7 @@ pub handler async_handler for Async needs {Process, Actor a} {
     })
     resume (Future pid)
   }
-  await future = {
+  await _future = {
     receive {
       value -> resume value
     }

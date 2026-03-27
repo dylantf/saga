@@ -1,7 +1,7 @@
 module Std.Result
 
-pub type Result a b
-  = Ok(a)
+pub type Result a b =
+  | Ok(a)
   | Err(b)
 
 impl Debug for Result a b where {a: Debug, b: Debug} {

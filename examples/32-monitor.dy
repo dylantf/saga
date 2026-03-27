@@ -1,7 +1,7 @@
 import Std.Actor
 
-type WorkerMsg
-  = Work(Int)
+type WorkerMsg =
+  | Work(Int)
   | Die
 
 fun worker : Unit -> Unit needs {Actor WorkerMsg}
