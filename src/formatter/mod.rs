@@ -17,3 +17,6 @@ pub fn format(program: &crate::ast::AnnotatedProgram, width: usize) -> String {
     let doc = format_program(program);
     pretty(width, &doc)
 }
+
+#[cfg(test)]
+mod tests;

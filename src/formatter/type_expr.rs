@@ -40,10 +40,21 @@ pub fn format_type_expr(ty: &TypeExpr) -> Doc {
 }
 
 /// Format a function type signature: params -> return_type [needs {...}]
+/// Used for effect ops and trait methods where needs/where always inline.
 pub fn format_fun_type(
     params: &[(String, TypeExpr)], return_type: &TypeExpr,
     effects: &[EffectRef], effect_row_var: &Option<(String, Span)>,
 ) -> Doc {
+    let type_doc = format_arrow_chain(params, return_type);
+    if effects.is_empty() && effect_row_var.is_none() {
+        type_doc
+    } else {
+        docs![type_doc, Doc::text(" "), format_needs(effects, effect_row_var)]
+    }
+}
+
+/// Format just the arrow chain: A -> B -> C
+pub fn format_arrow_chain(params: &[(String, TypeExpr)], return_type: &TypeExpr) -> Doc {
     let mut parts: Vec<Doc> = params.iter().map(|(label, ty)| {
         if label.starts_with('_') {
             format_type_expr(ty)
@@ -52,18 +63,19 @@ pub fn format_fun_type(
         }
     }).collect();
     parts.push(format_type_expr(return_type));
+    Doc::join(Doc::text(" -> "), parts)
+}
 
-    let mut d = Doc::join(Doc::text(" -> "), parts);
-
-    if !effects.is_empty() || effect_row_var.is_some() {
-        d = d.append(Doc::text(" needs {"));
-        let mut eff_parts: Vec<String> = effects.iter().map(format_effect_ref_str).collect();
-        if let Some((var, _)) = effect_row_var {
-            eff_parts.push(format!("..{}", var));
-        }
-        d = d.append(Doc::text(eff_parts.join(", "))).append(Doc::text("}"));
+/// Format `needs {Effect1, Effect2}` if non-empty.
+pub fn format_needs(effects: &[EffectRef], effect_row_var: &Option<(String, Span)>) -> Doc {
+    if effects.is_empty() && effect_row_var.is_none() {
+        return Doc::Nil;
     }
-    d
+    let mut eff_parts: Vec<String> = effects.iter().map(format_effect_ref_str).collect();
+    if let Some((var, _)) = effect_row_var {
+        eff_parts.push(format!("..{}", var));
+    }
+    Doc::text(format!("needs {{{}}}", eff_parts.join(", ")))
 }
 
 pub fn format_effect_ref_str(e: &EffectRef) -> String {

@@ -4,8 +4,8 @@ Tracks formatting rules that need proper group/break behavior. Most braced-body 
 
 ## Line-break rules
 
-- [ ] **Fun bindings** — `name params = body` should break after `=` and indent body when too long
-- [ ] **Fun signatures** — `fun name : A -> B -> C needs {E}` break on arrows or after `:`
+- [x] **Fun bindings** — `name params = body` should break after `=` and indent body when too long
+- [x] **Fun signatures** — `fun name : A -> B -> C needs {E}` break on arrows or after `:`
 - [ ] **`with` expressions** — break handler side first (into braced block), then expression side
 - [ ] **Application** — `func arg1 arg2 arg3` break arguments when too long
 - [ ] **Binary operators** — `a + b * c + d` break before operator when too long

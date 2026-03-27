@@ -83,13 +83,10 @@ fn is_block_like(expr: &Expr) -> bool {
         | ExprKind::Case { .. }
         | ExprKind::Do { .. }
         | ExprKind::Receive { .. } => true,
-        // Pipes that are forced multi-line (user linebreaks or trivia)
-        // stay on the = line to avoid double-indentation
-        ExprKind::Pipe { segments, multiline } => *multiline || segments.iter().any(|s| {
-            s.trailing_comment.is_some()
-                || !s.leading_trivia.is_empty()
-                || !s.trailing_trivia.is_empty()
-        }),
+        // Pipes stay on the = line — they handle their own line-breaking
+        // via group/nest internally, so nesting them under a binding break
+        // would cause double-indentation
+        ExprKind::Pipe { .. } => true,
         // with expressions where the handler is inline are block-like
         ExprKind::With { handler, .. } => matches!(handler.as_ref(), Handler::Inline { .. }),
         _ => false,

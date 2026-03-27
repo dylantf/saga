@@ -115,5 +115,55 @@ main () = {
   let _longer_pipe = 1 |> add 2 |> add 3 |> add 4 |> add 5 |> add 6 |> add 7 |> add 8 |> add 9 |> add 10
 }
 
+# --- Fun signature formatting ---
+
+# Short: stays on one line
+fun short_sig : Int -> Int
+
+# Medium with needs: stays on one line
+fun medium_sig : String -> Unit needs {Log}
+
+# Long with needs: needs should break
+fun long_signature_name : String -> Int -> Result String Error needs {Log, Actor, Process}
+
+# Long with traits: where should break
+fun long_signature_name : String -> Int -> Result String Error where {a: Show, b: Debug}
+
+# Long with needs and where: both should break
+fun very_long_sig : String -> Int -> Bool -> Unit needs {Log, Actor} where {a: Show, b: Debug}
+
+# --- Fun binding formatting ---
+
+# Short: one line
+short x = x + 1
+
+# Long body: breaks after =
+long_binding_name some_param = some_very_long_function_name some_param other_arg third_arg
+
+# Block body: { stays on = line
+block_binding x = {
+  let y = x + 1
+  y
+}
+
+# Case body: case stays on = line
+case_binding x = case x {
+  True -> 1
+  False -> 0
+}
+
+# With named handler: one line
+with_named x = do_thing x with console
+
+# With inline handler: { stays on = line
+with_inline x = do_thing x with {
+  log msg = { println msg; resume () },
+}
+
+# --- Let statement formatting ---
+
+let _short_let = 42
+let _long_let_binding = some_very_long_expression_that_is_way_too_wide_for_one_line
+
 # comment 9999: last comment in file
 

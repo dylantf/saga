@@ -1,8 +1,9 @@
 use super::Doc;
 use super::decl::*;
-use super::helpers::{docs_from_vec, format_trailing, format_trivia};
+use super::helpers::{format_trailing, format_trivia};
 use super::type_expr::*;
 use crate::ast::*;
+use crate::docs;
 
 /// Format an entire program (list of annotated declarations).
 pub fn format_program(program: &AnnotatedProgram) -> Doc {
@@ -69,26 +70,41 @@ fn format_decl(decl: &Decl) -> Doc {
             annotations,
             ..
         } => {
-            let mut parts = Vec::new();
+            let mut prefix = Doc::Nil;
             for ann in annotations {
-                parts.push(format_annotation(ann));
-                parts.push(Doc::hardline());
+                prefix = prefix.append(format_annotation(ann)).append(Doc::hardline());
             }
             if *public {
-                parts.push(Doc::text("pub "));
+                prefix = prefix.append(Doc::text("pub "));
             }
-            parts.push(Doc::text(format!("fun {} : ", name)));
-            parts.push(format_fun_type(
-                params,
-                return_type,
-                effects,
-                effect_row_var,
-            ));
-            if !where_clause.is_empty() {
-                parts.push(Doc::text(" "));
-                parts.push(format_where_clause(where_clause));
+
+            let head = docs![
+                prefix,
+                Doc::text(format!("fun {} : ", name)),
+                format_arrow_chain(params, return_type)
+            ];
+            let needs = format_needs(effects, effect_row_var);
+            let where_doc = if where_clause.is_empty() {
+                Doc::Nil
+            } else {
+                format_where_clause(where_clause)
+            };
+
+            // Break from the end: needs/where break to indented lines when too long
+            let has_needs = !effects.is_empty() || effect_row_var.is_some();
+            let has_where = !where_clause.is_empty();
+            if !has_needs && !has_where {
+                head
+            } else {
+                let mut trailing = Doc::Nil;
+                if has_needs {
+                    trailing = trailing.append(Doc::line()).append(needs);
+                }
+                if has_where {
+                    trailing = trailing.append(Doc::line()).append(where_doc);
+                }
+                Doc::group(docs![head, Doc::nest(2, trailing)])
             }
-            docs_from_vec(parts)
         }
         Decl::FunBinding {
             name,
