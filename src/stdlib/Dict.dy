@@ -6,13 +6,6 @@ impl Debug for Dict k v where {k: Debug, v: Debug} {
   debug d = "{" <> List.flatten (List.join ", " (List.map (fun (k, v) -> debug k <> ": " <> debug v) (to_list d))) <> "}"
 }
 
-# impl Debug for Dict k v where {k: Debug, v: Debug} {
-#   debug d = 
-#     "{" 
-#       <> List.flatten (List.join ", " (List.map (fun (k, v) -> debug k <> ": " <> debug v) (to_list d))) 
-#       <> "}"
-# }
-
 @external("erlang", "maps", "put")
 pub fun put : (key: k) -> (value: v) -> (dict: Dict k v) -> Dict k v where {k: Eq}
 

@@ -34,7 +34,11 @@ pub fn format_type_expr(ty: &TypeExpr) -> Doc {
         TypeExpr::Var { name, .. } => Doc::text(name),
         TypeExpr::App { func, arg, .. } => {
             let arg_doc = match arg.as_ref() {
-                TypeExpr::App { .. } => docs![Doc::text("("), format_type_expr(arg), Doc::text(")")],
+                // Paren-wrap App args to disambiguate, but not tuples — they
+                // already produce (a, b) which is self-wrapping.
+                TypeExpr::App { .. } if collect_tuple_args(arg).is_none() => {
+                    docs![Doc::text("("), format_type_expr(arg), Doc::text(")")]
+                }
                 _ => format_type_expr(arg),
             };
             docs![format_type_expr(func), Doc::text(" "), arg_doc]
@@ -122,7 +126,10 @@ pub fn format_type_expr_str(ty: &TypeExpr) -> String {
         TypeExpr::Named { name, .. } | TypeExpr::Var { name, .. } => name.clone(),
         TypeExpr::App { func, arg, .. } => {
             let arg_str = match arg.as_ref() {
-                TypeExpr::App { .. } | TypeExpr::Arrow { .. } => format!("({})", format_type_expr_str(arg)),
+                TypeExpr::App { .. } if collect_tuple_args(arg).is_none() => {
+                    format!("({})", format_type_expr_str(arg))
+                }
+                TypeExpr::Arrow { .. } => format!("({})", format_type_expr_str(arg)),
                 _ => format_type_expr_str(arg),
             };
             format!("{} {}", format_type_expr_str(func), arg_str)

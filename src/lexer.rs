@@ -176,7 +176,13 @@ impl Lexer {
         }
     }
 
-    fn emit(&self, token: Token, start: usize, leading_trivia: Vec<Trivia>, preceded_by_newline: bool) -> Spanned {
+    fn emit(
+        &self,
+        token: Token,
+        start: usize,
+        leading_trivia: Vec<Trivia>,
+        preceded_by_newline: bool,
+    ) -> Spanned {
         Spanned {
             token,
             span: Span {
@@ -205,8 +211,8 @@ impl Lexer {
             }
         }
         // Strip at most one leading space after # (preserve further indentation)
-        let text = if text.starts_with(' ') {
-            text[1..].trim_end().to_string()
+        let text = if let Some(stripped) = text.strip_prefix(' ') {
+            stripped.trim_end().to_string()
         } else {
             text.trim_end().to_string()
         };
@@ -344,10 +350,13 @@ impl Lexer {
                             let lo = self.advance().and_then(|c| c.to_digit(16));
                             match (hi, lo) {
                                 (Some(h), Some(l)) => s.push((h * 16 + l) as u8 as char),
-                                _ => return Err(LexError {
-                                    message: "invalid \\x escape: expected two hex digits".to_string(),
-                                    pos: start,
-                                }),
+                                _ => {
+                                    return Err(LexError {
+                                        message: "invalid \\x escape: expected two hex digits"
+                                            .to_string(),
+                                        pos: start,
+                                    });
+                                }
                             }
                         }
                         Some(ch) => s.push(ch),
@@ -400,10 +409,13 @@ impl Lexer {
                             let lo = self.advance().and_then(|c| c.to_digit(16));
                             match (hi, lo) {
                                 (Some(h), Some(l)) => literal.push((h * 16 + l) as u8 as char),
-                                _ => return Err(LexError {
-                                    message: "invalid \\x escape: expected two hex digits".to_string(),
-                                    pos: start,
-                                }),
+                                _ => {
+                                    return Err(LexError {
+                                        message: "invalid \\x escape: expected two hex digits"
+                                            .to_string(),
+                                        pos: start,
+                                    });
+                                }
                             }
                         }
                         Some(ch) => literal.push(ch),
@@ -524,7 +536,10 @@ impl Lexer {
                     self.advance(); // "
                     self.advance(); // "
                     self.advance(); // "
-                    return Ok(Token::String(strip_indentation(&s, close_col), StringKind::RawMultiline));
+                    return Ok(Token::String(
+                        strip_indentation(&s, close_col),
+                        StringKind::RawMultiline,
+                    ));
                 }
                 Some(ch) => {
                     s.push(ch);
@@ -551,7 +566,10 @@ impl Lexer {
                     self.advance(); // "
                     self.advance(); // "
                     self.advance(); // "
-                    return Ok(Token::String(strip_indentation(&s, close_col), StringKind::Multiline));
+                    return Ok(Token::String(
+                        strip_indentation(&s, close_col),
+                        StringKind::Multiline,
+                    ));
                 }
                 Some('\\') => {
                     self.advance();
@@ -565,10 +583,13 @@ impl Lexer {
                             let lo = self.advance().and_then(|c| c.to_digit(16));
                             match (hi, lo) {
                                 (Some(h), Some(l)) => s.push((h * 16 + l) as u8 as char),
-                                _ => return Err(LexError {
-                                    message: "invalid \\x escape: expected two hex digits".to_string(),
-                                    pos: start,
-                                }),
+                                _ => {
+                                    return Err(LexError {
+                                        message: "invalid \\x escape: expected two hex digits"
+                                            .to_string(),
+                                        pos: start,
+                                    });
+                                }
                             }
                         }
                         Some(ch) => s.push(ch),
@@ -612,7 +633,10 @@ impl Lexer {
                     }
                     // Apply indentation stripping to literal parts
                     strip_indentation_interp(&mut parts, close_col);
-                    return Ok(Token::InterpolatedString(parts, StringKind::InterpolatedMultiline));
+                    return Ok(Token::InterpolatedString(
+                        parts,
+                        StringKind::InterpolatedMultiline,
+                    ));
                 }
                 Some('\\') => {
                     self.advance();
@@ -626,10 +650,13 @@ impl Lexer {
                             let lo = self.advance().and_then(|c| c.to_digit(16));
                             match (hi, lo) {
                                 (Some(h), Some(l)) => literal.push((h * 16 + l) as u8 as char),
-                                _ => return Err(LexError {
-                                    message: "invalid \\x escape: expected two hex digits".to_string(),
-                                    pos: start,
-                                }),
+                                _ => {
+                                    return Err(LexError {
+                                        message: "invalid \\x escape: expected two hex digits"
+                                            .to_string(),
+                                        pos: start,
+                                    });
+                                }
                             }
                         }
                         Some(ch) => literal.push(ch),
@@ -722,7 +749,12 @@ impl Lexer {
 
             match self.peek() {
                 None => {
-                    let spanned = self.emit(Token::Eof, start, std::mem::take(&mut pending_trivia), seen_newline && self.nesting == 0);
+                    let spanned = self.emit(
+                        Token::Eof,
+                        start,
+                        std::mem::take(&mut pending_trivia),
+                        seen_newline && self.nesting == 0,
+                    );
                     tokens.push(spanned);
                     return Ok(tokens);
                 }

@@ -122,16 +122,17 @@ fn format_decl(decl: &Decl) -> Doc {
             annotations,
             ..
         } => {
-            let mut prefix = Doc::Nil;
+            let mut preamble = Doc::Nil;
             for ann in annotations {
-                prefix = prefix.append(format_annotation(ann)).append(Doc::hardline());
-            }
-            if *public {
-                prefix = prefix.append(Doc::text("pub "));
+                preamble = preamble.append(format_annotation(ann)).append(Doc::hardline());
             }
 
-            let head = docs![
-                prefix,
+            let mut sig_head = Doc::Nil;
+            if *public {
+                sig_head = sig_head.append(Doc::text("pub "));
+            }
+            sig_head = docs![
+                sig_head,
                 Doc::text(format!("fun {} : ", name)),
                 format_arrow_chain(params, return_type)
             ];
@@ -142,11 +143,13 @@ fn format_decl(decl: &Decl) -> Doc {
                 format_where_clause(where_clause)
             };
 
-            // Break from the end: needs/where break to indented lines when too long
+            // Break from the end: needs/where break to indented lines when too long.
+            // Annotations (with hardlines) stay outside the group so they don't
+            // force the signature itself to break.
             let has_needs = !effects.is_empty() || effect_row_var.is_some();
             let has_where = !where_clause.is_empty();
-            if !has_needs && !has_where {
-                head
+            let sig = if !has_needs && !has_where {
+                sig_head
             } else {
                 let mut trailing = Doc::Nil;
                 if has_needs {
@@ -155,8 +158,9 @@ fn format_decl(decl: &Decl) -> Doc {
                 if has_where {
                     trailing = trailing.append(Doc::line()).append(where_doc);
                 }
-                Doc::group(docs![head, Doc::nest(2, trailing)])
-            }
+                Doc::group(docs![sig_head, Doc::nest(2, trailing)])
+            };
+            docs![preamble, sig]
         }
         Decl::FunBinding {
             name,
@@ -177,16 +181,7 @@ fn format_decl(decl: &Decl) -> Doc {
             }
             format_binding(lhs, value)
         }
-        Decl::TypeDef {
-            doc,
-            public,
-            opaque,
-            name,
-            type_params,
-            variants,
-            deriving,
-            ..
-        } => format_type_def(doc, *public, *opaque, name, type_params, variants, deriving),
+        Decl::TypeDef { .. } => format_type_def(decl),
         Decl::RecordDef {
             doc,
             public,
@@ -254,26 +249,7 @@ fn format_decl(decl: &Decl) -> Doc {
             return_clause,
             dangling_trivia,
         ),
-        Decl::ImplDef {
-            doc,
-            trait_name,
-            target_type,
-            type_params,
-            where_clause,
-            needs,
-            methods,
-            dangling_trivia,
-            ..
-        } => format_impl_def(
-            doc,
-            trait_name,
-            target_type,
-            type_params,
-            where_clause,
-            needs,
-            methods,
-            dangling_trivia,
-        ),
+        Decl::ImplDef { .. } => format_impl_def(decl),
         Decl::DictConstructor { .. } => Doc::Nil,
     }
 }

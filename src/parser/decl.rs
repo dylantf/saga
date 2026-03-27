@@ -232,7 +232,11 @@ impl Parser {
         self.expect(Token::Eq)?;
 
         // Optional leading `|` before first variant
+        let mut multiline = false;
         if matches!(self.peek(), Token::Bar) {
+            if self.tokens[self.pos].preceded_by_newline {
+                multiline = true;
+            }
             self.advance();
         }
 
@@ -249,6 +253,9 @@ impl Parser {
         });
 
         while matches!(self.peek(), Token::Bar) {
+            if self.tokens[self.pos].preceded_by_newline {
+                multiline = true;
+            }
             self.advance();
             let variant_start = self.pos;
             let variant = self.parse_type_constructor_def()?;
@@ -289,6 +296,7 @@ impl Parser {
             type_params,
             variants,
             deriving,
+            multiline,
             span: start.to(end),
         })
     }

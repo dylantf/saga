@@ -104,15 +104,22 @@ pub(super) fn is_block_like(expr: &Expr) -> bool {
     }
 }
 
-pub fn format_type_def(
-    doc: &[String],
-    public: bool,
-    opaque: bool,
-    name: &str,
-    type_params: &[String],
-    variants: &[Annotated<TypeConstructor>],
-    deriving: &[String],
-) -> Doc {
+pub fn format_type_def(decl: &Decl) -> Doc {
+    let Decl::TypeDef {
+        doc,
+        public,
+        opaque,
+        name,
+        type_params,
+        variants,
+        deriving,
+        multiline,
+        ..
+    } = decl
+    else {
+        unreachable!()
+    };
+
     let mut parts = Vec::new();
     if !doc.is_empty() {
         parts.push(format_doc_comment(doc));
@@ -120,9 +127,9 @@ pub fn format_type_def(
     }
 
     let mut header = String::new();
-    if opaque {
+    if *opaque {
         header.push_str("opaque ");
-    } else if public {
+    } else if *public {
         header.push_str("pub ");
     }
     header.push_str("type ");
@@ -149,7 +156,9 @@ pub fn format_type_def(
             vdoc = vdoc.append(format_trivia(&ann.leading_trivia));
         }
         let prefix = if i == 0 { "= " } else { "| " };
-        vdoc = vdoc.append(Doc::text(prefix)).append(Doc::text(&variant.name));
+        vdoc = vdoc
+            .append(Doc::text(prefix))
+            .append(Doc::text(&variant.name));
         if !variant.fields.is_empty() {
             let fields: Vec<Doc> = variant
                 .fields
@@ -167,29 +176,41 @@ pub fn format_type_def(
         variant_docs.push(vdoc);
     }
 
-    // Try flat: `type Name = A | B | C deriving (...)`
-    // Broken:  `type Name\n  = A\n  | B\n  | C\n  deriving (...)`
-    let mut flat_variants = Doc::text(" ");
-    for (i, vd) in variant_docs.iter().enumerate() {
-        if i > 0 {
-            flat_variants = flat_variants.append(Doc::text(" "));
+    if *multiline {
+        // User wrote variants on separate lines — preserve that layout
+        let mut broken_variants = Doc::Nil;
+        for vd in &variant_docs {
+            broken_variants = broken_variants.append(Doc::hardline()).append(vd.clone());
         }
-        flat_variants = flat_variants.append(vd.clone());
-    }
-    flat_variants = flat_variants.append(deriving_doc.clone());
+        if !deriving.is_empty() {
+            broken_variants = broken_variants.append(Doc::hardline()).append(deriving_doc);
+        }
+        parts.push(Doc::nest(2, broken_variants));
+    } else {
+        // Try flat: `type Name = A | B | C deriving (...)`
+        // Broken:  `type Name\n  = A\n  | B\n  | C\n  deriving (...)`
+        let mut flat_variants = Doc::text(" ");
+        for (i, vd) in variant_docs.iter().enumerate() {
+            if i > 0 {
+                flat_variants = flat_variants.append(Doc::text(" "));
+            }
+            flat_variants = flat_variants.append(vd.clone());
+        }
+        flat_variants = flat_variants.append(deriving_doc.clone());
 
-    let mut broken_variants = Doc::Nil;
-    for vd in &variant_docs {
-        broken_variants = broken_variants.append(Doc::hardline()).append(vd.clone());
-    }
-    if !deriving.is_empty() {
-        broken_variants = broken_variants.append(Doc::hardline()).append(deriving_doc);
-    }
+        let mut broken_variants = Doc::Nil;
+        for vd in &variant_docs {
+            broken_variants = broken_variants.append(Doc::hardline()).append(vd.clone());
+        }
+        if !deriving.is_empty() {
+            broken_variants = broken_variants.append(Doc::hardline()).append(deriving_doc);
+        }
 
-    parts.push(Doc::group(Doc::if_break(
-        Doc::nest(2, broken_variants),
-        flat_variants,
-    )));
+        parts.push(Doc::group(Doc::if_break(
+            Doc::nest(2, broken_variants),
+            flat_variants,
+        )));
+    }
 
     docs_from_vec(parts)
 }
@@ -428,16 +449,22 @@ fn format_handler_arm(arm: &HandlerArm) -> Doc {
     d
 }
 
-pub fn format_impl_def(
-    doc: &[String],
-    trait_name: &str,
-    target_type: &str,
-    type_params: &[String],
-    where_clause: &[TraitBound],
-    needs: &[EffectRef],
-    methods: &[Annotated<ImplMethod>],
-    dangling: &[Trivia],
-) -> Doc {
+pub fn format_impl_def(decl: &Decl) -> Doc {
+    let Decl::ImplDef {
+        doc,
+        trait_name,
+        target_type,
+        type_params,
+        where_clause,
+        needs,
+        methods,
+        dangling_trivia: dangling,
+        ..
+    } = decl
+    else {
+        unreachable!()
+    };
+
     let mut parts = Vec::new();
     if !doc.is_empty() {
         parts.push(format_doc_comment(doc));

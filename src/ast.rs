@@ -193,6 +193,8 @@ pub enum Decl {
         type_params: Vec<String>,
         variants: Vec<Annotated<TypeConstructor>>,
         deriving: Vec<String>,
+        /// True if any `|` was on a new line — preserve multi-line layout.
+        multiline: bool,
         span: Span,
     },
 

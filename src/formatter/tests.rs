@@ -137,12 +137,14 @@ fn normalize_decl(d: &mut Decl) {
             id,
             name_span,
             variants,
+            multiline,
             span,
             ..
         } => {
             *id = NID;
             *name_span = S;
             *span = S;
+            *multiline = false;
             for v in variants.iter_mut() {
                 normalize_annotated(v, normalize_type_constructor);
             }
@@ -1233,6 +1235,14 @@ fn tuple_type_round_trips() {
     );
 }
 
+#[test]
+fn tuple_type_as_app_arg_not_double_parened() {
+    assert_eq!(
+        fmt80("fun foo : List (a, b) -> Int"),
+        "fun foo : List (a, b) -> Int\n"
+    );
+}
+
 // --- Trailing lambda ---
 
 #[test]
@@ -1351,26 +1361,15 @@ fn collect_dy_files() -> Vec<std::path::PathBuf> {
     files
 }
 
-/// Files with known formatter bugs that prevent clean round-tripping.
-const KNOWN_FAILING: &[&str] = &[];
-
-fn is_known_failing(path: &std::path::Path) -> bool {
-    let name = path.file_name().unwrap().to_str().unwrap();
-    KNOWN_FAILING.contains(&name)
-}
-
 #[test]
 fn round_trip_all_dy_files() {
     let mut failures = Vec::new();
 
     for path in collect_dy_files() {
-        if is_known_failing(&path) {
-            continue;
-        }
         let source = std::fs::read_to_string(&path).unwrap();
         let name = path.display().to_string();
 
-        // 1. Format (skip files that don't parse — e.g. error examples)
+        // 1. Format (skip files that don't parse)
         let first = match try_fmt(&source, 80) {
             Some(f) => f,
             None => continue,
@@ -1409,47 +1408,5 @@ fn round_trip_all_dy_files() {
         failures.is_empty(),
         "Round-trip failures:\n{}",
         failures.join("\n")
-    );
-}
-
-/// Verify that known-failing files still fail (so we remove them from the list when fixed).
-#[test]
-fn known_failing_files_still_fail() {
-    let mut unexpectedly_passing = Vec::new();
-
-    for path in collect_dy_files() {
-        if !is_known_failing(&path) {
-            continue;
-        }
-        let source = std::fs::read_to_string(&path).unwrap();
-
-        let first = match try_fmt(&source, 80) {
-            Some(f) => f,
-            None => continue,
-        };
-        let second = match try_fmt(&first, 80) {
-            Some(f) => f,
-            None => continue,
-        };
-        if first != second {
-            continue; // still broken (not idempotent)
-        }
-        let original = match try_parse_normalized(&source) {
-            Some(a) => a,
-            None => continue,
-        };
-        let formatted = match try_parse_normalized(&first) {
-            Some(a) => a,
-            None => continue,
-        };
-        if original == formatted {
-            unexpectedly_passing.push(path.display().to_string());
-        }
-    }
-
-    assert!(
-        unexpectedly_passing.is_empty(),
-        "These files now pass round-trip — remove from KNOWN_FAILING:\n{}",
-        unexpectedly_passing.join("\n")
     );
 }
