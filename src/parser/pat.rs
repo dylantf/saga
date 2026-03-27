@@ -93,8 +93,8 @@ impl Parser {
             self.peek(),
             Token::Ident(_)
                 | Token::UpperIdent(_)
-                | Token::Int(_)
-                | Token::Float(_)
+                | Token::Int(..)
+                | Token::Float(..)
                 | Token::String(_)
                 | Token::True
                 | Token::False
@@ -207,14 +207,14 @@ impl Parser {
             Token::Ident(s) if s.starts_with('_') => Ok(Pat::Wildcard { id: NodeId::fresh(), span }),
             Token::Ident(s) => Ok(Pat::Var { id: NodeId::fresh(), name: s, span }),
             Token::Minus => match self.advance() {
-                Token::Int(n) => Ok(Pat::Lit {
+                Token::Int(s, n) => Ok(Pat::Lit {
                     id: NodeId::fresh(),
-                    value: Lit::Int(-n),
+                    value: Lit::Int(format!("-{}", s), -n),
                     span: span.to(self.tokens[self.pos - 1].span),
                 }),
-                Token::Float(f) => Ok(Pat::Lit {
+                Token::Float(s, f) => Ok(Pat::Lit {
                     id: NodeId::fresh(),
-                    value: Lit::Float(-f),
+                    value: Lit::Float(format!("-{}", s), -f),
                     span: span.to(self.tokens[self.pos - 1].span),
                 }),
                 tok => {
@@ -230,14 +230,14 @@ impl Parser {
                 value: Lit::String(s),
                 span,
             }),
-            Token::Int(n) => Ok(Pat::Lit {
+            Token::Int(s, n) => Ok(Pat::Lit {
                 id: NodeId::fresh(),
-                value: Lit::Int(n),
+                value: Lit::Int(s, n),
                 span,
             }),
-            Token::Float(f) => Ok(Pat::Lit {
+            Token::Float(s, f) => Ok(Pat::Lit {
                 id: NodeId::fresh(),
-                value: Lit::Float(f),
+                value: Lit::Float(s, f),
                 span,
             }),
             Token::True => Ok(Pat::Lit {

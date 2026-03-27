@@ -398,8 +398,8 @@ impl Parser {
                     }
                     let lit = match self.advance() {
                         Token::String(s) => Lit::String(s),
-                        Token::Int(n) => Lit::Int(n),
-                        Token::Float(f) => Lit::Float(f),
+                        Token::Int(s, n) => Lit::Int(s, n),
+                        Token::Float(s, f) => Lit::Float(s, f),
                         Token::True => Lit::Bool(true),
                         Token::False => Lit::Bool(false),
                         tok => {

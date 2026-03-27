@@ -32,7 +32,7 @@ fn literal_int() {
         expr,
         Expr {
             kind: ExprKind::Lit {
-                value: Lit::Int(42),
+                value: Lit::Int(_, 42),
                 ..
             },
             ..
@@ -44,7 +44,7 @@ fn literal_int() {
 fn literal_float() {
     let expr = parse_expr("1.5");
     assert!(
-        matches!(expr, Expr { kind: ExprKind::Lit { value: Lit::Float(f), .. }, .. } if f == 1.5)
+        matches!(expr, Expr { kind: ExprKind::Lit { value: Lit::Float(_, f), .. }, .. } if f == 1.5)
     );
 }
 
@@ -131,7 +131,7 @@ fn binary_precedence_mul_over_add() {
                 *left,
                 Expr {
                     kind: ExprKind::Lit {
-                        value: Lit::Int(1),
+                        value: Lit::Int(_, 1),
                         ..
                     },
                     ..
@@ -209,7 +209,7 @@ fn binary_left_associative() {
                 *right,
                 Expr {
                     kind: ExprKind::Lit {
-                        value: Lit::Int(3),
+                        value: Lit::Int(_, 3),
                         ..
                     },
                     ..
@@ -436,7 +436,7 @@ fn cons_operator_right_associative() {
     let expr = parse_expr("1 :: 2 :: xs");
     match expr {
         Expr { kind: ExprKind::Cons { head, tail }, .. } => {
-            assert!(matches!(*head, Expr { kind: ExprKind::Lit { value: Lit::Int(1), .. }, .. }));
+            assert!(matches!(*head, Expr { kind: ExprKind::Lit { value: Lit::Int(_, 1), .. }, .. }));
             // tail is Cons(2, xs)
             assert!(matches!(*tail, Expr { kind: ExprKind::Cons { .. }, .. }));
         }
@@ -474,7 +474,7 @@ fn if_else() {
                 *then_branch,
                 Expr {
                     kind: ExprKind::Lit {
-                        value: Lit::Int(1),
+                        value: Lit::Int(_, 1),
                         ..
                     },
                     ..
@@ -484,7 +484,7 @@ fn if_else() {
                 *else_branch,
                 Expr {
                     kind: ExprKind::Lit {
-                        value: Lit::Int(2),
+                        value: Lit::Int(_, 2),
                         ..
                     },
                     ..
@@ -530,7 +530,7 @@ fn block_single_expr() {
                 stmts[0].node,
                 Stmt::Expr(Expr {
                     kind: ExprKind::Lit {
-                        value: Lit::Int(42),
+                        value: Lit::Int(_, 42),
                         ..
                     },
                     ..
@@ -591,7 +591,7 @@ fn pattern_lit_int() {
     assert!(matches!(
         pat,
         Pat::Lit {
-            value: Lit::Int(42),
+            value: Lit::Int(_, 42),
             ..
         }
     ));
@@ -615,7 +615,7 @@ fn pattern_lit_negative_int() {
     assert!(matches!(
         pat,
         Pat::Lit {
-            value: Lit::Int(-1),
+            value: Lit::Int(_, -1),
             ..
         }
     ));
@@ -624,13 +624,13 @@ fn pattern_lit_negative_int() {
 #[test]
 fn pattern_lit_float() {
     let pat = parse_pattern("1.5");
-    assert!(matches!(pat, Pat::Lit { value: Lit::Float(f), .. } if f == 1.5));
+    assert!(matches!(pat, Pat::Lit { value: Lit::Float(_, f), .. } if f == 1.5));
 }
 
 #[test]
 fn pattern_lit_negative_float() {
     let pat = parse_pattern("-2.5");
-    assert!(matches!(pat, Pat::Lit { value: Lit::Float(f), .. } if f == -2.5));
+    assert!(matches!(pat, Pat::Lit { value: Lit::Float(_, f), .. } if f == -2.5));
 }
 
 #[test]
@@ -645,7 +645,7 @@ fn pattern_negative_in_case() {
             assert!(matches!(
                 &arms[0].node.pattern,
                 Pat::Lit {
-                    value: Lit::Int(-1),
+                    value: Lit::Int(_, -1),
                     ..
                 }
             ));
@@ -831,7 +831,7 @@ fn pattern_constructor_space_separated_with_literal() {
             assert!(matches!(
                 &args[0],
                 Pat::Lit {
-                    value: Lit::Int(42),
+                    value: Lit::Int(_, 42),
                     ..
                 }
             ));
@@ -1210,7 +1210,7 @@ fn record_create_simple() {
                 &fields[1].2,
                 Expr {
                     kind: ExprKind::Lit {
-                        value: Lit::Int(30),
+                        value: Lit::Int(_, 30),
                         ..
                     },
                     ..
@@ -1306,7 +1306,7 @@ fn record_update_simple() {
                 &fields[0].2,
                 Expr {
                     kind: ExprKind::Lit {
-                        value: Lit::Int(31),
+                        value: Lit::Int(_, 31),
                         ..
                     },
                     ..
@@ -1380,7 +1380,7 @@ fn block_single_expr_still_works() {
                 &stmts[0].node,
                 Stmt::Expr(Expr {
                     kind: ExprKind::Lit {
-                        value: Lit::Int(42),
+                        value: Lit::Int(_, 42),
                         ..
                     },
                     ..
@@ -2337,8 +2337,8 @@ fn normal_list_still_works() {
     match expr {
         Expr { kind: ExprKind::ListLit { elements, .. }, .. } => {
             assert_eq!(elements.len(), 2);
-            assert!(matches!(&elements[0], Expr { kind: ExprKind::Lit { value: Lit::Int(1) }, .. }));
-            assert!(matches!(&elements[1], Expr { kind: ExprKind::Lit { value: Lit::Int(2) }, .. }));
+            assert!(matches!(&elements[0], Expr { kind: ExprKind::Lit { value: Lit::Int(_, 1) }, .. }));
+            assert!(matches!(&elements[1], Expr { kind: ExprKind::Lit { value: Lit::Int(_, 2) }, .. }));
         }
         other => panic!("expected ListLit, got {:?}", other),
     }

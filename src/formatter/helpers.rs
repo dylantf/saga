@@ -7,15 +7,8 @@ pub fn format_lit(lit: &Lit) -> Doc {
 
 pub fn format_lit_raw(lit: &Lit) -> String {
     match lit {
-        Lit::Int(n) => n.to_string(),
-        Lit::Float(f) => {
-            let s = format!("{}", f);
-            if s.contains('.') {
-                s
-            } else {
-                format!("{}.0", s)
-            }
-        }
+        Lit::Int(s, _) => s.clone(),
+        Lit::Float(s, _) => s.clone(),
         Lit::String(s) => format!("\"{}\"", s),
         Lit::Bool(true) => "True".to_string(),
         Lit::Bool(false) => "False".to_string(),

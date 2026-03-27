@@ -29,8 +29,8 @@ impl Checker {
             }
             Pat::Lit { value, span, .. } => {
                 let lit_ty = match value {
-                    Lit::Int(_) => Type::int(),
-                    Lit::Float(_) => Type::float(),
+                    Lit::Int(..) => Type::int(),
+                    Lit::Float(..) => Type::float(),
                     Lit::String(_) => Type::string(),
                     Lit::Bool(_) => Type::bool(),
                     Lit::Unit => Type::unit(),

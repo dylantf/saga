@@ -802,10 +802,12 @@ impl PartialEq for TypeExpr {
 
 // --- Supporting types ---
 
+/// Literal values. Int and Float carry the original source text alongside the
+/// parsed numeric value so the formatter can round-trip exactly what the user wrote.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Lit {
-    Int(i64),
-    Float(f64),
+    Int(String, i64),
+    Float(String, f64),
     String(String),
     Bool(bool),
     Unit,

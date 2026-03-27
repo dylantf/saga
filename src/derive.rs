@@ -458,7 +458,7 @@ fn derive_ord(
                                 body: Expr::synth(
                                     span,
                                     ExprKind::Lit {
-                                        value: Lit::Int(i as i64),
+                                        value: Lit::Int((i as i64).to_string(), i as i64),
                                     },
                                 ),
                                 span,
@@ -681,7 +681,7 @@ fn derive_enum(
             Annotated::bare(CaseArm {
                 pattern: Pat::Constructor { id: NodeId::fresh(), name: ann_v.node.name.clone(), args: vec![], span },
                 guard: None,
-                body: Expr::synth(span, ExprKind::Lit { value: Lit::Int(i as i64) }),
+                body: Expr::synth(span, ExprKind::Lit { value: Lit::Int((i as i64).to_string(), i as i64) }),
                 span,
             })
         }).collect(),
@@ -692,7 +692,7 @@ fn derive_enum(
     let from_enum_param = "__n".to_string();
     let mut from_enum_arms: Vec<Annotated<CaseArm>> = variants.iter().enumerate().map(|(i, ann_v)| {
         Annotated::bare(CaseArm {
-            pattern: Pat::Lit { id: NodeId::fresh(), value: Lit::Int(i as i64), span },
+            pattern: Pat::Lit { id: NodeId::fresh(), value: Lit::Int((i as i64).to_string(), i as i64), span },
             guard: None,
             body: Expr::synth(span, ExprKind::Constructor { name: ann_v.node.name.clone() }),
             span,

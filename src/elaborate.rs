@@ -1423,7 +1423,7 @@ impl Elaborator {
                         Expr::synth(
                             s,
                             ExprKind::Lit {
-                                value: Lit::Int((i + 1) as i64),
+                                value: Lit::Int(((i + 1) as i64).to_string(), (i + 1) as i64),
                             },
                         ),
                         t_var.clone(),

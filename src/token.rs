@@ -1,8 +1,8 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    // Literals
-    Int(i64),
-    Float(f64),
+    // Literals (source text, parsed value)
+    Int(String, i64),
+    Float(String, f64),
     String(String),
     /// `$"hello {name}"` -- pre-tokenized interpolated string
     InterpolatedString(Vec<InterpPart>),

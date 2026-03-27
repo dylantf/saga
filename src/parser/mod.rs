@@ -143,8 +143,8 @@ impl Parser {
     pub(super) fn can_start_primary(&self) -> bool {
         matches!(
             self.peek(),
-            Token::Int(_)
-                | Token::Float(_)
+            Token::Int(..)
+                | Token::Float(..)
                 | Token::String(_)
                 | Token::InterpolatedString(_)
                 | Token::True

@@ -355,8 +355,8 @@ fn format_spat(pat: &SPat) -> String {
             format!("{}({})", name, args_str.join(", "))
         }
         SPat::Literal(lit) => match lit {
-            Lit::Int(n) => n.to_string(),
-            Lit::Float(f) => f.to_string(),
+            Lit::Int(s, _) => s.clone(),
+            Lit::Float(s, _) => s.clone(),
             Lit::String(s) => format!("\"{}\"", s),
             Lit::Bool(b) => b.to_string(),
             Lit::Unit => "()".into(),

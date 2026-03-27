@@ -19,35 +19,35 @@ fn lex(source: &str) -> Vec<Spanned> {
 
 #[test]
 fn integer() {
-    assert_eq!(toks("42"), vec![Int(42), Eof]);
+    assert_eq!(toks("42"), vec![Int("42".into(), 42), Eof]);
 }
 
 #[test]
 fn float() {
-    assert_eq!(toks("3.144"), vec![Float(3.144), Eof]);
+    assert_eq!(toks("3.144"), vec![Float("3.144".into(), 3.144), Eof]);
 }
 
 #[test]
 fn integer_with_separators() {
-    assert_eq!(toks("1_000_000"), vec![Int(1_000_000), Eof]);
-    assert_eq!(toks("1_0"), vec![Int(10), Eof]);
+    assert_eq!(toks("1_000_000"), vec![Int("1_000_000".into(), 1_000_000), Eof]);
+    assert_eq!(toks("1_0"), vec![Int("1_0".into(), 10), Eof]);
 }
 
 #[test]
 fn float_with_separators() {
-    assert_eq!(toks("1_000.000_1"), vec![Float(1_000.000_1), Eof]);
+    assert_eq!(toks("1_000.000_1"), vec![Float("1_000.000_1".into(), 1_000.000_1), Eof]);
 }
 
 #[test]
 fn trailing_underscore_is_not_separator() {
     // 42_ should lex as int 42 then ident _foo
-    assert_eq!(toks("42_foo"), vec![Int(42), Ident("_foo".into()), Eof]);
+    assert_eq!(toks("42_foo"), vec![Int("42".into(), 42), Ident("_foo".into()), Eof]);
 }
 
 #[test]
 fn multiple_consecutive_underscores() {
-    assert_eq!(toks("1__0"), vec![Int(10), Eof]);
-    assert_eq!(toks("1___000"), vec![Int(1000), Eof]);
+    assert_eq!(toks("1__0"), vec![Int("1__0".into(), 10), Eof]);
+    assert_eq!(toks("1___000"), vec![Int("1___000".into(), 1000), Eof]);
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn leading_underscore_is_ident() {
 #[test]
 fn integer_then_dot_ident() {
     // 3.foo should be int, dot, ident — not a float
-    assert_eq!(toks("3.foo"), vec![Int(3), Dot, Ident("foo".into()), Eof]);
+    assert_eq!(toks("3.foo"), vec![Int("3".into(), 3), Dot, Ident("foo".into()), Eof]);
 }
 
 #[test]
@@ -199,16 +199,16 @@ fn unexpected_character() {
 #[test]
 fn comment_on_own_line_is_leading_trivia() {
     let tokens = lex("# comment\n42");
-    // Only significant tokens: Int(42), Eof
+    // Only significant tokens: Int("42".into(), 42), Eof
     assert_eq!(tokens.len(), 2);
-    assert_eq!(tokens[0].token, Int(42));
+    assert_eq!(tokens[0].token, Int("42".into(), 42));
     assert_eq!(tokens[0].leading_trivia, vec![Trivia::Comment("comment".into())]);
 }
 
 #[test]
 fn inline_comment_is_trailing() {
     let tokens = lex("42 # comment\n");
-    assert_eq!(tokens[0].token, Int(42));
+    assert_eq!(tokens[0].token, Int("42".into(), 42));
     assert_eq!(tokens[0].trailing_comment, Some("comment".into()));
 }
 
@@ -235,8 +235,8 @@ fn comment_at_end_of_file_is_eof_leading_trivia() {
 #[test]
 fn newlines_produce_no_extra_tokens() {
     // Only significant tokens remain in the stream
-    assert_eq!(toks("42\n"), vec![Int(42), Eof]);
-    assert_eq!(toks("3.144\n"), vec![Float(3.144), Eof]);
+    assert_eq!(toks("42\n"), vec![Int("42".into(), 42), Eof]);
+    assert_eq!(toks("3.144\n"), vec![Float("3.144".into(), 3.144), Eof]);
     assert_eq!(toks("\"hi\"\n"), vec![String("hi".into()), Eof]);
     assert_eq!(toks("True\n"), vec![True, Eof]);
     assert_eq!(toks("foo\n"), vec![Ident("foo".into()), Eof]);
@@ -244,8 +244,8 @@ fn newlines_produce_no_extra_tokens() {
 
 #[test]
 fn no_extra_tokens_after_operators() {
-    assert_eq!(toks("+\n42"), vec![Plus, Int(42), Eof]);
-    assert_eq!(toks("=\n42"), vec![Eq, Int(42), Eof]);
+    assert_eq!(toks("+\n42"), vec![Plus, Int("42".into(), 42), Eof]);
+    assert_eq!(toks("=\n42"), vec![Eq, Int("42".into(), 42), Eof]);
     assert_eq!(toks("->\nInt"), vec![Arrow, UpperIdent("Int".into()), Eof]);
 }
 
@@ -257,7 +257,7 @@ fn no_extra_tokens_after_keywords() {
 
 #[test]
 fn no_extra_tokens_inside_parens() {
-    assert_eq!(toks("(\n42\n)"), vec![LParen, Int(42), RParen, Eof]);
+    assert_eq!(toks("(\n42\n)"), vec![LParen, Int("42".into(), 42), RParen, Eof]);
     assert_eq!(
         toks("(foo\nbar)"),
         vec![
@@ -287,9 +287,9 @@ fn no_extra_tokens_inside_parens() {
 #[test]
 fn blank_lines_are_leading_trivia() {
     let tokens = lex("42\n\n\n");
-    // Int(42), Eof
+    // Int("42".into(), 42), Eof
     assert_eq!(tokens.len(), 2);
-    assert_eq!(tokens[0].token, Int(42));
+    assert_eq!(tokens[0].token, Int("42".into(), 42));
     // The blank lines are leading trivia on the Eof token
     assert_eq!(tokens[1].token, Eof);
     assert_eq!(tokens[1].leading_trivia, vec![Trivia::BlankLines(2)]);
@@ -297,7 +297,7 @@ fn blank_lines_are_leading_trivia() {
 
 #[test]
 fn leading_newlines_no_extra_tokens() {
-    assert_eq!(toks("\n\n42"), vec![Int(42), Eof]);
+    assert_eq!(toks("\n\n42"), vec![Int("42".into(), 42), Eof]);
 }
 
 // --- Multi-statement programs ---
@@ -310,11 +310,11 @@ fn two_statements() {
             Let,
             Ident("x".into()),
             Eq,
-            Int(1),
+            Int("1".into(), 1),
             Let,
             Ident("y".into()),
             Eq,
-            Int(2),
+            Int("2".into(), 2),
             Eof,
         ]
     );

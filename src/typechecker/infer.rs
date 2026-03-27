@@ -14,8 +14,8 @@ impl Checker {
         let node_id = expr.id;
         match &expr.kind {
             ExprKind::Lit { value, .. } => Ok(match value {
-                Lit::Int(_) => Type::int(),
-                Lit::Float(_) => Type::float(),
+                Lit::Int(..) => Type::int(),
+                Lit::Float(..) => Type::float(),
                 Lit::String(_) => Type::string(),
                 Lit::Bool(_) => Type::bool(),
                 Lit::Unit => Type::unit(),

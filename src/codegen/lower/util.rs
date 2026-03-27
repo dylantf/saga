@@ -24,8 +24,8 @@ pub(super) fn mangle_ctor_atom(
 
 pub(super) fn lower_lit(lit: &Lit) -> CLit {
     match lit {
-        Lit::Int(n) => CLit::Int(*n),
-        Lit::Float(f) => CLit::Float(*f),
+        Lit::Int(_, n) => CLit::Int(*n),
+        Lit::Float(_, f) => CLit::Float(*f),
         Lit::Bool(true) => CLit::Atom("true".to_string()),
         Lit::Bool(false) => CLit::Atom("false".to_string()),
         Lit::Unit => CLit::Atom("unit".to_string()),

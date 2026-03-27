@@ -428,11 +428,11 @@ impl Parser {
             Token::False => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
                 value: Lit::Bool(false),
             }}),
-            Token::Int(n) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
-                value: Lit::Int(n),
+            Token::Int(s, n) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
+                value: Lit::Int(s, n),
             }}),
-            Token::Float(f) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
-                value: Lit::Float(f),
+            Token::Float(s, f) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
+                value: Lit::Float(s, f),
             }}),
             Token::String(s) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
                 value: Lit::String(s),

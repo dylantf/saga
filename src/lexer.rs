@@ -208,10 +208,12 @@ impl Lexer {
     }
 
     fn read_number(&mut self) -> Token {
-        let mut left_hand = String::new();
+        let start = self.pos;
+        // digits_only strips underscores for parsing; we also capture the full source text
+        let mut digits_only = String::new();
         while let Some(ch) = self.peek() {
             if ch.is_ascii_digit() {
-                left_hand.push(ch);
+                digits_only.push(ch);
                 self.advance();
             } else if ch == '_'
                 && self
@@ -226,10 +228,10 @@ impl Lexer {
 
         if self.peek() == Some('.') && self.peek_next().is_some_and(|c| c.is_ascii_digit()) {
             self.advance(); // consume '.'
-            let mut right_hand = String::new();
+            let mut frac_digits = String::new();
             while let Some(ch) = self.peek() {
                 if ch.is_ascii_digit() {
-                    right_hand.push(ch);
+                    frac_digits.push(ch);
                     self.advance();
                 } else if ch == '_'
                     && self
@@ -241,10 +243,14 @@ impl Lexer {
                     break;
                 }
             }
-            let str = format!("{left_hand}.{right_hand}");
-            Token::Float(str.parse().unwrap())
+            let source_text = self.source[start..self.pos].to_string();
+            let numeric_str = format!("{digits_only}.{frac_digits}");
+            let val = numeric_str.parse().unwrap();
+            Token::Float(source_text, val)
         } else {
-            Token::Int(left_hand.parse().unwrap())
+            let source_text = self.source[start..self.pos].to_string();
+            let val = digits_only.parse().unwrap();
+            Token::Int(source_text, val)
         }
     }
 
