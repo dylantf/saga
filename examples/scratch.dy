@@ -9,9 +9,13 @@ import Std.Test (describe, test) # comment 4: trailing on import
 # comment 5: before let binding
 let x = 42 # comment 6: trailing on let
 
+
+
+
+
 # comment 7: before type def
-type Shape
-  = Circle(Float)
+type Shape = 
+  | Circle(Float)
   | Rect(Float, Float) # comment 8: trailing on variant
   | Point
 

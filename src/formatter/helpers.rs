@@ -1,5 +1,5 @@
-use crate::ast::*;
 use super::Doc;
+use crate::ast::*;
 
 pub fn format_lit(lit: &Lit) -> Doc {
     Doc::text(format_lit_raw(lit))
@@ -8,7 +8,14 @@ pub fn format_lit(lit: &Lit) -> Doc {
 pub fn format_lit_raw(lit: &Lit) -> String {
     match lit {
         Lit::Int(n) => n.to_string(),
-        Lit::Float(f) => format!("{}", f),
+        Lit::Float(f) => {
+            let s = format!("{}", f);
+            if s.contains('.') {
+                s
+            } else {
+                format!("{}.0", s)
+            }
+        }
         Lit::String(s) => format!("\"{}\"", s),
         Lit::Bool(true) => "True".to_string(),
         Lit::Bool(false) => "False".to_string(),
@@ -36,7 +43,10 @@ pub fn format_binop(op: &BinOp) -> &'static str {
 }
 
 pub fn format_doc_comment(doc: &[String]) -> Doc {
-    let lines: Vec<Doc> = doc.iter().map(|line| Doc::text(format!("#@ {}", line))).collect();
+    let lines: Vec<Doc> = doc
+        .iter()
+        .map(|line| Doc::text(format!("#@ {}", line)))
+        .collect();
     Doc::join(Doc::hardline(), lines)
 }
 
@@ -55,6 +65,35 @@ pub fn format_trivia(trivia: &[Trivia]) -> Doc {
             Trivia::DocComment(text) => {
                 parts.push(Doc::text(format!("#@ {}", text)));
                 parts.push(Doc::hardline());
+            }
+        }
+    }
+    docs_from_vec(parts)
+}
+
+/// Format trivia in "dangling" position (end of a braced block, before `}`).
+/// Same as `format_trivia` but omits the trailing hardline on the last comment,
+/// since the caller will emit its own hardline before the closing brace.
+pub fn format_trivia_dangling(trivia: &[Trivia]) -> Doc {
+    let mut parts = Vec::new();
+    let len = trivia.len();
+    for (i, item) in trivia.iter().enumerate() {
+        let is_last = i == len - 1;
+        match item {
+            Trivia::BlankLines(_) => {
+                parts.push(Doc::hardline());
+            }
+            Trivia::Comment(text) => {
+                parts.push(Doc::text(format!("# {}", text)));
+                if !is_last {
+                    parts.push(Doc::hardline());
+                }
+            }
+            Trivia::DocComment(text) => {
+                parts.push(Doc::text(format!("#@ {}", text)));
+                if !is_last {
+                    parts.push(Doc::hardline());
+                }
             }
         }
     }

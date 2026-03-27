@@ -107,14 +107,14 @@ abs n = if n < 0 then -n else n
 ## ADTs
 
 ```
-type Shape
-  = Circle(Float)
+type Shape =
+  | Circle(Float)
   | Rect(Float, Float)
   | Point
 
 # With type parameter
-type Maybe a
-  = Just(a)
+type Maybe a =
+  | Just(a)
   | Nothing
 
 # Single line

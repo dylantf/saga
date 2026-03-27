@@ -1,9 +1,9 @@
-use crate::ast::*;
 use super::Doc;
-use super::helpers::{docs_from_vec, format_trivia, format_trailing};
-use super::type_expr::*;
-use super::expr::format_expr;
 use super::decl::*;
+use super::expr::format_expr;
+use super::helpers::{docs_from_vec, format_trailing, format_trivia};
+use super::type_expr::*;
+use crate::ast::*;
 
 /// Format an entire program (list of annotated declarations).
 pub fn format_program(program: &AnnotatedProgram) -> Doc {
@@ -46,13 +46,24 @@ pub fn format_program(program: &AnnotatedProgram) -> Doc {
 /// Format a single declaration.
 fn format_decl(decl: &Decl) -> Doc {
     match decl {
-        Decl::ModuleDecl { path, .. } => {
-            Doc::text(format!("module {}", path.join(".")))
-        }
-        Decl::Import { module_path, alias, exposing, .. } => {
-            format_import(module_path, alias, exposing)
-        }
-        Decl::FunSignature { public, name, params, return_type, effects, effect_row_var, where_clause, annotations, .. } => {
+        Decl::ModuleDecl { path, .. } => Doc::text(format!("module {}", path.join("."))),
+        Decl::Import {
+            module_path,
+            alias,
+            exposing,
+            ..
+        } => format_import(module_path, alias, exposing),
+        Decl::FunSignature {
+            public,
+            name,
+            params,
+            return_type,
+            effects,
+            effect_row_var,
+            where_clause,
+            annotations,
+            ..
+        } => {
             let mut parts = Vec::new();
             for ann in annotations {
                 parts.push(format_annotation(ann));
@@ -62,17 +73,31 @@ fn format_decl(decl: &Decl) -> Doc {
                 parts.push(Doc::text("pub "));
             }
             parts.push(Doc::text(format!("fun {} : ", name)));
-            parts.push(format_fun_type(params, return_type, effects, effect_row_var));
+            parts.push(format_fun_type(
+                params,
+                return_type,
+                effects,
+                effect_row_var,
+            ));
             if !where_clause.is_empty() {
                 parts.push(Doc::text(" "));
                 parts.push(format_where_clause(where_clause));
             }
             docs_from_vec(parts)
         }
-        Decl::FunBinding { name, params, guard, body, .. } => {
-            format_fun_binding(name, params, guard, body)
-        }
-        Decl::Let { name, annotation, value, .. } => {
+        Decl::FunBinding {
+            name,
+            params,
+            guard,
+            body,
+            ..
+        } => format_fun_binding(name, params, guard, body),
+        Decl::Let {
+            name,
+            annotation,
+            value,
+            ..
+        } => {
             let mut d = Doc::text(format!("let {}", name));
             if let Some(ty) = annotation {
                 d = d.append(Doc::text(" : ")).append(format_type_expr(ty));
@@ -80,24 +105,103 @@ fn format_decl(decl: &Decl) -> Doc {
             d = d.append(Doc::text(" = ")).append(format_expr(value));
             d
         }
-        Decl::TypeDef { doc, public, opaque, name, type_params, variants, deriving, .. } => {
-            format_type_def(doc, *public, *opaque, name, type_params, variants, deriving)
-        }
-        Decl::RecordDef { doc, public, name, type_params, fields, deriving, dangling_trivia, .. } => {
-            format_record_def(doc, *public, name, type_params, fields, deriving, dangling_trivia)
-        }
-        Decl::EffectDef { doc, public, name, type_params, operations, dangling_trivia, .. } => {
-            format_effect_def(doc, *public, name, type_params, operations, dangling_trivia)
-        }
-        Decl::TraitDef { doc, public, name, type_param, supertraits, methods, dangling_trivia, .. } => {
-            format_trait_def(doc, *public, name, type_param, supertraits, methods, dangling_trivia)
-        }
-        Decl::HandlerDef { doc, public, name, effects, needs, where_clause, arms, return_clause, dangling_trivia, .. } => {
-            format_handler_def(doc, *public, name, effects, needs, where_clause, arms, return_clause, dangling_trivia)
-        }
-        Decl::ImplDef { doc, trait_name, target_type, type_params, where_clause, needs, methods, dangling_trivia, .. } => {
-            format_impl_def(doc, trait_name, target_type, type_params, where_clause, needs, methods, dangling_trivia)
-        }
+        Decl::TypeDef {
+            doc,
+            public,
+            opaque,
+            name,
+            type_params,
+            variants,
+            deriving,
+            ..
+        } => format_type_def(doc, *public, *opaque, name, type_params, variants, deriving),
+        Decl::RecordDef {
+            doc,
+            public,
+            name,
+            type_params,
+            fields,
+            deriving,
+            dangling_trivia,
+            ..
+        } => format_record_def(
+            doc,
+            *public,
+            name,
+            type_params,
+            fields,
+            deriving,
+            dangling_trivia,
+        ),
+        Decl::EffectDef {
+            doc,
+            public,
+            name,
+            type_params,
+            operations,
+            dangling_trivia,
+            ..
+        } => format_effect_def(doc, *public, name, type_params, operations, dangling_trivia),
+        Decl::TraitDef {
+            doc,
+            public,
+            name,
+            type_param,
+            supertraits,
+            methods,
+            dangling_trivia,
+            ..
+        } => format_trait_def(
+            doc,
+            *public,
+            name,
+            type_param,
+            supertraits,
+            methods,
+            dangling_trivia,
+        ),
+        Decl::HandlerDef {
+            doc,
+            public,
+            name,
+            effects,
+            needs,
+            where_clause,
+            arms,
+            return_clause,
+            dangling_trivia,
+            ..
+        } => format_handler_def(
+            doc,
+            *public,
+            name,
+            effects,
+            needs,
+            where_clause,
+            arms,
+            return_clause,
+            dangling_trivia,
+        ),
+        Decl::ImplDef {
+            doc,
+            trait_name,
+            target_type,
+            type_params,
+            where_clause,
+            needs,
+            methods,
+            dangling_trivia,
+            ..
+        } => format_impl_def(
+            doc,
+            trait_name,
+            target_type,
+            type_params,
+            where_clause,
+            needs,
+            methods,
+            dangling_trivia,
+        ),
         Decl::DictConstructor { .. } => Doc::Nil,
     }
 }
