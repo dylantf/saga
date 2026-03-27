@@ -28,8 +28,14 @@ pub fn format_program(program: &AnnotatedProgram) -> Doc {
         // The declaration itself
         result = result.append(format_decl(&ann.node));
 
-        // Trailing comment
+        // Trailing comment (same line)
         result = result.append(format_trailing(&ann.trailing_comment));
+
+        // Trailing trivia (own-line comments following this decl, before a blank line)
+        if !ann.trailing_trivia.is_empty() {
+            result = result.append(Doc::hardline());
+            result = result.append(format_trivia(&ann.trailing_trivia));
+        }
     }
 
     // Trailing trivia at end of file

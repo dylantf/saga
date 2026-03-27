@@ -157,10 +157,11 @@ pub fn cmd_emit(file: &str) {
 
 pub fn cmd_fmt(args: &[String]) {
     let write_mode = args.contains(&"--write".to_string());
+    let debug_mode = args.contains(&"--debug".to_string());
     let file = args.iter().find(|a| a.ends_with(".dy"));
 
     let Some(file) = file else {
-        eprintln!("Usage: dylang fmt [--write] <file.dy>");
+        eprintln!("Usage: dylang fmt [--write] [--debug] <file.dy>");
         std::process::exit(1);
     };
 
@@ -179,6 +180,11 @@ pub fn cmd_fmt(args: &[String]) {
         eprintln!("Parse error in {}: {} at {:?}", file, e.message, e.span);
         std::process::exit(1);
     });
+
+    if debug_mode {
+        println!("{:#?}", program);
+        return;
+    }
 
     let formatted = dylang::formatter::format(&program, 80);
 

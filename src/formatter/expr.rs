@@ -277,7 +277,9 @@ pub fn format_expr(expr: &Expr) -> Doc {
         // --- Surface syntax sugar ---
         ExprKind::Pipe { segments } => {
             let has_trivia = segments.iter().any(|s| {
-                s.trailing_comment.is_some() || !s.leading_trivia.is_empty()
+                s.trailing_comment.is_some()
+                    || !s.leading_trivia.is_empty()
+                    || !s.trailing_trivia.is_empty()
             });
             // Head segment (not indented)
             let mut head = format_expr(&segments[0].node);
@@ -296,6 +298,11 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 }
                 tail = tail.append(docs![Doc::text("|> "), format_expr(&seg.node)]);
                 tail = tail.append(format_trailing(&seg.trailing_comment));
+                // Trailing trivia (own-line comments after last segment)
+                if !seg.trailing_trivia.is_empty() {
+                    tail = tail.append(Doc::hardline());
+                    tail = tail.append(format_trivia(&seg.trailing_trivia));
+                }
             }
 
             let result = docs![head, Doc::nest(2, tail)];

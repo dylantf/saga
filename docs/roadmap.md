@@ -277,6 +277,12 @@ Checkbox = implemented and working. Unchecked = not yet done.
   - [ ] `assert_throws` / `assert_fails` (test that an effect or panic is raised)
   - [ ] Test timing (suite duration)
 - [ ] Formatter
+  - [x] Wadler-Lindig Doc algebra with proper `Nest`/`Group` indentation
+  - [x] Token-level trivia attachment (comments/blank lines on tokens, promoted to AST)
+  - [x] Trailing trivia splitting (blank line = paragraph break heuristic)
+  - [ ] Audit program-level `split_inter_decl_trivia` — may be redundant now that expression parsers steal their own trailing trivia via `steal_trailing_trivia`
+  - [ ] Semicolon-separated single-line blocks (e.g. `{ println msg; resume () }`)
+  - [ ] Configurable line width
 - [ ] Docstrings/generated docs
 - [ ] Language documentation/website
 

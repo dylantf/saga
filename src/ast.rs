@@ -12,6 +12,9 @@ pub struct Annotated<T> {
     pub node: T,
     pub leading_trivia: Vec<Trivia>,
     pub trailing_comment: Option<String>,
+    /// Own-line comments that follow this node (before a blank line boundary).
+    /// Only populated at the program declaration level.
+    pub trailing_trivia: Vec<Trivia>,
 }
 
 impl<T: PartialEq> PartialEq for Annotated<T> {
@@ -27,6 +30,7 @@ impl<T> Annotated<T> {
             node,
             leading_trivia: Vec::new(),
             trailing_comment: None,
+            trailing_trivia: Vec::new(),
         }
     }
 }

@@ -178,6 +178,7 @@ impl Parser {
                 node: (field_name, field_type),
                 leading_trivia: self.take_leading_trivia(start),
                 trailing_comment,
+                trailing_trivia: vec![],
             });
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
@@ -244,6 +245,7 @@ impl Parser {
             node: first,
             leading_trivia: self.take_leading_trivia(first_start),
             trailing_comment,
+            trailing_trivia: vec![],
         });
 
         while matches!(self.peek(), Token::Bar) {
@@ -256,6 +258,7 @@ impl Parser {
                 node: variant,
                 leading_trivia: self.take_leading_trivia(variant_start),
                 trailing_comment,
+                trailing_trivia: vec![],
             });
         }
 
@@ -462,6 +465,7 @@ impl Parser {
                 },
                 leading_trivia: self.take_leading_trivia(start),
                 trailing_comment,
+                trailing_trivia: vec![],
             });
         }
 
@@ -567,6 +571,7 @@ impl Parser {
                         },
                         leading_trivia: self.take_leading_trivia(arm_start_pos),
                         trailing_comment,
+                        trailing_trivia: vec![],
                     });
                 }
                 Ok(())
@@ -604,6 +609,7 @@ impl Parser {
                         },
                         leading_trivia: self.take_leading_trivia(arm_start_pos),
                         trailing_comment,
+                        trailing_trivia: vec![],
                     });
                 }
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
@@ -695,6 +701,7 @@ impl Parser {
                 },
                 leading_trivia: self.take_leading_trivia(start_pos),
                 trailing_comment,
+                trailing_trivia: vec![],
             });
         }
 
@@ -800,6 +807,7 @@ impl Parser {
                 node: ImplMethod { name, name_span, params, body },
                 leading_trivia: self.take_leading_trivia(start_pos),
                 trailing_comment,
+                trailing_trivia: vec![],
             });
         }
 

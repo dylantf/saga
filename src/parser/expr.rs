@@ -103,7 +103,22 @@ impl Parser {
                         node: seg,
                         leading_trivia: leading,
                         trailing_comment: None,
+                        trailing_trivia: vec![],
                     });
+                }
+                // Capture trailing comment on last segment's final token
+                let trailing = self.tokens[self.pos - 1].trailing_comment.take();
+                if let Some(comment) = trailing
+                    && let Some(last) = segments.last_mut()
+                {
+                    last.trailing_comment = Some(comment);
+                }
+                // Steal own-line comments from next token that follow without a blank line
+                let stolen = self.steal_trailing_trivia();
+                if !stolen.is_empty()
+                    && let Some(last) = segments.last_mut()
+                {
+                    last.trailing_trivia = stolen;
                 }
                 let start_span = segments.first().unwrap().node.span;
                 let end_span = segments.last().unwrap().node.span;
@@ -370,6 +385,7 @@ impl Parser {
                             },
                             leading_trivia: self.take_leading_trivia(start),
                             trailing_comment,
+                            trailing_trivia: vec![],
                         });
                     }
                 }
@@ -745,6 +761,7 @@ impl Parser {
                         node: stmt,
                         leading_trivia: self.take_leading_trivia(start),
                         trailing_comment,
+                        trailing_trivia: vec![],
                     });
                 }
                 let dangling_trivia = self.take_leading_trivia(self.pos);
@@ -808,6 +825,7 @@ impl Parser {
                         },
                         leading_trivia: self.take_leading_trivia(start),
                         trailing_comment,
+                        trailing_trivia: vec![],
                     });
                 }
 
@@ -866,6 +884,7 @@ impl Parser {
                         },
                         leading_trivia: self.take_leading_trivia(start),
                         trailing_comment,
+                        trailing_trivia: vec![],
                     });
                 }
 
@@ -965,6 +984,7 @@ impl Parser {
                         },
                         leading_trivia: self.take_leading_trivia(start),
                         trailing_comment,
+                        trailing_trivia: vec![],
                     });
                 }
                 let dangling_trivia = self.take_leading_trivia(self.pos);
