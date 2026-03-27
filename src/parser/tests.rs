@@ -574,9 +574,9 @@ fn pattern_wildcard() {
 }
 
 #[test]
-fn pattern_wildcard_prefixed() {
+fn pattern_underscore_prefixed_is_var() {
     let pat = parse_pattern("_unused");
-    assert!(matches!(pat, Pat::Wildcard { .. }));
+    assert!(matches!(pat, Pat::Var { ref name, .. } if name == "_unused"));
 }
 
 #[test]

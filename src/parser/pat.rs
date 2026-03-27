@@ -204,7 +204,7 @@ impl Parser {
                     span: span.to(end),
                 })
             }
-            Token::Ident(s) if s.starts_with('_') => Ok(Pat::Wildcard { id: NodeId::fresh(), span }),
+            Token::Ident(s) if s == "_" => Ok(Pat::Wildcard { id: NodeId::fresh(), span }),
             Token::Ident(s) => Ok(Pat::Var { id: NodeId::fresh(), name: s, span }),
             Token::Minus => match self.advance() {
                 Token::Int(s, n) => Ok(Pat::Lit {
