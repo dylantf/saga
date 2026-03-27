@@ -5,7 +5,7 @@ import Std.Actor
 pub opaque type Future a = Future(Pid a)
 
 pub effect Async {
-  fun async : (f: () -> a) -> Future a
+  fun async : (f: Unit -> a) -> Future a
   fun await : (future: Future a) -> a
 }
 

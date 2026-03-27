@@ -42,16 +42,16 @@ Partial application `greet "hi"` returns `Fun(String, Unit, {Log})` -- effects a
 
 How effects compose at each expression form:
 
-| Expression | Value type | Effect row |
-|---|---|---|
-| Literal, Var, Constructor | the value's type | empty |
-| `log! "hello"` (effect call) | op return type | `{Log}` |
-| `f x` (application) | return type | func_effs + arg_effs + callee_row (at saturation) |
-| `{ a; b; c }` (block) | type of `c` | merge of all statement effects |
-| `if c then a else b` | unified branch type | merge of cond + both branches |
-| `case x { ... }` | unified arm type | merge of scrutinee + all arms |
-| `fun x -> body` (lambda) | `Fun(param, body_ty, body_effs)` | body_effs (propagates to enclosing scope) |
-| `expr with handler` | handler result type | inner_effs - handled + arm_effs |
+| Expression                   | Value type                       | Effect row                                        |
+| ---------------------------- | -------------------------------- | ------------------------------------------------- |
+| Literal, Var, Constructor    | the value's type                 | empty                                             |
+| `log! "hello"` (effect call) | op return type                   | `{Log}`                                           |
+| `f x` (application)          | return type                      | func_effs + arg_effs + callee_row (at saturation) |
+| `{ a; b; c }` (block)        | type of `c`                      | merge of all statement effects                    |
+| `if c then a else b`         | unified branch type              | merge of cond + both branches                     |
+| `case x { ... }`             | unified arm type                 | merge of scrutinee + all arms                     |
+| `fun x -> body` (lambda)     | `Fun(param, body_ty, body_effs)` | body_effs (propagates to enclosing scope)         |
+| `expr with handler`          | handler result type              | inner_effs - handled + arm_effs                   |
 
 ### Effect Subtyping
 
@@ -64,7 +64,7 @@ The directional check runs after unification succeeds, comparing the resolved ar
 
 ### Absorption
 
-When a HOF parameter declares effects (e.g. `f: () -> a needs {Fail}`), calling the HOF with an effectful lambda doesn't propagate those effects to the caller. The parameter's declared effects are **absorbed** -- subtracted from the merged effect row.
+When a HOF parameter declares effects (e.g. `f: Unit -> a needs {Fail}`), calling the HOF with an effectful lambda doesn't propagate those effects to the caller. The parameter's declared effects are **absorbed** -- subtracted from the merged effect row.
 
 The absorption logic uses `resolve_var` (not full `apply`) on the parameter type to read only the statically declared effects, not effects captured by a row variable (`..e`). This ensures row-captured effects propagate to the caller while explicitly declared effects are absorbed.
 
@@ -73,7 +73,7 @@ The absorption logic uses `resolve_var` (not full `apply`) on the parameter type
 Open effect rows (`..e`) allow functions to be polymorphic over effects:
 
 ```
-fun run : (f: () -> Unit needs {Fail, ..e}) -> Unit needs {..e}
+fun run : (f: Unit -> Unit needs {Fail, ..e}) -> Unit needs {..e}
 run f = f () with { fail msg = () }
 ```
 

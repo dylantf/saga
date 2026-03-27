@@ -3,11 +3,11 @@
 # Assumes the prelude provides:
 #
 #   effect State s {
-#     fun get () -> s
-#     fun put (val: s) -> Unit
+#     fun get : Unit -> s
+#     fun put : (val: s) -> Unit
 #   }
 #
-#   fun run_state (initial: s) (f: () -> a needs {State s}) -> (a, s)
+#   fun run_state (initial: s) (f: Unit -> a needs {State s}) -> (a, s)
 #
 # MVector a is an opaque type -- inert without State.
 # Its operations all require State (MVector a):

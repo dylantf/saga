@@ -136,10 +136,7 @@ fn type_mismatch_in_addition() {
 #[test]
 fn lambda_simple() {
     let ty = infer_expr_type("fun x -> x + 1").unwrap();
-    assert_eq!(
-        ty,
-        Type::arrow(Type::int(), Type::int())
-    );
+    assert_eq!(ty, Type::arrow(Type::int(), Type::int()));
 }
 
 #[test]
@@ -222,10 +219,7 @@ fn recursive_function() {
     let checker = check("factorial n = if n == 0 then 1 else n * factorial (n - 1)").unwrap();
     let scheme = checker.env.get("factorial").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
-    assert_eq!(
-        ty,
-        Type::arrow(Type::int(), Type::int())
-    );
+    assert_eq!(ty, Type::arrow(Type::int(), Type::int()));
 }
 
 #[test]
@@ -233,10 +227,7 @@ fn multi_clause_with_guards() {
     let checker = check("abs n | n < 0 = 0 - n\nabs n = n").unwrap();
     let scheme = checker.env.get("abs").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
-    assert_eq!(
-        ty,
-        Type::arrow(Type::int(), Type::int())
-    );
+    assert_eq!(ty, Type::arrow(Type::int(), Type::int()));
 }
 
 #[test]
@@ -244,25 +235,16 @@ fn multi_clause_literal_patterns() {
     let checker = check("fib 0 = 0\nfib 1 = 1\nfib n = fib (n - 1) + fib (n - 2)").unwrap();
     let scheme = checker.env.get("fib").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
-    assert_eq!(
-        ty,
-        Type::arrow(Type::int(), Type::int())
-    );
+    assert_eq!(ty, Type::arrow(Type::int(), Type::int()));
 }
 
 #[test]
 fn mutual_recursion() {
     let checker = check("is_even n = if n == 0 then True else is_odd (n - 1)\nis_odd n = if n == 0 then False else is_even (n - 1)").unwrap();
     let even_ty = checker.sub.apply(&checker.env.get("is_even").unwrap().ty);
-    assert_eq!(
-        even_ty,
-        Type::arrow(Type::int(), Type::bool())
-    );
+    assert_eq!(even_ty, Type::arrow(Type::int(), Type::bool()));
     let odd_ty = checker.sub.apply(&checker.env.get("is_odd").unwrap().ty);
-    assert_eq!(
-        odd_ty,
-        Type::arrow(Type::int(), Type::bool())
-    );
+    assert_eq!(odd_ty, Type::arrow(Type::int(), Type::bool()));
 }
 
 #[test]
@@ -438,10 +420,7 @@ fn annotation_correct() {
         check("fun fib : (n: Int) -> Int\nfib 0 = 0\nfib 1 = 1\nfib n = fib (n - 1) + fib (n - 2)")
             .unwrap();
     let ty = checker.sub.apply(&checker.env.get("fib").unwrap().ty);
-    assert_eq!(
-        ty,
-        Type::arrow(Type::int(), Type::int())
-    );
+    assert_eq!(ty, Type::arrow(Type::int(), Type::int()));
 }
 
 #[test]
@@ -471,10 +450,7 @@ fn annotation_constrains_polymorphism() {
     // id without annotation is polymorphic; with annotation it's constrained to Int -> Int
     let checker = check("fun myid : (x: Int) -> Int\nmyid x = x").unwrap();
     let ty = checker.sub.apply(&checker.env.get("myid").unwrap().ty);
-    assert_eq!(
-        ty,
-        Type::arrow(Type::int(), Type::int())
-    );
+    assert_eq!(ty, Type::arrow(Type::int(), Type::int()));
 }
 
 #[test]
@@ -643,7 +619,7 @@ fn lambda_effects_covered_by_enclosing_needs() {
 fn lambda_effects_absorbed_by_hof_annotation() {
     // HOF parameter annotated with `needs {Fail}` absorbs the effect from the lambda
     check(
-        "effect Fail {\n  fun fail : (msg: String) -> a\n}\nfun run : (f: () -> Int needs {Fail}) -> Int\nrun f = f () with { fail msg = 0 }\nfoo x = run (fun () -> fail! \"oops\")",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\nfun run : (f: Unit -> Int needs {Fail}) -> Int\nrun f = f () with { fail msg = 0 }\nfoo x = run (fun () -> fail! \"oops\")",
     )
     .unwrap();
 }
@@ -2833,7 +2809,7 @@ fn generic_effect_effarrow_polymorphic_hof() {
   fun put : (val: s) -> Unit
 }
 
-fun run_state : (init: s) -> (f: () -> a needs {State s}) -> (a, s)
+fun run_state : (init: s) -> (f: Unit -> a needs {State s}) -> (a, s)
 run_state init f = (f (), init)
 
 fun use_it : Unit -> Int
@@ -2928,7 +2904,7 @@ fn handler_where_clause_unknown_type_var() {
 handler bad for Store Int where {b: Show} {
   save item = resume ()
   load () = resume 42
-}"
+}",
     );
     assert!(result.is_err());
 }
@@ -3634,7 +3610,7 @@ fn effect_row_var_basic_hof() {
     // HOF with open effect row: lambda with extra effects is accepted.
     // The extra Log effect propagates through ..e to the caller.
     check(
-        "effect Assert {\n  fun assert_ok : (ok: Bool) -> Unit\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: () -> Unit needs {Assert, ..e}) -> Unit needs {..e}\nrun f = f () with { assert_ok ok = () }\nfun caller : Unit -> Unit needs {Log}\ncaller () = run (fun () -> {\n  assert_ok! True\n  log! \"hello\"\n})",
+        "effect Assert {\n  fun assert_ok : (ok: Bool) -> Unit\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: Unit -> Unit needs {Assert, ..e}) -> Unit needs {..e}\nrun f = f () with { assert_ok ok = () }\nfun caller : Unit -> Unit needs {Log}\ncaller () = run (fun () -> {\n  assert_ok! True\n  log! \"hello\"\n})",
     )
     .unwrap();
 }
@@ -3643,7 +3619,7 @@ fn effect_row_var_basic_hof() {
 fn effect_row_var_pure_lambda_satisfies_open_row() {
     // A pure lambda satisfies a parameter with an open effect row
     check(
-        "effect Chk {\n  fun chk : (ok: Bool) -> Unit\n}\nfun run : (f: () -> Unit needs {..e}) -> Unit needs {..e}\nrun f = f ()\nmain () = run (fun () -> ())",
+        "effect Chk {\n  fun chk : (ok: Bool) -> Unit\n}\nfun run : (f: Unit -> Unit needs {..e}) -> Unit needs {..e}\nrun f = f ()\nmain () = run (fun () -> ())",
     )
     .unwrap();
 }
@@ -3653,7 +3629,7 @@ fn effect_row_var_propagation() {
     // Extra effects from the lambda propagate through the row variable
     // to the caller's needs clause
     check(
-        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run_with_fail : (f: () -> Int needs {Fail, ..e}) -> Int needs {..e}\nrun_with_fail f = f () with { fail msg = 0 }\nfun caller : Unit -> Int needs {Log}\ncaller () = run_with_fail (fun () -> {\n  log! \"hello\"\n  fail! \"oops\"\n})",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run_with_fail : (f: Unit -> Int needs {Fail, ..e}) -> Int needs {..e}\nrun_with_fail f = f () with { fail msg = 0 }\nfun caller : Unit -> Int needs {Log}\ncaller () = run_with_fail (fun () -> {\n  log! \"hello\"\n  fail! \"oops\"\n})",
     )
     .unwrap();
 }
@@ -3662,7 +3638,7 @@ fn effect_row_var_propagation() {
 fn effect_row_var_only_row_var() {
     // `needs {..e}` with no concrete effects
     check(
-        "fun apply : (f: () -> Int needs {..e}) -> Int needs {..e}\napply f = f ()\nmain () = apply (fun () -> 42)",
+        "fun apply : (f: Unit -> Int needs {..e}) -> Int needs {..e}\napply f = f ()\nmain () = apply (fun () -> 42)",
     )
     .unwrap();
 }
@@ -3671,9 +3647,12 @@ fn effect_row_var_only_row_var() {
 fn effect_row_var_closed_row_rejects_extra_effects() {
     // A lambda with extra effects should be rejected when the parameter has a closed row
     let result = check(
-        "effect Assert {\n  fun assert_ok : (ok: Bool) -> Unit\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: () -> Unit needs {Assert}) -> Unit\nrun f = f () with { assert_ok ok = () }\nmain () = run (fun () -> {\n  assert_ok! True\n  log! \"hello\"\n})",
+        "effect Assert {\n  fun assert_ok : (ok: Bool) -> Unit\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: Unit -> Unit needs {Assert}) -> Unit\nrun f = f () with { assert_ok ok = () }\nmain () = run (fun () -> {\n  assert_ok! True\n  log! \"hello\"\n})",
     );
-    assert!(result.is_err(), "expected error for extra effects in closed row");
+    assert!(
+        result.is_err(),
+        "expected error for extra effects in closed row"
+    );
 }
 
 #[test]
@@ -3689,16 +3668,19 @@ fn effect_row_var_function_open_needs() {
 fn needs_empty_enforces_purity() {
     // `needs {}` means the callback must be pure -- no effects allowed
     let result = check(
-        "effect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run_pure : (f: () -> Int needs {}) -> Int\nrun_pure f = f ()\nmain () = run_pure (fun () -> {\n  log! \"hello\"\n  42\n})",
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run_pure : (f: Unit -> Int needs {}) -> Int\nrun_pure f = f ()\nmain () = run_pure (fun () -> {\n  log! \"hello\"\n  42\n})",
     );
-    assert!(result.is_err(), "expected error: effectful lambda passed to pure parameter");
+    assert!(
+        result.is_err(),
+        "expected error: effectful lambda passed to pure parameter"
+    );
 }
 
 #[test]
 fn needs_empty_accepts_pure_lambda() {
     // `needs {}` should accept a pure lambda
     check(
-        "fun run_pure : (f: () -> Int needs {}) -> Int\nrun_pure f = f ()\nmain () = run_pure (fun () -> 42)",
+        "fun run_pure : (f: Unit -> Int needs {}) -> Int\nrun_pure f = f ()\nmain () = run_pure (fun () -> 42)",
     )
     .unwrap();
 }
@@ -3708,7 +3690,7 @@ fn effect_row_var_handler_not_unnecessary() {
     // When effects flow through a row variable, the handler should not be
     // flagged as unnecessary (the string-based tracking can't see row-bound effects)
     check(
-        "effect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: () -> Unit needs {..e}) -> Unit needs {..e}\nrun f = f ()\nmain () = run (fun () -> log! \"hello\") with { log msg = () }",
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\nfun run : (f: Unit -> Unit needs {..e}) -> Unit needs {..e}\nrun f = f ()\nmain () = run (fun () -> log! \"hello\") with { log msg = () }",
     )
     .unwrap();
 }
@@ -3784,7 +3766,7 @@ fn hof_absorption_basic() {
     // HOF takes callback with Fail, handles it -- caller doesn't need Fail
     check(
         "effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
-         fun try_it : (f: () -> String needs {Fail}) -> String\n\
+         fun try_it : (f: Unit -> String needs {Fail}) -> String\n\
          try_it f = f () with { fail msg = \"err\" }\n\
          fun caller : Unit -> String\ncaller () = try_it (fun () -> fail! \"boom\")",
     )
@@ -3796,7 +3778,7 @@ fn hof_absorption_pure_callback_accepted() {
     // Pure callback passed where effectful callback expected (effect subtyping)
     check(
         "effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
-         fun try_it : (f: () -> String needs {Fail}) -> String\n\
+         fun try_it : (f: Unit -> String needs {Fail}) -> String\n\
          try_it f = f () with { fail msg = \"err\" }\n\
          fun caller : Unit -> String\ncaller () = try_it (fun () -> \"hello\")",
     )
@@ -3809,7 +3791,7 @@ fn row_var_propagation_extra_effects() {
     check(
         "effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
          effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
-         fun run : (f: () -> Unit needs {Fail, ..e}) -> Unit needs {..e}\n\
+         fun run : (f: Unit -> Unit needs {Fail, ..e}) -> Unit needs {..e}\n\
          run f = f () with { fail msg = () }\n\
          fun caller : Unit -> Unit needs {Log}\n\
          caller () = run (fun () -> { fail! \"x\"\n  log! \"y\" })",
@@ -3827,7 +3809,9 @@ fn unnecessary_handler_warning_fires() {
          caller () = pure_fn () with { log msg = { ()\n  0 } }",
     )
     .unwrap();
-    let warnings: Vec<_> = checker.collected_diagnostics.iter()
+    let warnings: Vec<_> = checker
+        .collected_diagnostics
+        .iter()
         .filter(|d| d.message.contains("unnecessary"))
         .collect();
     assert!(!warnings.is_empty(), "expected unnecessary handler warning");
@@ -3843,7 +3827,9 @@ fn no_unnecessary_handler_warning_when_used() {
          caller () = greet () with { log msg = () }",
     )
     .unwrap();
-    let warnings: Vec<_> = checker.collected_diagnostics.iter()
+    let warnings: Vec<_> = checker
+        .collected_diagnostics
+        .iter()
         .filter(|d| d.message.contains("unnecessary"))
         .collect();
     assert!(warnings.is_empty(), "unexpected warning: {:?}", warnings);
@@ -3974,9 +3960,16 @@ fn effectful_callback_where_pure_expected_is_error() {
          fun caller : Unit -> Int needs {Log}\n\
          caller () = apply_pure (fun x -> { log! \"hi\"\n  x })",
     );
-    assert!(result.is_err(), "effectful callback should be rejected by pure parameter");
+    assert!(
+        result.is_err(),
+        "effectful callback should be rejected by pure parameter"
+    );
     let msg = result.err().unwrap().message;
-    assert!(msg.contains("Log"), "error should mention the disallowed effect: {}", msg);
+    assert!(
+        msg.contains("Log"),
+        "error should mention the disallowed effect: {}",
+        msg
+    );
 }
 
 #[test]
@@ -3985,12 +3978,15 @@ fn effectful_callback_where_fewer_effects_expected_is_error() {
     let result = check(
         "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
          effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
-         fun try_it : (f: () -> Int needs {Fail}) -> Int\n\
+         fun try_it : (f: Unit -> Int needs {Fail}) -> Int\n\
          try_it f = f () with { fail msg = 0 }\n\
          fun caller : Unit -> Int needs {Log}\n\
          caller () = try_it (fun () -> { log! \"hi\"\n  fail! \"oops\" })",
     );
-    assert!(result.is_err(), "callback with extra effects should be rejected");
+    assert!(
+        result.is_err(),
+        "callback with extra effects should be rejected"
+    );
     let msg = result.err().unwrap().message;
     assert!(msg.contains("Log"), "error should mention Log: {}", msg);
 }
@@ -4001,7 +3997,7 @@ fn pure_callback_where_effectful_expected_still_works() {
     // (effect subtyping: pure is a subtype of effectful)
     check(
         "effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
-         fun try_it : (f: () -> Int needs {Fail}) -> Int\n\
+         fun try_it : (f: Unit -> Int needs {Fail}) -> Int\n\
          try_it f = f () with { fail msg = 0 }\n\
          fun caller : Unit -> Int\n\
          caller () = try_it (fun () -> 42)",
@@ -4016,7 +4012,7 @@ fn open_row_callback_accepts_extra_effects() {
     check(
         "effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
          effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
-         fun run : (f: () -> Unit needs {Fail, ..e}) -> Unit needs {..e}\n\
+         fun run : (f: Unit -> Unit needs {Fail, ..e}) -> Unit needs {..e}\n\
          run f = f () with { fail msg = () }\n\
          fun caller : Unit -> Unit needs {Log}\n\
          caller () = run (fun () -> { fail! \"x\"\n  log! \"y\" })",

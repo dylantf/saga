@@ -7,7 +7,7 @@ pub type Pid msg = Pid(Int)
 
 #@ Type variable `msg` is free per call site, inferred from the pid / spawned function.
 pub effect Process {
-  fun spawn : (f: () -> Unit needs {Actor msg, ..e}) -> Pid msg
+  fun spawn : (f: Unit -> Unit needs {Actor msg, ..e}) -> Pid msg
   fun send : (pid: Pid msg) -> (msg: msg) -> Unit
 }
 

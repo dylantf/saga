@@ -24,7 +24,7 @@ record School {
   students: List Student,
 } deriving (Debug)
 
-fun fake_school : () -> School
+fun fake_school : Unit -> School
 fake_school () = {
   let students = [
     Student { name: "John", grade: 2 },

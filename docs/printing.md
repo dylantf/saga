@@ -110,16 +110,16 @@ The builtins (`print`, `eprint`, `dbg`) are escape hatches for convenience and d
 
 ```
 effect Console {
-  fun write (msg: String) -> Unit
-  fun write_error (msg: String) -> Unit
-  fun read_line () -> String
+  fun write : (msg: String) -> Unit
+  fun write_error : (msg: String) -> Unit
+  fun read_line : Unit -> String
 }
 
 effect Logger {
-  fun error (msg: String) -> Unit
-  fun warn (msg: String) -> Unit
-  fun info (msg: String) -> Unit
-  fun debug (msg: String) -> Unit
+  fun error : (msg: String) -> Unit
+  fun warn : (msg: String) -> Unit
+  fun info : (msg: String) -> Unit
+  fun debug : (msg: String) -> Unit
 }
 ```
 

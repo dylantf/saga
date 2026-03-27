@@ -1142,7 +1142,7 @@ effect Fail {
   fun fail : (msg: String) -> a
 }
 
-fun try_it : (computation: () -> a needs {Fail}) -> Result a String
+fun try_it : (computation: Unit -> a needs {Fail}) -> Result a String
 try_it computation = computation () with {
   fail msg = Err(msg)
   return value = Ok(value)
@@ -1167,7 +1167,7 @@ effect Fail {
   fun fail : (msg: String) -> a
 }
 
-fun try_it : (computation: () -> a needs {Fail}) -> Result a String
+fun try_it : (computation: Unit -> a needs {Fail}) -> Result a String
 try_it computation = computation () with {
   fail msg = Err(msg)
   return value = Ok(value)
@@ -1191,7 +1191,7 @@ effect Fail {
   fun fail : (msg: String) -> a
 }
 
-fun try_it : (computation: () -> a needs {Fail}) -> String
+fun try_it : (computation: Unit -> a needs {Fail}) -> String
 try_it computation = computation () with {
   fail msg = "err: " <> msg
 }
@@ -1240,7 +1240,7 @@ effect Fail {
   fun fail : (msg: String) -> a
 }
 
-fun try_it : (computation: () -> a needs {Fail}) -> Result a String
+fun try_it : (computation: Unit -> a needs {Fail}) -> Result a String
 try_it computation = computation () with {
   fail msg = Err(msg)
   return value = Ok(value)
@@ -1561,7 +1561,7 @@ outer () = {
   x + 1
 }
 
-fun try_it : (computation: () -> a needs {Fail}) -> Result a String
+fun try_it : (computation: Unit -> a needs {Fail}) -> Result a String
 try_it computation = computation () with {
   fail msg = Err(msg)
   return value = Ok(value)

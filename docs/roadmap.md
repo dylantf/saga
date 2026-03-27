@@ -31,7 +31,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `resume` (deep handlers, single-shot)
 - [x] `return value ->` clause in handlers
 - [x] Abort without resume (structured exceptions)
-- [x] `needs` on functions (`fun f () -> T needs {Log, Http}`)
+- [x] `needs` on functions (`fun f : Unit -> T needs {Log, Http}`)
 - [x] `needs` on handlers (`handler stripe for Billing needs {Log} { ... }`)
 - [x] `needs` on impl blocks (different impls may use different effects)
 
@@ -243,7 +243,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ## Upcoming
 
-- [x] Generic effects (`effect State s { fun get () -> s; fun put (val: s) -> Unit }`)
+- [x] Generic effects (`effect State s { fun get : Unit -> s; fun put (val: s) -> Unit }`)
   - Parser: type params on effect declarations, `EffectRef` with type_args in needs/handler clauses
   - Type checker: shared type vars across operations, fresh instantiation on lookup, handler specialization
   - Handlers: `handler counter for State Int { ... }` binds the type param

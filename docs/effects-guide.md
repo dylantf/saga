@@ -487,7 +487,7 @@ the row variable `..e`:
 
 ```
 # run_logged handles Log, but forwards any other effects from the callback
-fun run_logged : (f: () -> Unit needs {Log, ..e}) -> Unit needs {..e}
+fun run_logged : (f: Unit -> Unit needs {Log, ..e}) -> Unit needs {..e}
 run_logged f = f () with { log msg = { println msg; resume () } }
 
 # Caller uses both Log and Fail in the lambda.
@@ -563,20 +563,20 @@ handlers are for.
 
 ## Summary
 
-| Concept               | Syntax                                             |
-| --------------------- | -------------------------------------------------- |
-| Define an effect      | `effect Log { fun log : String -> Unit }`           |
-| Perform an effect     | `log! "hello"`                                     |
-| Named handler         | `handler h for Log { log msg = ... }`              |
-| Handler with effects  | `handler h for Log needs {X} { ... }`               |
-| Inline handler        | `expr with { log msg = ... }`                      |
-| Attach named handler  | `expr with console_log`                            |
-| Stack handlers        | `expr with { h1, h2, op args = ... }`              |
-| Continue computation  | `resume value`                                     |
-| Abort computation     | (just don't call `resume`)                         |
-| Intercept success     | `return value = Ok(value)`                         |
-| Qualify ambiguous ops | `Cache.get! key`                                   |
-| Declare effects on fn | `fun f : Unit -> T needs {Log, Http}`              |
-| Pure callback param   | `fun map : (f: a -> b) -> List a -> List b`        |
-| Closed effect param   | `fun try : (() -> a needs {Fail}) -> Result a String` |
-| Open effect row       | `fun run : (f: () -> a needs {Log, ..e}) -> a needs {..e}` |
+| Concept               | Syntax                                                       |
+| --------------------- | ------------------------------------------------------------ |
+| Define an effect      | `effect Log { fun log : String -> Unit }`                    |
+| Perform an effect     | `log! "hello"`                                               |
+| Named handler         | `handler h for Log { log msg = ... }`                        |
+| Handler with effects  | `handler h for Log needs {X} { ... }`                        |
+| Inline handler        | `expr with { log msg = ... }`                                |
+| Attach named handler  | `expr with console_log`                                      |
+| Stack handlers        | `expr with { h1, h2, op args = ... }`                        |
+| Continue computation  | `resume value`                                               |
+| Abort computation     | (just don't call `resume`)                                   |
+| Intercept success     | `return value = Ok(value)`                                   |
+| Qualify ambiguous ops | `Cache.get! key`                                             |
+| Declare effects on fn | `fun f : Unit -> T needs {Log, Http}`                        |
+| Pure callback param   | `fun map : (f: a -> b) -> List a -> List b`                  |
+| Closed effect param   | `fun try : (() -> a needs {Fail}) -> Result a String`        |
+| Open effect row       | `fun run : (f: Unit -> a needs {Log, ..e}) -> a needs {..e}` |

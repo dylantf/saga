@@ -3,7 +3,32 @@ use crate::token::Span;
 use crate::docs;
 use super::Doc;
 
+/// If `ty` is `Tuple` applied to 2+ args, return those args.
+/// The parser desugars `(A, B)` into `App(App(Named("Tuple"), A), B)`.
+fn collect_tuple_args(ty: &TypeExpr) -> Option<Vec<&TypeExpr>> {
+    let mut args = Vec::new();
+    let mut cur = ty;
+    loop {
+        match cur {
+            TypeExpr::App { func, arg, .. } => {
+                args.push(arg.as_ref());
+                cur = func.as_ref();
+            }
+            TypeExpr::Named { name, .. } if name == "Tuple" && args.len() >= 2 => {
+                args.reverse();
+                return Some(args);
+            }
+            _ => return None,
+        }
+    }
+}
+
 pub fn format_type_expr(ty: &TypeExpr) -> Doc {
+    // Tuple sugar: Tuple applied to args → (A, B, ...)
+    if let Some(args) = collect_tuple_args(ty) {
+        let inner: Vec<Doc> = args.iter().map(|a| format_type_expr(a)).collect();
+        return docs![Doc::text("("), Doc::join(Doc::text(", "), inner), Doc::text(")")];
+    }
     match ty {
         TypeExpr::Named { name, .. } => Doc::text(name),
         TypeExpr::Var { name, .. } => Doc::text(name),
@@ -89,6 +114,10 @@ pub fn format_effect_ref_str(e: &EffectRef) -> String {
 
 /// Simple string-based type formatting (for contexts where we need a String, not a Doc).
 pub fn format_type_expr_str(ty: &TypeExpr) -> String {
+    if let Some(args) = collect_tuple_args(ty) {
+        let inner: Vec<String> = args.iter().map(|a| format_type_expr_str(a)).collect();
+        return format!("({})", inner.join(", "));
+    }
     match ty {
         TypeExpr::Named { name, .. } | TypeExpr::Var { name, .. } => name.clone(),
         TypeExpr::App { func, arg, .. } => {

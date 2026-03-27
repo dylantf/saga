@@ -11,9 +11,7 @@ use super::{
 /// Walk an arrow chain and return the EffectRow from the innermost Fun.
 fn innermost_effect_row(ty: &Type) -> Option<EffectRow> {
     match ty {
-        Type::Fun(_, ret, row) => {
-            innermost_effect_row(ret).or_else(|| Some(row.clone()))
-        }
+        Type::Fun(_, ret, row) => innermost_effect_row(ret).or_else(|| Some(row.clone())),
         _ => None,
     }
 }
@@ -117,7 +115,9 @@ impl Checker {
 
         // Validate that `main` does not declare effects (it's the top of the call stack,
         // there is no caller above to provide handlers)
-        let main_effects: Vec<String> = self.env.get("main")
+        let main_effects: Vec<String> = self
+            .env
+            .get("main")
             .and_then(|s| innermost_effect_row(&self.sub.apply(&s.ty)))
             .map(|r| r.effects.iter().map(|(n, _)| n.clone()).collect())
             .unwrap_or_default();
@@ -181,17 +181,20 @@ impl Checker {
                 .iter()
                 .filter_map(|d| match d {
                     Decl::FunSignature {
-                        name, annotations: ann, ..
-                    } if ann.iter().any(|a| a.name == "external" || a.name == "builtin") => {
+                        name,
+                        annotations: ann,
+                        ..
+                    } if ann
+                        .iter()
+                        .any(|a| a.name == "external" || a.name == "builtin") =>
+                    {
                         Some(name.as_str())
                     }
                     _ => None,
                 })
                 .collect();
             for (name, (_, span)) in &annotations {
-                if !bound_names.contains(name.as_str())
-                    && !bodyless_names.contains(name.as_str())
-                {
+                if !bound_names.contains(name.as_str()) && !bodyless_names.contains(name.as_str()) {
                     errors.push(Diagnostic::error_at(
                         *span,
                         format!("type annotation for `{name}` has no matching function definition"),
@@ -436,17 +439,21 @@ impl Checker {
                         })
                         .collect();
                     let tail = effect_row_var.as_ref().map(|(rv_name, _)| {
-                        let id = if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
-                            *id
-                        } else {
-                            let id = self.next_var;
-                            self.next_var += 1;
-                            params_list.push((rv_name.clone(), id));
-                            id
-                        };
+                        let id =
+                            if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
+                                *id
+                            } else {
+                                let id = self.next_var;
+                                self.next_var += 1;
+                                params_list.push((rv_name.clone(), id));
+                                id
+                            };
                         Box::new(Type::Var(id))
                     });
-                    EffectRow { effects: effect_refs, tail }
+                    EffectRow {
+                        effects: effect_refs,
+                        tail,
+                    }
                 } else {
                     EffectRow::closed(vec![])
                 };
@@ -456,18 +463,14 @@ impl Checker {
                 for (_, texpr) in params.iter().rev() {
                     let param_ty = self.convert_type_expr(texpr, &mut params_list);
                     if first_arrow {
-                        fun_ty = Type::Fun(
-                            Box::new(param_ty),
-                            Box::new(fun_ty),
-                            fun_effect_row.clone(),
-                        );
+                        fun_ty =
+                            Type::Fun(Box::new(param_ty), Box::new(fun_ty), fun_effect_row.clone());
                     } else {
                         fun_ty = Type::arrow(param_ty, fun_ty);
                     }
                     first_arrow = false;
                 }
                 annotations.insert(name.clone(), (fun_ty.clone(), *span));
-
 
                 // Always register in known_funs (even pure functions) so the
                 // `with` validation can distinguish local declarations
@@ -825,9 +828,15 @@ impl Checker {
 
             // Check for effects declared but never used
             let body_effect_names: std::collections::HashSet<String> = all_body_effs
-                .effects.iter().map(|(n, _)| n.clone()).collect();
+                .effects
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
             let declared_effects: std::collections::HashSet<String> = declared_row
-                .effects.iter().map(|(n, _)| n.clone()).collect();
+                .effects
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
             let unused: Vec<_> = declared_effects.difference(&body_effect_names).collect();
             if !unused.is_empty() {
                 let span = annotation_span.expect("unused effects implies annotation exists");
@@ -1531,10 +1540,16 @@ impl Checker {
             needs.iter().map(|e| e.name.clone()).collect();
 
         let body_effects: std::collections::HashSet<String> = all_handler_effs
-            .effects.iter().map(|(n, _)| n.clone()).collect();
+            .effects
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect();
         if !body_effects.is_empty() || !declared_effects.is_empty() {
             let err_span = arms.first().map(|a| a.node.span).unwrap_or(*span);
-            let undeclared: Vec<String> = body_effects.difference(&declared_effects).cloned().collect();
+            let undeclared: Vec<String> = body_effects
+                .difference(&declared_effects)
+                .cloned()
+                .collect();
             if !undeclared.is_empty() {
                 let mut sorted = undeclared;
                 sorted.sort();
@@ -1542,12 +1557,20 @@ impl Checker {
                 if declared_effects.is_empty() {
                     return Err(Diagnostic::error_at(
                         err_span,
-                        format!("{} uses effects {{{}}} but has no 'needs' declaration", label, sorted.join(", ")),
+                        format!(
+                            "{} uses effects {{{}}} but has no 'needs' declaration",
+                            label,
+                            sorted.join(", ")
+                        ),
                     ));
                 } else {
                     return Err(Diagnostic::error_at(
                         err_span,
-                        format!("{} uses effects {{{}}} not declared in its 'needs' clause", label, sorted.join(", ")),
+                        format!(
+                            "{} uses effects {{{}}} not declared in its 'needs' clause",
+                            label,
+                            sorted.join(", ")
+                        ),
                     ));
                 }
             }

@@ -5,7 +5,7 @@ import Std.Result (Result, Ok, Err)
 
 # Catch failures and retry up to `retries` times.
 # Returns Ok on success, Err with the last failure on exhaustion.
-pub fun supervised : (retries: Int) -> (f: () -> a needs {Fail e}) -> Result a e
+pub fun supervised : (retries: Int) -> (f: Unit -> a needs {Fail e}) -> Result a e
 supervised 0 f = {
   f () with {
     return value = Ok value

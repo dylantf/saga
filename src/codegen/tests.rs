@@ -1,6 +1,6 @@
 #[cfg(test)]
 use super::emit_module;
-use super::{emit_module_with_context, CodegenContext};
+use super::{CodegenContext, emit_module_with_context};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::{derive, desugar, elaborate, typechecker};
@@ -23,11 +23,7 @@ fn emit_full(src: &str) -> String {
 
     let mut checker = typechecker::Checker::with_prelude(None).expect("prelude error");
     let result = checker.check_program(&program);
-    assert!(
-        !result.has_errors(),
-        "Type errors: {:?}",
-        result.errors()
-    );
+    assert!(!result.has_errors(), "Type errors: {:?}", result.errors());
 
     let elaborated = elaborate::elaborate(&program, &result);
     let ctx = CodegenContext {
@@ -465,7 +461,7 @@ effect Outer {
   fun outer_op : Unit -> Unit
 }
 
-fun middle : (body: () -> Unit needs {Inner}) -> Unit needs {Outer}
+fun middle : (body: Unit -> Unit needs {Inner}) -> Unit needs {Outer}
 middle body = {
   let result = { body () } with {
     inner_op () = { resume (); "handled" }
@@ -586,7 +582,8 @@ fn dict_empty() {
 
 #[test]
 fn dict_get() {
-    let src = "import Std.Dict\nfun main : Unit -> Maybe Int\nmain () = Dict.get \"a\" (Dict.new ())";
+    let src =
+        "import Std.Dict\nfun main : Unit -> Maybe Int\nmain () = Dict.get \"a\" (Dict.new ())";
     let out = emit_full(src);
     assert!(
         out.contains("call 'std_dict':'get'"),

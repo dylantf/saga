@@ -615,13 +615,13 @@ fun add : (a: Int) -> (b: Int) -> Int
 fun map : (f: a -> b) -> List a -> List b
 
 # Closed effect set on parameter (exactly these effects)
-fun try : (() -> a needs {Fail}) -> Result a String
+fun try : (Unit -> a needs {Fail}) -> Result a String
 
 # Open effect row (..e captures extras and forwards them)
-fun run_logged : (f: () -> Unit needs {Log, ..e}) -> Unit needs {..e}
+fun run_logged : (f: Unit -> Unit needs {Log, ..e}) -> Unit needs {..e}
 
 # Row variable only (any effects forwarded)
-fun apply : (f: () -> a needs {..e}) -> a needs {..e}
+fun apply : (f: Unit -> a needs {..e}) -> a needs {..e}
 
 # Unit param
 fun main : Unit -> Unit

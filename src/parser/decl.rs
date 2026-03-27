@@ -1030,12 +1030,6 @@ impl Parser {
             }
             Token::Ident(s) => Ok(TypeExpr::Var { name: s, span: start }),
             Token::LParen => {
-                // () is the Unit type
-                if matches!(self.peek(), Token::RParen) {
-                    let end = self.tokens[self.pos].span;
-                    self.advance();
-                    return Ok(TypeExpr::Named { name: "Unit".to_string(), span: start.to(end) });
-                }
                 let first = self.parse_type_expr()?;
                 if matches!(self.peek(), Token::Comma) {
                     // Tuple type: (Int, String, ...)

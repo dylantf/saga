@@ -14,12 +14,12 @@ Two separate effects cover concurrency:
 
 ```
 effect Process {
-  fun spawn (f: () -> Unit) -> Pid msg
+  fun spawn (f: Unit -> Unit) -> Pid msg
   fun send (pid: Pid msg) (msg: msg) -> Unit
 }
 
 effect Actor msg {
-  fun self () -> Pid msg
+  fun self : Unit -> Pid msg
 }
 ```
 
@@ -35,7 +35,7 @@ This split means a function can talk to multiple process types without
 conflict:
 
 ```
-fun run () -> Unit needs {Process, Actor Int}
+fun run : Unit -> Unit needs {Process, Actor Int}
 run () = {
   let c = spawn! (fun () -> counter 0)     # c : Pid CounterMsg
   let l = spawn! (fun () -> logger ())     # l : Pid LogMsg
@@ -90,6 +90,7 @@ main () = {
 ```
 
 Under the hood:
+
 - `spawn!` lowers to `erlang:spawn/1`
 - `send!` lowers to `erlang:send/2`
 - `self!` lowers to `erlang:self/0`
@@ -115,7 +116,7 @@ counter count = {
   }
 }
 
-fun run_counter () -> Unit needs {Process, Actor Int}
+fun run_counter : Unit -> Unit needs {Process, Actor Int}
 run_counter () = {
   let pid = spawn! (fun () -> counter 0)
   send! pid (Increment 5)
@@ -141,7 +142,7 @@ type LogMsg
   = Log(String)
   | Flush
 
-fun run () -> Unit needs {Process, Actor Int}
+fun run : Unit -> Unit needs {Process, Actor Int}
 run () = {
   let c = spawn! (fun () -> counter 0)
   let l = spawn! (fun () -> logger ())
@@ -161,7 +162,7 @@ run () = {
 ## Example: Timeout
 
 ```
-fun wait_for_reply () -> String needs {Actor Int}
+fun wait_for_reply : Unit -> String needs {Actor Int}
 wait_for_reply () = {
   receive {
     n -> show n
@@ -208,7 +209,7 @@ carry the correct message type. Sending the wrong message type is a compile
 error.
 
 **Effect absorption fix**: When a HOF absorbs effects from a callback
-(e.g. `try` absorbs `Fail`), only effects the callback *introduced* are
+(e.g. `try` absorbs `Fail`), only effects the callback _introduced_ are
 removed from the caller's effect set. Effects the caller already had are
 preserved. This prevents spawn from accidentally absorbing the caller's
 own Actor effect.

@@ -212,8 +212,8 @@ pub enum Decl {
         span: Span,
     },
 
-    /// `effect Console { fun print (msg: String) -> Unit }`
-    /// `effect State s { fun get () -> s; fun put (val: s) -> Unit }`
+    /// `effect Console { fun print : (msg: String) -> Unit }`
+    /// `effect State s { fun get : Unit -> s; fun put (val: s) -> Unit }`
     EffectDef {
         id: NodeId,
         doc: Vec<String>,
@@ -281,7 +281,6 @@ pub enum Decl {
         dangling_trivia: Vec<Trivia>,
         span: Span,
     },
-
 
     /// `import Math exposing { abs, max }`
     Import {
@@ -458,7 +457,6 @@ pub enum ExprKind {
     },
 
     // --- Surface syntax (desugared before typechecking) ---
-
     /// `x |> f |> g` -- forward pipe chain.
     /// Stored as a flat list of annotated segments: [x, f, g].
     /// Each segment carries leading trivia (comments before `|>`) and
@@ -568,23 +566,22 @@ impl Expr {
                         .is_some_and(|(t, b)| t.contains_resume() || b.contains_resume())
             }
             ExprKind::Ascription { expr, .. } => expr.contains_resume(),
-            ExprKind::Pipe { segments, .. } => {
-                segments.iter().any(|s| s.node.contains_resume())
-            }
+            ExprKind::Pipe { segments, .. } => segments.iter().any(|s| s.node.contains_resume()),
             ExprKind::PipeBack { segments }
             | ExprKind::ComposeForward { segments }
             | ExprKind::ComposeBack { segments } => {
                 segments.iter().any(|s| s.node.contains_resume())
             }
-            ExprKind::Cons { head, tail } => {
-                head.contains_resume() || tail.contains_resume()
-            }
+            ExprKind::Cons { head, tail } => head.contains_resume() || tail.contains_resume(),
             ExprKind::ListLit { elements } => elements.iter().any(|e| e.contains_resume()),
-            ExprKind::StringInterp { parts } => parts.iter().any(|p| matches!(p, StringPart::Expr(e) if e.contains_resume())),
+            ExprKind::StringInterp { parts } => parts
+                .iter()
+                .any(|p| matches!(p, StringPart::Expr(e) if e.contains_resume())),
             ExprKind::ListComprehension { body, qualifiers } => {
                 body.contains_resume()
                     || qualifiers.iter().any(|q| match q {
-                        ComprehensionQualifier::Generator(_, e) | ComprehensionQualifier::Let(_, e) => e.contains_resume(),
+                        ComprehensionQualifier::Generator(_, e)
+                        | ComprehensionQualifier::Let(_, e) => e.contains_resume(),
                         ComprehensionQualifier::Guard(e) => e.contains_resume(),
                     })
             }
