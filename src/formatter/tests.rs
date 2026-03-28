@@ -1211,6 +1211,41 @@ fn interpolated_multiline_string_preserved() {
 }
 
 #[test]
+fn interpolated_string_expr_stays_flat_at_narrow_width() {
+    // Even at narrow width, expressions inside interp holes must not break
+    // (breaking would insert a literal newline in the string)
+    let src = "let x = $\"result: {some_long_function arg1 arg2}\"";
+    let result = fmt(src, 20);
+    assert!(
+        result.contains("{some_long_function arg1 arg2}"),
+        "interp hole expr should not break: {}",
+        result
+    );
+}
+
+#[test]
+fn interpolated_string_binop_stays_flat() {
+    let src = "let x = $\"sum: {a + b + c}\"";
+    let result = fmt(src, 20);
+    assert!(
+        result.contains("{a + b + c}"),
+        "binop in interp hole should not break: {}",
+        result
+    );
+}
+
+#[test]
+fn interpolated_multiline_expr_stays_flat() {
+    let src = "let x = $\"\"\"\n  value: {some_function arg1 arg2}\n  \"\"\"";
+    let result = fmt(src, 20);
+    assert!(
+        result.contains("{some_function arg1 arg2}"),
+        "interp hole in multiline should not break: {}",
+        result
+    );
+}
+
+#[test]
 fn escaped_quote_in_string_preserved() {
     let src = "let x = \"hello \\\"world\\\"\"";
     let result = fmt80(src);

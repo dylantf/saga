@@ -1,7 +1,7 @@
 use super::Doc;
 use super::expr::format_expr;
 use super::helpers::{
-    docs_from_vec, format_annotated_body, format_braced_body, format_doc_comment,
+    docs_from_vec, format_annotated_body, format_braced_body, format_doc_preamble,
     format_handler_arm, format_lit_raw, format_trailing, format_trivia,
 };
 use super::pat::format_pat;
@@ -121,10 +121,7 @@ pub fn format_type_def(decl: &Decl) -> Doc {
     };
 
     let mut parts = Vec::new();
-    if !doc.is_empty() {
-        parts.push(format_doc_comment(doc));
-        parts.push(Doc::hardline());
-    }
+    format_doc_preamble(doc, &mut parts);
 
     let mut header = String::new();
     if *opaque {
@@ -225,10 +222,7 @@ pub fn format_record_def(
     dangling: &[Trivia],
 ) -> Doc {
     let mut parts = Vec::new();
-    if !doc.is_empty() {
-        parts.push(format_doc_comment(doc));
-        parts.push(Doc::hardline());
-    }
+    format_doc_preamble(doc, &mut parts);
 
     let mut header = String::new();
     if public {
@@ -266,10 +260,7 @@ pub fn format_effect_def(
     dangling: &[Trivia],
 ) -> Doc {
     let mut parts = Vec::new();
-    if !doc.is_empty() {
-        parts.push(format_doc_comment(doc));
-        parts.push(Doc::hardline());
-    }
+    format_doc_preamble(doc, &mut parts);
 
     let mut header = String::new();
     if public {
@@ -303,10 +294,7 @@ pub fn format_trait_def(
     dangling: &[Trivia],
 ) -> Doc {
     let mut parts = Vec::new();
-    if !doc.is_empty() {
-        parts.push(format_doc_comment(doc));
-        parts.push(Doc::hardline());
-    }
+    format_doc_preamble(doc, &mut parts);
 
     let mut header = String::new();
     if public {
@@ -354,10 +342,7 @@ pub fn format_handler_def(
     dangling: &[Trivia],
 ) -> Doc {
     let mut parts = Vec::new();
-    if !doc.is_empty() {
-        parts.push(format_doc_comment(doc));
-        parts.push(Doc::hardline());
-    }
+    format_doc_preamble(doc, &mut parts);
 
     let mut header = String::new();
     if public {
@@ -416,10 +401,7 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
     };
 
     let mut parts = Vec::new();
-    if !doc.is_empty() {
-        parts.push(format_doc_comment(doc));
-        parts.push(Doc::hardline());
-    }
+    format_doc_preamble(doc, &mut parts);
 
     let mut header = format!("impl {} for {}", trait_name, target_type);
     for tp in type_params {

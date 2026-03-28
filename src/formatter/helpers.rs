@@ -96,6 +96,15 @@ pub fn format_doc_comment(doc: &[String]) -> Doc {
     Doc::join(Doc::hardline(), lines)
 }
 
+/// Emit a doc comment block (if non-empty) followed by a hardline,
+/// as a preamble to a definition.
+pub fn format_doc_preamble(doc: &[String], parts: &mut Vec<Doc>) {
+    if !doc.is_empty() {
+        parts.push(format_doc_comment(doc));
+        parts.push(Doc::hardline());
+    }
+}
+
 /// Format trivia (blank lines, comments, doc comments) into Doc nodes.
 pub fn format_trivia(trivia: &[Trivia]) -> Doc {
     let mut parts = Vec::new();

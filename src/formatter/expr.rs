@@ -497,6 +497,9 @@ fn format_comma_list_spaced(open: Doc, close: &str, items: Vec<Doc>) -> Doc {
 }
 
 fn format_comma_list_inner(open: Doc, close: &str, items: Vec<Doc>, spaced: bool) -> Doc {
+    if items.is_empty() {
+        return docs![open, Doc::text(close)];
+    }
     let fields_joined = Doc::join(docs![Doc::text(","), Doc::line()], items);
     let trailing_comma = Doc::if_break(Doc::text(","), Doc::Nil);
     // Spaced (records): `{ a, b }` flat, `{\n  a,\n  b,\n}` broken
@@ -598,34 +601,35 @@ fn format_interp_string(parts: &[StringPart], kind: StringKind) -> Doc {
 
 /// Format a single-line interpolated string: `$"text {expr} text"`.
 fn format_interp_single_line(parts: &[StringPart]) -> Doc {
-    let mut s = String::from("$\"");
+    let mut parts_doc = vec![Doc::text("$\"")];
     for part in parts {
         match part {
-            StringPart::Lit(text) => s.push_str(&escape_string(text)),
+            StringPart::Lit(text) => parts_doc.push(Doc::text(escape_string(text))),
             StringPart::Expr(expr) => {
-                let expr_doc = format_expr(expr);
-                let rendered = super::pretty(10000, &expr_doc);
-                let rendered = rendered.trim_end();
-                s.push('{');
-                s.push_str(rendered);
-                s.push('}');
+                parts_doc.push(Doc::text("{"));
+                parts_doc.push(Doc::flat(format_expr(expr)));
+                parts_doc.push(Doc::text("}"));
             }
         }
     }
-    s.push('"');
-    Doc::text(s)
+    parts_doc.push(Doc::text("\""));
+    docs_from_vec(parts_doc)
 }
 
 /// Format a multiline interpolated string: `$"""\n  text {expr}\n  """`.
 fn format_interp_multiline(parts: &[StringPart]) -> Doc {
-    // Build the full text content (with {expr} rendered inline) then split into lines.
-    // We need to handle Doc construction line-by-line.
-    //
-    // Approach: walk parts, split literal text at newlines. Each line becomes a
-    // HardLine + Doc::text(...). Expression holes are rendered inline on their
-    // current line.
+    // Walk parts, building Doc fragments per line. Literal text is split at
+    // newlines; expression holes stay as Doc::flat nodes on their current line.
     let mut inner = Vec::new();
-    let mut current_line = String::new();
+    // Fragments accumulating for the current line
+    let mut line_frags: Vec<Doc> = Vec::new();
+
+    let flush_line = |inner: &mut Vec<Doc>, line_frags: &mut Vec<Doc>| {
+        inner.push(Doc::hardline());
+        if !line_frags.is_empty() {
+            inner.append(line_frags);
+        }
+    };
 
     for part in parts {
         match part {
@@ -633,32 +637,24 @@ fn format_interp_multiline(parts: &[StringPart]) -> Doc {
                 let mut first = true;
                 for segment in text.split('\n') {
                     if !first {
-                        // Emit current line and start new one
-                        inner.push(Doc::hardline());
-                        if !current_line.is_empty() {
-                            inner.push(Doc::text(std::mem::take(&mut current_line)));
-                        }
+                        flush_line(&mut inner, &mut line_frags);
                     }
-                    current_line.push_str(segment);
+                    if !segment.is_empty() {
+                        line_frags.push(Doc::text(segment.to_string()));
+                    }
                     first = false;
                 }
             }
             StringPart::Expr(expr) => {
-                let expr_doc = format_expr(expr);
-                let rendered = super::pretty(10000, &expr_doc);
-                let rendered = rendered.trim_end();
-                current_line.push('{');
-                current_line.push_str(rendered);
-                current_line.push('}');
+                line_frags.push(Doc::text("{"));
+                line_frags.push(Doc::flat(format_expr(expr)));
+                line_frags.push(Doc::text("}"));
             }
         }
     }
 
     // Emit remaining line content
-    inner.push(Doc::hardline());
-    if !current_line.is_empty() {
-        inner.push(Doc::text(current_line));
-    }
+    flush_line(&mut inner, &mut line_frags);
     inner.push(Doc::hardline());
     inner.push(Doc::text("\"\"\""));
 

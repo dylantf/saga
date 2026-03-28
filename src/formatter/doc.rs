@@ -70,6 +70,25 @@ impl Doc {
         Doc::IfBreak { broken: Box::new(broken), flat: Box::new(flat) }
     }
 
+    /// Structurally flatten a document: remove all group-breaking decisions
+    /// so the result always renders on a single line. Used for contexts where
+    /// line breaks would change semantics (e.g. expressions inside string
+    /// interpolation holes).
+    pub fn flat(doc: Doc) -> Doc {
+        match doc {
+            Doc::Nil | Doc::Text(_) => doc,
+            Doc::HardLine => Doc::HardLine,
+            Doc::Line { flat_alt } => Doc::text(flat_alt),
+            Doc::Concat(a, b) => Doc::Concat(
+                Box::new(Doc::flat(*a)),
+                Box::new(Doc::flat(*b)),
+            ),
+            Doc::Nest(n, inner) => Doc::Nest(n, Box::new(Doc::flat(*inner))),
+            Doc::Group(inner) => Doc::flat(*inner),
+            Doc::IfBreak { flat, .. } => Doc::flat(*flat),
+        }
+    }
+
     /// Concatenate a sequence of docs with a separator between each pair.
     pub fn join(sep: Doc, docs: Vec<Doc>) -> Doc {
         let mut result = Doc::Nil;
