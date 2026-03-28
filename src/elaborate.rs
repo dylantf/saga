@@ -64,7 +64,8 @@ impl Elaborator {
         // explicit where clauses that still have inferred trait constraints).
         // Traits that use operator dispatch, not dictionary dispatch.
         // These should not generate dict params.
-        let operator_traits: std::collections::HashSet<&str> = ["Eq"].into_iter().collect();
+        let operator_traits: std::collections::HashSet<&str> =
+            ["Num", "Semigroup", "Eq"].into_iter().collect();
 
         let mut inferred_dict_params: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (name, scheme) in result.env.iter() {
@@ -164,7 +165,7 @@ impl Elaborator {
         let mut dict_params = Vec::new();
         for bound in where_clause {
             for (trait_name, _, _) in &bound.traits {
-                if trait_name != "Eq" {
+                if trait_name != "Num" && trait_name != "Semigroup" && trait_name != "Eq" {
                     dict_params.push((trait_name.clone(), bound.type_var.clone()));
                 }
             }
@@ -747,44 +748,6 @@ impl Elaborator {
                     }
                 }
 
-                // Rewrite arithmetic operators to Num dict method calls for non-primitive types.
-                // Primitives (Int, Float) keep using BEAM BIFs directly.
-                if matches!(
-                    op,
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::Mod
-                ) {
-                    let is_primitive = self
-                        .evidence_by_node
-                        .get(&node_id)
-                        .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Num"))
-                        .and_then(|ev| ev.resolved_type.as_ref())
-                        .is_some_and(|(name, _)| matches!(name.as_str(), "Int" | "Float"));
-
-                    if !is_primitive
-                        && let Some(desugared) = self.desugar_num_op(op, left, right, node_id, span)
-                    {
-                        return desugared;
-                    }
-                }
-
-                // Rewrite <> to Semigroup dict method call for non-primitive types.
-                // String and List keep using BEAM BIF (erlang:++) directly.
-                if *op == BinOp::Concat {
-                    let is_primitive = self
-                        .evidence_by_node
-                        .get(&node_id)
-                        .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Semigroup"))
-                        .and_then(|ev| ev.resolved_type.as_ref())
-                        .is_some_and(|(name, _)| matches!(name.as_str(), "String" | "List"));
-
-                    if !is_primitive
-                        && let Some(desugared) =
-                            self.desugar_semigroup_op(left, right, node_id, span)
-                    {
-                        return desugared;
-                    }
-                }
-
                 // Rewrite Div to IntDiv when the Num constraint resolved to Int,
                 // and Mod to FloatMod when resolved to Float.
                 let elaborated_op = if *op == BinOp::FloatDiv {
@@ -1353,88 +1316,6 @@ impl Elaborator {
         ))
     }
 
-    /// Rewrite `a + b` (etc.) into `Num.add a b` (etc.) using the Num dict.
-    ///
-    /// Method indices in Num: add=0, sub=1, mul=2, div=3, mod=4
-    fn desugar_num_op(
-        &mut self,
-        op: &BinOp,
-        left: &Expr,
-        right: &Expr,
-        node_id: crate::ast::NodeId,
-        span: Span,
-    ) -> Option<Expr> {
-        let dict_expr = self.resolve_dict("Num", node_id, span)?;
-
-        let method_index = match op {
-            BinOp::Add => 0,
-            BinOp::Sub => 1,
-            BinOp::Mul => 2,
-            BinOp::FloatDiv => 3,
-            BinOp::Mod => 4,
-            _ => unreachable!(),
-        };
-
-        let method_fn = Expr::synth(
-            span,
-            ExprKind::DictMethodAccess {
-                dict: Box::new(dict_expr),
-                method_index,
-            },
-        );
-        let elab_left = self.elaborate_expr(left);
-        let elab_right = self.elaborate_expr(right);
-        Some(Expr::synth(
-            span,
-            ExprKind::App {
-                func: Box::new(Expr::synth(
-                    span,
-                    ExprKind::App {
-                        func: Box::new(method_fn),
-                        arg: Box::new(elab_left),
-                    },
-                )),
-                arg: Box::new(elab_right),
-            },
-        ))
-    }
-
-    /// Rewrite `a <> b` into `Semigroup.concat a b` using the Semigroup dict.
-    ///
-    /// Method index: concat=0
-    fn desugar_semigroup_op(
-        &mut self,
-        left: &Expr,
-        right: &Expr,
-        node_id: crate::ast::NodeId,
-        span: Span,
-    ) -> Option<Expr> {
-        let dict_expr = self.resolve_dict("Semigroup", node_id, span)?;
-
-        let method_fn = Expr::synth(
-            span,
-            ExprKind::DictMethodAccess {
-                dict: Box::new(dict_expr),
-                method_index: 0,
-            },
-        );
-        let elab_left = self.elaborate_expr(left);
-        let elab_right = self.elaborate_expr(right);
-        Some(Expr::synth(
-            span,
-            ExprKind::App {
-                func: Box::new(Expr::synth(
-                    span,
-                    ExprKind::App {
-                        func: Box::new(method_fn),
-                        arg: Box::new(elab_left),
-                    },
-                )),
-                arg: Box::new(elab_right),
-            },
-        ))
-    }
-
     /// Resolve which dictionary to use for a given trait at a given node.
     /// Returns a DictRef expression or None if no evidence found.
     fn resolve_dict(
@@ -1490,7 +1371,7 @@ impl Elaborator {
         }
 
         // No matching evidence for this trait. Might be a built-in trait
-        // (Eq) that uses direct BEAM BIF dispatch rather than dictionary dispatch.
+        // (Num, Semigroup, Eq) that uses direct BEAM BIF dispatch rather than dictionary dispatch.
         None
     }
 

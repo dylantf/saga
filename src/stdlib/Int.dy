@@ -16,3 +16,27 @@ fun to_string : Int -> String
 
 @external("erlang", "std_int_bridge", "parse")
 pub fun parse : (s: String) -> Maybe Int
+
+pub fun add : Int -> Int -> Int
+add x y = x + y
+
+pub fun sub : Int -> Int -> Int
+sub x y = x - y
+
+pub fun mul : Int -> Int -> Int
+mul x y = x * y
+
+pub fun div : Int -> Int -> Int
+div x y = x / y
+
+pub fun mod : Int -> Int -> Int
+mod x y = x % y
+
+pub fun abs : Int -> Int
+abs x = if x < 0 then 0 - x else x
+
+pub fun min : Int -> Int -> Int
+min a b = if a < b then a else b
+
+pub fun max : Int -> Int -> Int
+max a b = if a > b then a else b

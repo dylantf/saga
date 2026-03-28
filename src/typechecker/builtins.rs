@@ -2,8 +2,50 @@ use super::{Checker, ImplInfo, Scheme, TraitInfo, Type};
 
 impl Checker {
     pub(crate) fn register_builtins(&mut self) {
-        // Note: Show, Ord, Num, and Semigroup traits are defined in Std.Base
-        // (loaded before stdlib modules). Eq is built-in (BEAM BIF dispatch).
+        // Note: Show and Ord traits are defined in Std.Base
+        // (loaded before stdlib modules).
+        // Num, Semigroup, and Eq are built-in marker traits (operator dispatch,
+        // no dictionary passing).
+
+        // Built-in Num trait (arithmetic: +, -, *, /, %, unary -)
+        self.trait_state.traits.insert(
+            "Num".into(),
+            TraitInfo {
+                type_params: vec!["a".into()],
+                supertraits: vec![],
+                methods: vec![],
+            },
+        );
+        for prim in &["Int", "Float"] {
+            self.trait_state.impls.insert(
+                ("Num".into(), vec![], prim.to_string()),
+                ImplInfo {
+                    param_constraints: vec![],
+                    trait_type_args: vec![],
+                    span: None,
+                },
+            );
+        }
+
+        // Built-in Semigroup trait (<>)
+        self.trait_state.traits.insert(
+            "Semigroup".into(),
+            TraitInfo {
+                type_params: vec!["a".into()],
+                supertraits: vec![],
+                methods: vec![],
+            },
+        );
+        for prim in &["String", "List"] {
+            self.trait_state.impls.insert(
+                ("Semigroup".into(), vec![], prim.to_string()),
+                ImplInfo {
+                    param_constraints: vec![],
+                    trait_type_args: vec![],
+                    span: None,
+                },
+            );
+        }
 
         // Built-in Eq trait (==, !=)
         self.trait_state.traits.insert(

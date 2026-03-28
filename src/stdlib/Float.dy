@@ -25,3 +25,18 @@ pub fun ceil : (x: Float) -> Int
 
 @external("erlang", "std_float_bridge", "parse")
 pub fun parse : (s: String) -> Maybe Float
+
+pub fun add : Float -> Float -> Float
+add x y = x + y
+
+pub fun sub : Float -> Float -> Float
+sub x y = x - y
+
+pub fun mul : Float -> Float -> Float
+mul x y = x * y
+
+pub fun div : Float -> Float -> Float
+div x y = x / y
+
+pub fun mod : Float -> Float -> Float
+mod x y = x % y

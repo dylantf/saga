@@ -1314,6 +1314,16 @@ main () = add (Foo { x: 1 }) (Foo { x: 2 })",
     );
 }
 
+#[test]
+fn user_defined_add_does_not_collide_with_stdlib() {
+    // Users should be able to define their own `add` without conflicting with Int.add
+    assert!(check(
+        "fun add : String -> String -> String
+add a b = a <> b
+main () = add \"hello\" \"world\""
+    ).is_ok());
+}
+
 // --- Eq constraint tests ---
 
 #[test]

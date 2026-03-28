@@ -260,7 +260,7 @@ pub fn resolve_names(
 
             let is_exposed = |name: &str| -> bool {
                 match exposing {
-                    None => true, // glob import
+                    None => false, // qualified-only import
                     Some(names) => names.iter().any(|n| n == name),
                 }
             };

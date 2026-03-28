@@ -796,7 +796,7 @@ impl Checker {
             });
 
         let operator_traits: std::collections::HashSet<&str> =
-            ["Eq"].into_iter().collect();
+            ["Num", "Semigroup", "Eq"].into_iter().collect();
         let dict_params: Vec<(String, String)> = scheme
             .constraints
             .iter()
