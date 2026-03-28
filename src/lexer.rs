@@ -279,6 +279,7 @@ impl Lexer {
 
         match s.as_str() {
             "let" => Token::Let,
+            "val" => Token::Val,
             "assert" => Token::Ident("assert".into()),
             "type" => Token::Type,
             "case" => Token::Case,

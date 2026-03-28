@@ -1129,17 +1129,17 @@ trait Eq a {
 trait Special a where {a: Show + Eq} {
   fun special : (x: a) -> String
 }
-record Bar { val: Int }
+record Bar { num: Int }
 impl Show for Bar {
   show b = \"Bar\"
 }
 impl Eq for Bar {
-  eq a b = a.val == b.val
+  eq a b = a.num == b.num
 }
 impl Special for Bar {
   special b = show b
 }
-main () = special (Bar { val: 1 })",
+main () = special (Bar { num: 1 })",
     );
     assert!(result.is_ok(), "got: {:?}", result.err());
 }
@@ -1156,14 +1156,14 @@ trait Eq a {
 trait Special a where {a: Show + Eq} {
   fun special : (x: a) -> String
 }
-record Bar { val: Int }
+record Bar { num: Int }
 impl Show for Bar {
   show b = \"Bar\"
 }
 impl Special for Bar {
   special b = show b
 }
-main () = special (Bar { val: 1 })",
+main () = special (Bar { num: 1 })",
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
@@ -2322,12 +2322,12 @@ fn generic_effect_basic() {
         check(
             "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 handler counter for State Int {
   get () = resume 0
-  put val = resume ()
+  put v = resume ()
 }
 
 fun use_state : Unit -> Unit needs {State}
@@ -2348,12 +2348,12 @@ fn generic_effect_type_shared_across_ops() {
         check(
             "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 handler string_state for State String {
   get () = resume \"hello\"
-  put val = resume ()
+  put v = resume ()
 }
 
 fun use_string_state : Unit -> Unit needs {State}
@@ -2392,12 +2392,12 @@ fn generic_effect_handler_type_mismatch() {
     let result = check(
         "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 handler bad for State Int {
   get () = resume \"not an int\"
-  put val = resume ()
+  put v = resume ()
 }",
     );
     assert!(result.is_err());
@@ -2410,7 +2410,7 @@ fn generic_effect_get_infers_type() {
         check(
             "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun inc : Unit -> Unit needs {State}
@@ -2429,7 +2429,7 @@ fn generic_effect_put_get_type_mismatch() {
     let result = check(
         "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun bad : Unit -> Unit needs {State}
@@ -2449,12 +2449,12 @@ fn generic_effect_multiple_type_params() {
         check(
             "effect Store k v {
   fun read : (key: k) -> v
-  fun write : (key: k) -> (val: v) -> Unit
+  fun write : (key: k) -> (data: v) -> Unit
 }
 
 handler dict_store for Store String Int {
   read key = resume 0
-  write key val = resume ()
+  write key data = resume ()
 }"
         )
         .is_ok()
@@ -2472,7 +2472,7 @@ fn generic_effect_with_existing_effects() {
 
 effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun work : Unit -> Unit needs {Log, State}
@@ -2494,7 +2494,7 @@ fn generic_effect_independent_across_functions() {
         check(
             "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun use_int : Unit -> Unit needs {State}
@@ -2520,7 +2520,7 @@ fn generic_effect_put_then_get() {
         check(
             "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun put_then_get : Unit -> Int needs {State}
@@ -2539,7 +2539,7 @@ fn generic_effect_put_then_get_mismatch() {
     let result = check(
         "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun bad : Unit -> String needs {State}
@@ -2558,14 +2558,14 @@ fn generic_effect_complex_type_param() {
         check(
             "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 type List a = Nil | Cons(a, List a)
 
 handler list_state for State (List Int) {
   get () = resume Nil
-  put val = resume ()
+  put v = resume ()
 }"
         )
         .is_ok()
@@ -2579,14 +2579,14 @@ fn generic_effect_handler_return_clause() {
         check(
             "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 type Result a = Ok(a) | Err(String)
 
 handler safe_state for State Int {
   get () = resume 0
-  put val = resume ()
+  put v = resume ()
   return value = Ok(value)
 }"
         )
@@ -2601,13 +2601,13 @@ fn generic_effect_op_with_function_param() {
         check(
             "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
   fun modify : (f: s -> s) -> Unit
 }
 
 handler counter for State Int {
   get () = resume 0
-  put val = resume ()
+  put v = resume ()
   modify f = resume ()
 }
 
@@ -2627,7 +2627,7 @@ fn generic_effect_op_with_function_param_mismatch() {
     let result = check(
         "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
   fun modify : (f: s -> s) -> Unit
 }
 
@@ -2646,7 +2646,7 @@ fn generic_effect_multi_param_partial_mismatch() {
     let result = check(
         "effect Store k v {
   fun read : (key: k) -> v
-  fun write : (key: k) -> (val: v) -> Unit
+  fun write : (key: k) -> (data: v) -> Unit
 }
 
 fun bad : Unit -> Unit needs {Store}
@@ -2666,17 +2666,17 @@ fn generic_effect_with_scopes_independent() {
         check(
             "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 handler int_state for State Int {
   get () = resume 0
-  put val = resume ()
+  put v = resume ()
 }
 
 handler string_state for State String {
   get () = resume \"\"
-  put val = resume ()
+  put v = resume ()
 }
 
 fun use_int : Unit -> Unit needs {State}
@@ -2707,7 +2707,7 @@ fn generic_effect_needs_type_arg_constrains_body() {
     let result = check(
         "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun bad : Unit -> Unit needs {State Int}
@@ -2723,7 +2723,7 @@ fn generic_effect_needs_type_arg_allows_matching_usage() {
         check(
             "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun good : Unit -> Unit needs {State Int}
@@ -2742,7 +2742,7 @@ fn generic_effect_needs_type_arg_get_returns_correct_type() {
     let result = check(
         "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun bad : Unit -> Int needs {State String}
@@ -2761,7 +2761,7 @@ fn generic_effect_needs_type_var_from_annotation() {
     let result = check(
         "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun transform : (f: a -> a) -> a needs {State a}
@@ -2784,7 +2784,7 @@ fn generic_effect_needs_type_var_mismatch() {
     let result = check(
         "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun bad : (x: a) -> Int needs {State a}
@@ -2806,7 +2806,7 @@ fn generic_effect_effarrow_polymorphic_hof() {
         check(
             "effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun run_state : (init: s) -> (f: Unit -> a needs {State s}) -> (a, s)

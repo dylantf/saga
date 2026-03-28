@@ -85,6 +85,7 @@ pub fn strip_annotations(annotated: AnnotatedProgram) -> Program {
 pub fn set_decl_doc(decl: &mut Decl, doc: Vec<String>) {
     match decl {
         Decl::FunSignature { doc: d, .. }
+        | Decl::Val { doc: d, .. }
         | Decl::TypeDef { doc: d, .. }
         | Decl::RecordDef { doc: d, .. }
         | Decl::EffectDef { doc: d, .. }
@@ -178,6 +179,18 @@ pub enum Decl {
         name: String,
         name_span: Span,
         annotation: Option<TypeExpr>,
+        value: Expr,
+        span: Span,
+    },
+
+    /// `val pi = 3.14159` or `pub val version = "1.0.0"`
+    Val {
+        id: NodeId,
+        doc: Vec<String>,
+        public: bool,
+        name: String,
+        name_span: Span,
+        annotations: Vec<Annotation>,
         value: Expr,
         span: Span,
     },

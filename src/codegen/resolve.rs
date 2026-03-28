@@ -188,6 +188,9 @@ pub fn resolve_names(
             Decl::FunBinding { name, params, .. } => {
                 local_funs.entry(name.clone()).or_insert(params.len());
             }
+            Decl::Val { name, .. } => {
+                local_funs.entry(name.clone()).or_insert(0);
+            }
             Decl::FunSignature {
                 name,
                 params,
@@ -376,7 +379,9 @@ fn resolve_decl(
 ) {
     match decl {
         Decl::FunBinding { body, .. } => resolve_expr(body, scope, qualified_scope, map),
-        Decl::Let { value, .. } => resolve_expr(value, scope, qualified_scope, map),
+        Decl::Let { value, .. } | Decl::Val { value, .. } => {
+            resolve_expr(value, scope, qualified_scope, map)
+        }
         Decl::HandlerDef {
             arms,
             return_clause,

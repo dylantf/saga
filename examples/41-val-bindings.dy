@@ -1,0 +1,13 @@
+# Val bindings - module-level pure values
+
+val pi = 3.14159
+val greeting = "hello world"
+val max_retries = 5
+val origins = ["localhost", "example.com"]
+
+main () = {
+  println (show pi)
+  println greeting
+  println (show max_retries)
+  println (debug origins)
+}

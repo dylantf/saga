@@ -1,0 +1,19 @@
+# @inline val - compile-time inlined constants
+
+@inline
+val pi = 3.14159
+
+@inline
+val app_name = "dylang"
+
+@inline
+val numbers = [1, 2, 3]
+
+val computed = List.map (fun x -> x * 2) [1, 2, 3]
+
+main () = {
+  println (show pi)
+  println app_name
+  println (debug numbers)
+  println (debug computed)
+}

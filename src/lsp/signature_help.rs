@@ -101,7 +101,7 @@ fn find_call_in_decl(decl: &Decl, offset: usize) -> Option<(String, usize)> {
             }
             None
         }
-        Decl::Let { value, span, .. } => {
+        Decl::Let { value, span, .. } | Decl::Val { value, span, .. } => {
             if !contains(span, offset) {
                 return None;
             }

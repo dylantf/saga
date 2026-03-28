@@ -39,13 +39,13 @@ run_body body = {
   let (_, failures) = { body () } with {
     assert ok msg =
       if ok then {
-        let (val, errs) = resume ()
-        (val, errs)
+        let (v, errs) = resume ()
+        (v, errs)
       } else {
-        let (val, errs) = resume ()
-        (val, msg :: errs)
+        let (v, errs) = resume ()
+        (v, msg :: errs)
       }
-    return val = (val, [])
+    return v = (v, [])
   }
   failures
 }

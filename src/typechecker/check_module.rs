@@ -163,6 +163,7 @@ impl ModuleExports {
         for decl in program {
             let (name, doc) = match decl {
                 Decl::FunSignature { public: true, name, doc, .. } => (name, doc),
+                Decl::Val { public: true, name, doc, .. } => (name, doc),
                 Decl::TypeDef { public: true, name, doc, .. } => (name, doc),
                 Decl::RecordDef { public: true, name, doc, .. } => (name, doc),
                 Decl::EffectDef { public: true, name, doc, .. } => (name, doc),
@@ -1099,7 +1100,10 @@ pub(super) fn public_names_for_tc(
             } => {
                 names.insert(name.clone());
             }
-            Decl::HandlerDef {
+            Decl::Val {
+                public: true, name, ..
+            }
+            | Decl::HandlerDef {
                 public: true, name, ..
             } => {
                 names.insert(name.clone());

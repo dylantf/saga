@@ -133,6 +133,23 @@ fn normalize_decl(d: &mut Decl) {
             }
             normalize_expr(value);
         }
+        Decl::Val {
+            id,
+            name_span,
+            annotations,
+            value,
+            span,
+            ..
+        } => {
+            *id = NID;
+            *name_span = S;
+            *span = S;
+            for ann in annotations.iter_mut() {
+                ann.name_span = S;
+                ann.span = S;
+            }
+            normalize_expr(value);
+        }
         Decl::TypeDef {
             id,
             name_span,
@@ -1302,14 +1319,14 @@ fn trailing_lambda_with_block_body() {
 
 #[test]
 fn handler_arm_zero_arg_gets_unit() {
-    let src = "f x = compute () with {\n  get () = resume 0\n  put val = resume ()\n}";
+    let src = "f x = compute () with {\n  get () = resume 0\n  put v = resume ()\n}";
     let result = fmt80(src);
     assert!(result.contains("get () ="), "should preserve (): {}", result);
 }
 
 #[test]
 fn named_handler_def_zero_arg_gets_unit() {
-    let src = "handler my_state for State {\n  get () = resume 42\n  put val = resume ()\n}";
+    let src = "handler my_state for State {\n  get () = resume 42\n  put v = resume ()\n}";
     let result = fmt80(src);
     assert!(result.contains("get () ="), "named handler should preserve () for zero-arg ops: {}", result);
 }
