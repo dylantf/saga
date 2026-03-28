@@ -692,7 +692,49 @@ The exit code behavior means `dylang test` works directly in CI pipelines.
 
 ---
 
-## 14. Settled Decisions & Notes
+## 14. Val Bindings
+
+Module-level named values. Not functions -- `val` is for data, `fun` is for
+functions. Compiles to a zero-arity BEAM function under the hood, called
+automatically at every use site.
+
+```
+# Simple constants
+val pi = 3.14159
+val app_name = "my-app"
+val max_retries = 5
+
+# Public (no type signature required -- the value is self-documenting)
+pub val version = "1.0.0"
+
+# Any pure expression is valid
+val origins = ["localhost", "example.com"]
+val config = Config { port: 8080, debug: False }
+val codes = Dict.from_list [(404, "Not Found"), (500, "Server Error")]
+
+# @inline annotation: compiler substitutes the literal at use sites
+# instead of emitting a function call. RHS must be a compile-time value.
+@inline
+val pi = 3.141592653589793
+```
+
+**Rules:**
+- RHS must be pure (no effects). If the expression performs effects, it's an error.
+- Inferred type must not be a function (`a -> b`). Use `fun` for functions.
+- Can reference other vals and call pure functions.
+- `pub val` is exported without a type signature.
+- `@inline` restricts the RHS to compile-time literals (scalars, lists, tuples).
+  The value is substituted at each use site within the module; a zero-arity
+  function is still emitted for cross-module consumers.
+
+**Why not zero-argument functions?** There are no zero-argument functions in the
+language -- every function takes at least one parameter. `val` fills the gap for
+named constants and precomputed data without introducing zero-arity functions
+into the type system. See `docs/val-bindings.md` for the full design rationale.
+
+---
+
+## 15. Settled Decisions & Notes
 
 1. **Effect polymorphism** - higher-order functions explicitly propagate
    effects from callbacks using an effect variable `e`:

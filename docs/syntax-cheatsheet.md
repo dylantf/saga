@@ -50,6 +50,33 @@ add_five = add 5
 
 ---
 
+## Val Bindings
+
+```
+# Module-level pure value bindings (not functions)
+val pi = 3.14159
+val greeting = "hello"
+val origins = ["localhost", "example.com"]
+val config = Config { port: 8080, debug: False }
+
+# Public val (no type signature needed)
+pub val version = "1.0.0"
+
+# Computed values (any pure expression)
+val codes = Dict.from_list [(404, "Not Found"), (500, "Server Error")]
+
+# @inline - compile-time literal substitution (same-module optimization)
+@inline
+val max_retries = 5
+
+# Rules:
+# - RHS must be pure (no effects, no !)
+# - Type must not be a function (use `fun` for functions)
+# - Compiles to zero-arity BEAM function (called automatically at use sites)
+```
+
+---
+
 ## Operators & Syntax
 
 ```
