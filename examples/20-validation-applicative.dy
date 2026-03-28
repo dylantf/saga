@@ -25,8 +25,8 @@ type Validation e a =
 
 impl Debug for Validation e a where {e: Debug, a: Debug} {
   debug v = case v {
-    Valid(x) -> $"Valid: {debug x}"
-    Invalid(e) -> $"Invalid: {debug e}"
+    Valid x -> $"Valid: {debug x}"
+    Invalid e -> $"Invalid: {debug e}"
   }
 }
 

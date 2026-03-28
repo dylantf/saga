@@ -12,7 +12,7 @@ impl Show for Point {
 
 impl Show for Shape {
   show s = case s {
-    Circle(r) -> $"Circle({r})"
+    Circle r -> $"Circle({r})"
     Rect(w, h) -> $"Rect({w}, {h})"
   }
 }
@@ -20,7 +20,7 @@ impl Show for Shape {
 # Function argument destructuring
 add_points (x1, y1) (x2, y2) = (x1 + x2, y1 + y2)
 
-area (Circle(r)) = r * r * 3.14
+area (Circle r) = r * r * 3.14
 area (Rect(w, h)) = w * h
 
 main () = {
@@ -34,13 +34,13 @@ main () = {
   println $"origin: ({x}, {y})"
 
   # Let with single-constructor types (irrefutable)
-  let Wrapped(inner) = Wrapped 42
+  let Wrapped inner = Wrapped 42
   println $"inner: {inner}"
 
   # Case for multi-constructor types
   let shape = Circle 10.0
   let r2 = case shape {
-    Circle(r) -> r
+    Circle r -> r
     Rect(w, h) -> w * h
   }
   println $"r2: {r2}"

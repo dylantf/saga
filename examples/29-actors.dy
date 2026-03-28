@@ -8,8 +8,8 @@ type CounterMsg =
 fun counter : (count: Int) -> Unit needs {Process, Actor CounterMsg}
 counter count = {
   receive {
-    Increment(n) -> counter (count + n)
-    GetCount(caller) -> {
+    Increment n -> counter (count + n)
+    GetCount caller -> {
       send! caller count
       counter count
     }
@@ -23,7 +23,9 @@ run_counter () = {
   send! pid (Increment 5)
   send! pid (Increment 3)
   send! pid (GetCount (self! ()))
-  let result = receive { n -> n }
+  let result = receive {
+    n -> n
+  }
   println (show result)
 }
 

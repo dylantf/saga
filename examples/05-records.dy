@@ -90,15 +90,13 @@ main () = {
 
   # Record update on nested anonymous record
   let house2 = { house | address: { house.address | street: "Real Street" } }
-  println (house2.address.street)
+  println house2.address.street
 
   # Pattern matching on anonymous record fields
   let House { address: { number, street } } = house
   println (show number)
   println street
-
   # let incomplete_house = House { year_built: 2005 }
-
   # let invalid_house = House {
   #   year_builded: 2005,
   #   year_built: "2005",

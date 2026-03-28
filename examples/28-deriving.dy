@@ -4,8 +4,8 @@ type Animal =
   deriving (Show, Eq)
 
 speak animal = case animal {
-  Dog(age) | age > 15 -> "im tired"
-  Dog(_) -> "woof"
+  Dog age | age > 15 -> "im tired"
+  Dog _ -> "woof"
   Cat -> "meow"
 }
 

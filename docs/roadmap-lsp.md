@@ -68,7 +68,7 @@ lock-free hover/goto/completion.
 
 ## Phase 5: Polish
 
-- [ ] Formatter (`textDocument/formatting`)
+- [x] Formatter (`textDocument/formatting`)
 - [ ] Incremental checking (re-check only changed files + dependents)
 - [ ] Workspace support (multi-root projects)
 - [ ] Semantic tokens (richer syntax highlighting from type info)

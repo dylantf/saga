@@ -20,11 +20,11 @@ effect Fail {
 # `run_with_log` handles Log but forwards any other effects from the callback.
 # The `..e` captures extras and propagates them to the caller's needs.
 fun run_with_log : (f: Unit -> Unit needs {Log, ..e}) -> Unit needs {..e}
-run_with_log f = f () with { 
-  log msg = { 
+run_with_log f = f () with {
+  log msg = {
     println msg
     resume ()
-  } 
+  }
 }
 
 # This caller uses both Log and Fail. Log is handled by run_with_log,
@@ -50,6 +50,11 @@ main () = {
   println $"5 doubled twice: {result}"
 
   # run_with_log handles Log, inline handler catches Fail
-  { greet "world" } with { fail msg = println $"caught: {msg}" }
-  { greet "" } with { fail msg = println $"caught: {msg}" }
+  greet "world" with {
+    fail msg = println $"caught: {msg}"
+  }
+
+  greet "" with {
+    fail msg = println $"caught: {msg}"
+  }
 }

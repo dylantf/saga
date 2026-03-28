@@ -182,6 +182,12 @@ pub fn format_type_def(decl: &Decl) -> Doc {
         vdoc.append(format_trailing(&ann.trailing_comment))
     };
 
+    let deriving_bare = if !deriving.is_empty() {
+        Doc::text(format!("deriving ({})", deriving.join(", ")))
+    } else {
+        Doc::Nil
+    };
+
     if *multiline {
         // User wrote variants on separate lines - `=` on header, `|` before each
         parts.push(Doc::text(" ="));
@@ -193,7 +199,7 @@ pub fn format_type_def(decl: &Decl) -> Doc {
                 .append(format_variant(ann));
         }
         if !deriving.is_empty() {
-            broken_variants = broken_variants.append(Doc::hardline()).append(deriving_doc);
+            broken_variants = broken_variants.append(Doc::hardline()).append(deriving_bare);
         }
         parts.push(Doc::nest(2, broken_variants));
     } else {
@@ -216,7 +222,7 @@ pub fn format_type_def(decl: &Decl) -> Doc {
                 .append(format_variant(ann));
         }
         if !deriving.is_empty() {
-            broken_variants = broken_variants.append(Doc::hardline()).append(deriving_doc);
+            broken_variants = broken_variants.append(Doc::hardline()).append(deriving_bare);
         }
 
         parts.push(Doc::group(Doc::if_break(
@@ -228,21 +234,27 @@ pub fn format_type_def(decl: &Decl) -> Doc {
     docs_from_vec(parts)
 }
 
-pub fn format_record_def(
-    doc: &[String],
-    public: bool,
-    name: &str,
-    type_params: &[String],
-    fields: &[Annotated<(String, TypeExpr)>],
-    deriving: &[String],
-    multiline: bool,
-    dangling: &[Trivia],
-) -> Doc {
+pub fn format_record_def(decl: &Decl) -> Doc {
+    let Decl::RecordDef {
+        doc,
+        public,
+        name,
+        type_params,
+        fields,
+        deriving,
+        multiline,
+        dangling_trivia: dangling,
+        ..
+    } = decl
+    else {
+        unreachable!()
+    };
+
     let mut parts = Vec::new();
     format_doc_preamble(doc, &mut parts);
 
     let mut header = String::new();
-    if public {
+    if *public {
         header.push_str("pub ");
     }
     header.push_str("record ");
@@ -274,7 +286,7 @@ pub fn format_record_def(
         docs![Doc::text(" {"), Doc::nest(2, body), Doc::hardline(), Doc::text("}"), deriving_doc.clone()]
     };
 
-    if multiline {
+    if *multiline {
         parts.push(broken_fields);
     } else {
         let field_docs: Vec<Doc> = fields.iter().map(|ann| {

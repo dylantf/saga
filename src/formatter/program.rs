@@ -200,26 +200,7 @@ fn format_decl(decl: &Decl) -> Doc {
             docs![preamble, format_binding(lhs, value)]
         }
         Decl::TypeDef { .. } => format_type_def(decl),
-        Decl::RecordDef {
-            doc,
-            public,
-            name,
-            type_params,
-            fields,
-            deriving,
-            multiline,
-            dangling_trivia,
-            ..
-        } => format_record_def(
-            doc,
-            *public,
-            name,
-            type_params,
-            fields,
-            deriving,
-            *multiline,
-            dangling_trivia,
-        ),
+        Decl::RecordDef { .. } => format_record_def(decl),
         Decl::EffectDef {
             doc,
             public,

@@ -27,23 +27,23 @@ grade score =
 # All three Err bails unify to the same else arm.
 fun lookup_grade : (id: Int) -> Result String String
 lookup_grade id = do {
-  Ok(name) <- find_user id
-  Ok(score) <- find_score name
-  Ok(g) <- grade score
+  Ok name <- find_user id
+  Ok score <- find_score name
+  Ok g <- grade score
   Ok g
 } else {
-  Err(e) -> Err e
+  Err e -> Err e
 }
 
 # The success expression doesn't have to be Ok/Err.
 # Here the success path returns an Int and the else arm returns 0.
 fun score_or_zero : (id: Int) -> Int
 score_or_zero id = do {
-  Ok(name) <- find_user id
-  Ok(score) <- find_score name
+  Ok name <- find_user id
+  Ok score <- find_score name
   score
 } else {
-  Err(_) -> 0
+  Err _ -> 0
 }
 
 fun active_users : Unit -> Maybe (List String)
@@ -58,14 +58,14 @@ first xs = case xs {
 # Success: Ok(name). Mixed else arms: Nothing and Err both return Err.
 fun first_active_grade : Unit -> Result String String
 first_active_grade () = do {
-  Just(users) <- active_users ()
-  Just(name) <- first users
-  Ok(score) <- find_score name
-  Ok(g) <- grade score
+  Just users <- active_users ()
+  Just name <- first users
+  Ok score <- find_score name
+  Ok g <- grade score
   Ok g
 } else {
   Nothing -> Err "nothing found"
-  Err(e) -> Err e
+  Err e -> Err e
 }
 
 main () = {

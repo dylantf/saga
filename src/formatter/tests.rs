@@ -750,7 +750,7 @@ fn fun_binding_case_body_stays_on_eq_line() {
     let src = "dispatch shape = case shape {\n  Circle(r) -> r\n  Point -> 0.0\n}";
     assert_eq!(
         fmt80(src),
-        "dispatch shape = case shape {\n  Circle(r) -> r\n  Point -> 0.0\n}\n"
+        "dispatch shape = case shape {\n  Circle r -> r\n  Point -> 0.0\n}\n"
     );
 }
 
@@ -1396,8 +1396,8 @@ fn inline_handler_named_then_inline_no_comma_before_inline() {
 fn inline_handler_only_named_gets_commas() {
     let src = "f x = compute () with {\n  console,\n  to_result,\n}";
     let result = fmt80(src);
-    assert!(result.contains("console,"), "result: {}", result);
-    assert!(result.contains("to_result,"), "result: {}", result);
+    // Named-only handlers go on one line: `{ console, to_result }`
+    assert!(result.contains("{console, to_result}"), "result: {}", result);
 }
 
 // --- Comments ---

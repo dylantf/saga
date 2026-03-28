@@ -6,7 +6,7 @@ type WorkerMsg =
 
 fun worker : Unit -> Unit needs {Actor WorkerMsg}
 worker () = receive {
-  Work(n) -> {
+  Work n -> {
     println $"Working on {n}"
     worker ()
   }

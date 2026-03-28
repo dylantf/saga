@@ -1,5 +1,5 @@
-import Std.Result
 import Std.Fail
+import Std.Result
 import Std.Supervisor (supervised)
 
 # A computation that always fails

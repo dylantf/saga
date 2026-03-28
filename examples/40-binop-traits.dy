@@ -42,6 +42,6 @@ main () = {
   # let bad_sum = add amount1 (nok 500.00)
   # compile error: type mismatch: expected USD, got NOK
 
-  let amount1_in_nok : Currency NOK = convert amount1
+  let amount1_in_nok: Currency NOK = convert amount1
   println (show (add amount1_in_nok (nok 500.00)))
 }

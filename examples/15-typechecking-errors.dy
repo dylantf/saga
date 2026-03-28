@@ -26,7 +26,7 @@ distance p = {
 # Pattern matching: all branches must return the same type
 fun describe : (m: Maybe Int) -> String
 describe m = case m {
-  Just(x) -> $"got: {x}"
+  Just x -> $"got: {x}"
   Nothing -> "nothing"
 }
 
@@ -68,7 +68,6 @@ main () = {
   let greeting: String = "hello"
   println (show n)
   println greeting
-
   # --- Uncomment any line below to see a type error: ---
   # let bad = 1 + "hello"               # type mismatch: expected Int, got String
   # let bad = if True then 1 else "no"   # branch type mismatch

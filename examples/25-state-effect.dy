@@ -25,7 +25,7 @@ modify f = {
   put! (f x)
 }
 
-###
+# ###
 
 # Simple counter: increment 5 times
 fun count_up : (n: Int) -> Int needs {State Int}
@@ -51,4 +51,3 @@ main () = {
   let (msg, _) = run_state "" (fun () -> build_msg ())
   println msg
 }
-

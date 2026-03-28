@@ -9,20 +9,16 @@ import Std.Test (describe, test) # comment 4: trailing on import
 # comment 5: before let binding
 let x = 42 # comment 6: trailing on let
 
-
-
-
-
 # comment 7: before type def
-type Shape = 
+type Shape =
   | Circle(Float)
   | Rect(Float, Float) # comment 8: trailing on variant
   | Point
 
 # comment 9: before record
 record User {
-  name : String,
-  age : Int,
+  name: String,
+  age: Int,
 }
 
 # comment 10: before effect
@@ -80,10 +76,12 @@ dispatch shape = case shape {
 }
 
 # comment 33: before fun with inline handler
-run_it () =
-  process "hello" with {
-    log msg = { println msg; resume () }, # comment 34: trailing on inline handler arm
-  }
+run_it () = process "hello" with {
+  log msg = {
+    println msg
+    resume ()
+  } # comment 34: trailing on inline handler arm
+}
 
 # comment 35: before if-then-else
 pick x = if x > 0 then x else -x # comment 36: Trailing on if-then-else
@@ -92,27 +90,40 @@ pick x = if x > 0 then x else -x # comment 36: Trailing on if-then-else
 apply_fn f x = f x
 
 # comment 38: before pipe chain
-piped x = x
+piped x =
+  x
   # comment 39: before first pipe
   |> add 1 # comment 40: trailing on mid-pipe segment
   # comment 41: between pipes
   |> double
   # comment 42: after pipe
-# comment 43: after complete pipe expression
+  # comment 43: after complete pipe expression
+
 
 main () = {
   println "Hello world"
 
   let _single_line_pipe = 1 |> add 2 |> add 3
 
-  let _multi_line_pipe = 
+  let _multi_line_pipe =
     1
     |> add 2
     |> add 3
 
-  let _long_pipe = 1 |> add 2 |> add 3 |> add 4 |> add 5 |> add 6 |> add 7 |> add 8
+  let _long_pipe =
+    1 |> add 2 |> add 3 |> add 4 |> add 5 |> add 6 |> add 7 |> add 8
 
-  let _longer_pipe = 1 |> add 2 |> add 3 |> add 4 |> add 5 |> add 6 |> add 7 |> add 8 |> add 9 |> add 10
+  let _longer_pipe =
+    1
+    |> add 2
+    |> add 3
+    |> add 4
+    |> add 5
+    |> add 6
+    |> add 7
+    |> add 8
+    |> add 9
+    |> add 10
 }
 
 # --- Fun signature formatting ---
@@ -124,13 +135,17 @@ fun short_sig : Int -> Int
 fun medium_sig : String -> Unit needs {Log}
 
 # Long with needs: needs should break
-fun long_signature_name : String -> Int -> Result String Error needs {Log, Actor, Process}
+fun long_signature_name : String -> Int -> Result String Error
+  needs {Log, Actor, Process}
 
 # Long with traits: where should break
-fun long_signature_name : String -> Int -> Result String Error where {a: Show, b: Debug}
+fun long_signature_name : String -> Int -> Result String Error
+  where {a: Show, b: Debug}
 
 # Long with needs and where: both should break
-fun very_long_sig : String -> Int -> Bool -> Unit needs {Log, Actor} where {a: Show, b: Debug}
+fun very_long_sig : String -> Int -> Bool -> Unit
+  needs {Log, Actor}
+  where {a: Show, b: Debug}
 
 # --- Fun binding formatting ---
 
@@ -138,7 +153,8 @@ fun very_long_sig : String -> Int -> Bool -> Unit needs {Log, Actor} where {a: S
 short x = x + 1
 
 # Long body: breaks after =
-long_binding_name some_param = some_very_long_function_name some_param other_arg third_arg
+long_binding_name some_param =
+  some_very_long_function_name some_param other_arg third_arg
 
 # Block body: { stays on = line
 block_binding x = {
@@ -157,13 +173,16 @@ with_named x = do_thing x with console
 
 # With inline handler: { stays on = line
 with_inline x = do_thing x with {
-  log msg = { println msg; resume () },
+  log msg = {
+    println msg
+    resume ()
+  }
 }
 
 # --- Let statement formatting ---
 
 let _short_let = 42
-let _long_let_binding = some_very_long_expression_that_is_way_too_wide_for_one_line
+let _long_let_binding =
+  some_very_long_expression_that_is_way_too_wide_for_one_line
 
 # comment 9999: last comment in file
-
