@@ -275,10 +275,10 @@ impl<'a> Lowerer<'a> {
         let info = compiled.codegen_info.clone();
 
         // Determine which names are exposed unqualified.
-        // None = glob import (all exports), Some(list) = specific names.
+        // None = qualified-only import, Some(list) = specific names exposed.
         let is_exposed = |name: &str| -> bool {
             match exposing {
-                None => true,
+                None => false,
                 Some(names) => names.iter().any(|n| n == name),
             }
         };
