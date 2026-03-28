@@ -75,7 +75,7 @@ pub fn format_binop(op: &BinOp) -> &'static str {
         BinOp::Sub => "-",
         BinOp::Mul => "*",
         BinOp::FloatDiv | BinOp::IntDiv => "/",
-        BinOp::Mod => "%",
+        BinOp::Mod | BinOp::FloatMod => "%",
         BinOp::Eq => "==",
         BinOp::NotEq => "!=",
         BinOp::Lt => "<",

@@ -2,27 +2,8 @@ use super::{Checker, ImplInfo, Scheme, TraitInfo, Type};
 
 impl Checker {
     pub(crate) fn register_builtins(&mut self) {
-        // Note: Show and Ord traits are defined in Std.dy (loaded before
-        // stdlib modules). Eq is built-in (BEAM BIF dispatch).
-
-        // Built-in Num trait (arithmetic: +, -, *, /, %, unary -)
-        self.trait_state.traits.insert(
-            "Num".into(),
-            TraitInfo {
-                type_param: "a".into(),
-                supertraits: vec![],
-                methods: vec![],
-            },
-        );
-        for prim in &["Int", "Float"] {
-            self.trait_state.impls.insert(
-                ("Num".into(), prim.to_string()),
-                ImplInfo {
-                    param_constraints: vec![],
-                    span: None,
-                },
-            );
-        }
+        // Note: Show, Ord, Num, and Semigroup traits are defined in Std.Base
+        // (loaded before stdlib modules). Eq is built-in (BEAM BIF dispatch).
 
         // Built-in Eq trait (==, !=)
         self.trait_state.traits.insert(

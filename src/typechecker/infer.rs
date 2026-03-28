@@ -157,7 +157,7 @@ impl Checker {
                 let left_ty = self.infer_expr(left)?;
                 let right_ty = self.infer_expr(right)?;
                 match op {
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::IntDiv => {
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::IntDiv | BinOp::Mod | BinOp::FloatMod => {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.trait_state.pending_constraints.push((
                             "Num".into(),
@@ -166,11 +166,6 @@ impl Checker {
                             node_id,
                         ));
                         Ok(left_ty)
-                    }
-                    BinOp::Mod => {
-                        self.unify_at(&left_ty, &Type::int(), span)?;
-                        self.unify_at(&right_ty, &Type::int(), span)?;
-                        Ok(Type::int())
                     }
                     BinOp::Eq | BinOp::NotEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
@@ -198,9 +193,14 @@ impl Checker {
                         Ok(Type::bool())
                     }
                     BinOp::Concat => {
-                        self.unify_at(&Type::string(), &left_ty, span)?;
-                        self.unify_at(&Type::string(), &right_ty, span)?;
-                        Ok(Type::string())
+                        self.unify_at(&left_ty, &right_ty, span)?;
+                        self.trait_state.pending_constraints.push((
+                            "Semigroup".into(),
+                            left_ty.clone(),
+                            span,
+                            node_id,
+                        ));
+                        Ok(left_ty)
                     }
                 }
             }
@@ -786,7 +786,7 @@ impl Checker {
             });
 
         let operator_traits: std::collections::HashSet<&str> =
-            ["Num", "Eq"].into_iter().collect();
+            ["Eq"].into_iter().collect();
         let dict_params: Vec<(String, String)> = scheme
             .constraints
             .iter()

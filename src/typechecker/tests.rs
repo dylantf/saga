@@ -1243,9 +1243,9 @@ fn num_arithmetic_on_float() {
 }
 
 #[test]
-fn mod_on_float_fails() {
-    let result = check("main () = 1.0 % 2.0");
-    assert!(result.is_err());
+fn mod_on_float_works() {
+    // Float now has Num impl with mod, lowered to math:fmod
+    assert!(check("main () = 1.0 % 2.0").is_ok());
 }
 
 #[test]

@@ -33,3 +33,35 @@ impl Ord for Float {
 impl Ord for String {
   compare x y = if x < y then Lt else if x > y then Gt else Eq
 }
+
+pub trait Num a {
+  fun add : a -> a -> a
+  fun sub : a -> a -> a
+  fun mul : a -> a -> a
+  fun div : a -> a -> a
+  fun mod : a -> a -> a
+}
+
+impl Num for Int {
+  add x y = x + y
+  sub x y = x - y
+  mul x y = x * y
+  div x y = x / y
+  mod x y = x % y
+}
+
+impl Num for Float {
+  add x y = x + y
+  sub x y = x - y
+  mul x y = x * y
+  div x y = x / y
+  mod x y = x % y
+}
+
+pub trait Semigroup a {
+  fun concat : a -> a -> a
+}
+
+impl Semigroup for String {
+  concat x y = x <> y
+}

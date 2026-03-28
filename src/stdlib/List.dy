@@ -1,5 +1,9 @@
 module Std.List
 
+impl Semigroup for List a {
+  concat xs ys = xs <> ys
+}
+
 impl Debug for List a where {a: Debug} {
   debug xs = "[" <> flatten (join ", " (map debug xs)) <> "]"
 }

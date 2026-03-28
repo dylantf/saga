@@ -838,7 +838,8 @@ pub enum BinOp {
     Mul,      // *
     FloatDiv, // / (float division)
     IntDiv,   // / on Int (truncating integer division, emitted by elaboration)
-    Mod,      // %
+    Mod,      // % (integer remainder, emitted by elaboration for Int)
+    FloatMod, // % on Float (math:fmod, emitted by elaboration)
     Eq,       // ==
     NotEq,    // !=
     Lt,       // <

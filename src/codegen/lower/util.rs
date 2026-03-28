@@ -67,6 +67,7 @@ pub(super) fn binop_call(op: &BinOp, left: &str, right: &str) -> CExpr {
         BinOp::FloatDiv => cerl_call("erlang", "/", vec![l, r]),
         BinOp::IntDiv => cerl_call("erlang", "div", vec![l, r]),
         BinOp::Mod => cerl_call("erlang", "rem", vec![l, r]),
+        BinOp::FloatMod => cerl_call("math", "fmod", vec![l, r]),
         BinOp::Eq => cerl_call("erlang", "=:=", vec![l, r]),
         BinOp::NotEq => cerl_call("erlang", "=/=", vec![l, r]),
         BinOp::Lt => cerl_call("erlang", "<", vec![l, r]),
@@ -248,11 +249,11 @@ pub(super) fn module_name_to_erlang(path: &[String]) -> String {
 }
 
 /// Count dictionary parameters from trait constraints.
-/// Excludes operator-dispatched traits (Num, Eq) which use BIF dispatch instead.
+/// Excludes operator-dispatched traits (Eq) which use BIF dispatch instead.
 pub fn dict_param_count(constraints: &[(String, u32)]) -> usize {
     constraints
         .iter()
-        .filter(|(trait_name, _)| trait_name != "Num" && trait_name != "Eq")
+        .filter(|(trait_name, _)| trait_name != "Eq")
         .count()
 }
 
