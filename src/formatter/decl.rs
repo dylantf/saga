@@ -1,8 +1,8 @@
 use super::Doc;
 use super::expr::format_expr;
 use super::helpers::{
-    docs_from_vec, format_doc_comment, format_lit_raw, format_trailing, format_trivia,
-    format_trivia_dangling,
+    docs_from_vec, format_annotated_body, format_braced_body, format_doc_comment,
+    format_handler_arm, format_lit_raw, format_trailing, format_trivia,
 };
 use super::pat::format_pat;
 use super::type_expr::*;
@@ -243,22 +243,9 @@ pub fn format_record_def(
     header.push_str(" {");
     parts.push(Doc::text(header));
 
-    let mut body = Doc::Nil;
-    for ann in fields {
-        let (fname, ty) = &ann.node;
-        body = body.append(Doc::hardline());
-        body = body.append(format_trivia(&ann.leading_trivia));
-        body = body.append(docs![
-            Doc::text(format!("{} : ", fname)),
-            format_type_expr(ty),
-            Doc::text(",")
-        ]);
-        body = body.append(format_trailing(&ann.trailing_comment));
-    }
-    if !dangling.is_empty() {
-        body = body.append(Doc::hardline());
-        body = body.append(format_trivia_dangling(dangling));
-    }
+    let body = format_annotated_body(fields, |(fname, ty)| {
+        docs![Doc::text(format!("{} : ", fname)), format_type_expr(ty), Doc::text(",")]
+    }, dangling);
     parts.push(Doc::nest(2, body));
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));
@@ -297,19 +284,9 @@ pub fn format_effect_def(
     header.push_str(" {");
     parts.push(Doc::text(header));
 
-    let mut body = Doc::Nil;
-    for ann in operations {
-        let op = &ann.node;
-        body = body.append(Doc::hardline());
-        body = body.append(format_trivia(&ann.leading_trivia));
-        body = body.append(Doc::text(format!("fun {} : ", op.name)));
-        body = body.append(format_fun_type(&op.params, &op.return_type, &[], &None));
-        body = body.append(format_trailing(&ann.trailing_comment));
-    }
-    if !dangling.is_empty() {
-        body = body.append(Doc::hardline());
-        body = body.append(format_trivia_dangling(dangling));
-    }
+    let body = format_annotated_body(operations, |op| {
+        docs![Doc::text(format!("fun {} : ", op.name)), format_fun_type(&op.params, &op.return_type, &[], &None)]
+    }, dangling);
     parts.push(Doc::nest(2, body));
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));
@@ -355,24 +332,9 @@ pub fn format_trait_def(
 
     parts.push(Doc::text(" {"));
 
-    let mut body = Doc::Nil;
-    for ann in methods {
-        let method = &ann.node;
-        body = body.append(Doc::hardline());
-        body = body.append(format_trivia(&ann.leading_trivia));
-        body = body.append(Doc::text(format!("fun {} : ", method.name)));
-        body = body.append(format_fun_type(
-            &method.params,
-            &method.return_type,
-            &[],
-            &None,
-        ));
-        body = body.append(format_trailing(&ann.trailing_comment));
-    }
-    if !dangling.is_empty() {
-        body = body.append(Doc::hardline());
-        body = body.append(format_trivia_dangling(dangling));
-    }
+    let body = format_annotated_body(methods, |method| {
+        docs![Doc::text(format!("fun {} : ", method.name)), format_fun_type(&method.params, &method.return_type, &[], &None)]
+    }, dangling);
     parts.push(Doc::nest(2, body));
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));
@@ -404,13 +366,13 @@ pub fn format_handler_def(
     header.push_str("handler ");
     header.push_str(name);
     header.push_str(" for ");
-    let eff_strs: Vec<String> = effects.iter().map(format_effect_ref_str).collect();
-    header.push_str(&eff_strs.join(", "));
     parts.push(Doc::text(header));
+    let eff_docs: Vec<Doc> = effects.iter().map(format_effect_ref).collect();
+    parts.push(Doc::join(Doc::text(", "), eff_docs));
 
     if !needs.is_empty() {
-        let need_strs: Vec<String> = needs.iter().map(format_effect_ref_str).collect();
-        parts.push(Doc::text(format!(" needs {{{}}}", need_strs.join(", "))));
+        parts.push(Doc::text(" "));
+        parts.push(format_needs(needs, &None));
     }
     if !where_clause.is_empty() {
         parts.push(Doc::text(" "));
@@ -419,34 +381,22 @@ pub fn format_handler_def(
 
     parts.push(Doc::text(" {"));
 
-    let mut body = Doc::Nil;
+    let mut body_items = Vec::new();
     for ann in arms {
-        body = body.append(Doc::hardline());
-        body = body.append(format_trivia(&ann.leading_trivia));
-        body = body.append(format_handler_arm(&ann.node));
-        body = body.append(format_trailing(&ann.trailing_comment));
+        body_items.push(Doc::hardline());
+        body_items.push(format_trivia(&ann.leading_trivia));
+        body_items.push(format_handler_arm(&ann.node));
+        body_items.push(format_trailing(&ann.trailing_comment));
     }
     if let Some(rc) = return_clause {
-        body = body.append(Doc::hardline());
-        body = body.append(format_handler_arm(rc));
+        body_items.push(Doc::hardline());
+        body_items.push(format_handler_arm(rc));
     }
-    if !dangling.is_empty() {
-        body = body.append(Doc::hardline());
-        body = body.append(format_trivia_dangling(dangling));
-    }
+    let body = format_braced_body(&body_items, dangling);
     parts.push(Doc::nest(2, body));
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));
     docs_from_vec(parts)
-}
-
-fn format_handler_arm(arm: &HandlerArm) -> Doc {
-    let mut d = Doc::text(&arm.op_name);
-    for (param, _) in &arm.params {
-        d = d.append(Doc::text(format!(" {}", param)));
-    }
-    d = d.append(Doc::text(" = ")).append(format_expr(&arm.body));
-    d
 }
 
 pub fn format_impl_def(decl: &Decl) -> Doc {
@@ -479,8 +429,8 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
     parts.push(Doc::text(header));
 
     if !needs.is_empty() {
-        let need_strs: Vec<String> = needs.iter().map(format_effect_ref_str).collect();
-        parts.push(Doc::text(format!(" needs {{{}}}", need_strs.join(", "))));
+        parts.push(Doc::text(" "));
+        parts.push(format_needs(needs, &None));
     }
     if !where_clause.is_empty() {
         parts.push(Doc::text(" "));
@@ -489,23 +439,9 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
 
     parts.push(Doc::text(" {"));
 
-    let mut body = Doc::Nil;
-    for ann in methods {
-        let ImplMethod {
-            name: method_name,
-            params,
-            body: method_body,
-            ..
-        } = &ann.node;
-        body = body.append(Doc::hardline());
-        body = body.append(format_trivia(&ann.leading_trivia));
-        body = body.append(format_fun_binding(method_name, params, &None, method_body));
-        body = body.append(format_trailing(&ann.trailing_comment));
-    }
-    if !dangling.is_empty() {
-        body = body.append(Doc::hardline());
-        body = body.append(format_trivia_dangling(dangling));
-    }
+    let body = format_annotated_body(methods, |m| {
+        format_fun_binding(&m.name, &m.params, &None, &m.body)
+    }, dangling);
     parts.push(Doc::nest(2, body));
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));

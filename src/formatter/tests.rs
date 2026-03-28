@@ -1263,6 +1263,13 @@ fn handler_arm_zero_arg_gets_unit() {
 }
 
 #[test]
+fn named_handler_def_zero_arg_gets_unit() {
+    let src = "handler my_state for State {\n  get () = resume 42\n  put val = resume ()\n}";
+    let result = fmt80(src);
+    assert!(result.contains("get () ="), "named handler should preserve () for zero-arg ops: {}", result);
+}
+
+#[test]
 fn inline_handler_named_then_inline_no_comma_before_inline() {
     let src = "f x = compute () with {\n  console,\n  fail msg = Err msg\n}";
     let result = fmt80(src);

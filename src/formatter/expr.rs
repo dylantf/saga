@@ -1,7 +1,8 @@
 use super::Doc;
 use super::decl::is_block_like;
 use super::helpers::{
-    docs_from_vec, format_binop, format_trailing, format_trivia, format_trivia_dangling,
+    docs_from_vec, escape_string, format_binop, format_braced_body, format_handler_arm,
+    format_trailing, format_trivia,
 };
 use super::pat::format_pat;
 use super::type_expr::format_type_expr;
@@ -55,21 +56,6 @@ fn format_binary_chain(segments: &[Annotated<Expr>], op: &str) -> Doc {
         parts.push(format_expr(&seg.node));
     }
     docs_from_vec(parts)
-}
-
-/// Build a nested body for a braced block: each item gets a hardline before it,
-/// trivia is emitted inline, and dangling trivia omits its trailing hardline.
-/// The result should be wrapped in `Doc::nest(indent, body)`.
-fn format_braced_body(items: &[Doc], dangling_trivia: &[Trivia]) -> Doc {
-    let mut body = Doc::Nil;
-    for item in items {
-        body = body.append(item.clone());
-    }
-    if !dangling_trivia.is_empty() {
-        body = body.append(Doc::hardline());
-        body = body.append(format_trivia_dangling(dangling_trivia));
-    }
-    body
 }
 
 pub fn format_expr(expr: &Expr) -> Doc {
@@ -566,20 +552,6 @@ fn format_handler(handler: &Handler) -> Doc {
     }
 }
 
-fn format_handler_arm(arm: &HandlerArm) -> Doc {
-    let mut d = Doc::text(&arm.op_name);
-    if arm.params.is_empty() {
-        // Zero-arg effect ops need explicit () in handler arms
-        d = d.append(Doc::text(" ()"));
-    } else {
-        for (param, _) in &arm.params {
-            d = d.append(Doc::text(format!(" {}", param)));
-        }
-    }
-    d = d.append(Doc::text(" = ")).append(format_expr(&arm.body));
-    d
-}
-
 pub fn format_stmt(stmt: &Stmt) -> Doc {
     match stmt {
         Stmt::Let {
@@ -629,7 +601,7 @@ fn format_interp_single_line(parts: &[StringPart]) -> Doc {
     let mut s = String::from("$\"");
     for part in parts {
         match part {
-            StringPart::Lit(text) => s.push_str(&escape_interp_string(text)),
+            StringPart::Lit(text) => s.push_str(&escape_string(text)),
             StringPart::Expr(expr) => {
                 let expr_doc = format_expr(expr);
                 let rendered = super::pretty(10000, &expr_doc);
@@ -642,21 +614,6 @@ fn format_interp_single_line(parts: &[StringPart]) -> Doc {
     }
     s.push('"');
     Doc::text(s)
-}
-
-/// Escape special characters in interpolated string literal segments.
-fn escape_interp_string(s: &str) -> String {
-    let mut out = String::new();
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            ch => out.push(ch),
-        }
-    }
-    out
 }
 
 /// Format a multiline interpolated string: `$"""\n  text {expr}\n  """`.

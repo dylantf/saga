@@ -25,7 +25,7 @@ pub fn format_lit_raw(lit: &Lit) -> String {
 }
 
 /// Escape special characters for a regular (non-raw) string literal.
-fn escape_string(s: &str) -> String {
+pub fn escape_string(s: &str) -> String {
     let mut out = String::new();
     for ch in s.chars() {
         match ch {
@@ -152,6 +152,54 @@ pub fn format_trailing(comment: &Option<String>) -> Doc {
         Some(text) => Doc::text(format!(" # {}", text)),
         None => Doc::Nil,
     }
+}
+
+/// Format a handler arm: `op_name params = body`.
+/// Zero-arg effect ops get explicit `()` since the parser strips it.
+pub fn format_handler_arm(arm: &crate::ast::HandlerArm) -> Doc {
+    let mut d = Doc::text(&arm.op_name);
+    if arm.params.is_empty() {
+        // Zero-arg effect ops need explicit () in handler arms
+        d = d.append(Doc::text(" ()"));
+    } else {
+        for (param, _) in &arm.params {
+            d = d.append(Doc::text(format!(" {}", param)));
+        }
+    }
+    d = d.append(Doc::text(" = ")).append(super::expr::format_expr(&arm.body));
+    d
+}
+
+/// Build the body of a braced block from pre-built Doc items and dangling trivia.
+/// The result should be wrapped in `Doc::nest(indent, body)` by the caller.
+pub fn format_braced_body(items: &[Doc], dangling_trivia: &[Trivia]) -> Doc {
+    let mut body = Doc::Nil;
+    for item in items {
+        body = body.append(item.clone());
+    }
+    if !dangling_trivia.is_empty() {
+        body = body.append(Doc::hardline());
+        body = body.append(format_trivia_dangling(dangling_trivia));
+    }
+    body
+}
+
+/// Format a braced block body from annotated items. Each item gets a hardline,
+/// leading trivia, the formatted node, and trailing comment. Dangling trivia
+/// is appended at the end. Returns the body doc (caller wraps in `nest` + `}`).
+pub fn format_annotated_body<T>(
+    items: &[Annotated<T>],
+    format_item: impl Fn(&T) -> Doc,
+    dangling_trivia: &[Trivia],
+) -> Doc {
+    let mut body_items = Vec::new();
+    for ann in items {
+        body_items.push(Doc::hardline());
+        body_items.push(format_trivia(&ann.leading_trivia));
+        body_items.push(format_item(&ann.node));
+        body_items.push(format_trailing(&ann.trailing_comment));
+    }
+    format_braced_body(&body_items, dangling_trivia)
 }
 
 /// Concatenate a Vec<Doc> into a single Doc.
