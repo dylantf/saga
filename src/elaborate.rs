@@ -502,6 +502,29 @@ impl Elaborator {
                     });
                 }
 
+                Decl::Val {
+                    doc,
+                    public,
+                    name,
+                    name_span,
+                    annotations,
+                    value,
+                    span,
+                    ..
+                } => {
+                    let elab_value = self.elaborate_expr(value);
+                    output.push(Decl::Val {
+                        id: NodeId::fresh(),
+                        doc: doc.clone(),
+                        public: *public,
+                        name: name.clone(),
+                        name_span: *name_span,
+                        annotations: annotations.clone(),
+                        value: elab_value,
+                        span: *span,
+                    });
+                }
+
                 // Pass through everything else
                 _ => output.push(decl.clone()),
             }

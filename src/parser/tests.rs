@@ -2485,7 +2485,7 @@ fn compose_chain() {
 
 #[test]
 fn effect_def_with_type_params() {
-    let decls = parse("effect State s {\n  fun get : Unit -> s\n  fun put : (val: s) -> Unit\n}");
+    let decls = parse("effect State s {\n  fun get : Unit -> s\n  fun put : (v: s) -> Unit\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::EffectDef {
@@ -2507,7 +2507,7 @@ fn effect_def_with_type_params() {
 #[test]
 fn handler_for_parameterized_effect() {
     let decls =
-        parse("handler counter for State Int {\n  get () = resume 0\n  put val = resume ()\n}");
+        parse("handler counter for State Int {\n  get () = resume 0\n  put v = resume ()\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::HandlerDef {

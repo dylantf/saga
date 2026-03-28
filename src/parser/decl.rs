@@ -79,29 +79,38 @@ impl Parser {
                     value,
                 })
             }
+            Token::Val => {
+                let start = self.tokens[self.pos].span;
+                self.parse_val(false, start, vec![])
+            }
             Token::At => {
                 let start = self.tokens[self.pos].span;
                 let annotations = self.parse_annotations()?;
-                // After annotations, expect a function declaration (optionally pub)
+                // After annotations, expect a function or val declaration (optionally pub)
                 let public = if matches!(self.peek(), Token::Pub) {
                     self.advance();
                     true
                 } else {
                     false
                 };
-                if !matches!(self.peek(), Token::Fun) {
-                    return Err(ParseError {
-                        message: format!("expected 'fun' after annotation, got {:?}", self.peek()),
+                match self.peek() {
+                    Token::Fun => self.parse_fun_signature(public, start, annotations),
+                    Token::Val => self.parse_val(public, start, annotations),
+                    _ => Err(ParseError {
+                        message: format!(
+                            "expected 'fun' or 'val' after annotation, got {:?}",
+                            self.peek()
+                        ),
                         span: self.tokens[self.pos].span,
-                    });
+                    }),
                 }
-                self.parse_fun_signature(public, start, annotations)
             }
             Token::Pub => {
                 let start = self.tokens[self.pos].span;
                 self.advance(); // consume 'pub'
                 match self.peek() {
                     Token::Fun => self.parse_fun_signature(true, start, vec![]),
+                    Token::Val => self.parse_val(true, start, vec![]),
                     Token::Type => self.parse_type_def(true, false),
                     Token::Opaque => {
                         self.advance(); // consume 'opaque'
@@ -379,6 +388,30 @@ impl Parser {
         })
     }
 
+    // Parses: [pub] val <name> = <expr>
+    fn parse_val(
+        &mut self,
+        public: bool,
+        start: Span,
+        annotations: Vec<Annotation>,
+    ) -> Result<Decl, ParseError> {
+        self.advance(); // consume 'val'
+        let name = self.expect_ident()?;
+        let name_span = self.tokens[self.pos - 1].span;
+        self.expect(Token::Eq)?;
+        let value = self.parse_expr(0)?;
+        Ok(Decl::Val {
+            id: NodeId::fresh(),
+            doc: vec![],
+            public,
+            name,
+            name_span,
+            annotations,
+            span: start.to(value.span),
+            value,
+        })
+    }
+
     /// Parse one or more annotations: `@name` or `@name(arg1, arg2, ...)`
     fn parse_annotations(&mut self) -> Result<Vec<Annotation>, ParseError> {
         let mut annotations = Vec::new();
@@ -389,7 +422,7 @@ impl Parser {
             let name = self.expect_ident()?;
             let name_span = self.tokens[self.pos - 1].span;
 
-            const KNOWN_ANNOTATIONS: &[&str] = &["external", "builtin"];
+            const KNOWN_ANNOTATIONS: &[&str] = &["external", "builtin", "inline"];
             if !KNOWN_ANNOTATIONS.contains(&name.as_str()) {
                 return Err(ParseError {
                     message: format!("unknown annotation @{}", name),

@@ -5,7 +5,7 @@
 
 effect State s {
   fun get : Unit -> s
-  fun put : (val: s) -> Unit
+  fun put : (v: s) -> Unit
 }
 
 fun run_state : (init: s) -> (f: Unit -> a needs {State s}) -> (a, s)

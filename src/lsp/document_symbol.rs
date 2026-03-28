@@ -52,7 +52,7 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex, source: &str) -> Vec<Sy
                     container_name: None,
                 });
             }
-            Decl::Let { name, span, .. } => {
+            Decl::Let { name, span, .. } | Decl::Val { name, span, .. } => {
                 symbols.push(SymbolInformation {
                     name: name.clone(),
                     kind: SymbolKind::VARIABLE,

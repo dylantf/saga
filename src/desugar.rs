@@ -31,7 +31,7 @@ fn desugar_decl(decl: &mut Decl) {
                 desugar_expr(g);
             }
         }
-        Decl::Let { value, .. } => {
+        Decl::Let { value, .. } | Decl::Val { value, .. } => {
             desugar_expr(value);
         }
         Decl::HandlerDef { arms, recovered_arms, return_clause, .. } => {

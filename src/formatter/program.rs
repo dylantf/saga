@@ -181,6 +181,24 @@ fn format_decl(decl: &Decl) -> Doc {
             }
             format_binding(lhs, value)
         }
+        Decl::Val {
+            public,
+            name,
+            annotations,
+            value,
+            ..
+        } => {
+            let mut preamble = Doc::Nil;
+            for ann in annotations {
+                preamble = preamble.append(format_annotation(ann)).append(Doc::hardline());
+            }
+            let mut lhs = Doc::Nil;
+            if *public {
+                lhs = lhs.append(Doc::text("pub "));
+            }
+            lhs = lhs.append(Doc::text(format!("val {}", name)));
+            docs![preamble, format_binding(lhs, value)]
+        }
         Decl::TypeDef { .. } => format_type_def(decl),
         Decl::RecordDef {
             doc,

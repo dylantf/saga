@@ -131,6 +131,20 @@ impl<'a> Lowerer<'a> {
                         );
                     }
                 }
+                Decl::Val {
+                    public, name, ..
+                } => {
+                    if *public {
+                        self.pub_names.insert(name.clone());
+                    }
+                    self.fun_info.insert(
+                        name.clone(),
+                        FunInfo {
+                            arity: 0,
+                            ..Default::default()
+                        },
+                    );
+                }
                 _ => {}
             }
         }

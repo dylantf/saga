@@ -112,6 +112,8 @@ pub struct Lowerer<'a> {
     /// Pre-resolved name resolution map: NodeId -> ResolvedName.
     /// Built by resolve::resolve_names before lowering.
     resolved: super::resolve::ResolutionMap,
+    /// @inline val name -> lowered expression. Substituted at reference sites.
+    inline_vals: HashMap<String, CExpr>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -139,6 +141,7 @@ impl<'a> Lowerer<'a> {
             constructor_atoms,
             resolved,
             current_handler_k: None,
+            inline_vals: HashMap::new(),
         }
     }
 
@@ -320,6 +323,7 @@ impl<'a> Lowerer<'a> {
         // populate top_level_funs. Handler params are added to the arity for effectful funs.
         let mut clause_groups: Vec<(String, usize, Vec<Clause>)> = Vec::new();
         let mut dict_constructors: Vec<(&str, &[String], &[Expr])> = Vec::new();
+        let mut val_bindings: Vec<(&str, bool, &Expr)> = Vec::new(); // (name, is_inline, value)
         for decl in program {
             match decl {
                 Decl::FunBinding {
@@ -371,6 +375,15 @@ impl<'a> Lowerer<'a> {
                     );
                     dict_constructors.push((name, dict_params, methods));
                 }
+                Decl::Val {
+                    name,
+                    annotations,
+                    value,
+                    ..
+                } => {
+                    let is_inline = annotations.iter().any(|a| a.name == "inline");
+                    val_bindings.push((name, is_inline, value));
+                }
                 _ => {}
             }
         }
@@ -408,6 +421,15 @@ impl<'a> Lowerer<'a> {
                 if *public || !is_module {
                     exports.push((name.clone(), arity));
                 }
+            }
+        }
+
+        // Process @inline vals first so their expressions are available for substitution
+        // when lowering function bodies.
+        for &(name, is_inline, value) in &val_bindings {
+            if is_inline {
+                let lowered = self.lower_expr(value);
+                self.inline_vals.insert(name.to_string(), lowered);
             }
         }
 
@@ -651,6 +673,23 @@ impl<'a> Lowerer<'a> {
             });
         }
 
+        // Lower non-inline val bindings to zero-arity functions.
+        // (Inline vals were already processed before function clause lowering.)
+        for (name, is_inline, value) in val_bindings {
+            if is_inline {
+                continue; // already in self.inline_vals
+            }
+            let lowered = self.lower_expr(value);
+            if !is_module || self.pub_names.contains(name) {
+                exports.push((name.to_string(), 0));
+            }
+            fun_defs.push(CFunDef {
+                name: name.to_string(),
+                arity: 0,
+                body: CExpr::Fun(vec![], Box::new(lowered)),
+            });
+        }
+
         CModule {
             name: module_name.to_string(),
             exports,
@@ -670,15 +709,22 @@ impl<'a> Lowerer<'a> {
                         name: erl_name,
                         arity,
                         ..
-                    }) => CExpr::Call(
-                        "erlang".to_string(),
-                        "make_fun".to_string(),
-                        vec![
-                            CExpr::Lit(CLit::Atom(erlang_mod.clone())),
-                            CExpr::Lit(CLit::Atom(erl_name.clone())),
-                            CExpr::Lit(CLit::Int(*arity as i64)),
-                        ],
-                    ),
+                    }) => {
+                        if *arity == 0 {
+                            // Val reference: call the zero-arity function
+                            CExpr::Call(erlang_mod.clone(), erl_name.clone(), vec![])
+                        } else {
+                            CExpr::Call(
+                                "erlang".to_string(),
+                                "make_fun".to_string(),
+                                vec![
+                                    CExpr::Lit(CLit::Atom(erlang_mod.clone())),
+                                    CExpr::Lit(CLit::Atom(erl_name.clone())),
+                                    CExpr::Lit(CLit::Int(*arity as i64)),
+                                ],
+                            )
+                        }
+                    }
                     Some(ResolvedName::ExternalFun {
                         erlang_mod,
                         erlang_func,
@@ -693,14 +739,34 @@ impl<'a> Lowerer<'a> {
                         ],
                     ),
                     Some(ResolvedName::LocalFun { name, arity, .. }) => {
-                        CExpr::FunRef(name.clone(), *arity)
+                        if *arity == 0 {
+                            // Val reference: check inline_vals first, then call
+                            if let Some(inlined) = self.inline_vals.get(name) {
+                                inlined.clone()
+                            } else {
+                                CExpr::Apply(
+                                    Box::new(CExpr::FunRef(name.clone(), 0)),
+                                    vec![],
+                                )
+                            }
+                        } else {
+                            CExpr::FunRef(name.clone(), *arity)
+                        }
                     }
                     _ => {
-                        // Not in resolution map: check fun_info for local top-level
-                        // functions (needed for functions registered during init
-                        // like FunBindings), otherwise treat as local variable.
-                        if let Some(arity) = self.fun_arity(name) {
-                            CExpr::FunRef(name.clone(), arity)
+                        // Not in resolution map: check inline_vals, then fun_info
+                        // for local top-level functions, otherwise treat as local variable.
+                        if let Some(inlined) = self.inline_vals.get(name) {
+                            inlined.clone()
+                        } else if let Some(arity) = self.fun_arity(name) {
+                            if arity == 0 {
+                                CExpr::Apply(
+                                    Box::new(CExpr::FunRef(name.clone(), 0)),
+                                    vec![],
+                                )
+                            } else {
+                                CExpr::FunRef(name.clone(), arity)
+                            }
                         } else {
                             CExpr::Var(core_var(name))
                         }
@@ -1460,15 +1526,19 @@ impl<'a> Lowerer<'a> {
                 if let Some(resolved) = self.resolved.get(&expr.id) {
                     match resolved {
                         ResolvedName::ImportedFun { erlang_mod, name: erl_name, arity, .. } => {
-                            CExpr::Call(
-                                "erlang".to_string(),
-                                "make_fun".to_string(),
-                                vec![
-                                    CExpr::Lit(CLit::Atom(erlang_mod.clone())),
-                                    CExpr::Lit(CLit::Atom(erl_name.clone())),
-                                    CExpr::Lit(CLit::Int(*arity as i64)),
-                                ],
-                            )
+                            if *arity == 0 {
+                                CExpr::Call(erlang_mod.clone(), erl_name.clone(), vec![])
+                            } else {
+                                CExpr::Call(
+                                    "erlang".to_string(),
+                                    "make_fun".to_string(),
+                                    vec![
+                                        CExpr::Lit(CLit::Atom(erlang_mod.clone())),
+                                        CExpr::Lit(CLit::Atom(erl_name.clone())),
+                                        CExpr::Lit(CLit::Int(*arity as i64)),
+                                    ],
+                                )
+                            }
                         }
                         ResolvedName::ExternalFun { erlang_mod, erlang_func, arity } => {
                             CExpr::Call(
@@ -1482,7 +1552,18 @@ impl<'a> Lowerer<'a> {
                             )
                         }
                         ResolvedName::LocalFun { name, arity, .. } => {
-                            CExpr::FunRef(name.clone(), *arity)
+                            if *arity == 0 {
+                                if let Some(inlined) = self.inline_vals.get(name) {
+                                    inlined.clone()
+                                } else {
+                                    CExpr::Apply(
+                                        Box::new(CExpr::FunRef(name.clone(), 0)),
+                                        vec![],
+                                    )
+                                }
+                            } else {
+                                CExpr::FunRef(name.clone(), *arity)
+                            }
                         }
                     }
                 } else {

@@ -9,7 +9,7 @@ handler abort for Fail a {
 #@ Converts a failure to a Result of the given type
 handler to_result for Fail a {
   fail x = Err x
-  return val = Ok val
+  return v = Ok v
 }
 
 #@ Continues a failed call with a default value of 0
