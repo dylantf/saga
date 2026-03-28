@@ -6,10 +6,7 @@ use std::path::PathBuf;
 
 use super::build::*;
 
-pub fn cmd_run(args: &[String]) {
-    let release = args.contains(&"--release".to_string());
-    let file = args.iter().find(|a| a.ends_with(".dy"));
-
+pub fn cmd_run(file: Option<&str>, release: bool) {
     if release {
         // --release: use existing build if present, build only if missing
         if let Some(f) = file {
@@ -59,15 +56,11 @@ pub fn cmd_run(args: &[String]) {
     }
 }
 
-pub fn cmd_build(args: &[String]) {
-    let profile = if args.contains(&"--release".to_string()) {
-        "release"
-    } else {
-        "dev"
-    };
+pub fn cmd_build(file: Option<&str>, release: bool) {
+    let profile = if release { "release" } else { "dev" };
 
-    if let Some(file) = args.iter().find(|a| a.ends_with(".dy")) {
-        build_script(file, profile);
+    if let Some(f) = file {
+        build_script(f, profile);
     } else {
         build_project(profile);
     }
@@ -155,20 +148,7 @@ pub fn cmd_emit(file: &str) {
     print!("{}", core_src);
 }
 
-pub fn cmd_fmt(args: &[String]) {
-    let write_mode = args.contains(&"--write".to_string());
-    let debug_mode = args.contains(&"--debug".to_string());
-    let cli_width = args
-        .windows(2)
-        .find(|w| w[0] == "--width")
-        .and_then(|w| w[1].parse().ok());
-    let file = args.iter().find(|a| a.ends_with(".dy"));
-
-    let Some(file) = file else {
-        eprintln!("Usage: dylang fmt [--write] [--debug] [--width N] <file.dy>");
-        std::process::exit(1);
-    };
-
+pub fn cmd_fmt(file: &str, write_mode: bool, debug_mode: bool, cli_width: Option<usize>) {
     // CLI --width overrides project.toml [formatter] width
     let width = cli_width.unwrap_or_else(|| {
         super::find_project_root()
@@ -209,7 +189,7 @@ pub fn cmd_fmt(args: &[String]) {
     }
 }
 
-pub fn cmd_test(args: &[String]) {
+pub fn cmd_test(filter: Option<&str>) {
     let project_root = super::find_project_root().unwrap_or_else(|| {
         eprintln!("No project.toml found. Tests require a project.");
         std::process::exit(1);
@@ -231,7 +211,6 @@ pub fn cmd_test(args: &[String]) {
     }
 
     // Filter test files if a pattern argument was provided
-    let filter = args.iter().find(|a| !a.starts_with('-'));
     let test_files: Vec<PathBuf> = if let Some(pattern) = filter {
         let pattern_path = PathBuf::from(pattern);
 
@@ -250,7 +229,7 @@ pub fn cmd_test(args: &[String]) {
                     .filter(|f| {
                         let name = f.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                         let rel = f.strip_prefix(&project_root).unwrap_or(f).to_string_lossy();
-                        name.contains(pattern.as_str()) || rel.contains(pattern.as_str())
+                        name.contains(pattern) || rel.contains(pattern)
                     })
                     .collect();
 
