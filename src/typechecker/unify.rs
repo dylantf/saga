@@ -246,11 +246,11 @@ impl Checker {
         let constraints = scheme
             .constraints
             .iter()
-            .map(|(trait_name, var_id, extra_var_ids)| {
+            .map(|(trait_name, var_id, extra_types)| {
                 let fresh = mapping.get(var_id).cloned().unwrap_or(Type::Var(*var_id));
-                let extra_fresh: Vec<Type> = extra_var_ids
+                let extra_fresh: Vec<Type> = extra_types
                     .iter()
-                    .map(|id| mapping.get(id).cloned().unwrap_or(Type::Var(*id)))
+                    .map(|ty| self.replace_vars(ty, &mapping))
                     .collect();
                 (trait_name.clone(), fresh, extra_fresh)
             })

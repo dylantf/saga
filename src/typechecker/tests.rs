@@ -4120,5 +4120,33 @@ fn multi_param_trait_display_with_constraints() {
     .unwrap();
     let scheme = checker.env.get("convert").unwrap();
     let display = scheme.display_with_constraints(&checker.sub);
-    assert!(display.contains("ConvertTo"), "display should contain 'ConvertTo': {}", display);
+    assert!(
+        display.contains("ConvertTo"),
+        "display should contain 'ConvertTo': {}",
+        display
+    );
+}
+
+#[test]
+fn handler_with_multi_param_trait_where_clause() {
+    // Handler with a multi-param trait in its where clause.
+    // The handler constrains the effect's type param with ConvertTo Int,
+    // and when used with a concrete type (Float), the impl is resolved.
+    check(
+        "trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         }\n\
+         effect State s {\n\
+         fun get : Unit -> s\n\
+         fun put : s -> Unit\n\
+         }\n\
+         impl ConvertTo Int for Float {\n\
+         rate () = 1.0\n\
+         }\n\
+         handler my_handler for State a where {a: ConvertTo Int} {\n\
+         get () = resume 1.5\n\
+         put x = resume ()\n\
+         }",
+    )
+    .unwrap();
 }

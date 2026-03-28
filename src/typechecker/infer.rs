@@ -777,14 +777,11 @@ impl Checker {
                         .any(|(t, v, _)| t == trait_name && *v == id)
                     {
                         // Resolve extra type arg var IDs through substitution
-                        let extra_ids: Vec<u32> = _trait_type_args
+                        let extra_resolved: Vec<Type> = _trait_type_args
                             .iter()
-                            .filter_map(|t| match self.sub.apply(t) {
-                                Type::Var(extra_id) => Some(extra_id),
-                                _ => None,
-                            })
+                            .map(|t| self.sub.apply(t))
                             .collect();
-                        scheme.constraints.push((trait_name.clone(), id, extra_ids));
+                        scheme.constraints.push((trait_name.clone(), id, extra_resolved));
                     }
                     self.evidence.push(super::TraitEvidence {
                         node_id: *node_id,

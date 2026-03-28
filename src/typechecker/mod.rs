@@ -356,10 +356,11 @@ impl Substitution {
 #[derive(Debug, Clone)]
 pub struct Scheme {
     pub forall: Vec<u32>,
-    /// Trait constraints: (trait_name, self_type_var_id, extra_type_arg_var_ids).
-    /// Extra var IDs are empty for single-param traits like Show.
-    /// For multi-param traits like `ConvertTo a b`, the extra IDs track `b`.
-    pub constraints: Vec<(String, u32, Vec<u32>)>,
+    /// Trait constraints: (trait_name, self_type_var_id, extra_type_arg_types).
+    /// Extra types are empty for single-param traits like Show.
+    /// For multi-param traits like `ConvertTo a b`, the extras track `b` as Type::Var.
+    /// Concrete type args like `ConvertTo Int` are stored as Type::Con.
+    pub constraints: Vec<(String, u32, Vec<Type>)>,
     pub ty: Type,
 }
 
@@ -395,17 +396,20 @@ impl Scheme {
         let names = self.var_names();
         // Group constraints by type variable
         let mut bounds: HashMap<String, Vec<String>> = HashMap::new();
-        for (trait_name, var_id, extra_var_ids) in &self.constraints {
+        for (trait_name, var_id, extra_types) in &self.constraints {
             let var_name = names
                 .get(var_id)
                 .cloned()
                 .unwrap_or_else(|| format!("?{}", var_id));
-            let trait_display = if extra_var_ids.is_empty() {
+            let trait_display = if extra_types.is_empty() {
                 trait_name.clone()
             } else {
-                let extra_names: Vec<String> = extra_var_ids
+                let extra_names: Vec<String> = extra_types
                     .iter()
-                    .map(|id| names.get(id).cloned().unwrap_or_else(|| format!("?{}", id)))
+                    .map(|ty| match ty {
+                        Type::Var(id) => names.get(id).cloned().unwrap_or_else(|| format!("?{}", id)),
+                        other => format!("{}", rename_vars(other, &names)),
+                    })
                     .collect();
                 format!("{} {}", trait_name, extra_names.join(" "))
             };
@@ -618,6 +622,10 @@ pub struct EffectDefInfo {
     pub source_module: Option<String>,
 }
 
+/// Handler where constraint key: (effect_name, param_index).
+/// Value: list of (trait_name, extra_type_arg_var_ids).
+pub type HandlerWhereConstraints = HashMap<(String, usize), Vec<(String, Vec<u32>)>>;
+
 #[derive(Debug, Clone)]
 pub struct HandlerInfo {
     /// Which effects this handler handles
@@ -630,8 +638,10 @@ pub struct HandlerInfo {
     /// op_name -> span of the handler arm (for LSP go-to-def and with-stack)
     pub arm_spans: HashMap<String, Span>,
     /// Trait constraints from `where` clause, keyed by (effect_name, param_index).
-    /// E.g. `handler h for Store a where {a: Show}` -> {("Store", 0) -> {"Show"}}
-    pub where_constraints: HashMap<(String, usize), HashSet<String>>,
+    /// Each constraint is (trait_name, extra_type_arg_var_ids).
+    /// E.g. `handler h for Store a where {a: Show}` -> {("Store", 0) -> [("Show", [])]}
+    /// E.g. `handler h for State a where {a: ConvertTo b}` -> {("State", 0) -> [("ConvertTo", [b_var_id])]}
+    pub where_constraints: HandlerWhereConstraints,
     /// Which module this handler is defined in (None = main file).
     pub source_module: Option<String>,
 }

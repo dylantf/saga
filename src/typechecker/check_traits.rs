@@ -267,7 +267,7 @@ impl Checker {
                 }
                 let mut forall = Vec::new();
                 super::collect_free_vars(&fun_ty, &mut forall);
-                let constraints: Vec<(String, u32, Vec<u32>)> = forall
+                let constraints: Vec<(String, u32, Vec<Type>)> = forall
                     .iter()
                     .map(|&var_id| (trait_name.to_string(), var_id, vec![]))
                     .collect();

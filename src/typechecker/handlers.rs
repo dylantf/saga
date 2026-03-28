@@ -119,7 +119,7 @@ impl Checker {
                         let fresh_ret = self.replace_vars(ret_ty, &mapping);
                         self.unify_at(&fresh_param, &expr_ty, with_span)?;
 
-                        for ((effect_name, param_idx), trait_names) in
+                        for ((effect_name, param_idx), trait_constraints) in
                             &handler_info.where_constraints
                         {
                             if let Some(effect_info) = self.effects.get(effect_name).cloned()
@@ -132,11 +132,18 @@ impl Checker {
                                 } else {
                                     self.sub.apply(&Type::Var(param_var_id))
                                 };
-                                for trait_name in trait_names {
-                                    // TODO: thread trait type args for multi-param traits in handler where clauses
+                                for (trait_name, extra_var_ids) in trait_constraints {
+                                    // Map extra type arg var IDs through the fresh var mapping
+                                    let extra_types: Vec<Type> = extra_var_ids
+                                        .iter()
+                                        .map(|id| {
+                                            let mapped = mapping.get(id).cloned().unwrap_or(Type::Var(*id));
+                                            self.sub.apply(&mapped)
+                                        })
+                                        .collect();
                                     self.trait_state.pending_constraints.push((
                                         trait_name.clone(),
-                                        vec![],
+                                        extra_types,
                                         ty.clone(),
                                         with_span,
                                         with_node_id,

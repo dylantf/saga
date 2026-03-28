@@ -20,7 +20,7 @@ fn innermost_effect_row(ty: &Type) -> Option<EffectRow> {
 /// (name -> (type, span)) and (name -> where clause constraints).
 type Annotations = (
     HashMap<String, (Type, Span)>,
-    HashMap<String, Vec<(String, u32, Vec<u32>)>>,
+    HashMap<String, Vec<(String, u32, Vec<Type>)>>,
 );
 
 impl Checker {
@@ -377,13 +377,18 @@ impl Checker {
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
                         {
                             for (trait_name, trait_type_args, _) in &bound.traits {
-                                let extra_var_ids: Vec<u32> = trait_type_args
+                                let extra_types: Vec<Type> = trait_type_args
                                     .iter()
-                                    .filter_map(|arg_name| {
-                                        params_list.iter().find(|(n, _)| n == arg_name).map(|(_, id)| *id)
+                                    .map(|arg_name| {
+                                        // Type variable (lowercase) -> Type::Var, concrete type (uppercase) -> Type::Con
+                                        if let Some((_, id)) = params_list.iter().find(|(n, _)| n == arg_name) {
+                                            Type::Var(*id)
+                                        } else {
+                                            Type::Con(arg_name.clone(), vec![])
+                                        }
                                     })
                                     .collect();
-                                scheme_constraints.push((trait_name.clone(), *var_id, extra_var_ids));
+                                scheme_constraints.push((trait_name.clone(), *var_id, extra_types));
                             }
                         } else {
                             return Err(vec![Diagnostic::error_at(
@@ -412,7 +417,7 @@ impl Checker {
         program: &[Decl],
     ) -> std::result::Result<Annotations, Vec<Diagnostic>> {
         let mut annotations: HashMap<String, (Type, Span)> = HashMap::new();
-        let mut annotation_constraints: HashMap<String, Vec<(String, u32, Vec<u32>)>> = HashMap::new();
+        let mut annotation_constraints: HashMap<String, Vec<(String, u32, Vec<Type>)>> = HashMap::new();
 
         for decl in program {
             if let Decl::FunSignature {
@@ -517,13 +522,17 @@ impl Checker {
                                 .where_bound_var_names
                                 .insert(*var_id, bound.type_var.clone());
                             for (trait_name, trait_type_args, _) in &bound.traits {
-                                let extra_var_ids: Vec<u32> = trait_type_args
+                                let extra_types: Vec<Type> = trait_type_args
                                     .iter()
-                                    .filter_map(|arg_name| {
-                                        params_list.iter().find(|(n, _)| n == arg_name).map(|(_, id)| *id)
+                                    .map(|arg_name| {
+                                        if let Some((_, id)) = params_list.iter().find(|(n, _)| n == arg_name) {
+                                            Type::Var(*id)
+                                        } else {
+                                            Type::Con(arg_name.clone(), vec![])
+                                        }
                                     })
                                     .collect();
-                                constraints.push((trait_name.clone(), *var_id, extra_var_ids));
+                                constraints.push((trait_name.clone(), *var_id, extra_types));
                             }
                         } else {
                             return Err(vec![Diagnostic::error_at(
@@ -645,7 +654,7 @@ impl Checker {
         fun_var: &Type,
         annotation: Option<&Type>,
         annotation_span: Option<Span>,
-        where_constraints: &[(String, u32, Vec<u32>)],
+        where_constraints: &[(String, u32, Vec<Type>)],
     ) -> Result<(), Diagnostic> {
         // All clauses must have the same arity
         let arity = match clauses[0] {
@@ -947,7 +956,7 @@ impl Checker {
         fun_ty: Type,
         constraints_before: usize,
         has_annotation: bool,
-        where_constraints: &[(String, u32, Vec<u32>)],
+        where_constraints: &[(String, u32, Vec<Type>)],
     ) -> Result<Scheme, Diagnostic> {
         let new_constraints = self
             .trait_state
@@ -972,8 +981,6 @@ impl Checker {
                                     }
                             });
                     if in_where {
-                        // Record polymorphic passthrough evidence so the elaborator
-                        // knows this is a trait method call (needs DictMethodAccess).
                         let var_name = self.trait_state.where_bound_var_names.get(&id).cloned();
                         self.evidence.push(super::TraitEvidence {
                             node_id,
@@ -1016,19 +1023,15 @@ impl Checker {
         self.env.remove(name);
         let mut scheme = self.generalize(&fun_ty);
 
-        for (trait_name, var_id, extra_var_ids) in where_constraints {
+        for (trait_name, var_id, extra_types) in where_constraints {
             let resolved_id = match self.sub.apply(&Type::Var(*var_id)) {
                 Type::Var(id) => id,
                 _ => continue,
             };
             if scheme.forall.contains(&resolved_id) {
-                // Resolve extra type arg var IDs through substitution
-                let resolved_extras: Vec<u32> = extra_var_ids
+                let resolved_extras: Vec<Type> = extra_types
                     .iter()
-                    .filter_map(|id| match self.sub.apply(&Type::Var(*id)) {
-                        Type::Var(resolved) => Some(resolved),
-                        _ => None,
-                    })
+                    .map(|ty| self.sub.apply(ty))
                     .collect();
                 scheme.constraints.push((trait_name.clone(), resolved_id, resolved_extras));
             }
@@ -1639,12 +1642,10 @@ impl Checker {
             vec![]
         };
 
-        // Build where_constraints map: (effect_name, param_index) -> set of required trait names.
+        // Build where_constraints map: (effect_name, param_index) -> trait constraints.
         // Links where clause type vars back to their position in the effect's type param list.
-        let mut where_constraints: std::collections::HashMap<
-            (String, usize),
-            std::collections::HashSet<String>,
-        > = std::collections::HashMap::new();
+        let mut where_constraints: super::HandlerWhereConstraints =
+            std::collections::HashMap::new();
         for bound in where_clause {
             if let Some((_, var_id)) = type_var_params.iter().find(|(n, _)| n == &bound.type_var) {
                 // Find which effect and param index this var corresponds to
@@ -1657,9 +1658,14 @@ impl Checker {
                                 let entry = where_constraints
                                     .entry((effect_ref.name.clone(), i))
                                     .or_default();
-                                // TODO: thread trait type args for multi-param traits in handler where clauses
-                                for (trait_name, _, _) in &bound.traits {
-                                    entry.insert(trait_name.clone());
+                                for (trait_name, trait_type_args, _) in &bound.traits {
+                                    let extra_var_ids: Vec<u32> = trait_type_args
+                                        .iter()
+                                        .filter_map(|arg_name| {
+                                            type_var_params.iter().find(|(n, _)| n == arg_name).map(|(_, id)| *id)
+                                        })
+                                        .collect();
+                                    entry.push((trait_name.clone(), extra_var_ids));
                                 }
                             }
                         }
