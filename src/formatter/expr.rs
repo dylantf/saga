@@ -138,15 +138,56 @@ pub fn format_expr(expr: &Expr) -> Doc {
             cond,
             then_branch,
             else_branch,
-        } => Doc::group(docs![
-            Doc::text("if "),
-            format_expr(cond),
-            Doc::text(" then "),
-            format_expr(then_branch),
-            Doc::line(),
-            Doc::text("else "),
-            format_expr(else_branch),
-        ]),
+            multiline,
+        } => {
+            // Flatten if/else if chains: collect all cond/then pairs + final else.
+            // Track whether any `else` was on a new line (force multi-line).
+            let mut chains: Vec<(&Expr, &Expr)> = vec![(cond, then_branch)];
+            let mut force_multiline = *multiline;
+            let mut final_else = else_branch.as_ref();
+            while let ExprKind::If {
+                cond: c,
+                then_branch: t,
+                else_branch: e,
+                multiline: ml,
+            } = &final_else.kind
+            {
+                if *ml {
+                    force_multiline = true;
+                }
+                chains.push((c, t));
+                final_else = e;
+            }
+
+            let linebreak = if force_multiline {
+                Doc::hardline()
+            } else {
+                Doc::line()
+            };
+
+            let mut parts = Vec::new();
+            for (i, (c, t)) in chains.iter().enumerate() {
+                if i == 0 {
+                    parts.push(Doc::text("if "));
+                } else {
+                    parts.push(linebreak.clone());
+                    parts.push(Doc::text("else if "));
+                }
+                parts.push(format_expr(c));
+                parts.push(Doc::text(" then "));
+                parts.push(format_expr(t));
+            }
+            parts.push(linebreak);
+            parts.push(Doc::text("else "));
+            parts.push(format_expr(final_else));
+
+            let result = docs_from_vec(parts);
+            if force_multiline {
+                result
+            } else {
+                Doc::group(result)
+            }
+        }
 
         ExprKind::Case {
             scrutinee,
@@ -155,17 +196,9 @@ pub fn format_expr(expr: &Expr) -> Doc {
         } => {
             let mut body_items = Vec::new();
             for ann in arms {
-                let arm = &ann.node;
                 body_items.push(Doc::hardline());
                 body_items.push(format_trivia(&ann.leading_trivia));
-                let mut arm_doc = format_pat(&arm.pattern);
-                if let Some(g) = &arm.guard {
-                    arm_doc = arm_doc.append(Doc::text(" | ")).append(format_expr(g));
-                }
-                arm_doc = arm_doc
-                    .append(Doc::text(" -> "))
-                    .append(format_expr(&arm.body));
-                body_items.push(arm_doc);
+                body_items.push(format_case_arm_doc(&ann.node));
                 body_items.push(format_trailing(&ann.trailing_comment));
             }
             let body = format_braced_body(&body_items, dangling_trivia);
@@ -292,15 +325,9 @@ pub fn format_expr(expr: &Expr) -> Doc {
 
             let mut else_items = Vec::new();
             for ann in else_arms {
-                let arm = &ann.node;
                 else_items.push(Doc::hardline());
                 else_items.push(format_trivia(&ann.leading_trivia));
-                let arm_doc = docs![
-                    format_pat(&arm.pattern),
-                    Doc::text(" -> "),
-                    format_expr(&arm.body)
-                ];
-                else_items.push(arm_doc);
+                else_items.push(format_case_arm_doc(&ann.node));
                 else_items.push(format_trailing(&ann.trailing_comment));
             }
             let else_body = format_braced_body(&else_items, dangling_trivia);
@@ -323,17 +350,9 @@ pub fn format_expr(expr: &Expr) -> Doc {
         } => {
             let mut body_items = Vec::new();
             for ann in arms {
-                let arm = &ann.node;
                 body_items.push(Doc::hardline());
                 body_items.push(format_trivia(&ann.leading_trivia));
-                let mut arm_doc = format_pat(&arm.pattern);
-                if let Some(g) = &arm.guard {
-                    arm_doc = arm_doc.append(Doc::text(" | ")).append(format_expr(g));
-                }
-                arm_doc = arm_doc
-                    .append(Doc::text(" -> "))
-                    .append(format_expr(&arm.body));
-                body_items.push(arm_doc);
+                body_items.push(format_case_arm_doc(&ann.node));
                 body_items.push(format_trailing(&ann.trailing_comment));
             }
             if let Some((timeout, timeout_body)) = after_clause {
@@ -496,6 +515,25 @@ pub fn format_expr(expr: &Expr) -> Doc {
     }
 }
 
+/// Format a case arm: `pattern [| guard] -> body`.
+/// Block-like bodies stay on the arrow line; other bodies break after `->` when too wide.
+fn format_case_arm_doc(arm: &CaseArm) -> Doc {
+    let mut lhs = format_pat(&arm.pattern);
+    if let Some(g) = &arm.guard {
+        lhs = lhs.append(Doc::text(" | ")).append(format_expr(g));
+    }
+    let body_doc = format_expr(&arm.body);
+    if is_block_like(&arm.body) {
+        docs![lhs, Doc::text(" -> "), body_doc]
+    } else {
+        Doc::group(docs![
+            lhs,
+            Doc::text(" ->"),
+            Doc::nest(2, docs![Doc::line(), body_doc])
+        ])
+    }
+}
+
 /// Format an expression in "atom" position (parenthesize if complex).
 pub fn format_expr_atom(expr: &Expr) -> Doc {
     match &expr.kind {
@@ -503,6 +541,7 @@ pub fn format_expr_atom(expr: &Expr) -> Doc {
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
+        | ExprKind::FieldAccess { .. }
         | ExprKind::Tuple { .. }
         | ExprKind::Block { .. }
         | ExprKind::StringInterp { .. }

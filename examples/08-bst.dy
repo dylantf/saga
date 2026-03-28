@@ -3,10 +3,10 @@ type Tree =
   | Node(Tree, Int, Tree)
 
 insert t x = case t {
-  Empty -> Node(Empty, x, Empty)
+  Empty -> Node Empty x Empty
   Node(l, v, r) ->
-    if x < v then Node(insert l x, v, r)
-    else if x > v then Node(l, v, insert r x)
+    if x < v then Node (insert l x) v r
+    else if x > v then Node l v (insert r x)
     else t
 }
 

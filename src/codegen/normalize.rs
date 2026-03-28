@@ -197,12 +197,14 @@ impl Normalizer {
                 cond,
                 then_branch,
                 else_branch,
+                ..
             } => {
                 let new_cond = self.normalize_and_lift(cond, lifted);
                 Expr::synth(span, ExprKind::If {
                     cond: Box::new(new_cond),
                     then_branch: Box::new(self.normalize_expr(then_branch)),
                     else_branch: Box::new(self.normalize_expr(else_branch)),
+                    multiline: false,
                 })
             }
 

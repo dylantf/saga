@@ -798,12 +798,14 @@ impl Elaborator {
                 cond,
                 then_branch,
                 else_branch,
+                ..
             } => Expr::synth(
                 span,
                 ExprKind::If {
                     cond: Box::new(self.elaborate_expr(cond)),
                     then_branch: Box::new(self.elaborate_expr(then_branch)),
                     else_branch: Box::new(self.elaborate_expr(else_branch)),
+                    multiline: false,
                 },
             ),
 

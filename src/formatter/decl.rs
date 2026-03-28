@@ -149,18 +149,14 @@ pub fn format_type_def(decl: &Decl) -> Doc {
         Doc::Nil
     };
 
-    // Format each variant
-    let mut variant_docs: Vec<Doc> = Vec::new();
-    for (i, ann) in variants.iter().enumerate() {
+    // Format each variant body (name + fields + trailing comment, no prefix)
+    let format_variant = |ann: &Annotated<TypeConstructor>| -> Doc {
         let variant = &ann.node;
         let mut vdoc = Doc::Nil;
         if !ann.leading_trivia.is_empty() {
             vdoc = vdoc.append(format_trivia(&ann.leading_trivia));
         }
-        let prefix = if i == 0 { "= " } else { "| " };
-        vdoc = vdoc
-            .append(Doc::text(prefix))
-            .append(Doc::text(&variant.name));
+        vdoc = vdoc.append(Doc::text(&variant.name));
         if !variant.fields.is_empty() {
             let fields: Vec<Doc> = variant
                 .fields
@@ -174,15 +170,18 @@ pub fn format_type_def(decl: &Decl) -> Doc {
             vdoc = vdoc.append(Doc::join(Doc::text(", "), fields));
             vdoc = vdoc.append(Doc::text(")"));
         }
-        vdoc = vdoc.append(format_trailing(&ann.trailing_comment));
-        variant_docs.push(vdoc);
-    }
+        vdoc.append(format_trailing(&ann.trailing_comment))
+    };
 
     if *multiline {
-        // User wrote variants on separate lines — preserve that layout
+        // User wrote variants on separate lines — `=` on header, `|` before each
+        parts.push(Doc::text(" ="));
         let mut broken_variants = Doc::Nil;
-        for vd in &variant_docs {
-            broken_variants = broken_variants.append(Doc::hardline()).append(vd.clone());
+        for ann in variants {
+            broken_variants = broken_variants
+                .append(Doc::hardline())
+                .append(Doc::text("| "))
+                .append(format_variant(ann));
         }
         if !deriving.is_empty() {
             broken_variants = broken_variants.append(Doc::hardline()).append(deriving_doc);
@@ -190,19 +189,22 @@ pub fn format_type_def(decl: &Decl) -> Doc {
         parts.push(Doc::nest(2, broken_variants));
     } else {
         // Try flat: `type Name = A | B | C deriving (...)`
-        // Broken:  `type Name\n  = A\n  | B\n  | C\n  deriving (...)`
-        let mut flat_variants = Doc::text(" ");
-        for (i, vd) in variant_docs.iter().enumerate() {
+        // Broken:  `type Name =\n  | A\n  | B\n  | C\n  deriving (...)`
+        let mut flat_variants = Doc::text(" = ");
+        for (i, ann) in variants.iter().enumerate() {
             if i > 0 {
-                flat_variants = flat_variants.append(Doc::text(" "));
+                flat_variants = flat_variants.append(Doc::text(" | "));
             }
-            flat_variants = flat_variants.append(vd.clone());
+            flat_variants = flat_variants.append(format_variant(ann));
         }
         flat_variants = flat_variants.append(deriving_doc.clone());
 
-        let mut broken_variants = Doc::Nil;
-        for vd in &variant_docs {
-            broken_variants = broken_variants.append(Doc::hardline()).append(vd.clone());
+        let mut broken_variants = Doc::text(" =");
+        for ann in variants {
+            broken_variants = broken_variants
+                .append(Doc::hardline())
+                .append(Doc::text("| "))
+                .append(format_variant(ann));
         }
         if !deriving.is_empty() {
             broken_variants = broken_variants.append(Doc::hardline()).append(deriving_doc);

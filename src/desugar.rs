@@ -73,7 +73,7 @@ fn desugar_expr(expr: &mut Expr) {
             desugar_expr(right);
         }
         ExprKind::UnaryMinus { expr: inner } => desugar_expr(inner),
-        ExprKind::If { cond, then_branch, else_branch } => {
+        ExprKind::If { cond, then_branch, else_branch, .. } => {
             desugar_expr(cond);
             desugar_expr(then_branch);
             desugar_expr(else_branch);
@@ -500,6 +500,7 @@ fn desugar_comprehension(body: Expr, qualifiers: &[ComprehensionQualifier], span
                 cond: Box::new(guard.clone()),
                 then_branch: Box::new(then_branch),
                 else_branch: Box::new(else_branch),
+                multiline: false,
             })
         }
         ComprehensionQualifier::Let(pat, value) => {

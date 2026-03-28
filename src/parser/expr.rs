@@ -1048,6 +1048,7 @@ impl Parser {
                 self.expect(Token::Then)?;
 
                 let then_branch = self.parse_expr(0)?;
+                let multiline = self.tokens[self.pos].preceded_by_newline;
                 self.expect(Token::Else)?;
 
                 let else_branch = self.parse_expr(0)?;
@@ -1060,6 +1061,7 @@ impl Parser {
                         cond: Box::new(cond),
                         then_branch: Box::new(then_branch),
                         else_branch: Box::new(else_branch),
+                        multiline,
                     },
                 })
             }

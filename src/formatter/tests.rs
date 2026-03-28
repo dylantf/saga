@@ -316,7 +316,9 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
             cond,
             then_branch,
             else_branch,
+            multiline,
         } => {
+            *multiline = false;
             normalize_expr(cond);
             normalize_expr(then_branch);
             normalize_expr(else_branch);

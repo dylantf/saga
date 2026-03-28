@@ -392,6 +392,8 @@ pub enum ExprKind {
         cond: Box<Expr>,
         then_branch: Box<Expr>,
         else_branch: Box<Expr>,
+        /// True if `else` was on a new line — preserve multi-line layout.
+        multiline: bool,
     },
 
     /// `case expr { Pat -> Expr, ... }`

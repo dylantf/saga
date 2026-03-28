@@ -26,10 +26,10 @@ safe_str "" = fail! "String was too short, here's a default one"
 safe_str str = str
 
 main () = {
-  let a = (safe_div 10 2) with to_result
+  let a = safe_div 10 2 with to_result
   println (debug a)
 
-  let b = (safe_div 10 0) with {
+  let b = safe_div 10 0 with {
     fail _ = resume 0
   }
   println (debug b)
@@ -38,5 +38,5 @@ main () = {
   println (debug str)
 
   let bad_result = safe_div 2 0 with abort
-  println $"You shouldn't see this: {debug bad_result}" 
+  println $"You shouldn't see this: {debug bad_result}"
 }

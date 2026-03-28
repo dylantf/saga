@@ -6,9 +6,6 @@ handler console_log for Log {
   log msg = println msg # this is a comment
 }
 
-
-
-
 main () = {
   log! "hello" with console_log
 }
