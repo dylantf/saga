@@ -529,6 +529,17 @@ fn normalize_pat(p: &mut Pat) {
             *span = S;
             normalize_pat(rest);
         }
+        Pat::ListPat { id, elements, span } => {
+            *id = NID;
+            *span = S;
+            for e in elements { normalize_pat(e); }
+        }
+        Pat::ConsPat { id, head, tail, span } => {
+            *id = NID;
+            *span = S;
+            normalize_pat(head);
+            normalize_pat(tail);
+        }
     }
 }
 

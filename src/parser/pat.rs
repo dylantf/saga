@@ -7,15 +7,15 @@ impl Parser {
         let start = self.tokens[self.pos].span;
         let pat = self.parse_pattern_atom()?;
 
-        // x :: xs  -> Cons(x, xs)  (right-associative: recurse into parse_pattern)
+        // x :: xs  -> ConsPat (desugars to Cons(x, xs) before typechecking)
         if matches!(self.peek(), Token::DoubleColon) {
             self.advance(); // consume ::
             let tail = self.parse_pattern()?;
             let end = self.tokens[self.pos - 1].span;
-            return Ok(Pat::Constructor {
+            return Ok(Pat::ConsPat {
                 id: NodeId::fresh(),
-                name: "Cons".to_string(),
-                args: vec![pat, tail],
+                head: Box::new(pat),
+                tail: Box::new(tail),
                 span: start.to(end),
             });
         }
@@ -294,22 +294,11 @@ impl Parser {
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBracket)?;
 
-                // Build from right to left: Nil, then wrap each element in Cons
-                let mut result = Pat::Constructor {
+                Ok(Pat::ListPat {
                     id: NodeId::fresh(),
-                    name: "Nil".to_string(),
-                    args: vec![],
-                    span: end,
-                };
-                for elem in elements.into_iter().rev() {
-                    result = Pat::Constructor {
-                        id: NodeId::fresh(),
-                        name: "Cons".to_string(),
-                        args: vec![elem, result],
-                        span: span.to(end),
-                    };
-                }
-                Ok(result)
+                    elements,
+                    span: span.to(end),
+                })
             }
             tok => {
                 self.pos -= 1;

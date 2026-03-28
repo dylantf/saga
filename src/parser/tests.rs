@@ -866,76 +866,61 @@ fn pattern_record_with_alias() {
 #[test]
 fn pattern_cons_operator() {
     let pat = parse_pattern("x :: xs");
-    match pat {
-        Pat::Constructor { name, args, .. } => {
-            assert_eq!(name, "Cons");
-            assert_eq!(args.len(), 2);
-            assert!(matches!(&args[0], Pat::Var { name, .. } if name == "x"));
-            assert!(matches!(&args[1], Pat::Var { name, .. } if name == "xs"));
+    match &pat {
+        Pat::ConsPat { head, tail, .. } => {
+            assert!(matches!(head.as_ref(), Pat::Var { name, .. } if name == "x"));
+            assert!(matches!(tail.as_ref(), Pat::Var { name, .. } if name == "xs"));
         }
-        _ => panic!("expected Constructor, got {:?}", pat),
+        _ => panic!("expected ConsPat, got {:?}", pat),
     }
 }
 
 #[test]
 fn pattern_cons_right_associative() {
-    // x :: y :: zs  =>  Cons(x, Cons(y, zs))
+    // x :: y :: zs  =>  ConsPat(x, ConsPat(y, zs))
     let pat = parse_pattern("x :: y :: zs");
-    match pat {
-        Pat::Constructor { name, args, .. } => {
-            assert_eq!(name, "Cons");
-            assert!(matches!(&args[0], Pat::Var { name, .. } if name == "x"));
-            assert!(matches!(&args[1], Pat::Constructor { name, .. } if name == "Cons"));
+    match &pat {
+        Pat::ConsPat { head, tail, .. } => {
+            assert!(matches!(head.as_ref(), Pat::Var { name, .. } if name == "x"));
+            assert!(matches!(tail.as_ref(), Pat::ConsPat { .. }));
         }
-        _ => panic!("expected Constructor, got {:?}", pat),
+        _ => panic!("expected ConsPat, got {:?}", pat),
     }
 }
 
 #[test]
 fn pattern_list_empty() {
     let pat = parse_pattern("[]");
-    match pat {
-        Pat::Constructor { name, args, .. } => {
-            assert_eq!(name, "Nil");
-            assert!(args.is_empty());
+    match &pat {
+        Pat::ListPat { elements, .. } => {
+            assert!(elements.is_empty());
         }
-        _ => panic!("expected Constructor, got {:?}", pat),
+        _ => panic!("expected ListPat, got {:?}", pat),
     }
 }
 
 #[test]
 fn pattern_list_single() {
     let pat = parse_pattern("[x]");
-    match pat {
-        Pat::Constructor { name, args, .. } => {
-            assert_eq!(name, "Cons");
-            assert_eq!(args.len(), 2);
-            assert!(matches!(&args[0], Pat::Var { name, .. } if name == "x"));
-            assert!(matches!(&args[1], Pat::Constructor { name, .. } if name == "Nil"));
+    match &pat {
+        Pat::ListPat { elements, .. } => {
+            assert_eq!(elements.len(), 1);
+            assert!(matches!(&elements[0], Pat::Var { name, .. } if name == "x"));
         }
-        _ => panic!("expected Constructor, got {:?}", pat),
+        _ => panic!("expected ListPat, got {:?}", pat),
     }
 }
 
 #[test]
 fn pattern_list_two_elements() {
     let pat = parse_pattern("[x, y]");
-    match pat {
-        Pat::Constructor { name, args, .. } => {
-            assert_eq!(name, "Cons");
-            assert_eq!(args.len(), 2);
-            assert!(matches!(&args[0], Pat::Var { name, .. } if name == "x"));
-            match &args[1] {
-                Pat::Constructor { name, args, .. } => {
-                    assert_eq!(name, "Cons");
-                    assert_eq!(args.len(), 2);
-                    assert!(matches!(&args[0], Pat::Var { name, .. } if name == "y"));
-                    assert!(matches!(&args[1], Pat::Constructor { name, .. } if name == "Nil"));
-                }
-                _ => panic!("expected inner Cons, got {:?}", args[1]),
-            }
+    match &pat {
+        Pat::ListPat { elements, .. } => {
+            assert_eq!(elements.len(), 2);
+            assert!(matches!(&elements[0], Pat::Var { name, .. } if name == "x"));
+            assert!(matches!(&elements[1], Pat::Var { name, .. } if name == "y"));
         }
-        _ => panic!("expected Constructor, got {:?}", pat),
+        _ => panic!("expected ListPat, got {:?}", pat),
     }
 }
 

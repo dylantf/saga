@@ -123,5 +123,8 @@ pub(super) fn lower_pat(
                 CPat::Cons(Box::new(CPat::Lit(CLit::Int(ch as i64))), Box::new(acc))
             })
         }
+        Pat::ListPat { .. } | Pat::ConsPat { .. } => {
+            unreachable!("surface syntax should be desugared before codegen")
+        }
     }
 }

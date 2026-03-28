@@ -727,6 +727,23 @@ pub enum Pat {
         rest: Box<Pat>,
         span: Span,
     },
+
+    // --- Surface syntax (desugared before typechecking) ---
+
+    /// `[a, b, c]` -- list pattern (desugars to nested Cons/Nil constructors)
+    ListPat {
+        id: NodeId,
+        elements: Vec<Pat>,
+        span: Span,
+    },
+
+    /// `x :: xs` -- cons pattern (desugars to Constructor("Cons", [x, xs]))
+    ConsPat {
+        id: NodeId,
+        head: Box<Pat>,
+        tail: Box<Pat>,
+        span: Span,
+    },
 }
 
 impl Pat {
@@ -739,7 +756,9 @@ impl Pat {
             | Pat::Record { id, .. }
             | Pat::AnonRecord { id, .. }
             | Pat::Tuple { id, .. }
-            | Pat::StringPrefix { id, .. } => *id,
+            | Pat::StringPrefix { id, .. }
+            | Pat::ListPat { id, .. }
+            | Pat::ConsPat { id, .. } => *id,
         }
     }
 
@@ -752,7 +771,9 @@ impl Pat {
             | Pat::Record { span, .. }
             | Pat::AnonRecord { span, .. }
             | Pat::Tuple { span, .. }
-            | Pat::StringPrefix { span, .. } => *span,
+            | Pat::StringPrefix { span, .. }
+            | Pat::ListPat { span, .. }
+            | Pat::ConsPat { span, .. } => *span,
         }
     }
 }

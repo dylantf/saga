@@ -49,6 +49,17 @@ pub fn format_pat(pat: &Pat) -> Doc {
         Pat::StringPrefix { prefix, rest, .. } => {
             docs![Doc::text(format!("\"{}\" <> ", prefix)), format_pat(rest)]
         }
+        Pat::ListPat { elements, .. } => {
+            if elements.is_empty() {
+                Doc::text("[]")
+            } else {
+                let elem_docs: Vec<Doc> = elements.iter().map(format_pat).collect();
+                docs![Doc::text("["), Doc::join(Doc::text(", "), elem_docs), Doc::text("]")]
+            }
+        }
+        Pat::ConsPat { head, tail, .. } => {
+            docs![format_pat(head), Doc::text(" :: "), format_pat(tail)]
+        }
     }
 }
 
@@ -60,7 +71,8 @@ pub fn format_pat_atom(pat: &Pat) -> Doc {
         | Pat::Var { .. }
         | Pat::Lit { .. }
         | Pat::Tuple { .. }
-        | Pat::AnonRecord { .. } => format_pat(pat),
+        | Pat::AnonRecord { .. }
+        | Pat::ListPat { .. } => format_pat(pat),
         // Constructor with no args is just a name — no parens needed
         Pat::Constructor { args, .. } if args.is_empty() => format_pat(pat),
         // Record with no as_name and no fields is just `Name {}` — no parens needed

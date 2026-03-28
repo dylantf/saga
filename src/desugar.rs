@@ -25,7 +25,8 @@ pub fn desugar_program(program: &mut Vec<Decl>) {
 
 fn desugar_decl(decl: &mut Decl) {
     match decl {
-        Decl::FunBinding { body, guard, .. } => {
+        Decl::FunBinding { params, body, guard, .. } => {
+            for p in params { desugar_pat(p); }
             desugar_expr(body);
             if let Some(g) = guard {
                 desugar_expr(g);
@@ -44,6 +45,7 @@ fn desugar_decl(decl: &mut Decl) {
         }
         Decl::ImplDef { methods, .. } => {
             for ann_method in methods.iter_mut() {
+                for p in &mut ann_method.node.params { desugar_pat(p); }
                 desugar_expr(&mut ann_method.node.body);
             }
         }
@@ -79,6 +81,7 @@ fn desugar_expr(expr: &mut Expr) {
         ExprKind::Case { scrutinee, arms, .. } => {
             desugar_expr(scrutinee);
             for ann_arm in arms {
+                desugar_pat(&mut ann_arm.node.pattern);
                 if let Some(g) = &mut ann_arm.node.guard {
                     desugar_expr(g);
                 }
@@ -90,7 +93,10 @@ fn desugar_expr(expr: &mut Expr) {
                 desugar_stmt(&mut ann_stmt.node);
             }
         }
-        ExprKind::Lambda { body, .. } => desugar_expr(body),
+        ExprKind::Lambda { params, body } => {
+            for p in params { desugar_pat(p); }
+            desugar_expr(body);
+        }
         ExprKind::FieldAccess { expr: inner, .. } => desugar_expr(inner),
         ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
             for (_, _, val) in fields {
@@ -119,11 +125,13 @@ fn desugar_expr(expr: &mut Expr) {
             }
         }
         ExprKind::Do { bindings, success, else_arms, .. } => {
-            for (_, e) in bindings {
+            for (p, e) in bindings {
+                desugar_pat(p);
                 desugar_expr(e);
             }
             desugar_expr(success);
             for ann_arm in else_arms {
+                desugar_pat(&mut ann_arm.node.pattern);
                 if let Some(g) = &mut ann_arm.node.guard {
                     desugar_expr(g);
                 }
@@ -132,6 +140,7 @@ fn desugar_expr(expr: &mut Expr) {
         }
         ExprKind::Receive { arms, after_clause, .. } => {
             for ann_arm in arms {
+                desugar_pat(&mut ann_arm.node.pattern);
                 if let Some(g) = &mut ann_arm.node.guard {
                     desugar_expr(g);
                 }
@@ -336,14 +345,82 @@ fn desugar_expr(expr: &mut Expr) {
 
 fn desugar_stmt(stmt: &mut Stmt) {
     match stmt {
-        Stmt::Let { value, .. } => desugar_expr(value),
-        Stmt::LetFun { body, guard, .. } => {
+        Stmt::Let { pattern, value, .. } => {
+            desugar_pat(pattern);
+            desugar_expr(value);
+        }
+        Stmt::LetFun { params, body, guard, .. } => {
+            for p in params { desugar_pat(p); }
             desugar_expr(body);
             if let Some(g) = guard {
                 desugar_expr(g);
             }
         }
         Stmt::Expr(e) => desugar_expr(e),
+    }
+}
+
+fn desugar_pat(pat: &mut Pat) {
+    // Recurse first (bottom-up)
+    match pat {
+        Pat::Wildcard { .. } | Pat::Var { .. } | Pat::Lit { .. } => {}
+        Pat::Constructor { args, .. } => {
+            for a in args { desugar_pat(a); }
+        }
+        Pat::Record { fields, .. } => {
+            for (_, alias) in fields {
+                if let Some(p) = alias { desugar_pat(p); }
+            }
+        }
+        Pat::AnonRecord { fields, .. } => {
+            for (_, alias) in fields {
+                if let Some(p) = alias { desugar_pat(p); }
+            }
+        }
+        Pat::Tuple { elements, .. } => {
+            for e in elements { desugar_pat(e); }
+        }
+        Pat::StringPrefix { rest, .. } => desugar_pat(rest),
+        Pat::ListPat { elements, .. } => {
+            for e in elements { desugar_pat(e); }
+        }
+        Pat::ConsPat { head, tail, .. } => {
+            desugar_pat(head);
+            desugar_pat(tail);
+        }
+    }
+
+    // Transform
+    match pat {
+        Pat::ListPat { .. } => {
+            let Pat::ListPat { elements, span, .. } = std::mem::replace(pat, Pat::Wildcard { id: NodeId::fresh(), span: Span { start: 0, end: 0 } }) else { unreachable!() };
+            // Build from right to left: Nil, then wrap each element in Cons
+            let mut result = Pat::Constructor {
+                id: NodeId::fresh(),
+                name: "Nil".to_string(),
+                args: vec![],
+                span,
+            };
+            for elem in elements.into_iter().rev() {
+                result = Pat::Constructor {
+                    id: NodeId::fresh(),
+                    name: "Cons".to_string(),
+                    args: vec![elem, result],
+                    span,
+                };
+            }
+            *pat = result;
+        }
+        Pat::ConsPat { .. } => {
+            let Pat::ConsPat { head, tail, span, .. } = std::mem::replace(pat, Pat::Wildcard { id: NodeId::fresh(), span: Span { start: 0, end: 0 } }) else { unreachable!() };
+            *pat = Pat::Constructor {
+                id: NodeId::fresh(),
+                name: "Cons".to_string(),
+                args: vec![*head, *tail],
+                span,
+            };
+        }
+        _ => {}
     }
 }
 
