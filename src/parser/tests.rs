@@ -1987,6 +1987,21 @@ fn where_clause_with_trait_type_args() {
 }
 
 #[test]
+fn where_clause_with_concrete_trait_type_arg() {
+    let decls = parse("fun convert : a -> Float where {a: ConvertTo Int}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::FunSignature { where_clause, .. } => {
+            assert_eq!(where_clause.len(), 1);
+            let (name, type_args, _) = &where_clause[0].traits[0];
+            assert_eq!(name, "ConvertTo");
+            assert_eq!(type_args, &["Int"]);
+        }
+        _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
+    }
+}
+
+#[test]
 fn fun_annotation_needs_and_where() {
     let decls = parse("fun f : (x: a) -> Unit needs {Log} where {a: Show}");
     assert_eq!(decls.len(), 1);

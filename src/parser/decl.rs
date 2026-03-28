@@ -757,13 +757,16 @@ impl Parser {
             self.expect(Token::Colon)?;
             let name = self.parse_upper_name()?;
             let span = self.tokens[self.pos - 1].span;
-            // Parse optional type args after trait name: `ConvertTo b` in `a: ConvertTo b`
+            // Parse optional type args after trait name: `ConvertTo b` or `ConvertTo Int`
             // Stop at `+` (next trait), `,` (next bound), `}` (end of clause)
             let mut type_args = Vec::new();
-            while matches!(self.peek(), Token::Ident(_))
+            while matches!(self.peek(), Token::Ident(_) | Token::UpperIdent(_))
                 && !matches!(self.peek(), Token::Plus | Token::Comma | Token::RBrace)
             {
-                type_args.push(self.expect_ident()?);
+                match self.peek() {
+                    Token::UpperIdent(_) => type_args.push(self.parse_upper_name()?),
+                    _ => type_args.push(self.expect_ident()?),
+                }
             }
             let mut traits = vec![(name, type_args, span)];
             while *self.peek() == Token::Plus {
@@ -771,10 +774,13 @@ impl Parser {
                 let name = self.parse_upper_name()?;
                 let span = self.tokens[self.pos - 1].span;
                 let mut type_args = Vec::new();
-                while matches!(self.peek(), Token::Ident(_))
+                while matches!(self.peek(), Token::Ident(_) | Token::UpperIdent(_))
                     && !matches!(self.peek(), Token::Plus | Token::Comma | Token::RBrace)
                 {
-                    type_args.push(self.expect_ident()?);
+                    match self.peek() {
+                        Token::UpperIdent(_) => type_args.push(self.parse_upper_name()?),
+                        _ => type_args.push(self.expect_ident()?),
+                    }
                 }
                 traits.push((name, type_args, span));
             }

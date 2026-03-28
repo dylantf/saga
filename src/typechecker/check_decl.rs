@@ -20,7 +20,7 @@ fn innermost_effect_row(ty: &Type) -> Option<EffectRow> {
 /// (name -> (type, span)) and (name -> where clause constraints).
 type Annotations = (
     HashMap<String, (Type, Span)>,
-    HashMap<String, Vec<(String, u32)>>,
+    HashMap<String, Vec<(String, u32, Vec<u32>)>>,
 );
 
 impl Checker {
@@ -145,7 +145,7 @@ impl Checker {
         if let Some(scheme) = self.env.get("main")
             && !scheme.constraints.is_empty()
         {
-            let traits: Vec<_> = scheme.constraints.iter().map(|(t, _)| t.as_str()).collect();
+            let traits: Vec<_> = scheme.constraints.iter().map(|(t, _, _)| t.as_str()).collect();
             let span = program
                 .iter()
                 .find_map(|d| {
@@ -376,8 +376,14 @@ impl Checker {
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
                         {
-                            for (trait_name, _, _) in &bound.traits {
-                                scheme_constraints.push((trait_name.clone(), *var_id));
+                            for (trait_name, trait_type_args, _) in &bound.traits {
+                                let extra_var_ids: Vec<u32> = trait_type_args
+                                    .iter()
+                                    .filter_map(|arg_name| {
+                                        params_list.iter().find(|(n, _)| n == arg_name).map(|(_, id)| *id)
+                                    })
+                                    .collect();
+                                scheme_constraints.push((trait_name.clone(), *var_id, extra_var_ids));
                             }
                         } else {
                             return Err(vec![Diagnostic::error_at(
@@ -406,7 +412,7 @@ impl Checker {
         program: &[Decl],
     ) -> std::result::Result<Annotations, Vec<Diagnostic>> {
         let mut annotations: HashMap<String, (Type, Span)> = HashMap::new();
-        let mut annotation_constraints: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+        let mut annotation_constraints: HashMap<String, Vec<(String, u32, Vec<u32>)>> = HashMap::new();
 
         for decl in program {
             if let Decl::FunSignature {
@@ -510,8 +516,14 @@ impl Checker {
                             self.trait_state
                                 .where_bound_var_names
                                 .insert(*var_id, bound.type_var.clone());
-                            for (trait_name, _, _) in &bound.traits {
-                                constraints.push((trait_name.clone(), *var_id));
+                            for (trait_name, trait_type_args, _) in &bound.traits {
+                                let extra_var_ids: Vec<u32> = trait_type_args
+                                    .iter()
+                                    .filter_map(|arg_name| {
+                                        params_list.iter().find(|(n, _)| n == arg_name).map(|(_, id)| *id)
+                                    })
+                                    .collect();
+                                constraints.push((trait_name.clone(), *var_id, extra_var_ids));
                             }
                         } else {
                             return Err(vec![Diagnostic::error_at(
@@ -633,7 +645,7 @@ impl Checker {
         fun_var: &Type,
         annotation: Option<&Type>,
         annotation_span: Option<Span>,
-        where_constraints: &[(String, u32)],
+        where_constraints: &[(String, u32, Vec<u32>)],
     ) -> Result<(), Diagnostic> {
         // All clauses must have the same arity
         let arity = match clauses[0] {
@@ -681,7 +693,7 @@ impl Checker {
         }
 
         // Register where clause bounds on type variable IDs
-        for (trait_name, var_id) in where_constraints {
+        for (trait_name, var_id, _extra_var_ids) in where_constraints {
             self.trait_state
                 .where_bounds
                 .entry(*var_id)
@@ -935,14 +947,14 @@ impl Checker {
         fun_ty: Type,
         constraints_before: usize,
         has_annotation: bool,
-        where_constraints: &[(String, u32)],
+        where_constraints: &[(String, u32, Vec<u32>)],
     ) -> Result<Scheme, Diagnostic> {
         let new_constraints = self
             .trait_state
             .pending_constraints
             .split_off(constraints_before);
         let mut scheme_constraints: Vec<(String, u32, Span)> = Vec::new();
-        for (trait_name, _trait_type_arg_types, ty, span, node_id) in new_constraints {
+        for (trait_name, trait_type_arg_types, ty, span, node_id) in new_constraints {
             let resolved = self.sub.apply(&ty);
             match resolved {
                 Type::Var(id) => {
@@ -968,6 +980,7 @@ impl Checker {
                             trait_name: trait_name.clone(),
                             resolved_type: None,
                             type_var_name: var_name,
+                            trait_type_args: trait_type_arg_types.clone(),
                         });
                         continue;
                     }
@@ -988,13 +1001,14 @@ impl Checker {
                         trait_name: trait_name.clone(),
                         resolved_type: None,
                         type_var_name: var_name,
+                        trait_type_args: trait_type_arg_types.clone(),
                     });
                     scheme_constraints.push((trait_name, id, span));
                 }
                 _ => {
                     self.trait_state
                         .pending_constraints
-                        .push((trait_name, vec![], ty, span, node_id));
+                        .push((trait_name, trait_type_arg_types, ty, span, node_id));
                 }
             }
         }
@@ -1002,13 +1016,21 @@ impl Checker {
         self.env.remove(name);
         let mut scheme = self.generalize(&fun_ty);
 
-        for (trait_name, var_id) in where_constraints {
+        for (trait_name, var_id, extra_var_ids) in where_constraints {
             let resolved_id = match self.sub.apply(&Type::Var(*var_id)) {
                 Type::Var(id) => id,
                 _ => continue,
             };
             if scheme.forall.contains(&resolved_id) {
-                scheme.constraints.push((trait_name.clone(), resolved_id));
+                // Resolve extra type arg var IDs through substitution
+                let resolved_extras: Vec<u32> = extra_var_ids
+                    .iter()
+                    .filter_map(|id| match self.sub.apply(&Type::Var(*id)) {
+                        Type::Var(resolved) => Some(resolved),
+                        _ => None,
+                    })
+                    .collect();
+                scheme.constraints.push((trait_name.clone(), resolved_id, resolved_extras));
             }
         }
 
@@ -1030,9 +1052,11 @@ impl Checker {
                 && !scheme
                     .constraints
                     .iter()
-                    .any(|(t, v)| t == &trait_name && *v == var_id)
+                    .any(|(t, v, _)| t == &trait_name && *v == var_id)
             {
-                scheme.constraints.push((trait_name, var_id));
+                // Inferred constraints (from operators) are always single-param traits.
+                // Multi-param constraints only enter through where clauses (handled above).
+                scheme.constraints.push((trait_name, var_id, vec![]));
             }
         }
 
@@ -1633,6 +1657,7 @@ impl Checker {
                                 let entry = where_constraints
                                     .entry((effect_ref.name.clone(), i))
                                     .or_default();
+                                // TODO: thread trait type args for multi-param traits in handler where clauses
                                 for (trait_name, _, _) in &bound.traits {
                                     entry.insert(trait_name.clone());
                                 }
@@ -1738,7 +1763,7 @@ impl Checker {
                                                 let is_trait_scheme = scheme
                                                     .constraints
                                                     .iter()
-                                                    .any(|(c, _)| c == t_name);
+                                                    .any(|(c, _, _)| c == t_name);
                                                 if !is_trait_scheme {
                                                     hint = format!(
                                                         ". `{}` shadows trait method `{}.{}`. \
@@ -1762,6 +1787,7 @@ impl Checker {
                                     trait_name: trait_name.clone(),
                                     resolved_type: Some((type_name.clone(), args.clone())),
                                     type_var_name: None,
+                                    trait_type_args: trait_type_arg_types.clone(),
                                 });
                                 // Push conditional constraints for type parameters
                                 if type_name == "Tuple" {
@@ -1812,6 +1838,7 @@ impl Checker {
                             trait_name: trait_name.clone(),
                             resolved_type: None,
                             type_var_name: var_name,
+                            trait_type_args: trait_type_arg_types.clone(),
                         });
                     }
                     Type::Fun(_, _, _) => {

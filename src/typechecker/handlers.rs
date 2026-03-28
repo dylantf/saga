@@ -133,6 +133,7 @@ impl Checker {
                                     self.sub.apply(&Type::Var(param_var_id))
                                 };
                                 for trait_name in trait_names {
+                                    // TODO: thread trait type args for multi-param traits in handler where clauses
                                     self.trait_state.pending_constraints.push((
                                         trait_name.clone(),
                                         vec![],

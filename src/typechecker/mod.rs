@@ -356,8 +356,10 @@ impl Substitution {
 #[derive(Debug, Clone)]
 pub struct Scheme {
     pub forall: Vec<u32>,
-    /// Trait constraints: (trait_name, type_var_id)
-    pub constraints: Vec<(String, u32)>,
+    /// Trait constraints: (trait_name, self_type_var_id, extra_type_arg_var_ids).
+    /// Extra var IDs are empty for single-param traits like Show.
+    /// For multi-param traits like `ConvertTo a b`, the extra IDs track `b`.
+    pub constraints: Vec<(String, u32, Vec<u32>)>,
     pub ty: Type,
 }
 
@@ -393,12 +395,21 @@ impl Scheme {
         let names = self.var_names();
         // Group constraints by type variable
         let mut bounds: HashMap<String, Vec<String>> = HashMap::new();
-        for (trait_name, var_id) in &self.constraints {
+        for (trait_name, var_id, extra_var_ids) in &self.constraints {
             let var_name = names
                 .get(var_id)
                 .cloned()
                 .unwrap_or_else(|| format!("?{}", var_id));
-            bounds.entry(var_name).or_default().push(trait_name.clone());
+            let trait_display = if extra_var_ids.is_empty() {
+                trait_name.clone()
+            } else {
+                let extra_names: Vec<String> = extra_var_ids
+                    .iter()
+                    .map(|id| names.get(id).cloned().unwrap_or_else(|| format!("?{}", id)))
+                    .collect();
+                format!("{} {}", trait_name, extra_names.join(" "))
+            };
+            bounds.entry(var_name).or_default().push(trait_display);
         }
         let mut parts: Vec<String> = bounds
             .iter()
@@ -659,6 +670,10 @@ pub struct TraitEvidence {
     /// Used to select the correct dict param when multiple where-clause bounds
     /// exist for the same trait (e.g. `where {e: Show, a: Show}`).
     pub type_var_name: Option<String>,
+    /// Resolved extra type arguments for multi-param traits.
+    /// e.g. for `ConvertTo NOK`, this holds [Type::Con("NOK", [])].
+    /// Empty for single-param traits.
+    pub trait_type_args: Vec<Type>,
 }
 
 /// Warnings deferred until after inference, when substitutions are complete.

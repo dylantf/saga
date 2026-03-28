@@ -72,8 +72,8 @@ impl Elaborator {
                 let dict_params: Vec<(String, String)> = scheme
                     .constraints
                     .iter()
-                    .filter(|(trait_name, _)| !operator_traits.contains(trait_name.as_str()))
-                    .map(|(trait_name, var_id)| (trait_name.clone(), format!("v{}", var_id)))
+                    .filter(|(trait_name, _, _)| !operator_traits.contains(trait_name.as_str()))
+                    .map(|(trait_name, var_id, _)| (trait_name.clone(), format!("v{}", var_id)))
                     .collect();
                 if !dict_params.is_empty() {
                     inferred_dict_params.insert(name.to_string(), dict_params);
@@ -1375,8 +1375,16 @@ impl Elaborator {
                         Some((type_name, args)) => {
                             // Concrete type: build the dict via dict_for_type,
                             // which handles where-clause constraints correctly.
+                            // Resolve extra type args to concrete type names for dict key.
+                            let resolved_type_args: Vec<String> = ev.trait_type_args
+                                .iter()
+                                .filter_map(|t| match t {
+                                    Type::Con(name, _) => Some(name.clone()),
+                                    _ => None,
+                                })
+                                .collect();
                             let ty = Type::Con(type_name.clone(), args.clone());
-                            self.dict_for_type(trait_name, &ty, span)
+                            self.dict_for_type(trait_name, &resolved_type_args, &ty, span)
                         }
                         None => {
                             // Polymorphic: use the dict param from current function.
@@ -1412,7 +1420,7 @@ impl Elaborator {
     /// Build the show function expression for a concrete type.
     /// Returns an expression that, when applied to a value of that type, produces a string.
     fn show_fn_for_type(&self, trait_name: &str, ty: &Type, span: Span) -> Option<Expr> {
-        let dict = self.dict_for_type(trait_name, ty, span)?;
+        let dict = self.dict_for_type(trait_name, &[], ty, span)?;
         Some(Expr::synth(
             span,
             ExprKind::DictMethodAccess {
@@ -1423,7 +1431,8 @@ impl Elaborator {
     }
 
     /// Build the dict expression for a concrete type (the dict itself, not the method).
-    fn dict_for_type(&self, trait_name: &str, ty: &Type, span: Span) -> Option<Expr> {
+    /// `trait_type_args` are the resolved extra type arguments for multi-param traits.
+    fn dict_for_type(&self, trait_name: &str, trait_type_args: &[String], ty: &Type, span: Span) -> Option<Expr> {
         match ty {
             Type::Con(name, args) if name == "Tuple" && (trait_name == "Show" || trait_name == "Debug") => {
                 // Tuples don't have a dict constructor; build an inline dict
@@ -1437,35 +1446,20 @@ impl Elaborator {
                 ))
             }
             Type::Con(name, args) => {
-                // Look up dict name: try empty type args first (single-param traits),
-                // then fall back to searching for any matching key (multi-param traits).
-                let dict_name = self
-                    .dict_names
-                    .get(&(trait_name.into(), vec![], name.clone()))
-                    .or_else(|| {
-                        self.dict_names
-                            .iter()
-                            .find(|((tn, _, tt), _)| tn == trait_name && tt == name)
-                            .map(|(_, v)| v)
-                    })?;
+                let key = (trait_name.to_string(), trait_type_args.to_vec(), name.clone());
+                let dict_name = self.dict_names.get(&key)?;
                 let mut dict_expr: Expr = Expr::synth(
                     span,
                     ExprKind::DictRef {
                         name: dict_name.clone(),
                     },
                 );
-                let key = (trait_name.to_string(), vec![], name.clone());
-                if let Some(constraints) = self.impl_dict_params.get(&key).or_else(|| {
-                    self.impl_dict_params
-                        .iter()
-                        .find(|((tn, _, tt), _)| tn == trait_name && tt == name)
-                        .map(|(_, v)| v)
-                }) {
+                if let Some(constraints) = self.impl_dict_params.get(&key) {
                     // Use explicit where-clause constraints (handles cases like
                     // Ord where the impl needs both Ord and Eq dicts per type param).
                     for (constraint_trait, param_idx) in constraints {
                         if let Some(arg_ty) = args.get(*param_idx) {
-                            let sub_dict = self.dict_for_type(constraint_trait, arg_ty, span)?;
+                            let sub_dict = self.dict_for_type(constraint_trait, &[], arg_ty, span)?;
                             dict_expr = Expr::synth(
                                 span,
                                 ExprKind::App {
@@ -1479,7 +1473,7 @@ impl Elaborator {
                     // Fallback: one sub-dict per type arg for the main trait.
                     // Works for simple cases like Show for List a where {a: Show}.
                     for arg_ty in args {
-                        let sub_dict = self.dict_for_type(trait_name, arg_ty, span)?;
+                        let sub_dict = self.dict_for_type(trait_name, trait_type_args, arg_ty, span)?;
                         dict_expr = Expr::synth(
                             span,
                             ExprKind::App {

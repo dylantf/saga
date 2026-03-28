@@ -105,7 +105,7 @@ impl Checker {
             super::collect_free_vars(&fun_ty, &mut forall);
 
             let constraints = match trait_param_id {
-                Some(id) => vec![(name.to_string(), *id)],
+                Some(id) => vec![(name.to_string(), *id, vec![])],
                 None => vec![],
             };
 
@@ -267,9 +267,9 @@ impl Checker {
                 }
                 let mut forall = Vec::new();
                 super::collect_free_vars(&fun_ty, &mut forall);
-                let constraints: Vec<(String, u32)> = forall
+                let constraints: Vec<(String, u32, Vec<u32>)> = forall
                     .iter()
-                    .map(|&var_id| (trait_name.to_string(), var_id))
+                    .map(|&var_id| (trait_name.to_string(), var_id, vec![]))
                     .collect();
                 self.env.insert(
                     m_name.clone(),

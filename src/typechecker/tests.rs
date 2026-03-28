@@ -4060,3 +4060,65 @@ fn multi_param_trait_too_many_args() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn multi_param_trait_where_clause_typechecks() {
+    // A function with a multi-param trait constraint in its where clause
+    check(
+        "trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         }\n\
+         fun convert : a -> b where {a: ConvertTo b}\n\
+         convert x = x",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_param_trait_where_clause_constraint_propagates() {
+    // The constraint from the where clause should flow through instantiation
+    check(
+        "trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         }\n\
+         impl ConvertTo Int for Float {\n\
+         rate () = 1.0\n\
+         }\n\
+         fun convert : a -> Float where {a: ConvertTo Int}\n\
+         convert x = x",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_param_trait_multiple_impls_different_type_args() {
+    // Two impls of the same trait with different type args should coexist
+    check(
+        "trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         }\n\
+         impl ConvertTo Int for Float {\n\
+         rate () = 1.0\n\
+         }\n\
+         impl ConvertTo Float for Int {\n\
+         rate () = 0.5\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_param_trait_display_with_constraints() {
+    // Verify constraint display includes type args
+    let checker = check(
+        "trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         }\n\
+         fun convert : a -> b where {a: ConvertTo b}\n\
+         convert x = x",
+    )
+    .unwrap();
+    let scheme = checker.env.get("convert").unwrap();
+    let display = scheme.display_with_constraints(&checker.sub);
+    assert!(display.contains("ConvertTo"), "display should contain 'ConvertTo': {}", display);
+}
