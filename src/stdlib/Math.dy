@@ -1,0 +1,71 @@
+module Std.Math
+
+pub val pi = 3.141592653589793
+pub val e = 2.718281828459045
+pub val tau = 6.283185307179586
+
+# --- Functions that need domain validation (via bridge) ---
+
+@external("erlang", "std_math_bridge", "sqrt")
+pub fun sqrt : Float -> Float
+
+@external("erlang", "std_math_bridge", "pow")
+pub fun pow : Float -> Float -> Float
+
+@external("erlang", "std_math_bridge", "log")
+pub fun log : Float -> Float
+
+@external("erlang", "std_math_bridge", "log2")
+pub fun log2 : Float -> Float
+
+@external("erlang", "std_math_bridge", "log10")
+pub fun log10 : Float -> Float
+
+@external("erlang", "std_math_bridge", "asin")
+pub fun asin : Float -> Float
+
+@external("erlang", "std_math_bridge", "acos")
+pub fun acos : Float -> Float
+
+@external("erlang", "std_math_bridge", "atan2")
+pub fun atan2 : Float -> Float -> Float
+
+# --- Functions that are always safe (direct Erlang calls) ---
+
+@external("erlang", "math", "exp")
+pub fun exp : Float -> Float
+
+@external("erlang", "math", "sin")
+pub fun sin : Float -> Float
+
+@external("erlang", "math", "cos")
+pub fun cos : Float -> Float
+
+@external("erlang", "math", "tan")
+pub fun tan : Float -> Float
+
+@external("erlang", "math", "atan")
+pub fun atan : Float -> Float
+
+# --- Pure helpers ---
+
+pub fun abs : Float -> Float
+abs x = if x < 0.0 then 0.0 - x else x
+
+pub fun min : Float -> Float -> Float
+min a b = if a < b then a else b
+
+pub fun max : Float -> Float -> Float
+max a b = if a > b then a else b
+
+pub fun clamp : Float -> Float -> Float -> Float
+clamp low high x = min high (max low x)
+
+pub fun sign : Float -> Float
+sign x = if x < 0.0 then 0.0 - 1.0 else if x > 0.0 then 1.0 else 0.0
+
+pub fun deg_to_rad : Float -> Float
+deg_to_rad d = d * pi / 180.0
+
+pub fun rad_to_deg : Float -> Float
+rad_to_deg r = r * 180.0 / pi

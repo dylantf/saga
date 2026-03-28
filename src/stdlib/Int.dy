@@ -40,3 +40,9 @@ min a b = if a < b then a else b
 
 pub fun max : Int -> Int -> Int
 max a b = if a > b then a else b
+
+pub fun clamp : Int -> Int -> Int -> Int
+clamp low high x = min high (max low x)
+
+pub fun sign : Int -> Int
+sign x = if x < 0 then 0 - 1 else if x > 0 then 1 else 0

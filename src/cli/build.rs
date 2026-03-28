@@ -146,6 +146,10 @@ fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
             "std_regex_bridge.erl",
             include_str!("../stdlib/Regex.bridge.erl"),
         ),
+        (
+            "std_math_bridge.erl",
+            include_str!("../stdlib/Math.bridge.erl"),
+        ),
     ]
 }
 

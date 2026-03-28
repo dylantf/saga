@@ -379,6 +379,7 @@ pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
             "Supervisor" => Some(include_str!("../stdlib/Supervisor.dy")),
             "Async" => Some(include_str!("../stdlib/Async.dy")),
             "IO" => Some(include_str!("../stdlib/IO.dy")),
+            "Math" => Some(include_str!("../stdlib/Math.dy")),
             "Test" => Some(include_str!("../stdlib/Test.dy")),
             "Process" => Some(include_str!("../stdlib/Process.dy")),
             "File" => Some(include_str!("../stdlib/File.dy")),
