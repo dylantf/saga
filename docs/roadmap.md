@@ -66,7 +66,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `needs` on impl blocks (parsing + type checking)
 - [x] `deriving` syntax to auto-generate trait impls from ADT structure (e.g. `type Color = Red | Green deriving (Show)`)
 - [x] `deriving (Eq, Ord)` for ADTs (constructor declaration order defines ordering, then fields lexicographically)
-- [ ] Trait type parameters (`trait ConvertTo b { ... }`, `impl ConvertTo NOK for USD { ... }`, `where {a: ConvertTo b}`) — enables multi-param trait patterns without full multi-param traits or fundeps
+- [ ] Trait type parameters (`trait ConvertTo b { ... }`, `impl ConvertTo NOK for USD { ... }`, `where {a: ConvertTo b}`) - enables multi-param trait patterns without full multi-param traits or fundeps
 
 ## Type System
 
@@ -281,7 +281,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
   - [x] Wadler-Lindig Doc algebra with proper `Nest`/`Group` indentation
   - [x] Token-level trivia attachment (comments/blank lines on tokens, promoted to AST)
   - [x] Trailing trivia splitting (blank line = paragraph break heuristic)
-  - [ ] Audit program-level `split_inter_decl_trivia` — may be redundant now that expression parsers steal their own trailing trivia via `steal_trailing_trivia`
+  - [ ] Audit program-level `split_inter_decl_trivia` - may be redundant now that expression parsers steal their own trailing trivia via `steal_trailing_trivia`
   - [ ] Semicolon-separated single-line blocks (e.g. `{ println msg; resume () }`)
   - [ ] Configurable line width
 - [ ] Docstrings/generated docs

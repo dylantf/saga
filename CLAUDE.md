@@ -93,7 +93,7 @@ Typechecker tests use `check(src)` which loads the prelude then checks the sourc
 
 ## Language Design Notes
 
-- **There are no zero-argument functions.** Every function takes at least one parameter. If a function has no meaningful input, it takes `Unit`: `fun foo : Unit -> Unit` / `foo () = ...`, called as `foo ()`. Think of `()` as the value that triggers execution. Do NOT add zero-arity cases in the compiler — this is intentional, not a gap. See `docs/const-bindings.md` for the design rationale.
+- **There are no zero-argument functions.** Every function takes at least one parameter. If a function has no meaningful input, it takes `Unit`: `fun foo : Unit -> Unit` / `foo () = ...`, called as `foo ()`. Think of `()` as the value that triggers execution. Do NOT add zero-arity cases in the compiler - this is intentional, not a gap. See `docs/const-bindings.md` for the design rationale.
 
 ## Code Conventions
 

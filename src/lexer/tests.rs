@@ -58,7 +58,7 @@ fn leading_underscore_is_ident() {
 
 #[test]
 fn integer_then_dot_ident() {
-    // 3.foo should be int, dot, ident — not a float
+    // 3.foo should be int, dot, ident - not a float
     assert_eq!(toks("3.foo"), vec![Int("3".into(), 3), Dot, Ident("foo".into()), Eof]);
 }
 
@@ -435,11 +435,11 @@ fn multiline_string_single_line() {
 
 #[test]
 fn multiline_string_escapes() {
-    // \t inside multiline string should produce a tab character
+    // Multiline strings store raw content - escapes preserved as-is
     let src = "\"\"\"\n    hello\\tworld\n    \"\"\"";
     assert_eq!(
         toks(src),
-        vec![String("hello\tworld".into(), StringKind::Multiline), Eof]
+        vec![String("hello\\tworld".into(), StringKind::Multiline), Eof]
     );
 }
 

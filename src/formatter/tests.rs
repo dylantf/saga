@@ -805,7 +805,7 @@ fn pipe_long_breaks_per_segment() {
 
 #[test]
 fn pipe_multiline_preserved() {
-    // User explicitly put |> on new lines — should stay multi-line
+    // User explicitly put |> on new lines - should stay multi-line
     let src = "f x = x\n  |> add 1\n  |> double";
     let result = fmt80(src);
     assert!(result.contains("|> add 1\n"));
@@ -1014,7 +1014,7 @@ fn binop_long_breaks_before_operator() {
 
 #[test]
 fn binop_mixed_operators_not_flattened() {
-    // a + b * c should NOT flatten — different operators
+    // a + b * c should NOT flatten - different operators
     assert_eq!(fmt80("f x = a + b * c"), "f x = a + b * c\n");
 }
 
@@ -1437,7 +1437,7 @@ fn binop_chain_preserves_comments() {
 
 #[test]
 fn binop_chain_multiline_preserved() {
-    // User explicitly put operators on new lines — should stay multi-line
+    // User explicitly put operators on new lines - should stay multi-line
     let src = "f x = a\n  + b\n  + c";
     let result = fmt80(src);
     assert!(result.contains("\n  + b"), "should stay multiline: {}", result);

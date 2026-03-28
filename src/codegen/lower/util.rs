@@ -29,8 +29,43 @@ pub(super) fn lower_lit(lit: &Lit) -> CLit {
         Lit::Bool(true) => CLit::Atom("true".to_string()),
         Lit::Bool(false) => CLit::Atom("false".to_string()),
         Lit::Unit => CLit::Atom("unit".to_string()),
-        Lit::String(s, _) => CLit::Str(s.clone()),
+        Lit::String(s, kind) => {
+            if kind.is_multiline() {
+                // Multiline strings store raw source - process escapes at emit time
+                CLit::Str(process_string_escapes(s))
+            } else {
+                CLit::Str(s.clone())
+            }
+        }
     }
+}
+
+/// Process escape sequences in a raw string (multiline strings store raw source).
+fn process_string_escapes(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('x') => {
+                    let hi = chars.next().and_then(|c| c.to_digit(16));
+                    let lo = chars.next().and_then(|c| c.to_digit(16));
+                    if let (Some(h), Some(l)) = (hi, lo) {
+                        out.push((h * 16 + l) as u8 as char);
+                    }
+                }
+                Some(ch) => out.push(ch),
+                None => {}
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Mangle a dylang variable name to a valid Core Erlang variable (uppercase start).

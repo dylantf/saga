@@ -195,9 +195,27 @@ fn binary_left_associative() {
             assert_eq!(ops.len(), 2);
             assert!(matches!(ops[0], BinOp::Sub));
             assert!(matches!(ops[1], BinOp::Sub));
-            assert!(matches!(segments[0].node.kind, ExprKind::Lit { value: Lit::Int(_, 1), .. }));
-            assert!(matches!(segments[1].node.kind, ExprKind::Lit { value: Lit::Int(_, 2), .. }));
-            assert!(matches!(segments[2].node.kind, ExprKind::Lit { value: Lit::Int(_, 3), .. }));
+            assert!(matches!(
+                segments[0].node.kind,
+                ExprKind::Lit {
+                    value: Lit::Int(_, 1),
+                    ..
+                }
+            ));
+            assert!(matches!(
+                segments[1].node.kind,
+                ExprKind::Lit {
+                    value: Lit::Int(_, 2),
+                    ..
+                }
+            ));
+            assert!(matches!(
+                segments[2].node.kind,
+                ExprKind::Lit {
+                    value: Lit::Int(_, 3),
+                    ..
+                }
+            ));
         }
         _ => panic!("expected BinOpChain, got {:?}", expr),
     }
@@ -350,10 +368,17 @@ fn application_binds_tighter_than_binop() {
 fn forward_pipe() {
     let expr = parse_expr("x |> f");
     match expr {
-        Expr { kind: ExprKind::Pipe { ref segments, .. }, .. } => {
+        Expr {
+            kind: ExprKind::Pipe { ref segments, .. },
+            ..
+        } => {
             assert_eq!(segments.len(), 2);
-            assert!(matches!(segments[0].node, Expr { kind: ExprKind::Var { ref name, .. }, .. } if name == "x"));
-            assert!(matches!(segments[1].node, Expr { kind: ExprKind::Var { ref name, .. }, .. } if name == "f"));
+            assert!(
+                matches!(segments[0].node, Expr { kind: ExprKind::Var { ref name, .. }, .. } if name == "x")
+            );
+            assert!(
+                matches!(segments[1].node, Expr { kind: ExprKind::Var { ref name, .. }, .. } if name == "f")
+            );
         }
         _ => panic!("expected Pipe, got {:?}", expr),
     }
@@ -381,8 +406,17 @@ fn type_ascription_lower_than_pipe() {
     // `x |> f : Int` should parse as `(x |> f) : Int`
     let expr = parse_expr("x |> f : Int");
     match expr {
-        Expr { kind: ExprKind::Ascription { expr, .. }, .. } => {
-            assert!(matches!(*expr, Expr { kind: ExprKind::Pipe { .. }, .. }));
+        Expr {
+            kind: ExprKind::Ascription { expr, .. },
+            ..
+        } => {
+            assert!(matches!(
+                *expr,
+                Expr {
+                    kind: ExprKind::Pipe { .. },
+                    ..
+                }
+            ));
         }
         _ => panic!("expected Ascription wrapping Pipe, got {:?}", expr),
     }
@@ -392,10 +426,17 @@ fn type_ascription_lower_than_pipe() {
 fn backward_pipe() {
     let expr = parse_expr("f <| x");
     match expr {
-        Expr { kind: ExprKind::PipeBack { segments }, .. } => {
+        Expr {
+            kind: ExprKind::PipeBack { segments },
+            ..
+        } => {
             assert_eq!(segments.len(), 2);
-            assert!(matches!(&segments[0].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
-            assert!(matches!(&segments[1].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
+            assert!(
+                matches!(&segments[0].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f")
+            );
+            assert!(
+                matches!(&segments[1].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x")
+            );
         }
         _ => panic!("expected PipeBack, got {:?}", expr),
     }
@@ -405,7 +446,10 @@ fn backward_pipe() {
 fn cons_operator_expr() {
     let expr = parse_expr("x :: xs");
     match expr {
-        Expr { kind: ExprKind::Cons { head, tail }, .. } => {
+        Expr {
+            kind: ExprKind::Cons { head, tail },
+            ..
+        } => {
             assert!(matches!(*head, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
             assert!(matches!(*tail, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "xs"));
         }
@@ -418,10 +462,28 @@ fn cons_operator_right_associative() {
     // 1 :: 2 :: xs  =>  Cons(1, Cons(2, xs))
     let expr = parse_expr("1 :: 2 :: xs");
     match expr {
-        Expr { kind: ExprKind::Cons { head, tail }, .. } => {
-            assert!(matches!(*head, Expr { kind: ExprKind::Lit { value: Lit::Int(_, 1), .. }, .. }));
+        Expr {
+            kind: ExprKind::Cons { head, tail },
+            ..
+        } => {
+            assert!(matches!(
+                *head,
+                Expr {
+                    kind: ExprKind::Lit {
+                        value: Lit::Int(_, 1),
+                        ..
+                    },
+                    ..
+                }
+            ));
             // tail is Cons(2, xs)
-            assert!(matches!(*tail, Expr { kind: ExprKind::Cons { .. }, .. }));
+            assert!(matches!(
+                *tail,
+                Expr {
+                    kind: ExprKind::Cons { .. },
+                    ..
+                }
+            ));
         }
         _ => panic!("expected Cons, got {:?}", expr),
     }
@@ -980,7 +1042,13 @@ fn fun_annotation_unit_param() {
             assert_eq!(name, "do_work");
             assert_eq!(params.len(), 1);
             assert_eq!(params[0].0, "_0");
-            assert_eq!(params[0].1, TypeExpr::Named { name: "Unit".into(), span: Span { start: 0, end: 0 } });
+            assert_eq!(
+                params[0].1,
+                TypeExpr::Named {
+                    name: "Unit".into(),
+                    span: Span { start: 0, end: 0 }
+                }
+            );
             assert_eq!(effect_names(effects), vec!["Log"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
@@ -1064,8 +1132,12 @@ fn case_simple() {
         } => {
             assert_eq!(arms.len(), 2);
             assert!(arms[0].node.guard.is_none());
-            assert!(matches!(&arms[0].node.pattern, Pat::Constructor { name, .. } if name == "Just"));
-            assert!(matches!(&arms[1].node.pattern, Pat::Constructor { name, .. } if name == "Nothing"));
+            assert!(
+                matches!(&arms[0].node.pattern, Pat::Constructor { name, .. } if name == "Just")
+            );
+            assert!(
+                matches!(&arms[1].node.pattern, Pat::Constructor { name, .. } if name == "Nothing")
+            );
         }
         _ => panic!("expected Case, got {:?}", expr),
     }
@@ -1594,7 +1666,12 @@ fn handler_def_simple() {
             assert_eq!(effect_names(effects), vec!["Log"]);
             assert_eq!(arms.len(), 1);
             assert_eq!(arms[0].node.op_name, "log");
-            let param_names: Vec<&str> = arms[0].node.params.iter().map(|(n, _)| n.as_str()).collect();
+            let param_names: Vec<&str> = arms[0]
+                .node
+                .params
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect();
             assert_eq!(param_names, vec!["level", "msg"]);
             assert!(return_clause.is_none());
         }
@@ -1807,7 +1884,7 @@ fn resume_with_value() {
 
 #[test]
 fn with_named_handler() {
-    // `with` has lowest precedence — wraps the entire expression
+    // `with` has lowest precedence - wraps the entire expression
     let expr = parse_expr("run_server () with console_log");
     match &expr {
         Expr {
@@ -1849,7 +1926,12 @@ fn with_inline_handler() {
                 assert!(named.is_empty());
                 assert_eq!(arms.len(), 1);
                 assert_eq!(arms[0].node.op_name, "log");
-                let param_names: Vec<&str> = arms[0].node.params.iter().map(|(n, _)| n.as_str()).collect();
+                let param_names: Vec<&str> = arms[0]
+                    .node
+                    .params
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect();
                 assert_eq!(param_names, vec!["level", "msg"]);
                 assert!(return_clause.is_none());
             }
@@ -1886,7 +1968,12 @@ fn with_inline_arms_single_line_comma_separated() {
             kind: ExprKind::With { handler, .. },
             ..
         } => match handler.as_ref() {
-            Handler::Inline { named, arms, return_clause, .. } => {
+            Handler::Inline {
+                named,
+                arms,
+                return_clause,
+                ..
+            } => {
                 assert!(named.is_empty());
                 assert_eq!(arms.len(), 1);
                 assert_eq!(arms[0].node.op_name, "fail");
@@ -1907,7 +1994,12 @@ fn with_inline_arms_multiline_no_commas() {
             kind: ExprKind::With { handler, .. },
             ..
         } => match handler.as_ref() {
-            Handler::Inline { named, arms, return_clause, .. } => {
+            Handler::Inline {
+                named,
+                arms,
+                return_clause,
+                ..
+            } => {
                 assert!(named.is_empty());
                 assert_eq!(arms.len(), 1);
                 assert_eq!(arms[0].node.op_name, "fail");
@@ -1929,7 +2021,11 @@ fn fun_annotation_with_where_clause() {
         Decl::FunSignature { where_clause, .. } => {
             assert_eq!(where_clause.len(), 1);
             assert_eq!(where_clause[0].type_var, "a");
-            let trait_names: Vec<&str> = where_clause[0].traits.iter().map(|(t, _, _)| t.as_str()).collect();
+            let trait_names: Vec<&str> = where_clause[0]
+                .traits
+                .iter()
+                .map(|(t, _, _)| t.as_str())
+                .collect();
             assert_eq!(trait_names, vec!["Show"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
@@ -1944,10 +2040,18 @@ fn fun_annotation_where_multiple_bounds() {
         Decl::FunSignature { where_clause, .. } => {
             assert_eq!(where_clause.len(), 2);
             assert_eq!(where_clause[0].type_var, "a");
-            let trait_names_0: Vec<&str> = where_clause[0].traits.iter().map(|(t, _, _)| t.as_str()).collect();
+            let trait_names_0: Vec<&str> = where_clause[0]
+                .traits
+                .iter()
+                .map(|(t, _, _)| t.as_str())
+                .collect();
             assert_eq!(trait_names_0, vec!["Show", "Eq"]);
             assert_eq!(where_clause[1].type_var, "b");
-            let trait_names_1: Vec<&str> = where_clause[1].traits.iter().map(|(t, _, _)| t.as_str()).collect();
+            let trait_names_1: Vec<&str> = where_clause[1]
+                .traits
+                .iter()
+                .map(|(t, _, _)| t.as_str())
+                .collect();
             assert_eq!(trait_names_1, vec!["Ord"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
@@ -2031,7 +2135,8 @@ fn trait_def_simple() {
 
 #[test]
 fn trait_def_with_supertraits() {
-    let decls = parse("trait Ord a where {a: Eq} {\n  fun compare : (x: a) -> (y: a) -> Ordering\n}");
+    let decls =
+        parse("trait Ord a where {a: Eq} {\n  fun compare : (x: a) -> (y: a) -> Ordering\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::TraitDef {
@@ -2285,7 +2390,9 @@ fn private_fun_annotation() {
 fn interp_empty() {
     // $"" → StringInterp with no parts
     let expr = parse_expr(r#"$"""#);
-    assert!(matches!(expr, Expr { kind: ExprKind::StringInterp { ref parts, .. }, .. } if parts.is_empty()));
+    assert!(
+        matches!(expr, Expr { kind: ExprKind::StringInterp { ref parts, .. }, .. } if parts.is_empty())
+    );
 }
 
 #[test]
@@ -2293,7 +2400,10 @@ fn interp_no_holes() {
     // $"hello" → StringInterp with one literal part
     let expr = parse_expr(r#"$"hello""#);
     match expr {
-        Expr { kind: ExprKind::StringInterp { parts, .. }, .. } => {
+        Expr {
+            kind: ExprKind::StringInterp { parts, .. },
+            ..
+        } => {
             assert_eq!(parts.len(), 1);
             assert!(matches!(&parts[0], StringPart::Lit(s) if s == "hello"));
         }
@@ -2306,9 +2416,14 @@ fn interp_single_hole() {
     // $"{x}" → StringInterp with one Expr part
     let expr = parse_expr(r#"$"{x}""#);
     match expr {
-        Expr { kind: ExprKind::StringInterp { parts, .. }, .. } => {
+        Expr {
+            kind: ExprKind::StringInterp { parts, .. },
+            ..
+        } => {
             assert_eq!(parts.len(), 1);
-            assert!(matches!(&parts[0], StringPart::Expr(e) if matches!(&e.kind, ExprKind::Var { name, .. } if name == "x")));
+            assert!(
+                matches!(&parts[0], StringPart::Expr(e) if matches!(&e.kind, ExprKind::Var { name, .. } if name == "x"))
+            );
         }
         other => panic!("expected StringInterp, got {:?}", other),
     }
@@ -2319,10 +2434,15 @@ fn interp_literal_and_hole() {
     // $"hello {name}" → StringInterp with literal + expr
     let expr = parse_expr(r#"$"hello {name}""#);
     match expr {
-        Expr { kind: ExprKind::StringInterp { parts, .. }, .. } => {
+        Expr {
+            kind: ExprKind::StringInterp { parts, .. },
+            ..
+        } => {
             assert_eq!(parts.len(), 2);
             assert!(matches!(&parts[0], StringPart::Lit(s) if s == "hello "));
-            assert!(matches!(&parts[1], StringPart::Expr(e) if matches!(&e.kind, ExprKind::Var { name, .. } if name == "name")));
+            assert!(
+                matches!(&parts[1], StringPart::Expr(e) if matches!(&e.kind, ExprKind::Var { name, .. } if name == "name"))
+            );
         }
         other => panic!("expected StringInterp, got {:?}", other),
     }
@@ -2333,7 +2453,10 @@ fn interp_escaped_braces() {
     // $"\{" → StringInterp with literal "{"
     let expr = parse_expr("$\"\\{\"");
     match expr {
-        Expr { kind: ExprKind::StringInterp { parts, .. }, .. } => {
+        Expr {
+            kind: ExprKind::StringInterp { parts, .. },
+            ..
+        } => {
             assert_eq!(parts.len(), 1);
             assert!(matches!(&parts[0], StringPart::Lit(s) if s == "{"));
         }
@@ -2353,7 +2476,10 @@ fn interp_pipe_in_hole() {
 fn list_comprehension_simple_generator() {
     let expr = parse_expr("[x | x <- xs]");
     match expr {
-        Expr { kind: ExprKind::ListComprehension { body, qualifiers }, .. } => {
+        Expr {
+            kind: ExprKind::ListComprehension { body, qualifiers },
+            ..
+        } => {
             assert!(matches!(*body, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "x"));
             assert_eq!(qualifiers.len(), 1);
             assert!(matches!(&qualifiers[0], ComprehensionQualifier::Generator(
@@ -2368,9 +2494,15 @@ fn list_comprehension_simple_generator() {
 fn list_comprehension_with_guard() {
     let expr = parse_expr("[x | x <- xs, x > 0]");
     match expr {
-        Expr { kind: ExprKind::ListComprehension { qualifiers, .. }, .. } => {
+        Expr {
+            kind: ExprKind::ListComprehension { qualifiers, .. },
+            ..
+        } => {
             assert_eq!(qualifiers.len(), 2);
-            assert!(matches!(&qualifiers[0], ComprehensionQualifier::Generator(..)));
+            assert!(matches!(
+                &qualifiers[0],
+                ComprehensionQualifier::Generator(..)
+            ));
             assert!(matches!(&qualifiers[1], ComprehensionQualifier::Guard(..)));
         }
         other => panic!("expected ListComprehension, got {:?}", other),
@@ -2381,7 +2513,10 @@ fn list_comprehension_with_guard() {
 fn list_comprehension_nested_generators() {
     let expr = parse_expr("[x + y | x <- xs, y <- ys]");
     match expr {
-        Expr { kind: ExprKind::ListComprehension { qualifiers, .. }, .. } => {
+        Expr {
+            kind: ExprKind::ListComprehension { qualifiers, .. },
+            ..
+        } => {
             assert_eq!(qualifiers.len(), 2);
             assert!(matches!(&qualifiers[0], ComprehensionQualifier::Generator(
                 Pat::Var { name, .. }, _
@@ -2398,9 +2533,15 @@ fn list_comprehension_nested_generators() {
 fn list_comprehension_with_let() {
     let expr = parse_expr("[y | x <- xs, let y = x + 1]");
     match expr {
-        Expr { kind: ExprKind::ListComprehension { qualifiers, .. }, .. } => {
+        Expr {
+            kind: ExprKind::ListComprehension { qualifiers, .. },
+            ..
+        } => {
             assert_eq!(qualifiers.len(), 2);
-            assert!(matches!(&qualifiers[0], ComprehensionQualifier::Generator(..)));
+            assert!(matches!(
+                &qualifiers[0],
+                ComprehensionQualifier::Generator(..)
+            ));
             assert!(matches!(&qualifiers[1], ComprehensionQualifier::Let(..)));
         }
         other => panic!("expected ListComprehension, got {:?}", other),
@@ -2410,17 +2551,38 @@ fn list_comprehension_with_let() {
 #[test]
 fn empty_list_still_works() {
     let expr = parse_expr("[]");
-    assert!(matches!(expr, Expr { kind: ExprKind::ListLit { ref elements, .. }, .. } if elements.is_empty()));
+    assert!(
+        matches!(expr, Expr { kind: ExprKind::ListLit { ref elements, .. }, .. } if elements.is_empty())
+    );
 }
 
 #[test]
 fn normal_list_still_works() {
     let expr = parse_expr("[1, 2]");
     match expr {
-        Expr { kind: ExprKind::ListLit { elements, .. }, .. } => {
+        Expr {
+            kind: ExprKind::ListLit { elements, .. },
+            ..
+        } => {
             assert_eq!(elements.len(), 2);
-            assert!(matches!(&elements[0], Expr { kind: ExprKind::Lit { value: Lit::Int(_, 1) }, .. }));
-            assert!(matches!(&elements[1], Expr { kind: ExprKind::Lit { value: Lit::Int(_, 2) }, .. }));
+            assert!(matches!(
+                &elements[0],
+                Expr {
+                    kind: ExprKind::Lit {
+                        value: Lit::Int(_, 1)
+                    },
+                    ..
+                }
+            ));
+            assert!(matches!(
+                &elements[1],
+                Expr {
+                    kind: ExprKind::Lit {
+                        value: Lit::Int(_, 2)
+                    },
+                    ..
+                }
+            ));
         }
         other => panic!("expected ListLit, got {:?}", other),
     }
@@ -2438,10 +2600,17 @@ fn list_comprehension_map_transform() {
 fn compose_forward() {
     let expr = parse_expr("f >> g");
     match expr {
-        Expr { kind: ExprKind::ComposeForward { segments }, .. } => {
+        Expr {
+            kind: ExprKind::ComposeForward { segments },
+            ..
+        } => {
             assert_eq!(segments.len(), 2);
-            assert!(matches!(&segments[0].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
-            assert!(matches!(&segments[1].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g"));
+            assert!(
+                matches!(&segments[0].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f")
+            );
+            assert!(
+                matches!(&segments[1].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g")
+            );
         }
         other => panic!("expected ComposeForward, got {:?}", other),
     }
@@ -2451,10 +2620,17 @@ fn compose_forward() {
 fn compose_backward() {
     let expr = parse_expr("f << g");
     match expr {
-        Expr { kind: ExprKind::ComposeBack { segments }, .. } => {
+        Expr {
+            kind: ExprKind::ComposeBack { segments },
+            ..
+        } => {
             assert_eq!(segments.len(), 2);
-            assert!(matches!(&segments[0].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f"));
-            assert!(matches!(&segments[1].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g"));
+            assert!(
+                matches!(&segments[0].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f")
+            );
+            assert!(
+                matches!(&segments[1].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g")
+            );
         }
         other => panic!("expected ComposeBack, got {:?}", other),
     }
@@ -2505,7 +2681,13 @@ fn handler_for_parameterized_effect() {
             assert_eq!(effects.len(), 1);
             assert_eq!(effects[0].name, "State");
             assert_eq!(effects[0].type_args.len(), 1);
-            assert_eq!(effects[0].type_args[0], TypeExpr::Named { name: "Int".into(), span: Span { start: 0, end: 0 } });
+            assert_eq!(
+                effects[0].type_args[0],
+                TypeExpr::Named {
+                    name: "Int".into(),
+                    span: Span { start: 0, end: 0 }
+                }
+            );
             assert_eq!(arms.len(), 2);
         }
         _ => panic!("expected HandlerDef"),
@@ -2573,7 +2755,13 @@ fn fun_annotation_needs_parameterized_effect() {
             assert_eq!(effects.len(), 1);
             assert_eq!(effects[0].name, "State");
             assert_eq!(effects[0].type_args.len(), 1);
-            assert_eq!(effects[0].type_args[0], TypeExpr::Named { name: "Int".into(), span: Span { start: 0, end: 0 } });
+            assert_eq!(
+                effects[0].type_args[0],
+                TypeExpr::Named {
+                    name: "Int".into(),
+                    span: Span { start: 0, end: 0 }
+                }
+            );
         }
         _ => panic!("expected FunAnnotation"),
     }
@@ -2616,11 +2804,14 @@ fn external_fun_basic() {
             assert_eq!(params[0].0, "list");
             assert_eq!(annotations.len(), 1);
             assert_eq!(annotations[0].name, "external");
-            assert_eq!(annotations[0].args, vec![
-                Lit::String("erlang".to_string(), StringKind::Normal),
-                Lit::String("lists".to_string(), StringKind::Normal),
-                Lit::String("reverse".to_string(), StringKind::Normal),
-            ]);
+            assert_eq!(
+                annotations[0].args,
+                vec![
+                    Lit::String("erlang".to_string(), StringKind::Normal),
+                    Lit::String("lists".to_string(), StringKind::Normal),
+                    Lit::String("reverse".to_string(), StringKind::Normal),
+                ]
+            );
         }
         _ => panic!("expected FunSignature with @external"),
     }
@@ -2689,7 +2880,11 @@ fn external_fun_with_where_clause() {
             assert_eq!(name, "do_thing");
             assert_eq!(where_clause.len(), 1);
             assert_eq!(where_clause[0].type_var, "a");
-            let trait_names: Vec<&str> = where_clause[0].traits.iter().map(|(t, _, _)| t.as_str()).collect();
+            let trait_names: Vec<&str> = where_clause[0]
+                .traits
+                .iter()
+                .map(|(t, _, _)| t.as_str())
+                .collect();
             assert_eq!(trait_names, vec!["Show"]);
             assert_eq!(annotations.len(), 1);
             assert_eq!(annotations[0].name, "external");

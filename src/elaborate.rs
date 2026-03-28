@@ -158,7 +158,7 @@ impl Elaborator {
     /// for traits that use dictionary dispatch (excludes Eq which uses BIFs).
     ///
     /// Note: trait type args (the `_` in the destructure) are intentionally not used here.
-    /// Dict params are keyed by (trait_name, self_type_var) — one dict per constraint.
+    /// Dict params are keyed by (trait_name, self_type_var) - one dict per constraint.
     /// The extra type args (e.g. `b` in `a: ConvertTo b`) are resolved separately
     /// through TraitEvidence when looking up which concrete dict to pass at call sites.
     fn dict_params_from_where(where_clause: &[TraitBound]) -> Vec<(String, String)> {

@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::token::{Span, StringKind};
 pub use crate::token::Trivia;
+use crate::token::{Span, StringKind};
 
 pub type Program = Vec<Decl>;
 
@@ -206,7 +206,7 @@ pub enum Decl {
         type_params: Vec<String>,
         variants: Vec<Annotated<TypeConstructor>>,
         deriving: Vec<String>,
-        /// True if any `|` was on a new line — preserve multi-line layout.
+        /// True if any `|` was on a new line - preserve multi-line layout.
         multiline: bool,
         span: Span,
     },
@@ -392,7 +392,7 @@ pub enum ExprKind {
         cond: Box<Expr>,
         then_branch: Box<Expr>,
         else_branch: Box<Expr>,
-        /// True if `else` was on a new line — preserve multi-line layout.
+        /// True if `else` was on a new line - preserve multi-line layout.
         multiline: bool,
     },
 
@@ -487,7 +487,7 @@ pub enum ExprKind {
     /// The first segment's leading trivia comes from the head expression.
     Pipe {
         segments: Vec<Annotated<Expr>>,
-        /// True if any `|>` was on a new line in the source — the user
+        /// True if any `|>` was on a new line in the source - the user
         /// intended multi-line layout, so the formatter should preserve it.
         multiline: bool,
     },
@@ -519,7 +519,10 @@ pub enum ExprKind {
     ListLit { elements: Vec<Expr> },
 
     /// `$"hello {name}"` -- interpolated string (desugars to show/concat chain)
-    StringInterp { parts: Vec<StringPart>, kind: StringKind },
+    StringInterp {
+        parts: Vec<StringPart>,
+        kind: StringKind,
+    },
 
     /// `[expr | qualifiers]` -- list comprehension (desugars to flat_map/if/let)
     ListComprehension {
@@ -600,8 +603,7 @@ impl Expr {
                         .is_some_and(|(t, b)| t.contains_resume() || b.contains_resume())
             }
             ExprKind::Ascription { expr, .. } => expr.contains_resume(),
-            ExprKind::Pipe { segments, .. }
-            | ExprKind::BinOpChain { segments, .. } => {
+            ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {
                 segments.iter().any(|s| s.node.contains_resume())
             }
             ExprKind::PipeBack { segments }
@@ -731,7 +733,6 @@ pub enum Pat {
     },
 
     // --- Surface syntax (desugared before typechecking) ---
-
     /// `[a, b, c]` -- list pattern (desugars to nested Cons/Nil constructors)
     ListPat {
         id: NodeId,
@@ -810,7 +811,7 @@ pub enum TypeExpr {
     /// Anonymous record type: `{ street: String, city: String }`
     Record {
         fields: Vec<(String, TypeExpr)>,
-        /// True if any field separator was on a new line — preserve multi-line layout.
+        /// True if any field separator was on a new line - preserve multi-line layout.
         multiline: bool,
         span: Span,
     },

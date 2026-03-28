@@ -495,7 +495,7 @@ impl Lexer {
         }
     }
 
-    // Read a raw string: @"..." — no escape processing.
+    // Read a raw string: @"..." - no escape processing.
     // Called after consuming `@`. Consumes the opening `"`.
     fn read_raw_string(&mut self, start: usize) -> Result<Token, LexError> {
         self.advance(); // consume opening "
@@ -520,7 +520,7 @@ impl Lexer {
         }
     }
 
-    // Read a raw multiline string: @"""...""" — no escape processing, with indentation stripping.
+    // Read a raw multiline string: @"""...""" - no escape processing, with indentation stripping.
     // Called after consuming `@"""`.
     fn read_raw_multiline_string(&mut self, start: usize) -> Result<Token, LexError> {
         let mut s = String::new();
@@ -550,9 +550,11 @@ impl Lexer {
         }
     }
 
-    // Read a multiline string: """...""" — with escape processing and indentation stripping.
+    // Read a multiline string: """...""" - with escape processing and indentation stripping.
     // Called after consuming the opening `"""`.
     fn read_multiline_string(&mut self, start: usize) -> Result<Token, LexError> {
+        // Multiline strings store raw content - no escape processing.
+        // Escapes are handled at codegen time.
         let mut s = String::new();
         loop {
             match self.peek() {
@@ -571,36 +573,6 @@ impl Lexer {
                         strip_indentation(&s, close_col),
                         StringKind::Multiline,
                     ));
-                }
-                Some('\\') => {
-                    self.advance();
-                    match self.advance() {
-                        Some('n') => s.push('\n'),
-                        Some('t') => s.push('\t'),
-                        Some('\\') => s.push('\\'),
-                        Some('"') => s.push('"'),
-                        Some('x') => {
-                            let hi = self.advance().and_then(|c| c.to_digit(16));
-                            let lo = self.advance().and_then(|c| c.to_digit(16));
-                            match (hi, lo) {
-                                (Some(h), Some(l)) => s.push((h * 16 + l) as u8 as char),
-                                _ => {
-                                    return Err(LexError {
-                                        message: "invalid \\x escape: expected two hex digits"
-                                            .to_string(),
-                                        pos: start,
-                                    });
-                                }
-                            }
-                        }
-                        Some(ch) => s.push(ch),
-                        None => {
-                            return Err(LexError {
-                                message: "unterminated escape sequence".to_string(),
-                                pos: start,
-                            });
-                        }
-                    }
                 }
                 Some(ch) => {
                     s.push(ch);
@@ -740,7 +712,7 @@ impl Lexer {
         // Start of file counts as "after newline" so first-line comments are leading.
         let mut seen_newline = true;
         // Track consecutive newlines for blank line detection.
-        // We count "empty lines" — a newline when we already saw one counts as a blank line.
+        // We count "empty lines" - a newline when we already saw one counts as a blank line.
         let mut prev_was_newline = true; // start of file
 
         loop {
@@ -801,7 +773,7 @@ impl Lexer {
                 _ => {}
             }
 
-            // Reset newline tracking — we're about to emit a significant token
+            // Reset newline tracking - we're about to emit a significant token
             prev_was_newline = false;
 
             // Capture whether this token is preceded by a newline at top-level nesting.
@@ -861,7 +833,7 @@ impl Lexer {
                     let spanned = self.emit(tok, start, trivia, newline_flag);
                     tokens.push(spanned);
                 }
-                // Bare @ (not followed by ") — annotation marker
+                // Bare @ (not followed by ") - annotation marker
                 Some('@') => {
                     self.advance();
                     let spanned = self.emit(Token::At, start, trivia, newline_flag);

@@ -34,7 +34,7 @@ pub fn format_type_expr(ty: &TypeExpr) -> Doc {
         TypeExpr::Var { name, .. } => Doc::text(name),
         TypeExpr::App { func, arg, .. } => {
             let arg_doc = match arg.as_ref() {
-                // Paren-wrap App args to disambiguate, but not tuples — they
+                // Paren-wrap App args to disambiguate, but not tuples - they
                 // already produce (a, b) which is self-wrapping.
                 TypeExpr::App { .. } if collect_tuple_args(arg).is_none() => {
                     docs![Doc::text("("), format_type_expr(arg), Doc::text(")")]

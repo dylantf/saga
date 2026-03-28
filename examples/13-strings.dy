@@ -30,8 +30,8 @@ main () = {
 
   # Escape sequences work in multiline strings
   let with_tabs = """
-    col1	col2	col3
-    a	b	c
+    col1\tcol2\tcol3
+    a\tb\tc
     """
   println with_tabs
 

@@ -1215,7 +1215,7 @@ impl Parser {
             None
         };
 
-        // Optional: (name1, Name2, ...) — unqualified imports
+        // Optional: (name1, Name2, ...) - unqualified imports
         // Capital names are inferred as types and hoist their constructors automatically.
         let exposing = if matches!(self.peek(), Token::LParen) {
             self.advance(); // consume '('

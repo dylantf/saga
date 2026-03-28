@@ -80,7 +80,7 @@ pub fn format_binding(lhs: Doc, body: &Expr) -> Doc {
     }
 }
 
-/// Is this expression "block-like" — handles its own multi-line layout?
+/// Is this expression "block-like" - handles its own multi-line layout?
 /// These should stay on the `=` line rather than breaking after `=`.
 pub(super) fn is_block_like(expr: &Expr) -> bool {
     match &expr.kind {
@@ -94,11 +94,11 @@ pub(super) fn is_block_like(expr: &Expr) -> bool {
             ..
         } => kind.is_multiline(),
         ExprKind::StringInterp { kind, .. } => kind.is_multiline(),
-        // Pipes and binop chains stay on the = line — they handle their own
+        // Pipes and binop chains stay on the = line - they handle their own
         // multi-line layout like `x |> f |> g` or `"a" <> "b" <> "c"`
         ExprKind::Pipe { .. } => false,
         ExprKind::BinOp { .. } | ExprKind::BinOpChain { .. } => true,
-        // Lists and tuples stay on the = line — they handle their own breaking
+        // Lists and tuples stay on the = line - they handle their own breaking
         ExprKind::ListLit { elements } => !elements.is_empty(),
         ExprKind::Tuple { .. } => true,
         // Named record creates stay on = line
@@ -174,7 +174,7 @@ pub fn format_type_def(decl: &Decl) -> Doc {
     };
 
     if *multiline {
-        // User wrote variants on separate lines — `=` on header, `|` before each
+        // User wrote variants on separate lines - `=` on header, `|` before each
         parts.push(Doc::text(" ="));
         let mut broken_variants = Doc::Nil;
         for ann in variants {

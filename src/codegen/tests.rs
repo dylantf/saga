@@ -6,7 +6,7 @@ use crate::parser::Parser;
 use crate::{derive, desugar, elaborate, typechecker};
 
 /// Parse `src` and emit Core Erlang for a single-file script module.
-/// Skips typechecking and elaboration — only tests basic lowering.
+/// Skips typechecking and elaboration - only tests basic lowering.
 fn emit(src: &str) -> String {
     let tokens = Lexer::new(src).lex().expect("lex error");
     let mut program = Parser::new(tokens).parse_program().expect("parse error");
@@ -14,7 +14,7 @@ fn emit(src: &str) -> String {
     emit_module("_script", &program)
 }
 
-/// Parse, typecheck, elaborate, and emit Core Erlang — mirrors the real compiler pipeline.
+/// Parse, typecheck, elaborate, and emit Core Erlang - mirrors the real compiler pipeline.
 fn emit_full(src: &str) -> String {
     let tokens = Lexer::new(src).lex().expect("lex error");
     let mut program = Parser::new(tokens).parse_program().expect("parse error");

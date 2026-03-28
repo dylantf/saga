@@ -16,7 +16,7 @@ fun max_retries : Unit -> Int
 max_retries () = 5
 ```
 
-This is ceremonial — `pi` isn't a computation, it's a value. AI agents and new users frequently try to write zero-argument functions, which don't exist in the language. `val` provides the right tool for this.
+This is ceremonial - `pi` isn't a computation, it's a value. AI agents and new users frequently try to write zero-argument functions, which don't exist in the language. `val` provides the right tool for this.
 
 Beyond scalars, there's no way to define module-level data structures without wrapping them in a function:
 
@@ -77,11 +77,11 @@ val add = fun a b -> a + b
 val inc = add 1
 ```
 
-The function type restriction prevents two ways of defining functions. If the inferred type of the RHS is `a -> b`, it's an error — use `fun` instead.
+The function type restriction prevents two ways of defining functions. If the inferred type of the RHS is `a -> b`, it's an error - use `fun` instead.
 
 ### Type inference
 
-The type is inferred from the expression. No annotation syntax — `pub val` does not require a type signature. The value is self-documenting.
+The type is inferred from the expression. No annotation syntax - `pub val` does not require a type signature. The value is self-documenting.
 
 ### References between vals
 
@@ -97,7 +97,7 @@ val b = a
 
 ### Compilation
 
-Vals compile to zero-arity Erlang functions. At use sites, a `val` reference emits a zero-arity function call. This is an implementation detail — vals are not functions in dylang's type system.
+Vals compile to zero-arity Erlang functions. At use sites, a `val` reference emits a zero-arity function call. This is an implementation detail - vals are not functions in dylang's type system.
 
 ```
 # dylang
@@ -125,11 +125,12 @@ val app_name = "dylang"
 ```
 
 When `@inline` is present, the typechecker verifies the RHS is a compile-time inlineable value:
+
 - Scalar literals: `Int`, `Float`, `String`, `Bool`
 - Tuples/lists of inlineable values: `(1, 2)`, `[1, 2, 3]`
 - References to other `@inline` vals
 
-If the check passes, the value is substituted at every use site during lowering — no zero-arity function is emitted. If the RHS isn't inlineable (e.g. a function call, record constructor, `Dict.from_list`), the typechecker reports an error.
+If the check passes, the value is substituted at every use site during lowering - no zero-arity function is emitted. If the RHS isn't inlineable (e.g. a function call, record constructor, `Dict.from_list`), the typechecker reports an error.
 
 ```
 @inline
@@ -151,11 +152,11 @@ val codes = Dict.from_list [] # error: function call not inlineable
 
 ### Interaction with existing features
 
-- `val` is **not** a function — it cannot be called with arguments, it has no arity, and it does not participate in the CPS effect transform
+- `val` is **not** a function - it cannot be called with arguments, it has no arity, and it does not participate in the CPS effect transform
 - `val` cannot appear inside function bodies (use `let` for local bindings)
 - `val` names cannot be used as patterns (they're not constructors)
-- `val` does not go through the normal function lowering path — it's a separate, simplified codegen path that emits a zero-arity Core Erlang function directly
-- The "all functions take at least one argument" rule is unchanged — `val` is a different kind of declaration, not a zero-argument function
+- `val` does not go through the normal function lowering path - it's a separate, simplified codegen path that emits a zero-arity Core Erlang function directly
+- The "all functions take at least one argument" rule is unchanged - `val` is a different kind of declaration, not a zero-argument function
 
 ## Implementation
 

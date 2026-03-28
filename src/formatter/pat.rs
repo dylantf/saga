@@ -73,9 +73,9 @@ pub fn format_pat_atom(pat: &Pat) -> Doc {
         | Pat::Tuple { .. }
         | Pat::AnonRecord { .. }
         | Pat::ListPat { .. } => format_pat(pat),
-        // Constructor with no args is just a name — no parens needed
+        // Constructor with no args is just a name - no parens needed
         Pat::Constructor { args, .. } if args.is_empty() => format_pat(pat),
-        // Record with no as_name and no fields is just `Name {}` — no parens needed
+        // Record with no as_name and no fields is just `Name {}` - no parens needed
         Pat::Record { fields, as_name: None, .. } if fields.is_empty() => format_pat(pat),
         _ => docs![Doc::text("("), format_pat(pat), Doc::text(")")],
     }

@@ -89,7 +89,7 @@ impl Parser {
         let mut left = self.parse_application()?;
 
         loop {
-            // Binary operators continue across lines — an operator token at the
+            // Binary operators continue across lines - an operator token at the
             // start of a line is unambiguous (it can't begin a new statement).
             // For `-`, this means `foo\n-bar` is subtraction, not `foo` then `(-bar)`.
             // Use `(-bar)` for unary negation as a separate expression.
@@ -220,7 +220,7 @@ impl Parser {
                 continue;
             }
 
-            // Binary operator — collect same-precedence chains into BinOpChain
+            // Binary operator - collect same-precedence chains into BinOpChain
             // with trivia on each segment, mirroring the Pipe pattern.
             let op = op.unwrap();
             let chain_bp = bp;
@@ -236,10 +236,10 @@ impl Parser {
             // If so, collect into a BinOpChain. Otherwise, emit plain BinOp.
             let next_same_bp = self.peek_binop_bp() == Some(chain_bp);
             if !next_same_bp {
-                // Plain BinOp (2 operands, no chain) — no trivia to preserve
+                // Plain BinOp (2 operands, no chain) - no trivia to preserve
                 // (same as before; trivia was on the operator token which is gone)
                 if let Some(comment) = first_trailing {
-                    // Re-attach trailing comment we stole — put on left expr's last token
+                    // Re-attach trailing comment we stole - put on left expr's last token
                     // This is best-effort; single binops can't carry trivia.
                     let _ = comment;
                 }
@@ -316,7 +316,7 @@ impl Parser {
             }
         }
 
-        // `with` has lowest precedence — checked after all binary ops
+        // `with` has lowest precedence - checked after all binary ops
         if matches!(self.peek(), Token::With) && !self.next_on_new_line() {
             self.advance();
             let handler = self.parse_handler_ref()?;
@@ -332,7 +332,7 @@ impl Parser {
             };
         }
 
-        // Type ascription: `expr : Type` — lowest precedence, only at top level
+        // Type ascription: `expr : Type` - lowest precedence, only at top level
         if min_bp == 0 && matches!(self.peek(), Token::Colon) && !self.next_on_new_line() {
             self.advance(); // consume ':'
             let type_expr = self.parse_type_expr()?;
@@ -933,7 +933,7 @@ impl Parser {
                         });
                     }
 
-                    // Not a record update — backtrack and parse as block
+                    // Not a record update - backtrack and parse as block
                     self.pos = save;
                 }
 

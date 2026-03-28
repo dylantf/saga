@@ -103,7 +103,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 return docs![prefix, Doc::text(" "), lhs, body_doc, Doc::text(")")];
             }
 
-            // Applications never break across lines — newlines terminate
+            // Applications never break across lines - newlines terminate
             // application parsing, so breaking would change semantics.
             // Users can wrap in parens to force multi-line if needed.
             let mut d = func_doc;
@@ -398,7 +398,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
             let mut head = format_expr(&segments[0].node);
             head = head.append(format_trailing(&segments[0].trailing_comment));
 
-            // Tail segments — same indent level as head (no extra nest)
+            // Tail segments - same indent level as head (no extra nest)
             let mut tail = Doc::Nil;
             for seg in &segments[1..] {
                 if force_multiline {
