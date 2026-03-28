@@ -499,7 +499,7 @@ fn find_in_type_expr(ty: &TypeExpr, offset: usize) -> Found {
         } if contains_ident(span, offset) => find_in_type_expr(from, offset)
             .or_else(|| find_in_type_expr(to, offset))
             .or_else(|| find_in_effect_refs(effects, offset)),
-        TypeExpr::Record { fields, span } if contains_ident(span, offset) => {
+        TypeExpr::Record { fields, span, .. } if contains_ident(span, offset) => {
             find_in_typed_params(fields, offset)
         }
         _ => None,

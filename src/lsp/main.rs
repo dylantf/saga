@@ -3,7 +3,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use dylang::typechecker;
+use dylang::{formatter, lexer, parser, typechecker};
 
 mod checker;
 mod code_action;
@@ -420,6 +420,7 @@ impl LanguageServer for Backend {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
                 })),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -1001,6 +1002,50 @@ impl LanguageServer for Backend {
             changes: Some(changes),
             ..Default::default()
         }))
+    }
+
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let Some(snap) = self.snapshot(&uri) else {
+            return Ok(None);
+        };
+
+        // Re-parse to get AnnotatedProgram (preserves comments/trivia)
+        let tokens = match lexer::Lexer::new(&snap.source).lex() {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        let mut p = parser::Parser::new(tokens);
+        let annotated = match p.parse_program_annotated() {
+            Ok(prog) => prog,
+            Err(_) => return Ok(None),
+        };
+
+        // Resolve width from project.toml, falling back to default
+        let width = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .and_then(|d| checker::find_project_root(&d))
+            .map(|root| dylang::project_config::ProjectConfig::load(&root).formatter.width)
+            .unwrap_or(formatter::DEFAULT_WIDTH);
+
+        let formatted = formatter::format(&annotated, width);
+
+        // Replace the entire document
+        let last_line = snap.source.lines().count() as u32;
+        let range = Range {
+            start: Position::new(0, 0),
+            end: Position::new(last_line, 0),
+        };
+
+        Ok(Some(vec![TextEdit {
+            range,
+            new_text: formatted,
+        }]))
     }
 }
 

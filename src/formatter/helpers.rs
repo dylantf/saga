@@ -158,7 +158,7 @@ pub fn format_trivia_dangling(trivia: &[Trivia]) -> Doc {
 /// Format a trailing comment (if any) as ` # text`.
 pub fn format_trailing(comment: &Option<String>) -> Doc {
     match comment {
-        Some(text) => Doc::text(format!(" # {}", text)),
+        Some(text) => Doc::TrailingComment(text.clone()),
         None => Doc::Nil,
     }
 }

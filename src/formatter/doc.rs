@@ -24,6 +24,9 @@ pub enum Doc {
     /// Emit `broken` in break mode, `flat` in flat mode.
     /// Useful for trailing commas, trailing separators, etc.
     IfBreak { broken: Box<Doc>, flat: Box<Doc> },
+    /// A trailing comment (` # text`). Rendered in output but excluded from
+    /// the fit check so comments don't cause lines to break.
+    TrailingComment(String),
 }
 
 // --- Constructors ---
@@ -86,6 +89,7 @@ impl Doc {
             Doc::Nest(n, inner) => Doc::Nest(n, Box::new(Doc::flat(*inner))),
             Doc::Group(inner) => Doc::flat(*inner),
             Doc::IfBreak { flat, .. } => Doc::flat(*flat),
+            Doc::TrailingComment(_) => doc,
         }
     }
 
@@ -181,6 +185,11 @@ pub fn pretty(width: usize, doc: &Doc) -> String {
                 Mode::Break => stack.push((indent, mode, broken)),
                 Mode::Flat => stack.push((indent, mode, flat)),
             },
+            Doc::TrailingComment(text) => {
+                output.push_str(" # ");
+                output.push_str(text);
+                col += 3 + text.len();
+            }
         }
     }
 
@@ -245,6 +254,9 @@ fn fits(remaining: isize, initial: &[(usize, Mode, &Doc)]) -> bool {
                 Mode::Break => stack.push((indent, mode, broken)),
                 Mode::Flat => stack.push((indent, mode, flat)),
             },
+            Doc::TrailingComment(_) => {
+                // Comments don't count toward line width for fit decisions
+            }
         }
     }
 

@@ -4,7 +4,7 @@ use super::helpers::{
     docs_from_vec, format_annotated_body, format_braced_body, format_doc_preamble,
     format_handler_arm, format_lit_raw, format_trailing, format_trivia,
 };
-use super::pat::format_pat;
+use super::pat::format_pat_atom;
 use super::type_expr::*;
 use crate::ast::*;
 use crate::docs;
@@ -53,7 +53,7 @@ pub fn format_fun_binding(
 ) -> Doc {
     let mut lhs = Doc::text(name.to_string());
     for p in params {
-        lhs = lhs.append(Doc::text(" ")).append(format_pat(p));
+        lhs = lhs.append(Doc::text(" ")).append(format_pat_atom(p));
     }
     if let Some(g) = guard {
         lhs = lhs.append(Doc::text(" | ")).append(format_expr(g));
@@ -98,6 +98,11 @@ pub(super) fn is_block_like(expr: &Expr) -> bool {
         // multi-line layout like `x |> f |> g` or `"a" <> "b" <> "c"`
         ExprKind::Pipe { .. } => false,
         ExprKind::BinOp { .. } | ExprKind::BinOpChain { .. } => true,
+        // Lists and tuples stay on the = line — they handle their own breaking
+        ExprKind::ListLit { elements } => !elements.is_empty(),
+        ExprKind::Tuple { .. } => true,
+        // Named record creates stay on = line
+        ExprKind::RecordCreate { .. } | ExprKind::AnonRecordCreate { .. } => true,
         // with expressions where the handler is inline are block-like
         ExprKind::With { handler, .. } => matches!(handler.as_ref(), Handler::Inline { .. }),
         _ => false,
@@ -234,19 +239,44 @@ pub fn format_record_def(
         header.push(' ');
         header.push_str(tp);
     }
-    header.push_str(" {");
     parts.push(Doc::text(header));
 
-    let body = format_annotated_body(fields, |(fname, ty)| {
-        docs![Doc::text(format!("{} : ", fname)), format_type_expr(ty), Doc::text(",")]
-    }, dangling);
-    parts.push(Doc::nest(2, body));
-    parts.push(Doc::hardline());
-    parts.push(Doc::text("}"));
+    let deriving_doc = if !deriving.is_empty() {
+        Doc::text(format!(" deriving ({})", deriving.join(", ")))
+    } else {
+        Doc::Nil
+    };
 
-    if !deriving.is_empty() {
-        parts.push(Doc::text(format!(" deriving ({})", deriving.join(", "))));
-    }
+    let field_docs: Vec<Doc> = fields.iter().map(|ann| {
+        let (fname, ty) = &ann.node;
+        let mut d = docs![Doc::text(format!("{}: ", fname)), format_type_expr(ty)];
+        d = d.append(format_trailing(&ann.trailing_comment));
+        d
+    }).collect();
+
+    // Try flat: `record Name { a: T, b: T } deriving (...)`
+    // Broken: `record Name {\n  a: T,\n  b: T,\n} deriving (...)`
+    let flat_fields = {
+        let joined = Doc::join(Doc::text(", "), field_docs.clone());
+        docs![Doc::text(" { "), joined, Doc::text(" }"), deriving_doc.clone()]
+    };
+
+    let broken_fields = {
+        let body = format_annotated_body(
+            fields,
+            |(fname, ty)| {
+                docs![
+                    Doc::text(format!("{}: ", fname)),
+                    format_type_expr(ty),
+                    Doc::text(",")
+                ]
+            },
+            dangling,
+        );
+        docs![Doc::text(" {"), Doc::nest(2, body), Doc::hardline(), Doc::text("}"), deriving_doc]
+    };
+
+    parts.push(Doc::group(Doc::if_break(broken_fields, flat_fields)));
 
     docs_from_vec(parts)
 }
@@ -275,9 +305,16 @@ pub fn format_effect_def(
     header.push_str(" {");
     parts.push(Doc::text(header));
 
-    let body = format_annotated_body(operations, |op| {
-        docs![Doc::text(format!("fun {} : ", op.name)), format_fun_type(&op.params, &op.return_type, &[], &None)]
-    }, dangling);
+    let body = format_annotated_body(
+        operations,
+        |op| {
+            docs![
+                Doc::text(format!("fun {} : ", op.name)),
+                format_fun_type(&op.params, &op.return_type, &[], &None)
+            ]
+        },
+        dangling,
+    );
     parts.push(Doc::nest(2, body));
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));
@@ -323,9 +360,16 @@ pub fn format_trait_def(
 
     parts.push(Doc::text(" {"));
 
-    let body = format_annotated_body(methods, |method| {
-        docs![Doc::text(format!("fun {} : ", method.name)), format_fun_type(&method.params, &method.return_type, &[], &None)]
-    }, dangling);
+    let body = format_annotated_body(
+        methods,
+        |method| {
+            docs![
+                Doc::text(format!("fun {} : ", method.name)),
+                format_fun_type(&method.params, &method.return_type, &[], &None)
+            ]
+        },
+        dangling,
+    );
     parts.push(Doc::nest(2, body));
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));
@@ -410,7 +454,12 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
     let mut header = if trait_type_args.is_empty() {
         format!("impl {} for {}", trait_name, target_type)
     } else {
-        format!("impl {} {} for {}", trait_name, trait_type_args.join(" "), target_type)
+        format!(
+            "impl {} {} for {}",
+            trait_name,
+            trait_type_args.join(" "),
+            target_type
+        )
     };
     for tp in type_params {
         header.push(' ');
@@ -429,9 +478,11 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
 
     parts.push(Doc::text(" {"));
 
-    let body = format_annotated_body(methods, |m| {
-        format_fun_binding(&m.name, &m.params, &None, &m.body)
-    }, dangling);
+    let body = format_annotated_body(
+        methods,
+        |m| format_fun_binding(&m.name, &m.params, &None, &m.body),
+        dangling,
+    );
     parts.push(Doc::nest(2, body));
     parts.push(Doc::hardline());
     parts.push(Doc::text("}"));

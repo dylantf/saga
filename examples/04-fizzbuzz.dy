@@ -4,9 +4,11 @@ fizzbuzz n | n % 3 == 0 = "Fizz"
 fizzbuzz n | n % 5 == 0 = "Buzz"
 fizzbuzz n = show n
 
-loop i max = if i > max then () else {
-  fizzbuzz i |> println
-  loop (i + 1) max
-}
+loop i max =
+  if i > max then ()
+  else {
+    fizzbuzz i |> println
+    loop (i + 1) max
+  }
 
 main () = loop 1 100

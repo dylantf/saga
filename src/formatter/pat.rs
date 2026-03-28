@@ -17,13 +17,17 @@ pub fn format_pat(pat: &Pat) -> Doc {
             }
         }
         Pat::Record { name, fields, as_name, .. } => {
-            let field_docs: Vec<Doc> = fields.iter().map(|(fname, alias)| {
-                match alias {
-                    Some(p) => docs![Doc::text(format!("{}: ", fname)), format_pat(p)],
-                    None => Doc::text(fname),
-                }
-            }).collect();
-            let mut d = docs![Doc::text(format!("{} {{ ", name)), Doc::join(Doc::text(", "), field_docs), Doc::text(" }")];
+            let mut d = if fields.is_empty() {
+                Doc::text(format!("{} {{}}", name))
+            } else {
+                let field_docs: Vec<Doc> = fields.iter().map(|(fname, alias)| {
+                    match alias {
+                        Some(p) => docs![Doc::text(format!("{}: ", fname)), format_pat(p)],
+                        None => Doc::text(fname),
+                    }
+                }).collect();
+                docs![Doc::text(format!("{} {{ ", name)), Doc::join(Doc::text(", "), field_docs), Doc::text(" }")]
+            };
             if let Some(a) = as_name {
                 d = d.append(Doc::text(format!(" as {}", a)));
             }
@@ -45,5 +49,22 @@ pub fn format_pat(pat: &Pat) -> Doc {
         Pat::StringPrefix { prefix, rest, .. } => {
             docs![Doc::text(format!("\"{}\" <> ", prefix)), format_pat(rest)]
         }
+    }
+}
+
+/// Format a pattern in "atom" position (function params, constructor args).
+/// Wraps patterns that contain spaces in parens to avoid ambiguity.
+pub fn format_pat_atom(pat: &Pat) -> Doc {
+    match pat {
+        Pat::Wildcard { .. }
+        | Pat::Var { .. }
+        | Pat::Lit { .. }
+        | Pat::Tuple { .. }
+        | Pat::AnonRecord { .. } => format_pat(pat),
+        // Constructor with no args is just a name — no parens needed
+        Pat::Constructor { args, .. } if args.is_empty() => format_pat(pat),
+        // Record with no as_name and no fields is just `Name {}` — no parens needed
+        Pat::Record { fields, as_name: None, .. } if fields.is_empty() => format_pat(pat),
+        _ => docs![Doc::text("("), format_pat(pat), Doc::text(")")],
     }
 }

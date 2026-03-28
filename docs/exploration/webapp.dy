@@ -13,26 +13,22 @@ effect Http {
 # Handlers
 
 handler postgres_handler for Database {
-  query sql -> todo! "connect to postgres and run query"
-  execute sql -> todo! "connect to postgres and run execute"
 }
 
 handler http_handler for Http {
-  listen port handler -> todo! "bind to port and dispatch requests"
-  send_response status body -> todo! "write http response to socket"
 }
 
 # Types
 
 record User {
-  name: String,
-  email: String,
+  name : String,
+  email : String,
 }
 
 record Post {
-  title: String,
-  body: String,
-  user_id: Int,
+  title : String,
+  body : String,
+  user_id : Int,
 }
 
 # Deserializing Db rows into record instances
@@ -42,18 +38,16 @@ trait FromRow a {
 }
 
 impl FromRow for User {
-  from_row row = User {
-    name: get row "name", 
-    email: get row "email",
-  }
+  from_row row = User { name: get row "name", email: get row "email" }
 }
 
 impl FromRow for Post {
-  from_row row = Post {
-    title: get row "title", 
-    body: get row "body", 
-    user_id: get row "user_id"
-  }
+  from_row row =
+    Post {
+      title: get row "title",
+      body: get row "body",
+      user_id: get row "user_id",
+    }
 }
 
 # Database layer
@@ -104,4 +98,7 @@ router request = {
 
 main () = {
   listen! 8080 router
-} with {postgres_handler, http_handler}
+} with {
+  postgres_handler,
+  http_handler,
+}

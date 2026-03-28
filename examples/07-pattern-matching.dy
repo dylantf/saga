@@ -2,8 +2,8 @@
 
 # --- Custom types ---
 
-type Shape =
-  | Circle(radius: Float)
+type Shape
+  = Circle(radius: Float)
   | Rect(Float, Float)
   | Triangle(Float, Float, Float)
 
@@ -11,7 +11,7 @@ fun area : Shape -> Float
 area shape = case shape {
   Circle(r) -> 3.0 * r * r
   Rect(w, h) -> w * h
-  Triangle(b, h, _) -> (b * h) / 2.0
+  Triangle(b, h, _) -> b * h / 2.0
 }
 
 describe_shape shape = case shape {
@@ -36,21 +36,21 @@ quadrant p = case p {
 
 fun describe : (xs: List a) -> String
 describe items = case items {
-  [] -> "empty"
-  [_] -> "one element"
-  [_, _] -> "two elements"
-  _ :: _ -> "many elements"
+  Nil -> "empty"
+  Cons(_, Nil) -> "one element"
+  Cons(_, Cons(_, Nil)) -> "two elements"
+  Cons(_, _) -> "many elements"
 }
 
 fun sum_two : (xs: List Int) -> Int
 sum_two xs = case xs {
-  [a, b] -> a + b
+  Cons(a, Cons(b, Nil)) -> a + b
   _ -> 0
 }
 
 fun first_two : (xs: List Int) -> String
 first_two xs = case xs {
-  x :: y :: _ -> show x <> " and " <> show y
+  Cons(x, Cons(y, _)) -> show x <> " and " <> show y
   _ -> "fewer than two elements"
 }
 
@@ -66,9 +66,9 @@ classify_log msg = case msg {
 
 main () = {
   # Custom type patterns
-  let c = Circle(5.0)
-  let r = Rect(3.0, 4.0)
-  let t = Triangle(6.0, 8.0, 10.0)
+  let c = Circle 5.0
+  let r = Rect 3.0 4.0
+  let t = Triangle 6.0 8.0 10.0
   describe_shape c |> println
   describe_shape r |> println
   describe_shape t |> println

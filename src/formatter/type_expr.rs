@@ -54,11 +54,28 @@ pub fn format_type_expr(ty: &TypeExpr) -> Doc {
             }
             d
         }
-        TypeExpr::Record { fields, .. } => {
+        TypeExpr::Record { fields, multiline, .. } => {
             let field_docs: Vec<Doc> = fields.iter().map(|(name, ty)| {
                 docs![Doc::text(format!("{}: ", name)), format_type_expr(ty)]
             }).collect();
-            docs![Doc::text("{ "), Doc::join(Doc::text(", "), field_docs), Doc::text(" }")]
+            if *multiline {
+                let fields_joined = Doc::join(docs![Doc::text(","), Doc::hardline()], field_docs);
+                docs![
+                    Doc::text("{"),
+                    Doc::nest(2, docs![Doc::hardline(), fields_joined, Doc::text(",")]),
+                    Doc::hardline(),
+                    Doc::text("}")
+                ]
+            } else {
+                let fields_joined = Doc::join(docs![Doc::text(","), Doc::line()], field_docs);
+                let trailing_comma = Doc::if_break(Doc::text(","), Doc::Nil);
+                Doc::group(docs![
+                    Doc::text("{"),
+                    Doc::nest(2, docs![Doc::line(), fields_joined, trailing_comma]),
+                    Doc::line(),
+                    Doc::text("}")
+                ])
+            }
         }
     }
 }

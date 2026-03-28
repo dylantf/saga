@@ -787,6 +787,8 @@ pub enum TypeExpr {
     /// Anonymous record type: `{ street: String, city: String }`
     Record {
         fields: Vec<(String, TypeExpr)>,
+        /// True if any field separator was on a new line — preserve multi-line layout.
+        multiline: bool,
         span: Span,
     },
 }

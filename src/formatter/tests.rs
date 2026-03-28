@@ -597,8 +597,9 @@ fn normalize_type_expr(te: &mut TypeExpr) {
                 *s = S;
             }
         }
-        TypeExpr::Record { fields, span } => {
+        TypeExpr::Record { fields, multiline, span } => {
             *span = S;
+            *multiline = false;
             for (_, te) in fields.iter_mut() {
                 normalize_type_expr(te);
             }

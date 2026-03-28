@@ -1142,21 +1142,25 @@ impl Parser {
             }
             Token::LBrace => {
                 // Anonymous record type: { field: Type, ... }
-                                let mut fields = Vec::new();
+                let mut fields = Vec::new();
+                let mut multiline = false;
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                    if self.tokens[self.pos].preceded_by_newline {
+                        multiline = true;
+                    }
                     let field_name = self.expect_ident()?;
                     self.expect(Token::Colon)?;
                     let field_type = self.parse_type_expr()?;
                     fields.push((field_name, field_type));
-                                        if matches!(self.peek(), Token::RBrace) {
+                    if matches!(self.peek(), Token::RBrace) {
                         // last field, no trailing comma needed
                     } else {
                         self.expect(Token::Comma)?;
-                                            }
+                    }
                 }
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;
-                Ok(TypeExpr::Record { fields, span: start.to(end) })
+                Ok(TypeExpr::Record { fields, multiline, span: start.to(end) })
             }
             tok => {
                 self.pos -= 1; // put back
