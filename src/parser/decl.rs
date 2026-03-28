@@ -652,7 +652,14 @@ impl Parser {
         self.advance(); // consume 'trait'
         let name_span = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
-        let type_param = self.expect_ident()?;
+        // Parse type parameters: first is self, rest are extras
+        // e.g. `trait ConvertTo a b` -> type_params = ["a", "b"]
+        let mut type_params = vec![self.expect_ident()?];
+        while matches!(self.peek(), Token::Ident(_))
+            && !matches!(self.peek(), Token::Where)
+        {
+            type_params.push(self.expect_ident()?);
+        }
 
         let mut supertraits = Vec::new();
         if *self.peek() == Token::Where {
@@ -723,7 +730,7 @@ impl Parser {
             public,
             name,
             name_span,
-            type_param,
+            type_params,
             supertraits,
             methods,
             dangling_trivia,
@@ -750,12 +757,26 @@ impl Parser {
             self.expect(Token::Colon)?;
             let name = self.parse_upper_name()?;
             let span = self.tokens[self.pos - 1].span;
-            let mut traits = vec![(name, span)];
+            // Parse optional type args after trait name: `ConvertTo b` in `a: ConvertTo b`
+            // Stop at `+` (next trait), `,` (next bound), `}` (end of clause)
+            let mut type_args = Vec::new();
+            while matches!(self.peek(), Token::Ident(_))
+                && !matches!(self.peek(), Token::Plus | Token::Comma | Token::RBrace)
+            {
+                type_args.push(self.expect_ident()?);
+            }
+            let mut traits = vec![(name, type_args, span)];
             while *self.peek() == Token::Plus {
                 self.advance();
                 let name = self.parse_upper_name()?;
                 let span = self.tokens[self.pos - 1].span;
-                traits.push((name, span));
+                let mut type_args = Vec::new();
+                while matches!(self.peek(), Token::Ident(_))
+                    && !matches!(self.peek(), Token::Plus | Token::Comma | Token::RBrace)
+                {
+                    type_args.push(self.expect_ident()?);
+                }
+                traits.push((name, type_args, span));
             }
             bounds.push(crate::ast::TraitBound { type_var, traits });
         }
@@ -769,6 +790,22 @@ impl Parser {
 
         let trait_name = self.parse_upper_name()?;
         let trait_name_span = self.tokens[self.pos - 1].span;
+
+        // Parse optional trait type args: `impl ConvertTo NOK for USD`
+        // These are uppercase names (concrete types) or lowercase (type vars) before `for`
+        let mut trait_type_args = Vec::new();
+        while !matches!(self.peek(), Token::For) {
+            match self.peek() {
+                Token::UpperIdent(_) => {
+                    trait_type_args.push(self.parse_upper_name()?);
+                }
+                Token::Ident(_) => {
+                    trait_type_args.push(self.expect_ident()?);
+                }
+                _ => break,
+            }
+        }
+
         self.expect(Token::For)?;
         let target_type = self.parse_upper_name()?;
         let target_type_span = self.tokens[self.pos - 1].span;
@@ -828,6 +865,7 @@ impl Parser {
             doc: vec![],
             trait_name,
             trait_name_span,
+            trait_type_args,
             target_type,
             target_type_span,
             type_params,

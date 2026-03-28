@@ -13,6 +13,10 @@ use crate::ast::*;
 use crate::token::{Span, StringKind};
 use crate::typechecker::{CheckResult, TraitEvidence, TraitInfo, Type};
 
+/// Impl key: (trait_name, trait_type_args, target_type).
+/// e.g. ("ConvertTo", ["NOK"], "USD") or ("Show", [], "Int").
+type ImplKey = (String, Vec<String>, String);
+
 /// Elaborate a program using typechecker results.
 /// Returns a new program with dictionary passing made explicit.
 pub fn elaborate(program: &Program, result: &CheckResult) -> Program {
@@ -32,11 +36,11 @@ struct Elaborator {
     fun_dict_params: HashMap<String, Vec<(String, String)>>,
     /// handler_name -> [(trait_name, type_var_name)] from handler where clauses
     handler_dict_params: HashMap<String, Vec<(String, String)>>,
-    /// (trait_name, target_type) -> dict constructor name
-    dict_names: HashMap<(String, String), String>,
-    /// (trait_name, target_type) -> ordered list of (constraint_trait, param_index) for dict params.
+    /// impl key -> dict constructor name
+    dict_names: HashMap<ImplKey, String>,
+    /// impl key -> ordered list of (constraint_trait, param_index) for dict params.
     /// Used to pass the correct sub-dicts when building parameterized dicts.
-    impl_dict_params: HashMap<(String, String), Vec<(String, usize)>>,
+    impl_dict_params: HashMap<ImplKey, Vec<(String, usize)>>,
     /// trait_name -> TraitInfo
     traits: HashMap<String, TraitInfo>,
     /// Evidence from typechecking: node_id -> Vec<TraitEvidence>
@@ -106,17 +110,17 @@ impl Elaborator {
 
         // Pre-populate dict_names from imported modules' codegen info
         let mut dict_names = HashMap::new();
-        let mut impl_dict_params_from_imports: HashMap<(String, String), Vec<(String, usize)>> =
+        let mut impl_dict_params_from_imports: HashMap<ImplKey, Vec<(String, usize)>> =
             HashMap::new();
         for info in result.codegen_info().values() {
             for d in &info.trait_impl_dicts {
                 dict_names.insert(
-                    (d.trait_name.clone(), d.target_type.clone()),
+                    (d.trait_name.clone(), d.trait_type_args.clone(), d.target_type.clone()),
                     d.dict_name.clone(),
                 );
                 if !d.param_constraints.is_empty() {
                     impl_dict_params_from_imports.insert(
-                        (d.trait_name.clone(), d.target_type.clone()),
+                        (d.trait_name.clone(), d.trait_type_args.clone(), d.target_type.clone()),
                         d.param_constraints.clone(),
                     );
                 }
@@ -144,7 +148,7 @@ impl Elaborator {
     fn dict_params_from_where(where_clause: &[TraitBound]) -> Vec<(String, String)> {
         let mut dict_params = Vec::new();
         for bound in where_clause {
-            for (trait_name, _) in &bound.traits {
+            for (trait_name, _, _) in &bound.traits {
                 if trait_name != "Eq" {
                     dict_params.push((trait_name.clone(), bound.type_var.clone()));
                 }
@@ -164,7 +168,7 @@ impl Elaborator {
             std::mem::take(&mut self.current_dict_params_by_var),
         );
         for bound in where_clause {
-            for (req_trait, _) in &bound.traits {
+            for (req_trait, _, _) in &bound.traits {
                 let param_name = format!("__dict_{}_{}", req_trait, bound.type_var);
                 self.current_dict_params
                     .insert(req_trait.clone(), param_name.clone());
@@ -211,21 +215,28 @@ impl Elaborator {
                 }
                 Decl::ImplDef {
                     trait_name,
+                    trait_type_args,
                     target_type,
                     type_params,
                     where_clause,
                     ..
                 } => {
+                    // Include trait type args in dict name for uniqueness
+                    let type_args_suffix = if trait_type_args.is_empty() {
+                        String::new()
+                    } else {
+                        format!("_{}", trait_type_args.join("_"))
+                    };
                     let dict_name = if self.erlang_module.is_empty() {
-                        format!("__dict_{}_{}", trait_name, target_type)
+                        format!("__dict_{}{}_{}", trait_name, type_args_suffix, target_type)
                     } else {
                         format!(
-                            "__dict_{}_{}_{}",
-                            trait_name, self.erlang_module, target_type
+                            "__dict_{}{}_{}_{}", trait_name, type_args_suffix,
+                            self.erlang_module, target_type
                         )
                     };
                     self.dict_names
-                        .insert((trait_name.clone(), target_type.clone()), dict_name);
+                        .insert((trait_name.clone(), trait_type_args.clone(), target_type.clone()), dict_name);
                     // Capture where-clause constraints as (trait, param_index) pairs.
                     // This tells dict_for_type which sub-dicts to pass for parameterized impls.
                     // Always insert (even empty) so dict_for_type doesn't fall back to
@@ -242,11 +253,11 @@ impl Elaborator {
                                 .get(bound.type_var.as_str())
                                 .copied()
                                 .unwrap_or(0);
-                            bound.traits.iter().map(move |(t, _)| (t.clone(), idx))
+                            bound.traits.iter().map(move |(t, _, _)| (t.clone(), idx))
                         })
                         .collect();
                     self.impl_dict_params
-                        .insert((trait_name.clone(), target_type.clone()), params);
+                        .insert((trait_name.clone(), trait_type_args.clone(), target_type.clone()), params);
                 }
                 Decl::HandlerDef {
                     name, where_clause, ..
@@ -278,6 +289,7 @@ impl Elaborator {
                 // Emit DictConstructor for each impl
                 Decl::ImplDef {
                     trait_name,
+                    trait_type_args,
                     target_type,
                     type_params,
                     where_clause,
@@ -287,7 +299,7 @@ impl Elaborator {
                 } => {
                     let dict_name = self
                         .dict_names
-                        .get(&(trait_name.clone(), target_type.clone()))
+                        .get(&(trait_name.clone(), trait_type_args.clone(), target_type.clone()))
                         .cloned()
                         .unwrap();
 
@@ -296,7 +308,7 @@ impl Elaborator {
                     // Build dict_params for conditional impls
                     let mut dict_params = Vec::new();
                     for bound in where_clause {
-                        for (req_trait, _) in &bound.traits {
+                        for (req_trait, _, _) in &bound.traits {
                             dict_params.push(format!("__dict_{}_{}", req_trait, bound.type_var));
                         }
                     }
@@ -1425,15 +1437,30 @@ impl Elaborator {
                 ))
             }
             Type::Con(name, args) => {
-                let dict_name = self.dict_names.get(&(trait_name.into(), name.clone()))?;
+                // Look up dict name: try empty type args first (single-param traits),
+                // then fall back to searching for any matching key (multi-param traits).
+                let dict_name = self
+                    .dict_names
+                    .get(&(trait_name.into(), vec![], name.clone()))
+                    .or_else(|| {
+                        self.dict_names
+                            .iter()
+                            .find(|((tn, _, tt), _)| tn == trait_name && tt == name)
+                            .map(|(_, v)| v)
+                    })?;
                 let mut dict_expr: Expr = Expr::synth(
                     span,
                     ExprKind::DictRef {
                         name: dict_name.clone(),
                     },
                 );
-                let key = (trait_name.to_string(), name.clone());
-                if let Some(constraints) = self.impl_dict_params.get(&key) {
+                let key = (trait_name.to_string(), vec![], name.clone());
+                if let Some(constraints) = self.impl_dict_params.get(&key).or_else(|| {
+                    self.impl_dict_params
+                        .iter()
+                        .find(|((tn, _, tt), _)| tn == trait_name && tt == name)
+                        .map(|(_, v)| v)
+                }) {
                     // Use explicit where-clause constraints (handles cases like
                     // Ord where the impl needs both Ord and Eq dicts per type param).
                     for (constraint_trait, param_idx) in constraints {

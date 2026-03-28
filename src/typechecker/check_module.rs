@@ -19,8 +19,8 @@ pub struct ModuleExports {
     pub record_defs: HashMap<String, RecordInfo>,
     /// Trait name -> trait info.
     pub traits: HashMap<String, TraitInfo>,
-    /// (trait_name, target_type) -> impl info.
-    pub trait_impls: HashMap<(String, String), ImplInfo>,
+    /// (trait_name, trait_type_args, target_type) -> impl info.
+    pub trait_impls: HashMap<(String, Vec<String>, String), ImplInfo>,
     /// Effect name -> effect def info.
     pub(crate) effects: HashMap<String, EffectDefInfo>,
     /// Handler name -> handler info.
@@ -89,7 +89,7 @@ impl ModuleExports {
         // Records, traits, trait impls, effects, handlers: all from AST + checker state
         let mut record_defs: HashMap<String, RecordInfo> = HashMap::new();
         let mut traits: HashMap<String, TraitInfo> = HashMap::new();
-        let mut trait_impls: HashMap<(String, String), ImplInfo> = HashMap::new();
+        let mut trait_impls: HashMap<(String, Vec<String>, String), ImplInfo> = HashMap::new();
         let mut effects: HashMap<String, EffectDefInfo> = HashMap::new();
         let mut handlers: HashMap<String, HandlerInfo> = HashMap::new();
 
@@ -111,10 +111,11 @@ impl ModuleExports {
                 }
                 Decl::ImplDef {
                     trait_name,
+                    trait_type_args,
                     target_type,
                     ..
                 } => {
-                    let key = (trait_name.clone(), target_type.clone());
+                    let key = (trait_name.clone(), trait_type_args.clone(), target_type.clone());
                     if let Some(info) = checker.trait_state.impls.get(&key) {
                         trait_impls.insert(key, info.clone());
                     }
@@ -209,6 +210,8 @@ pub struct EffectDef {
 #[derive(Debug, Clone)]
 pub struct TraitImplDict {
     pub trait_name: String,
+    /// Extra type arguments applied to the trait (e.g. ["NOK"] in `impl ConvertTo NOK for USD`).
+    pub trait_type_args: Vec<String>,
     pub target_type: String,
     /// Module-qualified dict name (e.g. `__dict_Show_animals_Animal`).
     pub dict_name: String,
@@ -1013,12 +1016,19 @@ fn collect_codegen_info(
             }
             Decl::ImplDef {
                 trait_name,
+                trait_type_args,
                 target_type,
                 type_params,
                 where_clause,
                 ..
             } => {
-                let dict_name = format!("__dict_{}_{}_{}", trait_name, erlang_module, target_type);
+                // Include trait type args in dict name for uniqueness
+                let type_args_suffix = if trait_type_args.is_empty() {
+                    String::new()
+                } else {
+                    format!("_{}", trait_type_args.join("_"))
+                };
+                let dict_name = format!("__dict_{}{}_{}_{}", trait_name, type_args_suffix, erlang_module, target_type);
                 let arity = where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
                 let var_to_idx: std::collections::HashMap<&str, usize> = type_params
                     .iter()
@@ -1029,11 +1039,12 @@ fn collect_codegen_info(
                     .iter()
                     .flat_map(|bound| {
                         let idx = var_to_idx.get(bound.type_var.as_str()).copied().unwrap_or(0);
-                        bound.traits.iter().map(move |(t, _)| (t.clone(), idx))
+                        bound.traits.iter().map(move |(t, _, _)| (t.clone(), idx))
                     })
                     .collect();
                 trait_impl_dicts.push(TraitImplDict {
                     trait_name: trait_name.clone(),
+                    trait_type_args: trait_type_args.clone(),
                     target_type: target_type.clone(),
                     dict_name,
                     arity,

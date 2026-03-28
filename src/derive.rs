@@ -91,7 +91,7 @@ fn derive_record_stringify(
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec![(trait_name.into(), Span { start: 0, end: 0 })],
+            traits: vec![(trait_name.into(), vec![], Span { start: 0, end: 0 })],
         })
         .collect();
 
@@ -99,6 +99,7 @@ fn derive_record_stringify(
         id: NodeId::fresh(),
         doc: vec![],
         trait_name: trait_name.into(),
+        trait_type_args: vec![],
         target_type: record_name.into(),
         type_params: type_params.to_vec(),
         where_clause,
@@ -335,7 +336,7 @@ fn derive_stringify(
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec![(trait_name.into(), Span { start: 0, end: 0 })],
+            traits: vec![(trait_name.into(), vec![], Span { start: 0, end: 0 })],
         })
         .collect();
 
@@ -343,6 +344,7 @@ fn derive_stringify(
         id: NodeId::fresh(),
         doc: vec![],
         trait_name: trait_name.into(),
+        trait_type_args: vec![],
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
         where_clause,
@@ -523,7 +525,7 @@ fn derive_ord(
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec![("Ord".into(), Span { start: 0, end: 0 })],
+            traits: vec![("Ord".into(), vec![], Span { start: 0, end: 0 })],
         })
         .collect();
 
@@ -531,6 +533,7 @@ fn derive_ord(
         id: NodeId::fresh(),
         doc: vec![],
         trait_name: "Ord".into(),
+        trait_type_args: vec![],
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
         where_clause,
@@ -639,7 +642,7 @@ fn derive_marker_trait(
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec![(trait_name.into(), Span { start: 0, end: 0 })],
+            traits: vec![(trait_name.into(), vec![], Span { start: 0, end: 0 })],
         })
         .collect();
 
@@ -647,6 +650,7 @@ fn derive_marker_trait(
         id: NodeId::fresh(),
         doc: vec![],
         trait_name: trait_name.into(),
+        trait_type_args: vec![],
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
         where_clause,
@@ -721,6 +725,7 @@ fn derive_enum(
         id: NodeId::fresh(),
         doc: vec![],
         trait_name: "Enum".into(),
+        trait_type_args: vec![],
         target_type: type_name.into(),
         type_params: vec![],
         where_clause: vec![],

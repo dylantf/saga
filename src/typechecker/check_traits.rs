@@ -64,10 +64,11 @@ impl Checker {
     pub(crate) fn register_trait_def(
         &mut self,
         name: &str,
-        type_param: &str,
+        type_params: &[String],
         supertraits: &[(String, crate::token::Span)],
         methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
+        let self_param = type_params.first().map(|s| s.as_str()).unwrap_or("a");
         let mut method_sigs = Vec::new();
 
         for method in methods {
@@ -79,10 +80,10 @@ impl Checker {
                 .collect();
             let return_type = self.convert_type_expr(&method.return_type, &mut params_list);
 
-            // Find the var ID assigned to the trait's type param
+            // Find the var ID assigned to the trait's self type param
             let trait_param_id = params_list
                 .iter()
-                .find(|(pname, _)| pname == type_param)
+                .find(|(pname, _)| pname == self_param)
                 .map(|(_, id)| *id);
 
             method_sigs.push((
@@ -126,7 +127,7 @@ impl Checker {
         self.trait_state.traits.insert(
             name.into(),
             super::TraitInfo {
-                type_param: type_param.into(),
+                type_params: type_params.to_vec(),
                 supertraits: supertraits.iter().map(|(n, _)| n.clone()).collect(),
                 methods: method_sigs,
             },
@@ -139,6 +140,7 @@ impl Checker {
     pub(crate) fn register_impl(
         &mut self,
         trait_name: &str,
+        trait_type_args: &[String],
         target_type: &str,
         type_params: &[String],
         where_clause: &[ast::TraitBound],
@@ -150,6 +152,18 @@ impl Checker {
         let trait_info = self.trait_state.traits.get(trait_name).cloned().ok_or_else(|| {
             Diagnostic::error_at(span, format!("impl for undefined trait: {}", trait_name))
         })?;
+
+        // Validate trait type arg arity: extra type params (all except the self param at index 0)
+        let expected_extra = trait_info.type_params.len().saturating_sub(1);
+        if trait_type_args.len() != expected_extra {
+            return Err(Diagnostic::error_at(
+                span,
+                format!(
+                    "trait {} expects {} type argument(s), but {} were provided",
+                    trait_name, expected_extra, trait_type_args.len()
+                ),
+            ));
+        }
 
         // Check all required methods are provided
         let provided: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
@@ -207,7 +221,7 @@ impl Checker {
                 {
                     self.trait_state.where_bound_var_names
                         .insert(*var_id, bound.type_var.clone());
-                    for (trait_req, trait_span) in &bound.traits {
+                    for (trait_req, _, trait_span) in &bound.traits {
                         self.lsp.type_references.push((*trait_span, trait_req.clone()));
                         self.trait_state.where_bounds
                             .entry(*var_id)
@@ -343,7 +357,7 @@ impl Checker {
             let param_idx = type_params.iter().position(|p| p == &bound.type_var);
             match param_idx {
                 Some(idx) => {
-                    for (trait_req, _) in &bound.traits {
+                    for (trait_req, _, _) in &bound.traits {
                         param_constraints.push((trait_req.clone(), idx));
                     }
                 }
@@ -359,13 +373,18 @@ impl Checker {
             }
         }
 
-        let key = (trait_name.to_string(), target_type.to_string());
+        let key = (trait_name.to_string(), trait_type_args.to_vec(), target_type.to_string());
         if self.trait_state.impls.contains_key(&key) {
+            let args_str = if trait_type_args.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", trait_type_args.join(" "))
+            };
             return Err(Diagnostic::error_at(
                 span,
                 format!(
-                    "duplicate impl: {} is already implemented for {}",
-                    trait_name, target_type
+                    "duplicate impl: {}{} is already implemented for {}",
+                    trait_name, args_str, target_type
                 ),
             ));
         }
@@ -373,6 +392,7 @@ impl Checker {
             key,
             ImplInfo {
                 param_constraints,
+                trait_type_args: trait_type_args.to_vec(),
                 span: Some(span),
             },
         );

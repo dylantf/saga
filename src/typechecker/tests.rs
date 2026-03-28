@@ -4019,3 +4019,44 @@ fn open_row_callback_accepts_extra_effects() {
     )
     .unwrap();
 }
+
+// --- Multi-param trait tests ---
+
+#[test]
+fn multi_param_trait_def_and_impl() {
+    check(
+        "trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         }\n\
+         impl ConvertTo Int for Float {\n\
+         rate () = 1.0\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_param_trait_arity_mismatch() {
+    let result = check(
+        "trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         }\n\
+         impl ConvertTo for Float {\n\
+         rate () = 1.0\n\
+         }",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn multi_param_trait_too_many_args() {
+    let result = check(
+        "trait Show a {\n\
+         fun show : a -> String\n\
+         }\n\
+         impl Show Int for Float {\n\
+         show x = \"float\"\n\
+         }",
+    );
+    assert!(result.is_err());
+}

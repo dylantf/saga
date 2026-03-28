@@ -1944,7 +1944,7 @@ fn fun_annotation_with_where_clause() {
         Decl::FunSignature { where_clause, .. } => {
             assert_eq!(where_clause.len(), 1);
             assert_eq!(where_clause[0].type_var, "a");
-            let trait_names: Vec<&str> = where_clause[0].traits.iter().map(|(t, _)| t.as_str()).collect();
+            let trait_names: Vec<&str> = where_clause[0].traits.iter().map(|(t, _, _)| t.as_str()).collect();
             assert_eq!(trait_names, vec!["Show"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
@@ -1959,11 +1959,28 @@ fn fun_annotation_where_multiple_bounds() {
         Decl::FunSignature { where_clause, .. } => {
             assert_eq!(where_clause.len(), 2);
             assert_eq!(where_clause[0].type_var, "a");
-            let trait_names_0: Vec<&str> = where_clause[0].traits.iter().map(|(t, _)| t.as_str()).collect();
+            let trait_names_0: Vec<&str> = where_clause[0].traits.iter().map(|(t, _, _)| t.as_str()).collect();
             assert_eq!(trait_names_0, vec!["Show", "Eq"]);
             assert_eq!(where_clause[1].type_var, "b");
-            let trait_names_1: Vec<&str> = where_clause[1].traits.iter().map(|(t, _)| t.as_str()).collect();
+            let trait_names_1: Vec<&str> = where_clause[1].traits.iter().map(|(t, _, _)| t.as_str()).collect();
             assert_eq!(trait_names_1, vec!["Ord"]);
+        }
+        _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn where_clause_with_trait_type_args() {
+    let decls = parse("fun convert : a -> b where {a: ConvertTo b}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::FunSignature { where_clause, .. } => {
+            assert_eq!(where_clause.len(), 1);
+            assert_eq!(where_clause[0].type_var, "a");
+            assert_eq!(where_clause[0].traits.len(), 1);
+            let (name, type_args, _) = &where_clause[0].traits[0];
+            assert_eq!(name, "ConvertTo");
+            assert_eq!(type_args, &["b"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
     }
@@ -1996,13 +2013,13 @@ fn trait_def_simple() {
     match &decls[0] {
         Decl::TraitDef {
             name,
-            type_param,
+            type_params,
             supertraits,
             methods,
             ..
         } => {
             assert_eq!(name, "Show");
-            assert_eq!(type_param, "a");
+            assert_eq!(type_params, &["a"]);
             assert!(supertraits.is_empty());
             assert_eq!(methods.len(), 1);
             assert_eq!(methods[0].node.name, "show");
@@ -2019,18 +2036,38 @@ fn trait_def_with_supertraits() {
     match &decls[0] {
         Decl::TraitDef {
             name,
-            type_param,
+            type_params,
             supertraits,
             methods,
             ..
         } => {
             assert_eq!(name, "Ord");
-            assert_eq!(type_param, "a");
+            assert_eq!(type_params, &["a"]);
             let st_names: Vec<&str> = supertraits.iter().map(|(n, _)| n.as_str()).collect();
             assert_eq!(st_names, &["Eq"]);
             assert_eq!(methods.len(), 1);
             assert_eq!(methods[0].node.name, "compare");
             assert_eq!(methods[0].node.params.len(), 2);
+        }
+        _ => panic!("expected TraitDef, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn trait_def_with_extra_type_params() {
+    let decls = parse("trait ConvertTo a b {\n  fun rate : Unit -> Float\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::TraitDef {
+            name,
+            type_params,
+            methods,
+            ..
+        } => {
+            assert_eq!(name, "ConvertTo");
+            assert_eq!(type_params, &["a", "b"]);
+            assert_eq!(methods.len(), 1);
+            assert_eq!(methods[0].node.name, "rate");
         }
         _ => panic!("expected TraitDef, got {:?}", decls[0]),
     }
@@ -2054,6 +2091,27 @@ fn impl_def_simple() {
             assert_eq!(methods.len(), 1);
             assert_eq!(methods[0].node.name, "show");
             assert_eq!(methods[0].node.params.len(), 1);
+        }
+        _ => panic!("expected ImplDef, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn impl_def_with_trait_type_args() {
+    let decls = parse("impl ConvertTo NOK for USD {\n  rate () = 10.5\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::ImplDef {
+            trait_name,
+            trait_type_args,
+            target_type,
+            methods,
+            ..
+        } => {
+            assert_eq!(trait_name, "ConvertTo");
+            assert_eq!(trait_type_args, &["NOK"]);
+            assert_eq!(target_type, "USD");
+            assert_eq!(methods.len(), 1);
         }
         _ => panic!("expected ImplDef, got {:?}", decls[0]),
     }
@@ -2631,7 +2689,7 @@ fn external_fun_with_where_clause() {
             assert_eq!(name, "do_thing");
             assert_eq!(where_clause.len(), 1);
             assert_eq!(where_clause[0].type_var, "a");
-            let trait_names: Vec<&str> = where_clause[0].traits.iter().map(|(t, _)| t.as_str()).collect();
+            let trait_names: Vec<&str> = where_clause[0].traits.iter().map(|(t, _, _)| t.as_str()).collect();
             assert_eq!(trait_names, vec!["Show"]);
             assert_eq!(annotations.len(), 1);
             assert_eq!(annotations[0].name, "external");

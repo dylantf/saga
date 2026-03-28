@@ -42,7 +42,7 @@ impl Checker {
                     let (mut ty, constraints) = self.instantiate(&scheme);
                     for (trait_name, trait_ty) in constraints {
                         self.trait_state.pending_constraints
-                            .push((trait_name, trait_ty, span, node_id));
+                            .push((trait_name, vec![], trait_ty, span, node_id));
                     }
                     if let Some(eff_constraints) =
                         self.effect_meta.fun_type_constraints.get(name).cloned()
@@ -161,6 +161,7 @@ impl Checker {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.trait_state.pending_constraints.push((
                             "Num".into(),
+                            vec![],
                             left_ty.clone(),
                             span,
                             node_id,
@@ -171,6 +172,7 @@ impl Checker {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.trait_state.pending_constraints.push((
                             "Eq".into(),
+                            vec![],
                             left_ty.clone(),
                             span,
                             node_id,
@@ -181,6 +183,7 @@ impl Checker {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.trait_state.pending_constraints.push((
                             "Ord".into(),
+                            vec![],
                             left_ty.clone(),
                             span,
                             node_id,
@@ -196,6 +199,7 @@ impl Checker {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.trait_state.pending_constraints.push((
                             "Semigroup".into(),
+                            vec![],
                             left_ty.clone(),
                             span,
                             node_id,
@@ -208,7 +212,7 @@ impl Checker {
             ExprKind::UnaryMinus { expr: inner, .. } => {
                 let ty = self.infer_expr(inner)?;
                 self.trait_state.pending_constraints
-                    .push(("Num".into(), ty.clone(), span, node_id));
+                    .push(("Num".into(), vec![], ty.clone(), span, node_id));
                 Ok(ty)
             }
 
@@ -344,7 +348,7 @@ impl Checker {
                         let (ty, constraints) = self.instantiate(&scheme);
                         for (trait_name, trait_ty) in constraints {
                             self.trait_state.pending_constraints
-                                .push((trait_name, trait_ty, span, node_id));
+                                .push((trait_name, vec![], trait_ty, span, node_id));
                         }
                         if let Some(def_id) = self.env.def_id(&key) {
                             self.record_reference(node_id, span, def_id);
@@ -762,7 +766,7 @@ impl Checker {
         let mut scheme = self.generalize(ty);
 
         self.trait_state.pending_constraints
-            .retain(|(trait_name, cty, _span, node_id)| {
+            .retain(|(trait_name, _trait_type_args, cty, _span, node_id)| {
                 let resolved = self.sub.apply(cty);
                 if let Type::Var(id) = resolved
                     && scheme.forall.contains(&id)

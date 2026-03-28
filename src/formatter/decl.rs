@@ -288,7 +288,7 @@ pub fn format_trait_def(
     doc: &[String],
     public: bool,
     name: &str,
-    type_param: &str,
+    type_params: &[String],
     supertraits: &[(String, Span)],
     methods: &[Annotated<TraitMethod>],
     dangling: &[Trivia],
@@ -302,10 +302,13 @@ pub fn format_trait_def(
     }
     header.push_str("trait ");
     header.push_str(name);
-    header.push(' ');
-    header.push_str(type_param);
+    for tp in type_params {
+        header.push(' ');
+        header.push_str(tp);
+    }
     parts.push(Doc::text(header));
 
+    let self_param = type_params.first().map(|s| s.as_str()).unwrap_or("a");
     if !supertraits.is_empty() {
         let st_names: Vec<&str> = supertraits
             .iter()
@@ -313,7 +316,7 @@ pub fn format_trait_def(
             .collect();
         parts.push(Doc::text(format!(
             " where {{{}: {}}}",
-            type_param,
+            self_param,
             st_names.join(" + ")
         )));
     }
@@ -388,6 +391,7 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
     let Decl::ImplDef {
         doc,
         trait_name,
+        trait_type_args,
         target_type,
         type_params,
         where_clause,
@@ -403,7 +407,11 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
     let mut parts = Vec::new();
     format_doc_preamble(doc, &mut parts);
 
-    let mut header = format!("impl {} for {}", trait_name, target_type);
+    let mut header = if trait_type_args.is_empty() {
+        format!("impl {} for {}", trait_name, target_type)
+    } else {
+        format!("impl {} {} for {}", trait_name, trait_type_args.join(" "), target_type)
+    };
     for tp in type_params {
         header.push(' ');
         header.push_str(tp);

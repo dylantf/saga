@@ -298,13 +298,13 @@ impl Checker {
                 }
                 Decl::TraitDef {
                     name,
-                    type_param,
+                    type_params,
                     supertraits,
                     methods,
                     ..
                 } => {
                     let plain_methods: Vec<_> = methods.iter().map(|a| &a.node).collect();
-                    self.register_trait_def(name, type_param, supertraits, &plain_methods)
+                    self.register_trait_def(name, type_params, supertraits, &plain_methods)
                         .map_err(|e| vec![e])?;
                 }
                 _ => {}
@@ -368,7 +368,7 @@ impl Checker {
                 let mut scheme_constraints = Vec::new();
                 if !where_clause.is_empty() {
                     for bound in where_clause {
-                        for (trait_name, trait_span) in &bound.traits {
+                        for (trait_name, _, trait_span) in &bound.traits {
                             self.lsp
                                 .type_references
                                 .push((*trait_span, trait_name.clone()));
@@ -376,7 +376,7 @@ impl Checker {
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
                         {
-                            for (trait_name, _) in &bound.traits {
+                            for (trait_name, _, _) in &bound.traits {
                                 scheme_constraints.push((trait_name.clone(), *var_id));
                             }
                         } else {
@@ -499,7 +499,7 @@ impl Checker {
                 if !where_clause.is_empty() {
                     let mut constraints = Vec::new();
                     for bound in where_clause {
-                        for (trait_name, trait_span) in &bound.traits {
+                        for (trait_name, _, trait_span) in &bound.traits {
                             self.lsp
                                 .type_references
                                 .push((*trait_span, trait_name.clone()));
@@ -510,7 +510,7 @@ impl Checker {
                             self.trait_state
                                 .where_bound_var_names
                                 .insert(*var_id, bound.type_var.clone());
-                            for (trait_name, _) in &bound.traits {
+                            for (trait_name, _, _) in &bound.traits {
                                 constraints.push((trait_name.clone(), *var_id));
                             }
                         } else {
@@ -586,6 +586,7 @@ impl Checker {
             if let Decl::ImplDef {
                 trait_name,
                 trait_name_span,
+                trait_type_args,
                 target_type,
                 target_type_span,
                 type_params,
@@ -609,6 +610,7 @@ impl Checker {
                 let plain_methods: Vec<_> = methods.iter().map(|a| a.node.clone()).collect();
                 self.register_impl(
                     trait_name,
+                    trait_type_args,
                     target_type,
                     type_params,
                     where_clause,
@@ -940,7 +942,7 @@ impl Checker {
             .pending_constraints
             .split_off(constraints_before);
         let mut scheme_constraints: Vec<(String, u32, Span)> = Vec::new();
-        for (trait_name, ty, span, node_id) in new_constraints {
+        for (trait_name, _trait_type_arg_types, ty, span, node_id) in new_constraints {
             let resolved = self.sub.apply(&ty);
             match resolved {
                 Type::Var(id) => {
@@ -992,7 +994,7 @@ impl Checker {
                 _ => {
                     self.trait_state
                         .pending_constraints
-                        .push((trait_name, ty, span, node_id));
+                        .push((trait_name, vec![], ty, span, node_id));
                 }
             }
         }
@@ -1354,7 +1356,7 @@ impl Checker {
                 self.trait_state
                     .where_bound_var_names
                     .insert(*var_id, bound.type_var.clone());
-                for (trait_req, trait_span) in &bound.traits {
+                for (trait_req, _, trait_span) in &bound.traits {
                     self.lsp
                         .type_references
                         .push((*trait_span, trait_req.clone()));
@@ -1631,7 +1633,7 @@ impl Checker {
                                 let entry = where_constraints
                                     .entry((effect_ref.name.clone(), i))
                                     .or_default();
-                                for (trait_name, _) in &bound.traits {
+                                for (trait_name, _, _) in &bound.traits {
                                     entry.insert(trait_name.clone());
                                 }
                             }
@@ -1695,29 +1697,39 @@ impl Checker {
             if constraints.is_empty() {
                 break;
             }
-            for (trait_name, ty, span, node_id) in constraints {
+            for (trait_name, trait_type_arg_types, ty, span, node_id) in constraints {
                 let resolved = self.sub.apply(&ty);
                 if matches!(resolved, Type::Error) {
                     continue;
                 }
+                // Resolve trait type args to concrete type names for impl lookup
+                let resolved_trait_type_args: Vec<String> = trait_type_arg_types
+                    .iter()
+                    .filter_map(|t| {
+                        let resolved_t = self.sub.apply(t);
+                        match &resolved_t {
+                            Type::Con(name, _) => Some(name.clone()),
+                            _ => None,
+                        }
+                    })
+                    .collect();
                 match &resolved {
                     // Concrete type (includes primitives): check that an impl exists
                     Type::Con(type_name, args) => {
                         let impl_info = self
                             .trait_state
                             .impls
-                            .get(&(trait_name.clone(), type_name.clone()));
+                            .get(&(trait_name.clone(), resolved_trait_type_args.clone(), type_name.clone()));
                         match impl_info {
                             None => {
                                 // Check if this might be caused by a user function
                                 // shadowing a trait method that would have worked.
                                 let mut hint = String::new();
                                 for (t_name, t_info) in &self.trait_state.traits {
-                                    if self
-                                        .trait_state
-                                        .impls
-                                        .contains_key(&(t_name.clone(), type_name.clone()))
-                                    {
+                                    let has_impl = self.trait_state.impls.keys().any(
+                                        |(tn, _, tt)| tn == t_name && tt == type_name,
+                                    );
+                                    if has_impl {
                                         for (m_name, _, _, _) in &t_info.methods {
                                             if let Some(scheme) = self.env.get(m_name) {
                                                 // A trait method's scheme has the trait name
@@ -1757,6 +1769,7 @@ impl Checker {
                                     for arg_ty in args {
                                         self.trait_state.pending_constraints.push((
                                             trait_name.clone(),
+                                            vec![],
                                             arg_ty.clone(),
                                             span,
                                             node_id,
@@ -1767,6 +1780,7 @@ impl Checker {
                                         if let Some(arg_ty) = args.get(*param_idx) {
                                             self.trait_state.pending_constraints.push((
                                                 req_trait.clone(),
+                                                vec![],
                                                 arg_ty.clone(),
                                                 span,
                                                 node_id,
@@ -1824,13 +1838,14 @@ impl Checker {
 
     /// Verify that every impl's trait has its supertraits also implemented for the same type.
     pub(crate) fn check_supertrait_impls(&self) -> Result<(), Diagnostic> {
-        for ((trait_name, target_type), impl_info) in &self.trait_state.impls {
+        for ((trait_name, _trait_type_args, target_type), impl_info) in &self.trait_state.impls {
             if let Some(trait_info) = self.trait_state.traits.get(trait_name) {
                 for supertrait in &trait_info.supertraits {
+                    // Supertraits are always single-param (no type args)
                     if !self
                         .trait_state
                         .impls
-                        .contains_key(&(supertrait.clone(), target_type.clone()))
+                        .contains_key(&(supertrait.clone(), vec![], target_type.clone()))
                     {
                         let msg = format!(
                             "impl {} for {} requires impl {} for {} (supertrait)",

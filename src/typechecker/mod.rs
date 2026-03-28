@@ -627,9 +627,11 @@ pub struct HandlerInfo {
 
 #[derive(Debug, Clone)]
 pub struct TraitInfo {
-    pub type_param: String,
+    /// Type parameters: first is self, rest are extras.
+    /// e.g. `trait ConvertTo a b` -> ["a", "b"]
+    pub type_params: Vec<String>,
     pub supertraits: Vec<String>,
-    /// Method signatures: name -> (param_types, return_type, trait_param_var_id)
+    /// Method signatures: name -> (param_types, return_type, trait_self_param_var_id)
     pub methods: Vec<(String, Vec<Type>, Type, Option<u32>)>,
 }
 
@@ -638,6 +640,9 @@ pub struct ImplInfo {
     /// Constraints on type parameters: (trait_name, param_index)
     /// e.g. Show for List requires Show on param 0 (the element type)
     pub param_constraints: Vec<(String, usize)>,
+    /// Extra type arguments applied to the trait (e.g. ["NOK"] in `impl ConvertTo NOK for USD`).
+    /// Empty for single-param traits.
+    pub trait_type_args: Vec<String>,
     pub span: Option<Span>,
 }
 
@@ -732,10 +737,11 @@ pub struct Checker {
 pub(crate) struct TraitState {
     /// Trait definitions: trait name -> info.
     pub traits: HashMap<String, TraitInfo>,
-    /// Impl registry: (trait_name, target_type) -> impl info.
-    pub impls: HashMap<(String, String), ImplInfo>,
-    /// Pending trait constraints to check: (trait_name, type, span_for_errors, node_id).
-    pub pending_constraints: Vec<(String, Type, Span, crate::ast::NodeId)>,
+    /// Impl registry: (trait_name, trait_type_args, target_type) -> impl info.
+    pub impls: HashMap<(String, Vec<String>, String), ImplInfo>,
+    /// Pending trait constraints to check: (trait_name, trait_type_arg_types, self_type, span, node_id).
+    /// trait_type_arg_types is empty for single-param traits.
+    pub pending_constraints: Vec<(String, Vec<Type>, Type, Span, crate::ast::NodeId)>,
     /// Where clause bounds: var_id -> set of trait names assumed satisfied.
     pub where_bounds: HashMap<u32, HashSet<String>>,
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence).
@@ -817,7 +823,7 @@ pub struct ModuleContext {
     pub(crate) prelude_snapshot: Option<Box<Checker>>,
     /// Trait impls from Std.dy (base layer). Shared with builtin module checkers
     /// so they can resolve constraints on primitives (e.g. Ord for Int).
-    pub(crate) base_trait_impls: HashMap<(String, String), ImplInfo>,
+    pub(crate) base_trait_impls: HashMap<(String, Vec<String>, String), ImplInfo>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) loading: HashSet<String>,
 }

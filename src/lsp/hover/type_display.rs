@@ -183,7 +183,7 @@ pub fn type_definition_summary(
             Decl::TraitDef {
                 name: def_name,
                 doc,
-                type_param,
+                type_params,
                 supertraits,
                 methods,
                 ..
@@ -204,7 +204,7 @@ pub fn type_definition_summary(
                 let code = format!(
                     "trait {} {}{} {{\n{}\n}}",
                     name,
-                    type_param,
+                    type_params.join(" "),
                     supers,
                     method_strs.join("\n")
                 );

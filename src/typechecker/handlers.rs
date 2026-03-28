@@ -135,6 +135,7 @@ impl Checker {
                                 for trait_name in trait_names {
                                     self.trait_state.pending_constraints.push((
                                         trait_name.clone(),
+                                        vec![],
                                         ty.clone(),
                                         with_span,
                                         with_node_id,

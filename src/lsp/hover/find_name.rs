@@ -70,7 +70,7 @@ fn find_in_exprs(exprs: &[Expr], offset: usize) -> Found {
 /// Search where clause trait bounds for trait names.
 fn find_in_where_clause(bounds: &[TraitBound], offset: usize) -> Found {
     for bound in bounds {
-        for (trait_name, trait_span) in &bound.traits {
+        for (trait_name, _, trait_span) in &bound.traits {
             if contains_ident(trait_span, offset) {
                 return Some((trait_name.clone(), *trait_span, None));
             }

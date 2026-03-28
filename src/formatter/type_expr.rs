@@ -118,7 +118,13 @@ pub fn format_effect_ref(e: &EffectRef) -> Doc {
 
 pub fn format_where_clause(bounds: &[TraitBound]) -> Doc {
     let bound_docs: Vec<Doc> = bounds.iter().map(|b| {
-        let traits: Vec<&str> = b.traits.iter().map(|(n, _)| n.as_str()).collect();
+        let traits: Vec<String> = b.traits.iter().map(|(name, type_args, _)| {
+            if type_args.is_empty() {
+                name.clone()
+            } else {
+                format!("{} {}", name, type_args.join(" "))
+            }
+        }).collect();
         Doc::text(format!("{}: {}", b.type_var, traits.join(" + ")))
     }).collect();
     docs![Doc::text("where {"), Doc::join(Doc::text(", "), bound_docs), Doc::text("}")]
