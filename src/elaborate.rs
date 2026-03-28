@@ -228,25 +228,25 @@ impl Elaborator {
                         .insert((trait_name.clone(), target_type.clone()), dict_name);
                     // Capture where-clause constraints as (trait, param_index) pairs.
                     // This tells dict_for_type which sub-dicts to pass for parameterized impls.
-                    if !where_clause.is_empty() {
-                        let var_to_idx: HashMap<&str, usize> = type_params
-                            .iter()
-                            .enumerate()
-                            .map(|(i, name)| (name.as_str(), i))
-                            .collect();
-                        let params: Vec<(String, usize)> = where_clause
-                            .iter()
-                            .flat_map(|bound| {
-                                let idx = var_to_idx
-                                    .get(bound.type_var.as_str())
-                                    .copied()
-                                    .unwrap_or(0);
-                                bound.traits.iter().map(move |(t, _)| (t.clone(), idx))
-                            })
-                            .collect();
-                        self.impl_dict_params
-                            .insert((trait_name.clone(), target_type.clone()), params);
-                    }
+                    // Always insert (even empty) so dict_for_type doesn't fall back to
+                    // guessing one sub-dict per type arg (which breaks phantom type params).
+                    let var_to_idx: HashMap<&str, usize> = type_params
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| (name.as_str(), i))
+                        .collect();
+                    let params: Vec<(String, usize)> = where_clause
+                        .iter()
+                        .flat_map(|bound| {
+                            let idx = var_to_idx
+                                .get(bound.type_var.as_str())
+                                .copied()
+                                .unwrap_or(0);
+                            bound.traits.iter().map(move |(t, _)| (t.clone(), idx))
+                        })
+                        .collect();
+                    self.impl_dict_params
+                        .insert((trait_name.clone(), target_type.clone()), params);
                 }
                 Decl::HandlerDef {
                     name, where_clause, ..
