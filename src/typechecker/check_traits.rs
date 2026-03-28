@@ -91,12 +91,16 @@ impl Checker {
                 param_types,
                 return_type,
                 trait_param_id,
+                params_list,
             ));
         }
 
         // Add each method to the env as a polymorphic function with trait constraint.
         // e.g. `fun show (x: a) -> String` becomes `show : forall a. Describe a => a -> String`
-        for (method_name, param_types, return_type, trait_param_id) in &method_sigs {
+        // For phantom type params (not mentioned in the method signature), we create
+        // fresh vars and add them to forall so the constraint flows through instantiation.
+        let mut trait_method_sigs = Vec::new();
+        for (method_name, param_types, return_type, trait_param_id, mut params_list) in method_sigs {
             let mut fun_ty = return_type.clone();
             for pt in param_types.iter().rev() {
                 fun_ty = Type::arrow(pt.clone(), fun_ty);
@@ -104,13 +108,38 @@ impl Checker {
             let mut forall = Vec::new();
             super::collect_free_vars(&fun_ty, &mut forall);
 
-            let constraints = match trait_param_id {
-                Some(id) => vec![(name.to_string(), *id, vec![])],
+            // Ensure all trait type params have var IDs, even if they don't
+            // appear in this method's signature (phantom type params).
+            for tp_name in type_params {
+                if !params_list.iter().any(|(n, _)| n == tp_name) {
+                    let fresh = self.fresh_var();
+                    let id = match fresh { Type::Var(id) => id, _ => unreachable!() };
+                    params_list.push((tp_name.clone(), id));
+                    forall.push(id);
+                }
+            }
+
+            // Build constraint with self param and extra type params.
+            let self_id = params_list
+                .iter()
+                .find(|(n, _)| n == self_param)
+                .map(|(_, id)| *id);
+            let extra_types: Vec<Type> = type_params[1..]
+                .iter()
+                .filter_map(|tp_name| {
+                    params_list.iter().find(|(n, _)| n == tp_name).map(|(_, id)| Type::Var(*id))
+                })
+                .collect();
+            let constraints = match self_id {
+                Some(id) => vec![(name.to_string(), id, extra_types)],
                 None => vec![],
             };
 
+            // Preserve original data for TraitInfo storage
+            trait_method_sigs.push((method_name.clone(), param_types, return_type, trait_param_id));
+
             self.env.insert(
-                method_name.clone(),
+                method_name,
                 Scheme {
                     forall,
                     constraints,
@@ -129,7 +158,7 @@ impl Checker {
             super::TraitInfo {
                 type_params: type_params.to_vec(),
                 supertraits: supertraits.iter().map(|(n, _)| n.clone()).collect(),
-                methods: method_sigs,
+                methods: trait_method_sigs,
             },
         );
         Ok(())

@@ -4150,3 +4150,124 @@ fn handler_with_multi_param_trait_where_clause() {
     )
     .unwrap();
 }
+
+// --- Phantom type param tests (trait methods that don't mention the self type) ---
+
+#[test]
+fn phantom_trait_method_in_where_clause_function() {
+    // rate : Unit -> Float doesn't mention `a` or `b`, but the constraint
+    // should still flow through the where clause.
+    check(
+        "trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         }\n\
+         impl ConvertTo Int for Float {\n\
+         rate () = 1.0\n\
+         }\n\
+         fun convert : a -> Float where {a: ConvertTo Int}\n\
+         convert x = rate ()",
+    )
+    .unwrap();
+}
+
+#[test]
+fn phantom_trait_method_without_where_clause_fails() {
+    // Calling a phantom trait method without the required where clause should error.
+    let result = check(
+        "trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         }\n\
+         fun bad : Unit -> Float\n\
+         bad () = rate ()",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn phantom_trait_method_wrong_trait_in_where_clause_fails() {
+    // Where clause has a different trait than what the phantom method requires.
+    let result = check(
+        "trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         }\n\
+         trait Other a {\n\
+         fun other : a -> String\n\
+         }\n\
+         fun bad : a -> Float where {a: Other}\n\
+         bad x = rate ()",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn phantom_and_non_phantom_methods_in_same_trait() {
+    // A trait with both phantom and non-phantom methods.
+    // convert uses the self type (non-phantom), rate doesn't (phantom).
+    check(
+        "trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         fun convert : a -> b\n\
+         }\n\
+         impl ConvertTo Int for Float {\n\
+         rate () = 2.5\n\
+         convert x = x\n\
+         }\n\
+         fun use_both : a -> a where {a: ConvertTo Int}\n\
+         use_both x = {\n\
+         let _ = rate ()\n\
+         convert x\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn phantom_trait_method_concrete_call_resolves_impl() {
+    // Calling a phantom trait method in a polymorphic function, then
+    // invoking at concrete types should resolve the impl.
+    check(
+        "type USD = USD\n\
+         type NOK = NOK\n\
+         type Currency c = Currency(Float)\n\
+         trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         }\n\
+         impl ConvertTo NOK for USD {\n\
+         rate () = 10.5\n\
+         }\n\
+         fun usd : Float -> Currency USD\n\
+         usd amount = Currency amount\n\
+         fun convert : Currency a -> Currency b where {a: ConvertTo b}\n\
+         convert (Currency amount) = Currency (amount * rate ())\n\
+         main () = {\n\
+         let x : Currency NOK = convert (usd 5.0)\n\
+         x\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn phantom_trait_method_wrong_impl_type_args_fails() {
+    // The where clause says ConvertTo Int, but we try to use the result
+    // where ConvertTo Float is needed. This should fail.
+    let result = check(
+        "type USD = USD\n\
+         type NOK = NOK\n\
+         type EUR = EUR\n\
+         type Currency c = Currency(Float)\n\
+         trait ConvertTo a b {\n\
+         fun rate : Unit -> Float\n\
+         }\n\
+         impl ConvertTo NOK for USD {\n\
+         rate () = 10.5\n\
+         }\n\
+         fun convert : Currency a -> Currency b where {a: ConvertTo b}\n\
+         convert (Currency amount) = Currency (amount * rate ())\n\
+         main () = {\n\
+         let x : Currency EUR = convert (Currency 5.0)\n\
+         x\n\
+         }",
+    );
+    assert!(result.is_err());
+}

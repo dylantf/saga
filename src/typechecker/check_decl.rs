@@ -962,6 +962,12 @@ impl Checker {
             .trait_state
             .pending_constraints
             .split_off(constraints_before);
+
+        // Collect type vars that appear in the function's type (used for
+        // phantom detection and ambiguous-variable checks below).
+        let mut type_vars = Vec::new();
+        super::collect_free_vars(&self.sub.apply(&fun_ty), &mut type_vars);
+
         let mut scheme_constraints: Vec<(String, u32, Span)> = Vec::new();
         for (trait_name, trait_type_arg_types, ty, span, node_id) in new_constraints {
             let resolved = self.sub.apply(&ty);
@@ -991,6 +997,47 @@ impl Checker {
                         });
                         continue;
                     }
+
+                    // Phantom constraint matching: if the constraint var doesn't
+                    // appear in the function's type, it's from a trait method with
+                    // phantom type params. Match against the function's own
+                    // where-constraints (local, not global where_bounds) to connect
+                    // the phantom var to the caller's type system.
+                    if !type_vars.contains(&id) {
+                        let matched = where_constraints
+                            .iter()
+                            .find(|(wc_trait, _, _)| *wc_trait == trait_name);
+                        if let Some((_, wc_var_id, wc_extras)) = matched {
+                            let wc_resolved = self.sub.apply(&Type::Var(*wc_var_id));
+                            self.unify_at(&Type::Var(id), &wc_resolved, span)?;
+                            // Unify extra type args pairwise
+                            for (phantom_extra, where_extra) in
+                                trait_type_arg_types.iter().zip(wc_extras.iter())
+                            {
+                                let pe = self.sub.apply(phantom_extra);
+                                let we = self.sub.apply(where_extra);
+                                self.unify_at(&pe, &we, span)?;
+                            }
+                            let resolved_id = match self.sub.apply(&Type::Var(id)) {
+                                Type::Var(rid) => rid,
+                                _ => id,
+                            };
+                            let var_name = self
+                                .trait_state
+                                .where_bound_var_names
+                                .get(&resolved_id)
+                                .cloned();
+                            self.evidence.push(super::TraitEvidence {
+                                node_id,
+                                trait_name: trait_name.clone(),
+                                resolved_type: None,
+                                type_var_name: var_name,
+                                trait_type_args: trait_type_arg_types.clone(),
+                            });
+                            continue;
+                        }
+                    }
+
                     if has_annotation {
                         return Err(Diagnostic::error_at(
                             span,
@@ -1036,10 +1083,6 @@ impl Checker {
                 scheme.constraints.push((trait_name.clone(), resolved_id, resolved_extras));
             }
         }
-
-        // Collect type vars that actually appear in the function's type
-        let mut type_vars = Vec::new();
-        super::collect_free_vars(&self.sub.apply(&fun_ty), &mut type_vars);
 
         for (trait_name, var_id, span) in scheme_constraints {
             if !type_vars.contains(&var_id) {
@@ -1787,13 +1830,19 @@ impl Checker {
                                 ));
                             }
                             Some(info) => {
+                                // Resolve extra type args through substitution so the
+                                // elaborator sees concrete types for dict key lookup.
+                                let resolved_extra_types: Vec<Type> = trait_type_arg_types
+                                    .iter()
+                                    .map(|t| self.sub.apply(t))
+                                    .collect();
                                 // Record evidence for the elaboration pass
                                 self.evidence.push(super::TraitEvidence {
                                     node_id,
                                     trait_name: trait_name.clone(),
                                     resolved_type: Some((type_name.clone(), args.clone())),
                                     type_var_name: None,
-                                    trait_type_args: trait_type_arg_types.clone(),
+                                    trait_type_args: resolved_extra_types,
                                 });
                                 // Push conditional constraints for type parameters
                                 if type_name == "Tuple" {
