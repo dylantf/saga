@@ -9,7 +9,7 @@ effect Fail {
 }
 
 # Run a computation that might fail, returning a Result
-fun try : (computation: () -> a needs {Fail}) -> Result a String
+fun try : (computation: Unit -> a needs {Fail}) -> Result a String
 try computation = {
   computation () with {
     fail msg = Err msg

@@ -1,4 +1,4 @@
-use dylang::{codegen, elaborate, lexer, parser, typechecker};
+use dylang::{codegen, desugar, elaborate, lexer, parser, typechecker};
 
 /// Load prelude (which imports Std + stdlib) into a checker.
 fn bootstrap() -> typechecker::Checker {
@@ -7,19 +7,25 @@ fn bootstrap() -> typechecker::Checker {
     let prelude_tokens = lexer::Lexer::new(prelude_src)
         .lex()
         .expect("prelude lex error");
-    let prelude_program = parser::Parser::new(prelude_tokens)
+    let mut prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
+    desugar::desugar_program(&mut prelude_program);
     let result = checker.check_program(&prelude_program);
-    assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
+    assert!(
+        !result.has_errors(),
+        "prelude typecheck error: {:?}",
+        result.errors()
+    );
     checker
 }
 
 fn emit(src: &str) -> String {
     let tokens = lexer::Lexer::new(src).lex().expect("lex error");
-    let program = parser::Parser::new(tokens)
+    let mut program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
+    desugar::desugar_program(&mut program);
     codegen::emit_module("_script", &program)
 }
 
@@ -38,12 +44,17 @@ fn emit_elaborated_with_std(src: &str) -> String {
 
 fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
     let tokens = lexer::Lexer::new(src).lex().expect("lex error");
-    let program = parser::Parser::new(tokens)
+    let mut program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
+    desugar::desugar_program(&mut program);
     let mut checker = bootstrap();
     let result = checker.check_program(&program);
-    assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());
+    assert!(
+        !result.has_errors(),
+        "typecheck error: {:?}",
+        result.errors()
+    );
     let elaborated = elaborate::elaborate(&program, &result);
 
     let elaborated_modules = if include_std_modules {
@@ -64,10 +75,33 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         std::collections::HashMap::new()
     };
 
+    let codegen_info_map = result.codegen_info();
+    let prelude_imports = &result.prelude_imports;
+    let mut modules = std::collections::HashMap::new();
+    // Always include codegen_info for all modules (needed for resolver to find dicts/exports)
+    for (name, info) in codegen_info_map.iter() {
+        modules.insert(
+            name.clone(),
+            codegen::CompiledModule {
+                codegen_info: info.clone(),
+                elaborated: Vec::new(),
+                resolution: codegen::resolve::ResolutionMap::new(),
+            },
+        );
+    }
+    // Overlay elaborated modules with their resolution maps
+    for (name, elab) in elaborated_modules {
+        let normalized = codegen::normalize::normalize_effects(&elab);
+        let resolution =
+            codegen::resolve::resolve_names(&normalized, codegen_info_map, prelude_imports);
+        let entry = modules.entry(name.clone()).or_default();
+        entry.elaborated = elab;
+        entry.resolution = resolution;
+    }
     let ctx = codegen::CodegenContext {
-        codegen_info: result.codegen_info().clone(),
-        elaborated_modules,
+        modules,
         let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
     };
     codegen::emit_module_with_context("_script", &elaborated, &ctx)
 }
@@ -1108,7 +1142,7 @@ effect Fail {
   fun fail : (msg: String) -> a
 }
 
-fun try_it : (computation: () -> a needs {Fail}) -> Result a String
+fun try_it : (computation: Unit -> a needs {Fail}) -> Result a String
 try_it computation = computation () with {
   fail msg = Err(msg)
   return value = Ok(value)
@@ -1133,7 +1167,7 @@ effect Fail {
   fun fail : (msg: String) -> a
 }
 
-fun try_it : (computation: () -> a needs {Fail}) -> Result a String
+fun try_it : (computation: Unit -> a needs {Fail}) -> Result a String
 try_it computation = computation () with {
   fail msg = Err(msg)
   return value = Ok(value)
@@ -1157,7 +1191,7 @@ effect Fail {
   fun fail : (msg: String) -> a
 }
 
-fun try_it : (computation: () -> a needs {Fail}) -> String
+fun try_it : (computation: Unit -> a needs {Fail}) -> String
 try_it computation = computation () with {
   fail msg = "err: " <> msg
 }
@@ -1206,7 +1240,7 @@ effect Fail {
   fun fail : (msg: String) -> a
 }
 
-fun try_it : (computation: () -> a needs {Fail}) -> Result a String
+fun try_it : (computation: Unit -> a needs {Fail}) -> Result a String
 try_it computation = computation () with {
   fail msg = Err(msg)
   return value = Ok(value)
@@ -1527,7 +1561,7 @@ outer () = {
   x + 1
 }
 
-fun try_it : (computation: () -> a needs {Fail}) -> Result a String
+fun try_it : (computation: Unit -> a needs {Fail}) -> Result a String
 try_it computation = computation () with {
   fail msg = Err(msg)
   return value = Ok(value)

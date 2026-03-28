@@ -73,7 +73,7 @@ impl ModuleExports {
                     if *opaque {
                         type_constructors.insert(name.clone(), vec![]);
                     } else {
-                        let ctors: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                        let ctors: Vec<String> = variants.iter().map(|v| v.node.name.clone()).collect();
                         type_constructors.insert(name.clone(), ctors);
                     }
                 }
@@ -237,6 +237,9 @@ pub struct ModuleCodegenInfo {
     pub type_constructors: Vec<(String, Vec<String>)>,
     /// Trait impl dicts exported by this module.
     pub trait_impl_dicts: Vec<TraitImplDict>,
+    /// External function mappings: (dylang_name, erlang_module, erlang_func, arity).
+    /// Includes both public and private externals (private ones are needed for handler inlining).
+    pub external_funs: Vec<(String, String, String, usize)>,
 }
 
 /// Count the arity of a constructor from its type (number of Fun levels).
@@ -458,6 +461,7 @@ impl Checker {
                 )
             })?;
         crate::derive::expand_derives(&mut program);
+        crate::desugar::desugar_program(&mut program);
 
         // Cache the parsed program so the build step can skip re-parsing
         self.modules
@@ -487,6 +491,7 @@ impl Checker {
                     .parse_program()
                     .expect("prelude parse error");
                 crate::derive::expand_derives(&mut prelude_program);
+                crate::desugar::desugar_program(&mut prelude_program);
                 snapshot
                     .check_program_inner(&prelude_program)
                     .expect("prelude type errors");
@@ -916,6 +921,7 @@ fn collect_codegen_info(
     let mut handler_defs = Vec::new();
     let mut fun_effects = Vec::new();
     let mut trait_impl_dicts = Vec::new();
+    let mut external_funs = Vec::new();
 
     // Erlang module name: "Foo.Bar" -> "foo_bar"
     let erlang_module = module_name
@@ -936,8 +942,8 @@ fn collect_codegen_info(
                 let ops = operations
                     .iter()
                     .map(|op| EffectOpDef {
-                        name: op.name.clone(),
-                        param_count: op.params.len(),
+                        name: op.node.name.clone(),
+                        param_count: op.node.params.len(),
                     })
                     .collect();
                 effect_defs.push(EffectDef {
@@ -952,7 +958,7 @@ fn collect_codegen_info(
                 fields,
                 ..
             } => {
-                let field_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                let field_names: Vec<String> = fields.iter().map(|f| f.node.0.clone()).collect();
                 record_fields.push((name.clone(), field_names));
             }
             Decl::HandlerDef {
@@ -982,6 +988,27 @@ fn collect_codegen_info(
                 sorted.sort();
                 if !sorted.is_empty() {
                     fun_effects.push((name.clone(), sorted));
+                }
+            }
+            Decl::FunSignature {
+                name,
+                params,
+                annotations,
+                ..
+            } => {
+                // Collect @external annotations for both public and private functions.
+                // Private externals are needed for handler body inlining.
+                if let Some(ext) = annotations.iter().find(|a| a.name == "external")
+                    && ext.args.len() >= 3
+                    && let (crate::ast::Lit::String(erl_mod, _), crate::ast::Lit::String(erl_func, _)) =
+                        (&ext.args[1], &ext.args[2])
+                {
+                    external_funs.push((
+                        name.clone(),
+                        erl_mod.clone(),
+                        erl_func.clone(),
+                        params.len(),
+                    ));
                 }
             }
             Decl::ImplDef {
@@ -1025,6 +1052,7 @@ fn collect_codegen_info(
         fun_effects,
         type_constructors: exports.type_constructors.clone().into_iter().collect(),
         trait_impl_dicts,
+        external_funs,
     }
 }
 
@@ -1051,7 +1079,7 @@ pub(super) fn public_names_for_tc(
                 names.insert(name.clone());
                 if !opaque {
                     for v in variants {
-                        names.insert(v.name.clone());
+                        names.insert(v.node.name.clone());
                     }
                 }
             }
@@ -1071,7 +1099,7 @@ pub(super) fn public_names_for_tc(
                 ..
             } => {
                 for m in methods {
-                    names.insert(m.name.clone());
+                    names.insert(m.node.name.clone());
                 }
             }
             _ => {}

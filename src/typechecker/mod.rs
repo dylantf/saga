@@ -119,9 +119,6 @@ pub enum Type {
     Record(Vec<(std::string::String, Type)>),
     /// Error recovery type: unifies with everything, suppresses cascading errors.
     Error,
-    /// Bottom type: the type of expressions that never produce a value (panic, exit).
-    /// Unifies with any type.
-    Never,
 }
 
 /// Convenience constructors for built-in types
@@ -202,7 +199,6 @@ impl std::fmt::Display for Type {
                 write!(f, " }}")
             }
             Type::Error => write!(f, "<error>"),
-            Type::Never => write!(f, "Never"),
         }
     }
 }
@@ -247,7 +243,7 @@ impl Substitution {
                     .collect(),
             ),
             Type::Error => Type::Error,
-            Type::Never => Type::Never,
+
         }
     }
 
@@ -348,7 +344,7 @@ impl Substitution {
             }
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
             Type::Record(fields) => fields.iter().any(|(_, ty)| self.occurs(id, ty)),
-            Type::Error | Type::Never => false,
+            Type::Error => false,
         }
     }
 }
@@ -512,7 +508,7 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                 free_vars_in_type(ty, bound, out);
             }
         }
-        Type::Error | Type::Never => {}
+        Type::Error => {}
     }
 }
 
@@ -696,6 +692,9 @@ pub struct Checker {
     pub(crate) resume_return_type: Option<Type>,
     /// Metadata for effect inference (instantiation caches, declared rows, name registries).
     pub(crate) effect_meta: EffectMeta,
+    /// Effect accumulator: effects from the current scope are pushed here automatically
+    /// during inference. Isolation scopes (handlers, lambdas) save/restore this field.
+    pub(crate) effect_row: EffectRow,
     /// Trait system state (definitions, impls, constraints, where bounds).
     pub(crate) trait_state: TraitState,
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
@@ -724,6 +723,8 @@ pub struct Checker {
     pub(crate) allow_bodyless_annotations: bool,
     /// Set to the module name when checking a module file; None for the main file.
     pub(crate) current_module: Option<String>,
+    /// Import declarations from the prelude (passed through to lowerer).
+    pub prelude_imports: Vec<crate::ast::Decl>,
 }
 
 /// Trait system state: definitions, impl registry, deferred constraints, where bounds.
@@ -741,20 +742,22 @@ pub(crate) struct TraitState {
     pub where_bound_var_names: HashMap<u32, String>,
 }
 
-/// Metadata for effect inference: instantiation caches, declared effect rows,
-/// and name registries. Does not track effect accumulation (that flows through
-/// the EffectRow returned by infer_expr).
+/// Metadata for effect inference: instantiation caches and name registries.
+/// Effect accumulation lives on Checker.effect_row.
 #[derive(Clone, Default)]
 pub(crate) struct EffectMeta {
     /// Per-scope cache of instantiated effect type params: effect name -> mapping
     /// from original var IDs to fresh vars. Ensures all ops from the same effect
     /// share type params within a function scope.
     pub type_param_cache: HashMap<String, HashMap<u32, Type>>,
-    /// Known local function names (for is_known_local checks in `with` validation).
+    /// Registry of locally defined function names. Not used for effect tracking
+    /// (the accumulator + absorption handle that). Only read at the CheckResult
+    /// boundary to build fun_effects for codegen. See docs/remove-known-funs-registry.md.
     pub known_funs: HashSet<String>,
     /// Annotation-provided effect type constraints: fn name -> [(effect_name, [concrete types])].
     pub fun_type_constraints: HashMap<String, Vec<(String, Vec<Type>)>>,
-    /// Known let binding names that may carry deferred effects (for is_known_local checks).
+    /// Registry of let bindings with deferred effects. Same story as known_funs:
+    /// only read at the CheckResult boundary for codegen, not for effect tracking.
     pub known_let_bindings: HashSet<String>,
 }
 
@@ -856,6 +859,7 @@ impl Checker {
             resume_type: None,
             resume_return_type: None,
             effect_meta: EffectMeta::default(),
+            effect_row: EffectRow::empty(),
             trait_state: TraitState::default(),
             field_candidates: HashMap::new(),
             modules: ModuleContext::default(),
@@ -868,6 +872,7 @@ impl Checker {
             lsp: LspState::default(),
             allow_bodyless_annotations: false,
             current_module: None,
+            prelude_imports: Vec::new(),
         };
         checker.register_builtins();
         checker
@@ -913,9 +918,17 @@ impl Checker {
             .parse_program()
             .expect("prelude parse");
         crate::derive::expand_derives(&mut prelude_program);
+        crate::desugar::desugar_program(&mut prelude_program);
         checker
             .check_program_inner(&prelude_program)
             .map_err(|errs| errs.into_iter().next().unwrap())?;
+
+        // Save the prelude's import declarations so the lowerer can register
+        // only the names the prelude actually exposes.
+        checker.prelude_imports = prelude_program
+            .into_iter()
+            .filter(|d| matches!(d, crate::ast::Decl::Import { .. }))
+            .collect();
 
         checker.modules.prelude_snapshot = Some(Box::new(checker.clone()));
         Ok(checker)
@@ -991,7 +1004,7 @@ impl Checker {
                 PendingWarning::DiscardedValue { span, ty } => {
                     let resolved = self.sub.apply(&ty);
                     let is_unit = matches!(&resolved, Type::Con(n, args) if n == "Unit" && args.is_empty());
-                    if !is_unit && !matches!(resolved, Type::Var(_) | Type::Error | Type::Never) {
+                    if !is_unit && !matches!(resolved, Type::Var(_) | Type::Error) {
                         let display_ty = self.prettify_type(&ty);
                         self.collected_diagnostics.push(Diagnostic::warning_at(
                             span,
@@ -1087,6 +1100,29 @@ impl Checker {
         (fields, result_ty)
     }
 
+    /// Push effects onto the accumulator. This is the primary way effects
+    /// are recorded during inference -- callers don't need to handle EffectRow returns.
+    pub(crate) fn emit_effects(&mut self, effs: &EffectRow) {
+        self.effect_row.effects.extend(effs.effects.clone());
+    }
+
+    /// Push a single named effect onto the accumulator.
+    pub(crate) fn emit_effect(&mut self, name: String, args: Vec<Type>) {
+        self.effect_row.effects.push((name, args));
+    }
+
+    /// Save the current effect accumulator and start a fresh one.
+    /// Returns the saved EffectRow so the caller can restore it later.
+    pub(crate) fn save_effects(&mut self) -> EffectRow {
+        std::mem::replace(&mut self.effect_row, EffectRow::empty())
+    }
+
+    /// Restore a previously saved effect accumulator, returning what
+    /// accumulated since the save.
+    pub(crate) fn restore_effects(&mut self, saved: EffectRow) -> EffectRow {
+        std::mem::replace(&mut self.effect_row, saved)
+    }
+
     /// Enter an isolated inference scope. Saves and clears
     /// effect_type_param_cache, field_candidates, resume_type, and
     /// resume_return_type. Call `exit_scope` to restore and collect
@@ -1133,6 +1169,18 @@ pub fn effects_from_type(ty: &Type) -> HashSet<String> {
     }
     walk(ty, &mut effects);
     effects
+}
+
+/// Collect effect names from a callback parameter type's effect rows.
+/// For `() -> a needs {Fail, Log}`, collects `{"Fail", "Log"}`.
+/// Only collects from closed-row effects (not row variables).
+pub fn collect_callback_effects(ty: &Type, out: &mut HashSet<String>) {
+    if let Type::Fun(_, ret, row) = ty {
+        for (name, _) in &row.effects {
+            out.insert(name.clone());
+        }
+        collect_callback_effects(ret, out);
+    }
 }
 
 // Re-export from unify module so other files can use `super::collect_free_vars`

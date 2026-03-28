@@ -2,27 +2,8 @@ use super::{Checker, ImplInfo, Scheme, TraitInfo, Type};
 
 impl Checker {
     pub(crate) fn register_builtins(&mut self) {
-        // Note: Show and Ord traits are defined in Std.dy (loaded before
-        // stdlib modules). Eq is built-in (BEAM BIF dispatch).
-
-        // Built-in Num trait (arithmetic: +, -, *, /, %, unary -)
-        self.trait_state.traits.insert(
-            "Num".into(),
-            TraitInfo {
-                type_param: "a".into(),
-                supertraits: vec![],
-                methods: vec![],
-            },
-        );
-        for prim in &["Int", "Float"] {
-            self.trait_state.impls.insert(
-                ("Num".into(), prim.to_string()),
-                ImplInfo {
-                    param_constraints: vec![],
-                    span: None,
-                },
-            );
-        }
+        // Note: Show, Ord, Num, and Semigroup traits are defined in Std.Base
+        // (loaded before stdlib modules). Eq is built-in (BEAM BIF dispatch).
 
         // Built-in Eq trait (==, !=)
         self.trait_state.traits.insert(
@@ -46,25 +27,33 @@ impl Checker {
         // Ord impls for primitives are defined in Std.Int, Std.Float, Std.String
         // (they provide real dict constructors for `compare`).
 
-        // panic : String -> Never (crashes at runtime)
-        self.env.insert(
-            "panic".into(),
-            Scheme {
-                forall: vec![],
-                constraints: vec![],
-                ty: Type::arrow(Type::string(), Type::Never),
-            },
-        );
+        // panic : forall a. String -> a (crashes at runtime)
+        {
+            let a_id = self.next_var;
+            self.next_var += 1;
+            self.env.insert(
+                "panic".into(),
+                Scheme {
+                    forall: vec![a_id],
+                    constraints: vec![],
+                    ty: Type::arrow(Type::string(), Type::Var(a_id)),
+                },
+            );
+        }
 
-        // todo : Unit -> Never (type hole, crashes at runtime with "not implemented")
-        self.env.insert(
-            "todo".into(),
-            Scheme {
-                forall: vec![],
-                constraints: vec![],
-                ty: Type::arrow(Type::unit(), Type::Never),
-            },
-        );
+        // todo : forall a. Unit -> a (type hole, crashes at runtime with "not implemented")
+        {
+            let a_id = self.next_var;
+            self.next_var += 1;
+            self.env.insert(
+                "todo".into(),
+                Scheme {
+                    forall: vec![a_id],
+                    constraints: vec![],
+                    ty: Type::arrow(Type::unit(), Type::Var(a_id)),
+                },
+            );
+        }
 
         // List constructors
         let a = self.fresh_var();

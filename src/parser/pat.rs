@@ -25,7 +25,7 @@ impl Parser {
             self.advance(); // consume <>
             match pat {
                 Pat::Lit {
-                    value: Lit::String(prefix),
+                    value: Lit::String(prefix, _),
                     ..
                 } => {
                     let rest = self.parse_pattern()?;
@@ -93,9 +93,9 @@ impl Parser {
             self.peek(),
             Token::Ident(_)
                 | Token::UpperIdent(_)
-                | Token::Int(_)
-                | Token::Float(_)
-                | Token::String(_)
+                | Token::Int(..)
+                | Token::Float(..)
+                | Token::String(..)
                 | Token::True
                 | Token::False
                 | Token::LParen
@@ -137,7 +137,6 @@ impl Parser {
                 } else if matches!(self.peek(), Token::LBrace) {
                     // Record pattern: User { name, age: a }
                     self.advance(); // consume '{'
-                    self.skip_terminators();
                     let mut fields = Vec::new();
                     while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                         let field_name = self.expect_ident()?;
@@ -151,8 +150,7 @@ impl Parser {
                         if matches!(self.peek(), Token::Comma) {
                             self.advance();
                         }
-                        self.skip_terminators();
-                    }
+                        }
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
                     Ok(Pat::Record {
@@ -184,7 +182,6 @@ impl Parser {
             }
             Token::LBrace => {
                 // Anonymous record pattern: { field, field: pat, ... }
-                self.skip_terminators();
                 let mut fields = Vec::new();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                     let field_name = self.expect_ident()?;
@@ -198,7 +195,6 @@ impl Parser {
                     if matches!(self.peek(), Token::Comma) {
                         self.advance();
                     }
-                    self.skip_terminators();
                 }
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;
@@ -208,17 +204,17 @@ impl Parser {
                     span: span.to(end),
                 })
             }
-            Token::Ident(s) if s.starts_with('_') => Ok(Pat::Wildcard { id: NodeId::fresh(), span }),
+            Token::Ident(s) if s == "_" => Ok(Pat::Wildcard { id: NodeId::fresh(), span }),
             Token::Ident(s) => Ok(Pat::Var { id: NodeId::fresh(), name: s, span }),
             Token::Minus => match self.advance() {
-                Token::Int(n) => Ok(Pat::Lit {
+                Token::Int(s, n) => Ok(Pat::Lit {
                     id: NodeId::fresh(),
-                    value: Lit::Int(-n),
+                    value: Lit::Int(format!("-{}", s), -n),
                     span: span.to(self.tokens[self.pos - 1].span),
                 }),
-                Token::Float(f) => Ok(Pat::Lit {
+                Token::Float(s, f) => Ok(Pat::Lit {
                     id: NodeId::fresh(),
-                    value: Lit::Float(-f),
+                    value: Lit::Float(format!("-{}", s), -f),
                     span: span.to(self.tokens[self.pos - 1].span),
                 }),
                 tok => {
@@ -229,19 +225,19 @@ impl Parser {
                     })
                 }
             },
-            Token::String(s) => Ok(Pat::Lit {
+            Token::String(s, kind) => Ok(Pat::Lit {
                 id: NodeId::fresh(),
-                value: Lit::String(s),
+                value: Lit::String(s, kind),
                 span,
             }),
-            Token::Int(n) => Ok(Pat::Lit {
+            Token::Int(s, n) => Ok(Pat::Lit {
                 id: NodeId::fresh(),
-                value: Lit::Int(n),
+                value: Lit::Int(s, n),
                 span,
             }),
-            Token::Float(f) => Ok(Pat::Lit {
+            Token::Float(s, f) => Ok(Pat::Lit {
                 id: NodeId::fresh(),
-                value: Lit::Float(f),
+                value: Lit::Float(s, f),
                 span,
             }),
             Token::True => Ok(Pat::Lit {

@@ -1,5 +1,5 @@
-type Animal
-  = Dog(age: Int)
+type Animal =
+  | Dog(age: Int)
   | Cat
   deriving (Show, Eq)
 

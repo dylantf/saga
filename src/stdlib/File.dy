@@ -1,13 +1,14 @@
 module Std.File
 
-pub type FileError
-  = NotFound
+pub type FileError =
+  | NotFound
   | PermissionDenied
   | IsDirectory
   | NotDirectory
   | NoSpace
   | AlreadyExists
   | Other(String)
+  deriving (Debug)
 
 pub effect File {
   fun read : String -> Result String FileError

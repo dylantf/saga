@@ -1,6 +1,6 @@
 use tower_lsp::lsp_types::*;
 
-use dylang::ast::{Decl, Expr, ExprKind, Pat, Stmt};
+use dylang::ast::{self, Decl, Expr, ExprKind, Pat, Stmt};
 use dylang::typechecker::CheckResult;
 
 use super::hover::format_type_expr;
@@ -88,7 +88,8 @@ fn find_call_in_decl(decl: &Decl, offset: usize) -> Option<(String, usize)> {
             if !contains(span, offset) {
                 return None;
             }
-            for (_, _, params, body) in methods {
+            for method in methods {
+                let ast::ImplMethod { params, body, .. } = &method.node;
                 for pat in params {
                     if let Some(r) = find_call_in_pat(pat, offset) {
                         return Some(r);
@@ -158,7 +159,7 @@ fn find_call_in_expr(expr: &Expr, offset: usize) -> Option<(String, usize)> {
         // Recurse into subexpressions
         ExprKind::Block { stmts, .. } => {
             for stmt in stmts {
-                if let Some(r) = find_call_in_stmt(stmt, offset) {
+                if let Some(r) = find_call_in_stmt(&stmt.node, offset) {
                     return Some(r);
                 }
             }
@@ -179,12 +180,12 @@ fn find_call_in_expr(expr: &Expr, offset: usize) -> Option<(String, usize)> {
                 return Some(r);
             }
             for arm in arms {
-                if let Some(guard) = &arm.guard
+                if let Some(guard) = &arm.node.guard
                     && let Some(r) = find_call_in_expr(guard, offset)
                 {
                     return Some(r);
                 }
-                if let Some(r) = find_call_in_expr(&arm.body, offset) {
+                if let Some(r) = find_call_in_expr(&arm.node.body, offset) {
                     return Some(r);
                 }
             }

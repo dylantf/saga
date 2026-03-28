@@ -8,7 +8,7 @@ effect State s {
   fun put : (val: s) -> Unit
 }
 
-fun run_state : (init: s) -> (f: () -> a needs {State s}) -> (a, s)
+fun run_state : (init: s) -> (f: Unit -> a needs {State s}) -> (a, s)
 run_state init f = {
   let state_fn = f () with {
     get () = fun s -> (resume s) s

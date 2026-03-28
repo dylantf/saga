@@ -17,6 +17,8 @@ fn print_usage() {
     eprintln!("  dylang test <file>      Run a specific test file");
     eprintln!("  dylang test <pattern>   Run test files matching pattern");
     eprintln!("  dylang install          Fetch and cache git dependencies");
+    eprintln!("  dylang fmt <file.dy>    Format a source file (prints to stdout)");
+    eprintln!("  dylang fmt --write <file.dy>  Format a source file in place");
 }
 
 fn main() {
@@ -35,6 +37,7 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Some("fmt") => cli::commands::cmd_fmt(&args[2..]),
         _ => {
             print_usage();
             std::process::exit(1);

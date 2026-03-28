@@ -1,5 +1,5 @@
 module Std.Fail
 
 pub effect Fail e {
-  fun fail : e -> Never
+  fun fail : e -> a
 }

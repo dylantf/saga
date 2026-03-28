@@ -7,8 +7,8 @@ impl Debug for Maybe a where {a: Debug} {
   }
 }
 
-pub type Maybe a
-  = Nothing
+pub type Maybe a =
+  | Nothing
   | Just(a)
 
 pub fun map : (f: a -> b) -> (m: Maybe a) -> Maybe b

@@ -19,7 +19,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Let destructuring (`let (x, y) = ...`, `let Point { x } = ...`, `let h :: t = ...`)
 - [x] String interpolation (`$"hello {name}"`)
 - [x] `panic` and `todo` builtins (halt immediately, return `Never`)
-- [ ] Assertions/single-arm matching + let binding sugar + panic? (Sugar for Result.unwrap)
+- [ ] Multiple matches on one pattern, e.g. `case foo { A | B -> C }. Means changing guard syntax to if/when
 
 ## Effects / Handlers
 
@@ -31,7 +31,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `resume` (deep handlers, single-shot)
 - [x] `return value ->` clause in handlers
 - [x] Abort without resume (structured exceptions)
-- [x] `needs` on functions (`fun f () -> T needs {Log, Http}`)
+- [x] `needs` on functions (`fun f : Unit -> T needs {Log, Http}`)
 - [x] `needs` on handlers (`handler stripe for Billing needs {Log} { ... }`)
 - [x] `needs` on impl blocks (different impls may use different effects)
 
@@ -66,6 +66,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `needs` on impl blocks (parsing + type checking)
 - [x] `deriving` syntax to auto-generate trait impls from ADT structure (e.g. `type Color = Red | Green deriving (Show)`)
 - [x] `deriving (Eq, Ord)` for ADTs (constructor declaration order defines ordering, then fields lexicographically)
+- [ ] Trait type parameters (`trait ConvertTo b { ... }`, `impl ConvertTo NOK for USD { ... }`, `where {a: ConvertTo b}`) — enables multi-param trait patterns without full multi-param traits or fundeps
 
 ## Type System
 
@@ -243,7 +244,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 ## Upcoming
 
-- [x] Generic effects (`effect State s { fun get () -> s; fun put (val: s) -> Unit }`)
+- [x] Generic effects (`effect State s { fun get : Unit -> s; fun put (val: s) -> Unit }`)
   - Parser: type params on effect declarations, `EffectRef` with type_args in needs/handler clauses
   - Type checker: shared type vars across operations, fresh instantiation on lookup, handler specialization
   - Handlers: `handler counter for State Int { ... }` binds the type param
@@ -277,6 +278,12 @@ Checkbox = implemented and working. Unchecked = not yet done.
   - [ ] `assert_throws` / `assert_fails` (test that an effect or panic is raised)
   - [ ] Test timing (suite duration)
 - [ ] Formatter
+  - [x] Wadler-Lindig Doc algebra with proper `Nest`/`Group` indentation
+  - [x] Token-level trivia attachment (comments/blank lines on tokens, promoted to AST)
+  - [x] Trailing trivia splitting (blank line = paragraph break heuristic)
+  - [ ] Audit program-level `split_inter_decl_trivia` — may be redundant now that expression parsers steal their own trailing trivia via `steal_trailing_trivia`
+  - [ ] Semicolon-separated single-line blocks (e.g. `{ println msg; resume () }`)
+  - [ ] Configurable line width
 - [ ] Docstrings/generated docs
 - [ ] Language documentation/website
 

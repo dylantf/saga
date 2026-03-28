@@ -35,3 +35,5 @@ pub fun get : (key: k) -> (dict: Dict k v) -> Maybe v where {k: Eq}
 
 @external("erlang", "std_dict_bridge", "new")
 pub fun new : Unit -> Dict k v
+
+

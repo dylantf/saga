@@ -1,15 +1,15 @@
 mod builtins;
 mod effects;
 mod exprs;
-mod init;
+pub(crate) mod init;
 mod pats;
-mod util;
+pub mod util;
 
 use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use std::collections::HashMap;
 
-use init::{extract_external, PendingAnnotation};
+use init::{PendingAnnotation, extract_external};
 use pats::{lower_params, lower_pat};
 use util::{
     cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_qualified_call,
@@ -45,31 +45,35 @@ struct EffectInfo {
 }
 
 /// All information about a top-level function needed by the lowerer.
-/// A single struct replaces separate `top_level_funs`, `fun_effects`,
-/// `param_absorbed_effects`, and `imported_names` maps.
+/// CPS metadata for a function. Used by the lowerer to determine how to
+/// thread handler parameters and return continuations through effectful calls.
+/// This is NOT name resolution -- name resolution is handled by the ResolutionMap.
+/// FunInfo only tracks arity/effects needed for CPS transformation.
 #[derive(Debug, Clone, Default)]
 struct FunInfo {
     /// Exported arity (including handler params). 0 if not yet known (set by FunBinding).
     arity: usize,
-    /// Effect names from `needs` clause (sorted).
+    /// Effect names from `needs` clause (sorted). Used to determine which
+    /// handler params to thread through at call sites.
     effects: Vec<String>,
-    /// For EffArrow params: param_index -> absorbed effects.
+    /// For EffArrow params: param_index -> absorbed effects. Used to inject
+    /// handler params into lambdas passed to effectful higher-order functions.
     param_absorbed_effects: HashMap<usize, Vec<String>>,
-    /// If imported: (erlang_module, original_name).
-    import_origin: Option<(String, String)>,
 }
 
 pub struct Lowerer<'a> {
     counter: usize,
-    /// Cross-module codegen context (codegen info, elaborated modules, effect bindings).
+    /// Cross-module codegen context (compiled modules, effect bindings, prelude imports).
     ctx: &'a super::CodegenContext,
-    /// Maps module alias/name used in source -> Erlang module atom name.
+    /// Maps module alias -> Erlang module atom (e.g. "List" -> "std_list").
+    /// Used by lower_qualified_call as a fallback for unresolved qualified names.
     module_aliases: HashMap<String, String>,
     /// Names declared as `pub` in the current module (for export filtering).
     pub_names: std::collections::HashSet<String>,
     /// Maps record name -> ordered field names (from RecordDef declarations).
     record_fields: HashMap<String, Vec<String>>,
-    /// All top-level function info: name -> FunInfo.
+    /// CPS metadata for top-level functions. Populated from FunBinding/FunSignature
+    /// during init_module. NOT used for name resolution (that's the ResolutionMap).
     fun_info: HashMap<String, FunInfo>,
     /// Maps effect name -> EffectInfo (op names and param counts).
     effect_defs: HashMap<String, EffectInfo>,
@@ -101,17 +105,21 @@ pub struct Lowerer<'a> {
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
-    /// Maps constructor name -> erlang module name for atom mangling.
-    /// e.g. "Circle" -> "shapes", "Just" -> "std_maybe".
-    /// Constructors not in this map are prelude builtins and are not mangled.
-    constructor_modules: HashMap<String, String>,
-    /// Maps external function name -> (erlang_module, erlang_func, arity).
-    /// Populated from `Decl::ExternalFun` declarations.
-    external_funs: HashMap<String, (String, String, usize)>,
+    /// Pre-resolved constructor name -> mangled Erlang atom.
+    /// e.g. "NotFound" -> "std_file_NotFound", "Ok" -> "ok".
+    /// Built by resolve::build_constructor_atoms before lowering.
+    constructor_atoms: super::resolve::ConstructorAtoms,
+    /// Pre-resolved name resolution map: NodeId -> ResolvedName.
+    /// Built by resolve::resolve_names before lowering.
+    resolved: super::resolve::ResolutionMap,
 }
 
 impl<'a> Lowerer<'a> {
-    pub fn new(ctx: &'a super::CodegenContext) -> Self {
+    pub fn new(
+        ctx: &'a super::CodegenContext,
+        constructor_atoms: super::resolve::ConstructorAtoms,
+        resolved: super::resolve::ResolutionMap,
+    ) -> Self {
         Lowerer {
             counter: 0,
             ctx,
@@ -128,9 +136,9 @@ impl<'a> Lowerer<'a> {
             lambda_effect_context: None,
             current_return_k: None,
             pending_callee_return_k: None,
-            constructor_modules: HashMap::new(),
+            constructor_atoms,
+            resolved,
             current_handler_k: None,
-            external_funs: HashMap::new(),
         }
     }
 
@@ -210,11 +218,69 @@ impl<'a> Lowerer<'a> {
             .filter(|e| !e.is_empty())
     }
 
-    /// Get a function's import origin (erlang_module, original_name).
-    fn import_origin(&self, name: &str) -> Option<&(String, String)> {
-        self.fun_info
-            .get(name)
-            .and_then(|f| f.import_origin.as_ref())
+    /// Emit a call expression using the resolution map, falling back to old lookup maps.
+    /// Get a function's effects from the resolution map, falling back to fun_info.
+    fn resolved_effects(&self, node_id: crate::ast::NodeId, name: &str) -> Option<Vec<String>> {
+        use super::resolve::ResolvedName;
+        match self.resolved.get(&node_id) {
+            Some(ResolvedName::ImportedFun { effects, .. })
+            | Some(ResolvedName::LocalFun { effects, .. })
+                if !effects.is_empty() =>
+            {
+                Some(effects.clone())
+            }
+            Some(ResolvedName::ExternalFun { .. }) => None,
+            _ => self.fun_effects(name).cloned(),
+        }
+    }
+
+    /// Emit a function call using the resolution map.
+    fn emit_call(
+        &self,
+        func_name: &str,
+        head_node_id: crate::ast::NodeId,
+        arity: usize,
+        call_args: Vec<CExpr>,
+    ) -> CExpr {
+        use super::resolve::ResolvedName;
+        match self.resolved.get(&head_node_id) {
+            Some(ResolvedName::ExternalFun {
+                erlang_mod,
+                erlang_func,
+                ..
+            }) => {
+                // float_to_list/1 -> float_to_list/2 with [short] option
+                if erlang_mod == "erlang" && erlang_func == "float_to_list" && call_args.len() == 1
+                {
+                    let opts = CExpr::Cons(
+                        Box::new(CExpr::Lit(CLit::Atom("short".into()))),
+                        Box::new(CExpr::Nil),
+                    );
+                    CExpr::Call(
+                        erlang_mod.clone(),
+                        erlang_func.clone(),
+                        vec![call_args.into_iter().next().unwrap(), opts],
+                    )
+                } else {
+                    CExpr::Call(erlang_mod.clone(), erlang_func.clone(), call_args)
+                }
+            }
+            Some(ResolvedName::ImportedFun {
+                erlang_mod,
+                name: erl_name,
+                ..
+            }) => CExpr::Call(erlang_mod.clone(), erl_name.clone(), call_args),
+            Some(ResolvedName::LocalFun { name, .. }) => {
+                CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), arity)), call_args)
+            }
+            _ => {
+                // Not in resolution map: local function or variable apply
+                CExpr::Apply(
+                    Box::new(CExpr::FunRef(func_name.to_string(), arity)),
+                    call_args,
+                )
+            }
+        }
     }
 
     /// Get a function's param absorbed effects.
@@ -272,21 +338,19 @@ impl<'a> Lowerer<'a> {
                             effects: Vec::new(),
                             param_absorbed_effects: HashMap::new(),
                         });
-                    let base_arity =
-                        lower_params(params).len() + count_lambda_params(body);
+                    let base_arity = lower_params(params).len() + count_lambda_params(body);
                     let arity = self.expanded_arity(base_arity, &effects);
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _)| n == name) {
                         // Additional clause: just add to existing group
                         group.2.push((params, guard, body));
                     } else {
-                        // First clause: register fun_info (overrides any pre-registration)
+                        // First clause: register fun_info for arity/effects lookup.
                         self.fun_info.insert(
                             name.clone(),
                             FunInfo {
                                 arity,
                                 effects,
                                 param_absorbed_effects,
-                                import_origin: None,
                             },
                         );
                         clause_groups.push((name.clone(), arity, vec![(params, guard, body)]));
@@ -446,7 +510,7 @@ impl<'a> Lowerer<'a> {
                     } else {
                         // Check for effectful function call: pass _ReturnK directly
                         let is_eff_call = collect_fun_call(body)
-                            .map(|(name, _)| {
+                            .map(|(name, _, _)| {
                                 self.is_effectful(name)
                                     || self.current_effectful_vars.contains_key(name)
                             })
@@ -497,7 +561,7 @@ impl<'a> Lowerer<'a> {
                             lower_pat(
                                 non_unit_pats[0],
                                 &self.record_fields,
-                                &self.constructor_modules,
+                                &self.constructor_atoms,
                             )
                         } else if base_arity == 0 {
                             // No user params to match on -- use wildcard
@@ -507,13 +571,14 @@ impl<'a> Lowerer<'a> {
                                 non_unit_pats
                                     .iter()
                                     .map(|p| {
-                                        lower_pat(p, &self.record_fields, &self.constructor_modules)
+                                        lower_pat(p, &self.record_fields, &self.constructor_atoms)
                                     })
                                     .collect(),
                             )
                         };
                         let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
-                        let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
+                        let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. })
+                        {
                             if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
                                 let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                                 self.lower_effect_call(
@@ -593,33 +658,53 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(super) fn lower_expr(&mut self, expr: &Expr) -> CExpr {
         match &expr.kind {
             ExprKind::Lit { value, .. } => CExpr::Lit(lower_lit(value)),
 
             ExprKind::Var { name, .. } => {
-                // If it's an imported name used bare, emit an external fun ref.
-                if let Some((erl_mod, erl_name)) = self.import_origin(name).cloned() {
-                    if let Some(arity) = self.fun_arity(name) {
-                        CExpr::Call(
-                            "erlang".to_string(),
-                            "make_fun".to_string(),
-                            vec![
-                                CExpr::Lit(CLit::Atom(erl_mod)),
-                                CExpr::Lit(CLit::Atom(erl_name)),
-                                CExpr::Lit(CLit::Int(arity as i64)),
-                            ],
-                        )
-                    } else {
-                        CExpr::Var(core_var(name))
+                use super::resolve::ResolvedName;
+                match self.resolved.get(&expr.id) {
+                    Some(ResolvedName::ImportedFun {
+                        erlang_mod,
+                        name: erl_name,
+                        arity,
+                        ..
+                    }) => CExpr::Call(
+                        "erlang".to_string(),
+                        "make_fun".to_string(),
+                        vec![
+                            CExpr::Lit(CLit::Atom(erlang_mod.clone())),
+                            CExpr::Lit(CLit::Atom(erl_name.clone())),
+                            CExpr::Lit(CLit::Int(*arity as i64)),
+                        ],
+                    ),
+                    Some(ResolvedName::ExternalFun {
+                        erlang_mod,
+                        erlang_func,
+                        arity,
+                    }) => CExpr::Call(
+                        "erlang".to_string(),
+                        "make_fun".to_string(),
+                        vec![
+                            CExpr::Lit(CLit::Atom(erlang_mod.clone())),
+                            CExpr::Lit(CLit::Atom(erlang_func.clone())),
+                            CExpr::Lit(CLit::Int(*arity as i64)),
+                        ],
+                    ),
+                    Some(ResolvedName::LocalFun { name, arity, .. }) => {
+                        CExpr::FunRef(name.clone(), *arity)
                     }
-                } else if let Some(arity) = self.fun_arity(name) {
-                    // If referenced bare (not in application position), emit a FunRef
-                    // so it can be passed as a value.
-                    CExpr::FunRef(name.clone(), arity)
-                } else {
-                    CExpr::Var(core_var(name))
+                    _ => {
+                        // Not in resolution map: check fun_info for local top-level
+                        // functions (needed for functions registered during init
+                        // like FunBindings), otherwise treat as local variable.
+                        if let Some(arity) = self.fun_arity(name) {
+                            CExpr::FunRef(name.clone(), arity)
+                        } else {
+                            CExpr::Var(core_var(name))
+                        }
+                    }
                 }
             }
 
@@ -640,12 +725,12 @@ impl<'a> Lowerer<'a> {
 
                 // Check for a qualified call: App(QualifiedName { module, name }, arg1, ...)
                 // e.g. `Math.abs x` -> call 'math':'abs'(X)
-                if let Some((module, func_name, args)) = collect_qualified_call(expr) {
-                    return self.lower_qualified_call(module, func_name, &args);
+                if let Some((module, func_name, head, args)) = collect_qualified_call(expr) {
+                    return self.lower_qualified_call(module, func_name, head, &args);
                 }
 
                 // Lower print/println/eprint/eprintln to io:format, dbg to stderr+passthrough
-                if let Some((func_name, args)) = collect_fun_call(expr) {
+                if let Some((func_name, _head, args)) = collect_fun_call(expr) {
                     let lowered = match func_name {
                         "print" => self.lower_builtin_print(&args, false, false),
                         "println" => self.lower_builtin_print(&args, false, true),
@@ -660,7 +745,7 @@ impl<'a> Lowerer<'a> {
                 }
 
                 // Lower `panic msg` / `todo ()` to stderr print + erlang:halt(1)
-                if let Some((func_name, args)) = collect_fun_call(expr)
+                if let Some((func_name, _head, args)) = collect_fun_call(expr)
                     && (func_name == "panic" || func_name == "todo")
                     && args.len() == 1
                 {
@@ -722,9 +807,10 @@ impl<'a> Lowerer<'a> {
                 // For effectful functions, the user provides N args but the function
                 // takes N+M where M is the number of handler params. We thread
                 // the caller's handler params through automatically.
-                if let Some((func_name, args)) = collect_fun_call(expr) {
-                    let callee_effects = self.fun_effects(func_name).cloned();
-                    let callee_ops = callee_effects.as_ref()
+                if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
+                    let callee_effects = self.resolved_effects(head_expr.id, func_name);
+                    let callee_ops = callee_effects
+                        .as_ref()
                         .map(|effs| self.effect_handler_ops(effs))
                         .unwrap_or_default();
                     let effect_count = callee_ops.len();
@@ -792,35 +878,7 @@ impl<'a> Lowerer<'a> {
                         }
                         let call_args: Vec<CExpr> =
                             arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-                        let call = if let Some((erl_mod, erl_func, _)) =
-                            self.external_funs.get(func_name)
-                        {
-                            // float_to_list/1 -> float_to_list/2 with [short] option
-                            if erl_mod == "erlang"
-                                && erl_func == "float_to_list"
-                                && call_args.len() == 1
-                            {
-                                let opts = CExpr::Cons(
-                                    Box::new(CExpr::Lit(CLit::Atom("short".into()))),
-                                    Box::new(CExpr::Nil),
-                                );
-                                CExpr::Call(
-                                    erl_mod.clone(),
-                                    erl_func.clone(),
-                                    vec![call_args.into_iter().next().unwrap(), opts],
-                                )
-                            } else {
-                                // External function: direct call to the foreign module
-                                CExpr::Call(erl_mod.clone(), erl_func.clone(), call_args)
-                            }
-                        } else if let Some((erl_mod, erl_name)) = self.import_origin(func_name) {
-                            CExpr::Call(erl_mod.clone(), erl_name.clone(), call_args)
-                        } else {
-                            CExpr::Apply(
-                                Box::new(CExpr::FunRef(func_name.to_string(), arity)),
-                                call_args,
-                            )
-                        };
+                        let call = self.emit_call(func_name, head_expr.id, arity, call_args);
                         return bindings.into_iter().rev().fold(call, |body, (var, val)| {
                             CExpr::Let(var, Box::new(val), Box::new(body))
                         });
@@ -864,19 +922,7 @@ impl<'a> Lowerer<'a> {
                                 params.push(rk.clone());
                                 call_args.push(CExpr::Var(rk));
                             }
-                            let call = if let Some((erl_mod, erl_func, _)) =
-                                self.external_funs.get(func_name)
-                            {
-                                CExpr::Call(erl_mod.clone(), erl_func.clone(), call_args)
-                            } else if let Some((erl_mod, erl_name)) = self.import_origin(func_name)
-                            {
-                                CExpr::Call(erl_mod.clone(), erl_name.clone(), call_args)
-                            } else {
-                                CExpr::Apply(
-                                    Box::new(CExpr::FunRef(func_name.to_string(), arity)),
-                                    call_args,
-                                )
-                            };
+                            let call = self.emit_call(func_name, head_expr.id, arity, call_args);
                             let lambda = CExpr::Fun(params, Box::new(call));
                             return bindings.into_iter().rev().fold(lambda, |body, (var, val)| {
                                 CExpr::Let(var, Box::new(val), Box::new(body))
@@ -887,7 +933,7 @@ impl<'a> Lowerer<'a> {
 
                 // Check for call to an effectful variable (HOF absorption).
                 // e.g. `computation ()` where computation absorbs Fail
-                if let Some((var_name, args)) = collect_fun_call(expr)
+                if let Some((var_name, _, args)) = collect_fun_call(expr)
                     && let Some(absorbed) = self.current_effectful_vars.get(var_name).cloned()
                 {
                     let mut arg_vars: Vec<String> = Vec::new();
@@ -995,20 +1041,17 @@ impl<'a> Lowerer<'a> {
                         .collect();
                     let func_ce = self.lower_expr(callee);
                     let result_var = self.fresh();
-                    bindings.push((result_var.clone(), CExpr::Apply(
-                        Box::new(func_ce),
-                        sat_args,
-                    )));
+                    bindings.push((
+                        result_var.clone(),
+                        CExpr::Apply(Box::new(func_ce), sat_args),
+                    ));
 
                     // Apply remaining args to the result
                     let extra_args: Vec<CExpr> = arg_vars[arity..]
                         .iter()
                         .map(|v| CExpr::Var(v.clone()))
                         .collect();
-                    let call = CExpr::Apply(
-                        Box::new(CExpr::Var(result_var)),
-                        extra_args,
-                    );
+                    let call = CExpr::Apply(Box::new(CExpr::Var(result_var)), extra_args);
                     bindings.into_iter().rev().fold(call, |body, (var, val)| {
                         CExpr::Let(var, Box::new(val), Box::new(body))
                     })
@@ -1048,7 +1091,7 @@ impl<'a> Lowerer<'a> {
                 "Killed" => CExpr::Lit(CLit::Atom("killed".to_string())),
                 "Noproc" => CExpr::Lit(CLit::Atom("noproc".to_string())),
                 _ => {
-                    let atom = util::mangle_ctor_atom(name, &self.constructor_modules);
+                    let atom = util::mangle_ctor_atom(name, &self.constructor_atoms);
                     // Wrap in a 1-tuple to match pattern representation and avoid atom collisions
                     CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(atom))])
                 }
@@ -1103,7 +1146,10 @@ impl<'a> Lowerer<'a> {
                 )
             }
 
-            ExprKind::Block { stmts, .. } => self.lower_block(stmts),
+            ExprKind::Block { stmts, .. } => {
+                let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
+                self.lower_block(&stmts)
+            }
 
             ExprKind::Lambda { params, body, .. } => {
                 let all_simple = params.iter().all(|p| {
@@ -1141,7 +1187,8 @@ impl<'a> Lowerer<'a> {
                     // directly (e.g. lambda defined in a block that already has
                     // handler params in scope -- those are captured, not parameterized).
                 }
-                let body_ce = if is_effectful_lambda && !matches!(body.kind, ExprKind::Block { .. }) {
+                let body_ce = if is_effectful_lambda && !matches!(body.kind, ExprKind::Block { .. })
+                {
                     if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
                         let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                         self.lower_effect_call(
@@ -1158,7 +1205,7 @@ impl<'a> Lowerer<'a> {
                     } else {
                         // Check for effectful function call: pass _ReturnK directly
                         let is_eff_call = collect_fun_call(body)
-                            .map(|(name, _)| {
+                            .map(|(name, _, _)| {
                                 self.is_effectful(name)
                                     || self.current_effectful_vars.contains_key(name)
                             })
@@ -1188,14 +1235,12 @@ impl<'a> Lowerer<'a> {
                         CExpr::Tuple(param_vars.iter().map(|v| CExpr::Var(v.clone())).collect())
                     };
                     let pat = if params.len() == 1 {
-                        lower_pat(&params[0], &self.record_fields, &self.constructor_modules)
+                        lower_pat(&params[0], &self.record_fields, &self.constructor_atoms)
                     } else {
                         CPat::Tuple(
                             params
                                 .iter()
-                                .map(|p| {
-                                    lower_pat(p, &self.record_fields, &self.constructor_modules)
-                                })
+                                .map(|p| lower_pat(p, &self.record_fields, &self.constructor_atoms))
                                 .collect(),
                         )
                     };
@@ -1218,7 +1263,8 @@ impl<'a> Lowerer<'a> {
             } => {
                 let scrut_var = self.fresh();
                 let scrut_ce = self.lower_expr(scrutinee);
-                let arms_ce = self.lower_case_arms(&scrut_var, arms);
+                let arms: Vec<_> = arms.iter().map(|a| a.node.clone()).collect();
+                let arms_ce = self.lower_case_arms(&scrut_var, &arms);
                 CExpr::Let(
                     scrut_var.clone(),
                     Box::new(scrut_ce),
@@ -1233,7 +1279,8 @@ impl<'a> Lowerer<'a> {
                 // there is no scrutinee variable to fall through to.
                 let lowered_arms: Vec<CArm> = arms
                     .iter()
-                    .map(|arm| {
+                    .map(|annotated| {
+                        let arm = &annotated.node;
                         // System message patterns: bind a raw reason variable
                         // and wrap the body with a conversion case.
                         let (pat, reason_wrapper) = if let Pat::Constructor { name, args, .. } =
@@ -1250,7 +1297,7 @@ impl<'a> Lowerer<'a> {
                                             lower_pat(
                                                 &args[1],
                                                 &self.record_fields,
-                                                &self.constructor_modules,
+                                                &self.constructor_atoms,
                                             ),
                                             None,
                                         )
@@ -1265,7 +1312,7 @@ impl<'a> Lowerer<'a> {
                                         lower_pat(
                                             &args[0],
                                             &self.record_fields,
-                                            &self.constructor_modules,
+                                            &self.constructor_atoms,
                                         ),
                                         reason_pat,
                                     ])
@@ -1276,7 +1323,7 @@ impl<'a> Lowerer<'a> {
                                         lower_pat(
                                             &args[0],
                                             &self.record_fields,
-                                            &self.constructor_modules,
+                                            &self.constructor_atoms,
                                         ),
                                         reason_pat,
                                     ])
@@ -1287,7 +1334,7 @@ impl<'a> Lowerer<'a> {
                                     lower_pat(
                                         &arm.pattern,
                                         &self.record_fields,
-                                        &self.constructor_modules,
+                                        &self.constructor_atoms,
                                     ),
                                     None,
                                 )
@@ -1297,7 +1344,7 @@ impl<'a> Lowerer<'a> {
                                 lower_pat(
                                     &arm.pattern,
                                     &self.record_fields,
-                                    &self.constructor_modules,
+                                    &self.constructor_atoms,
                                 ),
                                 None,
                             )
@@ -1306,7 +1353,7 @@ impl<'a> Lowerer<'a> {
                         let raw_body = self.lower_expr(&arm.body);
                         // Convert raw Erlang exit reason to ExitReason type
                         let body = if let Some((user_var, raw_var)) = reason_wrapper {
-                            let cm = &self.constructor_modules;
+                            let cm = &self.constructor_atoms;
                             let normal = util::mangle_ctor_atom("Normal", cm);
                             let shutdown = util::mangle_ctor_atom("Shutdown", cm);
                             let killed = util::mangle_ctor_atom("Killed", cm);
@@ -1408,27 +1455,36 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Tuple { elements, .. } => self.lower_tuple_elems(elements),
 
-            ExprKind::QualifiedName { module, name, .. } => {
-                // When used as a bare reference (not in application position),
-                // emit a FunRef if it's a known imported function, otherwise a Var.
-                let qualified = format!("{}.{}", module, name);
-                if let Some(arity) = self.fun_arity(&qualified) {
-                    let erlang_module = self
-                        .module_aliases
-                        .get(module.as_str())
-                        .cloned()
-                        .unwrap_or_else(|| module.to_lowercase());
-                    // In Core Erlang, referencing an external function as a value
-                    // is done with: fun 'module':'name'/arity
-                    CExpr::Call(
-                        "erlang".to_string(),
-                        "make_fun".to_string(),
-                        vec![
-                            CExpr::Lit(CLit::Atom(erlang_module)),
-                            CExpr::Lit(CLit::Atom(name.clone())),
-                            CExpr::Lit(CLit::Int(arity as i64)),
-                        ],
-                    )
+            ExprKind::QualifiedName { module: _, name, .. } => {
+                use super::resolve::ResolvedName;
+                if let Some(resolved) = self.resolved.get(&expr.id) {
+                    match resolved {
+                        ResolvedName::ImportedFun { erlang_mod, name: erl_name, arity, .. } => {
+                            CExpr::Call(
+                                "erlang".to_string(),
+                                "make_fun".to_string(),
+                                vec![
+                                    CExpr::Lit(CLit::Atom(erlang_mod.clone())),
+                                    CExpr::Lit(CLit::Atom(erl_name.clone())),
+                                    CExpr::Lit(CLit::Int(*arity as i64)),
+                                ],
+                            )
+                        }
+                        ResolvedName::ExternalFun { erlang_mod, erlang_func, arity } => {
+                            CExpr::Call(
+                                "erlang".to_string(),
+                                "make_fun".to_string(),
+                                vec![
+                                    CExpr::Lit(CLit::Atom(erlang_mod.clone())),
+                                    CExpr::Lit(CLit::Atom(erlang_func.clone())),
+                                    CExpr::Lit(CLit::Int(*arity as i64)),
+                                ],
+                            )
+                        }
+                        ResolvedName::LocalFun { name, arity, .. } => {
+                            CExpr::FunRef(name.clone(), *arity)
+                        }
+                    }
                 } else {
                     CExpr::Var(core_var(name))
                 }
@@ -1449,7 +1505,7 @@ impl<'a> Lowerer<'a> {
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
-                let atom = util::mangle_ctor_atom(name, &self.constructor_modules);
+                let atom = util::mangle_ctor_atom(name, &self.constructor_atoms);
                 let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
                 elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
                 let tuple = CExpr::Tuple(elems);
@@ -1558,7 +1614,10 @@ impl<'a> Lowerer<'a> {
                 success,
                 else_arms,
                 ..
-            } => self.lower_do(bindings, success, else_arms),
+            } => {
+                let else_arms: Vec<_> = else_arms.iter().map(|a| a.node.clone()).collect();
+                self.lower_do(bindings, success, &else_arms)
+            }
 
             // --- Elaboration-only constructs ---
             ExprKind::DictMethodAccess {
@@ -1623,33 +1682,40 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::DictRef { name, .. } => {
-                if let Some((erl_mod, erl_name)) = self.import_origin(name).cloned() {
-                    // Cross-module dict constructor
-                    let arity = self.fun_arity(name).unwrap_or(0);
-                    if arity == 0 {
-                        CExpr::Call(erl_mod, erl_name, vec![])
-                    } else {
-                        CExpr::Call(
-                            "erlang".to_string(),
-                            "make_fun".to_string(),
-                            vec![
-                                CExpr::Lit(CLit::Atom(erl_mod)),
-                                CExpr::Lit(CLit::Atom(erl_name)),
-                                CExpr::Lit(CLit::Int(arity as i64)),
-                            ],
-                        )
+                use super::resolve::ResolvedName;
+                match self.resolved.get(&expr.id) {
+                    Some(ResolvedName::ImportedFun {
+                        erlang_mod,
+                        name: erl_name,
+                        arity,
+                        ..
+                    }) => {
+                        if *arity == 0 {
+                            CExpr::Call(erlang_mod.clone(), erl_name.clone(), vec![])
+                        } else {
+                            CExpr::Call(
+                                "erlang".to_string(),
+                                "make_fun".to_string(),
+                                vec![
+                                    CExpr::Lit(CLit::Atom(erlang_mod.clone())),
+                                    CExpr::Lit(CLit::Atom(erl_name.clone())),
+                                    CExpr::Lit(CLit::Int(*arity as i64)),
+                                ],
+                            )
+                        }
                     }
-                } else if let Some(arity) = self.fun_arity(name) {
-                    if arity == 0 {
-                        // Nullary dict constructor: call it to get the dict tuple
-                        CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])
-                    } else {
-                        // Parameterized dict constructor: reference it
-                        CExpr::FunRef(name.clone(), arity)
+                    _ => {
+                        if let Some(arity) = self.fun_arity(name) {
+                            if arity == 0 {
+                                CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])
+                            } else {
+                                CExpr::FunRef(name.clone(), arity)
+                            }
+                        } else {
+                            // Dict param variable (passed as function argument)
+                            CExpr::Var(core_var(name))
+                        }
                     }
-                } else {
-                    // Dict param variable (passed as function argument)
-                    CExpr::Var(core_var(name))
                 }
             }
 
@@ -1699,7 +1765,13 @@ impl<'a> Lowerer<'a> {
 
     /// Lower a qualified function call like `Math.abs x` to `call 'math':'abs'(X)`.
     /// For effectful imported functions, handler params and _ReturnK are threaded.
-    fn lower_qualified_call(&mut self, module: &str, func_name: &str, args: &[&Expr]) -> CExpr {
+    fn lower_qualified_call(
+        &mut self,
+        module: &str,
+        func_name: &str,
+        head: &Expr,
+        args: &[&Expr],
+    ) -> CExpr {
         let erlang_module = self
             .module_aliases
             .get(module)
@@ -1707,8 +1779,9 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|| module.to_lowercase());
 
         let qualified = format!("{}.{}", module, func_name);
-        let callee_effects = self.fun_effects(&qualified).cloned();
-        let callee_ops = callee_effects.as_ref()
+        let callee_effects = self.resolved_effects(head.id, &qualified);
+        let callee_ops = callee_effects
+            .as_ref()
             .map(|effs| self.effect_handler_ops(effs))
             .unwrap_or_default();
 
@@ -1759,18 +1832,18 @@ impl<'a> Lowerer<'a> {
             arg_vars.push(rk_var);
         }
 
-        // Check if the function is an @external with a specific bridge module.
-        // Look up by qualified name first to disambiguate same-named externals
-        // from different modules (e.g. List.reverse vs String.reverse).
         let call_args: Vec<CExpr> = arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-        let call = if let Some((erl_mod, erl_func, _)) = self
-            .external_funs
-            .get(&qualified)
-            .or_else(|| self.external_funs.get(func_name))
-        {
-            CExpr::Call(erl_mod.clone(), erl_func.clone(), call_args)
-        } else {
-            CExpr::Call(erlang_module, func_name.to_string(), call_args)
+        use super::resolve::ResolvedName;
+        let call = match self.resolved.get(&head.id) {
+            Some(ResolvedName::ExternalFun {
+                erlang_mod,
+                erlang_func,
+                ..
+            }) => CExpr::Call(erlang_mod.clone(), erlang_func.clone(), call_args),
+            Some(ResolvedName::ImportedFun {
+                erlang_mod, name, ..
+            }) => CExpr::Call(erlang_mod.clone(), name.clone(), call_args),
+            _ => CExpr::Call(erlang_module, func_name.to_string(), call_args),
         };
 
         bindings.into_iter().rev().fold(call, |body, (var, val)| {

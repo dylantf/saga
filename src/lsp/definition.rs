@@ -73,8 +73,8 @@ fn find_in_decl(decl: &Decl, name: &str) -> Option<Span> {
                 return Some(*name_span);
             }
             for variant in variants {
-                if variant.name == name {
-                    return Some(variant.span);
+                if variant.node.name == name {
+                    return Some(variant.node.span);
                 }
             }
             None
@@ -96,8 +96,8 @@ fn find_in_decl(decl: &Decl, name: &str) -> Option<Span> {
                 return Some(*name_span);
             }
             for op in operations {
-                if op.name == name {
-                    return Some(op.span);
+                if op.node.name == name {
+                    return Some(op.node.span);
                 }
             }
             None
@@ -126,7 +126,7 @@ fn find_local_def(expr: &Expr, name: &str) -> Option<Span> {
     match &expr.kind {
         ExprKind::Block { stmts, .. } => {
             for stmt in stmts {
-                if let Some(span) = find_def_in_stmt(stmt, name) {
+                if let Some(span) = find_def_in_stmt(&stmt.node, name) {
                     return Some(span);
                 }
             }
@@ -134,10 +134,10 @@ fn find_local_def(expr: &Expr, name: &str) -> Option<Span> {
         }
         ExprKind::Case { arms, .. } => {
             for arm in arms {
-                if let Some(span) = find_def_in_pat(&arm.pattern, name) {
+                if let Some(span) = find_def_in_pat(&arm.node.pattern, name) {
                     return Some(span);
                 }
-                if let Some(span) = find_local_def(&arm.body, name) {
+                if let Some(span) = find_local_def(&arm.node.body, name) {
                     return Some(span);
                 }
             }

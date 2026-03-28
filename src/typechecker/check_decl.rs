@@ -11,9 +11,7 @@ use super::{
 /// Walk an arrow chain and return the EffectRow from the innermost Fun.
 fn innermost_effect_row(ty: &Type) -> Option<EffectRow> {
     match ty {
-        Type::Fun(_, ret, row) => {
-            innermost_effect_row(ret).or_else(|| Some(row.clone()))
-        }
+        Type::Fun(_, ret, row) => innermost_effect_row(ret).or_else(|| Some(row.clone())),
         _ => None,
     }
 }
@@ -117,7 +115,9 @@ impl Checker {
 
         // Validate that `main` does not declare effects (it's the top of the call stack,
         // there is no caller above to provide handlers)
-        let main_effects: Vec<String> = self.env.get("main")
+        let main_effects: Vec<String> = self
+            .env
+            .get("main")
             .and_then(|s| innermost_effect_row(&self.sub.apply(&s.ty)))
             .map(|r| r.effects.iter().map(|(n, _)| n.clone()).collect())
             .unwrap_or_default();
@@ -181,17 +181,20 @@ impl Checker {
                 .iter()
                 .filter_map(|d| match d {
                     Decl::FunSignature {
-                        name, annotations: ann, ..
-                    } if ann.iter().any(|a| a.name == "external" || a.name == "builtin") => {
+                        name,
+                        annotations: ann,
+                        ..
+                    } if ann
+                        .iter()
+                        .any(|a| a.name == "external" || a.name == "builtin") =>
+                    {
                         Some(name.as_str())
                     }
                     _ => None,
                 })
                 .collect();
             for (name, (_, span)) in &annotations {
-                if !bound_names.contains(name.as_str())
-                    && !bodyless_names.contains(name.as_str())
-                {
+                if !bound_names.contains(name.as_str()) && !bodyless_names.contains(name.as_str()) {
                     errors.push(Diagnostic::error_at(
                         *span,
                         format!("type annotation for `{name}` has no matching function definition"),
@@ -223,7 +226,7 @@ impl Checker {
                 span,
                 ..
             } => {
-                let (ty, _effs) = self.infer_expr(value)?;
+                let ty = self.infer_expr(value)?;
                 if let Some(ann) = annotation {
                     let ann_ty = self.convert_type_expr(ann, &mut vec![]);
                     self.unify_at(&ty, &ann_ty, *span)?;
@@ -268,7 +271,8 @@ impl Checker {
                     variants,
                     ..
                 } => {
-                    self.register_type_def(name, type_params, variants)
+                    let plain_variants: Vec<_> = variants.iter().map(|a| &a.node).collect();
+                    self.register_type_def(name, type_params, &plain_variants)
                         .map_err(|e| vec![e])?;
                 }
                 Decl::RecordDef {
@@ -278,7 +282,8 @@ impl Checker {
                     fields,
                     ..
                 } => {
-                    self.register_record_def(name, type_params, fields, *id)
+                    let plain_fields: Vec<_> = fields.iter().map(|a| &a.node).collect();
+                    self.register_record_def(name, type_params, &plain_fields, *id)
                         .map_err(|e| vec![e])?;
                 }
                 Decl::EffectDef {
@@ -287,7 +292,8 @@ impl Checker {
                     operations,
                     ..
                 } => {
-                    self.register_effect_def(name, type_params, operations)
+                    let plain_ops: Vec<_> = operations.iter().map(|a| &a.node).collect();
+                    self.register_effect_def(name, type_params, &plain_ops)
                         .map_err(|e| vec![e])?;
                 }
                 Decl::TraitDef {
@@ -297,7 +303,8 @@ impl Checker {
                     methods,
                     ..
                 } => {
-                    self.register_trait_def(name, type_param, supertraits, methods)
+                    let plain_methods: Vec<_> = methods.iter().map(|a| &a.node).collect();
+                    self.register_trait_def(name, type_param, supertraits, &plain_methods)
                         .map_err(|e| vec![e])?;
                 }
                 _ => {}
@@ -432,17 +439,21 @@ impl Checker {
                         })
                         .collect();
                     let tail = effect_row_var.as_ref().map(|(rv_name, _)| {
-                        let id = if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
-                            *id
-                        } else {
-                            let id = self.next_var;
-                            self.next_var += 1;
-                            params_list.push((rv_name.clone(), id));
-                            id
-                        };
+                        let id =
+                            if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
+                                *id
+                            } else {
+                                let id = self.next_var;
+                                self.next_var += 1;
+                                params_list.push((rv_name.clone(), id));
+                                id
+                            };
                         Box::new(Type::Var(id))
                     });
-                    EffectRow { effects: effect_refs, tail }
+                    EffectRow {
+                        effects: effect_refs,
+                        tail,
+                    }
                 } else {
                     EffectRow::closed(vec![])
                 };
@@ -452,18 +463,14 @@ impl Checker {
                 for (_, texpr) in params.iter().rev() {
                     let param_ty = self.convert_type_expr(texpr, &mut params_list);
                     if first_arrow {
-                        fun_ty = Type::Fun(
-                            Box::new(param_ty),
-                            Box::new(fun_ty),
-                            fun_effect_row.clone(),
-                        );
+                        fun_ty =
+                            Type::Fun(Box::new(param_ty), Box::new(fun_ty), fun_effect_row.clone());
                     } else {
                         fun_ty = Type::arrow(param_ty, fun_ty);
                     }
                     first_arrow = false;
                 }
                 annotations.insert(name.clone(), (fun_ty.clone(), *span));
-
 
                 // Always register in known_funs (even pure functions) so the
                 // `with` validation can distinguish local declarations
@@ -599,13 +606,14 @@ impl Checker {
                 for eff in needs {
                     self.record_effect_ref(eff);
                 }
+                let plain_methods: Vec<_> = methods.iter().map(|a| a.node.clone()).collect();
                 self.register_impl(
                     trait_name,
                     target_type,
                     type_params,
                     where_clause,
                     needs,
-                    methods,
+                    &plain_methods,
                     *span,
                 )
                 .map_err(|e| vec![e])?;
@@ -702,7 +710,8 @@ impl Checker {
             }
         }
 
-        let mut all_body_effs = EffectRow::empty();
+        // Save effects and start fresh for this function body
+        let saved_effs = self.save_effects();
         for clause in clauses {
             let Decl::FunBinding {
                 params,
@@ -740,16 +749,43 @@ impl Checker {
                         "Effect calls are not allowed in guard expressions".to_string(),
                     ));
                 }
-                let (guard_ty, _effs) = self.infer_expr(guard)?;
+                let guard_saved = self.save_effects();
+                let guard_ty = self.infer_expr(guard)?;
+                self.restore_effects(guard_saved);
                 self.unify_at(&guard_ty, &Type::bool(), guard.span)?;
             }
 
-            let (body_ty, body_effs) = self.infer_expr(body)?;
+            let body_ty = self.infer_expr(body)?;
             self.unify_at(&result_ty, &body_ty, body.span)?;
-            all_body_effs = all_body_effs.merge(&body_effs);
 
             self.env = saved_env;
         }
+        // Collect accumulated effects and restore outer scope
+        let all_body_effs = self.restore_effects(saved_effs);
+
+        // Absorption (boundary half): when a function directly calls a callback
+        // parameter like `f ()` in `run_state init f = (f (), init)`, the callee's
+        // effect row is emitted to the accumulator. But those effects belong to the
+        // *caller* of run_state, not run_state itself. We subtract effects declared
+        // on any callback parameter types.
+        //
+        // There is a second absorption site in infer.rs App (call-site half) that
+        // handles the inverse case: passing a lambda to a HOF like `try_it (fun () -> ...)`.
+        // Both are needed because they fire at different points in inference:
+        // - Call-site: lambda effects propagate immediately during lambda inference,
+        //   before the boundary runs. Only the App knows the HOF's parameter type.
+        // - Boundary: direct callback calls emit effects from the callee's type.
+        //   Only the boundary knows which params are callback parameters.
+        let mut absorbed = std::collections::HashSet::new();
+        for pt in &param_types {
+            let resolved = self.sub.apply(pt);
+            super::collect_callback_effects(&resolved, &mut absorbed);
+        }
+        let all_body_effs = if absorbed.is_empty() {
+            all_body_effs
+        } else {
+            all_body_effs.subtract(&absorbed)
+        };
 
         // Check exhaustiveness of function clause patterns (multi-column Maranget)
         if clauses.len() > 1
@@ -770,8 +806,7 @@ impl Checker {
         }
 
         // Check effect requirements against declared needs via row comparison.
-        // Use the EffectRow returned by infer_expr (all_body_effs) instead of
-        // the scope-based HashSet accumulator.
+        // all_body_effs was accumulated on self.effect_row during body inference.
         let scope_result = self.exit_scope(body_scope);
         let body_field_candidates = scope_result.field_candidates;
 
@@ -793,9 +828,15 @@ impl Checker {
 
             // Check for effects declared but never used
             let body_effect_names: std::collections::HashSet<String> = all_body_effs
-                .effects.iter().map(|(n, _)| n.clone()).collect();
+                .effects
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
             let declared_effects: std::collections::HashSet<String> = declared_row
-                .effects.iter().map(|(n, _)| n.clone()).collect();
+                .effects
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
             let unused: Vec<_> = declared_effects.difference(&body_effect_names).collect();
             if !unused.is_empty() {
                 let span = annotation_span.expect("unused effects implies annotation exists");
@@ -1086,7 +1127,7 @@ impl Checker {
         &mut self,
         name: &str,
         type_params: &[String],
-        variants: &[ast::TypeConstructor],
+        variants: &[&ast::TypeConstructor],
     ) -> Result<(), Diagnostic> {
         // Create fresh type variables for the type parameters
         let mut param_vars: Vec<(String, u32)> = type_params
@@ -1149,7 +1190,7 @@ impl Checker {
         &mut self,
         name: &str,
         type_params: &[String],
-        fields: &[(String, ast::TypeExpr)],
+        fields: &[&(String, ast::TypeExpr)],
         def_id: crate::ast::NodeId,
     ) -> Result<(), Diagnostic> {
         // Create fresh type variables for declared type parameters (same as register_type_def)
@@ -1211,7 +1252,7 @@ impl Checker {
         &mut self,
         name: &str,
         effect_type_params: &[String],
-        operations: &[ast::EffectOp],
+        operations: &[&ast::EffectOp],
     ) -> Result<(), Diagnostic> {
         // Create fresh vars for the effect's type params, shared across all operations.
         // E.g. for `effect State s { get () -> s; put (val: s) -> Unit }`,
@@ -1338,14 +1379,15 @@ impl Checker {
         // Arms unify against this; the return clause (if any) constrains it later.
         let answer_ty = self.fresh_var();
 
-        // Accumulate effects from all handler arm bodies
-        let mut all_handler_effs = EffectRow::empty();
+        // Save effects and start fresh for handler body checking
+        let handler_saved_effs = self.save_effects();
 
         // Validate that each arm's operation belongs to the handler's declared effects
         let mut seen_ops: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut arm_spans: std::collections::HashMap<String, Span> =
             std::collections::HashMap::new();
-        for arm in arms {
+        for arm_ann in arms {
+            let arm = &arm_ann.node;
             if !seen_ops.insert(arm.op_name.clone()) {
                 return Err(Diagnostic::error_at(
                     arm.span,
@@ -1437,24 +1479,8 @@ impl Checker {
                     .push((param_id, param_name.clone(), *param_span));
             }
 
-            let (body_ty, arm_effs) = self.infer_expr(&arm.body)?;
-            all_handler_effs = all_handler_effs.merge(&arm_effs);
-            // If the op returns Never (non-resumable), the arm body must also
-            // be Never (i.e. diverge). Otherwise the handler would silently
-            // produce a non-Never value with no way to continue the computation.
-            if matches!(op_sig.return_type, Type::Never) {
-                let resolved = self.sub.apply(&body_ty);
-                if !matches!(resolved, Type::Never | Type::Error) {
-                    let display_ty = self.prettify_type(&body_ty);
-                    self.collected_diagnostics.push(Diagnostic::error_at(
-                        arm.span,
-                        format!(
-                            "non-resumable handler arm must diverge (return Never), but returns `{}`",
-                            display_ty
-                        ),
-                    ));
-                }
-            } else if let Err(e) = self.unify(&answer_ty, &body_ty) {
+            let body_ty = self.infer_expr(&arm.body)?;
+            if let Err(e) = self.unify(&answer_ty, &body_ty) {
                 self.collected_diagnostics.push(e.with_span(arm.span));
             }
             self.resume_type = saved_resume;
@@ -1488,8 +1514,7 @@ impl Checker {
                     .definitions
                     .push((param_id, param_name.clone(), *param_span));
             }
-            let (ret_ty, ret_effs) = self.infer_expr(&rc.body)?;
-            all_handler_effs = all_handler_effs.merge(&ret_effs);
+            let ret_ty = self.infer_expr(&rc.body)?;
             // Constrain answer_ty to match the return clause's body type
             if let Err(e) = self.unify(&answer_ty, &ret_ty) {
                 self.collected_diagnostics.push(e.with_span(rc.body.span));
@@ -1508,16 +1533,23 @@ impl Checker {
             Some((frozen.clone(), frozen))
         };
 
-        // Check effect requirements against declared needs
+        // Collect accumulated handler effects and restore outer scope
+        let all_handler_effs = self.restore_effects(handler_saved_effs);
         let _scope_result = self.exit_scope(body_scope);
         let declared_effects: std::collections::HashSet<String> =
             needs.iter().map(|e| e.name.clone()).collect();
 
         let body_effects: std::collections::HashSet<String> = all_handler_effs
-            .effects.iter().map(|(n, _)| n.clone()).collect();
+            .effects
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect();
         if !body_effects.is_empty() || !declared_effects.is_empty() {
-            let err_span = arms.first().map(|a| a.span).unwrap_or(*span);
-            let undeclared: Vec<String> = body_effects.difference(&declared_effects).cloned().collect();
+            let err_span = arms.first().map(|a| a.node.span).unwrap_or(*span);
+            let undeclared: Vec<String> = body_effects
+                .difference(&declared_effects)
+                .cloned()
+                .collect();
             if !undeclared.is_empty() {
                 let mut sorted = undeclared;
                 sorted.sort();
@@ -1525,12 +1557,20 @@ impl Checker {
                 if declared_effects.is_empty() {
                     return Err(Diagnostic::error_at(
                         err_span,
-                        format!("{} uses effects {{{}}} but has no 'needs' declaration", label, sorted.join(", ")),
+                        format!(
+                            "{} uses effects {{{}}} but has no 'needs' declaration",
+                            label,
+                            sorted.join(", ")
+                        ),
                     ));
                 } else {
                     return Err(Diagnostic::error_at(
                         err_span,
-                        format!("{} uses effects {{{}}} not declared in its 'needs' clause", label, sorted.join(", ")),
+                        format!(
+                            "{} uses effects {{{}}} not declared in its 'needs' clause",
+                            label,
+                            sorted.join(", ")
+                        ),
                     ));
                 }
             }
@@ -1539,7 +1579,7 @@ impl Checker {
         // Check that all operations from the handled effects are covered
         if !self.allow_bodyless_annotations {
             let handled_ops: std::collections::HashSet<&str> =
-                arms.iter().map(|a| a.op_name.as_str()).collect();
+                arms.iter().map(|a| a.node.op_name.as_str()).collect();
             for effect_ref in effect_names {
                 if let Some(info) = self.effects.get(&effect_ref.name) {
                     let missing: Vec<_> = info
@@ -1657,7 +1697,7 @@ impl Checker {
             }
             for (trait_name, ty, span, node_id) in constraints {
                 let resolved = self.sub.apply(&ty);
-                if matches!(resolved, Type::Error | Type::Never) {
+                if matches!(resolved, Type::Error) {
                     continue;
                 }
                 match &resolved {
@@ -1773,7 +1813,7 @@ impl Checker {
                         ));
                     }
                     // Error/Never type: skip trait checking
-                    Type::Error | Type::Never => {}
+                    Type::Error => {}
                 }
             }
         }

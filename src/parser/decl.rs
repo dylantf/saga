@@ -82,7 +82,6 @@ impl Parser {
             Token::At => {
                 let start = self.tokens[self.pos].span;
                 let annotations = self.parse_annotations()?;
-                self.skip_terminators();
                 // After annotations, expect a function declaration (optionally pub)
                 let public = if matches!(self.peek(), Token::Pub) {
                     self.advance();
@@ -133,7 +132,7 @@ impl Parser {
                     && (s == "test" || s == "describe" || s == "skip" || s == "only")
                     && matches!(
                         self.tokens.get(self.pos + 1).map(|t| &t.token),
-                        Some(Token::String(_))
+                        Some(Token::String(..))
                     ) =>
             {
                 // Top-level test/describe: parse as expression (desugar triggers in parse_primary)
@@ -167,23 +166,26 @@ impl Parser {
             type_params.push(self.expect_ident()?);
         }
         self.expect(Token::LBrace)?;
-        self.skip_terminators();
 
         let mut fields = Vec::new();
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let start = self.pos;
             let field_name = self.expect_ident()?;
             self.expect(Token::Colon)?;
             let field_type = self.parse_type_expr()?;
-            fields.push((field_name, field_type));
-            self.skip_terminators();
-            if matches!(self.peek(), Token::RBrace) {
-                // last field, no trailing comma needed
-            } else {
-                self.expect(Token::Comma)?;
-                self.skip_terminators();
+            let trailing_comment = self.take_trailing_comment(self.pos - 1);
+            fields.push(Annotated {
+                node: (field_name, field_type),
+                leading_trivia: self.take_leading_trivia(start),
+                trailing_comment,
+                trailing_trivia: vec![],
+            });
+            if matches!(self.peek(), Token::Comma) {
+                self.advance();
             }
         }
 
+        let dangling_trivia = self.take_leading_trivia(self.pos);
         let end = self.tokens[self.pos].span;
         self.expect(Token::RBrace)?;
 
@@ -212,6 +214,7 @@ impl Parser {
             type_params,
             fields,
             deriving,
+            dangling_trivia,
             span: start.to(end),
         })
     }
@@ -222,35 +225,48 @@ impl Parser {
         let name_span = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let mut type_params = Vec::new();
-        while !matches!(self.peek(), Token::Eq | Token::Terminator | Token::Eof) {
+        // Type params are lowercase identifiers before `=`
+        while matches!(self.peek(), Token::Ident(_)) {
             type_params.push(self.expect_ident()?);
         }
-        self.skip_terminators();
         self.expect(Token::Eq)?;
-        self.skip_terminators();
 
         // Optional leading `|` before first variant
+        let mut multiline = false;
         if matches!(self.peek(), Token::Bar) {
+            if self.tokens[self.pos].preceded_by_newline {
+                multiline = true;
+            }
             self.advance();
-            self.skip_terminators();
         }
 
         let mut variants = Vec::new();
+        let first_start = self.pos;
         let first = self.parse_type_constructor_def()?;
         let mut end = first.span;
-        variants.push(first);
+        let trailing_comment = self.take_trailing_comment(self.pos - 1);
+        variants.push(Annotated {
+            node: first,
+            leading_trivia: self.take_leading_trivia(first_start),
+            trailing_comment,
+            trailing_trivia: vec![],
+        });
 
-        loop {
-            self.skip_terminators();
-            if matches!(self.peek(), Token::Bar) {
-                self.advance();
-                self.skip_terminators();
-                let variant = self.parse_type_constructor_def()?;
-                end = variant.span;
-                variants.push(variant);
-            } else {
-                break;
+        while matches!(self.peek(), Token::Bar) {
+            if self.tokens[self.pos].preceded_by_newline {
+                multiline = true;
             }
+            self.advance();
+            let variant_start = self.pos;
+            let variant = self.parse_type_constructor_def()?;
+            end = variant.span;
+            let trailing_comment = self.take_trailing_comment(self.pos - 1);
+            variants.push(Annotated {
+                node: variant,
+                leading_trivia: self.take_leading_trivia(variant_start),
+                trailing_comment,
+                trailing_trivia: vec![],
+            });
         }
 
         // Parse optional `deriving (Show, Eq, ...)`
@@ -280,6 +296,7 @@ impl Parser {
             type_params,
             variants,
             deriving,
+            multiline,
             span: start.to(end),
         })
     }
@@ -339,13 +356,10 @@ impl Parser {
         let name = self.expect_ident()?;
         let name_span = self.tokens[self.pos - 1].span;
 
-        self.skip_terminators();
         self.expect(Token::Colon)?;
-        self.skip_terminators();
         let (params, return_type, effects, effect_row_var) = self.parse_annotated_signature()?;
 
         // Parse optional `where {a: Show + Eq, b: Ord}`
-        self.skip_terminators();
         let where_clause = self.parse_where_clause()?;
 
         let end = self.tokens[self.pos - 1].span;
@@ -391,9 +405,9 @@ impl Parser {
                         self.expect(Token::Comma)?;
                     }
                     let lit = match self.advance() {
-                        Token::String(s) => Lit::String(s),
-                        Token::Int(n) => Lit::Int(n),
-                        Token::Float(f) => Lit::Float(f),
+                        Token::String(s, kind) => Lit::String(s, kind),
+                        Token::Int(s, n) => Lit::Int(s, n),
+                        Token::Float(s, f) => Lit::Float(s, f),
                         Token::True => Lit::Bool(true),
                         Token::False => Lit::Bool(false),
                         tok => {
@@ -421,8 +435,6 @@ impl Parser {
                 args,
                 span: start.to(end),
             });
-
-            self.skip_terminators();
         }
         Ok(annotations)
     }
@@ -438,11 +450,10 @@ impl Parser {
             type_params.push(self.expect_ident()?);
         }
         self.expect(Token::LBrace)?;
-        self.skip_terminators();
 
         let mut operations = Vec::new();
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-            let doc = self.collect_doc_comments();
+            let start = self.pos;
             let op_start = self.tokens[self.pos].span;
             self.expect(Token::Fun)?;
             let op_name = self.expect_ident()?;
@@ -451,16 +462,22 @@ impl Parser {
             let (params, return_type, _effects, _effect_row_var) = self.parse_annotated_signature()?;
             let op_end = self.tokens[self.pos - 1].span;
 
-            operations.push(EffectOp {
-                doc,
-                name: op_name,
-                params,
-                return_type,
-                span: op_start.to(op_end),
+            let trailing_comment = self.take_trailing_comment(self.pos - 1);
+            operations.push(Annotated {
+                node: EffectOp {
+                    doc: vec![],
+                    name: op_name,
+                    params,
+                    return_type,
+                    span: op_start.to(op_end),
+                },
+                leading_trivia: self.take_leading_trivia(start),
+                trailing_comment,
+                trailing_trivia: vec![],
             });
-            self.skip_terminators();
         }
 
+        let dangling_trivia = self.take_leading_trivia(self.pos);
         let end = self.tokens[self.pos].span;
         self.expect(Token::RBrace)?;
 
@@ -469,6 +486,7 @@ impl Parser {
             doc: vec![],
             public,
             name,
+            dangling_trivia,
             name_span,
             type_params,
             operations,
@@ -508,13 +526,13 @@ impl Parser {
         let where_clause = self.parse_where_clause()?;
 
         self.expect(Token::LBrace)?;
-        self.skip_terminators();
 
         let mut arms = Vec::new();
         let mut recovered_arms = Vec::new();
         let mut return_clause = None;
 
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let arm_start_pos = self.pos;
             let arm_start = self.tokens[self.pos].span;
             let save = self.pos;
 
@@ -551,11 +569,17 @@ impl Parser {
                     self.expect(Token::Eq)?;
                     let body = self.parse_expr(0)?;
                     let arm_end = body.span;
-                    arms.push(HandlerArm {
-                        op_name,
-                        params,
-                        body: Box::new(body),
-                        span: arm_start.to(arm_end),
+                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
+                    arms.push(Annotated {
+                        node: HandlerArm {
+                            op_name,
+                            params,
+                            body: Box::new(body),
+                            span: arm_start.to(arm_end),
+                        },
+                        leading_trivia: self.take_leading_trivia(arm_start_pos),
+                        trailing_comment,
+                        trailing_trivia: vec![],
                     });
                 }
                 Ok(())
@@ -569,7 +593,7 @@ impl Parser {
                     let mut params = Vec::new();
                     while !matches!(
                         self.peek(),
-                        Token::Eq | Token::Terminator | Token::RBrace | Token::Eof
+                        Token::Eq | Token::RBrace | Token::Eof
                     ) {
                         let pspan = self.tokens[self.pos].span;
                         if let Ok(p) = self.expect_ident() {
@@ -579,25 +603,30 @@ impl Parser {
                         }
                     }
                     let end = self.tokens[self.pos.saturating_sub(1)].span;
-                    recovered_arms.push(HandlerArm {
-                        op_name,
-                        params,
-                        body: Box::new(Expr {
-                            id: NodeId::fresh(),
-                            kind: ExprKind::Lit { value: Lit::Unit },
-                            span: end,
-                        }),
-                        span: arm_start.to(end),
+                    let trailing_comment = self.take_trailing_comment(self.pos.saturating_sub(1));
+                    recovered_arms.push(Annotated {
+                        node: HandlerArm {
+                            op_name,
+                            params,
+                            body: Box::new(Expr {
+                                id: NodeId::fresh(),
+                                kind: ExprKind::Lit { value: Lit::Unit },
+                                span: end,
+                            }),
+                            span: arm_start.to(end),
+                        },
+                        leading_trivia: self.take_leading_trivia(arm_start_pos),
+                        trailing_comment,
+                        trailing_trivia: vec![],
                     });
                 }
-                while !matches!(self.peek(), Token::Terminator | Token::RBrace | Token::Eof) {
+                while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                     self.advance();
                 }
             }
-
-            self.skip_terminators();
         }
 
+        let dangling_trivia = self.take_leading_trivia(self.pos);
         let end = self.tokens[self.pos].span;
         self.expect(Token::RBrace)?;
 
@@ -613,6 +642,7 @@ impl Parser {
             arms,
             recovered_arms,
             return_clause,
+            dangling_trivia,
             span: start.to(end),
         })
     }
@@ -656,11 +686,10 @@ impl Parser {
         }
 
         self.expect(Token::LBrace)?;
-        self.skip_terminators();
 
         let mut methods = Vec::new();
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-            let doc = self.collect_doc_comments();
+            let start_pos = self.pos;
             let method_start = self.tokens[self.pos].span;
             self.expect(Token::Fun)?;
             let method_name = self.expect_ident()?;
@@ -669,16 +698,22 @@ impl Parser {
             let (params, return_type, _effects, _effect_row_var) = self.parse_annotated_signature()?;
             let method_end = self.tokens[self.pos - 1].span;
 
-            methods.push(TraitMethod {
-                doc,
-                name: method_name,
-                params,
-                return_type,
-                span: method_start.to(method_end),
+            let trailing_comment = self.take_trailing_comment(self.pos - 1);
+            methods.push(Annotated {
+                node: TraitMethod {
+                    doc: vec![],
+                    name: method_name,
+                    params,
+                    return_type,
+                    span: method_start.to(method_end),
+                },
+                leading_trivia: self.take_leading_trivia(start_pos),
+                trailing_comment,
+                trailing_trivia: vec![],
             });
-            self.skip_terminators();
         }
 
+        let dangling_trivia = self.take_leading_trivia(self.pos);
         let end = self.tokens[self.pos].span;
         self.expect(Token::RBrace)?;
 
@@ -691,6 +726,7 @@ impl Parser {
             type_param,
             supertraits,
             methods,
+            dangling_trivia,
             span: start.to(end),
         })
     }
@@ -761,10 +797,10 @@ impl Parser {
         }
 
         self.expect(Token::LBrace)?;
-        self.skip_terminators();
 
         let mut methods = Vec::new();
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let start_pos = self.pos;
             let name = self.expect_ident()?;
             let name_span = self.tokens[self.pos - 1].span;
             let mut params = Vec::new();
@@ -774,10 +810,16 @@ impl Parser {
 
             self.expect(Token::Eq)?;
             let body = self.parse_expr(0)?;
-            methods.push((name, name_span, params, body));
-            self.skip_terminators();
+            let trailing_comment = self.take_trailing_comment(self.pos - 1);
+            methods.push(Annotated {
+                node: ImplMethod { name, name_span, params, body },
+                leading_trivia: self.take_leading_trivia(start_pos),
+                trailing_comment,
+                trailing_trivia: vec![],
+            });
         }
 
+        let dangling_trivia = self.take_leading_trivia(self.pos);
         let end = self.tokens[self.pos].span;
         self.expect(Token::RBrace)?;
 
@@ -792,6 +834,7 @@ impl Parser {
             where_clause,
             needs,
             methods,
+            dangling_trivia,
             span: start.to(end),
         })
     }
@@ -839,19 +882,14 @@ impl Parser {
         let mut segments: Vec<(Option<String>, TypeExpr)> = Vec::new();
         segments.push(self.parse_labeled_type_segment()?);
 
-        while {
-            self.skip_terminators();
-            matches!(self.peek(), Token::Arrow)
-        } {
+        while matches!(self.peek(), Token::Arrow) {
             self.advance(); // consume '->'
-            self.skip_terminators();
             segments.push(self.parse_labeled_type_segment()?);
         }
 
         // Parse trailing `needs {...}` if present
         let mut effects = Vec::new();
         let mut effect_row_var = None;
-        self.skip_terminators();
         if matches!(self.peek(), Token::Needs) {
             self.advance();
             self.expect(Token::LBrace)?;
@@ -913,9 +951,10 @@ impl Parser {
         }
 
         // Regular type (may include application: `Option a`, `Result String Int`)
+        // Stop at line boundaries to avoid consuming the next declaration.
         let seg_start = self.tokens[self.pos].span;
         let mut left = self.parse_type_atom()?;
-        while self.can_start_type_atom() {
+        while self.can_start_type_atom() && !self.next_on_new_line() {
             let arg = self.parse_type_atom()?;
             let span = seg_start.to(arg.span());
             left = TypeExpr::App { func: Box::new(left), arg: Box::new(arg), span };
@@ -939,8 +978,9 @@ impl Parser {
     pub(super) fn parse_type_expr(&mut self) -> Result<TypeExpr, ParseError> {
         let start = self.tokens[self.pos].span;
         // First: parse a type with possible application (`Option a`, `Result a e`)
+        // Stop at line boundaries to avoid consuming the next declaration.
         let mut left = self.parse_type_atom()?;
-        while self.can_start_type_atom() {
+        while self.can_start_type_atom() && !self.next_on_new_line() {
             let arg = self.parse_type_atom()?;
             let span = start.to(arg.span());
             left = TypeExpr::App { func: Box::new(left), arg: Box::new(arg), span };
@@ -998,12 +1038,6 @@ impl Parser {
             }
             Token::Ident(s) => Ok(TypeExpr::Var { name: s, span: start }),
             Token::LParen => {
-                // () is the Unit type
-                if matches!(self.peek(), Token::RParen) {
-                    let end = self.tokens[self.pos].span;
-                    self.advance();
-                    return Ok(TypeExpr::Named { name: "Unit".to_string(), span: start.to(end) });
-                }
                 let first = self.parse_type_expr()?;
                 if matches!(self.peek(), Token::Comma) {
                     // Tuple type: (Int, String, ...)
@@ -1031,20 +1065,17 @@ impl Parser {
             }
             Token::LBrace => {
                 // Anonymous record type: { field: Type, ... }
-                self.skip_terminators();
-                let mut fields = Vec::new();
+                                let mut fields = Vec::new();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                     let field_name = self.expect_ident()?;
                     self.expect(Token::Colon)?;
                     let field_type = self.parse_type_expr()?;
                     fields.push((field_name, field_type));
-                    self.skip_terminators();
-                    if matches!(self.peek(), Token::RBrace) {
+                                        if matches!(self.peek(), Token::RBrace) {
                         // last field, no trailing comma needed
                     } else {
                         self.expect(Token::Comma)?;
-                        self.skip_terminators();
-                    }
+                                            }
                 }
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;

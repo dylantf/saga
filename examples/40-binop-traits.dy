@@ -1,0 +1,35 @@
+type USD = USD deriving (Eq)
+type NOK = NOK deriving (Eq)
+
+type Currency c = Currency(Float) deriving (Eq)
+
+impl Num for Currency c {
+  add (Currency a) (Currency b) = Currency (a + b)
+  sub (Currency a) (Currency b) = Currency (a - b)
+  div (Currency a) (Currency b) = Currency (a / b)
+  mul (Currency a) (Currency b) = Currency (a * b)
+  mod (Currency a) (Currency b) = Currency (a % b)
+}
+
+impl Show for Currency c {
+  show (Currency a) = show a
+}
+
+fun usd : Float -> Currency USD
+usd amount = Currency amount
+
+fun nok : Float -> Currency NOK
+nok amount = Currency amount
+
+main () = {
+  let amount1 = usd 23.50
+  let amount2 = usd 50.00
+  let sum = amount1 + amount2
+  println (show sum)
+
+  println (show (amount1 == amount2))
+  println (show (amount1 == usd 23.50))
+
+  # let bad_sum = amount1 + nok 500.00
+  # compile error: type mismatch: expected USD, got NOK
+}

@@ -53,7 +53,7 @@ pub fn cmd_run(args: &[String]) {
                 );
                 std::process::exit(1);
             }
-            let (build_dir, _, _) = build_project("dev");
+            let (build_dir, _) = build_project("dev");
             exec_erl(&build_dir, "main");
         }
     }
@@ -132,16 +132,81 @@ pub fn cmd_emit(file: &str) {
         std::process::exit(1);
     });
     let mut checker = make_checker(None);
-    let (program, result) = parse_and_typecheck(&source, file, &mut checker);
+    let (program, _) = parse_and_typecheck(&source, file, &mut checker);
+    let result = checker.to_result();
 
+    // Full pipeline: compile Std modules + elaborate user code
+    let mut compiled_modules = compile_std_modules(&result);
     let elaborated = elaborate::elaborate(&program, &result);
+    compiled_modules.insert(
+        "_script".to_string(),
+        codegen::CompiledModule {
+            codegen_info: Default::default(),
+            elaborated: elaborated.clone(),
+            resolution: codegen::resolve::ResolutionMap::new(),
+        },
+    );
     let ctx = codegen::CodegenContext {
-        codegen_info: result.codegen_info().clone(),
-        elaborated_modules: HashMap::new(),
+        modules: compiled_modules,
         let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
     };
     let core_src = codegen::emit_module_with_context("_script", &elaborated, &ctx);
     print!("{}", core_src);
+}
+
+pub fn cmd_fmt(args: &[String]) {
+    let write_mode = args.contains(&"--write".to_string());
+    let debug_mode = args.contains(&"--debug".to_string());
+    let cli_width = args
+        .windows(2)
+        .find(|w| w[0] == "--width")
+        .and_then(|w| w[1].parse().ok());
+    let file = args.iter().find(|a| a.ends_with(".dy"));
+
+    let Some(file) = file else {
+        eprintln!("Usage: dylang fmt [--write] [--debug] [--width N] <file.dy>");
+        std::process::exit(1);
+    };
+
+    // CLI --width overrides project.toml [formatter] width
+    let width = cli_width.unwrap_or_else(|| {
+        super::find_project_root()
+            .map(|root| ProjectConfig::load(&root).formatter.width)
+            .unwrap_or(dylang::formatter::DEFAULT_WIDTH)
+    });
+
+    let source = fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Error reading {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let tokens = dylang::lexer::Lexer::new(&source)
+        .lex()
+        .unwrap_or_else(|e| {
+            eprintln!("Lex error in {}: {:?}", file, e);
+            std::process::exit(1);
+        });
+    let mut parser = dylang::parser::Parser::new(tokens);
+    let program = parser.parse_program_annotated().unwrap_or_else(|e| {
+        eprintln!("Parse error in {}: {} at {:?}", file, e.message, e.span);
+        std::process::exit(1);
+    });
+
+    if debug_mode {
+        println!("{:#?}", program);
+        return;
+    }
+
+    let formatted = dylang::formatter::format(&program, width);
+
+    if write_mode {
+        fs::write(file, &formatted).unwrap_or_else(|e| {
+            eprintln!("Error writing {}: {}", file, e);
+            std::process::exit(1);
+        });
+    } else {
+        print!("{}", formatted);
+    }
 }
 
 pub fn cmd_test(args: &[String]) {
@@ -201,7 +266,7 @@ pub fn cmd_test(args: &[String]) {
     };
 
     // Build the main project first (compiles all non-test modules)
-    let (build_dir, elaborated_modules, codegen_info) = build_project("test");
+    let (build_dir, project_modules) = build_project("test");
 
     // Build and run each test file, reusing the project's compiled modules.
     for test_file in &test_files {
@@ -222,32 +287,38 @@ pub fn cmd_test(args: &[String]) {
 
         // Compile any std modules the test file needs that weren't in the project build
         let test_std_modules = compile_std_modules(&result);
-        let mut all_modules = elaborated_modules.clone();
-        let mut all_codegen = codegen_info.clone();
-        all_codegen.extend(result.codegen_info().clone());
+        let mut all_modules = project_modules.clone();
+        // Merge test std modules
         let std_ctx = codegen::CodegenContext {
-            codegen_info: all_codegen.clone(),
-            elaborated_modules: test_std_modules.clone(),
+            modules: test_std_modules.clone(),
             let_effect_bindings: HashMap::new(),
+            prelude_imports: result.prelude_imports.clone(),
         };
-        for (name, elab) in &test_std_modules {
+        for (name, compiled) in &test_std_modules {
             if !all_modules.contains_key(name) {
                 let erlang_name = name.to_lowercase().replace('.', "_");
-                emit_module(&erlang_name, elab, &std_ctx, &build_dir);
+                emit_module(&erlang_name, &compiled.elaborated, &std_ctx, &build_dir);
                 run_erlc_file(&build_dir.join(format!("{}.core", erlang_name)), &build_dir);
-                all_modules.insert(name.clone(), elab.clone());
+                all_modules.insert(name.clone(), compiled.clone());
             }
         }
 
         // Elaborate only the test file
         let elaborated = elaborate::elaborate(&program, &result);
-        all_modules.insert("_test".to_string(), elaborated.clone());
+        all_modules.insert(
+            "_test".to_string(),
+            codegen::CompiledModule {
+                codegen_info: Default::default(),
+                elaborated: elaborated.clone(),
+                resolution: codegen::resolve::ResolutionMap::new(),
+            },
+        );
 
         // Emit only the test module
         let test_ctx = codegen::CodegenContext {
-            codegen_info: all_codegen,
-            elaborated_modules: all_modules.clone(),
+            modules: all_modules.clone(),
             let_effect_bindings: result.let_effect_bindings.clone(),
+            prelude_imports: result.prelude_imports.clone(),
         };
         let core_src = codegen::emit_module_with_context("_test", &elaborated, &test_ctx);
         let core_path = build_dir.join("_test.core");

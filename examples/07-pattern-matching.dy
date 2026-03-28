@@ -2,8 +2,8 @@
 
 # --- Custom types ---
 
-type Shape
-  = Circle(radius: Float)
+type Shape =
+  | Circle(radius: Float)
   | Rect(Float, Float)
   | Triangle(Float, Float, Float)
 

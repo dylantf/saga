@@ -1,15 +1,16 @@
 #[cfg(test)]
 use super::emit_module;
-use super::{emit_module_with_context, CodegenContext};
+use super::{CodegenContext, emit_module_with_context};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
-use crate::{derive, elaborate, typechecker};
+use crate::{derive, desugar, elaborate, typechecker};
 
 /// Parse `src` and emit Core Erlang for a single-file script module.
 /// Skips typechecking and elaboration — only tests basic lowering.
 fn emit(src: &str) -> String {
     let tokens = Lexer::new(src).lex().expect("lex error");
-    let program = Parser::new(tokens).parse_program().expect("parse error");
+    let mut program = Parser::new(tokens).parse_program().expect("parse error");
+    desugar::desugar_program(&mut program);
     emit_module("_script", &program)
 }
 
@@ -18,20 +19,17 @@ fn emit_full(src: &str) -> String {
     let tokens = Lexer::new(src).lex().expect("lex error");
     let mut program = Parser::new(tokens).parse_program().expect("parse error");
     derive::expand_derives(&mut program);
+    desugar::desugar_program(&mut program);
 
     let mut checker = typechecker::Checker::with_prelude(None).expect("prelude error");
     let result = checker.check_program(&program);
-    assert!(
-        !result.has_errors(),
-        "Type errors: {:?}",
-        result.errors()
-    );
+    assert!(!result.has_errors(), "Type errors: {:?}", result.errors());
 
     let elaborated = elaborate::elaborate(&program, &result);
     let ctx = CodegenContext {
-        codegen_info: result.codegen_info().clone(),
-        elaborated_modules: std::collections::HashMap::new(),
+        modules: std::collections::HashMap::new(),
         let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
     };
     emit_module_with_context("_script", &elaborated, &ctx)
 }
@@ -338,7 +336,7 @@ fn effect_in_if_branch_threads_outer_k() {
     // NOT an identity function.
     let src = "
 effect Fail {
-  fun fail : (msg: String) -> Never
+  fun fail : (msg: String) -> a
 }
 
 fun process : Unit -> Unit needs {Fail}
@@ -365,7 +363,7 @@ fn effect_in_case_branch_threads_outer_k() {
     // Same issue but with case expressions instead of if.
     let src = "
 effect Fail {
-  fun fail : (msg: String) -> Never
+  fun fail : (msg: String) -> a
 }
 
 fun dispatch : (n: Int) -> Int needs {Fail}
@@ -391,7 +389,7 @@ fn nested_if_effect_threads_k_recursively() {
     // Nested if/case: K should be threaded through multiple levels.
     let src = "
 effect Fail {
-  fun fail : (msg: String) -> Never
+  fun fail : (msg: String) -> a
 }
 
 fun deep : (a: Bool) -> (b: Bool) -> Int needs {Fail}
@@ -414,7 +412,7 @@ fn effect_in_if_branch_k_not_identity() {
     // the rest of the block.
     let src = "
 effect Fail {
-  fun fail : (msg: String) -> Never
+  fun fail : (msg: String) -> a
 }
 
 fun process : Unit -> Int needs {Fail}
@@ -463,7 +461,7 @@ effect Outer {
   fun outer_op : Unit -> Unit
 }
 
-fun middle : (body: () -> Unit needs {Inner}) -> Unit needs {Outer}
+fun middle : (body: Unit -> Unit needs {Inner}) -> Unit needs {Outer}
 middle body = {
   let result = { body () } with {
     inner_op () = { resume (); "handled" }
@@ -584,7 +582,8 @@ fn dict_empty() {
 
 #[test]
 fn dict_get() {
-    let src = "import Std.Dict\nfun main : Unit -> Maybe Int\nmain () = Dict.get \"a\" (Dict.new ())";
+    let src =
+        "import Std.Dict\nfun main : Unit -> Maybe Int\nmain () = Dict.get \"a\" (Dict.new ())";
     let out = emit_full(src);
     assert!(
         out.contains("call 'std_dict':'get'"),

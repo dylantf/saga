@@ -61,6 +61,7 @@ fn constructor_labels(program: &[Decl], constructor_name: &str) -> Option<Vec<St
     for decl in program {
         if let Decl::TypeDef { variants, .. } = decl {
             for variant in variants {
+                let variant = &variant.node;
                 if variant.name == constructor_name && !variant.fields.is_empty() {
                     let labels: Vec<String> = variant
                         .fields
@@ -117,6 +118,7 @@ pub fn type_definition_summary(
                     format_type_params(type_params)
                 )];
                 for variant in variants {
+                    let variant = &variant.node;
                     if variant.fields.is_empty() {
                         lines.push(format!("  {}", variant.name));
                     } else {
@@ -143,7 +145,7 @@ pub fn type_definition_summary(
             } if def_name == name => {
                 let field_strs: Vec<String> = fields
                     .iter()
-                    .map(|(fname, ty)| format!("  {}: {}", fname, format_type_expr(ty)))
+                    .map(|f| format!("  {}: {}", f.node.0, format_type_expr(&f.node.1)))
                     .collect();
                 let code = format!(
                     "record {}{} {{\n{}\n}}",
@@ -163,6 +165,7 @@ pub fn type_definition_summary(
                 let ops: Vec<String> = operations
                     .iter()
                     .map(|op| {
+                        let op = &op.node;
                         format!(
                             "  {}",
                             format_signature(&op.name, &op.params, &op.return_type)
@@ -193,7 +196,10 @@ pub fn type_definition_summary(
                 };
                 let method_strs: Vec<String> = methods
                     .iter()
-                    .map(|m| format!("  {}", format_signature(&m.name, &m.params, &m.return_type)))
+                    .map(|m| {
+                        let m = &m.node;
+                        format!("  {}", format_signature(&m.name, &m.params, &m.return_type))
+                    })
                     .collect();
                 let code = format!(
                     "trait {} {}{} {{\n{}\n}}",

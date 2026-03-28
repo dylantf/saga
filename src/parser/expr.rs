@@ -1,6 +1,6 @@
 use super::{ParseError, Parser};
 use crate::ast::*;
-use crate::token::{Span, Token};
+use crate::token::{Span, StringKind, Token};
 
 impl Parser {
     /// Parse record fields: `field: expr, field2: expr2, ...`
@@ -15,7 +15,6 @@ impl Parser {
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
                 }
-                self.skip_terminators();
                 continue;
             }
             let field_name = self.expect_ident()?;
@@ -30,16 +29,51 @@ impl Parser {
                 let value = Expr {
                     id: self.next_id(),
                     span: field_span,
-                    kind: ExprKind::Var { name: field_name.clone() },
+                    kind: ExprKind::Var {
+                        name: field_name.clone(),
+                    },
                 };
                 fields.push((field_name, field_span, value));
             }
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
             }
-            self.skip_terminators();
         }
         Ok(fields)
+    }
+
+    /// Return the binding power of the next token if it's a binary operator.
+    fn peek_binop_bp(&self) -> Option<u8> {
+        match self.peek() {
+            Token::Or => Some(2),
+            Token::And => Some(3),
+            Token::EqEq | Token::NotEq => Some(4),
+            Token::Lt | Token::Gt | Token::LtEq | Token::GtEq => Some(5),
+            Token::Concat | Token::Plus | Token::Minus => Some(6),
+            Token::Star | Token::Slash | Token::Modulo => Some(7),
+            _ => None,
+        }
+    }
+
+    /// Return the BinOp for the next token (must be a binop).
+    fn peek_binop_op(&self) -> Option<BinOp> {
+        match self.peek() {
+            Token::Or => Some(BinOp::Or),
+            Token::And => Some(BinOp::And),
+            Token::EqEq => Some(BinOp::Eq),
+            Token::NotEq => Some(BinOp::NotEq),
+            Token::Lt => Some(BinOp::Lt),
+            Token::Gt => Some(BinOp::Gt),
+            Token::LtEq => Some(BinOp::LtEq),
+            Token::GtEq => Some(BinOp::GtEq),
+            Token::Concat => Some(BinOp::Concat),
+            Token::Plus => Some(BinOp::Add),
+            Token::Minus => Some(BinOp::Sub),
+            Token::Star => Some(BinOp::Mul),
+            Token::Slash => Some(BinOp::FloatDiv),
+            Token::Modulo => Some(BinOp::Mod),
+            _ => None,
+        }
     }
 
     /// Pratt parser: binary operators with precedence.
@@ -55,17 +89,16 @@ impl Parser {
         let mut left = self.parse_application()?;
 
         loop {
-            // Allow |> to continue an expression across a newline
-            if matches!(self.peek(), Token::Terminator) && matches!(self.peek_at(1), Token::Pipe) {
-                self.advance(); // skip newline
-            }
-
+            // Binary operators continue across lines — an operator token at the
+            // start of a line is unambiguous (it can't begin a new statement).
+            // For `-`, this means `foo\n-bar` is subtraction, not `foo` then `(-bar)`.
+            // Use `(-bar)` for unary negation as a separate expression.
             let (op, bp) = match self.peek() {
-                Token::Pipe => (None, 1),           // desugars to App(right, left)
-                Token::PipeBack => (None, 1),       // desugars to App(left, right)
-                Token::ComposeForward => (None, 1), // f >> g  →  fun x -> g (f x)
-                Token::ComposeBack => (None, 1),    // f << g  →  fun x -> f (g x)
-                Token::DoubleColon => (None, 1),    // desugars to Cons(left, right), right-assoc
+                Token::Pipe => (None, 1),
+                Token::PipeBack => (None, 1),
+                Token::ComposeForward => (None, 1),
+                Token::ComposeBack => (None, 1),
+                Token::DoubleColon => (None, 1),
                 Token::Or => (Some(BinOp::Or), 2),
                 Token::And => (Some(BinOp::And), 3),
                 Token::EqEq => (Some(BinOp::Eq), 4),
@@ -87,83 +120,232 @@ impl Parser {
                 break;
             }
 
-            // Remember operator kind before consuming
-            let desugar = match self.peek() {
-                Token::PipeBack => Desugar::PipeBack,
-                Token::DoubleColon => Desugar::Cons,
-                Token::ComposeForward => Desugar::ComposeForward,
-                Token::ComposeBack => Desugar::ComposeBack,
-                _ => Desugar::None,
-            };
-            self.advance(); // consume operator
-            // :: is right-associative (recurse at same bp); everything else is left-associative
-            let is_cons = matches!(desugar, Desugar::Cons);
-            let right = self.parse_expr(if is_cons { bp } else { bp + 1 })?;
+            // For |>, collect a flat pipe chain with full trivia per segment.
+            if matches!(self.peek(), Token::Pipe) {
+                // First segment is `left` (no pipe-specific trivia, it gets decl-level trivia)
+                let mut segments = vec![Annotated::bare(left)];
+                let mut multiline = false;
+                while matches!(self.peek(), Token::Pipe) {
+                    // Track if any |> is on a new line
+                    if self.tokens[self.pos].preceded_by_newline {
+                        multiline = true;
+                    }
+                    // Capture trailing comment from end of previous segment
+                    let trailing = self.tokens[self.pos - 1].trailing_comment.take();
+                    if let Some(comment) = trailing
+                        && let Some(last) = segments.last_mut()
+                    {
+                        last.trailing_comment = Some(comment);
+                    }
+                    // Capture leading trivia on the |> token
+                    let leading = self.take_leading_trivia(self.pos);
+                    self.advance(); // consume |>
+                    let seg = self.parse_expr(bp + 1)?;
+                    segments.push(Annotated {
+                        node: seg,
+                        leading_trivia: leading,
+                        trailing_comment: None,
+                        trailing_trivia: vec![],
+                    });
+                }
+                // Capture trailing comment on last segment's final token
+                let trailing = self.tokens[self.pos - 1].trailing_comment.take();
+                if let Some(comment) = trailing
+                    && let Some(last) = segments.last_mut()
+                {
+                    last.trailing_comment = Some(comment);
+                }
+                // Steal own-line comments from next token that follow without a blank line
+                let stolen = self.steal_trailing_trivia();
+                if !stolen.is_empty()
+                    && let Some(last) = segments.last_mut()
+                {
+                    last.trailing_trivia = stolen;
+                }
+                let start_span = segments.first().unwrap().node.span;
+                let end_span = segments.last().unwrap().node.span;
+                left = Expr {
+                    id: self.next_id(),
+                    span: start_span.to(end_span),
+                    kind: ExprKind::Pipe {
+                        segments,
+                        multiline,
+                    },
+                };
+                continue;
+            }
 
-            let span = left.span.to(right.span);
-            left = match op {
-                // x :: xs  →  Cons x xs  (right-associative)
-                None if is_cons => {
-                    let cons = Expr { id: self.next_id(), span, kind: ExprKind::Constructor {
-                        name: "Cons".to_string(),
-                    }};
-                    let app1 = Expr { id: self.next_id(), span, kind: ExprKind::App {
-                        func: Box::new(cons),
-                        arg: Box::new(left),
-                    }};
-                    Expr { id: self.next_id(), span, kind: ExprKind::App {
-                        func: Box::new(app1),
-                        arg: Box::new(right),
-                    }}
+            // For <|, >>, << collect flat chain like |>
+            if matches!(
+                self.peek(),
+                Token::PipeBack | Token::ComposeForward | Token::ComposeBack
+            ) {
+                let chain_token = self.peek().clone();
+                let mut segments = vec![Annotated::bare(left)];
+                while self.peek() == &chain_token {
+                    self.advance(); // consume operator
+                    let seg = self.parse_expr(bp + 1)?;
+                    segments.push(Annotated::bare(seg));
                 }
-                // f >> g  →  fun x -> g (f x)
-                None if matches!(desugar, Desugar::ComposeForward) => {
-                    self.desugar_compose(left, right, span)
+                let start_span = segments.first().unwrap().node.span;
+                let end_span = segments.last().unwrap().node.span;
+                let span = start_span.to(end_span);
+                let kind = match chain_token {
+                    Token::PipeBack => ExprKind::PipeBack { segments },
+                    Token::ComposeForward => ExprKind::ComposeForward { segments },
+                    Token::ComposeBack => ExprKind::ComposeBack { segments },
+                    _ => unreachable!(),
+                };
+                left = Expr {
+                    id: self.next_id(),
+                    span,
+                    kind,
+                };
+                continue;
+            }
+
+            // :: is cons sugar (right-associative, not a binop chain)
+            if matches!(self.peek(), Token::DoubleColon) {
+                self.advance(); // consume ::
+                let right = self.parse_expr(bp)?; // right-assoc: same bp
+                let span = left.span.to(right.span);
+                left = Expr {
+                    id: self.next_id(),
+                    span,
+                    kind: ExprKind::Cons {
+                        head: Box::new(left),
+                        tail: Box::new(right),
+                    },
+                };
+                continue;
+            }
+
+            // Binary operator — collect same-precedence chains into BinOpChain
+            // with trivia on each segment, mirroring the Pipe pattern.
+            let op = op.unwrap();
+            let chain_bp = bp;
+
+            // Capture trivia from the first operator token
+            let first_multiline = self.tokens[self.pos].preceded_by_newline;
+            let first_trailing = self.tokens[self.pos - 1].trailing_comment.take();
+            let first_leading = self.take_leading_trivia(self.pos);
+            self.advance(); // consume first operator
+            let right = self.parse_expr(chain_bp + 1)?;
+
+            // Check if the next token is a binop at the same precedence level.
+            // If so, collect into a BinOpChain. Otherwise, emit plain BinOp.
+            let next_same_bp = self.peek_binop_bp() == Some(chain_bp);
+            if !next_same_bp {
+                // Plain BinOp (2 operands, no chain) — no trivia to preserve
+                // (same as before; trivia was on the operator token which is gone)
+                if let Some(comment) = first_trailing {
+                    // Re-attach trailing comment we stole — put on left expr's last token
+                    // This is best-effort; single binops can't carry trivia.
+                    let _ = comment;
                 }
-                // f << g  →  fun x -> f (g x)
-                None if matches!(desugar, Desugar::ComposeBack) => {
-                    self.desugar_compose(right, left, span)
+                let span = left.span.to(right.span);
+                left = Expr {
+                    id: self.next_id(),
+                    span,
+                    kind: ExprKind::BinOp {
+                        op,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
+                };
+            } else {
+                // Build a BinOpChain
+                let mut segments = vec![Annotated::bare(left)];
+                if let Some(comment) = first_trailing {
+                    segments[0].trailing_comment = Some(comment);
                 }
-                // |> forward pipe: `x |> f` becomes `App(f, x)`
-                // <| backward pipe: `f <| x` becomes `App(f, x)`
-                None if matches!(desugar, Desugar::PipeBack) => Expr { id: self.next_id(), span, kind: ExprKind::App {
-                    func: Box::new(left),
-                    arg: Box::new(right),
-                }},
-                None => Expr { id: self.next_id(), span, kind: ExprKind::App {
-                    func: Box::new(right),
-                    arg: Box::new(left),
-                }},
-                Some(op) => Expr { id: self.next_id(), span, kind: ExprKind::BinOp {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }},
-            };
+                let mut ops = vec![op];
+                let mut multiline = first_multiline;
+
+                segments.push(Annotated {
+                    node: right,
+                    leading_trivia: first_leading,
+                    trailing_comment: None,
+                    trailing_trivia: vec![],
+                });
+
+                // Continue collecting same-precedence operators
+                while let Some(next_bp) = self.peek_binop_bp() {
+                    if next_bp != chain_bp {
+                        break;
+                    }
+                    if self.tokens[self.pos].preceded_by_newline {
+                        multiline = true;
+                    }
+                    // Capture trailing comment from previous segment
+                    if let Some(comment) = self.tokens[self.pos - 1].trailing_comment.take()
+                        && let Some(last) = segments.last_mut()
+                    {
+                        last.trailing_comment = Some(comment);
+                    }
+                    let leading = self.take_leading_trivia(self.pos);
+                    let next_op = self.peek_binop_op().unwrap();
+                    self.advance(); // consume operator
+                    let seg = self.parse_expr(chain_bp + 1)?;
+                    ops.push(next_op);
+                    segments.push(Annotated {
+                        node: seg,
+                        leading_trivia: leading,
+                        trailing_comment: None,
+                        trailing_trivia: vec![],
+                    });
+                }
+                // Trailing comment on last segment
+                if let Some(comment) = self.tokens[self.pos - 1].trailing_comment.take()
+                    && let Some(last) = segments.last_mut()
+                {
+                    last.trailing_comment = Some(comment);
+                }
+
+                let start_span = segments.first().unwrap().node.span;
+                let end_span = segments.last().unwrap().node.span;
+                left = Expr {
+                    id: self.next_id(),
+                    span: start_span.to(end_span),
+                    kind: ExprKind::BinOpChain {
+                        segments,
+                        ops,
+                        multiline,
+                    },
+                };
+            }
         }
 
         // `with` has lowest precedence — checked after all binary ops
-        if matches!(self.peek(), Token::With) {
+        if matches!(self.peek(), Token::With) && !self.next_on_new_line() {
             self.advance();
             let handler = self.parse_handler_ref()?;
             let end = self.tokens[self.pos - 1].span;
             let span = left.span.to(end);
-            left = Expr { id: self.next_id(), span, kind: ExprKind::With {
-                expr: Box::new(left),
-                handler: Box::new(handler),
-            }};
+            left = Expr {
+                id: self.next_id(),
+                span,
+                kind: ExprKind::With {
+                    expr: Box::new(left),
+                    handler: Box::new(handler),
+                },
+            };
         }
 
         // Type ascription: `expr : Type` — lowest precedence, only at top level
-        if min_bp == 0 && matches!(self.peek(), Token::Colon) {
+        if min_bp == 0 && matches!(self.peek(), Token::Colon) && !self.next_on_new_line() {
             self.advance(); // consume ':'
             let type_expr = self.parse_type_expr()?;
             let end = self.tokens[self.pos - 1].span;
             let span = left.span.to(end);
-            left = Expr { id: self.next_id(), span, kind: ExprKind::Ascription {
-                expr: Box::new(left),
-                type_expr,
-            }};
+            left = Expr {
+                id: self.next_id(),
+                span,
+                kind: ExprKind::Ascription {
+                    expr: Box::new(left),
+                    type_expr,
+                },
+            };
         }
 
         Ok(left)
@@ -174,13 +356,17 @@ impl Parser {
     fn parse_application(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_postfix()?;
 
-        while self.can_start_primary() {
+        while self.can_start_primary() && !self.next_on_new_line() {
             let arg = self.parse_postfix()?;
             let span = expr.span.to(arg.span);
-            expr = Expr { id: self.next_id(), span, kind: ExprKind::App {
-                func: Box::new(expr),
-                arg: Box::new(arg),
-            }};
+            expr = Expr {
+                id: self.next_id(),
+                span,
+                kind: ExprKind::App {
+                    func: Box::new(expr),
+                    arg: Box::new(arg),
+                },
+            };
         }
 
         Ok(expr)
@@ -204,11 +390,15 @@ impl Parser {
                 let effect_span = self.tokens[self.pos].span;
                 self.advance(); // consume effect call token
                 let span = start_span.to(effect_span);
-                expr = Expr { id: self.next_id(), span, kind: ExprKind::EffectCall {
-                    name,
-                    qualifier: Some(qualifier),
-                    args: Vec::new(),
-                }};
+                expr = Expr {
+                    id: self.next_id(),
+                    span,
+                    kind: ExprKind::EffectCall {
+                        name,
+                        qualifier: Some(qualifier),
+                        args: Vec::new(),
+                    },
+                };
                 continue;
             }
 
@@ -229,11 +419,18 @@ impl Parser {
                         // Recovery: incomplete module access (e.g. `Math.`).
                         // Produce a QualifiedName with an empty name.
                         let end = self.tokens[self.pos - 1].span;
-                        let qspan = Span { start, end: end.end };
-                        expr = Expr { id: self.next_id(), span: qspan, kind: ExprKind::QualifiedName {
-                            module,
-                            name: String::new(),
-                        }};
+                        let qspan = Span {
+                            start,
+                            end: end.end,
+                        };
+                        expr = Expr {
+                            id: self.next_id(),
+                            span: qspan,
+                            kind: ExprKind::QualifiedName {
+                                module,
+                                name: String::new(),
+                            },
+                        };
                         continue;
                     }
                 };
@@ -249,22 +446,23 @@ impl Parser {
                     && matches!(self.peek(), Token::LBrace)
                 {
                     self.advance(); // consume '{'
-                    self.skip_terminators();
                     let fields = self.parse_record_fields()?;
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
                     let span = qspan.to(end);
-                    expr = Expr { id: self.next_id(), span, kind: ExprKind::RecordCreate {
-                        name,
-                        fields,
-                    }};
+                    expr = Expr {
+                        id: self.next_id(),
+                        span,
+                        kind: ExprKind::RecordCreate { name, fields },
+                    };
                     continue;
                 }
 
-                expr = Expr { id: self.next_id(), span: qspan, kind: ExprKind::QualifiedName {
-                    module,
-                    name,
-                }};
+                expr = Expr {
+                    id: self.next_id(),
+                    span: qspan,
+                    kind: ExprKind::QualifiedName { module, name },
+                };
                 continue;
             }
             // Recovery: if no identifier follows the dot (e.g. `record.`),
@@ -281,10 +479,14 @@ impl Parser {
                 start,
                 end: end.end,
             };
-            expr = Expr { id: self.next_id(), span, kind: ExprKind::FieldAccess {
-                expr: Box::new(expr),
-                field,
-            }};
+            expr = Expr {
+                id: self.next_id(),
+                span,
+                kind: ExprKind::FieldAccess {
+                    expr: Box::new(expr),
+                    field,
+                },
+            };
         }
 
         Ok(expr)
@@ -296,13 +498,34 @@ impl Parser {
     pub(super) fn parse_handler_ref(&mut self) -> Result<Handler, ParseError> {
         if matches!(self.peek(), Token::LBrace) {
             self.advance(); // consume '{'
-            self.skip_terminators();
 
             let mut named = Vec::new();
             let mut arms = Vec::new();
             let mut return_clause = None;
 
+            // Phase 1: Parse comma-separated named handler refs.
+            // Named refs must come before inline arms.
             while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                // A named ref is an ident followed by `,` or `}`
+                if matches!(self.peek(), Token::Ident(_))
+                    && matches!(
+                        self.peek_at(1),
+                        Token::Comma | Token::RBrace
+                    )
+                {
+                    let name = self.expect_ident()?;
+                    named.push(name);
+                    if matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            // Phase 2: Parse inline handler arms (newline-separated, commas optional).
+            while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                let start = self.pos;
                 let arm_start = self.tokens[self.pos].span;
 
                 if matches!(self.peek(), Token::Return) {
@@ -320,54 +543,68 @@ impl Parser {
                         span: arm_start.to(arm_end),
                     }));
                 } else {
-                    // Could be a named handler ref or an inline arm.
-                    // Named ref: just an ident followed by `,` or `}` or newline
-                    // Inline arm: ident [params...] = body
                     let name = self.expect_ident()?;
 
-                    if matches!(
-                        self.peek(),
-                        Token::Comma | Token::RBrace | Token::Terminator
-                    ) {
-                        named.push(name);
-                    } else {
-                        // Inline arm: op params = body
-                        let mut params = Vec::new();
-                        while !matches!(self.peek(), Token::Eq | Token::Eof) {
-                            // Skip `()` unit params (zero-param effect ops)
-                            if matches!(self.peek(), Token::LParen)
-                                && matches!(self.peek_at(1), Token::RParen)
-                            {
-                                self.advance(); // consume '('
-                                self.advance(); // consume ')'
-                                continue;
-                            }
-                            let pspan = self.tokens[self.pos].span;
-                            params.push((self.expect_ident()?, pspan));
+                    if matches!(self.peek(), Token::Comma | Token::RBrace) {
+                        // Named ref after inline arms
+                        return Err(ParseError {
+                            message: "named handler refs must come before inline handler arms"
+                                .to_string(),
+                            span: arm_start,
+                        });
+                    }
+
+                    // Inline arm: op params = body
+                    let mut params = Vec::new();
+                    while !matches!(self.peek(), Token::Eq | Token::Eof) {
+                        // Skip `()` unit params (zero-param effect ops)
+                        if matches!(self.peek(), Token::LParen)
+                            && matches!(self.peek_at(1), Token::RParen)
+                        {
+                            self.advance(); // consume '('
+                            self.advance(); // consume ')'
+                            continue;
                         }
-                        self.expect(Token::Eq)?;
-                        let body = self.parse_expr(0)?;
-                        let arm_end = body.span;
-                        arms.push(HandlerArm {
+                        let pspan = self.tokens[self.pos].span;
+                        params.push((self.expect_ident()?, pspan));
+                    }
+                    self.expect(Token::Eq)?;
+                    let body = self.parse_expr(0)?;
+                    let arm_end = body.span;
+                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
+                    arms.push(Annotated {
+                        node: HandlerArm {
                             op_name: name,
                             params,
                             body: Box::new(body),
                             span: arm_start.to(arm_end),
-                        });
-                    }
+                        },
+                        leading_trivia: self.take_leading_trivia(start),
+                        trailing_comment,
+                        trailing_trivia: vec![],
+                    });
                 }
 
+                // Commas between inline arms are optional
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
+                    // Transfer trailing comment from comma to the last arm
+                    if let Some(comment) = self.tokens[self.pos - 1].trailing_comment.take()
+                        && let Some(last_arm) = arms.last_mut()
+                        && last_arm.trailing_comment.is_none()
+                    {
+                        last_arm.trailing_comment = Some(comment);
+                    }
                 }
-                self.skip_terminators();
             }
+            let dangling_trivia = self.take_leading_trivia(self.pos);
             self.expect(Token::RBrace)?;
 
             Ok(Handler::Inline {
                 named,
                 arms,
                 return_clause,
+                dangling_trivia,
             })
         } else {
             // Single named handler: `with console_log`
@@ -381,86 +618,79 @@ impl Parser {
         let span = self.tokens[self.pos].span;
 
         match self.advance() {
-            Token::True => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
-                value: Lit::Bool(true),
-            }}),
-            Token::False => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
-                value: Lit::Bool(false),
-            }}),
-            Token::Int(n) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
-                value: Lit::Int(n),
-            }}),
-            Token::Float(f) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
-                value: Lit::Float(f),
-            }}),
-            Token::String(s) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
-                value: Lit::String(s),
-            }}),
-            Token::InterpolatedString(parts) => {
+            Token::True => Ok(Expr {
+                id: self.next_id(),
+                span,
+                kind: ExprKind::Lit {
+                    value: Lit::Bool(true),
+                },
+            }),
+            Token::False => Ok(Expr {
+                id: self.next_id(),
+                span,
+                kind: ExprKind::Lit {
+                    value: Lit::Bool(false),
+                },
+            }),
+            Token::Int(s, n) => Ok(Expr {
+                id: self.next_id(),
+                span,
+                kind: ExprKind::Lit {
+                    value: Lit::Int(s, n),
+                },
+            }),
+            Token::Float(s, f) => Ok(Expr {
+                id: self.next_id(),
+                span,
+                kind: ExprKind::Lit {
+                    value: Lit::Float(s, f),
+                },
+            }),
+            Token::String(s, kind) => Ok(Expr {
+                id: self.next_id(),
+                span,
+                kind: ExprKind::Lit {
+                    value: Lit::String(s, kind),
+                },
+            }),
+            Token::InterpolatedString(parts, kind) => {
                 use crate::token::InterpPart;
-                // Desugar to a chain of `<>` concatenations.
-                // Each hole becomes `show(expr)`, each literal stays as a string.
-                // Adds a trailing Eof so sub-parsers can terminate cleanly.
-                let mut segments: Vec<Expr> = Vec::new();
+                // Preserve as StringInterp; desugared later to show/concat chain.
+                let mut string_parts: Vec<StringPart> = Vec::new();
                 for part in parts {
                     match part {
                         InterpPart::Literal(s) => {
                             if !s.is_empty() {
-                                segments.push(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
-                                    value: Lit::String(s),
-                                }});
+                                string_parts.push(StringPart::Lit(s));
                             }
                         }
                         InterpPart::Hole(mut tokens) => {
-                            // Use the last token's end position + 1 for the desugared
-                            // `show` call so it doesn't collide with a user-written `show`
-                            // inside the hole (which would share the first token's span).
-                            let show_span = tokens
-                                .last()
-                                .map(|t| Span {
-                                    start: t.span.end + 1,
-                                    end: t.span.end + 2,
-                                })
-                                .unwrap_or(span);
-                            // Span covering the entire hole for the wrapping App node,
-                            // so LSP traversal can reach expressions inside interpolation.
-                            let app_span = match (tokens.first(), tokens.last()) {
-                                (Some(first), Some(last)) => Span {
-                                    start: first.span.start,
-                                    end: last.span.end,
-                                },
-                                _ => span,
-                            };
                             tokens.push(crate::token::Spanned {
                                 token: crate::token::Token::Eof,
                                 span,
+                                leading_trivia: Vec::new(),
+                                trailing_comment: None,
+                                preceded_by_newline: false,
                             });
-
                             let mut sub = crate::parser::Parser::new(tokens);
                             let hole_expr = sub.parse_expr(0)?;
-                            segments.push(Expr { id: self.next_id(), span: app_span, kind: ExprKind::App {
-                                func: Box::new(Expr { id: self.next_id(), span: show_span, kind: ExprKind::Var {
-                                    name: "show".to_string(),
-                                }}),
-                                arg: Box::new(hole_expr),
-                            }});
+                            string_parts.push(StringPart::Expr(hole_expr));
                         }
                     }
                 }
-                // Fold into a left-associative `<>` chain; empty string if no parts.
-                let init = segments.into_iter().reduce(|left, right| Expr { id: self.next_id(), span, kind: ExprKind::BinOp {
-                    op: BinOp::Concat,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }});
-                Ok(init.unwrap_or(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
-                    value: Lit::String(String::new()),
-                }}))
+                Ok(Expr {
+                    id: self.next_id(),
+                    span,
+                    kind: ExprKind::StringInterp {
+                        parts: string_parts,
+                        kind,
+                    },
+                })
             }
             Token::Ident(ref i)
                 if self.test_mode
                     && (i == "test" || i == "describe" || i == "skip" || i == "only")
-                    && matches!(self.peek(), Token::String(_)) =>
+                    && matches!(self.peek(), Token::String(..)) =>
             {
                 // Desugar: test "name" { body } -> test "name" (fun () -> { body })
                 //          describe "name" { body } -> describe "name" (fun () -> { body })
@@ -492,7 +722,7 @@ impl Parser {
                     id: self.next_id(),
                     span: name_span,
                     kind: ExprKind::Lit {
-                        value: Lit::String(name_str),
+                        value: Lit::String(name_str, StringKind::Normal),
                     },
                 };
                 let app1 = Expr {
@@ -512,19 +742,23 @@ impl Parser {
                     },
                 })
             }
-            Token::Ident(i) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::Var { name: i } }),
+            Token::Ident(i) => Ok(Expr {
+                id: self.next_id(),
+                span,
+                kind: ExprKind::Var { name: i },
+            }),
             Token::UpperIdent(i) => {
                 if matches!(self.peek(), Token::LBrace) {
                     // Record create: User { name: "Dylan", age: 30 }
                     self.advance(); // consume '{'
-                    self.skip_terminators();
                     let fields = self.parse_record_fields()?;
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
-                    Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::RecordCreate {
-                        name: i,
-                        fields,
-                    }})
+                    Ok(Expr {
+                        id: self.next_id(),
+                        span: span.to(end),
+                        kind: ExprKind::RecordCreate { name: i, fields },
+                    })
                 } else if matches!(self.peek(), Token::LParen) {
                     // Constructor call: Circle(5), Rect(3, 4)
                     self.advance(); // consume '('
@@ -538,25 +772,39 @@ impl Parser {
                     }
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RParen)?;
-                    let mut expr = Expr { id: self.next_id(), span, kind: ExprKind::Constructor { name: i } };
+                    let mut expr = Expr {
+                        id: self.next_id(),
+                        span,
+                        kind: ExprKind::Constructor { name: i },
+                    };
                     for arg in args {
-                        expr = Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::App {
-                            func: Box::new(expr),
-                            arg: Box::new(arg),
-                        }};
+                        expr = Expr {
+                            id: self.next_id(),
+                            span: span.to(end),
+                            kind: ExprKind::App {
+                                func: Box::new(expr),
+                                arg: Box::new(arg),
+                            },
+                        };
                     }
                     Ok(expr)
                 } else {
-                    Ok(Expr { id: self.next_id(), span, kind: ExprKind::Constructor { name: i } })
+                    Ok(Expr {
+                        id: self.next_id(),
+                        span,
+                        kind: ExprKind::Constructor { name: i },
+                    })
                 }
             }
 
             Token::LParen => {
                 if matches!(self.peek(), Token::RParen) {
                     self.advance(); // consume ')'
-                    Ok(Expr { id: self.next_id(), span, kind: ExprKind::Lit {
-                        value: Lit::Unit,
-                    }})
+                    Ok(Expr {
+                        id: self.next_id(),
+                        span,
+                        kind: ExprKind::Lit { value: Lit::Unit },
+                    })
                 } else {
                     let first = self.parse_expr(0)?;
                     if matches!(self.peek(), Token::Comma) {
@@ -571,9 +819,11 @@ impl Parser {
                         }
                         let end = self.tokens[self.pos].span;
                         self.expect(Token::RParen)?;
-                        Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Tuple {
-                            elements,
-                        }})
+                        Ok(Expr {
+                            id: self.next_id(),
+                            span: span.to(end),
+                            kind: ExprKind::Tuple { elements },
+                        })
                     } else {
                         self.expect(Token::RParen)?;
                         Ok(first)
@@ -595,9 +845,11 @@ impl Parser {
                 if matches!(self.peek(), Token::RBracket) {
                     let end = self.tokens[self.pos].span;
                     self.advance();
-                    return Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Constructor {
-                        name: "Nil".to_string(),
-                    }});
+                    return Ok(Expr {
+                        id: self.next_id(),
+                        span: span.to(end),
+                        kind: ExprKind::ListLit { elements: vec![] },
+                    });
                 }
 
                 let first = self.parse_expr(0)?;
@@ -608,7 +860,14 @@ impl Parser {
                     let qualifiers = self.parse_comprehension_qualifiers()?;
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBracket)?;
-                    return Ok(self.desugar_comprehension(first, &qualifiers, span.to(end)));
+                    return Ok(Expr {
+                        id: self.next_id(),
+                        span: span.to(end),
+                        kind: ExprKind::ListComprehension {
+                            body: Box::new(first),
+                            qualifiers,
+                        },
+                    });
                 }
 
                 // Normal list literal
@@ -622,26 +881,11 @@ impl Parser {
                 }
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBracket)?;
-
-                // Build from right to left: Nil, then wrap each element
-                let mut result = Expr { id: self.next_id(), span: end, kind: ExprKind::Constructor {
-                    name: "Nil".to_string(),
-                }};
-                for elem in elements.into_iter().rev() {
-                    let elem_span = elem.span;
-                    let cons = Expr { id: self.next_id(), span: elem_span, kind: ExprKind::Constructor {
-                        name: "Cons".to_string(),
-                    }};
-                    let app1 = Expr { id: self.next_id(), span: elem_span, kind: ExprKind::App {
-                        func: Box::new(cons),
-                        arg: Box::new(elem),
-                    }};
-                    result = Expr { id: self.next_id(), span: elem_span.to(end), kind: ExprKind::App {
-                        func: Box::new(app1),
-                        arg: Box::new(result),
-                    }};
-                }
-                Ok(result)
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: span.to(end),
+                    kind: ExprKind::ListLit { elements },
+                })
             }
 
             Token::Fun => {
@@ -654,15 +898,17 @@ impl Parser {
                 let body = self.parse_expr(0)?;
                 let end_span = body.span;
 
-                Ok(Expr { id: self.next_id(), span: span.to(end_span), kind: ExprKind::Lambda {
-                    params,
-                    body: Box::new(body),
-                }})
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: span.to(end_span),
+                    kind: ExprKind::Lambda {
+                        params,
+                        body: Box::new(body),
+                    },
+                })
             }
 
             Token::LBrace => {
-                self.skip_terminators();
-
                 // Check for record update: { expr | field: val, ... }
                 // We don't start with `let`, so try parsing an expression,
                 // then check if the next token is `|`
@@ -674,14 +920,17 @@ impl Parser {
                         && matches!(self.peek(), Token::Bar)
                     {
                         self.advance(); // consume '|'
-                        self.skip_terminators();
                         let fields = self.parse_record_fields()?;
                         let end = self.tokens[self.pos].span;
                         self.expect(Token::RBrace)?;
-                        return Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::RecordUpdate {
-                            record: Box::new(record),
-                            fields,
-                        }});
+                        return Ok(Expr {
+                            id: self.next_id(),
+                            span: span.to(end),
+                            kind: ExprKind::RecordUpdate {
+                                record: Box::new(record),
+                                fields,
+                            },
+                        });
                     }
 
                     // Not a record update — backtrack and parse as block
@@ -704,9 +953,10 @@ impl Parser {
                     });
                 }
 
-                let mut stmts: Vec<Stmt> = Vec::new();
+                let mut stmts: Vec<Annotated<Stmt>> = Vec::new();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                    if matches!(self.peek(), Token::Let) {
+                    let start = self.pos;
+                    let stmt = if matches!(self.peek(), Token::Let) {
                         let let_start = self.tokens[self.pos].span;
                         self.advance(); // consume 'let'
                         let is_assert = matches!(self.peek(), Token::Ident(s) if s == "assert");
@@ -718,7 +968,11 @@ impl Parser {
                         // Check for local function definition: `let f x y = body`
                         // If the first pattern is a variable and next token is NOT
                         // `=` or `:`, we have parameter patterns following the name.
-                        if let Pat::Var { name, span: fn_name_span, .. } = &pattern
+                        if let Pat::Var {
+                            name,
+                            span: fn_name_span,
+                            ..
+                        } = &pattern
                             && !matches!(self.peek(), Token::Eq | Token::Colon)
                         {
                             let fun_name = name.clone();
@@ -736,7 +990,7 @@ impl Parser {
                             self.expect(Token::Eq)?;
                             let body = self.parse_expr(0)?;
                             let stmt_span = let_start.to(body.span);
-                            stmts.push(Stmt::LetFun {
+                            Stmt::LetFun {
                                 id: NodeId::fresh(),
                                 name: fun_name,
                                 name_span: fn_name_span,
@@ -744,7 +998,7 @@ impl Parser {
                                 guard,
                                 body,
                                 span: stmt_span,
-                            });
+                            }
                         } else {
                             let annotation = if matches!(self.peek(), Token::Colon)
                                 && matches!(pattern, Pat::Var { .. })
@@ -757,43 +1011,57 @@ impl Parser {
                             self.expect(Token::Eq)?;
                             let value = self.parse_expr(0)?;
                             let stmt_span = let_start.to(value.span);
-                            stmts.push(Stmt::Let {
+                            Stmt::Let {
                                 pattern,
                                 annotation,
                                 value,
                                 assert: is_assert,
                                 span: stmt_span,
-                            });
+                            }
                         }
                     } else {
-                        stmts.push(Stmt::Expr(self.parse_expr(0)?));
-                    }
-                    self.skip_terminators();
+                        Stmt::Expr(self.parse_expr(0)?)
+                    };
+                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
+                    stmts.push(Annotated {
+                        node: stmt,
+                        leading_trivia: self.take_leading_trivia(start),
+                        trailing_comment,
+                        trailing_trivia: vec![],
+                    });
                 }
+                let dangling_trivia = self.take_leading_trivia(self.pos);
                 let end_span = self.tokens[self.pos].span; // the RBrace
                 self.expect(Token::RBrace)?;
-                Ok(Expr { id: self.next_id(), span: span.to(end_span), kind: ExprKind::Block {
-                    stmts,
-                }})
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: span.to(end_span),
+                    kind: ExprKind::Block {
+                        stmts,
+                        dangling_trivia,
+                    },
+                })
             }
 
             Token::If => {
                 let cond = self.parse_expr(0)?;
-                self.skip_terminators();
                 self.expect(Token::Then)?;
 
                 let then_branch = self.parse_expr(0)?;
-                self.skip_terminators();
                 self.expect(Token::Else)?;
 
                 let else_branch = self.parse_expr(0)?;
                 let end_span = else_branch.span;
 
-                Ok(Expr { id: self.next_id(), span: span.to(end_span), kind: ExprKind::If {
-                    cond: Box::new(cond),
-                    then_branch: Box::new(then_branch),
-                    else_branch: Box::new(else_branch),
-                }})
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: span.to(end_span),
+                    kind: ExprKind::If {
+                        cond: Box::new(cond),
+                        then_branch: Box::new(then_branch),
+                        else_branch: Box::new(else_branch),
+                    },
+                })
             }
 
             Token::Case => {
@@ -801,10 +1069,10 @@ impl Parser {
                 let scrutinee = self.parse_expr(0)?;
                 self.no_brace_app = false;
                 self.expect(Token::LBrace)?;
-                self.skip_terminators();
 
                 let mut branches = Vec::new();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                    let start = self.pos;
                     let arm_start = self.tokens[self.pos].span;
                     let pattern = self.parse_pattern()?;
 
@@ -818,30 +1086,40 @@ impl Parser {
                     self.expect(Token::Arrow)?;
                     let body = self.parse_expr(0)?;
                     let end_span = body.span.end;
-                    branches.push(CaseArm {
-                        pattern,
-                        guard,
-                        body,
-                        span: Span {
-                            start: arm_start.start,
-                            end: end_span,
+                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
+                    branches.push(Annotated {
+                        node: CaseArm {
+                            pattern,
+                            guard,
+                            body,
+                            span: Span {
+                                start: arm_start.start,
+                                end: end_span,
+                            },
                         },
+                        leading_trivia: self.take_leading_trivia(start),
+                        trailing_comment,
+                        trailing_trivia: vec![],
                     });
-                    self.skip_terminators();
                 }
 
+                let dangling_trivia = self.take_leading_trivia(self.pos);
                 let end = self.tokens[self.pos].span; // the RBrace
                 self.expect(Token::RBrace)?;
 
-                Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Case {
-                    scrutinee: Box::new(scrutinee),
-                    arms: branches,
-                }})
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: span.to(end),
+                    kind: ExprKind::Case {
+                        scrutinee: Box::new(scrutinee),
+                        arms: branches,
+                        dangling_trivia,
+                    },
+                })
             }
 
             Token::Receive => {
                 self.expect(Token::LBrace)?;
-                self.skip_terminators();
 
                 let mut branches = Vec::new();
                 let mut after_clause = None;
@@ -854,10 +1132,10 @@ impl Parser {
                         self.expect(Token::Arrow)?;
                         let body = self.parse_expr(0)?;
                         after_clause = Some((Box::new(timeout), Box::new(body)));
-                        self.skip_terminators();
                         break; // after must be last
                     }
 
+                    let start = self.pos;
                     let arm_start = self.tokens[self.pos].span;
                     let pattern = self.parse_pattern()?;
 
@@ -871,25 +1149,36 @@ impl Parser {
                     self.expect(Token::Arrow)?;
                     let body = self.parse_expr(0)?;
                     let end_span = body.span.end;
-                    branches.push(CaseArm {
-                        pattern,
-                        guard,
-                        body,
-                        span: Span {
-                            start: arm_start.start,
-                            end: end_span,
+                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
+                    branches.push(Annotated {
+                        node: CaseArm {
+                            pattern,
+                            guard,
+                            body,
+                            span: Span {
+                                start: arm_start.start,
+                                end: end_span,
+                            },
                         },
+                        leading_trivia: self.take_leading_trivia(start),
+                        trailing_comment,
+                        trailing_trivia: vec![],
                     });
-                    self.skip_terminators();
                 }
 
+                let dangling_trivia = self.take_leading_trivia(self.pos);
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;
 
-                Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Receive {
-                    arms: branches,
-                    after_clause,
-                }})
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: span.to(end),
+                    kind: ExprKind::Receive {
+                        arms: branches,
+                        after_clause,
+                        dangling_trivia,
+                    },
+                })
             }
 
             // Unary negation
@@ -900,31 +1189,42 @@ impl Parser {
                     start: span.start,
                     end: end_span,
                 };
-                Ok(Expr { id: self.next_id(), span: neg_span, kind: ExprKind::UnaryMinus {
-                    expr: Box::new(expr),
-                }})
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: neg_span,
+                    kind: ExprKind::UnaryMinus {
+                        expr: Box::new(expr),
+                    },
+                })
             }
 
             // Effect call: `log! "hello"` args handled by parse_application
-            Token::EffectCall(name) => Ok(Expr { id: self.next_id(), span, kind: ExprKind::EffectCall {
-                name,
-                qualifier: None,
-                args: Vec::new(),
-            }}),
+            Token::EffectCall(name) => Ok(Expr {
+                id: self.next_id(),
+                span,
+                kind: ExprKind::EffectCall {
+                    name,
+                    qualifier: None,
+                    args: Vec::new(),
+                },
+            }),
 
             // Resume: `resume value`
             Token::Resume => {
                 let value = self.parse_expr(0)?;
                 let end = value.span;
-                Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Resume {
-                    value: Box::new(value),
-                }})
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: span.to(end),
+                    kind: ExprKind::Resume {
+                        value: Box::new(value),
+                    },
+                })
             }
 
             // do...else block: `do { Pat <- expr ... SuccessExpr } else { Pat -> expr ... }`
             Token::Do => {
                 self.expect(Token::LBrace)?;
-                self.skip_terminators();
 
                 let mut bindings = Vec::new();
                 // Parse bindings (`Pat <- expr`) until we find the success expression
@@ -943,50 +1243,58 @@ impl Parser {
                             self.advance(); // consume `<-`
                             let expr = self.parse_expr(0)?;
                             bindings.push((pat, expr));
-                            self.skip_terminators();
                         }
                         _ => {
                             // Not a binding -- restore and parse as success expression
                             self.pos = saved_pos;
                             let success = self.parse_expr(0)?;
-                            self.skip_terminators();
                             break success;
                         }
                     }
                 };
                 self.expect(Token::RBrace)?;
 
-                self.skip_terminators();
                 self.expect(Token::Else)?;
                 self.expect(Token::LBrace)?;
-                self.skip_terminators();
 
                 let mut else_arms = Vec::new();
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                    let start = self.pos;
                     let arm_start = self.tokens[self.pos].span;
                     let pattern = self.parse_pattern()?;
                     self.expect(Token::Arrow)?;
                     let body = self.parse_expr(0)?;
                     let end_span = body.span.end;
-                    else_arms.push(CaseArm {
-                        pattern,
-                        guard: None,
-                        body,
-                        span: Span {
-                            start: arm_start.start,
-                            end: end_span,
+                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
+                    else_arms.push(Annotated {
+                        node: CaseArm {
+                            pattern,
+                            guard: None,
+                            body,
+                            span: Span {
+                                start: arm_start.start,
+                                end: end_span,
+                            },
                         },
+                        leading_trivia: self.take_leading_trivia(start),
+                        trailing_comment,
+                        trailing_trivia: vec![],
                     });
-                    self.skip_terminators();
                 }
+                let dangling_trivia = self.take_leading_trivia(self.pos);
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;
 
-                Ok(Expr { id: self.next_id(), span: span.to(end), kind: ExprKind::Do {
-                    bindings,
-                    success: Box::new(success),
-                    else_arms,
-                }})
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: span.to(end),
+                    kind: ExprKind::Do {
+                        bindings,
+                        success: Box::new(success),
+                        else_arms,
+                        dangling_trivia,
+                    },
+                })
             }
 
             tok => {
@@ -1045,131 +1353,5 @@ impl Parser {
         }
         Ok(qualifiers)
     }
-
-    /// Recursively desugar list comprehension qualifiers into nested
-    /// flat_map / if-then-else / let expressions.
-    fn desugar_comprehension(
-        &mut self,
-        body: Expr,
-        qualifiers: &[ComprehensionQualifier],
-        span: Span,
-    ) -> Expr {
-        if qualifiers.is_empty() {
-            // Base case: [e] ==> Cons(e, Nil)
-            return self.make_singleton_list(body, span);
-        }
-
-        match &qualifiers[0] {
-            ComprehensionQualifier::Generator(pat, source) => {
-                // [e | p <- l, Q] ==> flat_map (fun p -> [e | Q]) l
-                let inner = self.desugar_comprehension(body, &qualifiers[1..], span);
-                let lambda = Expr { id: self.next_id(), span, kind: ExprKind::Lambda {
-                    params: vec![pat.clone()],
-                    body: Box::new(inner),
-                }};
-                let flat_map = Expr { id: self.next_id(), span, kind: ExprKind::QualifiedName {
-                    module: "List".to_string(),
-                    name: "flat_map".to_string(),
-                }};
-                let app1 = Expr { id: self.next_id(), span, kind: ExprKind::App {
-                    func: Box::new(flat_map),
-                    arg: Box::new(lambda),
-                }};
-                Expr { id: self.next_id(), span, kind: ExprKind::App {
-                    func: Box::new(app1),
-                    arg: Box::new(source.clone()),
-                }}
-            }
-            ComprehensionQualifier::Guard(guard) => {
-                // [e | g, Q] ==> if g then [e | Q] else []
-                let then_branch = self.desugar_comprehension(body, &qualifiers[1..], span);
-                let else_branch = Expr { id: self.next_id(), span, kind: ExprKind::Constructor {
-                    name: "Nil".to_string(),
-                }};
-                Expr { id: self.next_id(), span, kind: ExprKind::If {
-                    cond: Box::new(guard.clone()),
-                    then_branch: Box::new(then_branch),
-                    else_branch: Box::new(else_branch),
-                }}
-            }
-            ComprehensionQualifier::Let(pat, value) => {
-                // [e | let p = v, Q] ==> { let p = v; [e | Q] }
-                let inner = self.desugar_comprehension(body, &qualifiers[1..], span);
-                Expr { id: self.next_id(), span, kind: ExprKind::Block {
-                    stmts: vec![
-                        Stmt::Let {
-                            pattern: pat.clone(),
-                            annotation: None,
-                            value: value.clone(),
-                            assert: false,
-                            span,
-                        },
-                        Stmt::Expr(inner),
-                    ],
-                }}
-            }
-        }
-    }
-
-    /// Desugar `first >> second` into `fun _x -> second (first _x)`.
-    /// Both forward and backward compose call this with args in the right order.
-    fn desugar_compose(&mut self, first: Expr, second: Expr, span: Span) -> Expr {
-        let param = Pat::Var {
-            id: NodeId::fresh(),
-            name: "_x".to_string(),
-            span,
-        };
-        let arg = Expr { id: self.next_id(), span, kind: ExprKind::Var {
-            name: "_x".to_string(),
-        }};
-        let inner = Expr { id: self.next_id(), span, kind: ExprKind::App {
-            func: Box::new(first),
-            arg: Box::new(arg),
-        }};
-        let body = Expr { id: self.next_id(), span, kind: ExprKind::App {
-            func: Box::new(second),
-            arg: Box::new(inner),
-        }};
-        Expr { id: self.next_id(), span, kind: ExprKind::Lambda {
-            params: vec![param],
-            body: Box::new(body),
-        }}
-    }
-
-    /// Build Cons(elem, Nil) -- a singleton list.
-    fn make_singleton_list(&mut self, elem: Expr, span: Span) -> Expr {
-        let nil = Expr { id: self.next_id(), span, kind: ExprKind::Constructor {
-            name: "Nil".to_string(),
-        }};
-        let cons = Expr { id: self.next_id(), span, kind: ExprKind::Constructor {
-            name: "Cons".to_string(),
-        }};
-        let app1 = Expr { id: self.next_id(), span, kind: ExprKind::App {
-            func: Box::new(cons),
-            arg: Box::new(elem),
-        }};
-        Expr { id: self.next_id(), span, kind: ExprKind::App {
-            func: Box::new(app1),
-            arg: Box::new(nil),
-        }}
-    }
 }
 
-/// Tracks which desugared operator is being parsed.
-enum Desugar {
-    None,
-    PipeBack,
-    Cons,
-    ComposeForward,
-    ComposeBack,
-}
-
-/// A qualifier in a list comprehension.
-enum ComprehensionQualifier {
-    /// `pat <- expr` -- draw elements from a list
-    Generator(Pat, Expr),
-    /// `expr` -- boolean guard/filter
-    Guard(Expr),
-    /// `let pat = expr` -- local binding
-    Let(Pat, Expr),
-}

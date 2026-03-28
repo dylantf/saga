@@ -56,7 +56,6 @@ impl Checker {
                     .collect(),
             ),
             Type::Error => Type::Error,
-            Type::Never => Type::Never,
         }
     }
 
@@ -67,7 +66,7 @@ impl Checker {
         name: &str,
         type_param: &str,
         supertraits: &[(String, crate::token::Span)],
-        methods: &[ast::TraitMethod],
+        methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
         let mut method_sigs = Vec::new();
 
@@ -144,7 +143,7 @@ impl Checker {
         type_params: &[String],
         where_clause: &[ast::TraitBound],
         needs: &[ast::EffectRef],
-        methods: &[(String, Span, Vec<ast::Pat>, ast::Expr)],
+        methods: &[ast::ImplMethod],
         span: Span,
     ) -> Result<(), Diagnostic> {
         // Check the trait exists
@@ -153,7 +152,7 @@ impl Checker {
         })?;
 
         // Check all required methods are provided
-        let provided: Vec<&str> = methods.iter().map(|(n, _, _, _)| n.as_str()).collect();
+        let provided: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
         for (required_name, _, _, _) in &trait_info.methods {
             if !provided.contains(&required_name.as_str()) {
                 return Err(Diagnostic::error_at(
@@ -223,7 +222,8 @@ impl Checker {
         let declared_effects: std::collections::HashSet<String> =
             needs.iter().map(|e| e.name.clone()).collect();
 
-        for (method_name, _method_span, params, body) in methods {
+        for m in methods {
+            let (method_name, params, body) = (&m.name, &m.params, &m.body);
             let trait_method = trait_info
                 .methods
                 .iter()
@@ -240,6 +240,7 @@ impl Checker {
 
             let saved_env = self.env.clone();
             let body_scope = self.enter_scope();
+            let trait_saved_effs = self.save_effects();
 
             // Re-insert the trait's method schemes so that method calls inside
             // the impl body resolve to the trait signature, not to a user-defined
@@ -270,7 +271,7 @@ impl Checker {
             }
 
             // Infer body and check it matches the expected return type
-            let (body_ty, body_effs) = self.infer_expr(body)?;
+            let body_ty = self.infer_expr(body)?;
             self.unify_at(&body_ty, &expected_return, body.span)
                 .map_err(|e| {
                     Diagnostic::error_at(
@@ -283,6 +284,7 @@ impl Checker {
                 })?;
 
             // Check that body effects are covered by the impl's needs declaration
+            let body_effs = self.restore_effects(trait_saved_effs);
             let scope_result = self.exit_scope(body_scope);
             let body_field_candidates = scope_result.field_candidates;
             let body_effects: std::collections::HashSet<String> = body_effs

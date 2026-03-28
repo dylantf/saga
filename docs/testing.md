@@ -215,6 +215,7 @@ dylang test math         # filter: only tests whose path or describe/test name c
 ### Execution model
 
 For each test file:
+
 1. Compile the file and its imports
 2. Walk the `describe`/`test` tree
 3. For each `test`, evaluate its body with the `Test` handler attached
@@ -280,10 +281,10 @@ by providing mock handlers:
 ```
 # src
 pub effect Database {
-  fun query (sql: String) -> List String
+  fun query : (sql: String) -> List String
 }
 
-pub fun get_users () -> List String needs {Database}
+pub fun get_users : Unit -> List String needs {Database}
 get_users () = query! "SELECT name FROM users"
 
 # tests
@@ -334,7 +335,7 @@ Two new keywords: `test` and `describe`.
 
 `test` parses as: `test` STRING_LITERAL BLOCK
 
-`describe` parses as: `describe` STRING_LITERAL `{` (decl)* `}`
+`describe` parses as: `describe` STRING_LITERAL `{` (decl)\* `}`
 
 Inside a `describe` block, the parser accepts `test`, `describe`, and `let` declarations.
 No function definitions, type definitions, imports, etc. Imports go at the top of the file

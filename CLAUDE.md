@@ -91,6 +91,10 @@ Typechecker tests use `check(src)` which loads the prelude then checks the sourc
 - Single files: `<parent>/_build/{dev,release}/`
 - Projects: `<project_root>/_build/{dev,release}/`
 
+## Language Design Notes
+
+- **There are no zero-argument functions.** Every function takes at least one parameter. If a function has no meaningful input, it takes `Unit`: `fun foo : Unit -> Unit` / `foo () = ...`, called as `foo ()`. Think of `()` as the value that triggers execution. Do NOT add zero-arity cases in the compiler — this is intentional, not a gap. See `docs/const-bindings.md` for the design rationale.
+
 ## Code Conventions
 
 - Never use `3.14` as a float literal in tests (clippy warning); use `std::f64::consts::PI` or simple values like `1.5`

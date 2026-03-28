@@ -46,7 +46,7 @@ impl<'a> Lowerer<'a> {
         let mut result = Vec::new();
 
         for (i, arm) in arms.iter().enumerate() {
-            let pat = lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules);
+            let pat = lower_pat(&arm.pattern, &self.record_fields, &self.constructor_atoms);
 
             match &arm.guard {
                 None => {
@@ -168,7 +168,7 @@ impl<'a> Lowerer<'a> {
                     vars.push(var.clone());
                     bindings.push((var, val));
                 }
-                let atom = mangle_ctor_atom(name, &self.constructor_modules);
+                let atom = mangle_ctor_atom(name, &self.constructor_atoms);
                 let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
                 elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
                 let tuple = CExpr::Tuple(elems);
@@ -274,7 +274,7 @@ impl<'a> Lowerer<'a> {
             return (var, body);
         }
         let tmp = self.fresh();
-        let cpat = lower_pat(pat, &self.record_fields, &self.constructor_modules);
+        let cpat = lower_pat(pat, &self.record_fields, &self.constructor_atoms);
         let mut arms = vec![CArm {
             pat: cpat,
             guard: None,
@@ -321,7 +321,7 @@ impl<'a> Lowerer<'a> {
                     }
                     // Terminal effectful function call: pass current_return_k as _ReturnK
                     // so abort-style handlers skip the return clause wrapping.
-                    if let Some((name, _)) = collect_fun_call(e)
+                    if let Some((name, _, _)) = collect_fun_call(e)
                         && (self.is_effectful(name)
                             || self.current_effectful_vars.contains_key(name))
                     {
@@ -410,7 +410,7 @@ impl<'a> Lowerer<'a> {
                                     pats::lower_pat(
                                         p,
                                         &self.record_fields,
-                                        &self.constructor_modules,
+                                        &self.constructor_atoms,
                                     )
                                 })
                                 .collect();
@@ -500,7 +500,7 @@ impl<'a> Lowerer<'a> {
                         Stmt::LetFun { .. } => unreachable!(),
                     };
                     let is_effectful_call = collect_fun_call(value_expr)
-                        .map(|(name, _)| {
+                        .map(|(name, _, _)| {
                             self.is_effectful(name)
                                 || self.current_effectful_vars.contains_key(name)
                         })
@@ -647,12 +647,13 @@ impl<'a> Lowerer<'a> {
             } => {
                 let scrut_var = self.fresh();
                 let scrut_ce = self.lower_expr(scrutinee);
-                let reordered = Self::reorder_maybe_arms(arms);
+                let arms: Vec<_> = arms.iter().map(|a| a.node.clone()).collect();
+                let reordered = Self::reorder_maybe_arms(&arms);
                 let arms_ce: Vec<CArm> = reordered
                     .iter()
                     .map(|arm| {
                         let pat =
-                            lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules);
+                            lower_pat(&arm.pattern, &self.record_fields, &self.constructor_atoms);
                         let guard_ce = arm.guard.as_ref().map(|g| self.lower_expr(g));
                         let body_ce = self.lower_branch_with_k(&arm.body, k_var);
                         CArm {
@@ -668,7 +669,10 @@ impl<'a> Lowerer<'a> {
                     Box::new(CExpr::Case(Box::new(CExpr::Var(scrut_var)), arms_ce)),
                 )
             }
-            ExprKind::Block { stmts, .. } => self.lower_block_with_k(stmts, k_var),
+            ExprKind::Block { stmts, .. } => {
+                let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
+                self.lower_block_with_k(&stmts, k_var)
+            }
             _ => {
                 // Not a branching expression: apply K to the result
                 let v = self.fresh();
@@ -699,7 +703,7 @@ impl<'a> Lowerer<'a> {
                 Some(CExpr::Var(k_var.to_string())),
             )
         } else if collect_fun_call(expr)
-            .map(|(name, _)| {
+            .map(|(name, _, _)| {
                 self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
             })
             .unwrap_or(false)
@@ -770,7 +774,7 @@ impl<'a> Lowerer<'a> {
                     // rest of the block as _ReturnK so CPS chains correctly
                     // (e.g. state-threading handlers need real continuations).
                     let is_effectful_call = collect_fun_call(value_expr)
-                        .map(|(name, _)| {
+                        .map(|(name, _, _)| {
                             self.is_effectful(name)
                                 || self.current_effectful_vars.contains_key(name)
                         })
@@ -832,7 +836,7 @@ impl<'a> Lowerer<'a> {
         let else_arms_ce: Vec<CArm> = else_arms
             .iter()
             .map(|arm| CArm {
-                pat: lower_pat(&arm.pattern, &self.record_fields, &self.constructor_modules),
+                pat: lower_pat(&arm.pattern, &self.record_fields, &self.constructor_atoms),
                 guard: arm.guard.as_ref().map(|g| self.lower_expr(g)),
                 body: self.lower_expr(&arm.body),
             })
@@ -846,21 +850,46 @@ impl<'a> Lowerer<'a> {
             let fail_var = self.fresh();
             let val_ce = self.lower_expr(expr);
 
-            let case_expr = CExpr::Case(
-                Box::new(CExpr::Var(scrut_var.clone())),
-                vec![
-                    CArm {
-                        pat: lower_pat(pat, &self.record_fields, &self.constructor_modules),
-                        guard: None,
-                        body: inner,
-                    },
-                    CArm {
-                        pat: CPat::Var(fail_var.clone()),
-                        guard: None,
-                        body: CExpr::Case(Box::new(CExpr::Var(fail_var)), else_arms_ce.clone()),
-                    },
-                ],
-            );
+            let success_pat = lower_pat(pat, &self.record_fields, &self.constructor_atoms);
+            // If the success pattern is a catch-all (e.g. Just(x) lowers to a
+            // bare variable), put the else arms first so they get a chance to
+            // match before the catch-all swallows everything.
+            let is_catchall = matches!(success_pat, CPat::Var(_));
+            let success_arm = CArm {
+                pat: success_pat,
+                guard: None,
+                body: inner,
+            };
+            let mut else_with_fallthrough: Vec<CArm> = else_arms_ce.clone();
+            else_with_fallthrough.push(CArm {
+                pat: CPat::Var(fail_var.clone()),
+                guard: None,
+                body: CExpr::Var(fail_var),
+            });
+            let fail_arm = CArm {
+                pat: CPat::Var(self.fresh()),
+                guard: None,
+                body: CExpr::Case(
+                    Box::new(CExpr::Var(scrut_var.clone())),
+                    else_with_fallthrough,
+                ),
+            };
+            let arms = if is_catchall {
+                // Else arms first, then success as fallback
+                let mut arms: Vec<CArm> = else_arms_ce
+                    .iter()
+                    .map(|arm| CArm {
+                        pat: arm.pat.clone(),
+                        guard: arm.guard.clone(),
+                        body: arm.body.clone(),
+                    })
+                    .collect();
+                arms.push(success_arm);
+                arms
+            } else {
+                vec![success_arm, fail_arm]
+            };
+            let case_expr = CExpr::Case(Box::new(CExpr::Var(scrut_var.clone())), arms);
             inner = CExpr::Let(scrut_var, Box::new(val_ce), Box::new(case_expr));
         }
 

@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::ast::*;
-use crate::token::Span;
+use crate::token::{Span, StringKind};
 use crate::typechecker::{CheckResult, TraitEvidence, TraitInfo, Type};
 
 /// Elaborate a program using typechecker results.
@@ -60,7 +60,7 @@ impl Elaborator {
         // explicit where clauses that still have inferred trait constraints).
         // Traits that use operator dispatch, not dictionary dispatch.
         // These should not generate dict params.
-        let operator_traits: std::collections::HashSet<&str> = ["Num", "Eq"].into_iter().collect();
+        let operator_traits: std::collections::HashSet<&str> = ["Eq"].into_iter().collect();
 
         let mut inferred_dict_params: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (name, scheme) in result.env.iter() {
@@ -140,12 +140,12 @@ impl Elaborator {
     }
 
     /// Extract dict param info from a where clause: [(trait_name, type_var_name)]
-    /// for traits that use dictionary dispatch (excludes Num, Eq which use BIFs).
+    /// for traits that use dictionary dispatch (excludes Eq which uses BIFs).
     fn dict_params_from_where(where_clause: &[TraitBound]) -> Vec<(String, String)> {
         let mut dict_params = Vec::new();
         for bound in where_clause {
             for (trait_name, _) in &bound.traits {
-                if trait_name != "Num" && trait_name != "Eq" {
+                if trait_name != "Eq" {
                     dict_params.push((trait_name.clone(), bound.type_var.clone()));
                 }
             }
@@ -189,7 +189,8 @@ impl Elaborator {
         for decl in program {
             match decl {
                 Decl::TraitDef { name, methods, .. } => {
-                    for (idx, method) in methods.iter().enumerate() {
+                    for (idx, ann) in methods.iter().enumerate() {
+                        let method = &ann.node;
                         if let Some((existing_trait, _)) = self.trait_methods.get(&method.name) {
                             panic!(
                                 "trait method `{}` is defined in both `{}` and `{}`",
@@ -227,25 +228,25 @@ impl Elaborator {
                         .insert((trait_name.clone(), target_type.clone()), dict_name);
                     // Capture where-clause constraints as (trait, param_index) pairs.
                     // This tells dict_for_type which sub-dicts to pass for parameterized impls.
-                    if !where_clause.is_empty() {
-                        let var_to_idx: HashMap<&str, usize> = type_params
-                            .iter()
-                            .enumerate()
-                            .map(|(i, name)| (name.as_str(), i))
-                            .collect();
-                        let params: Vec<(String, usize)> = where_clause
-                            .iter()
-                            .flat_map(|bound| {
-                                let idx = var_to_idx
-                                    .get(bound.type_var.as_str())
-                                    .copied()
-                                    .unwrap_or(0);
-                                bound.traits.iter().map(move |(t, _)| (t.clone(), idx))
-                            })
-                            .collect();
-                        self.impl_dict_params
-                            .insert((trait_name.clone(), target_type.clone()), params);
-                    }
+                    // Always insert (even empty) so dict_for_type doesn't fall back to
+                    // guessing one sub-dict per type arg (which breaks phantom type params).
+                    let var_to_idx: HashMap<&str, usize> = type_params
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| (name.as_str(), i))
+                        .collect();
+                    let params: Vec<(String, usize)> = where_clause
+                        .iter()
+                        .flat_map(|bound| {
+                            let idx = var_to_idx
+                                .get(bound.type_var.as_str())
+                                .copied()
+                                .unwrap_or(0);
+                            bound.traits.iter().map(move |(t, _)| (t.clone(), idx))
+                        })
+                        .collect();
+                    self.impl_dict_params
+                        .insert((trait_name.clone(), target_type.clone()), params);
                 }
                 Decl::HandlerDef {
                     name, where_clause, ..
@@ -307,9 +308,10 @@ impl Elaborator {
                     let mut ordered_methods = Vec::new();
                     if let Some(ref info) = trait_info {
                         for (trait_method_name, _, _, _) in &info.methods {
-                            if let Some((_, _, params, body)) =
-                                methods.iter().find(|(n, _, _, _)| n == trait_method_name)
+                            if let Some(ann) =
+                                methods.iter().find(|ann| ann.node.name == *trait_method_name)
                             {
+                                let ImplMethod { params, body, .. } = &ann.node;
                                 let elab_body = self.elaborate_expr(body);
                                 ordered_methods.push(Expr::synth(
                                     *span,
@@ -416,13 +418,16 @@ impl Elaborator {
                     // reference trait dicts (e.g. `show entity` -> `__dict_Show_a`)
                     let saved = self.setup_dict_params(where_clause);
 
-                    let elab_arms: Vec<HandlerArm> = arms
+                    let elab_arms: Vec<Annotated<HandlerArm>> = arms
                         .iter()
-                        .map(|arm| HandlerArm {
-                            op_name: arm.op_name.clone(),
-                            params: arm.params.clone(),
-                            body: Box::new(self.elaborate_expr(&arm.body)),
-                            span: arm.span,
+                        .map(|ann| {
+                            let arm = &ann.node;
+                            Annotated::bare(HandlerArm {
+                                op_name: arm.op_name.clone(),
+                                params: arm.params.clone(),
+                                body: Box::new(self.elaborate_expr(&arm.body)),
+                                span: arm.span,
+                            })
                         })
                         .collect();
                     let elab_return = return_clause.as_ref().map(|rc| {
@@ -449,6 +454,7 @@ impl Elaborator {
                         recovered_arms: vec![],
                         return_clause: elab_return,
                         span: *span,
+                        dangling_trivia: vec![],
                     });
                 }
 
@@ -674,7 +680,48 @@ impl Elaborator {
                     }
                 }
 
-                // Rewrite Div to IntDiv when the Num constraint resolved to Int
+                // Rewrite arithmetic operators to Num dict method calls for non-primitive types.
+                // Primitives (Int, Float) keep using BEAM BIFs directly.
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::Mod) {
+                    let is_primitive = self
+                        .evidence_by_node
+                        .get(&node_id)
+                        .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Num"))
+                        .and_then(|ev| ev.resolved_type.as_ref())
+                        .is_some_and(|(name, _)| {
+                            matches!(name.as_str(), "Int" | "Float")
+                        });
+
+                    if !is_primitive
+                        && let Some(desugared) =
+                            self.desugar_num_op(op, left, right, node_id, span)
+                    {
+                        return desugared;
+                    }
+                }
+
+                // Rewrite <> to Semigroup dict method call for non-primitive types.
+                // String and List keep using BEAM BIF (erlang:++) directly.
+                if *op == BinOp::Concat {
+                    let is_primitive = self
+                        .evidence_by_node
+                        .get(&node_id)
+                        .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Semigroup"))
+                        .and_then(|ev| ev.resolved_type.as_ref())
+                        .is_some_and(|(name, _)| {
+                            matches!(name.as_str(), "String" | "List")
+                        });
+
+                    if !is_primitive
+                        && let Some(desugared) =
+                            self.desugar_semigroup_op(left, right, node_id, span)
+                    {
+                        return desugared;
+                    }
+                }
+
+                // Rewrite Div to IntDiv when the Num constraint resolved to Int,
+                // and Mod to FloatMod when resolved to Float.
                 let elaborated_op = if *op == BinOp::FloatDiv {
                     let is_int = self
                         .evidence_by_node
@@ -686,6 +733,18 @@ impl Elaborator {
                         BinOp::IntDiv
                     } else {
                         BinOp::FloatDiv
+                    }
+                } else if *op == BinOp::Mod {
+                    let is_float = self
+                        .evidence_by_node
+                        .get(&node_id)
+                        .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Num"))
+                        .and_then(|ev| ev.resolved_type.as_ref())
+                        .is_some_and(|(name, _)| name == "Float");
+                    if is_float {
+                        BinOp::FloatMod
+                    } else {
+                        BinOp::Mod
                     }
                 } else {
                     op.clone()
@@ -720,28 +779,35 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Case { scrutinee, arms } => Expr::synth(
+            ExprKind::Case { scrutinee, arms, .. } => Expr::synth(
                 span,
                 ExprKind::Case {
+                    dangling_trivia: vec![],
                     scrutinee: Box::new(self.elaborate_expr(scrutinee)),
                     arms: arms
                         .iter()
-                        .map(|arm| CaseArm {
-                            pattern: arm.pattern.clone(),
-                            guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
-                            body: self.elaborate_expr(&arm.body),
-                            span: arm.span,
+                        .map(|ann| {
+                            let arm = &ann.node;
+                            Annotated::bare(CaseArm {
+                                pattern: arm.pattern.clone(),
+                                guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
+                                body: self.elaborate_expr(&arm.body),
+                                span: arm.span,
+                            })
                         })
                         .collect(),
                 },
             ),
 
-            ExprKind::Block { stmts } => Expr::synth(
+            ExprKind::Block { stmts, .. } => Expr::synth(
                 span,
                 ExprKind::Block {
+                    dangling_trivia: vec![],
                     stmts: stmts
                         .iter()
-                        .map(|s| match s {
+                        .map(|ann| {
+                            let s = &ann.node;
+                            Annotated::bare(match s {
                             Stmt::Let {
                                 pattern,
                                 annotation,
@@ -854,7 +920,7 @@ impl Elaborator {
                                 span: *span,
                             },
                             Stmt::Expr(e) => Stmt::Expr(self.elaborate_expr(e)),
-                        })
+                        })})
                         .collect(),
                 },
             ),
@@ -918,9 +984,11 @@ impl Elaborator {
                 bindings,
                 success,
                 else_arms,
+                ..
             } => Expr::synth(
                 span,
                 ExprKind::Do {
+                    dangling_trivia: vec![],
                     bindings: bindings
                         .iter()
                         .map(|(p, e)| (p.clone(), self.elaborate_expr(e)))
@@ -928,11 +996,14 @@ impl Elaborator {
                     success: Box::new(self.elaborate_expr(success)),
                     else_arms: else_arms
                         .iter()
-                        .map(|arm| CaseArm {
-                            pattern: arm.pattern.clone(),
-                            guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
-                            body: self.elaborate_expr(&arm.body),
-                            span: arm.span,
+                        .map(|ann| {
+                            let arm = &ann.node;
+                            Annotated::bare(CaseArm {
+                                pattern: arm.pattern.clone(),
+                                guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
+                                body: self.elaborate_expr(&arm.body),
+                                span: arm.span,
+                            })
                         })
                         .collect(),
                 },
@@ -986,11 +1057,11 @@ impl Elaborator {
                 // capture them from the enclosing scope.
                 if let Handler::Named(handler_name, _) = handler.as_ref() {
                     if let Some(dict_param_info) = self.handler_dict_params.get(handler_name).cloned() {
-                        let mut stmts: Vec<Stmt> = Vec::new();
+                        let mut stmts: Vec<Annotated<Stmt>> = Vec::new();
                         for (trait_name, type_var) in &dict_param_info {
                             let dict_var = format!("__dict_{}_{}", trait_name, type_var);
                             if let Some(dict_expr) = self.resolve_dict(trait_name, node_id, span) {
-                                stmts.push(Stmt::Let {
+                                stmts.push(Annotated::bare(Stmt::Let {
                                     pattern: Pat::Var {
                                         id: NodeId::fresh(),
                                         name: dict_var,
@@ -1000,14 +1071,14 @@ impl Elaborator {
                                     value: dict_expr,
                                     assert: false,
                                     span,
-                                });
+                                }));
                             }
                         }
                         if stmts.is_empty() {
                             with_expr
                         } else {
-                            stmts.push(Stmt::Expr(with_expr));
-                            Expr::synth(span, ExprKind::Block { stmts })
+                            stmts.push(Annotated::bare(Stmt::Expr(with_expr)));
+                            Expr::synth(span, ExprKind::Block { stmts, dangling_trivia: vec![] })
                         }
                     } else {
                         with_expr
@@ -1033,16 +1104,20 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Receive { arms, after_clause } => Expr::synth(
+            ExprKind::Receive { arms, after_clause, .. } => Expr::synth(
                 span,
                 ExprKind::Receive {
+                    dangling_trivia: vec![],
                     arms: arms
                         .iter()
-                        .map(|arm| CaseArm {
-                            pattern: arm.pattern.clone(),
-                            guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
-                            body: self.elaborate_expr(&arm.body),
-                            span: arm.span,
+                        .map(|ann| {
+                            let arm = &ann.node;
+                            Annotated::bare(CaseArm {
+                                pattern: arm.pattern.clone(),
+                                guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
+                                body: self.elaborate_expr(&arm.body),
+                                span: arm.span,
+                            })
                         })
                         .collect(),
                     after_clause: after_clause.as_ref().map(|(timeout, body)| {
@@ -1058,6 +1133,18 @@ impl Elaborator {
 
             // Elaboration-only variants (shouldn't appear in input)
             ExprKind::DictMethodAccess { .. } | ExprKind::DictRef { .. } => expr.clone(),
+
+            ExprKind::Pipe { .. }
+            | ExprKind::BinOpChain { .. }
+            | ExprKind::PipeBack { .. }
+            | ExprKind::ComposeForward { .. }
+            | ExprKind::ComposeBack { .. }
+            | ExprKind::Cons { .. }
+            | ExprKind::ListLit { .. }
+            | ExprKind::StringInterp { .. }
+            | ExprKind::ListComprehension { .. } => {
+                unreachable!("surface syntax should be desugared before elaboration")
+            }
         }
     }
 
@@ -1068,15 +1155,20 @@ impl Elaborator {
                 named,
                 arms,
                 return_clause,
+                ..
             } => Handler::Inline {
+                dangling_trivia: vec![],
                 named: named.clone(),
                 arms: arms
                     .iter()
-                    .map(|arm| HandlerArm {
-                        op_name: arm.op_name.clone(),
-                        params: arm.params.clone(),
-                        body: Box::new(self.elaborate_expr(&arm.body)),
-                        span: arm.span,
+                    .map(|ann| {
+                        let arm = &ann.node;
+                        Annotated::bare(HandlerArm {
+                            op_name: arm.op_name.clone(),
+                            params: arm.params.clone(),
+                            body: Box::new(self.elaborate_expr(&arm.body)),
+                            span: arm.span,
+                        })
                     })
                     .collect(),
                 return_clause: return_clause.as_ref().map(|arm| {
@@ -1173,6 +1265,88 @@ impl Elaborator {
         ))
     }
 
+    /// Rewrite `a + b` (etc.) into `Num.add a b` (etc.) using the Num dict.
+    ///
+    /// Method indices in Num: add=0, sub=1, mul=2, div=3, mod=4
+    fn desugar_num_op(
+        &mut self,
+        op: &BinOp,
+        left: &Expr,
+        right: &Expr,
+        node_id: crate::ast::NodeId,
+        span: Span,
+    ) -> Option<Expr> {
+        let dict_expr = self.resolve_dict("Num", node_id, span)?;
+
+        let method_index = match op {
+            BinOp::Add => 0,
+            BinOp::Sub => 1,
+            BinOp::Mul => 2,
+            BinOp::FloatDiv => 3,
+            BinOp::Mod => 4,
+            _ => unreachable!(),
+        };
+
+        let method_fn = Expr::synth(
+            span,
+            ExprKind::DictMethodAccess {
+                dict: Box::new(dict_expr),
+                method_index,
+            },
+        );
+        let elab_left = self.elaborate_expr(left);
+        let elab_right = self.elaborate_expr(right);
+        Some(Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(Expr::synth(
+                    span,
+                    ExprKind::App {
+                        func: Box::new(method_fn),
+                        arg: Box::new(elab_left),
+                    },
+                )),
+                arg: Box::new(elab_right),
+            },
+        ))
+    }
+
+    /// Rewrite `a <> b` into `Semigroup.concat a b` using the Semigroup dict.
+    ///
+    /// Method index: concat=0
+    fn desugar_semigroup_op(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        node_id: crate::ast::NodeId,
+        span: Span,
+    ) -> Option<Expr> {
+        let dict_expr = self.resolve_dict("Semigroup", node_id, span)?;
+
+        let method_fn = Expr::synth(
+            span,
+            ExprKind::DictMethodAccess {
+                dict: Box::new(dict_expr),
+                method_index: 0,
+            },
+        );
+        let elab_left = self.elaborate_expr(left);
+        let elab_right = self.elaborate_expr(right);
+        Some(Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(Expr::synth(
+                    span,
+                    ExprKind::App {
+                        func: Box::new(method_fn),
+                        arg: Box::new(elab_left),
+                    },
+                )),
+                arg: Box::new(elab_right),
+            },
+        ))
+    }
+
     /// Resolve which dictionary to use for a given trait at a given node.
     /// Returns a DictRef expression or None if no evidence found.
     fn resolve_dict(
@@ -1219,7 +1393,7 @@ impl Elaborator {
         }
 
         // No matching evidence for this trait. Might be a built-in trait
-        // (Num, Eq, Ord) that doesn't use dictionary dispatch.
+        // (Eq) that uses direct BEAM BIF dispatch rather than dictionary dispatch.
         None
     }
 
@@ -1365,7 +1539,7 @@ impl Elaborator {
                     body: Box::new(Expr::synth(
                         s,
                         ExprKind::Lit {
-                            value: Lit::String("()".into()),
+                            value: Lit::String("()".into(), StringKind::Normal),
                         },
                     )),
                 },
@@ -1385,7 +1559,7 @@ impl Elaborator {
                         Expr::synth(
                             s,
                             ExprKind::Lit {
-                                value: Lit::Int((i + 1) as i64),
+                                value: Lit::Int(((i + 1) as i64).to_string(), (i + 1) as i64),
                             },
                         ),
                         t_var.clone(),
@@ -1405,7 +1579,7 @@ impl Elaborator {
         let mut result = Expr::synth(
             s,
             ExprKind::Lit {
-                value: Lit::String("(".into()),
+                value: Lit::String("(".into(), StringKind::Normal),
             },
         );
         for (i, part) in parts.into_iter().enumerate() {
@@ -1418,7 +1592,7 @@ impl Elaborator {
                         right: Box::new(Expr::synth(
                             s,
                             ExprKind::Lit {
-                                value: Lit::String(", ".into()),
+                                value: Lit::String(", ".into(), StringKind::Normal),
                             },
                         )),
                     },
@@ -1441,7 +1615,7 @@ impl Elaborator {
                 right: Box::new(Expr::synth(
                     s,
                     ExprKind::Lit {
-                        value: Lit::String(")".into()),
+                        value: Lit::String(")".into(), StringKind::Normal),
                     },
                 )),
             },

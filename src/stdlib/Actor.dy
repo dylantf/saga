@@ -7,7 +7,7 @@ pub type Pid msg = Pid(Int)
 
 #@ Type variable `msg` is free per call site, inferred from the pid / spawned function.
 pub effect Process {
-  fun spawn : (f: () -> Unit needs {Actor msg, ..e}) -> Pid msg
+  fun spawn : (f: Unit -> Unit needs {Actor msg, ..e}) -> Pid msg
   fun send : (pid: Pid msg) -> (msg: msg) -> Unit
 }
 
@@ -18,8 +18,8 @@ pub effect Actor msg {
 }
 
 #@ Exit reasons for monitored processes
-pub type ExitReason
-  = Normal
+pub type ExitReason =
+  | Normal
   | Shutdown
   | Killed
   | Noproc
@@ -28,8 +28,8 @@ pub type ExitReason
 
 #@ System messages delivered to the mailbox by the runtime (e.g. monitor notifications).
 #@ These can be matched in receive blocks alongside regular messages.
-pub type SystemMsg
-  = Down(Pid a, ExitReason)
+pub type SystemMsg =
+  | Down(Pid a, ExitReason)
   | Exit(Pid a, ExitReason)
 
 impl Show for ExitReason {

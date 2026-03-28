@@ -1,11 +1,11 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    // Literals
-    Int(i64),
-    Float(f64),
-    String(String),
+    // Literals (source text, parsed value)
+    Int(String, i64),
+    Float(String, f64),
+    String(String, StringKind),
     /// `$"hello {name}"` -- pre-tokenized interpolated string
-    InterpolatedString(Vec<InterpPart>),
+    InterpolatedString(Vec<InterpPart>, StringKind),
 
     // Identifiers
     Ident(String),
@@ -84,15 +84,33 @@ pub enum Token {
     // Annotations
     At, // @
 
-    // Comments
-    Comment(String),    // # regular comment
-    DocComment(String), // #@ doc comment
-
-    // End of statement/line
-    Terminator,
-
     // End of file
     Eof,
+}
+
+/// Distinguishes the syntactic form of a string literal so the formatter can
+/// round-trip the original delimiters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringKind {
+    /// `"..."`
+    Normal,
+    /// `"""..."""`
+    Multiline,
+    /// `@"..."`
+    Raw,
+    /// `@"""..."""`
+    RawMultiline,
+    /// `$"..."`
+    Interpolated,
+    /// `$"""..."""`
+    InterpolatedMultiline,
+}
+
+impl StringKind {
+    /// True for triple-quoted variants that use `"""` delimiters.
+    pub fn is_multiline(self) -> bool {
+        matches!(self, StringKind::Multiline | StringKind::RawMultiline | StringKind::InterpolatedMultiline)
+    }
 }
 
 /// Byte offset span in source code
@@ -121,9 +139,31 @@ pub enum InterpPart {
     Hole(Vec<Spanned>),
 }
 
-/// A token tagged with its location in source
+/// A piece of trivia (comment or blank line) attached to a token.
 #[derive(Debug, Clone, PartialEq)]
+pub enum Trivia {
+    BlankLines(u32),
+    Comment(String),
+    DocComment(String),
+}
+
+/// A token tagged with its location in source and attached trivia.
+#[derive(Debug, Clone)]
 pub struct Spanned {
     pub token: Token,
     pub span: Span,
+    /// Trivia (blank lines, comments) appearing before this token.
+    pub leading_trivia: Vec<Trivia>,
+    /// A same-line comment appearing after this token (at most one).
+    pub trailing_comment: Option<String>,
+    /// True if there was a newline between the previous token and this one,
+    /// at top-level nesting (outside parens/brackets). Used by the parser
+    /// to stop greedy parsing (e.g. type application) at line boundaries.
+    pub preceded_by_newline: bool,
+}
+
+impl PartialEq for Spanned {
+    fn eq(&self, other: &Self) -> bool {
+        self.token == other.token && self.span == other.span
+    }
 }

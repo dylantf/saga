@@ -1,8 +1,99 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::token::Span;
+use crate::token::{Span, StringKind};
+pub use crate::token::Trivia;
 
 pub type Program = Vec<Decl>;
+
+/// An AST node wrapped with leading trivia and an optional trailing comment.
+/// PartialEq compares the inner node only (trivia is formatting metadata).
+#[derive(Debug, Clone)]
+pub struct Annotated<T> {
+    pub node: T,
+    pub leading_trivia: Vec<Trivia>,
+    pub trailing_comment: Option<String>,
+    /// Own-line comments that follow this node (before a blank line boundary).
+    /// Only populated at the program declaration level.
+    pub trailing_trivia: Vec<Trivia>,
+}
+
+impl<T: PartialEq> PartialEq for Annotated<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.node == other.node
+    }
+}
+
+impl<T> Annotated<T> {
+    /// Wrap a node with no trivia.
+    pub fn bare(node: T) -> Self {
+        Annotated {
+            node,
+            leading_trivia: Vec::new(),
+            trailing_comment: None,
+            trailing_trivia: Vec::new(),
+        }
+    }
+}
+
+/// Strip `Annotated` wrappers from a vec, returning just the inner nodes.
+pub fn strip_vec<T>(items: Vec<Annotated<T>>) -> Vec<T> {
+    items.into_iter().map(|a| a.node).collect()
+}
+
+/// A program with trivia annotations preserved for formatting.
+#[derive(Debug, Clone)]
+pub struct AnnotatedProgram {
+    pub declarations: Vec<Annotated<Decl>>,
+    /// Comments/blank lines after the last declaration (end of file)
+    pub trailing_trivia: Vec<Trivia>,
+}
+
+/// A method implementation inside an `impl` block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImplMethod {
+    pub name: String,
+    pub name_span: Span,
+    pub params: Vec<Pat>,
+    pub body: Expr,
+}
+
+/// Strip trivia annotations, returning plain declarations.
+/// Transfers `Trivia::DocComment` items into each decl's `doc` field.
+pub fn strip_annotations(annotated: AnnotatedProgram) -> Program {
+    annotated
+        .declarations
+        .into_iter()
+        .map(|ann| {
+            let mut decl = ann.node;
+            let docs: Vec<String> = ann
+                .leading_trivia
+                .into_iter()
+                .filter_map(|t| match t {
+                    Trivia::DocComment(text) => Some(text),
+                    _ => None,
+                })
+                .collect();
+            if !docs.is_empty() {
+                set_decl_doc(&mut decl, docs);
+            }
+            decl
+        })
+        .collect()
+}
+
+/// Attach doc comments to a declaration node (if it supports them).
+pub fn set_decl_doc(decl: &mut Decl, doc: Vec<String>) {
+    match decl {
+        Decl::FunSignature { doc: d, .. }
+        | Decl::TypeDef { doc: d, .. }
+        | Decl::RecordDef { doc: d, .. }
+        | Decl::EffectDef { doc: d, .. }
+        | Decl::HandlerDef { doc: d, .. }
+        | Decl::TraitDef { doc: d, .. }
+        | Decl::ImplDef { doc: d, .. } => *d = doc,
+        _ => {}
+    }
+}
 
 static NEXT_NODE_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -100,8 +191,10 @@ pub enum Decl {
         name: String,
         name_span: Span,
         type_params: Vec<String>,
-        variants: Vec<TypeConstructor>,
+        variants: Vec<Annotated<TypeConstructor>>,
         deriving: Vec<String>,
+        /// True if any `|` was on a new line — preserve multi-line layout.
+        multiline: bool,
         span: Span,
     },
 
@@ -114,13 +207,15 @@ pub enum Decl {
         name: String,
         name_span: Span,
         type_params: Vec<String>,
-        fields: Vec<(String, TypeExpr)>,
+        fields: Vec<Annotated<(String, TypeExpr)>>,
         deriving: Vec<String>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
         span: Span,
     },
 
-    /// `effect Console { fun print (msg: String) -> Unit }`
-    /// `effect State s { fun get () -> s; fun put (val: s) -> Unit }`
+    /// `effect Console { fun print : (msg: String) -> Unit }`
+    /// `effect State s { fun get : Unit -> s; fun put (val: s) -> Unit }`
     EffectDef {
         id: NodeId,
         doc: Vec<String>,
@@ -128,7 +223,9 @@ pub enum Decl {
         name: String,
         name_span: Span,
         type_params: Vec<String>,
-        operations: Vec<EffectOp>,
+        operations: Vec<Annotated<EffectOp>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
         span: Span,
     },
 
@@ -144,11 +241,13 @@ pub enum Decl {
         effects: Vec<EffectRef>,
         needs: Vec<EffectRef>,
         where_clause: Vec<TraitBound>,
-        arms: Vec<HandlerArm>,
+        arms: Vec<Annotated<HandlerArm>>,
         /// Partially parsed arms from error recovery (for LSP hover, not typechecked).
-        recovered_arms: Vec<HandlerArm>,
+        recovered_arms: Vec<Annotated<HandlerArm>>,
         /// `return value = Ok(value)` clause
         return_clause: Option<Box<HandlerArm>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
         span: Span,
     },
 
@@ -161,7 +260,9 @@ pub enum Decl {
         name_span: Span,
         type_param: String,
         supertraits: Vec<(String, Span)>,
-        methods: Vec<TraitMethod>,
+        methods: Vec<Annotated<TraitMethod>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
         span: Span,
     },
 
@@ -177,10 +278,11 @@ pub enum Decl {
         type_params: Vec<String>,
         where_clause: Vec<TraitBound>,
         needs: Vec<EffectRef>,
-        methods: Vec<(String, Span, Vec<Pat>, Expr)>,
+        methods: Vec<Annotated<ImplMethod>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
         span: Span,
     },
-
 
     /// `import Math exposing { abs, max }`
     Import {
@@ -276,11 +378,17 @@ pub enum ExprKind {
     /// `case expr { Pat -> Expr, ... }`
     Case {
         scrutinee: Box<Expr>,
-        arms: Vec<CaseArm>,
+        arms: Vec<Annotated<CaseArm>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
     },
 
     /// `{ stmt1; stmt2; expr }`
-    Block { stmts: Vec<Stmt> },
+    Block {
+        stmts: Vec<Annotated<Stmt>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
+    },
 
     /// `fun x -> x + 1`
     Lambda { params: Vec<Pat>, body: Box<Expr> },
@@ -330,20 +438,72 @@ pub enum ExprKind {
     Do {
         bindings: Vec<(Pat, Expr)>,
         success: Box<Expr>,
-        else_arms: Vec<CaseArm>,
+        else_arms: Vec<Annotated<CaseArm>>,
+        /// Comments before the closing `}` of the else block
+        dangling_trivia: Vec<Trivia>,
     },
 
     /// `receive { Pat -> body, after N -> timeout_body }`
     Receive {
-        arms: Vec<CaseArm>,
+        arms: Vec<Annotated<CaseArm>>,
         /// Optional (timeout_expr, timeout_body)
         after_clause: Option<(Box<Expr>, Box<Expr>)>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
     },
 
     /// `(expr : Type)` -- inline type annotation / ascription
     Ascription {
         expr: Box<Expr>,
         type_expr: TypeExpr,
+    },
+
+    // --- Surface syntax (desugared before typechecking) ---
+    /// `x |> f |> g` -- forward pipe chain.
+    /// Stored as a flat list of annotated segments: [x, f, g].
+    /// Each segment carries leading trivia (comments before `|>`) and
+    /// a trailing comment (comment at end of that segment, before the next `|>`).
+    /// The first segment's leading trivia comes from the head expression.
+    Pipe {
+        segments: Vec<Annotated<Expr>>,
+        /// True if any `|>` was on a new line in the source — the user
+        /// intended multi-line layout, so the formatter should preserve it.
+        multiline: bool,
+    },
+
+    /// `a + b + c` or `a + b - c` -- binary operator chain at one precedence level.
+    /// Stored as a flat list of annotated operands plus per-pair operators.
+    /// `segments` has N elements, `ops` has N-1 elements.
+    /// Desugars to left-nested `BinOp` before typechecking.
+    BinOpChain {
+        segments: Vec<Annotated<Expr>>,
+        ops: Vec<BinOp>,
+        /// True if any operator was on a new line in the source.
+        multiline: bool,
+    },
+
+    /// `f <| x` -- backward pipe chain (desugars to App(f, x))
+    PipeBack { segments: Vec<Annotated<Expr>> },
+
+    /// `f >> g` -- forward compose chain (desugars to fun x -> g (f x))
+    ComposeForward { segments: Vec<Annotated<Expr>> },
+
+    /// `f << g` -- backward compose chain (desugars to fun x -> f (g x))
+    ComposeBack { segments: Vec<Annotated<Expr>> },
+
+    /// `x :: xs` -- cons (desugars to App(App(Constructor("Cons"), x), xs))
+    Cons { head: Box<Expr>, tail: Box<Expr> },
+
+    /// `[1, 2, 3]` or `[]` -- list literal (desugars to nested Cons/Nil)
+    ListLit { elements: Vec<Expr> },
+
+    /// `$"hello {name}"` -- interpolated string (desugars to show/concat chain)
+    StringInterp { parts: Vec<StringPart>, kind: StringKind },
+
+    /// `[expr | qualifiers]` -- list comprehension (desugars to flat_map/if/let)
+    ListComprehension {
+        body: Box<Expr>,
+        qualifiers: Vec<ComprehensionQualifier>,
     },
 
     // --- Elaboration-only (never produced by the parser) ---
@@ -368,7 +528,7 @@ impl Expr {
     pub fn contains_resume(&self) -> bool {
         match &self.kind {
             ExprKind::Resume { .. } => true,
-            ExprKind::Block { stmts, .. } => stmts.iter().any(|s| s.contains_resume()),
+            ExprKind::Block { stmts, .. } => stmts.iter().any(|s| s.node.contains_resume()),
             ExprKind::If {
                 cond,
                 then_branch,
@@ -381,7 +541,7 @@ impl Expr {
             }
             ExprKind::Case {
                 scrutinee, arms, ..
-            } => scrutinee.contains_resume() || arms.iter().any(|a| a.body.contains_resume()),
+            } => scrutinee.contains_resume() || arms.iter().any(|a| a.node.body.contains_resume()),
             ExprKind::Lambda { body, .. } => body.contains_resume(),
             ExprKind::App { func, arg, .. } => func.contains_resume() || arg.contains_resume(),
             ExprKind::BinOp { left, right, .. } => {
@@ -407,18 +567,40 @@ impl Expr {
             } => {
                 bindings.iter().any(|(_, e)| e.contains_resume())
                     || success.contains_resume()
-                    || else_arms.iter().any(|a| a.body.contains_resume())
+                    || else_arms.iter().any(|a| a.node.body.contains_resume())
             }
             ExprKind::EffectCall { args, .. } => args.iter().any(|e| e.contains_resume()),
             ExprKind::Receive {
                 arms, after_clause, ..
             } => {
-                arms.iter().any(|a| a.body.contains_resume())
+                arms.iter().any(|a| a.node.body.contains_resume())
                     || after_clause
                         .as_ref()
                         .is_some_and(|(t, b)| t.contains_resume() || b.contains_resume())
             }
             ExprKind::Ascription { expr, .. } => expr.contains_resume(),
+            ExprKind::Pipe { segments, .. }
+            | ExprKind::BinOpChain { segments, .. } => {
+                segments.iter().any(|s| s.node.contains_resume())
+            }
+            ExprKind::PipeBack { segments }
+            | ExprKind::ComposeForward { segments }
+            | ExprKind::ComposeBack { segments } => {
+                segments.iter().any(|s| s.node.contains_resume())
+            }
+            ExprKind::Cons { head, tail } => head.contains_resume() || tail.contains_resume(),
+            ExprKind::ListLit { elements } => elements.iter().any(|e| e.contains_resume()),
+            ExprKind::StringInterp { parts, .. } => parts
+                .iter()
+                .any(|p| matches!(p, StringPart::Expr(e) if e.contains_resume())),
+            ExprKind::ListComprehension { body, qualifiers } => {
+                body.contains_resume()
+                    || qualifiers.iter().any(|q| match q {
+                        ComprehensionQualifier::Generator(_, e)
+                        | ComprehensionQualifier::Let(_, e) => e.contains_resume(),
+                        ComprehensionQualifier::Guard(e) => e.contains_resume(),
+                    })
+            }
             ExprKind::ForeignCall { args, .. } => args.iter().any(|e| e.contains_resume()),
             ExprKind::DictMethodAccess { dict, .. } => dict.contains_resume(),
             ExprKind::Lit { .. }
@@ -638,11 +820,13 @@ impl PartialEq for TypeExpr {
 
 // --- Supporting types ---
 
+/// Literal values. Int and Float carry the original source text alongside the
+/// parsed numeric value so the formatter can round-trip exactly what the user wrote.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Lit {
-    Int(i64),
-    Float(f64),
-    String(String),
+    Int(String, i64),
+    Float(String, f64),
+    String(String, StringKind),
     Bool(bool),
     Unit,
 }
@@ -654,7 +838,8 @@ pub enum BinOp {
     Mul,      // *
     FloatDiv, // / (float division)
     IntDiv,   // / on Int (truncating integer division, emitted by elaboration)
-    Mod,      // %
+    Mod,      // % (integer remainder, emitted by elaboration for Int)
+    FloatMod, // % on Float (math:fmod, emitted by elaboration)
     Eq,       // ==
     NotEq,    // !=
     Lt,       // <
@@ -664,6 +849,26 @@ pub enum BinOp {
     And,      // &&
     Or,       // ||
     Concat,   // <>
+}
+
+/// A part of an interpolated string (`$"hello {name}"`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StringPart {
+    /// Literal text between holes.
+    Lit(String),
+    /// `{expr}` -- the raw expression inside the hole (before show wrapping).
+    Expr(Expr),
+}
+
+/// A qualifier in a list comprehension (`[expr | qualifiers]`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComprehensionQualifier {
+    /// `pat <- expr` -- generator
+    Generator(Pat, Expr),
+    /// `expr` -- guard (boolean filter)
+    Guard(Expr),
+    /// `let pat = expr` -- let binding
+    Let(Pat, Expr),
 }
 
 /// A constructor in a type definition, e.g. Some(a) or None
@@ -719,9 +924,11 @@ pub enum Handler {
         /// Named handler references (e.g. `h1, h2`)
         named: Vec<String>,
         /// Inline handler arms (e.g. `op args = body`)
-        arms: Vec<HandlerArm>,
+        arms: Vec<Annotated<HandlerArm>>,
         /// `return value = Ok(value)` clause
         return_clause: Option<Box<HandlerArm>>,
+        /// Comments before the closing `}` with no following sibling
+        dangling_trivia: Vec<Trivia>,
     },
 }
 

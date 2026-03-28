@@ -68,6 +68,9 @@ pub struct CheckResult {
     pub constructor_def_ids: HashMap<String, crate::ast::NodeId>,
     /// Doc comments from imported declarations: name -> doc lines.
     pub imported_docs: HashMap<String, Vec<String>>,
+    /// Import declarations from the prelude (so the lowerer knows which
+    /// stdlib names are actually in scope for user code).
+    pub prelude_imports: Vec<crate::ast::Decl>,
 }
 
 impl CheckResult {
@@ -287,6 +290,7 @@ impl Checker {
             type_import_origins: self.lsp.type_import_origins.clone(),
             constructor_def_ids: self.lsp.constructor_def_ids.clone(),
             imported_docs: self.lsp.imported_docs.clone(),
+            prelude_imports: self.prelude_imports.clone(),
         }
     }
 }

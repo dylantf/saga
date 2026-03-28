@@ -2,8 +2,8 @@ effect Fail a {
   fun fail : (msg: String) -> a
 }
 
-handler abort_failure for Fail Never {
-  fail msg = panic $"Error: {msg}"
+handler abort for Fail a {
+  fail _ = panic "nooooo"
 }
 
 #@ Converts a failure to a Result of the given type
@@ -36,4 +36,7 @@ main () = {
 
   let str = safe_str "Hello" with to_result
   println (debug str)
+
+  let bad_result = safe_div 2 0 with abort
+  println $"You shouldn't see this: {debug bad_result}" 
 }

@@ -4,40 +4,40 @@
 # This shows the core promise of effects: the library code
 # declares what it needs, the caller decides how to provide it.
 
-import Std.Actor (Pid)
+# import Std.Actor (Pid)
 
 # A simple "worker" that would normally run in a separate process.
 # It just computes a value and sends it back to the caller.
-type WorkerMsg = Compute(Int, Pid Int)
+# type WorkerMsg = Compute(Int, Pid Int)
 
-fun worker : Unit -> Unit needs {Process, Actor WorkerMsg}
-worker () = {
-  receive {
-    Compute(n, reply_to) -> send! reply_to (n * n)
-  }
-}
+# fun worker : Unit -> Unit needs {Process, Actor WorkerMsg}
+# worker () = {
+#   receive {
+#     Compute(n, reply_to) -> send! reply_to (n * n)
+#   }
+# }
 
 # Synchronous handler: no real processes, everything runs inline.
 # spawn just calls the function immediately and returns a dummy pid.
 # send stores the message for the next receive.
-handler sync_actor for Process, Actor msg {
-  spawn f = {
-    f ()
-    resume (Pid 0)
-  }
-  self () = resume (Pid 0)
-  send () = ()
-}
+# handler sync_actor for Process, Actor msg {
+#   spawn f = {
+#     f ()
+#     resume (Pid 0)
+#   }
+#   self () = resume (Pid 0)
+#   send () = ()
+# }
 
-fun run : Unit -> Int needs {Process, Actor Int}
-run () = {
-  let me = self! ()
-  let w = spawn! (fun () -> worker ())
-  send! w (Compute (5, me))
-  receive {
-    result -> result
-  }
-}
+# fun run : Unit -> Int needs {Process, Actor Int}
+# run () = {
+#   let me = self! ()
+#   let w = spawn! (fun () -> worker ())
+#   send! w (Compute (5, me))
+#   receive {
+#     result -> result
+#   }
+# }
 
 main () = {
   # let result = run () with sync_actor

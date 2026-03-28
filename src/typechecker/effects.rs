@@ -89,7 +89,7 @@ impl Checker {
                     }
                 }
                 for arm in arms {
-                    if let Some(effect_name) = self.effect_for_op(&arm.op_name, None) {
+                    if let Some(effect_name) = self.effect_for_op(&arm.node.op_name, None) {
                         handled.insert(effect_name);
                     }
                 }
@@ -130,7 +130,7 @@ impl Checker {
                             collect_vars(ty, vars);
                         }
                     }
-                    Type::Error | Type::Never => {}
+                    Type::Error => {}
                 }
             }
             for (_, t) in &op.params {

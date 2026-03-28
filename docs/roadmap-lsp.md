@@ -62,7 +62,7 @@ lock-free hover/goto/completion.
 
 ## Phase 4.5: Documentation
 
-- [ ] Doc comments (`#@`) shown in hover (attach to functions, types, records, effects, handlers, traits)
+- [x] Doc comments (`#@`) shown in hover (attach to functions, types, records, effects, handlers, traits)
 - [ ] Doc comments shown in completion detail/documentation field
 - [ ] Doc comments for stdlib modules surface on hover for imported names
 

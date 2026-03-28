@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::ast::{self, Expr, Lit, Pat};
+use crate::ast::{self, Annotated, Expr, Lit, Pat};
 use crate::token::Span;
 
 use super::{Checker, Diagnostic, Scheme, Type};
@@ -29,9 +29,9 @@ impl Checker {
             }
             Pat::Lit { value, span, .. } => {
                 let lit_ty = match value {
-                    Lit::Int(_) => Type::int(),
-                    Lit::Float(_) => Type::float(),
-                    Lit::String(_) => Type::string(),
+                    Lit::Int(..) => Type::int(),
+                    Lit::Float(..) => Type::float(),
+                    Lit::String(..) => Type::string(),
                     Lit::Bool(_) => Type::bool(),
                     Lit::Unit => Type::unit(),
                 };
@@ -271,7 +271,7 @@ impl Checker {
     /// usefulness algorithm. Also detects unreachable/redundant arms.
     pub(crate) fn check_exhaustiveness(
         &self,
-        arms: &[ast::CaseArm],
+        arms: &[Annotated<ast::CaseArm>],
         scrutinee_ty: &Type,
         span: Span,
     ) -> Result<(), Diagnostic> {
@@ -297,11 +297,11 @@ impl Checker {
         {
             let has_lit = arms
                 .iter()
-                .any(|arm| matches!(&arm.pattern, Pat::Lit { .. }));
+                .any(|arm| matches!(&arm.node.pattern, Pat::Lit { .. }));
             if has_lit {
                 let has_catchall = arms.iter().any(|arm| {
-                    arm.guard.is_none()
-                        && matches!(&arm.pattern, Pat::Wildcard { .. } | Pat::Var { .. })
+                    arm.node.guard.is_none()
+                        && matches!(&arm.node.pattern, Pat::Wildcard { .. } | Pat::Var { .. })
                 });
                 if !has_catchall {
                     return Err(Diagnostic::error_at(
@@ -332,6 +332,7 @@ impl Checker {
         let mut matrix: Vec<Vec<SPat>> = Vec::new();
 
         for arm in arms {
+            let arm = &arm.node;
             let spat = exh::simplify_pat(&arm.pattern);
             let row = vec![spat.clone()];
 
@@ -379,7 +380,7 @@ impl Checker {
         &self,
         bindings: &[(Pat, Expr)],
         binding_types: &[Type],
-        else_arms: &[ast::CaseArm],
+        else_arms: &[Annotated<ast::CaseArm>],
         span: Span,
     ) -> Result<(), Diagnostic> {
         use super::exhaustiveness::{self as exh, ExhaustivenessCtx, SPat};
@@ -433,8 +434,8 @@ impl Checker {
         // Build a matrix from else arms (each is a single-column pattern)
         let matrix: Vec<Vec<SPat>> = else_arms
             .iter()
-            .filter(|arm| arm.guard.is_none())
-            .map(|arm| vec![exh::simplify_pat(&arm.pattern)])
+            .filter(|arm| arm.node.guard.is_none())
+            .map(|arm| vec![exh::simplify_pat(&arm.node.pattern)])
             .collect();
 
         // Check that each needed bail constructor is covered

@@ -1,4 +1,6 @@
-use dylang::{ast, codegen, derive, elaborate, lexer, parser, project_config, typechecker};
+use dylang::{
+    ast, codegen, derive, desugar, elaborate, lexer, parser, project_config, typechecker,
+};
 use project_config::ProjectConfig;
 
 use std::collections::HashMap;
@@ -46,6 +48,7 @@ pub fn parse_and_typecheck_inner(
         }
     };
     derive::expand_derives(&mut program);
+    desugar::desugar_program(&mut program);
     let result = checker.check_program(&program);
     for w in result.warnings() {
         print_tc_diagnostic(source, source_path, w);
@@ -82,11 +85,13 @@ pub fn emit_module(
     });
 }
 
-/// Typecheck and elaborate Std modules. Returns their elaborated programs.
+/// Typecheck and elaborate Std modules. Returns compiled module bundles.
 pub fn compile_std_modules(
     result: &typechecker::CheckResult,
-) -> HashMap<String, ast::Program> {
-    let mut elaborated_modules = HashMap::new();
+) -> HashMap<String, codegen::CompiledModule> {
+    let mut modules = HashMap::new();
+    let codegen_info = result.codegen_info();
+    let prelude_imports = &result.prelude_imports;
 
     for (module_name, mod_result) in result.module_check_results() {
         if !module_name.starts_with("Std.") {
@@ -96,22 +101,51 @@ pub fn compile_std_modules(
             Some(p) => p,
             None => continue,
         };
+        let info = codegen_info.get(module_name).cloned().unwrap_or_default();
         let elaborated = elaborate::elaborate_module(program, mod_result, module_name);
-        elaborated_modules.insert(module_name.clone(), elaborated);
+        let normalized = codegen::normalize::normalize_effects(&elaborated);
+        let resolution =
+            codegen::resolve::resolve_names(&normalized, codegen_info, prelude_imports);
+        modules.insert(
+            module_name.clone(),
+            codegen::CompiledModule {
+                codegen_info: info,
+                elaborated,
+                resolution,
+            },
+        );
     }
 
-    elaborated_modules
+    modules
 }
 
 /// Returns embedded stdlib bridge (.erl) files as (filename, source) pairs.
 fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("std_file_bridge.erl", include_str!("../stdlib/File.bridge.erl")),
-        ("std_dict_bridge.erl", include_str!("../stdlib/Dict.bridge.erl")),
-        ("std_string_bridge.erl", include_str!("../stdlib/String.bridge.erl")),
-        ("std_int_bridge.erl", include_str!("../stdlib/Int.bridge.erl")),
-        ("std_float_bridge.erl", include_str!("../stdlib/Float.bridge.erl")),
-        ("std_regex_bridge.erl", include_str!("../stdlib/Regex.bridge.erl")),
+        (
+            "std_file_bridge.erl",
+            include_str!("../stdlib/File.bridge.erl"),
+        ),
+        (
+            "std_dict_bridge.erl",
+            include_str!("../stdlib/Dict.bridge.erl"),
+        ),
+        (
+            "std_string_bridge.erl",
+            include_str!("../stdlib/String.bridge.erl"),
+        ),
+        (
+            "std_int_bridge.erl",
+            include_str!("../stdlib/Int.bridge.erl"),
+        ),
+        (
+            "std_float_bridge.erl",
+            include_str!("../stdlib/Float.bridge.erl"),
+        ),
+        (
+            "std_regex_bridge.erl",
+            include_str!("../stdlib/Regex.bridge.erl"),
+        ),
     ]
 }
 
@@ -131,7 +165,11 @@ fn copy_project_bridges(roots: &[&Path], build_dir: &Path) {
     let mut count = 0;
     for root in roots {
         if let Err(e) = copy_bridges_from_dir(root, build_dir, &mut count) {
-            eprintln!("Error scanning for bridge files in {}: {}", root.display(), e);
+            eprintln!(
+                "Error scanning for bridge files in {}: {}",
+                root.display(),
+                e
+            );
             std::process::exit(1);
         }
     }
@@ -140,18 +178,16 @@ fn copy_project_bridges(roots: &[&Path], build_dir: &Path) {
     }
 }
 
-fn copy_bridges_from_dir(
-    dir: &Path,
-    build_dir: &Path,
-    count: &mut usize,
-) -> Result<(), String> {
-    let entries =
-        fs::read_dir(dir).map_err(|e| format!("cannot read {}: {}", dir.display(), e))?;
+fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("cannot read {}: {}", dir.display(), e))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("read_dir error: {}", e))?;
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "_build" || n == "tests") {
+            if path
+                .file_name()
+                .is_some_and(|n| n == "_build" || n == "tests")
+            {
                 continue;
             }
             copy_bridges_from_dir(&path, build_dir, count)?;
@@ -159,7 +195,12 @@ fn copy_bridges_from_dir(
             let filename = path.file_name().unwrap();
             let dest = build_dir.join(filename);
             fs::copy(&path, &dest).map_err(|e| {
-                format!("cannot copy {} to {}: {}", path.display(), dest.display(), e)
+                format!(
+                    "cannot copy {} to {}: {}",
+                    path.display(),
+                    dest.display(),
+                    e
+                )
             })?;
             *count += 1;
         }
@@ -234,13 +275,7 @@ pub fn exec_erl(build_dir: &Path, entry_module: &str) {
 
 /// Build a project (with project.toml) into the given build directory.
 /// Returns the build directory path, elaborated modules, and codegen info.
-pub fn build_project(
-    profile: &str,
-) -> (
-    PathBuf,
-    HashMap<String, ast::Program>,
-    HashMap<String, typechecker::ModuleCodegenInfo>,
-) {
+pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::CompiledModule>) {
     let project_root = super::find_project_root().unwrap_or_else(|| {
         eprintln!("No project.toml found. Use `dylang build <file.dy>` for single files.");
         std::process::exit(1);
@@ -283,10 +318,7 @@ pub fn build_project(
                 if module_map.contains_key(exposed) {
                     checker.typecheck_import_by_name(exposed);
                 } else {
-                    eprintln!(
-                        "Error: exposed module '{}' not found in project",
-                        exposed
-                    );
+                    eprintln!("Error: exposed module '{}' not found in project", exposed);
                     std::process::exit(1);
                 }
             }
@@ -304,7 +336,7 @@ pub fn build_project(
     });
 
     // Phase 2: Elaborate all modules
-    let mut elaborated_modules = compile_std_modules(&result);
+    let mut compiled_modules = compile_std_modules(&result);
 
     // Elaborate user modules
     let user_modules: Vec<String> = result
@@ -341,6 +373,7 @@ pub fn build_project(
                 })
         };
         derive::expand_derives(&mut program);
+        desugar::desugar_program(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
         let mod_result = mod_checker.check_program(&program);
@@ -355,28 +388,46 @@ pub fn build_project(
         }
 
         let elaborated = elaborate::elaborate_module(&program, &mod_result, module_name);
-        elaborated_modules.insert(module_name.clone(), elaborated);
+        compiled_modules.insert(
+            module_name.clone(),
+            codegen::CompiledModule {
+                codegen_info: result
+                    .codegen_info()
+                    .get(module_name)
+                    .cloned()
+                    .unwrap_or_default(),
+                elaborated,
+                resolution: codegen::resolve::ResolutionMap::new(),
+            },
+        );
     }
 
     // Elaborate Main (if this is a bin project)
     if let Some(main_program) = &main_program {
         let main_elaborated = elaborate::elaborate_module(main_program, &result, "Main");
-        elaborated_modules.insert("Main".to_string(), main_elaborated);
+        compiled_modules.insert(
+            "Main".to_string(),
+            codegen::CompiledModule {
+                codegen_info: Default::default(),
+                elaborated: main_elaborated,
+                resolution: codegen::resolve::ResolutionMap::new(),
+            },
+        );
     }
 
     // Phase 3: Lower and emit all modules
     let ctx = codegen::CodegenContext {
-        codegen_info: result.codegen_info().clone(),
-        elaborated_modules: elaborated_modules.clone(),
+        modules: compiled_modules.clone(),
         let_effect_bindings: HashMap::new(),
+        prelude_imports: result.prelude_imports.clone(),
     };
-    for (module_name, elaborated) in &elaborated_modules {
+    for (module_name, compiled) in &compiled_modules {
         let erlang_name = if module_name == "Main" {
             "main".to_string()
         } else {
             module_name.to_lowercase().replace('.', "_")
         };
-        emit_module(&erlang_name, elaborated, &ctx, &build_dir);
+        emit_module(&erlang_name, &compiled.elaborated, &ctx, &build_dir);
     }
 
     // Copy bridge (.erl) files into build dir
@@ -391,8 +442,7 @@ pub fn build_project(
     copy_project_bridges(&bridge_roots, &build_dir);
 
     run_erlc(&build_dir);
-    let codegen_info = result.codegen_info().clone();
-    (build_dir, elaborated_modules, codegen_info)
+    (build_dir, compiled_modules)
 }
 
 /// Build a single script file into the given build directory.
@@ -418,18 +468,25 @@ pub fn build_script(file: &str, profile: &str) -> PathBuf {
     });
 
     // Phase 2: Elaborate all modules
-    let mut elaborated_modules = compile_std_modules(&result);
+    let mut compiled_modules = compile_std_modules(&result);
     let elaborated = elaborate::elaborate(&program, &result);
-    elaborated_modules.insert("_script".to_string(), elaborated);
+    compiled_modules.insert(
+        "_script".to_string(),
+        codegen::CompiledModule {
+            codegen_info: Default::default(),
+            elaborated,
+            resolution: codegen::resolve::ResolutionMap::new(),
+        },
+    );
 
     // Phase 3: Emit all modules
     let ctx = codegen::CodegenContext {
-        codegen_info: result.codegen_info().clone(),
-        elaborated_modules: elaborated_modules.clone(),
+        modules: compiled_modules.clone(),
         let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
     };
-    for (module_name, elaborated) in &elaborated_modules {
-        emit_module(module_name, elaborated, &ctx, &build_dir);
+    for (module_name, compiled) in &compiled_modules {
+        emit_module(module_name, &compiled.elaborated, &ctx, &build_dir);
     }
 
     // Copy stdlib bridge (.erl) files into build dir

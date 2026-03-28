@@ -19,7 +19,7 @@ effect Fail {
 
 # `run_with_log` handles Log but forwards any other effects from the callback.
 # The `..e` captures extras and propagates them to the caller's needs.
-fun run_with_log : (f: () -> Unit needs {Log, ..e}) -> Unit needs {..e}
+fun run_with_log : (f: Unit -> Unit needs {Log, ..e}) -> Unit needs {..e}
 run_with_log f = f () with { 
   log msg = { 
     println msg

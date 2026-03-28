@@ -1,4 +1,4 @@
-use crate::token::{InterpPart, Span, Spanned, Token};
+use crate::token::{InterpPart, Span, Spanned, StringKind, Token, Trivia};
 
 /// Strip leading indentation from a multiline string based on the column of the closing `"""`.
 /// - The first element (empty string from newline after opening `"""`) is removed.
@@ -176,19 +176,27 @@ impl Lexer {
         }
     }
 
-    fn emit(&self, token: Token, start: usize) -> (Spanned, Token) {
-        let spanned = Spanned {
-            token: token.clone(),
+    fn emit(
+        &self,
+        token: Token,
+        start: usize,
+        leading_trivia: Vec<Trivia>,
+        preceded_by_newline: bool,
+    ) -> Spanned {
+        Spanned {
+            token,
             span: Span {
                 start,
                 end: self.pos,
             },
-        };
-        (spanned, token)
+            leading_trivia,
+            trailing_comment: None,
+            preceded_by_newline,
+        }
     }
 
-    fn read_comment(&mut self) -> Token {
-        // Check for doc comment: #@
+    /// Read a comment body (after the `#`). Returns (text, is_doc).
+    fn read_comment_text(&mut self) -> (String, bool) {
         let is_doc = self.peek() == Some('@');
         if is_doc {
             self.advance(); // skip @
@@ -202,19 +210,22 @@ impl Lexer {
                 self.advance();
             }
         }
-        let text = text.trim().to_string();
-        if is_doc {
-            Token::DocComment(text)
+        // Strip at most one leading space after # (preserve further indentation)
+        let text = if let Some(stripped) = text.strip_prefix(' ') {
+            stripped.trim_end().to_string()
         } else {
-            Token::Comment(text)
-        }
+            text.trim_end().to_string()
+        };
+        (text, is_doc)
     }
 
     fn read_number(&mut self) -> Token {
-        let mut left_hand = String::new();
+        let start = self.pos;
+        // digits_only strips underscores for parsing; we also capture the full source text
+        let mut digits_only = String::new();
         while let Some(ch) = self.peek() {
             if ch.is_ascii_digit() {
-                left_hand.push(ch);
+                digits_only.push(ch);
                 self.advance();
             } else if ch == '_'
                 && self
@@ -229,10 +240,10 @@ impl Lexer {
 
         if self.peek() == Some('.') && self.peek_next().is_some_and(|c| c.is_ascii_digit()) {
             self.advance(); // consume '.'
-            let mut right_hand = String::new();
+            let mut frac_digits = String::new();
             while let Some(ch) = self.peek() {
                 if ch.is_ascii_digit() {
-                    right_hand.push(ch);
+                    frac_digits.push(ch);
                     self.advance();
                 } else if ch == '_'
                     && self
@@ -244,10 +255,14 @@ impl Lexer {
                     break;
                 }
             }
-            let str = format!("{left_hand}.{right_hand}");
-            Token::Float(str.parse().unwrap())
+            let source_text = self.source[start..self.pos].to_string();
+            let numeric_str = format!("{digits_only}.{frac_digits}");
+            let val = numeric_str.parse().unwrap();
+            Token::Float(source_text, val)
         } else {
-            Token::Int(left_hand.parse().unwrap())
+            let source_text = self.source[start..self.pos].to_string();
+            let val = digits_only.parse().unwrap();
+            Token::Int(source_text, val)
         }
     }
 
@@ -321,7 +336,7 @@ impl Lexer {
                 }
                 Some('"') => {
                     self.advance(); // consume closing "
-                    return Ok(Token::String(s));
+                    return Ok(Token::String(s, StringKind::Normal));
                 }
                 Some('\\') => {
                     self.advance(); // consume backslash
@@ -335,10 +350,13 @@ impl Lexer {
                             let lo = self.advance().and_then(|c| c.to_digit(16));
                             match (hi, lo) {
                                 (Some(h), Some(l)) => s.push((h * 16 + l) as u8 as char),
-                                _ => return Err(LexError {
-                                    message: "invalid \\x escape: expected two hex digits".to_string(),
-                                    pos: start,
-                                }),
+                                _ => {
+                                    return Err(LexError {
+                                        message: "invalid \\x escape: expected two hex digits"
+                                            .to_string(),
+                                        pos: start,
+                                    });
+                                }
                             }
                         }
                         Some(ch) => s.push(ch),
@@ -377,7 +395,7 @@ impl Lexer {
                     if !literal.is_empty() {
                         parts.push(InterpPart::Literal(literal));
                     }
-                    return Ok(Token::InterpolatedString(parts));
+                    return Ok(Token::InterpolatedString(parts, StringKind::Interpolated));
                 }
                 Some('\\') => {
                     self.advance();
@@ -391,10 +409,13 @@ impl Lexer {
                             let lo = self.advance().and_then(|c| c.to_digit(16));
                             match (hi, lo) {
                                 (Some(h), Some(l)) => literal.push((h * 16 + l) as u8 as char),
-                                _ => return Err(LexError {
-                                    message: "invalid \\x escape: expected two hex digits".to_string(),
-                                    pos: start,
-                                }),
+                                _ => {
+                                    return Err(LexError {
+                                        message: "invalid \\x escape: expected two hex digits"
+                                            .to_string(),
+                                        pos: start,
+                                    });
+                                }
                             }
                         }
                         Some(ch) => literal.push(ch),
@@ -458,6 +479,9 @@ impl Lexer {
                                 start: t.span.start + hole_start,
                                 end: t.span.end + hole_start,
                             },
+                            leading_trivia: t.leading_trivia,
+                            trailing_comment: t.trailing_comment,
+                            preceded_by_newline: t.preceded_by_newline,
                         })
                         .collect();
                     parts.push(InterpPart::Hole(hole_tokens));
@@ -485,7 +509,7 @@ impl Lexer {
                 }
                 Some('"') => {
                     self.advance();
-                    return Ok(Token::String(s));
+                    return Ok(Token::String(s, StringKind::Raw));
                 }
                 Some(ch) => {
                     s.push(ch);
@@ -512,7 +536,10 @@ impl Lexer {
                     self.advance(); // "
                     self.advance(); // "
                     self.advance(); // "
-                    return Ok(Token::String(strip_indentation(&s, close_col)));
+                    return Ok(Token::String(
+                        strip_indentation(&s, close_col),
+                        StringKind::RawMultiline,
+                    ));
                 }
                 Some(ch) => {
                     s.push(ch);
@@ -539,7 +566,10 @@ impl Lexer {
                     self.advance(); // "
                     self.advance(); // "
                     self.advance(); // "
-                    return Ok(Token::String(strip_indentation(&s, close_col)));
+                    return Ok(Token::String(
+                        strip_indentation(&s, close_col),
+                        StringKind::Multiline,
+                    ));
                 }
                 Some('\\') => {
                     self.advance();
@@ -553,10 +583,13 @@ impl Lexer {
                             let lo = self.advance().and_then(|c| c.to_digit(16));
                             match (hi, lo) {
                                 (Some(h), Some(l)) => s.push((h * 16 + l) as u8 as char),
-                                _ => return Err(LexError {
-                                    message: "invalid \\x escape: expected two hex digits".to_string(),
-                                    pos: start,
-                                }),
+                                _ => {
+                                    return Err(LexError {
+                                        message: "invalid \\x escape: expected two hex digits"
+                                            .to_string(),
+                                        pos: start,
+                                    });
+                                }
                             }
                         }
                         Some(ch) => s.push(ch),
@@ -600,7 +633,10 @@ impl Lexer {
                     }
                     // Apply indentation stripping to literal parts
                     strip_indentation_interp(&mut parts, close_col);
-                    return Ok(Token::InterpolatedString(parts));
+                    return Ok(Token::InterpolatedString(
+                        parts,
+                        StringKind::InterpolatedMultiline,
+                    ));
                 }
                 Some('\\') => {
                     self.advance();
@@ -614,10 +650,13 @@ impl Lexer {
                             let lo = self.advance().and_then(|c| c.to_digit(16));
                             match (hi, lo) {
                                 (Some(h), Some(l)) => literal.push((h * 16 + l) as u8 as char),
-                                _ => return Err(LexError {
-                                    message: "invalid \\x escape: expected two hex digits".to_string(),
-                                    pos: start,
-                                }),
+                                _ => {
+                                    return Err(LexError {
+                                        message: "invalid \\x escape: expected two hex digits"
+                                            .to_string(),
+                                        pos: start,
+                                    });
+                                }
                             }
                         }
                         Some(ch) => literal.push(ch),
@@ -678,6 +717,9 @@ impl Lexer {
                                 start: t.span.start + hole_start,
                                 end: t.span.end + hole_start,
                             },
+                            leading_trivia: t.leading_trivia,
+                            trailing_comment: t.trailing_comment,
+                            preceded_by_newline: t.preceded_by_newline,
                         })
                         .collect();
                     parts.push(InterpPart::Hole(hole_tokens));
@@ -690,35 +732,15 @@ impl Lexer {
         }
     }
 
-    // Should we emit a terminator token right now?
-    // Only at nesting depth 0, and only after tokens that "end" an expression.
-    fn should_emit_terminator(&self, prev: &Option<Token>) -> bool {
-        if self.nesting > 0 {
-            return false;
-        }
-        match prev {
-            None => false,
-            Some(tok) => matches!(
-                tok,
-                Token::Int(_)
-                    | Token::Float(_)
-                    | Token::String(_)
-                    | Token::InterpolatedString(_)
-                    | Token::True
-                    | Token::False
-                    | Token::Ident(_)
-                    | Token::UpperIdent(_)
-                    | Token::EffectCall(_)
-                    | Token::RParen
-                    | Token::RBrace
-                    | Token::RBracket
-            ),
-        }
-    }
-
     pub fn lex(&mut self) -> Result<Vec<Spanned>, LexError> {
         let mut tokens: Vec<Spanned> = Vec::new();
-        let mut prev_token: Option<Token> = None;
+        let mut pending_trivia: Vec<Trivia> = Vec::new();
+        // Track whether we've seen a newline since the last significant token.
+        // Start of file counts as "after newline" so first-line comments are leading.
+        let mut seen_newline = true;
+        // Track consecutive newlines for blank line detection.
+        // We count "empty lines" — a newline when we already saw one counts as a blank line.
+        let mut prev_was_newline = true; // start of file
 
         loop {
             self.skip_whitespace();
@@ -727,27 +749,68 @@ impl Lexer {
 
             match self.peek() {
                 None => {
-                    let (spanned, _) = self.emit(Token::Eof, start);
+                    let spanned = self.emit(
+                        Token::Eof,
+                        start,
+                        std::mem::take(&mut pending_trivia),
+                        seen_newline && self.nesting == 0,
+                    );
                     tokens.push(spanned);
                     return Ok(tokens);
                 }
                 Some('\n') | Some(';') => {
                     self.advance();
-                    if self.should_emit_terminator(&prev_token) {
-                        let (spanned, tok) = self.emit(Token::Terminator, start);
-                        tokens.push(spanned);
-                        prev_token = Some(tok);
+                    if prev_was_newline {
+                        // Consecutive newline = blank line
+                        // Merge with previous BlankLines trivia if present
+                        if let Some(Trivia::BlankLines(n)) = pending_trivia.last_mut() {
+                            *n += 1;
+                        } else {
+                            pending_trivia.push(Trivia::BlankLines(1));
+                        }
                     }
+                    seen_newline = true;
+                    prev_was_newline = true;
                     continue;
                 }
                 Some('#') => {
                     self.advance(); // consume '#'
-                    let tok = self.read_comment();
-                    let (spanned, _) = self.emit(tok, start);
-                    tokens.push(spanned);
-                    // Don't update prev_token -- comments shouldn't affect
-                    // terminator insertion logic
+                    let (text, is_doc) = self.read_comment_text();
+
+                    if !seen_newline && !tokens.is_empty() {
+                        // Same line as previous token → trailing comment
+                        tokens.last_mut().unwrap().trailing_comment = Some(text);
+                    } else {
+                        // Own line → leading trivia on next token
+                        if is_doc {
+                            pending_trivia.push(Trivia::DocComment(text));
+                        } else {
+                            pending_trivia.push(Trivia::Comment(text));
+                        }
+                    }
+
+                    // Consume the trailing newline as part of the comment
+                    if self.peek() == Some('\n') {
+                        self.advance();
+                    }
+                    seen_newline = true;
+                    prev_was_newline = true;
+                    continue;
                 }
+                _ => {}
+            }
+
+            // Reset newline tracking — we're about to emit a significant token
+            prev_was_newline = false;
+
+            // Capture whether this token is preceded by a newline at top-level nesting.
+            // This mirrors the old Terminator behavior: newlines at nesting depth 0
+            // signal line boundaries to the parser.
+            let newline_flag = seen_newline && self.nesting == 0;
+
+            let trivia = std::mem::take(&mut pending_trivia);
+
+            match self.peek() {
                 Some('"') => {
                     let tok = if self.peek_next() == Some('"') && self.peek_ahead(2) == Some('"') {
                         self.advance(); // "
@@ -757,9 +820,8 @@ impl Lexer {
                     } else {
                         self.read_string()?
                     };
-                    let (spanned, tok) = self.emit(tok, start);
+                    let spanned = self.emit(tok, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('$') if self.peek_next() == Some('"') => {
                     let tok = if self.peek_ahead(2) == Some('"') && self.peek_ahead(3) == Some('"')
@@ -774,15 +836,13 @@ impl Lexer {
                         self.advance(); // "
                         self.read_interp_string(start)?
                     };
-                    let (spanned, tok) = self.emit(tok, start);
+                    let spanned = self.emit(tok, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some(ch) if ch.is_ascii_digit() => {
                     let tok = self.read_number();
-                    let (spanned, tok) = self.emit(tok, start);
+                    let spanned = self.emit(tok, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 // @"..." raw string or @"""...""" raw multiline string
                 Some('@') if self.peek_next() == Some('"') => {
@@ -797,16 +857,14 @@ impl Lexer {
                         self.advance(); // @
                         self.read_raw_string(start)?
                     };
-                    let (spanned, tok) = self.emit(tok, start);
+                    let spanned = self.emit(tok, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 // Bare @ (not followed by ") — annotation marker
                 Some('@') => {
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::At, start);
+                    let spanned = self.emit(Token::At, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some(ch) if ch.is_alphabetic() || ch == '_' => {
                     let mut tok = self.read_identifier();
@@ -819,116 +877,100 @@ impl Lexer {
                         self.advance(); // consume '!'
                         tok = Token::EffectCall(name);
                     }
-                    let (spanned, tok) = self.emit(tok, start);
+                    let spanned = self.emit(tok, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
 
                 // Two-character operators
                 Some('-') if self.peek_next() == Some('>') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::Arrow, start);
+                    let spanned = self.emit(Token::Arrow, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('|') if self.peek_next() == Some('>') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::Pipe, start);
+                    let spanned = self.emit(Token::Pipe, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('<') if self.peek_next() == Some('<') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::ComposeBack, start);
+                    let spanned = self.emit(Token::ComposeBack, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('<') if self.peek_next() == Some('>') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::Concat, start);
+                    let spanned = self.emit(Token::Concat, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('<') if self.peek_next() == Some('|') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::PipeBack, start);
+                    let spanned = self.emit(Token::PipeBack, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('=') if self.peek_next() == Some('=') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::EqEq, start);
+                    let spanned = self.emit(Token::EqEq, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('!') if self.peek_next() == Some('=') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::NotEq, start);
+                    let spanned = self.emit(Token::NotEq, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('<') if self.peek_next() == Some('-') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::LeftArrow, start);
+                    let spanned = self.emit(Token::LeftArrow, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('<') if self.peek_next() == Some('=') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::LtEq, start);
+                    let spanned = self.emit(Token::LtEq, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('>') if self.peek_next() == Some('>') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::ComposeForward, start);
+                    let spanned = self.emit(Token::ComposeForward, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('>') if self.peek_next() == Some('=') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::GtEq, start);
+                    let spanned = self.emit(Token::GtEq, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('&') if self.peek_next() == Some('&') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::And, start);
+                    let spanned = self.emit(Token::And, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some(':') if self.peek_next() == Some(':') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::DoubleColon, start);
+                    let spanned = self.emit(Token::DoubleColon, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('.') if self.peek_next() == Some('.') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::DotDot, start);
+                    let spanned = self.emit(Token::DotDot, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
                 Some('|') if self.peek_next() == Some('|') => {
                     self.advance();
                     self.advance();
-                    let (spanned, tok) = self.emit(Token::Or, start);
+                    let spanned = self.emit(Token::Or, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
 
                 // Single-character tokens
@@ -980,11 +1022,13 @@ impl Lexer {
                             });
                         }
                     };
-                    let (spanned, tok) = self.emit(tok, start);
+                    let spanned = self.emit(tok, start, trivia, newline_flag);
                     tokens.push(spanned);
-                    prev_token = Some(tok);
                 }
+                None => unreachable!(), // handled at top of loop
             }
+
+            seen_newline = false;
         }
     }
 }

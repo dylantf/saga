@@ -263,7 +263,7 @@ impl<'a> Lowerer<'a> {
         // If so, pass the return clause as _ReturnK parameter instead of
         // wrapping externally. This prevents abort values from being wrapped.
         let is_direct_effectful_call = collect_fun_call(expr)
-            .map(|(name, _)| {
+            .map(|(name, _, _)| {
                 self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
             })
             .unwrap_or(false);
@@ -398,6 +398,7 @@ impl<'a> Lowerer<'a> {
                 named,
                 arms,
                 return_clause,
+                ..
             } => {
                 let mut all_arms = Vec::new();
                 let mut resolved_return = return_clause.clone();
@@ -415,11 +416,11 @@ impl<'a> Lowerer<'a> {
                     }
                 }
 
-                all_arms.extend(arms.iter().cloned());
+                all_arms.extend(arms.iter().map(|a| a.node.clone()));
 
                 // Determine effects from inline arms
                 for arm in arms {
-                    if let Some(eff) = self.op_to_effect.get(&arm.op_name)
+                    if let Some(eff) = self.op_to_effect.get(&arm.node.op_name)
                         && !handled_effects.contains(eff)
                     {
                         handled_effects.push(eff.clone());

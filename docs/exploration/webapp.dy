@@ -6,8 +6,8 @@ effect Database {
 }
 
 effect Http {
-  fun listen : (port: Int, handler: Request -> Unit) -> Unit
-  fun send_response : (status: Int, body: String) -> Unit
+  fun listen : (port: Int) -> (handle: Request -> Unit) -> Unit
+  fun send_response : (status: Int) -> (body: String) -> Unit
 }
 
 # Handlers
@@ -73,8 +73,8 @@ get_posts_for_user id = {
 
 fun get_user_with_posts : (id: Int) -> (User, List Post) needs {Database}
 get_user_with_posts id = {
-  user = get_user id
-  posts = get_posts_for_user id
+  let user = get_user id
+  let posts = get_posts_for_user id
   (user, posts)
 }
 
@@ -92,11 +92,12 @@ get_user_route request = {
 
 fun router : (request: Request) -> Unit needs {Database, Http}
 router request = {
-  case (request.method, request.path) of
+  case (request.method, request.path) {
     ("GET", "/users/:id") -> get_user_route request
     ("POST", "/users") -> create_user_controller request
     ("GET", "/posts/:id") -> get_post_controller request
     _ -> send_response! 404 "not found"
+  }
 }
 
 # App entry point

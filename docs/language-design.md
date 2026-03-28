@@ -679,6 +679,7 @@ file has no explicit `main` function, the runner wraps its body in
 `test_handler` and prints a summary.
 
 Under the hood:
+
 - `test` runs the body with an `Assert` handler that collects failures via
   multi-shot continuations, then reports pass/fail through `TestRunner`
 - `describe` calls `enter_group!` / `leave_group!` for indentation tracking

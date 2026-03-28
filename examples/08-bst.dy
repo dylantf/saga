@@ -1,5 +1,5 @@
-type Tree
-  = Empty
+type Tree =
+  | Empty
   | Node(Tree, Int, Tree)
 
 insert t x = case t {

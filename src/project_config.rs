@@ -15,6 +15,8 @@ pub struct ProjectConfig {
     pub bin: Option<BinSection>,
     #[serde(default)]
     pub deps: Option<HashMap<String, DepEntry>>,
+    #[serde(default)]
+    pub formatter: FormatterSection,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -24,6 +26,24 @@ pub struct ProjectSection {
     pub name: Option<String>,
     #[serde(default)]
     pub tests_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct FormatterSection {
+    #[serde(default = "FormatterSection::default_width")]
+    pub width: usize,
+}
+
+impl Default for FormatterSection {
+    fn default() -> Self {
+        FormatterSection { width: Self::default_width() }
+    }
+}
+
+impl FormatterSection {
+    fn default_width() -> usize {
+        crate::formatter::DEFAULT_WIDTH
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
