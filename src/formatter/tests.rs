@@ -642,7 +642,7 @@ fn normalize_effect_ref(er: &mut EffectRef) {
 }
 
 fn normalize_trait_bound(tb: &mut TraitBound) {
-    for (_, s) in tb.traits.iter_mut() {
+    for (_, _, s) in tb.traits.iter_mut() {
         *s = S;
     }
 }

@@ -64,10 +64,11 @@ impl Checker {
     pub(crate) fn register_trait_def(
         &mut self,
         name: &str,
-        type_param: &str,
+        type_params: &[String],
         supertraits: &[(String, crate::token::Span)],
         methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
+        let self_param = type_params.first().map(|s| s.as_str()).unwrap_or("a");
         let mut method_sigs = Vec::new();
 
         for method in methods {
@@ -79,10 +80,10 @@ impl Checker {
                 .collect();
             let return_type = self.convert_type_expr(&method.return_type, &mut params_list);
 
-            // Find the var ID assigned to the trait's type param
+            // Find the var ID assigned to the trait's self type param
             let trait_param_id = params_list
                 .iter()
-                .find(|(pname, _)| pname == type_param)
+                .find(|(pname, _)| pname == self_param)
                 .map(|(_, id)| *id);
 
             method_sigs.push((
@@ -90,12 +91,16 @@ impl Checker {
                 param_types,
                 return_type,
                 trait_param_id,
+                params_list,
             ));
         }
 
         // Add each method to the env as a polymorphic function with trait constraint.
         // e.g. `fun show (x: a) -> String` becomes `show : forall a. Describe a => a -> String`
-        for (method_name, param_types, return_type, trait_param_id) in &method_sigs {
+        // For phantom type params (not mentioned in the method signature), we create
+        // fresh vars and add them to forall so the constraint flows through instantiation.
+        let mut trait_method_sigs = Vec::new();
+        for (method_name, param_types, return_type, trait_param_id, mut params_list) in method_sigs {
             let mut fun_ty = return_type.clone();
             for pt in param_types.iter().rev() {
                 fun_ty = Type::arrow(pt.clone(), fun_ty);
@@ -103,13 +108,38 @@ impl Checker {
             let mut forall = Vec::new();
             super::collect_free_vars(&fun_ty, &mut forall);
 
-            let constraints = match trait_param_id {
-                Some(id) => vec![(name.to_string(), *id)],
+            // Ensure all trait type params have var IDs, even if they don't
+            // appear in this method's signature (phantom type params).
+            for tp_name in type_params {
+                if !params_list.iter().any(|(n, _)| n == tp_name) {
+                    let fresh = self.fresh_var();
+                    let id = match fresh { Type::Var(id) => id, _ => unreachable!() };
+                    params_list.push((tp_name.clone(), id));
+                    forall.push(id);
+                }
+            }
+
+            // Build constraint with self param and extra type params.
+            let self_id = params_list
+                .iter()
+                .find(|(n, _)| n == self_param)
+                .map(|(_, id)| *id);
+            let extra_types: Vec<Type> = type_params[1..]
+                .iter()
+                .filter_map(|tp_name| {
+                    params_list.iter().find(|(n, _)| n == tp_name).map(|(_, id)| Type::Var(*id))
+                })
+                .collect();
+            let constraints = match self_id {
+                Some(id) => vec![(name.to_string(), id, extra_types)],
                 None => vec![],
             };
 
+            // Preserve original data for TraitInfo storage
+            trait_method_sigs.push((method_name.clone(), param_types, return_type, trait_param_id));
+
             self.env.insert(
-                method_name.clone(),
+                method_name,
                 Scheme {
                     forall,
                     constraints,
@@ -126,9 +156,9 @@ impl Checker {
         self.trait_state.traits.insert(
             name.into(),
             super::TraitInfo {
-                type_param: type_param.into(),
+                type_params: type_params.to_vec(),
                 supertraits: supertraits.iter().map(|(n, _)| n.clone()).collect(),
-                methods: method_sigs,
+                methods: trait_method_sigs,
             },
         );
         Ok(())
@@ -139,6 +169,7 @@ impl Checker {
     pub(crate) fn register_impl(
         &mut self,
         trait_name: &str,
+        trait_type_args: &[String],
         target_type: &str,
         type_params: &[String],
         where_clause: &[ast::TraitBound],
@@ -150,6 +181,18 @@ impl Checker {
         let trait_info = self.trait_state.traits.get(trait_name).cloned().ok_or_else(|| {
             Diagnostic::error_at(span, format!("impl for undefined trait: {}", trait_name))
         })?;
+
+        // Validate trait type arg arity: extra type params (all except the self param at index 0)
+        let expected_extra = trait_info.type_params.len().saturating_sub(1);
+        if trait_type_args.len() != expected_extra {
+            return Err(Diagnostic::error_at(
+                span,
+                format!(
+                    "trait {} expects {} type argument(s), but {} were provided",
+                    trait_name, expected_extra, trait_type_args.len()
+                ),
+            ));
+        }
 
         // Check all required methods are provided
         let provided: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
@@ -207,7 +250,7 @@ impl Checker {
                 {
                     self.trait_state.where_bound_var_names
                         .insert(*var_id, bound.type_var.clone());
-                    for (trait_req, trait_span) in &bound.traits {
+                    for (trait_req, _, trait_span) in &bound.traits {
                         self.lsp.type_references.push((*trait_span, trait_req.clone()));
                         self.trait_state.where_bounds
                             .entry(*var_id)
@@ -253,9 +296,9 @@ impl Checker {
                 }
                 let mut forall = Vec::new();
                 super::collect_free_vars(&fun_ty, &mut forall);
-                let constraints: Vec<(String, u32)> = forall
+                let constraints: Vec<(String, u32, Vec<Type>)> = forall
                     .iter()
-                    .map(|&var_id| (trait_name.to_string(), var_id))
+                    .map(|&var_id| (trait_name.to_string(), var_id, vec![]))
                     .collect();
                 self.env.insert(
                     m_name.clone(),
@@ -343,7 +386,7 @@ impl Checker {
             let param_idx = type_params.iter().position(|p| p == &bound.type_var);
             match param_idx {
                 Some(idx) => {
-                    for (trait_req, _) in &bound.traits {
+                    for (trait_req, _, _) in &bound.traits {
                         param_constraints.push((trait_req.clone(), idx));
                     }
                 }
@@ -359,13 +402,18 @@ impl Checker {
             }
         }
 
-        let key = (trait_name.to_string(), target_type.to_string());
+        let key = (trait_name.to_string(), trait_type_args.to_vec(), target_type.to_string());
         if self.trait_state.impls.contains_key(&key) {
+            let args_str = if trait_type_args.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", trait_type_args.join(" "))
+            };
             return Err(Diagnostic::error_at(
                 span,
                 format!(
-                    "duplicate impl: {} is already implemented for {}",
-                    trait_name, target_type
+                    "duplicate impl: {}{} is already implemented for {}",
+                    trait_name, args_str, target_type
                 ),
             ));
         }
@@ -373,6 +421,7 @@ impl Checker {
             key,
             ImplInfo {
                 param_constraints,
+                trait_type_args: trait_type_args.to_vec(),
                 span: Some(span),
             },
         );

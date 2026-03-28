@@ -21,6 +21,17 @@ usd amount = Currency amount
 fun nok : Float -> Currency NOK
 nok amount = Currency amount
 
+trait ConvertTo a b {
+  fun rate : Unit -> Float
+}
+
+impl ConvertTo NOK for USD {
+  rate () = 10.5
+}
+
+fun convert : Currency a -> Currency b where {a: ConvertTo b}
+convert (Currency amount) = Currency (amount * rate ())
+
 main () = {
   let amount1 = usd 23.50
   let amount2 = usd 50.00
@@ -32,4 +43,8 @@ main () = {
 
   # let bad_sum = amount1 + nok 500.00
   # compile error: type mismatch: expected USD, got NOK
+
+  let amount1_in_nok : Currency NOK = convert amount1
+  println (show (amount1_in_nok + nok 500.00))
 }
+

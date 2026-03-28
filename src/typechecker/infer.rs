@@ -40,9 +40,9 @@ impl Checker {
                         }
                     }
                     let (mut ty, constraints) = self.instantiate(&scheme);
-                    for (trait_name, trait_ty) in constraints {
+                    for (trait_name, trait_ty, extra_types) in constraints {
                         self.trait_state.pending_constraints
-                            .push((trait_name, trait_ty, span, node_id));
+                            .push((trait_name, extra_types, trait_ty, span, node_id));
                     }
                     if let Some(eff_constraints) =
                         self.effect_meta.fun_type_constraints.get(name).cloned()
@@ -161,6 +161,7 @@ impl Checker {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.trait_state.pending_constraints.push((
                             "Num".into(),
+                            vec![],
                             left_ty.clone(),
                             span,
                             node_id,
@@ -171,6 +172,7 @@ impl Checker {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.trait_state.pending_constraints.push((
                             "Eq".into(),
+                            vec![],
                             left_ty.clone(),
                             span,
                             node_id,
@@ -181,6 +183,7 @@ impl Checker {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.trait_state.pending_constraints.push((
                             "Ord".into(),
+                            vec![],
                             left_ty.clone(),
                             span,
                             node_id,
@@ -196,6 +199,7 @@ impl Checker {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.trait_state.pending_constraints.push((
                             "Semigroup".into(),
+                            vec![],
                             left_ty.clone(),
                             span,
                             node_id,
@@ -208,7 +212,7 @@ impl Checker {
             ExprKind::UnaryMinus { expr: inner, .. } => {
                 let ty = self.infer_expr(inner)?;
                 self.trait_state.pending_constraints
-                    .push(("Num".into(), ty.clone(), span, node_id));
+                    .push(("Num".into(), vec![], ty.clone(), span, node_id));
                 Ok(ty)
             }
 
@@ -342,9 +346,9 @@ impl Checker {
                 match self.env.get(&key).cloned() {
                     Some(scheme) => {
                         let (ty, constraints) = self.instantiate(&scheme);
-                        for (trait_name, trait_ty) in constraints {
+                        for (trait_name, trait_ty, extra_types) in constraints {
                             self.trait_state.pending_constraints
-                                .push((trait_name, trait_ty, span, node_id));
+                                .push((trait_name, extra_types, trait_ty, span, node_id));
                         }
                         if let Some(def_id) = self.env.def_id(&key) {
                             self.record_reference(node_id, span, def_id);
@@ -762,7 +766,7 @@ impl Checker {
         let mut scheme = self.generalize(ty);
 
         self.trait_state.pending_constraints
-            .retain(|(trait_name, cty, _span, node_id)| {
+            .retain(|(trait_name, _trait_type_args, cty, _span, node_id)| {
                 let resolved = self.sub.apply(cty);
                 if let Type::Var(id) = resolved
                     && scheme.forall.contains(&id)
@@ -770,15 +774,21 @@ impl Checker {
                     if !scheme
                         .constraints
                         .iter()
-                        .any(|(t, v)| t == trait_name && *v == id)
+                        .any(|(t, v, _)| t == trait_name && *v == id)
                     {
-                        scheme.constraints.push((trait_name.clone(), id));
+                        // Resolve extra type arg var IDs through substitution
+                        let extra_resolved: Vec<Type> = _trait_type_args
+                            .iter()
+                            .map(|t| self.sub.apply(t))
+                            .collect();
+                        scheme.constraints.push((trait_name.clone(), id, extra_resolved));
                     }
                     self.evidence.push(super::TraitEvidence {
                         node_id: *node_id,
                         trait_name: trait_name.clone(),
                         resolved_type: None,
                         type_var_name: None,
+                        trait_type_args: _trait_type_args.clone(),
                     });
                     return false;
                 }
@@ -790,8 +800,8 @@ impl Checker {
         let dict_params: Vec<(String, String)> = scheme
             .constraints
             .iter()
-            .filter(|(t, _)| !operator_traits.contains(t.as_str()))
-            .map(|(t, id)| (t.clone(), format!("v{}", id)))
+            .filter(|(t, _, _)| !operator_traits.contains(t.as_str()))
+            .map(|(t, id, _)| (t.clone(), format!("v{}", id)))
             .collect();
         if !dict_params.is_empty() {
             let resolved_ty = self.sub.apply(ty);

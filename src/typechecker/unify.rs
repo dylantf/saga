@@ -235,7 +235,8 @@ impl Checker {
 
     /// Replace forall'd variables with fresh type variables.
     /// Returns the instantiated type and any trait constraints (remapped to fresh vars).
-    pub(crate) fn instantiate(&mut self, scheme: &Scheme) -> (Type, Vec<(String, Type)>) {
+    /// Each constraint is (trait_name, self_type, extra_type_arg_types).
+    pub(crate) fn instantiate(&mut self, scheme: &Scheme) -> (Type, Vec<(String, Type, Vec<Type>)>) {
         let mapping: HashMap<u32, Type> = scheme
             .forall
             .iter()
@@ -245,9 +246,13 @@ impl Checker {
         let constraints = scheme
             .constraints
             .iter()
-            .map(|(trait_name, var_id)| {
+            .map(|(trait_name, var_id, extra_types)| {
                 let fresh = mapping.get(var_id).cloned().unwrap_or(Type::Var(*var_id));
-                (trait_name.clone(), fresh)
+                let extra_fresh: Vec<Type> = extra_types
+                    .iter()
+                    .map(|ty| self.replace_vars(ty, &mapping))
+                    .collect();
+                (trait_name.clone(), fresh, extra_fresh)
             })
             .collect();
         (ty, constraints)

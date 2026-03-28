@@ -252,13 +252,16 @@ pub enum Decl {
     },
 
     /// `trait Show a { fun show (x: a) -> String }`
+    /// `trait ConvertTo a b { ... }` -- a is self, b is an extra type param
     TraitDef {
         id: NodeId,
         doc: Vec<String>,
         public: bool,
         name: String,
         name_span: Span,
-        type_param: String,
+        /// Type parameters: first is the self type, rest are extras.
+        /// e.g. `trait ConvertTo a b` -> ["a", "b"]
+        type_params: Vec<String>,
         supertraits: Vec<(String, Span)>,
         methods: Vec<Annotated<TraitMethod>>,
         /// Comments before the closing `}` with no following sibling
@@ -267,12 +270,15 @@ pub enum Decl {
     },
 
     /// `impl Show for User { show user = ... }`
+    /// `impl ConvertTo NOK for USD { ... }` -- NOK is a trait type arg
     /// `impl Store for Redis needs {Http, Fail} { ... }`
     ImplDef {
         id: NodeId,
         doc: Vec<String>,
         trait_name: String,
         trait_name_span: Span,
+        /// Type arguments applied to the trait, e.g. ["NOK"] in `impl ConvertTo NOK for USD`
+        trait_type_args: Vec<String>,
         target_type: String,
         target_type_span: Span,
         type_params: Vec<String>,
@@ -905,13 +911,14 @@ pub struct HandlerArm {
     pub span: Span,
 }
 
-/// `a: Show + Eq` in a `where` clause
+/// `a: Show + Eq` or `a: ConvertTo b` in a `where` clause
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitBound {
     /// The type variable being constrained (e.g. `a`)
     pub type_var: String,
-    /// The required traits with their spans (e.g. `[("Show", span), ("Eq", span)]`)
-    pub traits: Vec<(String, Span)>,
+    /// The required traits with optional type args and spans.
+    /// e.g. `Show` -> ("Show", [], span), `ConvertTo b` -> ("ConvertTo", ["b"], span)
+    pub traits: Vec<(String, Vec<String>, Span)>,
 }
 
 /// The handler in a `with` expression

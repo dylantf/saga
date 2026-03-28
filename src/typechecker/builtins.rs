@@ -9,16 +9,17 @@ impl Checker {
         self.trait_state.traits.insert(
             "Eq".into(),
             TraitInfo {
-                type_param: "a".into(),
+                type_params: vec!["a".into()],
                 supertraits: vec![],
                 methods: vec![],
             },
         );
         for prim in &["Int", "Float", "String", "Bool", "Unit"] {
             self.trait_state.impls.insert(
-                ("Eq".into(), prim.to_string()),
+                ("Eq".into(), vec![], prim.to_string()),
                 ImplInfo {
                     param_constraints: vec![],
+                    trait_type_args: vec![],
                     span: None,
                 },
             );
@@ -122,23 +123,26 @@ impl Checker {
         // We use "Tuple" as the type name; param_constraints are checked dynamically
         // based on actual type args at constraint resolution time
         self.trait_state.impls.insert(
-            ("Show".into(), "Tuple".into()),
+            ("Show".into(), vec![], "Tuple".into()),
             ImplInfo {
                 param_constraints: vec![],
+                trait_type_args: vec![],
                 span: None,
             }, // handled specially in check_pending_constraints
         );
         self.trait_state.impls.insert(
-            ("Debug".into(), "Tuple".into()),
+            ("Debug".into(), vec![], "Tuple".into()),
             ImplInfo {
                 param_constraints: vec![],
+                trait_type_args: vec![],
                 span: None,
             }, // handled specially in check_pending_constraints
         );
         self.trait_state.impls.insert(
-            ("Eq".into(), "Tuple".into()),
+            ("Eq".into(), vec![], "Tuple".into()),
             ImplInfo {
                 param_constraints: vec![],
+                trait_type_args: vec![],
                 span: None,
             }, // handled specially in check_pending_constraints
         );
@@ -147,9 +151,10 @@ impl Checker {
 
         // Eq for Dict k v: requires Eq on both k and v
         self.trait_state.impls.insert(
-            ("Eq".into(), "Dict".into()),
+            ("Eq".into(), vec![], "Dict".into()),
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],
+                trait_type_args: vec![],
                 span: None,
             },
         );

@@ -13,6 +13,10 @@ use crate::ast::*;
 use crate::token::{Span, StringKind};
 use crate::typechecker::{CheckResult, TraitEvidence, TraitInfo, Type};
 
+/// Impl key: (trait_name, trait_type_args, target_type).
+/// e.g. ("ConvertTo", ["NOK"], "USD") or ("Show", [], "Int").
+type ImplKey = (String, Vec<String>, String);
+
 /// Elaborate a program using typechecker results.
 /// Returns a new program with dictionary passing made explicit.
 pub fn elaborate(program: &Program, result: &CheckResult) -> Program {
@@ -32,11 +36,11 @@ struct Elaborator {
     fun_dict_params: HashMap<String, Vec<(String, String)>>,
     /// handler_name -> [(trait_name, type_var_name)] from handler where clauses
     handler_dict_params: HashMap<String, Vec<(String, String)>>,
-    /// (trait_name, target_type) -> dict constructor name
-    dict_names: HashMap<(String, String), String>,
-    /// (trait_name, target_type) -> ordered list of (constraint_trait, param_index) for dict params.
+    /// impl key -> dict constructor name
+    dict_names: HashMap<ImplKey, String>,
+    /// impl key -> ordered list of (constraint_trait, param_index) for dict params.
     /// Used to pass the correct sub-dicts when building parameterized dicts.
-    impl_dict_params: HashMap<(String, String), Vec<(String, usize)>>,
+    impl_dict_params: HashMap<ImplKey, Vec<(String, usize)>>,
     /// trait_name -> TraitInfo
     traits: HashMap<String, TraitInfo>,
     /// Evidence from typechecking: node_id -> Vec<TraitEvidence>
@@ -68,8 +72,8 @@ impl Elaborator {
                 let dict_params: Vec<(String, String)> = scheme
                     .constraints
                     .iter()
-                    .filter(|(trait_name, _)| !operator_traits.contains(trait_name.as_str()))
-                    .map(|(trait_name, var_id)| (trait_name.clone(), format!("v{}", var_id)))
+                    .filter(|(trait_name, _, _)| !operator_traits.contains(trait_name.as_str()))
+                    .map(|(trait_name, var_id, _)| (trait_name.clone(), format!("v{}", var_id)))
                     .collect();
                 if !dict_params.is_empty() {
                     inferred_dict_params.insert(name.to_string(), dict_params);
@@ -80,7 +84,9 @@ impl Elaborator {
         // Merge let-binding dict params (from local let bindings with trait constraints)
         let mut let_binding_arities: HashMap<String, usize> = HashMap::new();
         for (name, (params, arity)) in &result.let_dict_params {
-            inferred_dict_params.entry(name.clone()).or_insert_with(|| params.clone());
+            inferred_dict_params
+                .entry(name.clone())
+                .or_insert_with(|| params.clone());
             let_binding_arities.insert(name.clone(), *arity);
         }
 
@@ -106,17 +112,25 @@ impl Elaborator {
 
         // Pre-populate dict_names from imported modules' codegen info
         let mut dict_names = HashMap::new();
-        let mut impl_dict_params_from_imports: HashMap<(String, String), Vec<(String, usize)>> =
+        let mut impl_dict_params_from_imports: HashMap<ImplKey, Vec<(String, usize)>> =
             HashMap::new();
         for info in result.codegen_info().values() {
             for d in &info.trait_impl_dicts {
                 dict_names.insert(
-                    (d.trait_name.clone(), d.target_type.clone()),
+                    (
+                        d.trait_name.clone(),
+                        d.trait_type_args.clone(),
+                        d.target_type.clone(),
+                    ),
                     d.dict_name.clone(),
                 );
                 if !d.param_constraints.is_empty() {
                     impl_dict_params_from_imports.insert(
-                        (d.trait_name.clone(), d.target_type.clone()),
+                        (
+                            d.trait_name.clone(),
+                            d.trait_type_args.clone(),
+                            d.target_type.clone(),
+                        ),
                         d.param_constraints.clone(),
                     );
                 }
@@ -141,10 +155,15 @@ impl Elaborator {
 
     /// Extract dict param info from a where clause: [(trait_name, type_var_name)]
     /// for traits that use dictionary dispatch (excludes Eq which uses BIFs).
+    ///
+    /// Note: trait type args (the `_` in the destructure) are intentionally not used here.
+    /// Dict params are keyed by (trait_name, self_type_var) — one dict per constraint.
+    /// The extra type args (e.g. `b` in `a: ConvertTo b`) are resolved separately
+    /// through TraitEvidence when looking up which concrete dict to pass at call sites.
     fn dict_params_from_where(where_clause: &[TraitBound]) -> Vec<(String, String)> {
         let mut dict_params = Vec::new();
         for bound in where_clause {
-            for (trait_name, _) in &bound.traits {
+            for (trait_name, _, _) in &bound.traits {
                 if trait_name != "Eq" {
                     dict_params.push((trait_name.clone(), bound.type_var.clone()));
                 }
@@ -164,7 +183,7 @@ impl Elaborator {
             std::mem::take(&mut self.current_dict_params_by_var),
         );
         for bound in where_clause {
-            for (req_trait, _) in &bound.traits {
+            for (req_trait, _, _) in &bound.traits {
                 let param_name = format!("__dict_{}_{}", req_trait, bound.type_var);
                 self.current_dict_params
                     .insert(req_trait.clone(), param_name.clone());
@@ -211,21 +230,34 @@ impl Elaborator {
                 }
                 Decl::ImplDef {
                     trait_name,
+                    trait_type_args,
                     target_type,
                     type_params,
                     where_clause,
                     ..
                 } => {
+                    // Include trait type args in dict name for uniqueness
+                    let type_args_suffix = if trait_type_args.is_empty() {
+                        String::new()
+                    } else {
+                        format!("_{}", trait_type_args.join("_"))
+                    };
                     let dict_name = if self.erlang_module.is_empty() {
-                        format!("__dict_{}_{}", trait_name, target_type)
+                        format!("__dict_{}{}_{}", trait_name, type_args_suffix, target_type)
                     } else {
                         format!(
-                            "__dict_{}_{}_{}",
-                            trait_name, self.erlang_module, target_type
+                            "__dict_{}{}_{}_{}",
+                            trait_name, type_args_suffix, self.erlang_module, target_type
                         )
                     };
-                    self.dict_names
-                        .insert((trait_name.clone(), target_type.clone()), dict_name);
+                    self.dict_names.insert(
+                        (
+                            trait_name.clone(),
+                            trait_type_args.clone(),
+                            target_type.clone(),
+                        ),
+                        dict_name,
+                    );
                     // Capture where-clause constraints as (trait, param_index) pairs.
                     // This tells dict_for_type which sub-dicts to pass for parameterized impls.
                     // Always insert (even empty) so dict_for_type doesn't fall back to
@@ -242,11 +274,17 @@ impl Elaborator {
                                 .get(bound.type_var.as_str())
                                 .copied()
                                 .unwrap_or(0);
-                            bound.traits.iter().map(move |(t, _)| (t.clone(), idx))
+                            bound.traits.iter().map(move |(t, _, _)| (t.clone(), idx))
                         })
                         .collect();
-                    self.impl_dict_params
-                        .insert((trait_name.clone(), target_type.clone()), params);
+                    self.impl_dict_params.insert(
+                        (
+                            trait_name.clone(),
+                            trait_type_args.clone(),
+                            target_type.clone(),
+                        ),
+                        params,
+                    );
                 }
                 Decl::HandlerDef {
                     name, where_clause, ..
@@ -278,6 +316,7 @@ impl Elaborator {
                 // Emit DictConstructor for each impl
                 Decl::ImplDef {
                     trait_name,
+                    trait_type_args,
                     target_type,
                     type_params,
                     where_clause,
@@ -287,7 +326,11 @@ impl Elaborator {
                 } => {
                     let dict_name = self
                         .dict_names
-                        .get(&(trait_name.clone(), target_type.clone()))
+                        .get(&(
+                            trait_name.clone(),
+                            trait_type_args.clone(),
+                            target_type.clone(),
+                        ))
                         .cloned()
                         .unwrap();
 
@@ -296,7 +339,7 @@ impl Elaborator {
                     // Build dict_params for conditional impls
                     let mut dict_params = Vec::new();
                     for bound in where_clause {
-                        for (req_trait, _) in &bound.traits {
+                        for (req_trait, _, _) in &bound.traits {
                             dict_params.push(format!("__dict_{}_{}", req_trait, bound.type_var));
                         }
                     }
@@ -308,8 +351,9 @@ impl Elaborator {
                     let mut ordered_methods = Vec::new();
                     if let Some(ref info) = trait_info {
                         for (trait_method_name, _, _, _) in &info.methods {
-                            if let Some(ann) =
-                                methods.iter().find(|ann| ann.node.name == *trait_method_name)
+                            if let Some(ann) = methods
+                                .iter()
+                                .find(|ann| ann.node.name == *trait_method_name)
                             {
                                 let ImplMethod { params, body, .. } = &ann.node;
                                 let elab_body = self.elaborate_expr(body);
@@ -682,19 +726,19 @@ impl Elaborator {
 
                 // Rewrite arithmetic operators to Num dict method calls for non-primitive types.
                 // Primitives (Int, Float) keep using BEAM BIFs directly.
-                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::Mod) {
+                if matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::Mod
+                ) {
                     let is_primitive = self
                         .evidence_by_node
                         .get(&node_id)
                         .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Num"))
                         .and_then(|ev| ev.resolved_type.as_ref())
-                        .is_some_and(|(name, _)| {
-                            matches!(name.as_str(), "Int" | "Float")
-                        });
+                        .is_some_and(|(name, _)| matches!(name.as_str(), "Int" | "Float"));
 
                     if !is_primitive
-                        && let Some(desugared) =
-                            self.desugar_num_op(op, left, right, node_id, span)
+                        && let Some(desugared) = self.desugar_num_op(op, left, right, node_id, span)
                     {
                         return desugared;
                     }
@@ -708,9 +752,7 @@ impl Elaborator {
                         .get(&node_id)
                         .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Semigroup"))
                         .and_then(|ev| ev.resolved_type.as_ref())
-                        .is_some_and(|(name, _)| {
-                            matches!(name.as_str(), "String" | "List")
-                        });
+                        .is_some_and(|(name, _)| matches!(name.as_str(), "String" | "List"));
 
                     if !is_primitive
                         && let Some(desugared) =
@@ -779,7 +821,9 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Case { scrutinee, arms, .. } => Expr::synth(
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => Expr::synth(
                 span,
                 ExprKind::Case {
                     dangling_trivia: vec![],
@@ -808,119 +852,130 @@ impl Elaborator {
                         .map(|ann| {
                             let s = &ann.node;
                             Annotated::bare(match s {
-                            Stmt::Let {
-                                pattern,
-                                annotation,
-                                value,
-                                assert,
-                                span,
-                            } => {
-                                // Check if this let binding has trait constraints
-                                let dict_info = if let Pat::Var { name, .. } = pattern {
-                                    self.fun_dict_params.get(name).cloned()
-                                } else {
-                                    None
-                                };
+                                Stmt::Let {
+                                    pattern,
+                                    annotation,
+                                    value,
+                                    assert,
+                                    span,
+                                } => {
+                                    // Check if this let binding has trait constraints
+                                    let dict_info = if let Pat::Var { name, .. } = pattern {
+                                        self.fun_dict_params.get(name).cloned()
+                                    } else {
+                                        None
+                                    };
 
-                                if let Some(dict_param_info) = dict_info {
-                                    // Set up dict params for elaborating the value.
-                                    // Eta-expand: `let f = val` becomes
-                                    // `let f = fun (dict, __arg) -> (elaborated_val)(__arg)`
-                                    // so the lowerer sees a single function of arity N+1.
-                                    let saved = (
-                                        std::mem::take(&mut self.current_dict_params),
-                                        std::mem::take(&mut self.current_dict_params_by_var),
-                                    );
-                                    let mut lambda_params = Vec::new();
+                                    if let Some(dict_param_info) = dict_info {
+                                        // Set up dict params for elaborating the value.
+                                        // Eta-expand: `let f = val` becomes
+                                        // `let f = fun (dict, __arg) -> (elaborated_val)(__arg)`
+                                        // so the lowerer sees a single function of arity N+1.
+                                        let saved = (
+                                            std::mem::take(&mut self.current_dict_params),
+                                            std::mem::take(&mut self.current_dict_params_by_var),
+                                        );
+                                        let mut lambda_params = Vec::new();
 
-                                    for (trait_name, type_var) in &dict_param_info {
-                                        let param_name = format!("__dict_{}_{}", trait_name, type_var);
-                                        self.current_dict_params
-                                            .insert(trait_name.clone(), param_name.clone());
-                                        self.current_dict_params_by_var
-                                            .insert((trait_name.clone(), type_var.clone()), param_name.clone());
-                                        lambda_params.push(Pat::Var {
-                                            id: NodeId::fresh(),
-                                            name: param_name,
-                                            span: *span,
-                                        });
-                                    }
+                                        for (trait_name, type_var) in &dict_param_info {
+                                            let param_name =
+                                                format!("__dict_{}_{}", trait_name, type_var);
+                                            self.current_dict_params
+                                                .insert(trait_name.clone(), param_name.clone());
+                                            self.current_dict_params_by_var.insert(
+                                                (trait_name.clone(), type_var.clone()),
+                                                param_name.clone(),
+                                            );
+                                            lambda_params.push(Pat::Var {
+                                                id: NodeId::fresh(),
+                                                name: param_name,
+                                                span: *span,
+                                            });
+                                        }
 
-                                    let elab_value = self.elaborate_expr(value);
+                                        let elab_value = self.elaborate_expr(value);
 
-                                    self.restore_dict_params(saved);
+                                        self.restore_dict_params(saved);
 
-                                    // Eta-expand with the correct arity
-                                    let let_name = if let Pat::Var { name: n, .. } = pattern { n } else { "" };
-                                    let arity = self.let_binding_arities.get(let_name).copied().unwrap_or(1);
-                                    let eta_params: Vec<String> = (0..arity)
-                                        .map(|i| format!("__let_arg{}", i))
-                                        .collect();
-                                    for p in &eta_params {
-                                        lambda_params.push(Pat::Var {
-                                            id: NodeId::fresh(),
-                                            name: p.clone(),
-                                            span: *span,
-                                        });
-                                    }
-                                    // Apply the elaborated value to each eta param
-                                    let mut body = elab_value;
-                                    for p in &eta_params {
-                                        body = Expr::synth(
+                                        // Eta-expand with the correct arity
+                                        let let_name = if let Pat::Var { name: n, .. } = pattern {
+                                            n
+                                        } else {
+                                            ""
+                                        };
+                                        let arity = self
+                                            .let_binding_arities
+                                            .get(let_name)
+                                            .copied()
+                                            .unwrap_or(1);
+                                        let eta_params: Vec<String> =
+                                            (0..arity).map(|i| format!("__let_arg{}", i)).collect();
+                                        for p in &eta_params {
+                                            lambda_params.push(Pat::Var {
+                                                id: NodeId::fresh(),
+                                                name: p.clone(),
+                                                span: *span,
+                                            });
+                                        }
+                                        // Apply the elaborated value to each eta param
+                                        let mut body = elab_value;
+                                        for p in &eta_params {
+                                            body = Expr::synth(
+                                                *span,
+                                                ExprKind::App {
+                                                    func: Box::new(body),
+                                                    arg: Box::new(Expr::synth(
+                                                        *span,
+                                                        ExprKind::Var { name: p.clone() },
+                                                    )),
+                                                },
+                                            );
+                                        }
+                                        let wrapped = Expr::synth(
                                             *span,
-                                            ExprKind::App {
-                                                func: Box::new(body),
-                                                arg: Box::new(Expr::synth(
-                                                    *span,
-                                                    ExprKind::Var { name: p.clone() },
-                                                )),
+                                            ExprKind::Lambda {
+                                                params: lambda_params,
+                                                body: Box::new(body),
                                             },
                                         );
-                                    }
-                                    let wrapped = Expr::synth(
-                                        *span,
-                                        ExprKind::Lambda {
-                                            params: lambda_params,
-                                            body: Box::new(body),
-                                        },
-                                    );
 
-                                    Stmt::Let {
-                                        pattern: pattern.clone(),
-                                        annotation: annotation.clone(),
-                                        value: wrapped,
-                                        assert: *assert,
-                                        span: *span,
-                                    }
-                                } else {
-                                    Stmt::Let {
-                                        pattern: pattern.clone(),
-                                        annotation: annotation.clone(),
-                                        value: self.elaborate_expr(value),
-                                        assert: *assert,
-                                        span: *span,
+                                        Stmt::Let {
+                                            pattern: pattern.clone(),
+                                            annotation: annotation.clone(),
+                                            value: wrapped,
+                                            assert: *assert,
+                                            span: *span,
+                                        }
+                                    } else {
+                                        Stmt::Let {
+                                            pattern: pattern.clone(),
+                                            annotation: annotation.clone(),
+                                            value: self.elaborate_expr(value),
+                                            assert: *assert,
+                                            span: *span,
+                                        }
                                     }
                                 }
-                            },
-                            Stmt::LetFun {
-                                id,
-                                name,
-                                name_span,
-                                params,
-                                guard,
-                                body,
-                                span,
-                            } => Stmt::LetFun {
-                                id: *id,
-                                name: name.clone(),
-                                name_span: *name_span,
-                                params: params.clone(),
-                                guard: guard.as_ref().map(|g| Box::new(self.elaborate_expr(g))),
-                                body: self.elaborate_expr(body),
-                                span: *span,
-                            },
-                            Stmt::Expr(e) => Stmt::Expr(self.elaborate_expr(e)),
-                        })})
+                                Stmt::LetFun {
+                                    id,
+                                    name,
+                                    name_span,
+                                    params,
+                                    guard,
+                                    body,
+                                    span,
+                                } => Stmt::LetFun {
+                                    id: *id,
+                                    name: name.clone(),
+                                    name_span: *name_span,
+                                    params: params.clone(),
+                                    guard: guard.as_ref().map(|g| Box::new(self.elaborate_expr(g))),
+                                    body: self.elaborate_expr(body),
+                                    span: *span,
+                                },
+                                Stmt::Expr(e) => Stmt::Expr(self.elaborate_expr(e)),
+                            })
+                        })
                         .collect(),
                 },
             ),
@@ -1056,7 +1111,9 @@ impl Elaborator {
                 // so handler arm bodies (which reference e.g. `__dict_Show_a`) can
                 // capture them from the enclosing scope.
                 if let Handler::Named(handler_name, _) = handler.as_ref() {
-                    if let Some(dict_param_info) = self.handler_dict_params.get(handler_name).cloned() {
+                    if let Some(dict_param_info) =
+                        self.handler_dict_params.get(handler_name).cloned()
+                    {
                         let mut stmts: Vec<Annotated<Stmt>> = Vec::new();
                         for (trait_name, type_var) in &dict_param_info {
                             let dict_var = format!("__dict_{}_{}", trait_name, type_var);
@@ -1078,7 +1135,13 @@ impl Elaborator {
                             with_expr
                         } else {
                             stmts.push(Annotated::bare(Stmt::Expr(with_expr)));
-                            Expr::synth(span, ExprKind::Block { stmts, dangling_trivia: vec![] })
+                            Expr::synth(
+                                span,
+                                ExprKind::Block {
+                                    stmts,
+                                    dangling_trivia: vec![],
+                                },
+                            )
                         }
                     } else {
                         with_expr
@@ -1104,7 +1167,9 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Receive { arms, after_clause, .. } => Expr::synth(
+            ExprKind::Receive {
+                arms, after_clause, ..
+            } => Expr::synth(
                 span,
                 ExprKind::Receive {
                     dangling_trivia: vec![],
@@ -1363,8 +1428,17 @@ impl Elaborator {
                         Some((type_name, args)) => {
                             // Concrete type: build the dict via dict_for_type,
                             // which handles where-clause constraints correctly.
+                            // Resolve extra type args to concrete type names for dict key.
+                            let resolved_type_args: Vec<String> = ev
+                                .trait_type_args
+                                .iter()
+                                .filter_map(|t| match t {
+                                    Type::Con(name, _) => Some(name.clone()),
+                                    _ => None,
+                                })
+                                .collect();
                             let ty = Type::Con(type_name.clone(), args.clone());
-                            self.dict_for_type(trait_name, &ty, span)
+                            self.dict_for_type(trait_name, &resolved_type_args, &ty, span)
                         }
                         None => {
                             // Polymorphic: use the dict param from current function.
@@ -1400,7 +1474,7 @@ impl Elaborator {
     /// Build the show function expression for a concrete type.
     /// Returns an expression that, when applied to a value of that type, produces a string.
     fn show_fn_for_type(&self, trait_name: &str, ty: &Type, span: Span) -> Option<Expr> {
-        let dict = self.dict_for_type(trait_name, ty, span)?;
+        let dict = self.dict_for_type(trait_name, &[], ty, span)?;
         Some(Expr::synth(
             span,
             ExprKind::DictMethodAccess {
@@ -1411,9 +1485,18 @@ impl Elaborator {
     }
 
     /// Build the dict expression for a concrete type (the dict itself, not the method).
-    fn dict_for_type(&self, trait_name: &str, ty: &Type, span: Span) -> Option<Expr> {
+    /// `trait_type_args` are the resolved extra type arguments for multi-param traits.
+    fn dict_for_type(
+        &self,
+        trait_name: &str,
+        trait_type_args: &[String],
+        ty: &Type,
+        span: Span,
+    ) -> Option<Expr> {
         match ty {
-            Type::Con(name, args) if name == "Tuple" && (trait_name == "Show" || trait_name == "Debug") => {
+            Type::Con(name, args)
+                if name == "Tuple" && (trait_name == "Show" || trait_name == "Debug") =>
+            {
                 // Tuples don't have a dict constructor; build an inline dict
                 // containing the show lambda: {fun t -> "(" ++ ... ++ ")"}
                 let show_lambda = self.build_tuple_show_lambda(trait_name, args, span)?;
@@ -1425,20 +1508,25 @@ impl Elaborator {
                 ))
             }
             Type::Con(name, args) => {
-                let dict_name = self.dict_names.get(&(trait_name.into(), name.clone()))?;
+                let key = (
+                    trait_name.to_string(),
+                    trait_type_args.to_vec(),
+                    name.clone(),
+                );
+                let dict_name = self.dict_names.get(&key)?;
                 let mut dict_expr: Expr = Expr::synth(
                     span,
                     ExprKind::DictRef {
                         name: dict_name.clone(),
                     },
                 );
-                let key = (trait_name.to_string(), name.clone());
                 if let Some(constraints) = self.impl_dict_params.get(&key) {
                     // Use explicit where-clause constraints (handles cases like
                     // Ord where the impl needs both Ord and Eq dicts per type param).
                     for (constraint_trait, param_idx) in constraints {
                         if let Some(arg_ty) = args.get(*param_idx) {
-                            let sub_dict = self.dict_for_type(constraint_trait, arg_ty, span)?;
+                            let sub_dict =
+                                self.dict_for_type(constraint_trait, &[], arg_ty, span)?;
                             dict_expr = Expr::synth(
                                 span,
                                 ExprKind::App {
@@ -1452,7 +1540,8 @@ impl Elaborator {
                     // Fallback: one sub-dict per type arg for the main trait.
                     // Works for simple cases like Show for List a where {a: Show}.
                     for arg_ty in args {
-                        let sub_dict = self.dict_for_type(trait_name, arg_ty, span)?;
+                        let sub_dict =
+                            self.dict_for_type(trait_name, trait_type_args, arg_ty, span)?;
                         dict_expr = Expr::synth(
                             span,
                             ExprKind::App {
@@ -1515,7 +1604,12 @@ impl Elaborator {
     }
 
     /// Build a show/debug lambda for a tuple with the given element types.
-    fn build_tuple_show_lambda(&self, trait_name: &str, type_args: &[Type], span: Span) -> Option<Expr> {
+    fn build_tuple_show_lambda(
+        &self,
+        trait_name: &str,
+        type_args: &[Type],
+        span: Span,
+    ) -> Option<Expr> {
         let s = span;
         let t_var = Expr::synth(
             s,

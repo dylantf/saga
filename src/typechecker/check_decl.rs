@@ -20,7 +20,7 @@ fn innermost_effect_row(ty: &Type) -> Option<EffectRow> {
 /// (name -> (type, span)) and (name -> where clause constraints).
 type Annotations = (
     HashMap<String, (Type, Span)>,
-    HashMap<String, Vec<(String, u32)>>,
+    HashMap<String, Vec<(String, u32, Vec<Type>)>>,
 );
 
 impl Checker {
@@ -145,7 +145,7 @@ impl Checker {
         if let Some(scheme) = self.env.get("main")
             && !scheme.constraints.is_empty()
         {
-            let traits: Vec<_> = scheme.constraints.iter().map(|(t, _)| t.as_str()).collect();
+            let traits: Vec<_> = scheme.constraints.iter().map(|(t, _, _)| t.as_str()).collect();
             let span = program
                 .iter()
                 .find_map(|d| {
@@ -298,13 +298,13 @@ impl Checker {
                 }
                 Decl::TraitDef {
                     name,
-                    type_param,
+                    type_params,
                     supertraits,
                     methods,
                     ..
                 } => {
                     let plain_methods: Vec<_> = methods.iter().map(|a| &a.node).collect();
-                    self.register_trait_def(name, type_param, supertraits, &plain_methods)
+                    self.register_trait_def(name, type_params, supertraits, &plain_methods)
                         .map_err(|e| vec![e])?;
                 }
                 _ => {}
@@ -368,7 +368,7 @@ impl Checker {
                 let mut scheme_constraints = Vec::new();
                 if !where_clause.is_empty() {
                     for bound in where_clause {
-                        for (trait_name, trait_span) in &bound.traits {
+                        for (trait_name, _, trait_span) in &bound.traits {
                             self.lsp
                                 .type_references
                                 .push((*trait_span, trait_name.clone()));
@@ -376,8 +376,19 @@ impl Checker {
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
                         {
-                            for (trait_name, _) in &bound.traits {
-                                scheme_constraints.push((trait_name.clone(), *var_id));
+                            for (trait_name, trait_type_args, _) in &bound.traits {
+                                let extra_types: Vec<Type> = trait_type_args
+                                    .iter()
+                                    .map(|arg_name| {
+                                        // Type variable (lowercase) -> Type::Var, concrete type (uppercase) -> Type::Con
+                                        if let Some((_, id)) = params_list.iter().find(|(n, _)| n == arg_name) {
+                                            Type::Var(*id)
+                                        } else {
+                                            Type::Con(arg_name.clone(), vec![])
+                                        }
+                                    })
+                                    .collect();
+                                scheme_constraints.push((trait_name.clone(), *var_id, extra_types));
                             }
                         } else {
                             return Err(vec![Diagnostic::error_at(
@@ -406,7 +417,7 @@ impl Checker {
         program: &[Decl],
     ) -> std::result::Result<Annotations, Vec<Diagnostic>> {
         let mut annotations: HashMap<String, (Type, Span)> = HashMap::new();
-        let mut annotation_constraints: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+        let mut annotation_constraints: HashMap<String, Vec<(String, u32, Vec<Type>)>> = HashMap::new();
 
         for decl in program {
             if let Decl::FunSignature {
@@ -499,7 +510,7 @@ impl Checker {
                 if !where_clause.is_empty() {
                     let mut constraints = Vec::new();
                     for bound in where_clause {
-                        for (trait_name, trait_span) in &bound.traits {
+                        for (trait_name, _, trait_span) in &bound.traits {
                             self.lsp
                                 .type_references
                                 .push((*trait_span, trait_name.clone()));
@@ -510,8 +521,18 @@ impl Checker {
                             self.trait_state
                                 .where_bound_var_names
                                 .insert(*var_id, bound.type_var.clone());
-                            for (trait_name, _) in &bound.traits {
-                                constraints.push((trait_name.clone(), *var_id));
+                            for (trait_name, trait_type_args, _) in &bound.traits {
+                                let extra_types: Vec<Type> = trait_type_args
+                                    .iter()
+                                    .map(|arg_name| {
+                                        if let Some((_, id)) = params_list.iter().find(|(n, _)| n == arg_name) {
+                                            Type::Var(*id)
+                                        } else {
+                                            Type::Con(arg_name.clone(), vec![])
+                                        }
+                                    })
+                                    .collect();
+                                constraints.push((trait_name.clone(), *var_id, extra_types));
                             }
                         } else {
                             return Err(vec![Diagnostic::error_at(
@@ -586,6 +607,7 @@ impl Checker {
             if let Decl::ImplDef {
                 trait_name,
                 trait_name_span,
+                trait_type_args,
                 target_type,
                 target_type_span,
                 type_params,
@@ -609,6 +631,7 @@ impl Checker {
                 let plain_methods: Vec<_> = methods.iter().map(|a| a.node.clone()).collect();
                 self.register_impl(
                     trait_name,
+                    trait_type_args,
                     target_type,
                     type_params,
                     where_clause,
@@ -631,7 +654,7 @@ impl Checker {
         fun_var: &Type,
         annotation: Option<&Type>,
         annotation_span: Option<Span>,
-        where_constraints: &[(String, u32)],
+        where_constraints: &[(String, u32, Vec<Type>)],
     ) -> Result<(), Diagnostic> {
         // All clauses must have the same arity
         let arity = match clauses[0] {
@@ -679,7 +702,7 @@ impl Checker {
         }
 
         // Register where clause bounds on type variable IDs
-        for (trait_name, var_id) in where_constraints {
+        for (trait_name, var_id, _extra_var_ids) in where_constraints {
             self.trait_state
                 .where_bounds
                 .entry(*var_id)
@@ -933,14 +956,20 @@ impl Checker {
         fun_ty: Type,
         constraints_before: usize,
         has_annotation: bool,
-        where_constraints: &[(String, u32)],
+        where_constraints: &[(String, u32, Vec<Type>)],
     ) -> Result<Scheme, Diagnostic> {
         let new_constraints = self
             .trait_state
             .pending_constraints
             .split_off(constraints_before);
+
+        // Collect type vars that appear in the function's type (used for
+        // phantom detection and ambiguous-variable checks below).
+        let mut type_vars = Vec::new();
+        super::collect_free_vars(&self.sub.apply(&fun_ty), &mut type_vars);
+
         let mut scheme_constraints: Vec<(String, u32, Span)> = Vec::new();
-        for (trait_name, ty, span, node_id) in new_constraints {
+        for (trait_name, trait_type_arg_types, ty, span, node_id) in new_constraints {
             let resolved = self.sub.apply(&ty);
             match resolved {
                 Type::Var(id) => {
@@ -958,17 +987,57 @@ impl Checker {
                                     }
                             });
                     if in_where {
-                        // Record polymorphic passthrough evidence so the elaborator
-                        // knows this is a trait method call (needs DictMethodAccess).
                         let var_name = self.trait_state.where_bound_var_names.get(&id).cloned();
                         self.evidence.push(super::TraitEvidence {
                             node_id,
                             trait_name: trait_name.clone(),
                             resolved_type: None,
                             type_var_name: var_name,
+                            trait_type_args: trait_type_arg_types.clone(),
                         });
                         continue;
                     }
+
+                    // Phantom constraint matching: if the constraint var doesn't
+                    // appear in the function's type, it's from a trait method with
+                    // phantom type params. Match against the function's own
+                    // where-constraints (local, not global where_bounds) to connect
+                    // the phantom var to the caller's type system.
+                    if !type_vars.contains(&id) {
+                        let matched = where_constraints
+                            .iter()
+                            .find(|(wc_trait, _, _)| *wc_trait == trait_name);
+                        if let Some((_, wc_var_id, wc_extras)) = matched {
+                            let wc_resolved = self.sub.apply(&Type::Var(*wc_var_id));
+                            self.unify_at(&Type::Var(id), &wc_resolved, span)?;
+                            // Unify extra type args pairwise
+                            for (phantom_extra, where_extra) in
+                                trait_type_arg_types.iter().zip(wc_extras.iter())
+                            {
+                                let pe = self.sub.apply(phantom_extra);
+                                let we = self.sub.apply(where_extra);
+                                self.unify_at(&pe, &we, span)?;
+                            }
+                            let resolved_id = match self.sub.apply(&Type::Var(id)) {
+                                Type::Var(rid) => rid,
+                                _ => id,
+                            };
+                            let var_name = self
+                                .trait_state
+                                .where_bound_var_names
+                                .get(&resolved_id)
+                                .cloned();
+                            self.evidence.push(super::TraitEvidence {
+                                node_id,
+                                trait_name: trait_name.clone(),
+                                resolved_type: None,
+                                type_var_name: var_name,
+                                trait_type_args: trait_type_arg_types.clone(),
+                            });
+                            continue;
+                        }
+                    }
+
                     if has_annotation {
                         return Err(Diagnostic::error_at(
                             span,
@@ -986,13 +1055,14 @@ impl Checker {
                         trait_name: trait_name.clone(),
                         resolved_type: None,
                         type_var_name: var_name,
+                        trait_type_args: trait_type_arg_types.clone(),
                     });
                     scheme_constraints.push((trait_name, id, span));
                 }
                 _ => {
                     self.trait_state
                         .pending_constraints
-                        .push((trait_name, ty, span, node_id));
+                        .push((trait_name, trait_type_arg_types, ty, span, node_id));
                 }
             }
         }
@@ -1000,19 +1070,19 @@ impl Checker {
         self.env.remove(name);
         let mut scheme = self.generalize(&fun_ty);
 
-        for (trait_name, var_id) in where_constraints {
+        for (trait_name, var_id, extra_types) in where_constraints {
             let resolved_id = match self.sub.apply(&Type::Var(*var_id)) {
                 Type::Var(id) => id,
                 _ => continue,
             };
             if scheme.forall.contains(&resolved_id) {
-                scheme.constraints.push((trait_name.clone(), resolved_id));
+                let resolved_extras: Vec<Type> = extra_types
+                    .iter()
+                    .map(|ty| self.sub.apply(ty))
+                    .collect();
+                scheme.constraints.push((trait_name.clone(), resolved_id, resolved_extras));
             }
         }
-
-        // Collect type vars that actually appear in the function's type
-        let mut type_vars = Vec::new();
-        super::collect_free_vars(&self.sub.apply(&fun_ty), &mut type_vars);
 
         for (trait_name, var_id, span) in scheme_constraints {
             if !type_vars.contains(&var_id) {
@@ -1028,9 +1098,11 @@ impl Checker {
                 && !scheme
                     .constraints
                     .iter()
-                    .any(|(t, v)| t == &trait_name && *v == var_id)
+                    .any(|(t, v, _)| t == &trait_name && *v == var_id)
             {
-                scheme.constraints.push((trait_name, var_id));
+                // Inferred constraints (from operators) are always single-param traits.
+                // Multi-param constraints only enter through where clauses (handled above).
+                scheme.constraints.push((trait_name, var_id, vec![]));
             }
         }
 
@@ -1354,7 +1426,7 @@ impl Checker {
                 self.trait_state
                     .where_bound_var_names
                     .insert(*var_id, bound.type_var.clone());
-                for (trait_req, trait_span) in &bound.traits {
+                for (trait_req, _, trait_span) in &bound.traits {
                     self.lsp
                         .type_references
                         .push((*trait_span, trait_req.clone()));
@@ -1613,12 +1685,10 @@ impl Checker {
             vec![]
         };
 
-        // Build where_constraints map: (effect_name, param_index) -> set of required trait names.
+        // Build where_constraints map: (effect_name, param_index) -> trait constraints.
         // Links where clause type vars back to their position in the effect's type param list.
-        let mut where_constraints: std::collections::HashMap<
-            (String, usize),
-            std::collections::HashSet<String>,
-        > = std::collections::HashMap::new();
+        let mut where_constraints: super::HandlerWhereConstraints =
+            std::collections::HashMap::new();
         for bound in where_clause {
             if let Some((_, var_id)) = type_var_params.iter().find(|(n, _)| n == &bound.type_var) {
                 // Find which effect and param index this var corresponds to
@@ -1631,8 +1701,14 @@ impl Checker {
                                 let entry = where_constraints
                                     .entry((effect_ref.name.clone(), i))
                                     .or_default();
-                                for (trait_name, _) in &bound.traits {
-                                    entry.insert(trait_name.clone());
+                                for (trait_name, trait_type_args, _) in &bound.traits {
+                                    let extra_var_ids: Vec<u32> = trait_type_args
+                                        .iter()
+                                        .filter_map(|arg_name| {
+                                            type_var_params.iter().find(|(n, _)| n == arg_name).map(|(_, id)| *id)
+                                        })
+                                        .collect();
+                                    entry.push((trait_name.clone(), extra_var_ids));
                                 }
                             }
                         }
@@ -1695,29 +1771,39 @@ impl Checker {
             if constraints.is_empty() {
                 break;
             }
-            for (trait_name, ty, span, node_id) in constraints {
+            for (trait_name, trait_type_arg_types, ty, span, node_id) in constraints {
                 let resolved = self.sub.apply(&ty);
                 if matches!(resolved, Type::Error) {
                     continue;
                 }
+                // Resolve trait type args to concrete type names for impl lookup
+                let resolved_trait_type_args: Vec<String> = trait_type_arg_types
+                    .iter()
+                    .filter_map(|t| {
+                        let resolved_t = self.sub.apply(t);
+                        match &resolved_t {
+                            Type::Con(name, _) => Some(name.clone()),
+                            _ => None,
+                        }
+                    })
+                    .collect();
                 match &resolved {
                     // Concrete type (includes primitives): check that an impl exists
                     Type::Con(type_name, args) => {
                         let impl_info = self
                             .trait_state
                             .impls
-                            .get(&(trait_name.clone(), type_name.clone()));
+                            .get(&(trait_name.clone(), resolved_trait_type_args.clone(), type_name.clone()));
                         match impl_info {
                             None => {
                                 // Check if this might be caused by a user function
                                 // shadowing a trait method that would have worked.
                                 let mut hint = String::new();
                                 for (t_name, t_info) in &self.trait_state.traits {
-                                    if self
-                                        .trait_state
-                                        .impls
-                                        .contains_key(&(t_name.clone(), type_name.clone()))
-                                    {
+                                    let has_impl = self.trait_state.impls.keys().any(
+                                        |(tn, _, tt)| tn == t_name && tt == type_name,
+                                    );
+                                    if has_impl {
                                         for (m_name, _, _, _) in &t_info.methods {
                                             if let Some(scheme) = self.env.get(m_name) {
                                                 // A trait method's scheme has the trait name
@@ -1726,7 +1812,7 @@ impl Checker {
                                                 let is_trait_scheme = scheme
                                                     .constraints
                                                     .iter()
-                                                    .any(|(c, _)| c == t_name);
+                                                    .any(|(c, _, _)| c == t_name);
                                                 if !is_trait_scheme {
                                                     hint = format!(
                                                         ". `{}` shadows trait method `{}.{}`. \
@@ -1744,12 +1830,19 @@ impl Checker {
                                 ));
                             }
                             Some(info) => {
+                                // Resolve extra type args through substitution so the
+                                // elaborator sees concrete types for dict key lookup.
+                                let resolved_extra_types: Vec<Type> = trait_type_arg_types
+                                    .iter()
+                                    .map(|t| self.sub.apply(t))
+                                    .collect();
                                 // Record evidence for the elaboration pass
                                 self.evidence.push(super::TraitEvidence {
                                     node_id,
                                     trait_name: trait_name.clone(),
                                     resolved_type: Some((type_name.clone(), args.clone())),
                                     type_var_name: None,
+                                    trait_type_args: resolved_extra_types,
                                 });
                                 // Push conditional constraints for type parameters
                                 if type_name == "Tuple" {
@@ -1757,6 +1850,7 @@ impl Checker {
                                     for arg_ty in args {
                                         self.trait_state.pending_constraints.push((
                                             trait_name.clone(),
+                                            vec![],
                                             arg_ty.clone(),
                                             span,
                                             node_id,
@@ -1767,6 +1861,7 @@ impl Checker {
                                         if let Some(arg_ty) = args.get(*param_idx) {
                                             self.trait_state.pending_constraints.push((
                                                 req_trait.clone(),
+                                                vec![],
                                                 arg_ty.clone(),
                                                 span,
                                                 node_id,
@@ -1798,6 +1893,7 @@ impl Checker {
                             trait_name: trait_name.clone(),
                             resolved_type: None,
                             type_var_name: var_name,
+                            trait_type_args: trait_type_arg_types.clone(),
                         });
                     }
                     Type::Fun(_, _, _) => {
@@ -1824,13 +1920,14 @@ impl Checker {
 
     /// Verify that every impl's trait has its supertraits also implemented for the same type.
     pub(crate) fn check_supertrait_impls(&self) -> Result<(), Diagnostic> {
-        for ((trait_name, target_type), impl_info) in &self.trait_state.impls {
+        for ((trait_name, _trait_type_args, target_type), impl_info) in &self.trait_state.impls {
             if let Some(trait_info) = self.trait_state.traits.get(trait_name) {
                 for supertrait in &trait_info.supertraits {
+                    // Supertraits are always single-param (no type args)
                     if !self
                         .trait_state
                         .impls
-                        .contains_key(&(supertrait.clone(), target_type.clone()))
+                        .contains_key(&(supertrait.clone(), vec![], target_type.clone()))
                     {
                         let msg = format!(
                             "impl {} for {} requires impl {} for {} (supertrait)",

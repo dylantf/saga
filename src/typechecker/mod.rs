@@ -356,8 +356,11 @@ impl Substitution {
 #[derive(Debug, Clone)]
 pub struct Scheme {
     pub forall: Vec<u32>,
-    /// Trait constraints: (trait_name, type_var_id)
-    pub constraints: Vec<(String, u32)>,
+    /// Trait constraints: (trait_name, self_type_var_id, extra_type_arg_types).
+    /// Extra types are empty for single-param traits like Show.
+    /// For multi-param traits like `ConvertTo a b`, the extras track `b` as Type::Var.
+    /// Concrete type args like `ConvertTo Int` are stored as Type::Con.
+    pub constraints: Vec<(String, u32, Vec<Type>)>,
     pub ty: Type,
 }
 
@@ -393,12 +396,24 @@ impl Scheme {
         let names = self.var_names();
         // Group constraints by type variable
         let mut bounds: HashMap<String, Vec<String>> = HashMap::new();
-        for (trait_name, var_id) in &self.constraints {
+        for (trait_name, var_id, extra_types) in &self.constraints {
             let var_name = names
                 .get(var_id)
                 .cloned()
                 .unwrap_or_else(|| format!("?{}", var_id));
-            bounds.entry(var_name).or_default().push(trait_name.clone());
+            let trait_display = if extra_types.is_empty() {
+                trait_name.clone()
+            } else {
+                let extra_names: Vec<String> = extra_types
+                    .iter()
+                    .map(|ty| match ty {
+                        Type::Var(id) => names.get(id).cloned().unwrap_or_else(|| format!("?{}", id)),
+                        other => format!("{}", rename_vars(other, &names)),
+                    })
+                    .collect();
+                format!("{} {}", trait_name, extra_names.join(" "))
+            };
+            bounds.entry(var_name).or_default().push(trait_display);
         }
         let mut parts: Vec<String> = bounds
             .iter()
@@ -607,6 +622,10 @@ pub struct EffectDefInfo {
     pub source_module: Option<String>,
 }
 
+/// Handler where constraint key: (effect_name, param_index).
+/// Value: list of (trait_name, extra_type_arg_var_ids).
+pub type HandlerWhereConstraints = HashMap<(String, usize), Vec<(String, Vec<u32>)>>;
+
 #[derive(Debug, Clone)]
 pub struct HandlerInfo {
     /// Which effects this handler handles
@@ -619,17 +638,21 @@ pub struct HandlerInfo {
     /// op_name -> span of the handler arm (for LSP go-to-def and with-stack)
     pub arm_spans: HashMap<String, Span>,
     /// Trait constraints from `where` clause, keyed by (effect_name, param_index).
-    /// E.g. `handler h for Store a where {a: Show}` -> {("Store", 0) -> {"Show"}}
-    pub where_constraints: HashMap<(String, usize), HashSet<String>>,
+    /// Each constraint is (trait_name, extra_type_arg_var_ids).
+    /// E.g. `handler h for Store a where {a: Show}` -> {("Store", 0) -> [("Show", [])]}
+    /// E.g. `handler h for State a where {a: ConvertTo b}` -> {("State", 0) -> [("ConvertTo", [b_var_id])]}
+    pub where_constraints: HandlerWhereConstraints,
     /// Which module this handler is defined in (None = main file).
     pub source_module: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TraitInfo {
-    pub type_param: String,
+    /// Type parameters: first is self, rest are extras.
+    /// e.g. `trait ConvertTo a b` -> ["a", "b"]
+    pub type_params: Vec<String>,
     pub supertraits: Vec<String>,
-    /// Method signatures: name -> (param_types, return_type, trait_param_var_id)
+    /// Method signatures: name -> (param_types, return_type, trait_self_param_var_id)
     pub methods: Vec<(String, Vec<Type>, Type, Option<u32>)>,
 }
 
@@ -638,6 +661,9 @@ pub struct ImplInfo {
     /// Constraints on type parameters: (trait_name, param_index)
     /// e.g. Show for List requires Show on param 0 (the element type)
     pub param_constraints: Vec<(String, usize)>,
+    /// Extra type arguments applied to the trait (e.g. ["NOK"] in `impl ConvertTo NOK for USD`).
+    /// Empty for single-param traits.
+    pub trait_type_args: Vec<String>,
     pub span: Option<Span>,
 }
 
@@ -654,6 +680,10 @@ pub struct TraitEvidence {
     /// Used to select the correct dict param when multiple where-clause bounds
     /// exist for the same trait (e.g. `where {e: Show, a: Show}`).
     pub type_var_name: Option<String>,
+    /// Resolved extra type arguments for multi-param traits.
+    /// e.g. for `ConvertTo NOK`, this holds [Type::Con("NOK", [])].
+    /// Empty for single-param traits.
+    pub trait_type_args: Vec<Type>,
 }
 
 /// Warnings deferred until after inference, when substitutions are complete.
@@ -732,10 +762,11 @@ pub struct Checker {
 pub(crate) struct TraitState {
     /// Trait definitions: trait name -> info.
     pub traits: HashMap<String, TraitInfo>,
-    /// Impl registry: (trait_name, target_type) -> impl info.
-    pub impls: HashMap<(String, String), ImplInfo>,
-    /// Pending trait constraints to check: (trait_name, type, span_for_errors, node_id).
-    pub pending_constraints: Vec<(String, Type, Span, crate::ast::NodeId)>,
+    /// Impl registry: (trait_name, trait_type_args, target_type) -> impl info.
+    pub impls: HashMap<(String, Vec<String>, String), ImplInfo>,
+    /// Pending trait constraints to check: (trait_name, trait_type_arg_types, self_type, span, node_id).
+    /// trait_type_arg_types is empty for single-param traits.
+    pub pending_constraints: Vec<(String, Vec<Type>, Type, Span, crate::ast::NodeId)>,
     /// Where clause bounds: var_id -> set of trait names assumed satisfied.
     pub where_bounds: HashMap<u32, HashSet<String>>,
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence).
@@ -817,7 +848,7 @@ pub struct ModuleContext {
     pub(crate) prelude_snapshot: Option<Box<Checker>>,
     /// Trait impls from Std.dy (base layer). Shared with builtin module checkers
     /// so they can resolve constraints on primitives (e.g. Ord for Int).
-    pub(crate) base_trait_impls: HashMap<(String, String), ImplInfo>,
+    pub(crate) base_trait_impls: HashMap<(String, Vec<String>, String), ImplInfo>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) loading: HashSet<String>,
 }
