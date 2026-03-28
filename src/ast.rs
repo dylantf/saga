@@ -222,6 +222,8 @@ pub enum Decl {
         type_params: Vec<String>,
         fields: Vec<Annotated<(String, TypeExpr)>>,
         deriving: Vec<String>,
+        /// True if any field was on a new line — preserve multi-line layout.
+        multiline: bool,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
         span: Span,

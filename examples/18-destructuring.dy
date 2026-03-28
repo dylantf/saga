@@ -1,7 +1,4 @@
-record Point {
-  x: Int,
-  y: Int,
-}
+record Point { x: Int, y: Int }
 
 type Shape =
   | Circle(Float)
@@ -20,11 +17,11 @@ impl Show for Shape {
   }
 }
 
-# Function argument destructuring 
+# Function argument destructuring
 add_points (x1, y1) (x2, y2) = (x1 + x2, y1 + y2)
 
-area Circle(r) = r * r * 3.14
-area Rect(w, h) = w * h
+area (Circle(r)) = r * r * 3.14
+area (Rect(w, h)) = w * h
 
 main () = {
   # Let with tuples
@@ -37,7 +34,7 @@ main () = {
   println $"origin: ({x}, {y})"
 
   # Let with single-constructor types (irrefutable)
-  let Wrapped(inner) = Wrapped(42)
+  let Wrapped(inner) = Wrapped 42
   println $"inner: {inner}"
 
   # Case for multi-constructor types
@@ -56,8 +53,8 @@ main () = {
       println $"tail: {debug t}"
     }
     [] -> println "empty"
- 
- }
+  }
+
   # Nested destructuring
   let ((a, b), (c, d)) = ((1, 2), (3, 4))
   println $"sum: {a + b + c + d}"
@@ -68,4 +65,3 @@ main () = {
   println $"{c} has area {area c}"
   println $"{rect} has area {area rect}"
 }
-

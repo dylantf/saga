@@ -36,7 +36,7 @@ fn flatten_binop<'a>(expr: &'a Expr, op: &'a BinOp) -> (Vec<&'a Expr>, &'a BinOp
 }
 
 /// Flatten a left-nested App chain into (func, [arg1, arg2, ...]).
-fn flatten_app(expr: &Expr) -> (&Expr, Vec<&Expr>) {
+pub fn flatten_app(expr: &Expr) -> (&Expr, Vec<&Expr>) {
     let mut args = Vec::new();
     let mut current = expr;
     while let ExprKind::App { func, arg } = &current.kind {
@@ -650,7 +650,7 @@ pub fn format_stmt(stmt: &Stmt) -> Doc {
             let kw = if *assert { "let! " } else { "let " };
             let mut lhs = Doc::text(kw).append(format_pat(pattern));
             if let Some(ty) = annotation {
-                lhs = lhs.append(Doc::text(" : ")).append(format_type_expr(ty));
+                lhs = lhs.append(Doc::text(": ")).append(format_type_expr(ty));
             }
             super::decl::format_binding(lhs, value)
         }

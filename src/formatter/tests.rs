@@ -170,6 +170,7 @@ fn normalize_decl(d: &mut Decl) {
             id,
             name_span,
             fields,
+            multiline,
             dangling_trivia,
             span,
             ..
@@ -177,6 +178,7 @@ fn normalize_decl(d: &mut Decl) {
             *id = NID;
             *name_span = S;
             *span = S;
+            *multiline = false;
             dangling_trivia.clear();
             for f in fields.iter_mut() {
                 normalize_annotated(f, |(_name, te)| normalize_type_expr(te));
@@ -959,6 +961,42 @@ fn record_update_long_breaks_fields() {
     assert!(result.contains("  age:"), "result: {}", result);
 }
 
+// --- Record definitions ---
+
+#[test]
+fn record_def_short_stays_on_one_line() {
+    assert_eq!(
+        fmt80("record Point { x: Int, y: Int }"),
+        "record Point { x: Int, y: Int }\n"
+    );
+}
+
+#[test]
+fn record_def_multiline_preserved() {
+    let src = "record User {\n  name: String,\n  age: Int,\n}";
+    let result = fmt80(src);
+    assert!(result.contains("record User {\n"), "should stay multiline: {}", result);
+    assert!(result.contains("  name: String,\n"), "result: {}", result);
+}
+
+// --- Type definitions ---
+
+#[test]
+fn type_def_short_stays_on_one_line() {
+    assert_eq!(
+        fmt80("type Color = Red | Green | Blue"),
+        "type Color = Red | Green | Blue\n"
+    );
+}
+
+#[test]
+fn type_def_multiline_preserved() {
+    let src = "type Tree =\n  | Empty\n  | Node(Tree, Int, Tree)";
+    let result = fmt80(src);
+    assert!(result.contains("type Tree =\n"), "should stay multiline: {}", result);
+    assert!(result.contains("  | Empty\n"), "result: {}", result);
+}
+
 // --- Lists ---
 
 #[test]
@@ -1442,6 +1480,40 @@ fn binop_chain_multiline_preserved() {
     let result = fmt80(src);
     assert!(result.contains("\n  + b"), "should stay multiline: {}", result);
     assert!(result.contains("\n  + c"), "should stay multiline: {}", result);
+}
+
+// --- List comprehensions ---
+
+#[test]
+fn list_comprehension_simple() {
+    assert_eq!(
+        fmt80("f x = [y * 2 | y <- x]"),
+        "f x = [y * 2 | y <- x]\n"
+    );
+}
+
+#[test]
+fn list_comprehension_with_guard() {
+    assert_eq!(
+        fmt80("f x = [y | y <- x, y > 0]"),
+        "f x = [y | y <- x, y > 0]\n"
+    );
+}
+
+#[test]
+fn list_comprehension_multiple_generators() {
+    assert_eq!(
+        fmt80("f x = [(a, b) | a <- x, b <- x, a > b]"),
+        "f x = [(a, b) | a <- x, b <- x, a > b]\n"
+    );
+}
+
+#[test]
+fn list_comprehension_with_let() {
+    assert_eq!(
+        fmt80("f x = [y * 2 | y <- x, let z = y + 1, z > 3]"),
+        "f x = [y * 2 | y <- x, let z = y + 1, z > 3]\n"
+    );
 }
 
 // --- Round-trip: stdlib .dy files format cleanly, idempotently, and preserve AST ---

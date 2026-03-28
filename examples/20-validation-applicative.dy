@@ -5,7 +5,8 @@ effect Validate {
   fun invalid : (err: String) -> Unit
 }
 
-fun require_non_empty : (label: String) -> (value: String) -> Unit needs {Validate}
+fun require_non_empty : (label: String) -> (value: String) -> Unit
+  needs {Validate}
 require_non_empty label value =
   if value == "" then invalid! $"{label} is required"
   else ()
@@ -30,7 +31,7 @@ impl Debug for Validation e a where {e: Debug, a: Debug} {
 }
 
 handler collecting for Validate {
-  invalid err = { 
+  invalid err = {
     let (v, errs) = resume ()
     (v, err :: errs)
   }
@@ -44,18 +45,18 @@ validate_user input = {
     require_min_age 18 input.age
     ValidUser { name: input.name, age: input.age }
   } with collecting
-  
+
   case errs {
-    [] -> Valid(v)
-    _  -> Invalid(errs)
+    [] -> Valid v
+    _ -> Invalid errs
   }
 }
 
 main () = {
   let print_result = validate_user >> debug >> println
 
-  print_result UserInput { name: "Alice", age: 25 }
-  print_result UserInput { name: "", age: 25 }
-  print_result UserInput { name: "Bob", age: 15 }
-  print_result UserInput { name: "", age: 15 }
+  print_result (UserInput { name: "Alice", age: 25 })
+  print_result (UserInput { name: "", age: 25 })
+  print_result (UserInput { name: "Bob", age: 15 })
+  print_result (UserInput { name: "", age: 15 })
 }

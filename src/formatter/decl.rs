@@ -103,8 +103,17 @@ pub(super) fn is_block_like(expr: &Expr) -> bool {
         ExprKind::Tuple { .. } => true,
         // Named record creates stay on = line
         ExprKind::RecordCreate { .. } | ExprKind::AnonRecordCreate { .. } => true,
-        // with expressions where the handler is inline are block-like
-        ExprKind::With { handler, .. } => matches!(handler.as_ref(), Handler::Inline { .. }),
+        // with expressions are block-like when the inner expr is block-like or handler is inline
+        ExprKind::With { expr, handler } => {
+            matches!(handler.as_ref(), Handler::Inline { .. }) || is_block_like(expr)
+        }
+        // App with a trailing lambda whose body is block-like: `f (fun x -> { ... })`
+        ExprKind::App { .. } => {
+            let (_, args) = crate::formatter::expr::flatten_app(expr);
+            args.last().is_some_and(|last| {
+                matches!(&last.kind, ExprKind::Lambda { body, .. } if is_block_like(body))
+            })
+        }
         _ => false,
     }
 }
@@ -226,6 +235,7 @@ pub fn format_record_def(
     type_params: &[String],
     fields: &[Annotated<(String, TypeExpr)>],
     deriving: &[String],
+    multiline: bool,
     dangling: &[Trivia],
 ) -> Doc {
     let mut parts = Vec::new();
@@ -249,20 +259,6 @@ pub fn format_record_def(
         Doc::Nil
     };
 
-    let field_docs: Vec<Doc> = fields.iter().map(|ann| {
-        let (fname, ty) = &ann.node;
-        let mut d = docs![Doc::text(format!("{}: ", fname)), format_type_expr(ty)];
-        d = d.append(format_trailing(&ann.trailing_comment));
-        d
-    }).collect();
-
-    // Try flat: `record Name { a: T, b: T } deriving (...)`
-    // Broken: `record Name {\n  a: T,\n  b: T,\n} deriving (...)`
-    let flat_fields = {
-        let joined = Doc::join(Doc::text(", "), field_docs.clone());
-        docs![Doc::text(" { "), joined, Doc::text(" }"), deriving_doc.clone()]
-    };
-
     let broken_fields = {
         let body = format_annotated_body(
             fields,
@@ -275,10 +271,24 @@ pub fn format_record_def(
             },
             dangling,
         );
-        docs![Doc::text(" {"), Doc::nest(2, body), Doc::hardline(), Doc::text("}"), deriving_doc]
+        docs![Doc::text(" {"), Doc::nest(2, body), Doc::hardline(), Doc::text("}"), deriving_doc.clone()]
     };
 
-    parts.push(Doc::group(Doc::if_break(broken_fields, flat_fields)));
+    if multiline {
+        parts.push(broken_fields);
+    } else {
+        let field_docs: Vec<Doc> = fields.iter().map(|ann| {
+            let (fname, ty) = &ann.node;
+            let mut d = docs![Doc::text(format!("{}: ", fname)), format_type_expr(ty)];
+            d = d.append(format_trailing(&ann.trailing_comment));
+            d
+        }).collect();
+        let flat_fields = {
+            let joined = Doc::join(Doc::text(", "), field_docs);
+            docs![Doc::text(" { "), joined, Doc::text(" }"), deriving_doc]
+        };
+        parts.push(Doc::group(Doc::if_break(broken_fields, flat_fields)));
+    }
 
     docs_from_vec(parts)
 }

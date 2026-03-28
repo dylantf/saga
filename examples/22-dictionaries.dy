@@ -5,7 +5,7 @@ main () = {
   # Create from list of tuples
   let ages = Dict.from_list [("alice", 30), ("bob", 25), ("charlie", 35)]
   println $"ages: {debug ages}"
-  println $"size: {(Dict.size ages)}"
+  println $"size: {Dict.size ages}"
 
   # Lookup
   let alice_age = Dict.get "alice" ages
@@ -26,8 +26,8 @@ main () = {
   println $"removed bob: {debug ages4}"
 
   # Membership
-  println $"has alice: {(Dict.member "alice" ages)}"
-  println $"has dave: {(Dict.member "dave" ages)}"
+  println $"has alice: {Dict.member "alice" ages}"
+  println $"has dave: {Dict.member "dave" ages}"
 
   # Keys and values
   println $"keys: {debug (Dict.keys ages)}"

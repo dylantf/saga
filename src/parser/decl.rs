@@ -177,7 +177,11 @@ impl Parser {
         self.expect(Token::LBrace)?;
 
         let mut fields = Vec::new();
+        let mut multiline = false;
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            if self.tokens[self.pos].preceded_by_newline {
+                multiline = true;
+            }
             let start = self.pos;
             let field_name = self.expect_ident()?;
             self.expect(Token::Colon)?;
@@ -223,6 +227,7 @@ impl Parser {
             type_params,
             fields,
             deriving,
+            multiline,
             dangling_trivia,
             span: start.to(end),
         })

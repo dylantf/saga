@@ -177,7 +177,7 @@ fn format_decl(decl: &Decl) -> Doc {
         } => {
             let mut lhs = Doc::text(format!("let {}", name));
             if let Some(ty) = annotation {
-                lhs = lhs.append(Doc::text(" : ")).append(format_type_expr(ty));
+                lhs = lhs.append(Doc::text(": ")).append(format_type_expr(ty));
             }
             format_binding(lhs, value)
         }
@@ -207,6 +207,7 @@ fn format_decl(decl: &Decl) -> Doc {
             type_params,
             fields,
             deriving,
+            multiline,
             dangling_trivia,
             ..
         } => format_record_def(
@@ -216,6 +217,7 @@ fn format_decl(decl: &Decl) -> Doc {
             type_params,
             fields,
             deriving,
+            *multiline,
             dangling_trivia,
         ),
         Decl::EffectDef {

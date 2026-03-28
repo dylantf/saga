@@ -186,9 +186,14 @@ pub fn format_braced_body(items: &[Doc], dangling_trivia: &[Trivia]) -> Doc {
     for item in items {
         body = body.append(item.clone());
     }
-    if !dangling_trivia.is_empty() {
+    // Only emit dangling comments, not blank lines (blank lines before `}` are noise)
+    let comments: Vec<&Trivia> = dangling_trivia
+        .iter()
+        .filter(|t| !matches!(t, Trivia::BlankLines(_)))
+        .collect();
+    if !comments.is_empty() {
         body = body.append(Doc::hardline());
-        body = body.append(format_trivia_dangling(dangling_trivia));
+        body = body.append(format_trivia_dangling(&comments.iter().map(|t| (*t).clone()).collect::<Vec<_>>()));
     }
     body
 }
