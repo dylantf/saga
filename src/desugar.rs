@@ -145,7 +145,8 @@ fn desugar_expr(expr: &mut Expr) {
         ExprKind::Ascription { expr: inner, .. } => desugar_expr(inner),
 
         // Sugar nodes: recurse into children before transforming
-        ExprKind::Pipe { segments, .. } => {
+        ExprKind::Pipe { segments, .. }
+        | ExprKind::BinOpChain { segments, .. } => {
             for seg in segments {
                 desugar_expr(&mut seg.node);
             }
@@ -212,6 +213,22 @@ fn desugar_expr(expr: &mut Expr) {
                         arg: Box::new(acc),
                     },
                 };
+            }
+            *expr = acc;
+        }
+        ExprKind::BinOpChain { .. } => {
+            // [a, b, c] with ops [+, -] → BinOp(-, BinOp(+, a, b), c)
+            let ExprKind::BinOpChain { segments, ops, .. } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
+            let mut iter = segments.into_iter();
+            let mut acc = iter.next().unwrap().node;
+            for (seg, op) in iter.zip(ops) {
+                let right = seg.node;
+                let binop_span = acc.span.to(right.span);
+                acc = Expr::synth(binop_span, ExprKind::BinOp {
+                    op,
+                    left: Box::new(acc),
+                    right: Box::new(right),
+                });
             }
             *expr = acc;
         }

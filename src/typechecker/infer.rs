@@ -423,6 +423,7 @@ impl Checker {
             }
 
             ExprKind::Pipe { .. }
+            | ExprKind::BinOpChain { .. }
             | ExprKind::PipeBack { .. }
             | ExprKind::ComposeForward { .. }
             | ExprKind::ComposeBack { .. }

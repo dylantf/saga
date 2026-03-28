@@ -421,6 +421,7 @@ impl Normalizer {
             ExprKind::Ascription { expr: inner, .. } => self.walk_expr(inner, lifted),
 
             ExprKind::Pipe { .. }
+            | ExprKind::BinOpChain { .. }
             | ExprKind::PipeBack { .. }
             | ExprKind::ComposeForward { .. }
             | ExprKind::ComposeBack { .. }

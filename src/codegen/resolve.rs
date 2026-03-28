@@ -584,7 +584,8 @@ fn resolve_expr(
         => {}
 
         // Sugar nodes should be desugared before this pass
-        ExprKind::Pipe { segments, .. } => {
+        ExprKind::Pipe { segments, .. }
+        | ExprKind::BinOpChain { segments, .. } => {
             for seg in segments {
                 resolve_expr(&seg.node, scope, qualified_scope, map);
             }

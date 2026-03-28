@@ -97,7 +97,7 @@ pub(super) fn is_block_like(expr: &Expr) -> bool {
         // Pipes and binop chains stay on the = line — they handle their own
         // multi-line layout like `x |> f |> g` or `"a" <> "b" <> "c"`
         ExprKind::Pipe { .. } => false,
-        ExprKind::BinOp { .. } => true,
+        ExprKind::BinOp { .. } | ExprKind::BinOpChain { .. } => true,
         // with expressions where the handler is inline are block-like
         ExprKind::With { handler, .. } => matches!(handler.as_ref(), Handler::Inline { .. }),
         _ => false,

@@ -12,9 +12,10 @@ fn emit_project_module(
     checker: &typechecker::Checker,
 ) -> String {
     let tokens = lexer::Lexer::new(source).lex().expect("lex error");
-    let program = parser::Parser::new(tokens)
+    let mut program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
+    dylang::desugar::desugar_program(&mut program);
     emit_from_program(&program, module_name, checker)
 }
 

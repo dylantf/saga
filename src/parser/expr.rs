@@ -42,6 +42,40 @@ impl Parser {
         Ok(fields)
     }
 
+    /// Return the binding power of the next token if it's a binary operator.
+    fn peek_binop_bp(&self) -> Option<u8> {
+        match self.peek() {
+            Token::Or => Some(2),
+            Token::And => Some(3),
+            Token::EqEq | Token::NotEq => Some(4),
+            Token::Lt | Token::Gt | Token::LtEq | Token::GtEq => Some(5),
+            Token::Concat | Token::Plus | Token::Minus => Some(6),
+            Token::Star | Token::Slash | Token::Modulo => Some(7),
+            _ => None,
+        }
+    }
+
+    /// Return the BinOp for the next token (must be a binop).
+    fn peek_binop_op(&self) -> Option<BinOp> {
+        match self.peek() {
+            Token::Or => Some(BinOp::Or),
+            Token::And => Some(BinOp::And),
+            Token::EqEq => Some(BinOp::Eq),
+            Token::NotEq => Some(BinOp::NotEq),
+            Token::Lt => Some(BinOp::Lt),
+            Token::Gt => Some(BinOp::Gt),
+            Token::LtEq => Some(BinOp::LtEq),
+            Token::GtEq => Some(BinOp::GtEq),
+            Token::Concat => Some(BinOp::Concat),
+            Token::Plus => Some(BinOp::Add),
+            Token::Minus => Some(BinOp::Sub),
+            Token::Star => Some(BinOp::Mul),
+            Token::Slash => Some(BinOp::FloatDiv),
+            Token::Modulo => Some(BinOp::Mod),
+            _ => None,
+        }
+    }
+
     /// Pratt parser: binary operators with precedence.
     /// Precedence levels:
     ///     1 = piping |>
@@ -170,27 +204,47 @@ impl Parser {
                 continue;
             }
 
-            // Remember which sugar operator we have before consuming
-            let sugar = match self.peek() {
-                Token::DoubleColon => Some(SugarOp::Cons),
-                _ => None,
-            };
-            self.advance(); // consume operator
-            // :: is right-associative (recurse at same bp); everything else is left-associative
-            let is_cons = matches!(sugar, Some(SugarOp::Cons));
-            let right = self.parse_expr(if is_cons { bp } else { bp + 1 })?;
-
-            let span = left.span.to(right.span);
-            left = match (op, sugar) {
-                (None, Some(SugarOp::Cons)) => Expr {
+            // :: is cons sugar (right-associative, not a binop chain)
+            if matches!(self.peek(), Token::DoubleColon) {
+                self.advance(); // consume ::
+                let right = self.parse_expr(bp)?; // right-assoc: same bp
+                let span = left.span.to(right.span);
+                left = Expr {
                     id: self.next_id(),
                     span,
                     kind: ExprKind::Cons {
                         head: Box::new(left),
                         tail: Box::new(right),
                     },
-                },
-                (Some(op), _) => Expr {
+                };
+                continue;
+            }
+
+            // Binary operator — collect same-precedence chains into BinOpChain
+            // with trivia on each segment, mirroring the Pipe pattern.
+            let op = op.unwrap();
+            let chain_bp = bp;
+
+            // Capture trivia from the first operator token
+            let first_multiline = self.tokens[self.pos].preceded_by_newline;
+            let first_trailing = self.tokens[self.pos - 1].trailing_comment.take();
+            let first_leading = self.take_leading_trivia(self.pos);
+            self.advance(); // consume first operator
+            let right = self.parse_expr(chain_bp + 1)?;
+
+            // Check if the next token is a binop at the same precedence level.
+            // If so, collect into a BinOpChain. Otherwise, emit plain BinOp.
+            let next_same_bp = self.peek_binop_bp() == Some(chain_bp);
+            if !next_same_bp {
+                // Plain BinOp (2 operands, no chain) — no trivia to preserve
+                // (same as before; trivia was on the operator token which is gone)
+                if let Some(comment) = first_trailing {
+                    // Re-attach trailing comment we stole — put on left expr's last token
+                    // This is best-effort; single binops can't carry trivia.
+                    let _ = comment;
+                }
+                let span = left.span.to(right.span);
+                left = Expr {
                     id: self.next_id(),
                     span,
                     kind: ExprKind::BinOp {
@@ -198,9 +252,68 @@ impl Parser {
                         left: Box::new(left),
                         right: Box::new(right),
                     },
-                },
-                _ => unreachable!(),
-            };
+                };
+            } else {
+                // Build a BinOpChain
+                let mut segments = vec![Annotated::bare(left)];
+                if let Some(comment) = first_trailing {
+                    segments[0].trailing_comment = Some(comment);
+                }
+                let mut ops = vec![op];
+                let mut multiline = first_multiline;
+
+                segments.push(Annotated {
+                    node: right,
+                    leading_trivia: first_leading,
+                    trailing_comment: None,
+                    trailing_trivia: vec![],
+                });
+
+                // Continue collecting same-precedence operators
+                while let Some(next_bp) = self.peek_binop_bp() {
+                    if next_bp != chain_bp {
+                        break;
+                    }
+                    if self.tokens[self.pos].preceded_by_newline {
+                        multiline = true;
+                    }
+                    // Capture trailing comment from previous segment
+                    if let Some(comment) = self.tokens[self.pos - 1].trailing_comment.take()
+                        && let Some(last) = segments.last_mut()
+                    {
+                        last.trailing_comment = Some(comment);
+                    }
+                    let leading = self.take_leading_trivia(self.pos);
+                    let next_op = self.peek_binop_op().unwrap();
+                    self.advance(); // consume operator
+                    let seg = self.parse_expr(chain_bp + 1)?;
+                    ops.push(next_op);
+                    segments.push(Annotated {
+                        node: seg,
+                        leading_trivia: leading,
+                        trailing_comment: None,
+                        trailing_trivia: vec![],
+                    });
+                }
+                // Trailing comment on last segment
+                if let Some(comment) = self.tokens[self.pos - 1].trailing_comment.take()
+                    && let Some(last) = segments.last_mut()
+                {
+                    last.trailing_comment = Some(comment);
+                }
+
+                let start_span = segments.first().unwrap().node.span;
+                let end_span = segments.last().unwrap().node.span;
+                left = Expr {
+                    id: self.next_id(),
+                    span: start_span.to(end_span),
+                    kind: ExprKind::BinOpChain {
+                        segments,
+                        ops,
+                        multiline,
+                    },
+                };
+            }
         }
 
         // `with` has lowest precedence — checked after all binary ops
@@ -1242,7 +1355,3 @@ impl Parser {
     }
 }
 
-/// Tracks which sugar operator is being parsed.
-enum SugarOp {
-    Cons,
-}

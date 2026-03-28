@@ -406,6 +406,50 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 Doc::group(result)
             }
         }
+        ExprKind::BinOpChain {
+            segments,
+            ops,
+            multiline,
+        } => {
+            let force_multiline = *multiline
+                || segments.iter().any(|s| {
+                    s.trailing_comment.is_some()
+                        || !s.leading_trivia.is_empty()
+                        || !s.trailing_trivia.is_empty()
+                });
+
+            // Head segment
+            let mut head = format_expr(&segments[0].node);
+            head = head.append(format_trailing(&segments[0].trailing_comment));
+
+            // Tail segments: `+ operand` pairs, indented when broken
+            let mut tail = Doc::Nil;
+            for (i, seg) in segments[1..].iter().enumerate() {
+                if force_multiline {
+                    tail = tail.append(Doc::hardline());
+                } else {
+                    tail = tail.append(Doc::line());
+                }
+                if !seg.leading_trivia.is_empty() {
+                    tail = tail.append(format_trivia(&seg.leading_trivia));
+                }
+                let op_str = format_binop(&ops[i]);
+                tail = tail.append(Doc::text(format!("{} ", op_str)));
+                tail = tail.append(format_expr(&seg.node));
+                tail = tail.append(format_trailing(&seg.trailing_comment));
+                if !seg.trailing_trivia.is_empty() {
+                    tail = tail.append(Doc::hardline());
+                    tail = tail.append(format_trivia(&seg.trailing_trivia));
+                }
+            }
+
+            let result = docs![head, Doc::nest(2, tail)];
+            if force_multiline {
+                result
+            } else {
+                Doc::group(result)
+            }
+        }
         ExprKind::PipeBack { segments } => format_binary_chain(segments, " <| "),
         ExprKind::ComposeForward { segments } => format_binary_chain(segments, " >> "),
         ExprKind::ComposeBack { segments } => format_binary_chain(segments, " << "),

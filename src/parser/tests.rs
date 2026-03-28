@@ -186,38 +186,20 @@ fn binary_precedence_comparison_over_logic() {
 
 #[test]
 fn binary_left_associative() {
-    // 1 - 2 - 3 should parse as (1 - 2) - 3
+    // 1 - 2 - 3 is a same-precedence chain: BinOpChain { [1, 2, 3], [Sub, Sub] }
+    // (desugars to left-nested (1 - 2) - 3 before typechecking)
     let expr = parse_expr("1 - 2 - 3");
-    match expr {
-        Expr {
-            kind:
-                ExprKind::BinOp {
-                    op: BinOp::Sub,
-                    left,
-                    right,
-                    ..
-                },
-            ..
-        } => {
-            assert!(matches!(
-                *left,
-                Expr {
-                    kind: ExprKind::BinOp { op: BinOp::Sub, .. },
-                    ..
-                }
-            ));
-            assert!(matches!(
-                *right,
-                Expr {
-                    kind: ExprKind::Lit {
-                        value: Lit::Int(_, 3),
-                        ..
-                    },
-                    ..
-                }
-            ));
+    match &expr.kind {
+        ExprKind::BinOpChain { segments, ops, .. } => {
+            assert_eq!(segments.len(), 3);
+            assert_eq!(ops.len(), 2);
+            assert!(matches!(ops[0], BinOp::Sub));
+            assert!(matches!(ops[1], BinOp::Sub));
+            assert!(matches!(segments[0].node.kind, ExprKind::Lit { value: Lit::Int(_, 1), .. }));
+            assert!(matches!(segments[1].node.kind, ExprKind::Lit { value: Lit::Int(_, 2), .. }));
+            assert!(matches!(segments[2].node.kind, ExprKind::Lit { value: Lit::Int(_, 3), .. }));
         }
-        _ => panic!("expected Sub at top level, got {:?}", expr),
+        _ => panic!("expected BinOpChain, got {:?}", expr),
     }
 }
 

@@ -471,6 +471,17 @@ pub enum ExprKind {
         multiline: bool,
     },
 
+    /// `a + b + c` or `a + b - c` -- binary operator chain at one precedence level.
+    /// Stored as a flat list of annotated operands plus per-pair operators.
+    /// `segments` has N elements, `ops` has N-1 elements.
+    /// Desugars to left-nested `BinOp` before typechecking.
+    BinOpChain {
+        segments: Vec<Annotated<Expr>>,
+        ops: Vec<BinOp>,
+        /// True if any operator was on a new line in the source.
+        multiline: bool,
+    },
+
     /// `f <| x` -- backward pipe chain (desugars to App(f, x))
     PipeBack { segments: Vec<Annotated<Expr>> },
 
@@ -568,7 +579,10 @@ impl Expr {
                         .is_some_and(|(t, b)| t.contains_resume() || b.contains_resume())
             }
             ExprKind::Ascription { expr, .. } => expr.contains_resume(),
-            ExprKind::Pipe { segments, .. } => segments.iter().any(|s| s.node.contains_resume()),
+            ExprKind::Pipe { segments, .. }
+            | ExprKind::BinOpChain { segments, .. } => {
+                segments.iter().any(|s| s.node.contains_resume())
+            }
             ExprKind::PipeBack { segments }
             | ExprKind::ComposeForward { segments }
             | ExprKind::ComposeBack { segments } => {

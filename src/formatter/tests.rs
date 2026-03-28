@@ -403,6 +403,16 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
                 normalize_annotated(seg, normalize_expr);
             }
         }
+        ExprKind::BinOpChain {
+            segments,
+            multiline,
+            ..
+        } => {
+            *multiline = false;
+            for seg in segments.iter_mut() {
+                normalize_annotated(seg, normalize_expr);
+            }
+        }
         ExprKind::PipeBack { segments }
         | ExprKind::ComposeForward { segments }
         | ExprKind::ComposeBack { segments } => {
@@ -1383,6 +1393,24 @@ fn binop_chain_breaks_before_operator_indented() {
     let result = fmt(src, 40);
     assert!(result.contains("f x = some_long_name\n"), "first operand on = line: {}", result);
     assert!(result.contains("  + another_long_name\n"), "indented continuation: {}", result);
+}
+
+#[test]
+fn binop_chain_preserves_comments() {
+    let src = "f x = \"{\"\n  # join pairs\n  <> join \", \" pairs\n  # close\n  <> \"}\"";
+    let result = fmt80(src);
+    assert!(result.contains("# join pairs"), "should preserve comment: {}", result);
+    assert!(result.contains("# close"), "should preserve comment: {}", result);
+    assert!(result.contains("<> join"), "should have operator: {}", result);
+}
+
+#[test]
+fn binop_chain_multiline_preserved() {
+    // User explicitly put operators on new lines — should stay multi-line
+    let src = "f x = a\n  + b\n  + c";
+    let result = fmt80(src);
+    assert!(result.contains("\n  + b"), "should stay multiline: {}", result);
+    assert!(result.contains("\n  + c"), "should stay multiline: {}", result);
 }
 
 // --- Round-trip: stdlib .dy files format cleanly, idempotently, and preserve AST ---
