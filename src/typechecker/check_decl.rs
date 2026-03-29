@@ -1981,7 +1981,7 @@ impl Checker {
                             return Err(Diagnostic::error_at(
                                 span,
                                 format!(
-                                    "trait {} required but no impl or where clause bound for this type",
+                                    "ambiguous type variable requires {}. Add a type annotation to pin the unconstrained type variable",
                                     trait_name
                                 ),
                             ));

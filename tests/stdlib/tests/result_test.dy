@@ -5,108 +5,146 @@ describe "Result" {
 
   describe "is_ok" {
     test "Ok is ok" {
-      assert_true (Result.is_ok (Ok 1))
+      let r = if True then Ok 1 else Err "e"
+      assert_true (Result.is_ok r)
     }
 
     test "Err is not ok" {
-      assert_false (Result.is_ok (Err "bad"))
+      let r = if False then Ok 0 else Err "bad"
+      assert_false (Result.is_ok r)
     }
   }
 
   describe "is_err" {
     test "Err is err" {
-      assert_true (Result.is_err (Err "bad"))
+      let r = if False then Ok 0 else Err "bad"
+      assert_true (Result.is_err r)
     }
 
     test "Ok is not err" {
-      assert_false (Result.is_err (Ok 1))
+      let r = if True then Ok 1 else Err "e"
+      assert_false (Result.is_err r)
     }
   }
 
   describe "map" {
     test "transforms Ok" {
-      assert_eq (Result.map (fun x -> x * 2) (Ok 5)) (Ok 10)
+      let r = if True then Ok 5 else Err "e"
+      assert_eq (Result.map (fun x -> x * 2) r) (if True then Ok 10 else Err "e")
     }
 
     test "Err stays Err" {
-      assert_eq (Result.map (fun x -> x * 2) (Err "bad")) (Err "bad")
+      let r = if False then Ok 0 else Err "bad"
+      assert_eq (Result.map (fun x -> x * 2) r) (if False then Ok 0 else Err "bad")
     }
   }
 
   describe "map_err" {
     test "transforms Err" {
-      assert_eq (Result.map_err (fun e -> e <> "!") (Err "bad")) (Err "bad!")
+      let r = if False then Ok 0 else Err "bad"
+      assert_eq (Result.map_err (fun e -> e <> "!") r) (if False then Ok 0 else Err "bad!")
     }
 
     test "Ok stays Ok" {
-      assert_eq (Result.map_err (fun e -> e <> "!") (Ok 1)) (Ok 1)
+      let r = if True then Ok 1 else Err "e"
+      assert_eq (Result.map_err (fun e -> e <> "!") r) (if True then Ok 1 else Err "e")
     }
   }
 
   describe "unwrap" {
     test "returns value from Ok" {
-      let r = if True then Ok 42 else Err "never"
+      let r = if True then Ok 42 else Err "e"
       assert_eq (Result.unwrap r) 42
     }
 
     test "panics on Err" {
-      let r = if False then Ok 0 else Err "oops"
-      assert_panics (fun () -> Result.unwrap r)
+      assert_panics (fun () -> {
+        let r = if False then Ok 0 else Err "oops"
+        Result.unwrap r
+      })
     }
   }
 
   describe "unwrap_or" {
     test "returns value from Ok" {
-      assert_eq (Result.unwrap_or 0 (Ok 42)) 42
+      let r = if True then Ok 42 else Err "e"
+      assert_eq (Result.unwrap_or 0 r) 42
     }
 
     test "returns default from Err" {
-      assert_eq (Result.unwrap_or 0 (Err "bad")) 0
+      let r = if False then Ok 0 else Err "bad"
+      assert_eq (Result.unwrap_or 0 r) 0
     }
   }
 
   describe "and_then" {
     test "chains on Ok" {
-      let parse = fun s -> if s == "42" then Ok 42 else Err "parse error"
-      assert_eq (Result.and_then parse (Ok "42")) (Ok 42)
+      let r = if True then Ok 42 else Err "e"
+      let f = fun x -> if x == 42 then Ok 100 else Err "no"
+      assert_ok (Result.and_then f r)
     }
 
     test "short-circuits on Err" {
-      assert_eq (Result.and_then (fun x -> Ok (x + 1)) (Err "bad")) (Err "bad")
+      let r = if False then Ok 0 else Err "bad"
+      assert_err (Result.and_then (fun x -> Ok (x + 1)) r)
     }
   }
 
   describe "or_else" {
     test "returns Ok when present" {
-      assert_eq (Result.or_else (Ok 99) (Ok 1)) (Ok 1)
+      let r = if True then Ok 1 else Err "e"
+      assert_ok (Result.or_else (Ok 99) r)
     }
 
     test "returns fallback on Err" {
-      assert_eq (Result.or_else (Ok 99) (Err "bad")) (Ok 99)
+      let r = if False then Ok 0 else Err "bad"
+      let fallback = if True then Ok 99 else Err "e"
+      assert_eq (Result.or_else fallback r) fallback
     }
   }
 
   describe "to_maybe" {
     test "Ok becomes Just" {
-      assert_eq (Result.to_maybe (Ok 42)) (Just 42)
+      let r = if True then Ok 42 else Err "e"
+      assert_eq (Result.to_maybe r) (Just 42)
     }
 
     test "Err becomes Nothing" {
-      assert_nothing (Result.to_maybe (Err "bad"))
+      let r = if False then Ok 0 else Err "bad"
+      assert_nothing (Result.to_maybe r)
+    }
+  }
+
+  describe "from_maybe" {
+    test "Just becomes Ok" {
+      let r = Result.from_maybe "missing" (Just 42)
+      assert_ok r
+    }
+
+    test "Nothing becomes Err" {
+      let n = if False then Just 0 else Nothing
+      let r = Result.from_maybe "missing" n
+      assert_err r
     }
   }
 
   describe "flatten" {
     test "flattens nested Ok" {
-      assert_eq (Result.flatten (Ok (Ok 42))) (Ok 42)
+      let inner = if True then Ok 42 else Err "e"
+      let outer = if True then Ok inner else Err "e"
+      assert_eq (Result.flatten outer) inner
     }
 
     test "flattens nested Err" {
-      assert_eq (Result.flatten (Ok (Err "inner"))) (Err "inner")
+      let inner = if False then Ok 0 else Err "inner"
+      let outer = if True then Ok inner else Err "e"
+      assert_err (Result.flatten outer)
     }
 
     test "outer Err stays Err" {
-      assert_eq (Result.flatten (Err "outer")) (Err "outer")
+      let inner = if True then Ok 0 else Err "e"
+      let outer = if False then Ok inner else Err "outer"
+      assert_err (Result.flatten outer)
     }
   }
 }

@@ -339,7 +339,7 @@ effect Log {
 }
 
 effect Fail {
-  fun fail : String -> Never
+  fun fail : String -> a
 }
 
 # Zero-arg op called with ()
@@ -609,7 +609,7 @@ Process.shutdown 0
 panic "something went wrong"    # prints "panic: something went wrong" to stderr
 todo "implement this"           # prints "todo: implement this" to stderr
 
-# All three return Never -- usable in any expression position
+# All three resolve to `forall a. => a` -- usable in any expression position
 ```
 
 ---
@@ -618,7 +618,7 @@ todo "implement this"           # prints "todo: implement this" to stderr
 
 ```
 # Built-in traits: Show, Eq, Ord, Num
-# Built-in types: Int, Float, String, Bool, Unit, Never, Dict k v
+# Built-in types: Int, Float, String, Bool, Unit, Dict k v
 # Literals: 42, 3.14, "hello", True, False, ()
 # Unit value: ()
 

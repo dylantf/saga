@@ -14,4 +14,11 @@ describe "panic recovery" {
   test "catch_panic returns Err on panic" {
     assert_err (catch_panic (fun () -> panic "boom") : Result Int String)
   }
+
+  test "panic inside multi-expression thunk" {
+    assert_panics (fun () -> {
+      let _ = 1 + 1
+      panic "after some work"
+    })
+  }
 }

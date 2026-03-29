@@ -566,8 +566,10 @@ impl Elaborator {
                 // e.g. `let p = print` becomes `let p = print __dict_Show_String`
                 if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
                     let mut result: Expr = expr.clone();
+                    let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                     for (trait_name, _type_var) in &dict_param_info {
-                        if let Some(dict_expr) = self.resolve_dict(trait_name, node_id, span) {
+                        let occ = trait_occurrences.entry(trait_name).or_insert(0);
+                        if let Some(dict_expr) = self.resolve_dict_nth(trait_name, node_id, span, *occ) {
                             result = Expr::synth(
                                 span,
                                 ExprKind::App {
@@ -576,6 +578,7 @@ impl Elaborator {
                                 },
                             );
                         }
+                        *occ += 1;
                     }
                     return result;
                 }
@@ -631,11 +634,11 @@ impl Elaborator {
                         // Build the call with dict args prepended
                         let mut result: Expr =
                             Expr::synth(func.span, ExprKind::Var { name: name.clone() });
+                        let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                         for (trait_name, _type_var) in &dict_param_info {
-                            // Use the Var's span for evidence lookup (that's where
-                            // the typechecker recorded it), not the App's span.
+                            let occ = trait_occurrences.entry(trait_name).or_insert(0);
                             if let Some(dict_expr) =
-                                self.resolve_dict(trait_name, func.id, func.span)
+                                self.resolve_dict_nth(trait_name, func.id, func.span, *occ)
                             {
                                 result = Expr::synth(
                                     span,
@@ -645,6 +648,7 @@ impl Elaborator {
                                     },
                                 );
                             }
+                            *occ += 1;
                         }
                         return Expr::synth(
                             span,
@@ -686,9 +690,11 @@ impl Elaborator {
                     if let Some(dict_param_info) = self.fun_dict_params.get(&qualified).cloned() {
                         let elab_arg = self.elaborate_expr(arg);
                         let mut result: Expr = func.as_ref().clone();
+                        let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                         for (trait_name, _type_var) in &dict_param_info {
+                            let occ = trait_occurrences.entry(trait_name).or_insert(0);
                             if let Some(dict_expr) =
-                                self.resolve_dict(trait_name, func.id, func.span)
+                                self.resolve_dict_nth(trait_name, func.id, func.span, *occ)
                             {
                                 result = Expr::synth(
                                     span,
@@ -698,6 +704,7 @@ impl Elaborator {
                                     },
                                 );
                             }
+                            *occ += 1;
                         }
                         return Expr::synth(
                             span,
@@ -1057,8 +1064,10 @@ impl Elaborator {
                 // Dict-parameterized function used as a bare value (not directly applied).
                 if let Some(dict_param_info) = self.fun_dict_params.get(&qualified).cloned() {
                     let mut result: Expr = expr.clone();
+                    let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                     for (trait_name, _type_var) in &dict_param_info {
-                        if let Some(dict_expr) = self.resolve_dict(trait_name, node_id, span) {
+                        let occ = trait_occurrences.entry(trait_name).or_insert(0);
+                        if let Some(dict_expr) = self.resolve_dict_nth(trait_name, node_id, span, *occ) {
                             result = Expr::synth(
                                 span,
                                 ExprKind::App {
@@ -1067,6 +1076,7 @@ impl Elaborator {
                                 },
                             );
                         }
+                        *occ += 1;
                     }
                     return result;
                 }
@@ -1103,9 +1113,11 @@ impl Elaborator {
                         self.handler_dict_params.get(handler_name).cloned()
                     {
                         let mut stmts: Vec<Annotated<Stmt>> = Vec::new();
+                        let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                         for (trait_name, type_var) in &dict_param_info {
+                            let occ = trait_occurrences.entry(trait_name).or_insert(0);
                             let dict_var = format!("__dict_{}_{}", trait_name, type_var);
-                            if let Some(dict_expr) = self.resolve_dict(trait_name, node_id, span) {
+                            if let Some(dict_expr) = self.resolve_dict_nth(trait_name, node_id, span, *occ) {
                                 stmts.push(Annotated::bare(Stmt::Let {
                                     pattern: Pat::Var {
                                         id: NodeId::fresh(),
@@ -1118,6 +1130,7 @@ impl Elaborator {
                                     span,
                                 }));
                             }
+                            *occ += 1;
                         }
                         if stmts.is_empty() {
                             with_expr
@@ -1326,10 +1339,29 @@ impl Elaborator {
         node_id: crate::ast::NodeId,
         span: Span,
     ) -> Option<Expr> {
+        self.resolve_dict_nth(trait_name, node_id, span, 0)
+    }
+
+    /// Resolve the `occurrence`-th evidence entry for `trait_name` at `node_id`.
+    /// When a function has multiple where-clause bounds for the same trait
+    /// (e.g. `where {a: Debug, b: Debug}`), each dict param needs a different
+    /// evidence entry. The occurrence index selects which one.
+    fn resolve_dict_nth(
+        &self,
+        trait_name: &str,
+        node_id: crate::ast::NodeId,
+        span: Span,
+        occurrence: usize,
+    ) -> Option<Expr> {
         // Check if we have evidence for this node
         if let Some(evidence_list) = self.evidence_by_node.get(&node_id) {
+            let mut count = 0;
             for ev in evidence_list {
                 if ev.trait_name == trait_name {
+                    if count < occurrence {
+                        count += 1;
+                        continue;
+                    }
                     return match &ev.resolved_type {
                         Some((type_name, args)) => {
                             // Concrete type: build the dict via dict_for_type,
