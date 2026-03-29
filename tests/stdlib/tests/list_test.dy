@@ -1,4 +1,4 @@
-import Std.Test (describe, test, assert_eq, assert_true, assert_false, assert_just, assert_nothing)
+import Std.Test (describe, test, assert_eq, assert_true, assert_false, assert_just, assert_nothing, assert_panics)
 import Std.List as List
 
 describe "List" {
@@ -6,6 +6,10 @@ describe "List" {
   describe "head" {
     test "returns first element" {
       assert_eq (List.head [1, 2, 3]) 1
+    }
+
+    test "panics on empty list" {
+      assert_panics (fun () -> List.head [])
     }
   }
 
@@ -17,6 +21,10 @@ describe "List" {
     test "single element gives empty" {
       assert_eq (List.tail [1]) []
     }
+
+    test "panics on empty list" {
+      assert_panics (fun () -> List.tail [])
+    }
   }
 
   describe "last" {
@@ -26,6 +34,10 @@ describe "List" {
 
     test "single element" {
       assert_eq (List.last [42]) 42
+    }
+
+    test "panics on empty list" {
+      assert_panics (fun () -> List.last [])
     }
   }
 

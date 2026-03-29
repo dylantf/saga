@@ -98,6 +98,7 @@ impl Checker {
             );
         }
 
+
         // List constructors
         let a = self.fresh_var();
         let a_id = match &a {

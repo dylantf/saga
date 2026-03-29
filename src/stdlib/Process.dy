@@ -10,3 +10,9 @@ pub fun exit : (code: Int) -> a
 #@ This is equivalent to init:stop/1.
 @external("erlang", "init", "stop")
 pub fun shutdown : (code: Int) -> a
+
+#@ Run a function and recover if it panics.
+#@ Returns Ok(value) on success, Err(message) if the function panicked.
+#@ Panics still crash the program by default — this is an opt-in recovery boundary.
+@builtin
+pub fun catch_panic : (f: Unit -> a needs {..e}) -> Result a String needs {..e}

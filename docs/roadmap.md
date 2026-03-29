@@ -275,7 +275,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
   - [x] Exit code 1 on test failure (for CI)
   - [x] Test filtering (`dylang test --filter "name"`)
   - [x] `only` (run a single test, ignore others)
-  - [ ] `assert_throws` / `assert_fails` (test that an effect or panic is raised)
+  - [x] `assert_panics` (test that a panic is raised, via `catch_panic` builtin)
   - [ ] Test timing (suite duration)
 - [ ] Formatter
   - [x] Wadler-Lindig Doc algebra with proper `Nest`/`Group` indentation
@@ -292,6 +292,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [ ] Span representation is inconsistent across the AST: some nodes use named `span: Span` fields, others use `(String, Span)` tuples, others embed spans in parent structs. Consider standardizing, e.g. a `Name { value: String, span: Span }` struct for the common "identifier with location" pattern.
 - [ ] Remove `emit` usage in integration tests. It skips typechecking and therefore elaboration cannot be performed. It should be replaced with emit_elaborated usage instead.
 - [ ] Union-find for substitution: replace `HashMap<u32, Type>` with union-find + path compression. Drop-in replacement inside `Substitution`, no interface changes. Current recursive follow-through is O(path length) per application; union-find makes it nearly O(1) amortized. Not urgent but avoids scaling issues as programs grow.
+- [ ] Builtin resolution via ResolutionMap: builtins (panic, todo, print, catch_panic, etc.) are currently matched by string name in the lowerer, with separate checks for qualified and unqualified calls. The resolution map should tag these so the lowerer can check a single `Builtin { name, .. }` variant instead of string matching in multiple places.
 
 ## Out of Scope (?)
 

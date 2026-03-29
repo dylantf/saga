@@ -4,9 +4,10 @@
 //! Remaining:
 //! - print/println/eprint/eprintln: wired to io:format
 //! - dbg: debug dict extraction + stderr printing + value passthrough
+//! - catch_panic: Core Erlang try/catch with CPS isolation
 
 use super::Lowerer;
-use crate::codegen::cerl::{CExpr, CLit};
+use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::util::cerl_call;
 
@@ -98,5 +99,66 @@ impl Lowerer<'_> {
                 )),
             )),
         ))
+    }
+
+    /// Lower `catch_panic thunk` to a Core Erlang try/catch.
+    /// Clears the CPS return continuation so the thunk returns its value
+    /// normally instead of tail-calling into the caller's continuation.
+    pub(super) fn lower_catch_panic(&mut self, thunk_expr: &crate::ast::Expr) -> CExpr {
+        let saved_return_k = self.current_return_k.take();
+        let saved_pending_k = self.pending_callee_return_k.take();
+        let thunk = self.lower_expr(thunk_expr);
+        self.current_return_k = saved_return_k;
+        self.pending_callee_return_k = saved_pending_k;
+
+        let applied = CExpr::Apply(Box::new(thunk), vec![]);
+        let ok_var = self.fresh();
+        let class_var = self.fresh();
+        let reason_var = self.fresh();
+        let trace_var = self.fresh();
+        let msg_var = self.fresh();
+
+        let ok_body = CExpr::Tuple(vec![
+            CExpr::Lit(CLit::Atom("ok".into())),
+            CExpr::Var(ok_var.clone()),
+        ]);
+
+        let catch_body = CExpr::Case(
+            Box::new(CExpr::Var(reason_var.clone())),
+            vec![
+                CArm {
+                    pat: CPat::Tuple(vec![
+                        CPat::Lit(CLit::Atom("dylang_panic".into())),
+                        CPat::Var(msg_var.clone()),
+                    ]),
+                    guard: None,
+                    body: CExpr::Tuple(vec![
+                        CExpr::Lit(CLit::Atom("error".into())),
+                        CExpr::Var(msg_var),
+                    ]),
+                },
+                CArm {
+                    pat: CPat::Wildcard,
+                    guard: None,
+                    body: cerl_call(
+                        "erlang",
+                        "raise",
+                        vec![
+                            CExpr::Var(class_var.clone()),
+                            CExpr::Var(reason_var.clone()),
+                            CExpr::Var(trace_var.clone()),
+                        ],
+                    ),
+                },
+            ],
+        );
+
+        CExpr::Try {
+            expr: Box::new(applied),
+            ok_var,
+            ok_body: Box::new(ok_body),
+            catch_vars: (class_var, reason_var, trace_var),
+            catch_body: Box::new(catch_body),
+        }
     }
 }

@@ -261,7 +261,7 @@ pub fn run_erlc(build_dir: &Path) {
 /// Run a compiled module on the BEAM.
 pub fn exec_erl(build_dir: &Path, entry_module: &str) {
     let eval = format!(
-        "try '{}':main() of _ -> init:stop() catch C:R:S -> io:format(\"~p: ~p~n~p~n\", [C,R,S]), init:stop(1) end",
+        "try '{}':main() of _ -> init:stop() catch error:{{dylang_panic, Msg}} -> io:format(standard_error, \"~ts~n\", [Msg]), init:stop(1); C:R:S -> io:format(\"~p: ~p~n~p~n\", [C,R,S]), init:stop(1) end",
         entry_module
     );
     let status = std::process::Command::new("erl")

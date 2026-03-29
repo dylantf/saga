@@ -791,6 +791,12 @@ impl<'a> Lowerer<'a> {
 
                 // Check for a qualified call: App(QualifiedName { module, name }, arg1, ...)
                 // e.g. `Math.abs x` -> call 'math':'abs'(X)
+                // Intercept Process.catch_panic as a builtin before general qualified call handling.
+                if let Some((_module, func_name, _head, args)) = collect_qualified_call(expr)
+                    && func_name == "catch_panic" && args.len() == 1
+                {
+                    return self.lower_catch_panic(args[0]);
+                }
                 if let Some((module, func_name, head, args)) = collect_qualified_call(expr) {
                     return self.lower_qualified_call(module, func_name, head, &args);
                 }
@@ -810,16 +816,16 @@ impl<'a> Lowerer<'a> {
                     }
                 }
 
-                // Lower `panic msg` / `todo ()` to stderr print + erlang:halt(1)
+                // Lower `panic msg` / `todo ()` to erlang:error({dylang_panic, Msg})
+                // The entry point wrapper catches this and prints nicely + exits.
+                // catch_panic can also intercept it for recovery boundaries.
                 if let Some((func_name, _head, args)) = collect_fun_call(expr)
                     && (func_name == "panic" || func_name == "todo")
                     && args.len() == 1
                 {
                     let v = self.fresh();
                     let prefixed = self.fresh();
-                    let dummy = self.fresh();
                     let (arg, prepend) = if func_name == "todo" {
-                        // todo () - just print "todo: not implemented"
                         let arg = CExpr::Lit(CLit::Str("not implemented".into()));
                         let prep = cerl_call(
                             "erlang",
@@ -831,7 +837,6 @@ impl<'a> Lowerer<'a> {
                         );
                         (arg, prep)
                     } else {
-                        // panic msg - prepend "panic: " to the message
                         let arg = self.lower_expr(args[0]);
                         let prep = cerl_call(
                             "erlang",
@@ -843,29 +848,27 @@ impl<'a> Lowerer<'a> {
                         );
                         (arg, prep)
                     };
-                    // io:format(standard_error, "~ts~n", [Msg])
-                    let print_stderr = cerl_call(
-                        "io",
-                        "format",
-                        vec![
-                            CExpr::Lit(CLit::Atom("standard_error".into())),
-                            CExpr::Lit(CLit::Str("~ts~n".into())),
-                            CExpr::Cons(
-                                Box::new(CExpr::Var(prefixed.clone())),
-                                Box::new(CExpr::Nil),
-                            ),
-                        ],
+                    let error = cerl_call(
+                        "erlang",
+                        "error",
+                        vec![CExpr::Tuple(vec![
+                            CExpr::Lit(CLit::Atom("dylang_panic".into())),
+                            CExpr::Var(prefixed.clone()),
+                        ])],
                     );
-                    let halt = cerl_call("erlang", "halt", vec![CExpr::Lit(CLit::Int(1))]);
                     return CExpr::Let(
                         v,
                         Box::new(arg),
-                        Box::new(CExpr::Let(
-                            prefixed,
-                            Box::new(prepend),
-                            Box::new(CExpr::Let(dummy, Box::new(print_stderr), Box::new(halt))),
-                        )),
+                        Box::new(CExpr::Let(prefixed, Box::new(prepend), Box::new(error))),
                     );
+                }
+
+                // Lower `catch_panic thunk` to a Core Erlang try/catch (unqualified call).
+                if let Some((func_name, _head, args)) = collect_fun_call(expr)
+                    && func_name == "catch_panic"
+                    && args.len() == 1
+                {
+                    return self.lower_catch_panic(args[0]);
                 }
 
                 // Check for a saturated call to a known top-level function.

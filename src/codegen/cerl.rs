@@ -42,6 +42,14 @@ pub enum CExpr {
     LetRec(Vec<(String, usize, CExpr)>, Box<CExpr>),
     /// `receive <Arms> after <Timeout> -> <TimeoutBody>`
     Receive(Vec<CArm>, Box<CExpr>, Box<CExpr>),
+    /// `try Expr of OkVar -> OkBody catch <Class, Reason, Trace> -> CatchBody`
+    Try {
+        expr: Box<CExpr>,
+        ok_var: String,
+        ok_body: Box<CExpr>,
+        catch_vars: (String, String, String), // (class, reason, trace)
+        catch_body: Box<CExpr>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +138,11 @@ impl CExpr {
                 }
                 timeout.collect_handle_refs(out);
                 timeout_body.collect_handle_refs(out);
+            }
+            CExpr::Try { expr, ok_body, catch_body, .. } => {
+                expr.collect_handle_refs(out);
+                ok_body.collect_handle_refs(out);
+                catch_body.collect_handle_refs(out);
             }
         }
     }
@@ -342,6 +355,26 @@ impl Printer {
                     });
                 });
                 self.newline();
+            }
+
+            CExpr::Try { expr, ok_var, ok_body, catch_vars: (class, reason, trace), catch_body } => {
+                self.push("try");
+                self.with_indent(2, |p| {
+                    p.newline();
+                    p.print_expr(expr);
+                });
+                self.newline();
+                self.push(&format!("of <{}> ->", ok_var));
+                self.with_indent(2, |p| {
+                    p.newline();
+                    p.print_expr(ok_body);
+                });
+                self.newline();
+                self.push(&format!("catch <{}, {}, {}> ->", class, reason, trace));
+                self.with_indent(2, |p| {
+                    p.newline();
+                    p.print_expr(catch_body);
+                });
             }
         }
     }

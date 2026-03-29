@@ -36,8 +36,7 @@ atan2(Y, X) ->
 %% Internal helpers
 
 panic(Msg) ->
-    io:format(standard_error, "panic: ~ts~n", [Msg]),
-    erlang:halt(1).
+    erlang:error({dylang_panic, "panic: " ++ Msg}).
 
 format_num(X) when is_float(X) -> float_to_list(X, [short]);
 format_num(X) when is_integer(X) -> integer_to_list(X);
