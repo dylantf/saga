@@ -27,10 +27,10 @@
 
 ## Maybe
 
-- [ ] is_just / is_nothing - Boolean checks.
-- [ ] unwrap - Crash on Nothing (for when you know it's Just). Complements unwrap_or.
-- [ ] or_else - Try a fallback Maybe.
-- [ ] to_result - Convert Maybe a to Result a e given an error.
+- [x] is_just / is_nothing - Boolean checks.
+- [x] unwrap - Crash on Nothing (for when you know it's Just). Complements unwrap_or.
+- [x] or_else - Try a fallback Maybe.
+- [x] to_result - Convert Maybe a to Result a e given an error.
 
 ## Result
 

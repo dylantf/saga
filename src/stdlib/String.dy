@@ -10,50 +10,81 @@ impl Debug for String {
   debug x = "\"" <> x <> "\""
 }
 
+#@ Returns the number of grapheme clusters in the string.
 @external("erlang", "string", "length")
 pub fun length : (s: String) -> Int
 
-@external("erlang", "string", "to_graphemes")
+#@ Returns True if the string is empty.
+pub fun is_empty : String -> Bool
+is_empty s = length s == 0
+
+#@ Splits a string into its individual grapheme clusters.
+@external("erlang", "std_string_bridge", "graphemes")
 pub fun graphemes : (s: String) -> List String
 
+#@ Removes leading and trailing whitespace.
 @external("erlang", "string", "trim")
 pub fun trim : (s: String) -> String
 
+#@ Converts all characters to lowercase.
 @external("erlang", "string", "lowercase")
 pub fun to_lower : (s: String) -> String
 
+#@ Converts all characters to uppercase.
 @external("erlang", "string", "uppercase")
 pub fun to_upper : (s: String) -> String
 
+#@ Reverses the string.
 @external("erlang", "string", "reverse")
 pub fun reverse : (s: String) -> String
 
+#@ Extracts a substring starting at the given index for the given length.
 @external("erlang", "string", "slice")
 pub fun slice : (s: String) -> (start: Int) -> (len: Int) -> String
 
+#@ Finds the first occurrence of a substring, returning it and the rest.
 @external("erlang", "std_string_bridge", "find")
 pub fun find : (s: String) -> (sub: String) -> Maybe String
 
+#@ Strips a prefix from the string, returning the rest or Nothing.
 @external("erlang", "std_string_bridge", "strip_prefix")
 pub fun strip_prefix : (s: String) -> (prefix: String) -> Maybe String
 
+#@ Returns True if the string contains the substring.
 @external("erlang", "std_string_bridge", "contains")
 pub fun contains : (s: String) -> (sub: String) -> Bool
 
+#@ Returns True if the string starts with the given prefix.
 @external("erlang", "std_string_bridge", "starts_with")
 pub fun starts_with : (s: String) -> (prefix: String) -> Bool
 
+#@ Returns True if the string ends with the given suffix.
 @external("erlang", "std_string_bridge", "ends_with")
 pub fun ends_with : (s: String) -> (suffix: String) -> Bool
 
+#@ Splits a string by a separator into a list of parts.
 @external("erlang", "std_string_bridge", "split")
 pub fun split : (s: String) -> (sep: String) -> List String
 
+#@ Replaces the first occurrence of a pattern with a replacement.
+@external("erlang", "std_string_bridge", "replace")
+pub fun replace : (s: String) -> (pattern: String) -> (replacement: String) -> String
+
+#@ Replaces all occurrences of a pattern with a replacement.
+@external("erlang", "std_string_bridge", "replace_all")
+pub fun replace_all : (s: String) -> (pattern: String) -> (replacement: String) -> String
+
+#@ Joins a list of strings with a separator.
+@external("erlang", "std_string_bridge", "join")
+pub fun join : (sep: String) -> (parts: List String) -> String
+
+#@ Repeats a string n times.
 pub fun repeat : (s: String) -> (n: Int) -> String
 repeat s n =
   if n <= 0 then ""
   else s <> repeat s (n - 1)
 
+#@ Pads a string on the left to the given width using the fill string.
 pub fun pad_left : (s: String) -> (width: Int) -> (fill: String) -> String
 pad_left s width fill = {
   let pad = width - length s
@@ -61,6 +92,7 @@ pad_left s width fill = {
   else repeat fill pad <> s
 }
 
+#@ Pads a string on the right to the given width using the fill string.
 pub fun pad_right : (s: String) -> (width: Int) -> (fill: String) -> String
 pad_right s width fill = {
   let pad = width - length s

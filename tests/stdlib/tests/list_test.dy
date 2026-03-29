@@ -347,14 +347,4 @@ describe "List" {
     }
 
   }
-
-  describe "join and flatten" {
-    test "join intersperses strings" {
-      assert_eq (List.join ", " ["a", "b", "c"]) ["a", ", ", "b", ", ", "c"]
-    }
-
-    test "flatten joins string list" {
-      assert_eq (List.flatten (List.join ", " ["a", "b", "c"])) "a, b, c"
-    }
-  }
 }

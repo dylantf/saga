@@ -3,7 +3,14 @@ module Std.Dict
 import Std.List as List
 
 impl Debug for Dict k v where {k: Debug, v: Debug} {
-  debug d = "{" <> List.flatten (List.join ", " (List.map (fun (k, v) -> debug k <> ": " <> debug v) (to_list d))) <> "}"
+  debug d = "{" <> debug_entries (to_list d) <> "}"
+}
+
+fun debug_entries : List (k, v) -> String where {k: Debug, v: Debug}
+debug_entries xs = case xs {
+  Nil -> ""
+  [(k, v)] -> debug k <> ": " <> debug v
+  (k, v) :: t -> debug k <> ": " <> debug v <> ", " <> debug_entries t
 }
 
 #@ Creates an empty dictionary.

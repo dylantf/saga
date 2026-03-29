@@ -1,10 +1,16 @@
 module Std.List
 import Std.Base (Ordering)
-
 import Std.Maybe (Maybe)
 
 impl Debug for List a where {a: Debug} {
-  debug xs = "[" <> flatten (join ", " (map debug xs)) <> "]"
+  debug xs = "[" <> debug_join (map debug xs) <> "]"
+}
+
+fun debug_join : List String -> String
+debug_join xs = case xs {
+  Nil -> ""
+  [x] -> x
+  h :: t -> h <> ", " <> debug_join t
 }
 
 #@ Returns the first element of a list. Panics on empty list.
@@ -70,14 +76,6 @@ pub fun append : (xs: List a) -> (ys: List a) -> List a
 #@ Maps a function over a list and flattens the results by one level.
 @external("erlang", "lists", "flatmap")
 pub fun flat_map : (f: a -> List b) -> (xs: List a) -> List b
-
-#@ Intersperses a separator string between each element of a string list.
-@external("erlang", "lists", "join")
-pub fun join : (separator: String) -> (xs: List String) -> List String
-
-#@ Concatenates a list of strings into a single string.
-@external("erlang", "lists", "flatten")
-pub fun flatten : (xs: List String) -> String
 
 #@ Returns the first n elements of a list.
 pub fun take : (n: Int) -> (xs: List a) -> List a
