@@ -41,12 +41,12 @@
 
 ## Dict
 
-- [ ] map - Transform values.
-- [ ] filter - Filter entries.
-- [ ] fold - Fold over entries.
-- [ ] merge - Combine two dicts.
-- [ ] is_empty
-- [ ] update - Update value at key with a function.
+- [x] map - Transform values.
+- [x] filter - Filter entries.
+- [x] fold - Fold over entries.
+- [x] merge - Combine two dicts.
+- [x] is_empty
+- [x] update - Update value at key with a function.
 
 # Medium Priority - Missing Modules
 
