@@ -1,66 +1,103 @@
 module Std.List
+import Std.Base (Ordering)
+
+import Std.Maybe (Maybe)
 
 impl Debug for List a where {a: Debug} {
   debug xs = "[" <> flatten (join ", " (map debug xs)) <> "]"
 }
 
+#@ Returns the first element of a list. Panics on empty list.
 pub fun head : List a -> a
 head xs = case xs {
   h :: _ -> h
   Nil -> panic "head: empty list"
 }
 
+#@ Returns all elements after the first. Panics on empty list.
 pub fun tail : List a -> List a
 tail xs = case xs {
   _ :: t -> t
   Nil -> panic "tail: empty list"
 }
 
+#@ Returns the last element of a list. Panics on empty list.
+pub fun last : List a -> a
+last xs = case xs {
+  [x] -> x
+  _ :: t -> last t
+  Nil -> panic "last: empty list"
+}
+
+#@ Returns the number of elements in a list.
 @external("erlang", "erlang", "length")
 pub fun length : (xs: List a) -> Int
 
+#@ Returns True if the list has no elements.
+pub fun is_empty : List a -> Bool
+is_empty xs = case xs {
+  Nil -> True
+  _ -> False
+}
+
+#@ Applies a function to every element, returning a new list of results.
 @external("erlang", "lists", "map")
 pub fun map : (f: a -> b) -> (xs: List a) -> List b
 
+#@ Returns a list of elements for which the predicate returns True.
 @external("erlang", "lists", "filter")
 pub fun filter : (pred: a -> Bool) -> (xs: List a) -> List a
 
+#@ Left fold. Applies f to the accumulator and each element, left to right.
 pub fun foldl : (f: b -> a -> b) -> (acc: b) -> (xs: List a) -> b
 foldl f acc xs = case xs {
   Nil -> acc
   h :: t -> foldl f (f acc h) t
 }
 
+#@ Right fold. Applies f to each element and the accumulator, right to left.
 @external("erlang", "lists", "foldr")
 pub fun foldr : (f: a -> b -> b) -> (acc: b) -> (xs: List a) -> b
 
+#@ Returns a list with elements in reverse order.
 @external("erlang", "lists", "reverse")
 pub fun reverse : (xs: List a) -> List a
 
+#@ Concatenates two lists.
 @external("erlang", "lists", "append")
 pub fun append : (xs: List a) -> (ys: List a) -> List a
 
+#@ Maps a function over a list and flattens the results by one level.
 @external("erlang", "lists", "flatmap")
 pub fun flat_map : (f: a -> List b) -> (xs: List a) -> List b
 
+#@ Intersperses a separator string between each element of a string list.
 @external("erlang", "lists", "join")
 pub fun join : (separator: String) -> (xs: List String) -> List String
 
+#@ Concatenates a list of strings into a single string.
 @external("erlang", "lists", "flatten")
 pub fun flatten : (xs: List String) -> String
 
+#@ Returns the first n elements of a list.
 pub fun take : (n: Int) -> (xs: List a) -> List a
-take n xs = if n <= 0 then [] else case xs {
-  Nil -> []
-  h :: t -> h :: take (n - 1) t
-}
+take n xs =
+  if n <= 0 then []
+  else case xs {
+    Nil -> []
+    h :: t -> h :: take (n - 1) t
+  }
 
+#@ Drops the first n elements of a list and returns the rest.
 pub fun drop : (n: Int) -> (xs: List a) -> List a
-drop n xs = if n <= 0 then xs else case xs {
-  Nil -> []
-  _ :: t -> drop (n - 1) t
-}
+drop n xs =
+  if n <= 0 then xs
+  else case xs {
+    Nil -> []
+    _ :: t -> drop (n - 1) t
+  }
 
+#@ Pairs up elements from two lists. Stops at the shorter list.
 pub fun zip : (xs: List a) -> (ys: List b) -> List (a, b)
 zip xs ys = case xs {
   Nil -> []
@@ -70,18 +107,99 @@ zip xs ys = case xs {
   }
 }
 
+#@ Returns True if any element satisfies the predicate.
 pub fun any : (pred: a -> Bool) -> (xs: List a) -> Bool
 any pred xs = case xs {
   Nil -> False
   h :: t -> if pred h then True else any pred t
 }
 
+#@ Returns True if all elements satisfy the predicate.
 pub fun all : (pred: a -> Bool) -> (xs: List a) -> Bool
 all pred xs = case xs {
   Nil -> True
   h :: t -> if pred h then all pred t else False
 }
 
+#@ Creates a list of integers from start to end, inclusive.
 pub fun range : (start: Int) -> (end: Int) -> List Int
 range start end = if start > end then [] else start :: range (start + 1) end
 
+# --- Sorting ---
+
+#@ Sorts a list in ascending order using the Ord instance.
+pub fun sort : (xs: List a) -> List a where {a: Ord}
+sort xs = sort_with compare xs
+
+#@ Sorts a list using a custom comparison function.
+@external("erlang", "std_list_bridge", "sort_with")
+pub fun sort_with : (cmp: a -> a -> Ordering) -> (xs: List a) -> List a
+
+#@ Sorts a list by comparing the results of a key function.
+@external("erlang", "std_list_bridge", "sort_by")
+pub fun sort_by : (key: a -> b) -> (xs: List a) -> List a
+
+# --- Search & Access ---
+
+#@ Returns the first element matching the predicate, or Nothing.
+pub fun find : (pred: a -> Bool) -> (xs: List a) -> Maybe a
+find pred xs = case xs {
+  Nil -> Nothing
+  h :: t -> if pred h then Just h else find pred t
+}
+
+#@ Returns True if the element is in the list.
+@external("erlang", "lists", "member")
+pub fun contains : (elem: a) -> (xs: List a) -> Bool where {a: Eq}
+
+#@ Returns the element at the given 0-based index, or Nothing if out of bounds.
+@external("erlang", "std_list_bridge", "nth")
+pub fun nth : (n: Int) -> (xs: List a) -> Maybe a
+
+# --- Transformations ---
+
+#@ Combines two lists element-wise using a function. Stops at the shorter list.
+pub fun zip_with : (f: a -> b -> c) -> (xs: List a) -> (ys: List b) -> List c
+zip_with f xs ys = case xs {
+  Nil -> []
+  x :: xt -> case ys {
+    Nil -> []
+    y :: yt -> f x y :: zip_with f xt yt
+  }
+}
+
+#@ Transforms a list of pairs into a pair of lists.
+@external("erlang", "lists", "unzip")
+pub fun unzip : (xs: List (a, b)) -> (List a, List b)
+
+#@ Splits a list into two: elements that satisfy the predicate and those that don't.
+@external("erlang", "lists", "partition")
+pub fun partition : (pred: a -> Bool) -> (xs: List a) -> (List a, List a)
+
+#@ Pairs each element with its 0-based index.
+@external("erlang", "std_list_bridge", "enumerate")
+pub fun enumerate : (xs: List a) -> List (Int, a)
+
+#@ Inserts a separator between each element of a list.
+pub fun intersperse : (sep: a) -> (xs: List a) -> List a
+intersperse sep xs = case xs {
+  Nil -> []
+  [x] -> [x]
+  h :: t -> h :: sep :: intersperse sep t
+}
+
+#@ Removes duplicate elements, preserving the first occurrence of each.
+pub fun unique : (xs: List a) -> List a where {a: Eq}
+unique xs = unique_go [] xs
+
+fun unique_go : List a -> List a -> List a where {a: Eq}
+unique_go seen remaining = case remaining {
+  Nil -> reverse seen
+  h :: t ->
+    if contains h seen then unique_go seen t
+    else unique_go (h :: seen) t
+}
+
+#@ Flattens a list of lists into a single list.
+@external("erlang", "lists", "append")
+pub fun concat : (xss: List (List a)) -> List a

@@ -191,6 +191,36 @@ impl Checker {
 
         // --- Dict type ---
 
+        // Eq for List a: requires Eq on a
+        self.trait_state.impls.insert(
+            ("Eq".into(), vec![], "List".into()),
+            ImplInfo {
+                param_constraints: vec![("Eq".into(), 0)],
+                trait_type_args: vec![],
+                span: None,
+            },
+        );
+
+        // Eq for Maybe a: requires Eq on a
+        self.trait_state.impls.insert(
+            ("Eq".into(), vec![], "Maybe".into()),
+            ImplInfo {
+                param_constraints: vec![("Eq".into(), 0)],
+                trait_type_args: vec![],
+                span: None,
+            },
+        );
+
+        // Eq for Result a b: requires Eq on both a and b
+        self.trait_state.impls.insert(
+            ("Eq".into(), vec![], "Result".into()),
+            ImplInfo {
+                param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],
+                trait_type_args: vec![],
+                span: None,
+            },
+        );
+
         // Eq for Dict k v: requires Eq on both k and v
         self.trait_state.impls.insert(
             ("Eq".into(), vec![], "Dict".into()),
