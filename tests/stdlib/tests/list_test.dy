@@ -1,4 +1,4 @@
-import Std.Test (describe, test, assert_eq)
+import Std.Test (describe, test, assert_eq, assert_true, assert_false, assert_just, assert_nothing)
 import Std.List as List
 
 describe "List" {
@@ -41,11 +41,11 @@ describe "List" {
 
   describe "is_empty" {
     test "empty list" {
-      assert_eq (List.is_empty []) True
+      assert_true (List.is_empty [])
     }
 
     test "non-empty list" {
-      assert_eq (List.is_empty [1]) False
+      assert_false (List.is_empty [1])
     }
   }
 
@@ -148,29 +148,29 @@ describe "List" {
 
   describe "any" {
     test "true when predicate matches" {
-      assert_eq (List.any (fun x -> x > 3) [1, 2, 3, 4]) True
+      assert_true (List.any (fun x -> x > 3) [1, 2, 3, 4])
     }
 
     test "false when no match" {
-      assert_eq (List.any (fun x -> x > 10) [1, 2, 3]) False
+      assert_false (List.any (fun x -> x > 10) [1, 2, 3])
     }
 
     test "empty list" {
-      assert_eq (List.any (fun x -> x > 0) []) False
+      assert_false (List.any (fun x -> x > 0) [])
     }
   }
 
   describe "all" {
     test "true when all match" {
-      assert_eq (List.all (fun x -> x > 0) [1, 2, 3]) True
+      assert_true (List.all (fun x -> x > 0) [1, 2, 3])
     }
 
     test "false when one fails" {
-      assert_eq (List.all (fun x -> x > 2) [1, 2, 3]) False
+      assert_false (List.all (fun x -> x > 2) [1, 2, 3])
     }
 
     test "empty list" {
-      assert_eq (List.all (fun x -> x > 0) []) True
+      assert_true (List.all (fun x -> x > 0) [])
     }
   }
 
@@ -222,25 +222,25 @@ describe "List" {
     }
 
     test "returns Nothing when not found" {
-      assert_eq (List.find (fun x -> x > 100) [1, 2, 3]) Nothing
+      assert_nothing (List.find (fun x -> x > 100) [1, 2, 3])
     }
 
     test "empty list" {
-      assert_eq (List.find (fun x -> x > 0) []) Nothing
+      assert_nothing (List.find (fun x -> x > 0) [])
     }
   }
 
   describe "contains" {
     test "true when element present" {
-      assert_eq (List.contains 3 [1, 2, 3, 4]) True
+      assert_true (List.contains 3 [1, 2, 3, 4])
     }
 
     test "false when element absent" {
-      assert_eq (List.contains 5 [1, 2, 3, 4]) False
+      assert_false (List.contains 5 [1, 2, 3, 4])
     }
 
     test "empty list" {
-      assert_eq (List.contains 1 []) False
+      assert_false (List.contains 1 [])
     }
   }
 
@@ -254,11 +254,11 @@ describe "List" {
     }
 
     test "out of bounds returns Nothing" {
-      assert_eq (List.nth 5 [10, 20, 30]) Nothing
+      assert_nothing (List.nth 5 [10, 20, 30])
     }
 
     test "negative index returns Nothing" {
-      assert_eq (List.nth (-1) [10, 20, 30]) Nothing
+      assert_nothing (List.nth (-1) [10, 20, 30])
     }
   }
 

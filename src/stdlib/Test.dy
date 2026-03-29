@@ -190,3 +190,39 @@ assert_gt a b =
 pub fun assert_lt : (a: x) -> (b: x) -> Unit needs {Assert} where {x: Debug + Ord}
 assert_lt a b =
   assert! (a < b) ("Expected " <> debug a <> " < " <> debug b)
+
+#@ Assert that a boolean value is True.
+pub fun assert_true : Bool -> Unit needs {Assert}
+assert_true v = assert! v "Expected True, got False"
+
+#@ Assert that a boolean value is False.
+pub fun assert_false : Bool -> Unit needs {Assert}
+assert_false v = assert! (v == False) "Expected False, got True"
+
+#@ Assert that a Maybe value is Just (contains a value).
+pub fun assert_just : Maybe a -> Unit needs {Assert} where {a: Debug}
+assert_just m = case m {
+  Just(_) -> assert! True ""
+  Nothing -> assert! False "Expected Just(_), got Nothing"
+}
+
+#@ Assert that a Maybe value is Nothing.
+pub fun assert_nothing : Maybe a -> Unit needs {Assert}
+assert_nothing m = case m {
+  Nothing -> assert! True ""
+  Just(_) -> assert! False "Expected Nothing, got Just(_)"
+}
+
+#@ Assert that a Result value is Ok.
+pub fun assert_ok : Result a b -> Unit needs {Assert} where {b: Debug}
+assert_ok r = case r {
+  Ok(_) -> assert! True ""
+  Err(e) -> assert! False $"Expected Ok(_), got Err({debug e})"
+}
+
+#@ Assert that a Result value is Err.
+pub fun assert_err : Result a b -> Unit needs {Assert} where {a: Debug}
+assert_err r = case r {
+  Ok(v) -> assert! False $"Expected Err(_), got Ok({debug v})"
+  Err(_) -> assert! True ""
+}
