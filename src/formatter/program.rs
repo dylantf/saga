@@ -251,6 +251,7 @@ fn format_decl(decl: &Decl) -> Doc {
             dangling_trivia,
         ),
         Decl::ImplDef { .. } => format_impl_def(decl),
+        Decl::TopExpr { value, .. } => super::expr::format_expr(value),
         Decl::DictConstructor { .. } => Doc::Nil,
     }
 }

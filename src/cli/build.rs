@@ -1,5 +1,5 @@
 use dylang::{
-    ast, codegen, derive, desugar, elaborate, lexer, parser, project_config, typechecker,
+    ast, codegen, derive, desugar, elaborate, lexer, parser, project_config, token, typechecker,
 };
 use project_config::ProjectConfig;
 
@@ -49,6 +49,9 @@ pub fn parse_and_typecheck_inner(
     };
     derive::expand_derives(&mut program);
     desugar::desugar_program(&mut program);
+    if test_mode {
+        synthesize_test_main(&mut program);
+    }
     let result = checker.check_program(&program);
     for w in result.warnings() {
         print_tc_diagnostic(source, source_path, w);
@@ -511,4 +514,125 @@ pub fn script_build_dir(file: &str, profile: &str) -> PathBuf {
         .unwrap_or(Path::new("."))
         .join("_build")
         .join(profile)
+}
+
+/// Check if a desugared Let { name: "_" } is a test/describe call.
+fn is_test_decl(decl: &ast::Decl) -> bool {
+    let ast::Decl::Let { name, value, .. } = decl else { return false };
+    if name != "_" {
+        return false;
+    }
+    // Walk App chain to find head Var
+    let mut e = value;
+    loop {
+        match &e.kind {
+            ast::ExprKind::App { func, .. } => e = func,
+            ast::ExprKind::Var { name } => {
+                return name == "test" || name == "describe";
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// If a test file has no explicit `main`, synthesize one at the AST level.
+/// Partitions declarations into top-level (functions, types, etc.) and test
+/// expressions, then wraps the test expressions in:
+///   main () = run_collected (fun () -> { <test exprs> })
+fn synthesize_test_main(program: &mut ast::Program) {
+    let has_main = program.iter().any(|d| {
+        matches!(d, ast::Decl::FunBinding { name, .. } if name == "main")
+            || matches!(d, ast::Decl::FunSignature { name, .. } if name == "main")
+    });
+    if has_main {
+        return;
+    }
+
+    let s = token::Span { start: 0, end: 0 };
+
+    let mut top_level = Vec::new();
+    let mut test_exprs = Vec::new();
+
+    for decl in std::mem::take(program) {
+        if is_test_decl(&decl) {
+            if let ast::Decl::Let { value, .. } = decl {
+                test_exprs.push(value);
+            }
+        } else {
+            top_level.push(decl);
+        }
+    }
+
+    if test_exprs.is_empty() {
+        *program = top_level;
+        return;
+    }
+
+    // Auto-import run_collected if not already imported
+    let has_run_collected = top_level.iter().any(|d| {
+        if let ast::Decl::Import { exposing: Some(items), .. } = d {
+            items.iter().any(|item| item == "run_collected")
+        } else {
+            false
+        }
+    });
+    if !has_run_collected {
+        top_level.push(ast::Decl::Import {
+            id: ast::NodeId::fresh(),
+            module_path: vec!["Std".to_string(), "Test".to_string()],
+            alias: None,
+            exposing: Some(vec!["run_collected".to_string()]),
+            span: s,
+        });
+    }
+
+    // Build: main () = run_collected (fun () -> { <test exprs> })
+    let stmts: Vec<ast::Annotated<ast::Stmt>> = test_exprs
+        .into_iter()
+        .map(|e| ast::Annotated {
+            node: ast::Stmt::Expr(e),
+            leading_trivia: vec![],
+            trailing_comment: None,
+            trailing_trivia: vec![],
+        })
+        .collect();
+
+    let block = ast::Expr::synth(s, ast::ExprKind::Block {
+        stmts,
+        dangling_trivia: vec![],
+    });
+
+    let lambda = ast::Expr::synth(s, ast::ExprKind::Lambda {
+        params: vec![ast::Pat::Lit {
+            id: ast::NodeId::fresh(),
+            value: ast::Lit::Unit,
+            span: s,
+        }],
+        body: Box::new(block),
+    });
+
+    let run_collected = ast::Expr::synth(s, ast::ExprKind::Var {
+        name: "run_collected".to_string(),
+    });
+
+    let body = ast::Expr::synth(s, ast::ExprKind::App {
+        func: Box::new(run_collected),
+        arg: Box::new(lambda),
+    });
+
+    top_level.push(ast::Decl::FunBinding {
+        id: ast::NodeId::fresh(),
+        name: "main".to_string(),
+        name_span: s,
+        params: vec![ast::Pat::Lit {
+            id: ast::NodeId::fresh(),
+            value: ast::Lit::Unit,
+            span: s,
+        }],
+        guard: None,
+        body,
+        span: s,
+    });
+
+    *program = top_level;
 }

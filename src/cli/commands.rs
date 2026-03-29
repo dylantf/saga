@@ -257,10 +257,6 @@ pub fn cmd_test(filter: Option<&str>) {
 
         let mut checker = make_checker(Some(project_root.clone()));
 
-        // If test file has no main, synthesize one:
-        // imports stay at top, everything else goes into main () = run (fun () -> { ... })
-        let source = inject_test_main(&source);
-
         let (program, _) = parse_and_typecheck_inner(&source, &source_path, &mut checker, true);
         let result = checker.to_result();
 
@@ -311,50 +307,6 @@ pub fn cmd_test(filter: Option<&str>) {
     }
 }
 
-/// If a test file has no `main` function, synthesize one by wrapping all
-/// non-import declarations in `main () = run_collected (fun () -> { ... })`.
-/// Also auto-imports Std.Test if not already imported.
-fn inject_test_main(source: &str) -> String {
-    // Check if there's already a main
-    if source.lines().any(|line| {
-        let trimmed = line.trim();
-        trimmed.starts_with("main ")
-            || trimmed.starts_with("pub fun main")
-            || trimmed.starts_with("fun main")
-    }) {
-        return source.to_string();
-    }
-
-    let mut imports = Vec::new();
-    let mut body = Vec::new();
-
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("import ") || trimmed.starts_with("module ") {
-            imports.push(line.to_string());
-        } else {
-            body.push(line.to_string());
-        }
-    }
-
-    let mut result = String::new();
-
-    result.push_str("import Std.Test (run_collected)\n");
-
-    for line in &imports {
-        result.push_str(line);
-        result.push('\n');
-    }
-
-    result.push_str("\nmain () = run_collected (fun () -> {\n");
-    for line in &body {
-        result.push_str(line);
-        result.push('\n');
-    }
-    result.push_str("})\n");
-
-    result
-}
 
 fn discover_test_files(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut files = Vec::new();

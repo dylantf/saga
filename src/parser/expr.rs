@@ -689,29 +689,17 @@ impl Parser {
             }
             Token::Ident(ref i)
                 if self.test_mode
-                    && (i == "test" || i == "describe" || i == "skip" || i == "only")
+                    && (i == "test" || i == "describe")
                     && matches!(self.peek(), Token::String(..)) =>
             {
-                // Desugar: test "name" { body } -> test "name" (fun () -> { body })
-                //          describe "name" { body } -> describe "name" (fun () -> { body })
+                // Parse test/describe sugar, preserving the block body as-is.
+                // Lambda wrapping (fun () -> body) happens in desugar.rs so
+                // the formatter can round-trip the original syntax.
                 let func_name = i.clone();
                 let name_str = self.expect_string()?;
                 let name_span = self.tokens[self.pos - 1].span;
                 let body = self.parse_expr(0)?;
                 let body_span = body.span;
-
-                let lambda = Expr {
-                    id: self.next_id(),
-                    span: body_span,
-                    kind: ExprKind::Lambda {
-                        params: vec![Pat::Lit {
-                            id: NodeId::fresh(),
-                            value: Lit::Unit,
-                            span: body_span,
-                        }],
-                        body: Box::new(body),
-                    },
-                };
 
                 let func = Expr {
                     id: self.next_id(),
@@ -738,7 +726,7 @@ impl Parser {
                     span: span.to(body_span),
                     kind: ExprKind::App {
                         func: Box::new(app1),
-                        arg: Box::new(lambda),
+                        arg: Box::new(body),
                     },
                 })
             }

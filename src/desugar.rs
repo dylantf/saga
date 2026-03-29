@@ -15,6 +15,39 @@
 use crate::ast::*;
 use crate::token::{Span, StringKind};
 
+const TEST_SUGAR_NAMES: &[&str] = &["test", "describe"];
+
+/// Wrap the body argument of test/describe/skip/only calls in a lambda.
+/// The parser produces `App(App(Var("test"), Lit("name")), body)` with the raw
+/// block; this function completes the desugaring to `... (fun () -> body)`.
+fn wrap_test_body_in_lambda(func: &Expr, arg: &mut Expr) {
+    // func must be App(Var("test"|...), Lit(String))
+    let ExprKind::App { func: head, arg: name_arg } = &func.kind else { return };
+    let ExprKind::Var { name } = &head.kind else { return };
+    if !TEST_SUGAR_NAMES.contains(&name.as_str()) {
+        return;
+    }
+    let ExprKind::Lit { value: Lit::String(..) } = &name_arg.kind else { return };
+    // Don't double-wrap if already a lambda
+    if matches!(&arg.kind, ExprKind::Lambda { .. }) {
+        return;
+    }
+    let body_span = arg.span;
+    let body = std::mem::replace(arg, Expr::synth(body_span, ExprKind::Lit { value: Lit::Unit }));
+    *arg = Expr {
+        id: NodeId::fresh(),
+        span: body_span,
+        kind: ExprKind::Lambda {
+            params: vec![Pat::Lit {
+                id: NodeId::fresh(),
+                value: Lit::Unit,
+                span: body_span,
+            }],
+            body: Box::new(body),
+        },
+    };
+}
+
 /// Desugar all surface syntax in a program, in place.
 #[allow(clippy::ptr_arg)]
 pub fn desugar_program(program: &mut Vec<Decl>) {
@@ -49,6 +82,20 @@ fn desugar_decl(decl: &mut Decl) {
                 desugar_expr(&mut ann_method.node.body);
             }
         }
+        Decl::TopExpr { value, span, .. } => {
+            desugar_expr(value);
+            // Convert to Let { name: "_" } so the rest of the pipeline sees a normal decl
+            let value = std::mem::replace(value, Expr::synth(*span, ExprKind::Lit { value: Lit::Unit }));
+            let s = *span;
+            *decl = Decl::Let {
+                id: NodeId::fresh(),
+                name: "_".to_string(),
+                name_span: s,
+                annotation: None,
+                value,
+                span: s,
+            };
+        }
         // Declarations without expression bodies
         Decl::FunSignature { .. }
         | Decl::TypeDef { .. }
@@ -67,6 +114,9 @@ fn desugar_expr(expr: &mut Expr) {
         ExprKind::App { func, arg } => {
             desugar_expr(func);
             desugar_expr(arg);
+            // Complete test/describe/skip/only sugar: wrap body in lambda.
+            // Parser leaves the body as a raw block; we add fun () -> body here.
+            wrap_test_body_in_lambda(func, arg);
         }
         ExprKind::BinOp { left, right, .. } => {
             desugar_expr(left);

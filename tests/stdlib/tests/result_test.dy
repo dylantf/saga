@@ -1,150 +1,151 @@
-import Std.Test (describe, test, assert_eq, assert_true, assert_false, assert_ok, assert_err, assert_just, assert_nothing, assert_panics)
 import Std.Result as Result
+import Std.Test (
+  describe,
+  test,
+  assert_eq,
+  assert_true,
+  assert_false,
+  assert_ok,
+  assert_err,
+  assert_just,
+  assert_nothing,
+  assert_panics
+)
+
+fun make_ok : Int -> Result Int String
+make_ok n = Ok n
+
+fun make_err : String -> Result Int String
+make_err s = Err s
+
+fun int_nothing : Unit -> Maybe Int
+int_nothing () = Nothing
 
 describe "Result" {
-
   describe "is_ok" {
     test "Ok is ok" {
-      let r = if True then Ok 1 else Err "e"
-      assert_true (Result.is_ok r)
+      make_ok 1 |> Result.is_ok |> assert_true
     }
-
     test "Err is not ok" {
-      let r = if False then Ok 0 else Err "bad"
-      assert_false (Result.is_ok r)
+      make_err "bad" |> Result.is_ok |> assert_false
     }
   }
 
   describe "is_err" {
     test "Err is err" {
-      let r = if False then Ok 0 else Err "bad"
-      assert_true (Result.is_err r)
+      make_err "bad" |> Result.is_err |> assert_true
     }
 
     test "Ok is not err" {
-      let r = if True then Ok 1 else Err "e"
-      assert_false (Result.is_err r)
+      make_ok 1 |> Result.is_err |> assert_false
     }
   }
 
   describe "map" {
     test "transforms Ok" {
-      let r = if True then Ok 5 else Err "e"
-      assert_eq (Result.map (fun x -> x * 2) r) (if True then Ok 10 else Err "e")
+      let result = make_ok 5 |> Result.map (fun x -> x * 2)
+      assert_eq result (make_ok 10)
     }
 
     test "Err stays Err" {
-      let r = if False then Ok 0 else Err "bad"
-      assert_eq (Result.map (fun x -> x * 2) r) (if False then Ok 0 else Err "bad")
+      let result = make_err "bad" |> Result.map (fun x -> x * 2)
+      assert_eq result (make_err "bad")
     }
   }
 
   describe "map_err" {
     test "transforms Err" {
-      let r = if False then Ok 0 else Err "bad"
-      assert_eq (Result.map_err (fun e -> e <> "!") r) (if False then Ok 0 else Err "bad!")
+      let result = make_err "bad" |> Result.map_err (fun e -> e <> "!")
+      assert_eq result (make_err "bad!")
     }
 
     test "Ok stays Ok" {
-      let r = if True then Ok 1 else Err "e"
-      assert_eq (Result.map_err (fun e -> e <> "!") r) (if True then Ok 1 else Err "e")
+      let result = make_ok 1 |> Result.map_err (fun e -> e <> "!")
+      assert_eq result (make_ok 1)
     }
   }
 
   describe "unwrap" {
     test "returns value from Ok" {
-      let r = if True then Ok 42 else Err "e"
-      assert_eq (Result.unwrap r) 42
+      assert_eq (make_ok 42 |> Result.unwrap) 42
     }
 
     test "panics on Err" {
-      assert_panics (fun () -> {
-        let r = if False then Ok 0 else Err "oops"
-        Result.unwrap r
-      })
+      assert_panics (fun () -> make_err "oops" |> Result.unwrap)
     }
   }
 
   describe "unwrap_or" {
     test "returns value from Ok" {
-      let r = if True then Ok 42 else Err "e"
-      assert_eq (Result.unwrap_or 0 r) 42
+      assert_eq (make_ok 42 |> Result.unwrap_or 0) 42
     }
 
     test "returns default from Err" {
-      let r = if False then Ok 0 else Err "bad"
-      assert_eq (Result.unwrap_or 0 r) 0
+      assert_eq (make_err "bad" |> Result.unwrap_or 0) 0
     }
   }
 
   describe "and_then" {
     test "chains on Ok" {
-      let r = if True then Ok 42 else Err "e"
-      let f = fun x -> if x == 42 then Ok 100 else Err "no"
-      assert_ok (Result.and_then f r)
+      let result =
+        make_ok 5
+        |> Result.and_then (fun x -> make_ok (x * 2))
+      assert_eq result (make_ok 10)
     }
 
     test "short-circuits on Err" {
-      let r = if False then Ok 0 else Err "bad"
-      assert_err (Result.and_then (fun x -> Ok (x + 1)) r)
+      make_err "bad"
+      |> Result.and_then (fun x -> make_ok (x + 1))
+      |> assert_err
     }
   }
 
   describe "or_else" {
     test "returns Ok when present" {
-      let r = if True then Ok 1 else Err "e"
-      assert_ok (Result.or_else (Ok 99) r)
+      make_ok 1 |> Result.or_else (make_ok 99) |> assert_ok
     }
 
     test "returns fallback on Err" {
-      let r = if False then Ok 0 else Err "bad"
-      let fallback = if True then Ok 99 else Err "e"
-      assert_eq (Result.or_else fallback r) fallback
+      let result = make_err "bad" |> Result.or_else (make_ok 99)
+      assert_eq result (make_ok 99)
     }
   }
 
   describe "to_maybe" {
     test "Ok becomes Just" {
-      let r = if True then Ok 42 else Err "e"
-      assert_eq (Result.to_maybe r) (Just 42)
+      assert_eq (make_ok 42 |> Result.to_maybe) (Just 42)
     }
 
     test "Err becomes Nothing" {
-      let r = if False then Ok 0 else Err "bad"
-      assert_nothing (Result.to_maybe r)
+      make_err "bad" |> Result.to_maybe |> assert_nothing
     }
   }
 
   describe "from_maybe" {
     test "Just becomes Ok" {
-      let r = Result.from_maybe "missing" (Just 42)
-      assert_ok r
+      Just 42 |> Result.from_maybe "missing" |> assert_ok
     }
 
     test "Nothing becomes Err" {
-      let n = if False then Just 0 else Nothing
-      let r = Result.from_maybe "missing" n
-      assert_err r
+      int_nothing () |> Result.from_maybe "missing" |> assert_err
     }
   }
 
   describe "flatten" {
     test "flattens nested Ok" {
-      let inner = if True then Ok 42 else Err "e"
-      let outer = if True then Ok inner else Err "e"
-      assert_eq (Result.flatten outer) inner
+      let result = Ok (make_ok 42) |> Result.flatten
+      assert_eq result (make_ok 42)
     }
 
     test "flattens nested Err" {
-      let inner = if False then Ok 0 else Err "inner"
-      let outer = if True then Ok inner else Err "e"
-      assert_err (Result.flatten outer)
+      Ok (make_err "inner") |> Result.flatten |> assert_err
     }
 
     test "outer Err stays Err" {
-      let inner = if True then Ok 0 else Err "e"
-      let outer = if False then Ok inner else Err "outer"
-      assert_err (Result.flatten outer)
+      make_err "outer"
+      |> Result.map (fun _ -> make_ok 0)
+      |> Result.flatten
+      |> assert_err
     }
   }
 }

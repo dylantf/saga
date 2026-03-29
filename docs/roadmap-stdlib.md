@@ -34,10 +34,10 @@
 
 ## Result
 
-- [ ] is_ok / is_err - Boolean checks.
-- [ ] or_else - Try alternative on Err.
-- [ ] to_maybe - Drop the error info.
-- [ ] flatten - Result (Result a e) e -> Result a e.
+- [x] is_ok / is_err - Boolean checks.
+- [x] or_else - Try alternative on Err.
+- [x] to_maybe - Drop the error info.
+- [x] flatten - Result (Result a e) e -> Result a e.
 
 ## Dict
 

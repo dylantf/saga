@@ -1,3 +1,9 @@
+import Std.Fail
+
+foo x = {
+  fail! "oops"
+}
+
 main () = {
   println "Placeholder for random testing"
 }

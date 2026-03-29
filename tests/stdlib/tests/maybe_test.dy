@@ -1,82 +1,85 @@
-import Std.Test (describe, test, assert_eq, assert_true, assert_false, assert_just, assert_nothing, assert_panics)
+import Std.Test (describe, test, assert_eq, assert_true, assert_false, assert_nothing, assert_panics)
 import Std.Maybe as Maybe
 
 describe "Maybe" {
 
   describe "is_just" {
     test "Just is just" {
-      assert_true (Maybe.is_just (Just 1))
+      Just 1 |> Maybe.is_just |> assert_true
     }
 
     test "Nothing is not just" {
-      assert_false (Maybe.is_just Nothing)
+      Nothing |> Maybe.is_just |> assert_false
     }
   }
 
   describe "is_nothing" {
     test "Nothing is nothing" {
-      assert_true (Maybe.is_nothing Nothing)
+      Nothing |> Maybe.is_nothing |> assert_true
     }
 
     test "Just is not nothing" {
-      assert_false (Maybe.is_nothing (Just 1))
+      Just 1 |> Maybe.is_nothing |> assert_false
     }
   }
 
   describe "map" {
     test "transforms Just" {
-      assert_eq (Maybe.map (fun x -> x * 2) (Just 5)) (Just 10)
+      let result = Just 5 |> Maybe.map (fun x -> x * 2)
+      assert_eq result (Just 10)
     }
 
     test "Nothing stays Nothing" {
-      assert_nothing (Maybe.map (fun x -> x * 2) Nothing)
+      Nothing |> Maybe.map (fun x -> x * 2) |> assert_nothing
     }
   }
 
   describe "unwrap_or" {
     test "returns value from Just" {
-      assert_eq (Maybe.unwrap_or 0 (Just 42)) 42
+      assert_eq (Just 42 |> Maybe.unwrap_or 0) 42
     }
 
     test "returns default from Nothing" {
-      assert_eq (Maybe.unwrap_or 0 Nothing) 0
+      assert_eq (Nothing |> Maybe.unwrap_or 0) 0
     }
   }
 
   describe "unwrap" {
     test "returns value from Just" {
-      assert_eq (Maybe.unwrap (Just 42)) 42
+      assert_eq (Just 42 |> Maybe.unwrap) 42
     }
 
     test "panics on Nothing" {
-      let n = Maybe.map (fun x -> x + 1) Nothing
+      let n = Nothing |> Maybe.map (fun x -> x + 1)
       assert_panics (fun () -> Maybe.unwrap n)
     }
   }
 
   describe "and_then" {
     test "chains on Just" {
-      let safe_div = fun x -> if x == 0 then Nothing else Just (10 / x)
-      assert_eq (Maybe.and_then safe_div (Just 2)) (Just 5)
+      let result = Just 2
+        |> Maybe.and_then (fun x -> if x == 0 then Nothing else Just (10 / x))
+      assert_eq result (Just 5)
     }
 
     test "short-circuits on Nothing" {
-      assert_nothing (Maybe.and_then (fun x -> Just (x + 1)) Nothing)
+      Nothing
+        |> Maybe.and_then (fun x -> Just (x + 1))
+        |> assert_nothing
     }
   }
 
   describe "or_else" {
     test "returns Just when present" {
-      assert_eq (Maybe.or_else (Just 99) (Just 1)) (Just 1)
+      assert_eq (Just 1 |> Maybe.or_else (Just 99)) (Just 1)
     }
 
     test "returns fallback on Nothing" {
-      assert_eq (Maybe.or_else (Just 99) Nothing) (Just 99)
+      assert_eq (Nothing |> Maybe.or_else (Just 99)) (Just 99)
     }
 
     test "returns Nothing when both Nothing" {
-      assert_nothing (Maybe.or_else Nothing Nothing)
+      Nothing |> Maybe.or_else Nothing |> assert_nothing
     }
   }
-
 }

@@ -138,20 +138,18 @@ impl Parser {
             Token::Import => self.parse_import_decl(),
             Token::Ident(s)
                 if self.test_mode
-                    && (s == "test" || s == "describe" || s == "skip" || s == "only")
+                    && (s == "test" || s == "describe")
                     && matches!(
                         self.tokens.get(self.pos + 1).map(|t| &t.token),
                         Some(Token::String(..))
                     ) =>
             {
-                // Top-level test/describe: parse as expression (desugar triggers in parse_primary)
+                // Top-level test/describe: bare expression.
+                // Desugar converts to Let { name: "_" } before typechecking.
                 let start = self.tokens[self.pos].span;
                 let value = self.parse_expr(0)?;
-                Ok(Decl::Let {
+                Ok(Decl::TopExpr {
                     id: NodeId::fresh(),
-                    name: "_".to_string(),
-                    name_span: start,
-                    annotation: None,
                     span: start.to(value.span),
                     value,
                 })
