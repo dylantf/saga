@@ -1046,8 +1046,12 @@ impl Parser {
 
     /// Look ahead to check if we have `(ident :` which signals a labeled parameter.
     fn is_labeled_param(&self) -> bool {
-        // Current token is '('. Check pos+1 is an ident and pos+2 is ':'
-        let base = self.pos + 1;
+        self.is_labeled_param_at(self.pos)
+    }
+
+    /// Check if the token at `lparen_pos` starts a `(ident : ...` labeled parameter.
+    fn is_labeled_param_at(&self, lparen_pos: usize) -> bool {
+        let base = lparen_pos + 1;
         if base + 1 >= self.tokens.len() {
             return false;
         }
@@ -1120,6 +1124,19 @@ impl Parser {
             }
             Token::Ident(s) => Ok(TypeExpr::Var { name: s, span: start }),
             Token::LParen => {
+                // Check for labeled parameter: `(label: Type)`
+                if self.is_labeled_param_at(self.pos - 1) {
+                    let label = self.expect_ident()?;
+                    self.expect(Token::Colon)?;
+                    let inner = self.parse_type_expr()?;
+                    let end = self.tokens[self.pos].span;
+                    self.expect(Token::RParen)?;
+                    return Ok(TypeExpr::Labeled {
+                        label,
+                        inner: Box::new(inner),
+                        span: start.to(end),
+                    });
+                }
                 let first = self.parse_type_expr()?;
                 if matches!(self.peek(), Token::Comma) {
                     // Tuple type: (Int, String, ...)

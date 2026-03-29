@@ -270,6 +270,7 @@ pub(super) fn collect_type_effects(ty: &TypeExpr) -> BTreeSet<String> {
             }
             effects
         }
+        TypeExpr::Labeled { inner, .. } => collect_type_effects(inner),
         TypeExpr::Named { .. } | TypeExpr::Var { .. } => BTreeSet::new(),
     }
 }

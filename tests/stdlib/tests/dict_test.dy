@@ -1,0 +1,144 @@
+import Std.Test (describe, test, assert_eq, assert_true, assert_false, assert_just, assert_nothing)
+import Std.Dict as Dict
+import Std.List as List
+
+describe "Dict" {
+
+  describe "new" {
+    test "creates empty dict" {
+      assert_eq (Dict.size (Dict.new ())) 0
+    }
+  }
+
+  describe "from_list and to_list" {
+    test "round-trips" {
+      let d = Dict.from_list [("a", 1), ("b", 2)]
+      assert_eq (Dict.size d) 2
+      assert_eq (Dict.get "a" d) (Just 1)
+      assert_eq (Dict.get "b" d) (Just 2)
+    }
+  }
+
+  describe "put and get" {
+    test "inserts and retrieves" {
+      let d = Dict.new () |> Dict.put "x" 42
+      assert_eq (Dict.get "x" d) (Just 42)
+    }
+
+    test "overwrites existing key" {
+      let d = Dict.from_list [("x", 1)] |> Dict.put "x" 2
+      assert_eq (Dict.get "x" d) (Just 2)
+    }
+
+    test "missing key returns Nothing" {
+      let d = Dict.from_list [("x", 1)]
+      assert_nothing (Dict.get "y" d)
+    }
+  }
+
+  describe "remove" {
+    test "removes a key" {
+      let d = Dict.from_list [("a", 1), ("b", 2)] |> Dict.remove "a"
+      assert_nothing (Dict.get "a" d)
+      assert_eq (Dict.size d) 1
+    }
+
+    test "removing missing key is a no-op" {
+      let d = Dict.from_list [("a", 1)]
+      assert_eq (Dict.size (Dict.remove "z" d)) 1
+    }
+  }
+
+  describe "member" {
+    test "true for present key" {
+      assert_true (Dict.member "a" (Dict.from_list [("a", 1)]))
+    }
+
+    test "false for missing key" {
+      assert_false (Dict.member "z" (Dict.from_list [("a", 1)]))
+    }
+  }
+
+  describe "size" {
+    test "empty dict" {
+      assert_eq (Dict.size (Dict.new ())) 0
+    }
+
+    test "non-empty dict" {
+      assert_eq (Dict.size (Dict.from_list [("a", 1), ("b", 2), ("c", 3)])) 3
+    }
+  }
+
+  describe "is_empty" {
+    test "empty dict" {
+      assert_true (Dict.is_empty (Dict.new ()))
+    }
+
+    test "non-empty dict" {
+      assert_false (Dict.is_empty (Dict.from_list [("a", 1)]))
+    }
+  }
+
+  describe "keys and values" {
+    test "returns keys" {
+      let ks = Dict.keys (Dict.from_list [("a", 1), ("b", 2)]) |> List.sort
+      assert_eq ks ["a", "b"]
+    }
+
+    test "returns values" {
+      let vs = Dict.values (Dict.from_list [("a", 1), ("b", 2)]) |> List.sort
+      assert_eq vs [1, 2]
+    }
+  }
+
+  describe "map" {
+    test "transforms values" {
+      let d = Dict.from_list [("a", 1), ("b", 2)] |> Dict.map (fun v -> v * 10)
+      assert_eq (Dict.get "a" d) (Just 10)
+      assert_eq (Dict.get "b" d) (Just 20)
+    }
+  }
+
+  describe "filter" {
+    test "keeps matching entries" {
+      let d = Dict.from_list [("a", 1), ("b", 2), ("c", 3)]
+        |> Dict.filter (fun _k v -> v > 1)
+      assert_eq (Dict.size d) 2
+      assert_nothing (Dict.get "a" d)
+      assert_just (Dict.get "b" d)
+      assert_just (Dict.get "c" d)
+    }
+  }
+
+  describe "fold" {
+    test "accumulates over entries" {
+      let d = Dict.from_list [("a", 1), ("b", 2), ("c", 3)]
+      let total = Dict.fold (fun acc _k v -> acc + v) 0 d
+      assert_eq total 6
+    }
+  }
+
+  describe "merge" {
+    test "combines two dicts" {
+      let a = Dict.from_list [("x", 1), ("y", 2)]
+      let b = Dict.from_list [("y", 99), ("z", 3)]
+      let merged = Dict.merge a b
+      assert_eq (Dict.get "x" merged) (Just 1)
+      assert_eq (Dict.get "y" merged) (Just 99)
+      assert_eq (Dict.get "z" merged) (Just 3)
+    }
+  }
+
+  describe "update" {
+    test "updates existing key" {
+      let d = Dict.from_list [("a", 10)] |> Dict.update "a" (fun v -> v + 5)
+      assert_eq (Dict.get "a" d) (Just 15)
+    }
+
+    test "missing key is a no-op" {
+      let d = Dict.from_list [("a", 10)] |> Dict.update "z" (fun v -> v + 5)
+      assert_eq (Dict.size d) 1
+      assert_nothing (Dict.get "z" d)
+    }
+  }
+}

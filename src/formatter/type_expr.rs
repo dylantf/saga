@@ -54,6 +54,9 @@ pub fn format_type_expr(ty: &TypeExpr) -> Doc {
             }
             d
         }
+        TypeExpr::Labeled { label, inner, .. } => {
+            docs![Doc::text(format!("({}: ", label)), format_type_expr(inner), Doc::text(")")]
+        }
         TypeExpr::Record { fields, multiline, .. } => {
             let field_docs: Vec<Doc> = fields.iter().map(|(name, ty)| {
                 docs![Doc::text(format!("{}: ", name)), format_type_expr(ty)]

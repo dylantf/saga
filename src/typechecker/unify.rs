@@ -428,6 +428,9 @@ impl Checker {
                 typed_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
                 Type::Record(typed_fields)
             }
+            crate::ast::TypeExpr::Labeled { inner, .. } => {
+                self.convert_type_expr(inner, params)
+            }
         }
     }
 }

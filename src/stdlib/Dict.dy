@@ -6,34 +6,66 @@ impl Debug for Dict k v where {k: Debug, v: Debug} {
   debug d = "{" <> List.flatten (List.join ", " (List.map (fun (k, v) -> debug k <> ": " <> debug v) (to_list d))) <> "}"
 }
 
-@external("erlang", "maps", "put")
-pub fun put : (key: k) -> (value: v) -> (dict: Dict k v) -> Dict k v where {k: Eq}
-
-@external("erlang", "maps", "remove")
-pub fun remove : (key: k) -> (dict: Dict k v) -> Dict k v where {k: Eq}
-
-@external("erlang", "maps", "keys")
-pub fun keys : (dict: Dict k v) -> List k
-
-@external("erlang", "maps", "values")
-pub fun values : (dict: Dict k v) -> List v
-
-@external("erlang", "maps", "size")
-pub fun size : (dict: Dict k v) -> Int
-
-@external("erlang", "maps", "from_list")
-pub fun from_list : (pairs: List (k, v)) -> Dict k v where {k: Eq}
-
-@external("erlang", "maps", "to_list")
-pub fun to_list : (dict: Dict k v) -> List (k, v)
-
-@external("erlang", "maps", "is_key")
-pub fun member : (key: k) -> (dict: Dict k v) -> Bool where {k: Eq}
-
-@external("erlang", "std_dict_bridge", "get")
-pub fun get : (key: k) -> (dict: Dict k v) -> Maybe v where {k: Eq}
-
+#@ Creates an empty dictionary.
 @external("erlang", "std_dict_bridge", "new")
 pub fun new : Unit -> Dict k v
 
+#@ Creates a dictionary from a list of key-value pairs.
+@external("erlang", "maps", "from_list")
+pub fun from_list : (pairs: List (k, v)) -> Dict k v where {k: Eq}
 
+#@ Returns the value for a key, or Nothing if not present.
+@external("erlang", "std_dict_bridge", "get")
+pub fun get : (key: k) -> (dict: Dict k v) -> Maybe v where {k: Eq}
+
+#@ Inserts or replaces a key-value pair.
+@external("erlang", "maps", "put")
+pub fun put : (key: k) -> (value: v) -> (dict: Dict k v) -> Dict k v where {k: Eq}
+
+#@ Removes a key from the dictionary. Returns the dict unchanged if key is not present.
+@external("erlang", "maps", "remove")
+pub fun remove : (key: k) -> (dict: Dict k v) -> Dict k v where {k: Eq}
+
+#@ Returns True if the key is present in the dictionary.
+@external("erlang", "maps", "is_key")
+pub fun member : (key: k) -> (dict: Dict k v) -> Bool where {k: Eq}
+
+#@ Returns the number of entries in the dictionary.
+@external("erlang", "maps", "size")
+pub fun size : (dict: Dict k v) -> Int
+
+#@ Returns True if the dictionary has no entries.
+pub fun is_empty : Dict k v -> Bool
+is_empty d = size d == 0
+
+#@ Returns all keys as a list.
+@external("erlang", "maps", "keys")
+pub fun keys : (dict: Dict k v) -> List k
+
+#@ Returns all values as a list.
+@external("erlang", "maps", "values")
+pub fun values : (dict: Dict k v) -> List v
+
+#@ Converts the dictionary to a list of key-value pairs.
+@external("erlang", "maps", "to_list")
+pub fun to_list : (dict: Dict k v) -> List (k, v)
+
+#@ Applies a function to every value, returning a new dictionary.
+@external("erlang", "std_dict_bridge", "map_values")
+pub fun map : (f: v -> v2) -> (dict: Dict k v) -> Dict k v2
+
+#@ Returns a dictionary containing only entries where the predicate returns True.
+@external("erlang", "std_dict_bridge", "filter_entries")
+pub fun filter : (pred: k -> v -> Bool) -> (dict: Dict k v) -> Dict k v
+
+#@ Folds over all entries, left to right.
+@external("erlang", "std_dict_bridge", "fold_entries")
+pub fun fold : (f: a -> k -> v -> a) -> (init: a) -> (dict: Dict k v) -> a
+
+#@ Merges two dictionaries. Values from the overrides dict win on key conflicts.
+@external("erlang", "maps", "merge")
+pub fun merge : (base: Dict k v) -> (overrides: Dict k v) -> Dict k v where {k: Eq}
+
+#@ Updates the value at a key by applying a function. No-op if key is not present.
+@external("erlang", "std_dict_bridge", "update")
+pub fun update : (key: k) -> (f: v -> v) -> (dict: Dict k v) -> Dict k v where {k: Eq}

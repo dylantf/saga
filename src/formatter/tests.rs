@@ -619,6 +619,10 @@ fn normalize_type_expr(te: &mut TypeExpr) {
                 normalize_type_expr(te);
             }
         }
+        TypeExpr::Labeled { inner, span, .. } => {
+            *span = S;
+            normalize_type_expr(inner);
+        }
     }
 }
 

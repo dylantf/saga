@@ -1205,6 +1205,64 @@ fn type_expr_arrow() {
     }
 }
 
+#[test]
+fn labeled_params_in_lambda_type() {
+    // Labels inside function-type arguments: (f: (input: String) -> Unit)
+    let decls = parse("fun foo : (f: (input: String) -> Unit) -> Unit");
+    match &decls[0] {
+        Decl::FunSignature { params, .. } => {
+            assert_eq!(params[0].0, "f");
+            // The inner type should be Arrow with a Labeled `from`
+            match &params[0].1 {
+                TypeExpr::Arrow { from, .. } => {
+                    assert!(matches!(from.as_ref(), TypeExpr::Labeled { label, .. } if label == "input"));
+                }
+                other => panic!("expected Arrow, got {:?}", other),
+            }
+        }
+        _ => panic!("expected FunSignature"),
+    }
+}
+
+#[test]
+fn multiple_labeled_params_in_lambda_type() {
+    // Multiple labels inside a function-type argument
+    let decls = parse("fun fold : (f: (acc: a) -> (key: k) -> (value: v) -> a) -> a");
+    match &decls[0] {
+        Decl::FunSignature { params, .. } => {
+            assert_eq!(params[0].0, "f");
+            match &params[0].1 {
+                TypeExpr::Arrow { from, to, .. } => {
+                    assert!(matches!(from.as_ref(), TypeExpr::Labeled { label, .. } if label == "acc"));
+                    // to should be (key: k) -> (value: v) -> a
+                    match to.as_ref() {
+                        TypeExpr::Arrow { from: from2, .. } => {
+                            assert!(matches!(from2.as_ref(), TypeExpr::Labeled { label, .. } if label == "key"));
+                        }
+                        other => panic!("expected inner Arrow, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Arrow, got {:?}", other),
+            }
+        }
+        _ => panic!("expected FunSignature"),
+    }
+}
+
+#[test]
+fn bare_parens_around_arrow_still_works() {
+    // Parenthesized arrow without label should still parse
+    let decls = parse("fun apply : (a -> b) -> a -> b");
+    match &decls[0] {
+        Decl::FunSignature { params, .. } => {
+            assert!(matches!(&params[0].1, TypeExpr::Arrow { .. }));
+            // No label on the first param (auto-generated _0)
+            assert!(params[0].0.starts_with('_'));
+        }
+        _ => panic!("expected FunSignature"),
+    }
+}
+
 // --- Combined programs ---
 
 #[test]
