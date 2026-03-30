@@ -1,150 +1,109 @@
-# FFI Design
+# FFI
 
-## Overview
-
-FFI to Erlang via `@external` annotations, following Gleam's model but without constraining our ADT representation.
+dylang calls Erlang/OTP code through `@external` annotations. The compiler trusts the type signature and emits a direct foreign call — no runtime validation or marshalling.
 
 ## Syntax
 
 ```
 @external("erlang", "lists", "reverse")
-fun reverse (list: List a) -> List a
+pub fun reverse : (xs: List a) -> List a
 ```
 
-Three string args: target, module, function. Type signature is mandatory and trusted by the compiler (no inference, no runtime validation).
+The three string arguments are: target (always `"erlang"` for now), module, function. A full type signature is required.
 
-## Compiler work
+## Direct FFI
 
-Minimal:
-
-1. Parse `@external` annotation
-2. Require full type signature (params + return)
-3. Emit a direct call: `call 'lists':'reverse'(List)`
-
-No special codegen beyond a qualified foreign call.
-
-## Representation alignment
-
-Compile `Result` and `Maybe` constructors to match Erlang conventions:
-
-| Constructor | Current codegen | New codegen  |
-| ----------- | --------------- | ------------ |
-| `Ok(v)`     | `{'Ok', v}`     | `{ok, v}`    |
-| `Err(e)`    | `{'Err', e}`    | `{error, e}` |
-| `Just(v)`   | `{'Just', v}`   | `{just, v}`  |
-| `None`      | `{'None'}`      | `{none}`     |
-
-`Maybe` maps to Erlang's `V | undefined` convention. `Some(v)` is just the bare value with no wrapping tuple. `None` is the atom `undefined`. This matches how Erlang/Elixir handle optionality (process dictionaries, ETS lookups, maps:get, etc.).
-
-`Result` maps to Erlang's `{ok, V} | {error, E}` convention directly.
-
-**Pattern matching implications:** `case x of Some(v) -> ... | None -> ...` compiles to:
-
-```erlang
-case X of
-  'undefined' -> ...   % None branch
-  V -> ...             % Some(v) branch, V is the unwrapped value
-end
-```
-
-The `None`/`undefined` arm must come first (specific before wildcard).
-
-## FFI categories
-
-**Direct FFI (no shim needed):**
-
-- Functions returning plain values: ints, floats, strings, atoms, lists, maps
-- Functions returning `{ok, V} | {error, E}` (if Result matches)
-- Functions returning `true | false` (Bool already compiles to atoms)
-
-**Direct FFI for Maybe (V | undefined):**
-
-- Functions returning `V | undefined` now work directly since `Maybe` compiles to `V | undefined`
-
-**Needs a .erl shim:**
-
-- Functions returning `V | false` (e.g. `lists:keyfind`)
-- Anything with a truly ad-hoc return convention
-
-**Shim example:**
-
-```erlang
-% dylang_ffi.erl
-keyfind(Key, List) ->
-    case lists:keyfind(Key, 1, List) of
-        false -> undefined;
-        Tuple -> Tuple
-    end.
-```
+When the Erlang function's argument and return types already match dylang's BEAM representations, no bridge is needed:
 
 ```
-@external("erlang", "dylang_ffi", "keyfind")
-fun keyfind (key: k) (list: List (k, v)) -> Maybe (k, v)
+@external("erlang", "erlang", "length")
+pub fun length : (xs: List a) -> Int
+
+@external("erlang", "maps", "put")
+pub fun put : (key: k) -> (value: v) -> (dict: Dict k v) -> Dict k v where {k: Eq}
 ```
+
+This works for functions returning plain values (ints, floats, binaries, lists, maps), `{ok, V} | {error, E}` (matches `Result`), and `true | false` (matches `Bool`).
 
 ## Bridge files
 
-When an `@external` call targets a module that doesn't exist in the Erlang standard library, you need a **bridge file**: a `.erl` file that implements the native side of the FFI.
+When an Erlang function's return convention doesn't match dylang's type representations, you write a **bridge file** — a `.erl` file that adapts between conventions.
 
-### How bridge files are discovered
+### Example: wrapping `Maybe` returns
 
-1. **Stdlib bridges** are embedded in the compiler binary via `include_str!` and written to the build directory automatically. These live in `src/stdlib/` with the naming convention `<Module>.bridge.erl` (e.g. `File.bridge.erl`).
-
-2. **User/library bridges** are discovered by scanning the project root for `.erl` files (skipping `_build/` and `tests/`). Any `.erl` file found is copied to the build directory and compiled alongside the generated `.core` files.
-
-### Writing a bridge file
-
-The `-module(name)` in your `.erl` file must match the module name referenced in `@external`. For example:
+Erlang idiomatically returns `Value | undefined` for optional values, but dylang represents `Maybe` as tagged tuples: `{just, V}` / `{nothing}`. A bridge converts between these:
 
 ```
-# File.dy
-@external("erlang", "dylang_file", "read_file")
-fun read_file : (path: String) -> Result String String
+-- Int.dy
+@external("erlang", "std_int_bridge", "parse")
+pub fun parse : (s: String) -> Maybe Int
+```
+
+```erlang
+%% Int.bridge.erl
+-module(std_int_bridge).
+-export([parse/1]).
+
+parse(S) ->
+    case string:to_integer(S) of
+        {N, []} -> {just, N};
+        _ -> {nothing}
+    end.
+```
+
+### Example: wrapping error types
+
+```
+-- File.dy
+@external("erlang", "std_file_bridge", "read_file")
+fun read_file : (path: String) -> Result String FileError
 ```
 
 ```erlang
 %% File.bridge.erl
--module(dylang_file).
+-module(std_file_bridge).
 -export([read_file/1]).
 
 read_file(Path) ->
     case file:read_file(Path) of
         {ok, Bin} -> {ok, Bin};
-        {error, Reason} -> {error, atom_to_binary(Reason)}
+        {error, Reason} -> {error, map_error(Reason)}
     end.
+
+map_error(enoent) -> {'std_file_NotFound'};
+map_error(eacces) -> {'std_file_PermissionDenied'};
+map_error(Other)  -> {'std_file_Other', atom_to_binary(Other)}.
 ```
 
-### Type representation conventions
+### Discovery
 
-Your bridge functions must return values that match how the compiler represents types at runtime on the BEAM:
+- **Stdlib bridges** live in `src/stdlib/` as `<Module>.bridge.erl`. They're embedded in the compiler binary and written to the build directory automatically.
+- **User bridges** are any `.erl` files in the project root (excluding `_build/` and `tests/`). They're copied to the build directory and compiled alongside generated `.core` files.
 
-| Type                         | BEAM representation      | Example                    |
-| ---------------------------- | ------------------------ | -------------------------- |
-| `Int`                        | Integer                  | `42`                       |
-| `Float`                      | Float                    | `3.14`                     |
-| `String`                     | Binary                   | `<<"hello">>`              |
-| `Bool`                       | Atoms `true` / `false`   | `true`                     |
-| `Unit`                       | Atom `unit`              | `unit`                     |
-| `List a`                     | Erlang list              | `[1, 2, 3]`                |
-| `(a, b)`                     | Tuple                    | `{1, <<"hi">>}`            |
-| `Ok v`                       | `{ok, V}`                | `{ok, <<"contents">>}`     |
-| `Err e`                      | `{error, E}`             | `{error, <<"not found">>}` |
-| `Just v`                     | Bare value `V`           | `<<"hello">>`              |
-| `Nothing`                    | Atom `undefined`         | `undefined`                |
-| Custom variant `Foo x y`     | `{module_Foo, X, Y}`     | `{shapes_Circle, 5}`       |
-| Custom nullary variant `Foo` | `{module_Foo}` (1-tuple) | `{std_file_NotFound}`      |
+The `-module(name)` in your `.erl` file must match the module string in `@external`.
 
-Key gotchas:
+## Type representation reference
 
+Bridge functions must return values matching these BEAM representations:
+
+| Type                     | BEAM representation    | Example                  |
+| ------------------------ | ---------------------- | ------------------------ |
+| `Int`                    | Integer                | `42`                     |
+| `Float`                  | Float                  | `1.5`                    |
+| `String`                 | Binary                 | `<<"hello">>`            |
+| `Bool`                   | Atoms `true` / `false` | `true`                   |
+| `Unit`                   | Atom `unit`            | `unit`                   |
+| `List a`                 | Erlang list            | `[1, 2, 3]`              |
+| `(a, b)`                 | Tuple                  | `{1, <<"hi">>}`          |
+| `Ok v`                   | `{ok, V}`              | `{ok, <<"contents">>}`   |
+| `Err e`                  | `{error, E}`           | `{error, <<"not found">>}` |
+| `Just v`                 | `{just, V}`            | `{just, <<"hello">>}`    |
+| `Nothing`                | `{nothing}`            | `{nothing}`              |
+| Custom `Foo x y`         | `{module_Foo, X, Y}`   | `{shapes_Circle, 5}`     |
+| Custom nullary `Foo`     | `{module_Foo}`         | `{std_file_NotFound}`    |
+
+Notes:
 - `Err` maps to the atom `error`, not `err`
-- `Nothing` / `None` is `undefined`, not `nil` or `none`
-- `Just` / `Some` is the bare unwrapped value, no tuple wrapper
 - `Unit` is the atom `unit`, not an empty tuple `{}`
-- Custom ADT constructors use the module prefix: `MyVariant` in module `Foo` becomes `foo_MyVariant`
-- Nullary custom constructors are still wrapped in a 1-tuple: `NotFound` becomes `{std_file_NotFound}`, not bare `std_file_NotFound`. This differs from prelude builtins like `True`/`False` which are bare atoms
-
-## Open questions
-
-- Do we want `@external` on the same line or as a separate declaration?
-- Should we support `@external("javascript", ...)` from day one for a future JS backend?
-- How to handle Erlang functions with variable arity (e.g. `io:format`)?
+- Custom ADT constructors are prefixed with the module name: `Circle` in module `Shapes` becomes `shapes_Circle`
+- Nullary custom constructors are 1-tuples (`{std_file_NotFound}`), unlike builtins like `True`/`False` which are bare atoms
