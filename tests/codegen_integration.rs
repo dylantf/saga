@@ -1984,3 +1984,156 @@ main () = {
         "let-bound 'length' should not become a function reference\n{out}"
     );
 }
+
+/// Param named `size` should not resolve to Dict.size (an FFI to maps:size).
+/// This was the original bug report: adding @external functions to a stdlib
+/// module caused the name to leak into scope even without importing it.
+#[test]
+fn param_shadows_ffi_function() {
+    let src = r#"
+describe size = case size {
+  0 -> "none"
+  1 -> "one"
+  _ -> "many"
+}
+
+main () = describe 0
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        !out.contains("'maps':'size'"),
+        "param 'size' should not resolve to maps:size FFI\n{out}"
+    );
+    assert!(
+        !out.contains("'size'/1"),
+        "param 'size' should not become a function reference\n{out}"
+    );
+}
+
+/// Param named `reverse` should not resolve to List.reverse (@external to lists:reverse).
+#[test]
+fn param_shadows_exposed_ffi() {
+    let src = r#"
+import Std.List (reverse)
+
+apply_or_default reverse xs = case xs {
+  [] -> []
+  _ -> reverse xs
+}
+
+main () = apply_or_default (fun x -> x) [1, 2, 3]
+"#;
+    let out = emit_elaborated_with_std(src);
+    // Inside the function body, `reverse` is the param, not lists:reverse
+    assert!(
+        !out.contains("call 'lists':'reverse'"),
+        "param 'reverse' should not resolve to lists:reverse\n{out}"
+    );
+}
+
+/// Param named `map` should not resolve to List.map when called as a function.
+/// This tests the App handler saturation gate — the param is applied to args.
+#[test]
+fn param_shadows_stdlib_in_call_position() {
+    let src = r#"
+import Std.List (map)
+
+apply_fn map xs = map xs
+
+main () = apply_fn (fun x -> x) [1, 2, 3]
+"#;
+    let out = emit_elaborated_with_std(src);
+    // `map xs` inside apply_fn should be a local variable apply, not std_list:map
+    assert!(
+        !out.contains("call 'std_list':'map'"),
+        "param 'map' in call position should not resolve to std_list:map\n{out}"
+    );
+}
+
+/// Let binding named `get` should shadow Dict.get FFI.
+#[test]
+fn let_shadows_dict_ffi() {
+    let src = r#"
+main () = {
+  let get = 42
+  get + 1
+}
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        !out.contains("'std_dict_bridge':'get'"),
+        "let-bound 'get' should not resolve to std_dict_bridge:get\n{out}"
+    );
+}
+
+/// Case binding named `filter` should shadow List.filter in guard and body.
+#[test]
+fn case_binding_shadows_stdlib_function() {
+    let src = r#"
+import Std.List (filter)
+
+check filter = case filter {
+  0 -> "zero"
+  filter | filter > 0 -> "positive"
+  _ -> "negative"
+}
+
+main () = check 5
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        !out.contains("'std_list':'filter'"),
+        "case binding 'filter' should not resolve to std_list:filter\n{out}"
+    );
+}
+
+/// LetFun named `length` should shadow imported length AND still work as a callable function.
+#[test]
+fn letfun_shadows_import_and_is_callable() {
+    let src = r#"
+import Std.List (length)
+
+main () = {
+  let length x = x + 1
+  length 5
+}
+"#;
+    let out = emit_elaborated_with_std(src);
+    // Should NOT call the imported length
+    assert!(
+        !out.contains("call 'erlang':'length'"),
+        "LetFun 'length' should shadow imported length\n{out}"
+    );
+    // Should be a letrec with a local function call
+    assert!(
+        out.contains("letrec"),
+        "LetFun should emit a letrec\n{out}"
+    );
+}
+
+/// Multiple binding forms all shadowing the same import in nested scopes.
+#[test]
+fn nested_shadowing() {
+    let src = r#"
+import Std.List (length)
+
+outer length = {
+  let f = fun length -> {
+    let length = length + 1
+    length
+  }
+  f length
+}
+
+main () = outer 10
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        !out.contains("'erlang':'length'"),
+        "nested shadowing should prevent all resolution to erlang:length\n{out}"
+    );
+    assert!(
+        !out.contains("'length'/1"),
+        "no occurrence of 'length' should become a function reference\n{out}"
+    );
+}

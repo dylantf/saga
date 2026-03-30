@@ -222,8 +222,8 @@ impl<'a> Lowerer<'a> {
             .filter(|e| !e.is_empty())
     }
 
-    /// Emit a call expression using the resolution map, falling back to old lookup maps.
-    /// Get a function's effects from the resolution map, falling back to fun_info.
+    /// Get a function's effects from the resolution map, falling back to fun_info
+    /// for resolved names whose effect list was empty in the resolver.
     fn resolved_effects(&self, node_id: crate::ast::NodeId, name: &str) -> Option<Vec<String>> {
         use super::resolve::ResolvedName;
         match self.resolved.get(&node_id) {
@@ -233,8 +233,14 @@ impl<'a> Lowerer<'a> {
             {
                 Some(effects.clone())
             }
+            Some(ResolvedName::ImportedFun { .. }) | Some(ResolvedName::LocalFun { .. }) => {
+                // Resolved as a function but effects were empty in the resolver.
+                // Fall back to fun_info which has CPS-expanded effect info.
+                self.fun_effects(name).cloned()
+            }
             Some(ResolvedName::ExternalFun { .. }) => None,
-            _ => self.fun_effects(name).cloned(),
+            // Not in resolution map → local variable, no effects.
+            None => None,
         }
     }
 
@@ -873,7 +879,14 @@ impl<'a> Lowerer<'a> {
                 // For effectful functions, the user provides N args but the function
                 // takes N+M where M is the number of handler params. We thread
                 // the caller's handler params through automatically.
-                if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
+                //
+                // Only attempt saturation/partial-application if the resolver
+                // confirmed the head is a function (top-level, imported, external,
+                // or LetFun). If the head Var is not in the resolution map, it's a
+                // local variable — fall through to generic apply.
+                if let Some((func_name, head_expr, args)) = collect_fun_call(expr)
+                    && self.resolved.contains_key(&head_expr.id)
+                {
                     let callee_effects = self.resolved_effects(head_expr.id, func_name);
                     let callee_ops = callee_effects
                         .as_ref()
@@ -1081,8 +1094,13 @@ impl<'a> Lowerer<'a> {
 
                 // Check if callee is a known function with mismatched arity.
                 // If so, split into a saturated call + apply of remaining args.
+                // Only consult fun_info if the resolver confirmed this is a function.
                 let callee_arity = match &callee.kind {
-                    ExprKind::Var { name, .. } => self.fun_arity(name),
+                    ExprKind::Var { name, .. }
+                        if self.resolved.contains_key(&callee.id) =>
+                    {
+                        self.fun_arity(name)
+                    }
                     _ => None,
                 };
 
