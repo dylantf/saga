@@ -105,7 +105,29 @@ describe "Int" {
     }
 
     test "mask with band" {
-      assert_eq (255 |> Int.band 240) 240
+      assert_eq (0xFF |> Int.band 0xF0) 0xF0
+    }
+  }
+
+  describe "hex literals" {
+    test "basic hex" {
+      assert_eq 0xFF 255
+    }
+
+    test "uppercase" {
+      assert_eq 0XFF 255
+    }
+
+    test "with underscores" {
+      assert_eq 0xDEAD_BEEF 3735928559
+    }
+
+    test "zero" {
+      assert_eq 0x0 0
+    }
+
+    test "hex in arithmetic" {
+      assert_eq (0x10 + 0x10) 32
     }
   }
 }

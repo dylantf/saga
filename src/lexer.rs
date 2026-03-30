@@ -223,6 +223,32 @@ impl Lexer {
         let start = self.pos;
         // digits_only strips underscores for parsing; we also capture the full source text
         let mut digits_only = String::new();
+
+        // Check for hex literal: 0x or 0X
+        if self.peek() == Some('0')
+            && self.peek_next().is_some_and(|c| c == 'x' || c == 'X')
+        {
+            self.advance(); // consume '0'
+            self.advance(); // consume 'x'
+            while let Some(ch) = self.peek() {
+                if ch.is_ascii_hexdigit() {
+                    digits_only.push(ch);
+                    self.advance();
+                } else if ch == '_'
+                    && self
+                        .peek_next()
+                        .is_some_and(|c| c.is_ascii_hexdigit() || c == '_')
+                {
+                    self.advance(); // skip separator
+                } else {
+                    break;
+                }
+            }
+            let source_text = self.source[start..self.pos].to_string();
+            let val = i64::from_str_radix(&digits_only, 16).unwrap();
+            return Token::Int(source_text, val);
+        }
+
         while let Some(ch) = self.peek() {
             if ch.is_ascii_digit() {
                 digits_only.push(ch);
