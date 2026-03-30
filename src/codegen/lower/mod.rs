@@ -765,19 +765,12 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                     _ => {
-                        // Not in resolution map: check inline_vals, then fun_info
-                        // for local top-level functions, otherwise treat as local variable.
+                        // Not in resolution map: this is a local variable
+                        // (function param, let binding, lambda param, case binding, etc.).
+                        // The resolver is authoritative — if it didn't resolve the name,
+                        // it's not a module-level or imported function.
                         if let Some(inlined) = self.inline_vals.get(name) {
                             inlined.clone()
-                        } else if let Some(arity) = self.fun_arity(name) {
-                            if arity == 0 {
-                                CExpr::Apply(
-                                    Box::new(CExpr::FunRef(name.clone(), 0)),
-                                    vec![],
-                                )
-                            } else {
-                                CExpr::FunRef(name.clone(), arity)
-                            }
                         } else {
                             CExpr::Var(core_var(name))
                         }

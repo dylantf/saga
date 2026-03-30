@@ -6,10 +6,15 @@
 //!
 //! The lowerer consumes these tables instead of re-deriving name resolution
 //! from scratch, eliminating name collisions and fragile dispatch logic.
+//!
+//! Name resolution is **scope-aware**: the AST walker maintains a stack of
+//! local binding frames (function params, let bindings, lambda params, case
+//! pattern bindings, etc.). A name that is locally bound shadows any
+//! module-level or imported name with the same spelling.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::ast::{self, ComprehensionQualifier, Decl, Expr, ExprKind, NodeId, Program, Stmt};
+use crate::ast::{self, ComprehensionQualifier, Decl, Expr, ExprKind, NodeId, Pat, Program, Stmt};
 use crate::codegen::lower::init::extract_external;
 use crate::typechecker::ModuleCodegenInfo;
 
@@ -177,11 +182,175 @@ enum ScopedName {
     ExternalFun { erlang_mod: String, erlang_func: String, arity: usize },
 }
 
+// ---------------------------------------------------------------------------
+// Lexical scope tracking
+// ---------------------------------------------------------------------------
+
+/// Tracks both module-level names and a stack of local binding frames.
+///
+/// There are two kinds of local names:
+/// - **Variables** (function params, let bindings, lambda params, case bindings):
+///   block module-scope resolution → the lowerer emits `CExpr::Var`.
+/// - **Local functions** (`let f x = ...` / LetFun): shadow module-scope names
+///   AND resolve as `LocalFun` → the lowerer emits `CExpr::FunRef`.
+///
+/// Resolution order (first match wins):
+/// 1. Local variables → None (not in map → lowerer defaults to CExpr::Var)
+/// 2. Local functions → Some(LocalFun { .. })
+/// 3. Module-level scope → Some(LocalFun/ImportedFun/ExternalFun)
+struct Scope<'a> {
+    /// Module-level unqualified names (local funs, exposed imports, trait dicts).
+    module: &'a HashMap<String, ScopedName>,
+    /// Qualified names (e.g. "List.map", "Std.List.map").
+    qualified: &'a HashMap<String, ScopedName>,
+    /// Stack of local variable binding frames (params, let, lambda, case).
+    /// Names here block resolution entirely.
+    locals: Vec<HashSet<String>>,
+    /// Stack of local function frames (LetFun).
+    /// Names here shadow module scope but still resolve as LocalFun.
+    local_funs: Vec<HashMap<String, ScopedName>>,
+}
+
+impl<'a> Scope<'a> {
+    fn new(
+        module: &'a HashMap<String, ScopedName>,
+        qualified: &'a HashMap<String, ScopedName>,
+    ) -> Self {
+        Self {
+            module,
+            qualified,
+            locals: Vec::new(),
+            local_funs: Vec::new(),
+        }
+    }
+
+    /// Push a new local variable binding frame.
+    fn push(&mut self, names: HashSet<String>) {
+        self.locals.push(names);
+    }
+
+    /// Pop the top local variable binding frame.
+    fn pop(&mut self) {
+        self.locals.pop();
+    }
+
+    /// Push a new local function frame.
+    fn push_funs(&mut self, funs: HashMap<String, ScopedName>) {
+        self.local_funs.push(funs);
+    }
+
+    /// Pop the top local function frame.
+    fn pop_funs(&mut self) {
+        self.local_funs.pop();
+    }
+
+    /// Resolve an unqualified name.
+    /// Returns None if it's a local variable (block resolution).
+    /// Returns Some(ScopedName) if it's a local function, module-level, or imported.
+    fn resolve_unqualified(&self, name: &str) -> Option<&ScopedName> {
+        // 1. Local variables shadow everything
+        if self.locals.iter().rev().any(|frame| frame.contains(name)) {
+            return None;
+        }
+        // 2. Local functions shadow module scope
+        for frame in self.local_funs.iter().rev() {
+            if let Some(scoped) = frame.get(name) {
+                return Some(scoped);
+            }
+        }
+        // 3. Module scope
+        self.module.get(name)
+    }
+
+    /// Resolve a qualified name (e.g. "List.map").
+    fn resolve_qualified(&self, qualified: &str) -> Option<&ScopedName> {
+        self.qualified.get(qualified)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extract bound variable names from patterns
+// ---------------------------------------------------------------------------
+
+/// Collect all variable names bound by a pattern.
+fn collect_pat_vars(pat: &Pat) -> HashSet<String> {
+    let mut vars = HashSet::new();
+    collect_pat_vars_into(pat, &mut vars);
+    vars
+}
+
+/// Collect all variable names bound by multiple patterns.
+fn collect_pats_vars(pats: &[Pat]) -> HashSet<String> {
+    let mut vars = HashSet::new();
+    for pat in pats {
+        collect_pat_vars_into(pat, &mut vars);
+    }
+    vars
+}
+
+fn collect_pat_vars_into(pat: &Pat, vars: &mut HashSet<String>) {
+    match pat {
+        Pat::Var { name, .. } => {
+            vars.insert(name.clone());
+        }
+        Pat::Constructor { args, .. } => {
+            for arg in args {
+                collect_pat_vars_into(arg, vars);
+            }
+        }
+        Pat::Tuple { elements, .. } => {
+            for elem in elements {
+                collect_pat_vars_into(elem, vars);
+            }
+        }
+        Pat::Record { fields, as_name, .. } => {
+            for (field_name, alias_pat) in fields {
+                if let Some(alias) = alias_pat {
+                    // `{ status: s }` — `s` is bound
+                    collect_pat_vars_into(alias, vars);
+                } else {
+                    // `{ status }` — `status` is bound as a variable
+                    vars.insert(field_name.clone());
+                }
+            }
+            if let Some(name) = as_name {
+                vars.insert(name.clone());
+            }
+        }
+        Pat::AnonRecord { fields, .. } => {
+            for (field_name, alias_pat) in fields {
+                if let Some(alias) = alias_pat {
+                    collect_pat_vars_into(alias, vars);
+                } else {
+                    vars.insert(field_name.clone());
+                }
+            }
+        }
+        Pat::StringPrefix { rest, .. } => {
+            collect_pat_vars_into(rest, vars);
+        }
+        Pat::ConsPat { head, tail, .. } => {
+            collect_pat_vars_into(head, vars);
+            collect_pat_vars_into(tail, vars);
+        }
+        Pat::ListPat { elements, .. } => {
+            for elem in elements {
+                collect_pat_vars_into(elem, vars);
+            }
+        }
+        Pat::Wildcard { .. } | Pat::Lit { .. } => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Build module-level scope (unchanged logic, minus the external leak)
+// ---------------------------------------------------------------------------
+
 /// Build the resolution map for a module.
 ///
 /// Walks the elaborated AST and, for each `ExprKind::Var` and `ExprKind::QualifiedName`
 /// node, determines whether it refers to a local function, an imported function,
-/// an external function, or a local variable.
+/// an external function, or a local variable (by absence from the map).
 pub fn resolve_names(
     program: &Program,
     codegen_info: &HashMap<String, ModuleCodegenInfo>,
@@ -345,15 +514,10 @@ pub fn resolve_names(
                 }
             }
 
-            // Register private externals (needed for handler body inlining)
-            for (name, erl_mod, erl_func, arity) in &info.external_funs {
-                // Only register if not already in scope (don't override public exports)
-                scope.entry(name.clone()).or_insert(ScopedName::ExternalFun {
-                    erlang_mod: erl_mod.clone(),
-                    erlang_func: erl_func.clone(),
-                    arity: *arity,
-                });
-            }
+            // NOTE: We intentionally do NOT register private externals from
+            // other modules into the bare scope. They are accessible through
+            // their module's own pre-computed ResolutionMap (merged in by
+            // emit_module_with_context) when inlining handler bodies.
         }
     }
 
@@ -373,37 +537,43 @@ pub fn resolve_names(
         }
     }
 
-    // Step 4: Walk the AST and resolve every Var and QualifiedName node.
-    // Resolution maps from imported modules are merged in by the caller
-    // (emit_module_with_context), so we only need to walk our own program.
+    // Step 4: Walk the AST with scope-aware resolution.
+    let mut lexical = Scope::new(&scope, &qualified_scope);
     let mut map = ResolutionMap::new();
-    resolve_program(program, &scope, &qualified_scope, &mut map);
+    resolve_program(program, &mut lexical, &mut map);
 
     map
 }
 
-/// Walk a program and resolve Var/QualifiedName nodes.
+// ---------------------------------------------------------------------------
+// Scope-aware AST walk
+// ---------------------------------------------------------------------------
+
 fn resolve_program(
     program: &Program,
-    scope: &HashMap<String, ScopedName>,
-    qualified_scope: &HashMap<String, ScopedName>,
+    scope: &mut Scope<'_>,
     map: &mut ResolutionMap,
 ) {
     for decl in program {
-        resolve_decl(decl, scope, qualified_scope, map);
+        resolve_decl(decl, scope, map);
     }
 }
 
 fn resolve_decl(
     decl: &Decl,
-    scope: &HashMap<String, ScopedName>,
-    qualified_scope: &HashMap<String, ScopedName>,
+    scope: &mut Scope<'_>,
     map: &mut ResolutionMap,
 ) {
     match decl {
-        Decl::FunBinding { body, .. } => resolve_expr(body, scope, qualified_scope, map),
+        Decl::FunBinding { params, body, .. } => {
+            // Function parameters shadow module-level names within the body
+            let param_vars = collect_pats_vars(params);
+            scope.push(param_vars);
+            resolve_expr(body, scope, map);
+            scope.pop();
+        }
         Decl::Let { value, .. } | Decl::Val { value, .. } => {
-            resolve_expr(value, scope, qualified_scope, map)
+            resolve_expr(value, scope, map);
         }
         Decl::HandlerDef {
             arms,
@@ -411,20 +581,32 @@ fn resolve_decl(
             ..
         } => {
             for arm in arms {
-                resolve_expr(&arm.node.body, scope, qualified_scope, map);
+                // Handler arm params shadow module names in the arm body
+                let param_names: HashSet<String> =
+                    arm.node.params.iter().map(|(name, _)| name.clone()).collect();
+                scope.push(param_names);
+                resolve_expr(&arm.node.body, scope, map);
+                scope.pop();
             }
             if let Some(rc) = return_clause {
-                resolve_expr(&rc.body, scope, qualified_scope, map);
+                let param_names: HashSet<String> =
+                    rc.params.iter().map(|(name, _)| name.clone()).collect();
+                scope.push(param_names);
+                resolve_expr(&rc.body, scope, map);
+                scope.pop();
             }
         }
         Decl::ImplDef { methods, .. } => {
             for method in methods {
-                resolve_expr(&method.node.body, scope, qualified_scope, map);
+                let param_vars = collect_pats_vars(&method.node.params);
+                scope.push(param_vars);
+                resolve_expr(&method.node.body, scope, map);
+                scope.pop();
             }
         }
         Decl::DictConstructor { methods, .. } => {
             for method in methods {
-                resolve_expr(method, scope, qualified_scope, map);
+                resolve_expr(method, scope, map);
             }
         }
         _ => {}
@@ -433,44 +615,77 @@ fn resolve_decl(
 
 fn resolve_expr(
     expr: &Expr,
-    scope: &HashMap<String, ScopedName>,
-    qualified_scope: &HashMap<String, ScopedName>,
+    scope: &mut Scope<'_>,
     map: &mut ResolutionMap,
 ) {
     match &expr.kind {
         ExprKind::Var { name, .. } => {
-            if let Some(scoped) = scope.get(name) {
+            if let Some(scoped) = scope.resolve_unqualified(name) {
                 map.insert(expr.id, scoped_to_resolved(scoped));
             }
-            // If not in scope, it's a local variable - we don't insert anything,
-            // and the lowerer defaults to CExpr::Var.
+            // If locally bound or not in module scope → not in map →
+            // lowerer treats as local variable (CExpr::Var).
         }
-        ExprKind::QualifiedName {
-            module, name, ..
-        } => {
+        ExprKind::QualifiedName { module, name, .. } => {
             let qualified = format!("{}.{}", module, name);
-            if let Some(scoped) = qualified_scope.get(&qualified) {
+            if let Some(scoped) = scope.resolve_qualified(&qualified) {
                 map.insert(expr.id, scoped_to_resolved(scoped));
             }
         }
         ExprKind::App { func, arg, .. } => {
-            resolve_expr(func, scope, qualified_scope, map);
-            resolve_expr(arg, scope, qualified_scope, map);
+            resolve_expr(func, scope, map);
+            resolve_expr(arg, scope, map);
         }
-        ExprKind::Lambda { body, .. } => {
-            resolve_expr(body, scope, qualified_scope, map);
+        ExprKind::Lambda { params, body, .. } => {
+            let param_vars = collect_pats_vars(params);
+            scope.push(param_vars);
+            resolve_expr(body, scope, map);
+            scope.pop();
         }
         ExprKind::Block { stmts, .. } => {
+            // Let bindings are visible to subsequent statements in the block.
+            // We accumulate frames for variable bindings and local function defs.
+            let mut block_locals = HashSet::new();
+            let mut block_funs: HashMap<String, ScopedName> = HashMap::new();
+            scope.push(block_locals.clone());
+            scope.push_funs(block_funs.clone());
             for stmt in stmts {
                 match &stmt.node {
-                    Stmt::Expr(e) | Stmt::Let { value: e, .. } => {
-                        resolve_expr(e, scope, qualified_scope, map);
+                    Stmt::Let { pattern, value, .. } => {
+                        // Resolve the value BEFORE adding the binding (no self-reference)
+                        resolve_expr(value, scope, map);
+                        // Add pattern vars to the block frame for subsequent stmts
+                        let new_vars = collect_pat_vars(pattern);
+                        block_locals.extend(new_vars);
+                        // Update the top frame
+                        scope.pop();
+                        scope.push(block_locals.clone());
                     }
-                    Stmt::LetFun { body, .. } => {
-                        resolve_expr(body, scope, qualified_scope, map);
+                    Stmt::LetFun { name, params, body, .. } => {
+                        // LetFun defines a local *function*, not a variable.
+                        // It resolves as LocalFun (for FunRef codegen) and shadows imports.
+                        let arity = params.len();
+                        block_funs.insert(name.clone(), ScopedName::LocalFun {
+                            name: name.clone(),
+                            arity,
+                            effects: Vec::new(),
+                        });
+                        // Update the local funs frame (visible to subsequent stmts + own body for recursion)
+                        scope.pop_funs();
+                        scope.push_funs(block_funs.clone());
+                        // Params shadow within the body
+                        let param_vars = collect_pats_vars(params);
+                        scope.push(param_vars);
+                        resolve_expr(body, scope, map);
+                        scope.pop();
+                    }
+                    Stmt::Expr(e) => {
+                        resolve_expr(e, scope, map);
                     }
                 }
             }
+            scope.pop_funs();
+            scope.pop();
         }
         ExprKind::If {
             cond,
@@ -478,21 +693,25 @@ fn resolve_expr(
             else_branch,
             ..
         } => {
-            resolve_expr(cond, scope, qualified_scope, map);
-            resolve_expr(then_branch, scope, qualified_scope, map);
-            resolve_expr(else_branch, scope, qualified_scope, map);
+            resolve_expr(cond, scope, map);
+            resolve_expr(then_branch, scope, map);
+            resolve_expr(else_branch, scope, map);
         }
         ExprKind::Case { scrutinee, arms, .. } => {
-            resolve_expr(scrutinee, scope, qualified_scope, map);
+            resolve_expr(scrutinee, scope, map);
             for arm in arms {
+                // Pattern vars are in scope for the guard and body
+                let arm_vars = collect_pat_vars(&arm.node.pattern);
+                scope.push(arm_vars);
                 if let Some(g) = &arm.node.guard {
-                    resolve_expr(g, scope, qualified_scope, map);
+                    resolve_expr(g, scope, map);
                 }
-                resolve_expr(&arm.node.body, scope, qualified_scope, map);
+                resolve_expr(&arm.node.body, scope, map);
+                scope.pop();
             }
         }
         ExprKind::With { expr: inner, handler, .. } => {
-            resolve_expr(inner, scope, qualified_scope, map);
+            resolve_expr(inner, scope, map);
             match handler.as_ref() {
                 ast::Handler::Named(_, _) => {}
                 ast::Handler::Inline {
@@ -501,46 +720,54 @@ fn resolve_expr(
                     ..
                 } => {
                     for arm in arms {
-                        resolve_expr(&arm.node.body, scope, qualified_scope, map);
+                        let param_names: HashSet<String> =
+                            arm.node.params.iter().map(|(name, _)| name.clone()).collect();
+                        scope.push(param_names);
+                        resolve_expr(&arm.node.body, scope, map);
+                        scope.pop();
                     }
                     if let Some(rc) = return_clause {
-                        resolve_expr(&rc.body, scope, qualified_scope, map);
+                        let param_names: HashSet<String> =
+                            rc.params.iter().map(|(name, _)| name.clone()).collect();
+                        scope.push(param_names);
+                        resolve_expr(&rc.body, scope, map);
+                        scope.pop();
                     }
                 }
             }
         }
         ExprKind::BinOp { left, right, .. } => {
-            resolve_expr(left, scope, qualified_scope, map);
-            resolve_expr(right, scope, qualified_scope, map);
+            resolve_expr(left, scope, map);
+            resolve_expr(right, scope, map);
         }
         ExprKind::UnaryMinus { expr: inner, .. }
         | ExprKind::Ascription { expr: inner, .. } => {
-            resolve_expr(inner, scope, qualified_scope, map);
+            resolve_expr(inner, scope, map);
         }
         ExprKind::Tuple { elements, .. } => {
             for e in elements {
-                resolve_expr(e, scope, qualified_scope, map);
+                resolve_expr(e, scope, map);
             }
         }
         ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
             for (_, _, e) in fields {
-                resolve_expr(e, scope, qualified_scope, map);
+                resolve_expr(e, scope, map);
             }
         }
         ExprKind::RecordUpdate { record, fields, .. } => {
-            resolve_expr(record, scope, qualified_scope, map);
+            resolve_expr(record, scope, map);
             for (_, _, e) in fields {
-                resolve_expr(e, scope, qualified_scope, map);
+                resolve_expr(e, scope, map);
             }
         }
         ExprKind::FieldAccess { expr: record, .. } => {
-            resolve_expr(record, scope, qualified_scope, map);
+            resolve_expr(record, scope, map);
         }
         ExprKind::EffectCall { .. } => {
             // Effect calls are resolved dynamically by the lowerer
         }
         ExprKind::Resume { value, .. } => {
-            resolve_expr(value, scope, qualified_scope, map);
+            resolve_expr(value, scope, map);
         }
         ExprKind::Do {
             bindings,
@@ -548,63 +775,95 @@ fn resolve_expr(
             else_arms,
             ..
         } => {
-            for (_, e) in bindings {
-                resolve_expr(e, scope, qualified_scope, map);
+            // Each binding's pattern vars are visible to subsequent bindings
+            // and the success expression.
+            let mut do_locals = HashSet::new();
+            scope.push(do_locals.clone());
+            for (pat, e) in bindings {
+                resolve_expr(e, scope, map);
+                let new_vars = collect_pat_vars(pat);
+                do_locals.extend(new_vars);
+                scope.pop();
+                scope.push(do_locals.clone());
             }
-            resolve_expr(success, scope, qualified_scope, map);
+            resolve_expr(success, scope, map);
+            scope.pop();
+            // Else arms have their own pattern scopes
             for arm in else_arms {
+                let arm_vars = collect_pat_vars(&arm.node.pattern);
+                scope.push(arm_vars);
                 if let Some(g) = &arm.node.guard {
-                    resolve_expr(g, scope, qualified_scope, map);
+                    resolve_expr(g, scope, map);
                 }
-                resolve_expr(&arm.node.body, scope, qualified_scope, map);
+                resolve_expr(&arm.node.body, scope, map);
+                scope.pop();
             }
         }
         ExprKind::Receive { arms, after_clause, .. } => {
             for arm in arms {
+                let arm_vars = collect_pat_vars(&arm.node.pattern);
+                scope.push(arm_vars);
                 if let Some(g) = &arm.node.guard {
-                    resolve_expr(g, scope, qualified_scope, map);
+                    resolve_expr(g, scope, map);
                 }
-                resolve_expr(&arm.node.body, scope, qualified_scope, map);
+                resolve_expr(&arm.node.body, scope, map);
+                scope.pop();
             }
             if let Some((timeout, body)) = after_clause {
-                resolve_expr(timeout, scope, qualified_scope, map);
-                resolve_expr(body, scope, qualified_scope, map);
+                resolve_expr(timeout, scope, map);
+                resolve_expr(body, scope, map);
             }
         }
         ExprKind::DictMethodAccess { dict, .. } => {
-            resolve_expr(dict, scope, qualified_scope, map);
+            resolve_expr(dict, scope, map);
         }
         ExprKind::DictRef { name, .. } => {
             // Dict refs are trait dictionary constructors - resolve like Var
-            if let Some(scoped) = scope.get(name) {
+            if let Some(scoped) = scope.resolve_unqualified(name) {
                 map.insert(expr.id, scoped_to_resolved(scoped));
             }
         }
         ExprKind::ForeignCall { args, .. } => {
             for arg in args {
-                resolve_expr(arg, scope, qualified_scope, map);
+                resolve_expr(arg, scope, map);
             }
         }
         ExprKind::StringInterp { parts, .. } => {
             for part in parts {
                 if let ast::StringPart::Expr(e) = part {
-                    resolve_expr(e, scope, qualified_scope, map);
+                    resolve_expr(e, scope, map);
                 }
             }
         }
         ExprKind::ListComprehension {
             body, qualifiers, ..
         } => {
-            resolve_expr(body, scope, qualified_scope, map);
+            // Generator and let bindings accumulate through qualifiers
+            let mut comp_locals = HashSet::new();
+            scope.push(comp_locals.clone());
             for q in qualifiers {
                 match q {
-                    ComprehensionQualifier::Generator(_, e)
-                    | ComprehensionQualifier::Guard(e)
-                    | ComprehensionQualifier::Let(_, e) => {
-                        resolve_expr(e, scope, qualified_scope, map);
+                    ComprehensionQualifier::Generator(pat, e) => {
+                        resolve_expr(e, scope, map);
+                        let new_vars = collect_pat_vars(pat);
+                        comp_locals.extend(new_vars);
+                        scope.pop();
+                        scope.push(comp_locals.clone());
+                    }
+                    ComprehensionQualifier::Let(pat, e) => {
+                        resolve_expr(e, scope, map);
+                        let new_vars = collect_pat_vars(pat);
+                        comp_locals.extend(new_vars);
+                        scope.pop();
+                        scope.push(comp_locals.clone());
+                    }
+                    ComprehensionQualifier::Guard(e) => {
+                        resolve_expr(e, scope, map);
                     }
                 }
             }
+            resolve_expr(body, scope, map);
+            scope.pop();
         }
         // Leaf nodes that don't contain sub-expressions
         ExprKind::Lit { .. }
@@ -615,23 +874,23 @@ fn resolve_expr(
         ExprKind::Pipe { segments, .. }
         | ExprKind::BinOpChain { segments, .. } => {
             for seg in segments {
-                resolve_expr(&seg.node, scope, qualified_scope, map);
+                resolve_expr(&seg.node, scope, map);
             }
         }
         ExprKind::PipeBack { segments }
         | ExprKind::ComposeForward { segments }
         | ExprKind::ComposeBack { segments } => {
             for seg in segments {
-                resolve_expr(&seg.node, scope, qualified_scope, map);
+                resolve_expr(&seg.node, scope, map);
             }
         }
         ExprKind::Cons { head, tail, .. } => {
-            resolve_expr(head, scope, qualified_scope, map);
-            resolve_expr(tail, scope, qualified_scope, map);
+            resolve_expr(head, scope, map);
+            resolve_expr(tail, scope, map);
         }
         ExprKind::ListLit { elements, .. } => {
             for e in elements {
-                resolve_expr(e, scope, qualified_scope, map);
+                resolve_expr(e, scope, map);
             }
         }
     }

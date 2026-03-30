@@ -1902,3 +1902,85 @@ main () = {
         "List.reverse should emit lists:reverse\n{out}"
     );
 }
+
+/// Function parameters must shadow exposed imports in the resolver.
+/// A param named `length` should NOT resolve to `Std.List.length`.
+#[test]
+fn param_shadows_exposed_import() {
+    let src = r#"
+import Std.List (length)
+
+length_status length = case length {
+  0 -> "empty"
+  _ -> "not empty"
+}
+
+main () = length_status 0
+"#;
+    let out = emit_elaborated_with_std(src);
+    // The `length` param inside length_status should be a plain variable,
+    // not a call to erlang:length/1 or std_list:length/1.
+    assert!(
+        !out.contains("'erlang':'length'"),
+        "param 'length' should not resolve to erlang:length\n{out}"
+    );
+    // The case scrutinee should use the variable, not a function reference
+    assert!(
+        !out.contains("'length'/1"),
+        "param 'length' should not become a function reference\n{out}"
+    );
+}
+
+/// Lambda parameters should shadow module-level names.
+#[test]
+fn lambda_param_shadows_import() {
+    let src = r#"
+import Std.List (length)
+
+main () = {
+  let f = fun length -> length + 1
+  f 5
+}
+"#;
+    let out = emit_elaborated_with_std(src);
+    // Inside the lambda, `length` is a param, not the imported function
+    assert!(
+        !out.contains("'length'/1"),
+        "lambda param 'length' should not become a function reference\n{out}"
+    );
+}
+
+/// Case pattern bindings should shadow imported names.
+#[test]
+fn case_binding_shadows_import() {
+    let src = r#"
+import Std.List (length)
+
+main () = case 42 {
+  length -> length + 1
+}
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        !out.contains("'length'/1"),
+        "case binding 'length' should not become a function reference\n{out}"
+    );
+}
+
+/// Let bindings should shadow imported names for subsequent expressions.
+#[test]
+fn let_binding_shadows_import() {
+    let src = r#"
+import Std.List (length)
+
+main () = {
+  let length = 42
+  length + 1
+}
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        !out.contains("'length'/1"),
+        "let-bound 'length' should not become a function reference\n{out}"
+    );
+}

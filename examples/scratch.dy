@@ -1,3 +1,11 @@
-foo size = size + 1
+import Std.List (length)
 
-main () = println (debug (foo 3))
+# foo size = size + 1
+# main () = println (debug (foo 3))
+
+length_status length = case length {
+  0 -> "empty"
+  _ -> "not empty"
+}
+
+main () = length_status (List.length []) |> println
