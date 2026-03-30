@@ -1853,15 +1853,15 @@ main () = {
         "List.reverse should emit lists:reverse\n{out}"
     );
     assert!(
-        out.contains("call 'string':'reverse'"),
-        "String.reverse should emit string:reverse\n{out}"
+        out.contains("call 'std_string_bridge':'reverse'"),
+        "String.reverse should emit std_string_bridge:reverse\n{out}"
     );
 }
 
 #[test]
 fn exposed_external_overrides_unqualified_lookup() {
     // When reverse is explicitly exposed from Std.String, an unqualified
-    // call to reverse must resolve to string:reverse, not lists:reverse.
+    // call to reverse must resolve to std_string_bridge:reverse, not lists:reverse.
     let src = r#"
 import Std.String (reverse)
 
@@ -1869,8 +1869,8 @@ main () = reverse "hello"
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("call 'string':'reverse'"),
-        "Exposed reverse should emit string:reverse, not lists:reverse\n{out}"
+        out.contains("call 'std_string_bridge':'reverse'"),
+        "Exposed reverse should emit std_string_bridge:reverse, not lists:reverse\n{out}"
     );
     assert!(
         !out.contains("call 'lists':'reverse'"),
@@ -1894,8 +1894,8 @@ main () = {
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("call 'string':'reverse'"),
-        "Exposed reverse should emit string:reverse\n{out}"
+        out.contains("call 'std_string_bridge':'reverse'"),
+        "Exposed reverse should emit std_string_bridge:reverse\n{out}"
     );
     assert!(
         out.contains("call 'lists':'reverse'"),
