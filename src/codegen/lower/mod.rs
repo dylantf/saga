@@ -1448,8 +1448,9 @@ impl<'a> Lowerer<'a> {
                             //   'shutdown' -> Shutdown
                             //   'killed' -> Killed
                             //   'noproc' -> Noproc
-                            //   {'error', Msg, _} -> Error(Msg)
-                            //   Other -> Other(lists:flatten(io_lib:format("~p", [Other])))
+                            //   {dylang_panic, Msg} -> Error(Msg)
+                            //   {_, Msg, _Stacktrace} -> Error(Msg)
+                            //   Other -> Other(io_lib:format("~p", [Other]))
                             let other_var = self.fresh();
                             let fmt_var = self.fresh();
                             let stringify = cerl_call(
@@ -1491,16 +1492,39 @@ impl<'a> Lowerer<'a> {
                                         guard: None,
                                         body: CExpr::Lit(CLit::Atom(noproc.clone())),
                                     },
+                                    // {{dylang_panic, Msg}, _Stacktrace} -> Error(Msg)
                                     CArm {
                                         pat: CPat::Tuple(vec![
-                                            CPat::Var(error_msg_var.clone()),
+                                            CPat::Tuple(vec![
+                                                CPat::Lit(CLit::Atom("dylang_panic".into())),
+                                                CPat::Var(error_msg_var.clone()),
+                                            ]),
                                             CPat::Wildcard, // stacktrace
                                         ]),
                                         guard: None,
                                         body: CExpr::Tuple(vec![
                                             CExpr::Lit(CLit::Atom(error.clone())),
-                                            CExpr::Var(error_msg_var),
+                                            CExpr::Var(error_msg_var.clone()),
                                         ]),
+                                    },
+                                    // {Msg, _Stacktrace} when is_binary(Msg) -> Error(Msg)
+                                    {
+                                        let error_msg_var2 = self.fresh();
+                                        CArm {
+                                            pat: CPat::Tuple(vec![
+                                                CPat::Var(error_msg_var2.clone()),
+                                                CPat::Wildcard, // stacktrace
+                                            ]),
+                                            guard: Some(cerl_call(
+                                                "erlang",
+                                                "is_binary",
+                                                vec![CExpr::Var(error_msg_var2.clone())],
+                                            )),
+                                            body: CExpr::Tuple(vec![
+                                                CExpr::Lit(CLit::Atom(error.clone())),
+                                                CExpr::Var(error_msg_var2),
+                                            ]),
+                                        }
                                     },
                                     CArm {
                                         pat: CPat::Var(other_var.clone()),

@@ -1038,6 +1038,33 @@ impl Checker {
         Ok(())
     }
 
+    /// Look up the source-level type variable name for a resolved type var ID.
+    /// `where_bound_var_names` is keyed by original (pre-substitution) var IDs,
+    /// so we resolve each bound ID through substitution to find the match.
+    fn resolve_where_var_name(&self, trait_name: &str, resolved_id: u32) -> Option<String> {
+        self.trait_state
+            .where_bounds
+            .iter()
+            .find_map(|(bound_id, traits)| {
+                if traits.contains(trait_name) {
+                    match self.sub.apply(&Type::Var(*bound_id)) {
+                        Type::Var(r) if r == resolved_id => {
+                            self.trait_state.where_bound_var_names.get(bound_id).cloned()
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                self.trait_state
+                    .where_bound_var_names
+                    .get(&resolved_id)
+                    .cloned()
+            })
+    }
+
     /// Partition pending constraints into scheme-level (polymorphic) vs global
     /// (concrete), then generalize the function type into a scheme with constraints.
     fn build_fun_scheme(
@@ -1077,7 +1104,7 @@ impl Checker {
                                     }
                             });
                     if in_where {
-                        let var_name = self.trait_state.where_bound_var_names.get(&id).cloned();
+                        let var_name = self.resolve_where_var_name(&trait_name, id);
                         self.evidence.push(super::TraitEvidence {
                             node_id,
                             trait_name: trait_name.clone(),
@@ -1112,11 +1139,7 @@ impl Checker {
                                 Type::Var(rid) => rid,
                                 _ => id,
                             };
-                            let var_name = self
-                                .trait_state
-                                .where_bound_var_names
-                                .get(&resolved_id)
-                                .cloned();
+                            let var_name = self.resolve_where_var_name(&trait_name, resolved_id);
                             self.evidence.push(super::TraitEvidence {
                                 node_id,
                                 trait_name: trait_name.clone(),
@@ -1139,7 +1162,7 @@ impl Checker {
                     }
                     // Record evidence for inferred constraints too, so the
                     // elaborator can resolve trait method calls (DictMethodAccess).
-                    let var_name = self.trait_state.where_bound_var_names.get(&id).cloned();
+                    let var_name = self.resolve_where_var_name(&trait_name, id);
                     self.evidence.push(super::TraitEvidence {
                         node_id,
                         trait_name: trait_name.clone(),
