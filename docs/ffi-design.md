@@ -16,6 +16,7 @@ Three string args: target, module, function. Type signature is mandatory and tru
 ## Compiler work
 
 Minimal:
+
 1. Parse `@external` annotation
 2. Require full type signature (params + return)
 3. Emit a direct call: `call 'lists':'reverse'(List)`
@@ -26,41 +27,47 @@ No special codegen beyond a qualified foreign call.
 
 Compile `Result` and `Maybe` constructors to match Erlang conventions:
 
-| Constructor | Current codegen | New codegen |
-|-------------|----------------|-------------|
-| `Ok(v)`     | `{'Ok', v}`    | `{ok, v}`   |
-| `Err(e)`    | `{'Err', e}`   | `{error, e}`|
-| `Some(v)`   | `{'Some', v}`  | `v` (bare)  |
-| `None`      | `{'None'}`     | `undefined` |
+| Constructor | Current codegen | New codegen  |
+| ----------- | --------------- | ------------ |
+| `Ok(v)`     | `{'Ok', v}`     | `{ok, v}`    |
+| `Err(e)`    | `{'Err', e}`    | `{error, e}` |
+| `Just(v)`   | `{'Just', v}`   | `{just, v}`  |
+| `None`      | `{'None'}`      | `{none}`     |
 
 `Maybe` maps to Erlang's `V | undefined` convention. `Some(v)` is just the bare value with no wrapping tuple. `None` is the atom `undefined`. This matches how Erlang/Elixir handle optionality (process dictionaries, ETS lookups, maps:get, etc.).
 
 `Result` maps to Erlang's `{ok, V} | {error, E}` convention directly.
 
 **Pattern matching implications:** `case x of Some(v) -> ... | None -> ...` compiles to:
+
 ```erlang
 case X of
   'undefined' -> ...   % None branch
   V -> ...             % Some(v) branch, V is the unwrapped value
 end
 ```
+
 The `None`/`undefined` arm must come first (specific before wildcard).
 
 ## FFI categories
 
 **Direct FFI (no shim needed):**
+
 - Functions returning plain values: ints, floats, strings, atoms, lists, maps
 - Functions returning `{ok, V} | {error, E}` (if Result matches)
 - Functions returning `true | false` (Bool already compiles to atoms)
 
 **Direct FFI for Maybe (V | undefined):**
+
 - Functions returning `V | undefined` now work directly since `Maybe` compiles to `V | undefined`
 
 **Needs a .erl shim:**
+
 - Functions returning `V | false` (e.g. `lists:keyfind`)
 - Anything with a truly ad-hoc return convention
 
 **Shim example:**
+
 ```erlang
 % dylang_ffi.erl
 keyfind(Key, List) ->
@@ -111,23 +118,24 @@ read_file(Path) ->
 
 Your bridge functions must return values that match how the compiler represents types at runtime on the BEAM:
 
-| Type | BEAM representation | Example |
-|------|-------------------|---------|
-| `Int` | Integer | `42` |
-| `Float` | Float | `3.14` |
-| `String` | Binary | `<<"hello">>` |
-| `Bool` | Atoms `true` / `false` | `true` |
-| `Unit` | Atom `unit` | `unit` |
-| `List a` | Erlang list | `[1, 2, 3]` |
-| `(a, b)` | Tuple | `{1, <<"hi">>}` |
-| `Ok v` | `{ok, V}` | `{ok, <<"contents">>}` |
-| `Err e` | `{error, E}` | `{error, <<"not found">>}` |
-| `Just v` | Bare value `V` | `<<"hello">>` |
-| `Nothing` | Atom `undefined` | `undefined` |
-| Custom variant `Foo x y` | `{module_Foo, X, Y}` | `{shapes_Circle, 5}` |
-| Custom nullary variant `Foo` | `{module_Foo}` (1-tuple) | `{std_file_NotFound}` |
+| Type                         | BEAM representation      | Example                    |
+| ---------------------------- | ------------------------ | -------------------------- |
+| `Int`                        | Integer                  | `42`                       |
+| `Float`                      | Float                    | `3.14`                     |
+| `String`                     | Binary                   | `<<"hello">>`              |
+| `Bool`                       | Atoms `true` / `false`   | `true`                     |
+| `Unit`                       | Atom `unit`              | `unit`                     |
+| `List a`                     | Erlang list              | `[1, 2, 3]`                |
+| `(a, b)`                     | Tuple                    | `{1, <<"hi">>}`            |
+| `Ok v`                       | `{ok, V}`                | `{ok, <<"contents">>}`     |
+| `Err e`                      | `{error, E}`             | `{error, <<"not found">>}` |
+| `Just v`                     | Bare value `V`           | `<<"hello">>`              |
+| `Nothing`                    | Atom `undefined`         | `undefined`                |
+| Custom variant `Foo x y`     | `{module_Foo, X, Y}`     | `{shapes_Circle, 5}`       |
+| Custom nullary variant `Foo` | `{module_Foo}` (1-tuple) | `{std_file_NotFound}`      |
 
 Key gotchas:
+
 - `Err` maps to the atom `error`, not `err`
 - `Nothing` / `None` is `undefined`, not `nil` or `none`
 - `Just` / `Some` is the bare unwrapped value, no tuple wrapper
