@@ -1,20 +1,8 @@
-import Std.String (replace)
-
-fun make_maybe : (value: Int) -> Maybe Int
 make_maybe v = Just v
 
 main () = {
-  Std.String.replace "[name]" "Dylan" "Hello, [name]"
-  |> println
-
-  String.replace "[name]" "Dylan" "Hello, [name]"
-  |> println
-
-  replace "[name]" "Dylan" "Hello, [name]"
-  |> println
-
-  case make_maybe 5 {
-    Just j -> j |> debug |> println
-    _ -> panic "nothing"
+  case make_maybe "hello" {
+    Just j -> println j
+    _ -> panic "shouldn't panic"
   }
 }

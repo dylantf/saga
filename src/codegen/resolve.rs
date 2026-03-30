@@ -23,7 +23,8 @@ fn beam_override(name: &str) -> Option<&'static str> {
     match name {
         "Ok" => Some("ok"),
         "Err" => Some("error"),
-        "Nothing" => Some("undefined"),
+        "Just" => Some("just"),
+        "Nothing" => Some("nothing"),
         "True" => Some("true"),
         "False" => Some("false"),
         "Normal" => Some("normal"),
@@ -48,7 +49,7 @@ pub fn build_constructor_atoms(
 
     // Register BEAM overrides (these win over any module-prefixed version)
     for name in &[
-        "Ok", "Err", "Nothing", "True", "False", "Normal", "Shutdown", "Killed", "Noproc",
+        "Ok", "Err", "Just", "Nothing", "True", "False", "Normal", "Shutdown", "Killed", "Noproc",
     ] {
         if let Some(atom) = beam_override(name) {
             atoms.insert(name.to_string(), atom.to_string());

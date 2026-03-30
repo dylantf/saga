@@ -3,8 +3,8 @@
 
 parse(S) ->
     case string:to_float(S) of
-        {F, []} -> F;
-        _ -> undefined
+        {F, []} -> {just, F};
+        _ -> {nothing}
     end.
 
 to_string(X) ->

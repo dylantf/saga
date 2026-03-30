@@ -45,14 +45,6 @@ pub(super) fn lower_pat(
                 Box::new(lower_pat(&args[1], record_fields, constructor_atoms)),
             ),
             "Nil" if args.is_empty() => CPat::Nil,
-            // Just(v) -> bare variable pattern (the value itself, no tuple)
-            "Just" if args.len() == 1 => {
-                lower_pat(&args[0], record_fields, constructor_atoms)
-            }
-            // Nothing -> match the atom 'undefined'
-            "Nothing" if args.is_empty() => {
-                CPat::Lit(CLit::Atom("undefined".to_string()))
-            }
             // Booleans are bare atoms to match Erlang's native true/false
             "True" if args.is_empty() => CPat::Lit(CLit::Atom("true".to_string())),
             "False" if args.is_empty() => CPat::Lit(CLit::Atom("false".to_string())),

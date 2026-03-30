@@ -3,14 +3,14 @@
 
 find(Sub, S) ->
     case string:find(S, Sub) of
-        nomatch -> undefined;
-        V -> V
+        nomatch -> {nothing};
+        V -> {just, V}
     end.
 
 strip_prefix(Prefix, S) ->
     case string:prefix(S, Prefix) of
-        nomatch -> undefined;
-        V -> V
+        nomatch -> {nothing};
+        V -> {just, V}
     end.
 
 contains(Sub, S) ->

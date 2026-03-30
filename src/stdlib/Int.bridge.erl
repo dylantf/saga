@@ -3,6 +3,6 @@
 
 parse(S) ->
     case string:to_integer(S) of
-        {N, []} -> N;
-        _ -> undefined
+        {N, []} -> {just, N};
+        _ -> {nothing}
     end.

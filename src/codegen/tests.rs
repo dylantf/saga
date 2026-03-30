@@ -133,17 +133,17 @@ main () = id 42
 // --- ADT constructors ---
 
 #[test]
-fn none_is_undefined_atom() {
-    // `Nothing` -> 'undefined' (BEAM convention)
-    assert_contains("main () = Nothing", "'undefined'");
+fn nothing_is_tagged_tuple() {
+    // `Nothing` -> {'nothing'} (tagged 1-tuple)
+    assert_contains("main () = Nothing", "{'nothing'}");
 }
 
 #[test]
-fn some_is_bare_value() {
-    // `Just(42)` -> 42 (bare value, no tuple wrapping)
+fn just_is_tagged_tuple() {
+    // `Just(42)` -> {'just', 42} (tagged tuple)
     let out = emit("main () = Just(42)");
     assert!(out.contains("42"), "missing value\n{out}");
-    assert!(!out.contains("'Just'"), "should not have Just tag\n{out}");
+    assert!(out.contains("'just'"), "missing just tag\n{out}");
 }
 
 #[test]
@@ -205,8 +205,8 @@ main () = case True {
 
 #[test]
 fn case_maybe_patterns() {
-    // Just(v) lowers to bare variable, Nothing to 'undefined'.
-    // Nothing arm must come before Just arm (specific before wildcard).
+    // Just(v) lowers to {'just', v}, Nothing to {'nothing'}.
+    // Arms stay in source order -- no reordering needed.
     let src = "
 unwrap opt = case opt {
   Just(v) -> v
@@ -215,17 +215,12 @@ unwrap opt = case opt {
 ";
     let out = emit(src);
     assert!(
-        out.contains("'undefined'"),
-        "missing undefined pattern for Nothing\n{out}"
+        out.contains("'nothing'"),
+        "missing nothing pattern for Nothing\n{out}"
     );
-    // Just(v) becomes a bare variable pattern
-    assert!(!out.contains("'Just'"), "should not have Just tag\n{out}");
-    // undefined arm should come before the variable arm
-    let undef_pos = out.find("'undefined'").unwrap();
-    let v_pos = out.rfind("V").unwrap();
     assert!(
-        undef_pos < v_pos,
-        "undefined arm should come before variable arm\n{out}"
+        out.contains("'just'"),
+        "missing just tag for Just pattern\n{out}"
     );
 }
 
@@ -653,8 +648,9 @@ main () = get "x" (empty ())
 
 #[test]
 fn external_fun_returning_maybe() {
-    // An external function returning Maybe should need no wrapping --
-    // Some(v) is a bare value and None is 'undefined', matching Erlang conventions.
+    // An external function returning Maybe needs a bridge wrapper to convert
+    // Erlang's Value|undefined convention to {just, Value}|{nothing}.
+    // For now, test that the pattern match uses the tagged tuple form.
     let src = r#"
 @external("erlang", "os", "getenv")
 fun getenv : (name: String) -> Maybe String
@@ -665,20 +661,19 @@ main () = case getenv "HOME" {
 }
 "#;
     let out = emit(src);
-    // Direct call, no wrapping logic
+    // Direct call to the external function
     assert!(
         out.contains("call 'os':'getenv'"),
         "Expected direct call to os:getenv in:\n{out}"
     );
-    // No tuple wrapping around the result
+    // Pattern match should use tagged tuples
     assert!(
-        !out.contains("'Just'"),
-        "Should not have Just tag in:\n{out}"
+        out.contains("'just'"),
+        "Expected just tag for Just pattern in:\n{out}"
     );
-    // Pattern match should use 'undefined' for None
     assert!(
-        out.contains("'undefined'"),
-        "Expected undefined pattern for None in:\n{out}"
+        out.contains("'nothing'"),
+        "Expected nothing tag for Nothing pattern in:\n{out}"
     );
 }
 

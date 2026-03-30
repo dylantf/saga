@@ -15,9 +15,9 @@ sort_by(KeyFun, List) ->
 
 nth(N, List) ->
     try lists:nth(N + 1, List) of
-        V -> V
+        V -> {just, V}
     catch
-        _:_ -> undefined
+        _:_ -> {nothing}
     end.
 
 enumerate(List) ->
