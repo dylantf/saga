@@ -97,10 +97,10 @@ Erlang has band, bor, bxor, bnot, bsl, bsr.
 
 # Lower Priority - Nice to Have
 
-- [ ] List.scan - Like fold but returns all intermediate accumulators
-- [ ] List.group_by - Group elements by key function (returns Dict k (List a))
-- [ ] List.chunks - Split into chunks of size n
-- [ ] List.window - Sliding window
-- [ ] Float.is_nan / is_infinite
-- [ ] Int.to_string / Float.to_string as public (currently private, covered by show)
-- [ ] String.to_int / to_float as aliases for Int.parse / Float.parse
+- [x] List.scan - Like fold but returns all intermediate accumulators
+- [x] List.group_by - Group elements by key function (returns Dict k (List a))
+- [x] List.chunks - Split into chunks of size n
+- [x] List.window - Sliding window
+- [x] Float.is_nan / is_infinite
+- [x] Int.to_string / Float.to_string as public (currently private, covered by show)
+- [x] String.to_int / to_float as aliases for Int.parse / Float.parse

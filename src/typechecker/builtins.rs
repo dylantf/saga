@@ -232,6 +232,16 @@ impl Checker {
             },
         );
 
+        // Eq for Set a: requires Eq on a
+        self.trait_state.impls.insert(
+            ("Eq".into(), vec![], "Set".into()),
+            ImplInfo {
+                param_constraints: vec![("Eq".into(), 0)],
+                trait_type_args: vec![],
+                span: None,
+            },
+        );
+
 
 
     }

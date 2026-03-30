@@ -1,5 +1,14 @@
-import Std.Test (describe, test, assert_eq, assert_true, assert_false, assert_just, assert_nothing, assert_panics)
 import Std.List as List
+import Std.Test (
+  describe,
+  test,
+  assert_eq,
+  assert_true,
+  assert_false,
+  assert_just,
+  assert_nothing,
+  assert_panics
+)
 
 describe "List" {
 
@@ -7,7 +16,6 @@ describe "List" {
     test "returns first element" {
       assert_eq (List.head [1, 2, 3]) 1
     }
-
     test "panics on empty list" {
       assert_panics (fun () -> List.head [])
     }
@@ -101,7 +109,6 @@ describe "List" {
     test "reverses a list" {
       assert_eq (List.reverse [1, 2, 3]) [3, 2, 1]
     }
-
   }
 
   describe "append" {
@@ -116,7 +123,8 @@ describe "List" {
 
   describe "flat_map" {
     test "maps and flattens" {
-      assert_eq (List.flat_map (fun x -> [x, x * 10]) [1, 2, 3]) [1, 10, 2, 20, 3, 30]
+      assert_eq (List.flat_map (fun x ->
+        [x, x * 10]) [1, 2, 3]) [1, 10, 2, 20, 3, 30]
     }
   }
 
@@ -212,13 +220,18 @@ describe "List" {
     }
 
     test "sorts strings" {
-      assert_eq (List.sort ["banana", "apple", "cherry"]) ["apple", "banana", "cherry"]
+      assert_eq (List.sort [
+        "banana",
+        "apple",
+        "cherry",
+      ]) ["apple", "banana", "cherry"]
     }
   }
 
   describe "sort_with" {
     test "descending with custom comparator" {
-      assert_eq (List.sort_with (fun a b -> compare b a) [3, 1, 4, 1, 5]) [5, 4, 3, 1, 1]
+      assert_eq (List.sort_with (fun a b ->
+        compare b a) [3, 1, 4, 1, 5]) [5, 4, 3, 1, 1]
     }
   }
 
@@ -276,7 +289,8 @@ describe "List" {
 
   describe "zip_with" {
     test "zips with function" {
-      assert_eq (List.zip_with (fun a b -> a + b) [1, 2, 3] [10, 20, 30]) [11, 22, 33]
+      assert_eq (List.zip_with (fun a b ->
+        a + b) [1, 2, 3] [10, 20, 30]) [11, 22, 33]
     }
 
     test "different lengths" {
@@ -286,14 +300,18 @@ describe "List" {
 
   describe "unzip" {
     test "unzips a list of pairs" {
-      assert_eq (List.unzip [(1, 10), (2, 20), (3, 30)]) ([1, 2, 3], [10, 20, 30])
+      assert_eq (List.unzip [
+        (1, 10),
+        (2, 20),
+        (3, 30),
+      ]) ([1, 2, 3], [10, 20, 30])
     }
-
   }
 
   describe "partition" {
     test "splits by predicate" {
-      assert_eq (List.partition (fun x -> x > 3) [1, 5, 2, 4, 3]) ([5, 4], [1, 2, 3])
+      assert_eq (List.partition (fun x ->
+        x > 3) [1, 5, 2, 4, 3]) ([5, 4], [1, 2, 3])
     }
 
     test "all match" {
@@ -309,7 +327,6 @@ describe "List" {
     test "pairs elements with 0-based indices" {
       assert_eq (List.enumerate [10, 20, 30]) [(0, 10), (1, 20), (2, 30)]
     }
-
   }
 
   describe "intersperse" {
@@ -328,13 +345,23 @@ describe "List" {
 
   describe "unique" {
     test "removes duplicates preserving order" {
-      assert_eq (List.unique [3, 1, 4, 1, 5, 9, 2, 6, 5, 3]) [3, 1, 4, 5, 9, 2, 6]
+      assert_eq (List.unique [
+        3,
+        1,
+        4,
+        1,
+        5,
+        9,
+        2,
+        6,
+        5,
+        3,
+      ]) [3, 1, 4, 5, 9, 2, 6]
     }
 
     test "no duplicates" {
       assert_eq (List.unique [1, 2, 3]) [1, 2, 3]
     }
-
   }
 
   describe "concat" {
@@ -349,7 +376,6 @@ describe "List" {
 
   describe "iter" {
     test "applies function to each element" {
-      # iter returns Unit, so we just verify it completes
       List.iter (fun _ -> ()) [1, 2, 3]
     }
   }
@@ -384,7 +410,13 @@ describe "List" {
     }
 
     test "window size 3" {
-      assert_eq (List.window 3 [1, 2, 3, 4, 5]) [[1, 2, 3], [2, 3, 4], [3, 4, 5]]
+      assert_eq (List.window 3 [
+        1,
+        2,
+        3,
+        4,
+        5,
+      ]) [[1, 2, 3], [2, 3, 4], [3, 4, 5]]
     }
 
     test "window larger than list" {

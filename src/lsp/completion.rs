@@ -427,7 +427,7 @@ pub fn collect_completions(
 
     // Built-in type names
     let type_names = [
-        "Int", "Float", "String", "Bool", "Unit", "List", "Maybe", "Result", "Tuple", "Pid", "Dict",
+        "Int", "Float", "String", "Bool", "Unit", "List", "Maybe", "Result", "Tuple", "Pid", "Dict", "Set",
     ];
     for type_name in type_names {
         if !prefix.is_empty() && !type_name.to_lowercase().starts_with(&prefix_lower) {

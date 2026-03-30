@@ -383,6 +383,7 @@ pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
             "Test" => Some(include_str!("../stdlib/Test.dy")),
             "Process" => Some(include_str!("../stdlib/Process.dy")),
             "File" => Some(include_str!("../stdlib/File.dy")),
+            "Set" => Some(include_str!("../stdlib/Set.dy")),
             _ => None,
         }
     } else {
