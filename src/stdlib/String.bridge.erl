@@ -1,47 +1,50 @@
 -module(std_string_bridge).
--export([find/2, strip_prefix/2, contains/2, starts_with/2, ends_with/2, split/2, replace/3, replace_all/3, join/2, graphemes/1]).
+-export([find/2, strip_prefix/2, contains/2, starts_with/2, ends_with/2, split/2, replace/3, replace_all/3, join/2, graphemes/1, slice/3]).
 
-find(S, Sub) ->
+find(Sub, S) ->
     case string:find(S, Sub) of
         nomatch -> undefined;
         V -> V
     end.
 
-strip_prefix(S, Prefix) ->
+strip_prefix(Prefix, S) ->
     case string:prefix(S, Prefix) of
         nomatch -> undefined;
         V -> V
     end.
 
-contains(S, Sub) ->
+contains(Sub, S) ->
     case string:find(S, Sub) of
         nomatch -> false;
         _ -> true
     end.
 
-starts_with(S, Prefix) ->
+starts_with(Prefix, S) ->
     case string:prefix(S, Prefix) of
         nomatch -> false;
         _ -> true
     end.
 
-ends_with(S, Suffix) ->
+ends_with(Suffix, S) ->
     case string:prefix(string:reverse(S), string:reverse(Suffix)) of
         nomatch -> false;
         _ -> true
     end.
 
-split(S, Sep) ->
+split(Sep, S) ->
     string:split(S, Sep, all).
 
-replace(S, Pattern, Replacement) ->
+replace(Pattern, Replacement, S) ->
     iolist_to_binary(string:replace(S, Pattern, Replacement)).
 
-replace_all(S, Pattern, Replacement) ->
+replace_all(Pattern, Replacement, S) ->
     iolist_to_binary(string:replace(S, Pattern, Replacement, all)).
 
 join(Sep, Parts) ->
     unicode:characters_to_binary(lists:join(Sep, Parts)).
+
+slice(Start, Len, S) ->
+    string:slice(S, Start, Len).
 
 graphemes(String) ->
     graphemes(String, []).

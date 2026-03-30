@@ -1,9 +1,7 @@
-import Std.Fail
-
-foo x = {
-  fail! "oops"
-}
+# import Std.String
 
 main () = {
-  println "Placeholder for random testing"
+  let result = Std.String.replace "[name]" "Dylan" "Hello, [name]"
+
+  println result
 }

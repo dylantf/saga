@@ -32,7 +32,7 @@ record TestState {
 }
 
 fun indent : (n: Int) -> (s: String) -> String
-indent n s = String.repeat "  " n <> s
+indent n s = String.repeat n "  " <> s
 
 fun run_body : (body: Unit -> Unit needs {Assert, ..e}) -> List String needs {..e}
 run_body body = {

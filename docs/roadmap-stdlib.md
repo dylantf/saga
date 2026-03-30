@@ -20,10 +20,10 @@
 
 ## String
 
-- [ ] replace / replace_all - You have this in Regex but not as plain string operations. Very common need.
-- [ ] is_empty
-- [ ] join - Join a List String with a separator. Your current List.join returns List String which looks like it intersperses, and List.flatten concatenates strings — but String.join ", " ["a", "b", "c"] producing "a, b, c" is the standard expected API.
-- [ ] char_at - Get character at index.
+- [x] replace / replace_all - You have this in Regex but not as plain string operations. Very common need.
+- [x] is_empty
+- [x] join - Join a List String with a separator. Your current List.join returns List String which looks like it intersperses, and List.flatten concatenates strings — but String.join ", " ["a", "b", "c"] producing "a, b, c" is the standard expected API.
+- [x] char_at - Get character at index.
 
 ## Maybe
 
