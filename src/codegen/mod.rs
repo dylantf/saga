@@ -58,7 +58,7 @@ pub fn emit_module_with_context(
     let codegen_info = ctx.codegen_info();
     let program = normalize::normalize_effects(program);
     let constructor_atoms =
-        resolve::build_constructor_atoms(module_name, &program, &codegen_info);
+        resolve::build_constructor_atoms(module_name, &program, &codegen_info, &ctx.prelude_imports);
     let mut resolution_map = resolve::resolve_names(
         &program,
         &codegen_info,

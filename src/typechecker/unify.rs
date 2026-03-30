@@ -336,7 +336,14 @@ impl Checker {
                 if name.starts_with(|c: char| c.is_uppercase()) {
                     self.lsp.type_references.push((*span, name.clone()));
                 }
-                Type::Con(name.clone(), vec![])
+                // Qualified type names (e.g. "M.Maybe", "Std.Maybe.Maybe") resolve
+                // to the bare type name. Module prefixes disambiguate values, not types.
+                let type_name = if let Some(pos) = name.rfind('.') {
+                    name[pos + 1..].to_string()
+                } else {
+                    name.clone()
+                };
+                Type::Con(type_name, vec![])
             }
             crate::ast::TypeExpr::Var { name, .. } => {
                 if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {

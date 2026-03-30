@@ -734,11 +734,18 @@ impl Checker {
         }
 
         // Function effects (for cross-module `with` validation and effect propagation).
-        // Register both qualified ("Logger.greet") and unqualified ("greet") forms
-        // so both qualified calls and exposed imports are covered.
+        // Register canonical ("Std.Logger.greet"), alias ("Logger.greet"), and
+        // unqualified ("greet") forms so all call styles are covered.
         for name in effectful_funs {
-            let qualified = format!("{}.{}", prefix, name);
-            self.effect_meta.known_funs.insert(qualified);
+            // Canonical: full module path
+            let canonical = format!("{}.{}", module_name, name);
+            self.effect_meta.known_funs.insert(canonical);
+            // Alias: short prefix (if different)
+            if prefix != module_name {
+                let aliased = format!("{}.{}", prefix, name);
+                self.effect_meta.known_funs.insert(aliased);
+            }
+            // Bare name (for exposed imports)
             self.effect_meta.known_funs.insert(name.clone());
         }
 
@@ -794,11 +801,21 @@ impl Checker {
         }
 
         for (name, scheme) in bindings {
-            let qualified = format!("{}.{}", prefix, name);
+            // Canonical: always register under full module path (e.g. "Std.String.replace")
+            let canonical = format!("{}.{}", module_name, name);
             if let Some(&did) = def_ids.get(name.as_str()) {
-                self.env.insert_with_def(qualified, scheme.clone(), did);
+                self.env.insert_with_def(canonical.clone(), scheme.clone(), did);
             } else {
-                self.env.insert(qualified, scheme.clone());
+                self.env.insert(canonical.clone(), scheme.clone());
+            }
+            // Alias: if prefix differs from module_name, also register short form (e.g. "String.replace")
+            if prefix != module_name {
+                let aliased = format!("{}.{}", prefix, name);
+                if let Some(&did) = def_ids.get(name.as_str()) {
+                    self.env.insert_with_def(aliased, scheme.clone(), did);
+                } else {
+                    self.env.insert(aliased, scheme.clone());
+                }
             }
         }
 
@@ -806,9 +823,15 @@ impl Checker {
         for (type_name, ctors) in ctors_map {
             let mut variants = Vec::new();
             for ctor in ctors {
-                let qualified = format!("{}.{}", prefix, ctor);
+                // Canonical: full module path (e.g. "Std.File.NotFound")
+                let canonical = format!("{}.{}", module_name, ctor);
                 if let Some(&scheme) = binding_map.get(ctor.as_str()) {
-                    self.constructors.insert(qualified, scheme.clone());
+                    self.constructors.insert(canonical, scheme.clone());
+                    // Alias: short prefix (e.g. "File.NotFound")
+                    if prefix != module_name {
+                        let aliased = format!("{}.{}", prefix, ctor);
+                        self.constructors.insert(aliased, scheme.clone());
+                    }
                     variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
                 }
             }
@@ -890,11 +913,17 @@ impl Checker {
                         ));
                     }
                 } else {
-                    let qualified = format!("{}.{}", prefix, name);
-                    match self.env.get(&qualified).cloned() {
+                    // Look up via canonical (full module path) first, then alias
+                    let canonical = format!("{}.{}", module_name, name);
+                    let alias_key = format!("{}.{}", prefix, name);
+                    let lookup = self.env.get(&canonical).cloned()
+                        .or_else(|| self.env.get(&alias_key).cloned());
+                    match lookup {
                         Some(scheme) => {
                             // Use the same def_id as the qualified form
-                            if let Some(did) = self.env.def_id(&qualified) {
+                            let did = self.env.def_id(&canonical)
+                                .or_else(|| self.env.def_id(&alias_key));
+                            if let Some(did) = did {
                                 self.env.insert_with_def(name.clone(), scheme, did);
                             } else {
                                 self.env.insert(name.clone(), scheme);

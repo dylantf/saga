@@ -42,6 +42,7 @@ pub fn build_constructor_atoms(
     module_name: &str,
     program: &Program,
     codegen_info: &HashMap<String, ModuleCodegenInfo>,
+    prelude_imports: &[Decl],
 ) -> ConstructorAtoms {
     let mut atoms = ConstructorAtoms::new();
 
@@ -80,12 +81,20 @@ pub fn build_constructor_atoms(
         }
     }
 
+    // Build a map of module name -> import alias from import declarations
+    let mut import_aliases: HashMap<String, String> = HashMap::new();
+    for decl in prelude_imports.iter().chain(program.iter()) {
+        if let Decl::Import { module_path, alias: Some(a), .. } = decl {
+            import_aliases.insert(module_path.join("."), a.clone());
+        }
+    }
+
     // Imported constructors from codegen_info
     for (mod_name, info) in codegen_info {
         let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
         let erlang_name = module_name_to_erlang(&mod_path);
-        // The last segment is the module alias (e.g. "File" from "Std.File")
-        let alias = mod_path.last().map(|s| s.as_str()).unwrap_or("");
+        let last_segment = mod_path.last().map(|s| s.as_str()).unwrap_or("");
+        let alias = import_aliases.get(mod_name).map(|s| s.as_str()).unwrap_or(last_segment);
 
         for (type_name, ctors) in &info.type_constructors {
             for ctor in ctors {
@@ -244,6 +253,7 @@ pub fn resolve_names(
     for decl in &import_decls {
         if let Decl::Import {
             module_path,
+            alias: import_alias,
             exposing,
             ..
         } = decl
@@ -251,7 +261,10 @@ pub fn resolve_names(
             let mod_name = module_path.join(".");
             let mod_path_strs: Vec<String> = module_path.to_vec();
             let erlang_mod = module_name_to_erlang(&mod_path_strs);
-            let alias = module_path.last().map(|s| s.as_str()).unwrap_or("");
+            let alias = import_alias
+                .as_deref()
+                .unwrap_or_else(|| module_path.last().map(|s| s.as_str()).unwrap_or(""));
+            let alias_differs = alias != mod_name;
 
             let info = match codegen_info.get(&mod_name) {
                 Some(info) => info,
@@ -283,7 +296,6 @@ pub fn resolve_names(
 
             // Register exported functions
             for (name, scheme) in &info.exports {
-                let qualified = format!("{}.{}", alias, name);
                 let (arity, _) = crate::codegen::lower::util::arity_and_effects_from_type(
                     &scheme.ty,
                 );
@@ -312,9 +324,19 @@ pub fn resolve_names(
                     }
                 };
 
+                // Canonical: full module path (e.g. "Std.String.replace")
+                let canonical = format!("{}.{}", mod_name, name);
                 qualified_scope
-                    .entry(qualified)
+                    .entry(canonical)
                     .or_insert_with(|| scoped.clone());
+
+                // Alias: short prefix (e.g. "String.replace") if different
+                if alias_differs {
+                    let aliased = format!("{}.{}", alias, name);
+                    qualified_scope
+                        .entry(aliased)
+                        .or_insert_with(|| scoped.clone());
+                }
 
                 // Register unqualified form only if exposed and not shadowed by local
                 if is_exposed(name) && !local_funs.contains_key(name) && !local_externals.contains_key(name) {

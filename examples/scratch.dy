@@ -1,7 +1,21 @@
-# import Std.String
+import Std.Maybe as M
+import Std.String (replace)
+
+fun make_maybe : (value: Int) -> M.Maybe Int
+make_maybe v = M.Just v
 
 main () = {
-  let result = Std.String.replace "[name]" "Dylan" "Hello, [name]"
+  Std.String.replace "[name]" "Dylan" "Hello, [name]"
+  |> println
 
-  println result
+  String.replace "[name]" "Dylan" "Hello, [name]"
+  |> println
+
+  replace "[name]" "Dylan" "Hello, [name]"
+  |> println
+
+  case make_maybe 5 {
+    M.Just j -> j |> debug |> println
+    _ -> panic "nothing"
+  }
 }
