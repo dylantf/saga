@@ -345,6 +345,50 @@ describe "List" {
     test "with empty sublists" {
       assert_eq (List.concat [[1], [], [2, 3], []]) [1, 2, 3]
     }
+  }
 
+  describe "iter" {
+    test "applies function to each element" {
+      # iter returns Unit, so we just verify it completes
+      List.iter (fun _ -> ()) [1, 2, 3]
+    }
+  }
+
+  describe "scan" {
+    test "running sum" {
+      assert_eq (List.scan (fun acc x -> acc + x) 0 [1, 2, 3, 4]) [1, 3, 6, 10]
+    }
+
+    test "empty list" {
+      assert_eq (List.scan (fun acc x -> acc + x) 0 []) []
+    }
+  }
+
+  describe "chunks" {
+    test "even split" {
+      assert_eq (List.chunks 2 [1, 2, 3, 4]) [[1, 2], [3, 4]]
+    }
+
+    test "uneven last chunk" {
+      assert_eq (List.chunks 2 [1, 2, 3]) [[1, 2], [3]]
+    }
+
+    test "chunk size larger than list" {
+      assert_eq (List.chunks 10 [1, 2]) [[1, 2]]
+    }
+  }
+
+  describe "window" {
+    test "sliding window" {
+      assert_eq (List.window 2 [1, 2, 3, 4]) [[1, 2], [2, 3], [3, 4]]
+    }
+
+    test "window size 3" {
+      assert_eq (List.window 3 [1, 2, 3, 4, 5]) [[1, 2, 3], [2, 3, 4], [3, 4, 5]]
+    }
+
+    test "window larger than list" {
+      assert_eq (List.window 5 [1, 2]) []
+    }
   }
 }

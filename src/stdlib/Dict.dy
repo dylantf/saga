@@ -76,3 +76,8 @@ pub fun merge : (base: Dict k v) -> (overrides: Dict k v) -> Dict k v where {k: 
 #@ Updates the value at a key by applying a function. No-op if key is not present.
 @external("erlang", "std_dict_bridge", "update")
 pub fun update : (key: k) -> (f: v -> v) -> (dict: Dict k v) -> Dict k v where {k: Eq}
+
+
+# NOTE: group_by is blocked on a name resolution bug where unqualified
+# function names inside lambdas resolve to wrong externals.
+# See examples/scratch.dy for repro.

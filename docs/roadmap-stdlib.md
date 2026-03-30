@@ -88,12 +88,12 @@ Character-level operations. Even if strings are UTF-8 binaries on BEAM, having
 Bit operations on Int:
 Erlang has band, bor, bxor, bnot, bsl, bsr.
 
-- [ ] and
-- [ ] or
-- [ ] xor
-- [ ] not
-- [ ] shift_left
-- [ ] shift_right
+- [x] and
+- [x] or
+- [x] xor
+- [x] not
+- [x] shift_left
+- [x] shift_right
 
 # Lower Priority - Nice to Have
 
