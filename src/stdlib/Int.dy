@@ -11,7 +11,7 @@ impl Debug for Int {
 @external("erlang", "erlang", "float")
 pub fun to_float : Int -> Float
 
-@external("erlang", "erlang", "integer_to_list")
+@external("erlang", "erlang", "integer_to_binary")
 fun to_string : Int -> String
 
 @external("erlang", "std_int_bridge", "parse")

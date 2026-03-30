@@ -5,15 +5,16 @@ pub(crate) mod init;
 mod pats;
 pub mod util;
 
-use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Pat};
+use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Lit, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use std::collections::HashMap;
 
 use init::{PendingAnnotation, extract_external};
 use pats::{lower_params, lower_pat};
 use util::{
-    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_qualified_call,
-    core_var, field_access_record_name, has_nested_effect_call, lower_lit,
+    binary_prepend, cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call,
+    collect_qualified_call, core_var, field_access_record_name, has_nested_effect_call, lower_lit,
+    lower_string_to_binary, process_string_escapes,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -699,7 +700,17 @@ impl<'a> Lowerer<'a> {
 
     pub(super) fn lower_expr(&mut self, expr: &Expr) -> CExpr {
         match &expr.kind {
-            ExprKind::Lit { value, .. } => CExpr::Lit(lower_lit(value)),
+            ExprKind::Lit { value, .. } => match value {
+                Lit::String(s, kind) => {
+                    let resolved = if kind.is_multiline() {
+                        process_string_escapes(s)
+                    } else {
+                        s.clone()
+                    };
+                    lower_string_to_binary(&resolved)
+                }
+                _ => CExpr::Lit(lower_lit(value)),
+            },
 
             ExprKind::Var { name, .. } => {
                 use super::resolve::ResolvedName;
@@ -826,26 +837,12 @@ impl<'a> Lowerer<'a> {
                     let v = self.fresh();
                     let prefixed = self.fresh();
                     let (arg, prepend) = if func_name == "todo" {
-                        let arg = CExpr::Lit(CLit::Str("not implemented".into()));
-                        let prep = cerl_call(
-                            "erlang",
-                            "++",
-                            vec![
-                                CExpr::Lit(CLit::Str("todo: ".into())),
-                                CExpr::Var(v.clone()),
-                            ],
-                        );
+                        let arg = lower_string_to_binary("not implemented");
+                        let prep = binary_prepend("todo: ", CExpr::Var(v.clone()));
                         (arg, prep)
                     } else {
                         let arg = self.lower_expr(args[0]);
-                        let prep = cerl_call(
-                            "erlang",
-                            "++",
-                            vec![
-                                CExpr::Lit(CLit::Str("panic: ".into())),
-                                CExpr::Var(v.clone()),
-                            ],
-                        );
+                        let prep = binary_prepend("panic: ", CExpr::Var(v.clone()));
                         (arg, prep)
                     };
                     let error = cerl_call(
@@ -1438,12 +1435,12 @@ impl<'a> Lowerer<'a> {
                             //   Other -> Other(lists:flatten(io_lib:format("~p", [Other])))
                             let other_var = self.fresh();
                             let fmt_var = self.fresh();
-                            let stringify = CExpr::Call(
-                                "lists".into(),
-                                "flatten".into(),
-                                vec![CExpr::Call(
-                                    "io_lib".into(),
-                                    "format".into(),
+                            let stringify = cerl_call(
+                                "unicode",
+                                "characters_to_binary",
+                                vec![cerl_call(
+                                    "io_lib",
+                                    "format",
                                     vec![
                                         CExpr::Lit(CLit::Str("~p".into())),
                                         CExpr::Cons(

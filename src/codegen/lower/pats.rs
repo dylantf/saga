@@ -1,8 +1,8 @@
 use crate::ast::{Lit, Pat};
-use crate::codegen::cerl::{CLit, CPat};
+use crate::codegen::cerl::{CBinSeg, CLit, CPat};
 use std::collections::HashMap;
 
-use super::util::{core_var, lower_lit, mangle_ctor_atom};
+use super::util::{core_var, lower_lit, mangle_ctor_atom, process_string_escapes};
 
 /// Map a function's parameter patterns to Core Erlang variable names.
 /// Unit patterns are dropped (they contribute no variable).
@@ -29,7 +29,13 @@ pub(super) fn lower_pat(
     match pat {
         Pat::Wildcard { .. } => CPat::Wildcard,
         Pat::Var { name, .. } => CPat::Var(core_var(name)),
-        Pat::Lit { value, .. } => CPat::Lit(lower_lit(value)),
+        Pat::Lit { value, .. } => match value {
+            Lit::String(s, kind) => {
+                let resolved = if kind.is_multiline() { process_string_escapes(s) } else { s.clone() };
+                CPat::Binary(resolved.as_bytes().iter().map(|&b| CBinSeg::Byte(b)).collect())
+            }
+            _ => CPat::Lit(lower_lit(value)),
+        },
         Pat::Tuple { elements, .. } => {
             CPat::Tuple(elements.iter().map(|p| lower_pat(p, record_fields, constructor_atoms)).collect())
         }
@@ -115,13 +121,11 @@ pub(super) fn lower_pat(
         Pat::StringPrefix {
             prefix, rest, ..
         } => {
-            // "abc" <> rest  =>  [97 | [98 | [99 | Rest]]]
-            // Expand the prefix string into a cons chain of character codes,
-            // with the rest pattern as the tail.
+            // "abc" <> rest  =>  #{#<97>(...),#<98>(...),#<99>(...),#<Rest>('all',8,'binary',...)}#
+            let mut segs: Vec<CBinSeg<CPat>> = prefix.as_bytes().iter().map(|&b| CBinSeg::Byte(b)).collect();
             let tail = lower_pat(rest, record_fields, constructor_atoms);
-            prefix.chars().rev().fold(tail, |acc, ch| {
-                CPat::Cons(Box::new(CPat::Lit(CLit::Int(ch as i64))), Box::new(acc))
-            })
+            segs.push(CBinSeg::BinaryAll(tail));
+            CPat::Binary(segs)
         }
         Pat::ListPat { .. } | Pat::ConsPat { .. } => {
             unreachable!("surface syntax should be desugared before codegen")

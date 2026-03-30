@@ -70,7 +70,8 @@ fn lit_int() {
 
 #[test]
 fn lit_string() {
-    assert_contains(r#"main () = "hello""#, r#""hello""#);
+    // Strings are emitted as binaries: #{#<byte>(8,1,'integer',['unsigned'|['big']]),..}#
+    assert_contains(r#"main () = "hello""#, "#{#<104>(8,1,'integer',['unsigned'|['big']])");
 }
 
 #[test]
@@ -92,7 +93,8 @@ fn binop_add() {
 
 #[test]
 fn binop_concat() {
-    assert_contains(r#"main () = "a" <> "b""#, "call 'erlang':'++'");
+    // <> emits binary concat: #{#<A>('all',8,'binary',...),#<B>('all',8,'binary',...)}#
+    assert_contains(r#"main () = "a" <> "b""#, "('all',8,'binary',['unsigned'|['big']])");
 }
 
 // --- If/else ---

@@ -357,18 +357,21 @@ fn show_tuple_inlines_per_element() {
         out.contains("__dict_Show_std_bool_Bool"),
         "expected Show/Bool dict for second element\n{out}"
     );
-    // Should produce parens and comma separator
+    // Should produce parens and comma separator (now as binaries)
+    // "(" = #{#<40>...}#
     assert!(
-        out.contains("\"(\""),
-        "expected opening paren string\n{out}"
+        out.contains("#<40>(8,1,'integer',['unsigned'|['big']])"),
+        "expected opening paren binary\n{out}"
     );
+    // ", " = #{#<44>...,#<32>...}#
     assert!(
-        out.contains("\", \""),
-        "expected comma separator string\n{out}"
+        out.contains("#<44>(8,1,'integer',['unsigned'|['big']]),#<32>(8,1,'integer',['unsigned'|['big']])"),
+        "expected comma separator binary\n{out}"
     );
+    // ")" = #{#<41>...}#
     assert!(
-        out.contains("\")\""),
-        "expected closing paren string\n{out}"
+        out.contains("#<41>(8,1,'integer',['unsigned'|['big']])"),
+        "expected closing paren binary\n{out}"
     );
     // The inline lambda should appear directly in main (fun (___tup) -> ...)
     assert!(
@@ -431,10 +434,11 @@ main () = show Red
         out.contains("'__dict_Show_Color'"),
         "main should reference the user Show impl\n{out}"
     );
-    // The user impl body should appear (case arms with color strings)
+    // The user impl body should appear (case arms with color strings as binaries)
+    // "Red" = #{#<82>...,#<101>...,#<100>...}#
     assert!(
-        out.contains("\"Red\""),
-        "expected \"Red\" string in Show impl body\n{out}"
+        out.contains("#<82>(8,1,'integer',['unsigned'|['big']]),#<101>(8,1,'integer',['unsigned'|['big']]),#<100>(8,1,'integer',['unsigned'|['big']])"),
+        "expected \"Red\" binary in Show impl body\n{out}"
     );
 }
 
@@ -525,7 +529,8 @@ do_work () = log! "hello"
 "#;
     let out = emit_elaborated(src);
     assert_contains(&out, "apply _Handle_Log_log(");
-    assert_contains(&out, "\"hello\"");
+    // String "hello" is now a binary: #{#<104>...}#
+    assert_contains(&out, "#{#<104>(8,1,'integer',['unsigned'|['big']])");
 }
 
 #[test]

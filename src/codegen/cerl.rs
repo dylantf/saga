@@ -50,6 +50,8 @@ pub enum CExpr {
         catch_vars: (String, String, String), // (class, reason, trace)
         catch_body: Box<CExpr>,
     },
+    /// `#{seg1,seg2,...}#` -- binary construction
+    Binary(Vec<CBinSeg<CExpr>>),
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +73,8 @@ pub enum CPat {
     Alias(String, Box<CPat>),
     /// `<P1, P2, ...>` -- Core Erlang value pattern (multi-arg case arm)
     Values(Vec<CPat>),
+    /// `#{seg1,seg2,...}#` -- binary pattern
+    Binary(Vec<CBinSeg<CPat>>),
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +83,15 @@ pub enum CLit {
     Float(f64),
     Atom(String),
     Str(String),
+}
+
+/// A single segment in a binary expression or pattern.
+#[derive(Debug, Clone)]
+pub enum CBinSeg<T> {
+    /// A literal byte: `#<N>(8,1,'integer',['unsigned'|['big']])`
+    Byte(u8),
+    /// A variable-length binary splice: `#<T>('all',8,'binary',['unsigned'|['big']])`
+    BinaryAll(T),
 }
 
 impl CExpr {
@@ -143,6 +156,13 @@ impl CExpr {
                 expr.collect_handle_refs(out);
                 ok_body.collect_handle_refs(out);
                 catch_body.collect_handle_refs(out);
+            }
+            CExpr::Binary(segs) => {
+                for seg in segs {
+                    if let CBinSeg::BinaryAll(e) = seg {
+                        e.collect_handle_refs(out);
+                    }
+                }
             }
         }
     }
@@ -376,6 +396,8 @@ impl Printer {
                     p.print_expr(catch_body);
                 });
             }
+
+            CExpr::Binary(segs) => self.print_binary_segs_expr(segs),
         }
     }
 
@@ -427,6 +449,49 @@ impl Printer {
         }
     }
 
+    fn print_bin_seg_byte(&mut self, b: u8) {
+        self.push(&format!(
+            "#<{}>(8,1,'integer',['unsigned'|['big']])",
+            b
+        ));
+    }
+
+    fn print_binary_segs_expr(&mut self, segs: &[CBinSeg<CExpr>]) {
+        self.push("#{");
+        for (i, seg) in segs.iter().enumerate() {
+            if i > 0 {
+                self.push(",");
+            }
+            match seg {
+                CBinSeg::Byte(b) => self.print_bin_seg_byte(*b),
+                CBinSeg::BinaryAll(expr) => {
+                    self.push("#<");
+                    self.print_expr(expr);
+                    self.push(">('all',8,'binary',['unsigned'|['big']])");
+                }
+            }
+        }
+        self.push("}#");
+    }
+
+    fn print_binary_segs_pat(&mut self, segs: &[CBinSeg<CPat>]) {
+        self.push("#{");
+        for (i, seg) in segs.iter().enumerate() {
+            if i > 0 {
+                self.push(",");
+            }
+            match seg {
+                CBinSeg::Byte(b) => self.print_bin_seg_byte(*b),
+                CBinSeg::BinaryAll(pat) => {
+                    self.push("#<");
+                    self.print_pat(pat);
+                    self.push(">('all',8,'binary',['unsigned'|['big']])");
+                }
+            }
+        }
+        self.push("}#");
+    }
+
     fn print_pat(&mut self, pat: &CPat) {
         match pat {
             CPat::Var(v) => self.push(v),
@@ -469,6 +534,7 @@ impl Printer {
                     self.print_pat(p);
                 }
             }
+            CPat::Binary(segs) => self.print_binary_segs_pat(segs),
         }
     }
 }

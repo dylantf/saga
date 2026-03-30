@@ -27,6 +27,7 @@ test "a simple assertion" {
   assert_eq True True
 }
 
-skip "a failing test" {
+@skip
+test "a failing test" {
   assert_eq True False
 }

@@ -8,7 +8,7 @@ use crate::token::Span;
 use super::pats::{self, lower_pat};
 use super::util::{
     binop_call, collect_effect_call, collect_fun_call, has_nested_effect_call,
-    mangle_ctor_atom, pat_binding_var,
+    lower_string_to_binary, mangle_ctor_atom, pat_binding_var,
 };
 use super::{FunInfo, Lowerer};
 
@@ -296,7 +296,7 @@ impl<'a> Lowerer<'a> {
                 body: CExpr::Call(
                     "erlang".into(),
                     "error".into(),
-                    vec![CExpr::Lit(CLit::Str(msg))],
+                    vec![lower_string_to_binary(&msg)],
                 ),
             });
         }

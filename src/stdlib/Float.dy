@@ -8,7 +8,7 @@ impl Debug for Float {
   debug x = to_string x
 }
 
-@external("erlang", "erlang", "float_to_list")
+@external("erlang", "std_float_bridge", "to_string")
 fun to_string : (x: Float) -> String
 
 @external("erlang", "erlang", "trunc")

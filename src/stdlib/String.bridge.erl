@@ -35,10 +35,10 @@ split(S, Sep) ->
     string:split(S, Sep, all).
 
 replace(S, Pattern, Replacement) ->
-    unicode:characters_to_binary(string:replace(S, Pattern, Replacement)).
+    iolist_to_binary(string:replace(S, Pattern, Replacement)).
 
 replace_all(S, Pattern, Replacement) ->
-    unicode:characters_to_binary(string:replace(S, Pattern, Replacement, all)).
+    iolist_to_binary(string:replace(S, Pattern, Replacement, all)).
 
 join(Sep, Parts) ->
     unicode:characters_to_binary(lists:join(Sep, Parts)).
