@@ -528,7 +528,8 @@ fn is_test_decl(decl: &ast::Decl) -> bool {
         match &e.kind {
             ast::ExprKind::App { func, .. } => e = func,
             ast::ExprKind::Var { name } => {
-                return name == "test" || name == "describe";
+                return name == "test" || name == "describe"
+                    || name == "skip" || name == "only";
             }
             _ => return false,
         }

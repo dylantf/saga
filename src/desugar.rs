@@ -15,7 +15,7 @@
 use crate::ast::*;
 use crate::token::{Span, StringKind};
 
-const TEST_SUGAR_NAMES: &[&str] = &["test", "describe"];
+const TEST_SUGAR_NAMES: &[&str] = &["test", "describe", "skip", "only"];
 
 /// Wrap the body argument of test/describe/skip/only calls in a lambda.
 /// The parser produces `App(App(Var("test"), Lit("name")), body)` with the raw

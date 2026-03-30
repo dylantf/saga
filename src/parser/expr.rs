@@ -689,7 +689,7 @@ impl Parser {
             }
             Token::Ident(ref i)
                 if self.test_mode
-                    && (i == "test" || i == "describe")
+                    && (i == "test" || i == "describe" || i == "skip" || i == "only")
                     && matches!(self.peek(), Token::String(..)) =>
             {
                 // Parse test/describe sugar, preserving the block body as-is.
