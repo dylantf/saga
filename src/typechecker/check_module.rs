@@ -725,12 +725,24 @@ impl Checker {
                 .or_insert_with(|| info.clone());
         }
 
-        // Type arities
+        // Type arities and type aliases (for resolving qualified type names)
         for (name, arity) in type_arity {
+            // Bare name (canonical internal form)
             self.type_arity.entry(name.clone()).or_insert(*arity);
             self.lsp.type_import_origins
                 .entry(name.clone())
                 .or_insert_with(|| module_name.to_string());
+
+            // Register qualified forms so M.Maybe, Maybe.Maybe, Std.Maybe.Maybe
+            // all resolve to the bare type name "Maybe" and pass arity checks
+            let canonical = format!("{}.{}", module_name, name);
+            self.type_arity.entry(canonical.clone()).or_insert(*arity);
+            self.type_aliases.insert(canonical, name.clone());
+            if prefix != module_name {
+                let aliased = format!("{}.{}", prefix, name);
+                self.type_arity.entry(aliased.clone()).or_insert(*arity);
+                self.type_aliases.insert(aliased, name.clone());
+            }
         }
 
         // Function effects (for cross-module `with` validation and effect propagation).

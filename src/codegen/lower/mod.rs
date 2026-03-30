@@ -809,6 +809,13 @@ impl<'a> Lowerer<'a> {
                     return self.lower_catch_panic(args[0]);
                 }
                 if let Some((module, func_name, head, args)) = collect_qualified_call(expr) {
+                    // Check if this is a qualified constructor (e.g. M.Just, Std.Maybe.Just)
+                    let qualified = format!("{}.{}", module, func_name);
+                    if self.constructor_atoms.contains_key(&qualified)
+                        || self.constructor_atoms.contains_key(func_name)
+                    {
+                        return self.lower_ctor(func_name, args);
+                    }
                     return self.lower_qualified_call(module, func_name, head, &args);
                 }
 
@@ -1521,7 +1528,14 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Tuple { elements, .. } => self.lower_tuple_elems(elements),
 
-            ExprKind::QualifiedName { module: _, name, .. } => {
+            ExprKind::QualifiedName { module, name, .. } => {
+                // Check if this is a qualified constructor with no args (e.g. M.Nothing)
+                let qualified = format!("{}.{}", module, name);
+                if self.constructor_atoms.contains_key(&qualified)
+                    || self.constructor_atoms.contains_key(name.as_str())
+                {
+                    return self.lower_ctor(name, vec![]);
+                }
                 use super::resolve::ResolvedName;
                 if let Some(resolved) = self.resolved.get(&expr.id) {
                     match resolved {

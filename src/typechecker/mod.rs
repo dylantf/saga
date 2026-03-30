@@ -738,6 +738,9 @@ pub struct Checker {
     /// Type name -> number of declared type parameters (for arity checking).
     /// Absent entries (e.g. Tuple) are unchecked.
     pub(crate) type_arity: HashMap<String, usize>,
+    /// Qualified type name -> canonical type name (for resolving M.Maybe -> Maybe etc).
+    /// Populated during import processing. Bare names map to themselves.
+    pub(crate) type_aliases: HashMap<String, String>,
     /// Evidence collected during constraint solving for the elaboration pass.
     pub(crate) evidence: Vec<TraitEvidence>,
     /// Dict params for let bindings with trait constraints: name -> (params, value_arity).
@@ -896,6 +899,7 @@ impl Checker {
             modules: ModuleContext::default(),
             adt_variants: HashMap::new(),
             type_arity: HashMap::new(),
+            type_aliases: HashMap::new(),
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
             collected_diagnostics: Vec::new(),
