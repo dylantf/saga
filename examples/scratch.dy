@@ -1,8 +1,7 @@
-import Std.Maybe as M
 import Std.String (replace)
 
-fun make_maybe : (value: Int) -> M.Maybe Int
-make_maybe v = M.Just v
+fun make_maybe : (value: Int) -> Maybe Int
+make_maybe v = Just v
 
 main () = {
   Std.String.replace "[name]" "Dylan" "Hello, [name]"
@@ -15,7 +14,7 @@ main () = {
   |> println
 
   case make_maybe 5 {
-    M.Just j -> j |> debug |> println
+    Just j -> j |> debug |> println
     _ -> panic "nothing"
   }
 }

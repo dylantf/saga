@@ -338,7 +338,21 @@ impl Checker {
                 }
                 // Resolve qualified type names (e.g. "M.Maybe" -> "Maybe") through
                 // the type alias map populated during import processing.
-                let resolved = self.type_aliases.get(name).cloned().unwrap_or_else(|| name.clone());
+                let resolved = if name.contains('.') {
+                    match self.type_aliases.get(name) {
+                        Some(canonical) => canonical.clone(),
+                        None => {
+                            self.collected_diagnostics.push(Diagnostic {
+                                severity: Severity::Error,
+                                message: format!("unknown qualified type '{}'", name),
+                                span: Some(*span),
+                            });
+                            return Type::Error;
+                        }
+                    }
+                } else {
+                    name.clone()
+                };
                 Type::Con(resolved, vec![])
             }
             crate::ast::TypeExpr::Var { name, .. } => {
