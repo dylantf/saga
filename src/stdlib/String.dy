@@ -35,7 +35,7 @@ pub fun to_lower : (s: String) -> String
 pub fun to_upper : (s: String) -> String
 
 #@ Reverses the string.
-@external("erlang", "string", "reverse")
+@external("erlang", "std_string_bridge", "reverse")
 pub fun reverse : (s: String) -> String
 
 #@ Extracts a substring starting at the given index for the given length.
@@ -77,6 +77,30 @@ pub fun replace_all : (pattern: String) -> (replacement: String) -> (s: String) 
 #@ Joins a list of strings with a separator.
 @external("erlang", "std_string_bridge", "join")
 pub fun join : (sep: String) -> (parts: List String) -> String
+
+#@ Returns True if all characters are alphabetic (a-z, A-Z).
+@external("erlang", "std_string_bridge", "is_alpha")
+pub fun is_alpha : (s: String) -> Bool
+
+#@ Returns True if all characters are digits (0-9).
+@external("erlang", "std_string_bridge", "is_digit")
+pub fun is_digit : (s: String) -> Bool
+
+#@ Returns True if all characters are alphanumeric (a-z, A-Z, 0-9).
+@external("erlang", "std_string_bridge", "is_alphanumeric")
+pub fun is_alphanumeric : (s: String) -> Bool
+
+#@ Returns True if all characters are uppercase (A-Z).
+@external("erlang", "std_string_bridge", "is_upper")
+pub fun is_upper : (s: String) -> Bool
+
+#@ Returns True if all characters are lowercase (a-z).
+@external("erlang", "std_string_bridge", "is_lower")
+pub fun is_lower : (s: String) -> Bool
+
+#@ Returns True if all characters are whitespace.
+@external("erlang", "std_string_bridge", "is_whitespace")
+pub fun is_whitespace : (s: String) -> Bool
 
 #@ Repeats a string n times.
 pub fun repeat : (n: Int) -> (s: String) -> String

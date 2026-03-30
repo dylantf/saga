@@ -74,14 +74,14 @@ This is a fundamental data structure missing entirely. Erlang has sets and gb_se
 
 Character-level operations. Even if strings are UTF-8 binaries on BEAM, having
 
-- [ ] is_alpha
-- [ ] is_digit
-- [ ] is_upper
-- [ ] is_lower
-- [ ] to_upper
-- [ ] to_lower
-- [ ] to_int
-- [ ] from_int
+- [x] is_alpha
+- [x] is_digit
+- [x] is_upper
+- [x] is_lower
+- [x] to_upper
+- [x] to_lower
+- [~] to_int - belongs in a bitstring module if we implement it
+- [~] from_int - belongs in a bitstring module if we implement it
 
 ## Bitwise
 

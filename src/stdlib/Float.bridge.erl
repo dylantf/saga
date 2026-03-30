@@ -3,6 +3,7 @@
 
 parse(S) ->
     case string:to_float(S) of
+        {F, <<>>} -> {just, F};
         {F, []} -> {just, F};
         _ -> {nothing}
     end.

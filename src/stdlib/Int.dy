@@ -46,3 +46,29 @@ clamp low high x = min high (max low x)
 
 pub fun sign : Int -> Int
 sign x = if x < 0 then 0 - 1 else if x > 0 then 1 else 0
+
+# --- Bitwise operations ---
+
+#@ Bitwise AND.
+@external("erlang", "erlang", "band")
+pub fun band : (a: Int) -> (b: Int) -> Int
+
+#@ Bitwise OR.
+@external("erlang", "erlang", "bor")
+pub fun bor : (a: Int) -> (b: Int) -> Int
+
+#@ Bitwise XOR.
+@external("erlang", "erlang", "bxor")
+pub fun bxor : (a: Int) -> (b: Int) -> Int
+
+#@ Bitwise NOT (ones' complement).
+@external("erlang", "erlang", "bnot")
+pub fun bnot : (n: Int) -> Int
+
+#@ Bitwise shift left.
+@external("erlang", "std_int_bridge", "shift_left")
+pub fun shift_left : (bits: Int) -> (n: Int) -> Int
+
+#@ Bitwise shift right.
+@external("erlang", "std_int_bridge", "shift_right")
+pub fun shift_right : (bits: Int) -> (n: Int) -> Int
