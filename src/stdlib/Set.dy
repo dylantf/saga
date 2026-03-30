@@ -1,0 +1,71 @@
+module Std.Set
+
+import Std.List
+
+impl Debug for Set a where {a: Debug} {
+  debug s = "Set(" <> debug (to_list s) <> ")"
+}
+
+#@ Creates an empty set.
+@external("erlang", "std_set_bridge", "new")
+pub fun new : Unit -> Set a
+
+#@ Creates a set from a list of elements.
+@external("erlang", "std_set_bridge", "from_list")
+pub fun from_list : (items: List a) -> Set a where {a: Eq}
+
+#@ Returns the elements as a list.
+@external("erlang", "std_set_bridge", "to_list")
+pub fun to_list : (set: Set a) -> List a
+
+#@ Inserts an element into the set.
+@external("erlang", "std_set_bridge", "insert")
+pub fun insert : (elem: a) -> (set: Set a) -> Set a where {a: Eq}
+
+#@ Removes an element from the set. Returns the set unchanged if not present.
+@external("erlang", "std_set_bridge", "remove")
+pub fun remove : (elem: a) -> (set: Set a) -> Set a where {a: Eq}
+
+#@ Returns True if the element is in the set.
+@external("erlang", "std_set_bridge", "member")
+pub fun member : (elem: a) -> (set: Set a) -> Bool where {a: Eq}
+
+#@ Returns the number of elements in the set.
+@external("erlang", "std_set_bridge", "size")
+pub fun size : (set: Set a) -> Int
+
+#@ Returns True if the set has no elements.
+pub fun is_empty : Set a -> Bool
+is_empty s = size s == 0
+
+#@ Returns the union of two sets.
+@external("erlang", "std_set_bridge", "union")
+pub fun union : (a: Set a) -> (b: Set a) -> Set a where {a: Eq}
+
+#@ Returns the intersection of two sets.
+@external("erlang", "std_set_bridge", "intersection")
+pub fun intersection : (a: Set a) -> (b: Set a) -> Set a where {a: Eq}
+
+#@ Returns elements in the first set but not the second.
+@external("erlang", "std_set_bridge", "difference")
+pub fun difference : (a: Set a) -> (b: Set a) -> Set a where {a: Eq}
+
+#@ Returns elements in either set but not both.
+pub fun symmetric_difference : (a: Set a) -> (b: Set a) -> Set a where {a: Eq}
+symmetric_difference a b = union (difference a b) (difference b a)
+
+#@ Returns True if the first set is a subset of the second.
+@external("erlang", "std_set_bridge", "is_subset")
+pub fun is_subset : (sub: Set a) -> (super: Set a) -> Bool where {a: Eq}
+
+#@ Applies a function to every element, returning a new set.
+@external("erlang", "std_set_bridge", "map")
+pub fun map : (f: a -> b) -> (set: Set a) -> Set b where {b: Eq}
+
+#@ Returns a set containing only elements where the predicate returns True.
+@external("erlang", "std_set_bridge", "filter")
+pub fun filter : (pred: a -> Bool) -> (set: Set a) -> Set a
+
+#@ Folds over all elements.
+@external("erlang", "std_set_bridge", "fold")
+pub fun fold : (f: b -> a -> b) -> (init: b) -> (set: Set a) -> b

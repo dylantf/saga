@@ -357,18 +357,21 @@ fn show_tuple_inlines_per_element() {
         out.contains("__dict_Show_std_bool_Bool"),
         "expected Show/Bool dict for second element\n{out}"
     );
-    // Should produce parens and comma separator
+    // Should produce parens and comma separator (now as binaries)
+    // "(" = #{#<40>...}#
     assert!(
-        out.contains("\"(\""),
-        "expected opening paren string\n{out}"
+        out.contains("#<40>(8,1,'integer',['unsigned'|['big']])"),
+        "expected opening paren binary\n{out}"
     );
+    // ", " = #{#<44>...,#<32>...}#
     assert!(
-        out.contains("\", \""),
-        "expected comma separator string\n{out}"
+        out.contains("#<44>(8,1,'integer',['unsigned'|['big']]),#<32>(8,1,'integer',['unsigned'|['big']])"),
+        "expected comma separator binary\n{out}"
     );
+    // ")" = #{#<41>...}#
     assert!(
-        out.contains("\")\""),
-        "expected closing paren string\n{out}"
+        out.contains("#<41>(8,1,'integer',['unsigned'|['big']])"),
+        "expected closing paren binary\n{out}"
     );
     // The inline lambda should appear directly in main (fun (___tup) -> ...)
     assert!(
@@ -431,10 +434,11 @@ main () = show Red
         out.contains("'__dict_Show_Color'"),
         "main should reference the user Show impl\n{out}"
     );
-    // The user impl body should appear (case arms with color strings)
+    // The user impl body should appear (case arms with color strings as binaries)
+    // "Red" = #{#<82>...,#<101>...,#<100>...}#
     assert!(
-        out.contains("\"Red\""),
-        "expected \"Red\" string in Show impl body\n{out}"
+        out.contains("#<82>(8,1,'integer',['unsigned'|['big']]),#<101>(8,1,'integer',['unsigned'|['big']]),#<100>(8,1,'integer',['unsigned'|['big']])"),
+        "expected \"Red\" binary in Show impl body\n{out}"
     );
 }
 
@@ -525,7 +529,8 @@ do_work () = log! "hello"
 "#;
     let out = emit_elaborated(src);
     assert_contains(&out, "apply _Handle_Log_log(");
-    assert_contains(&out, "\"hello\"");
+    // String "hello" is now a binary: #{#<104>...}#
+    assert_contains(&out, "#{#<104>(8,1,'integer',['unsigned'|['big']])");
 }
 
 #[test]
@@ -1848,15 +1853,15 @@ main () = {
         "List.reverse should emit lists:reverse\n{out}"
     );
     assert!(
-        out.contains("call 'string':'reverse'"),
-        "String.reverse should emit string:reverse\n{out}"
+        out.contains("call 'std_string_bridge':'reverse'"),
+        "String.reverse should emit std_string_bridge:reverse\n{out}"
     );
 }
 
 #[test]
 fn exposed_external_overrides_unqualified_lookup() {
     // When reverse is explicitly exposed from Std.String, an unqualified
-    // call to reverse must resolve to string:reverse, not lists:reverse.
+    // call to reverse must resolve to std_string_bridge:reverse, not lists:reverse.
     let src = r#"
 import Std.String (reverse)
 
@@ -1864,8 +1869,8 @@ main () = reverse "hello"
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("call 'string':'reverse'"),
-        "Exposed reverse should emit string:reverse, not lists:reverse\n{out}"
+        out.contains("call 'std_string_bridge':'reverse'"),
+        "Exposed reverse should emit std_string_bridge:reverse, not lists:reverse\n{out}"
     );
     assert!(
         !out.contains("call 'lists':'reverse'"),
@@ -1889,11 +1894,246 @@ main () = {
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("call 'string':'reverse'"),
-        "Exposed reverse should emit string:reverse\n{out}"
+        out.contains("call 'std_string_bridge':'reverse'"),
+        "Exposed reverse should emit std_string_bridge:reverse\n{out}"
     );
     assert!(
         out.contains("call 'lists':'reverse'"),
         "List.reverse should emit lists:reverse\n{out}"
+    );
+}
+
+/// Function parameters must shadow exposed imports in the resolver.
+/// A param named `length` should NOT resolve to `Std.List.length`.
+#[test]
+fn param_shadows_exposed_import() {
+    let src = r#"
+import Std.List (length)
+
+length_status length = case length {
+  0 -> "empty"
+  _ -> "not empty"
+}
+
+main () = length_status 0
+"#;
+    let out = emit_elaborated_with_std(src);
+    // The `length` param inside length_status should be a plain variable,
+    // not a call to erlang:length/1 or std_list:length/1.
+    assert!(
+        !out.contains("'erlang':'length'"),
+        "param 'length' should not resolve to erlang:length\n{out}"
+    );
+    // The case scrutinee should use the variable, not a function reference
+    assert!(
+        !out.contains("'length'/1"),
+        "param 'length' should not become a function reference\n{out}"
+    );
+}
+
+/// Lambda parameters should shadow module-level names.
+#[test]
+fn lambda_param_shadows_import() {
+    let src = r#"
+import Std.List (length)
+
+main () = {
+  let f = fun length -> length + 1
+  f 5
+}
+"#;
+    let out = emit_elaborated_with_std(src);
+    // Inside the lambda, `length` is a param, not the imported function
+    assert!(
+        !out.contains("'length'/1"),
+        "lambda param 'length' should not become a function reference\n{out}"
+    );
+}
+
+/// Case pattern bindings should shadow imported names.
+#[test]
+fn case_binding_shadows_import() {
+    let src = r#"
+import Std.List (length)
+
+main () = case 42 {
+  length -> length + 1
+}
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        !out.contains("'length'/1"),
+        "case binding 'length' should not become a function reference\n{out}"
+    );
+}
+
+/// Let bindings should shadow imported names for subsequent expressions.
+#[test]
+fn let_binding_shadows_import() {
+    let src = r#"
+import Std.List (length)
+
+main () = {
+  let length = 42
+  length + 1
+}
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        !out.contains("'length'/1"),
+        "let-bound 'length' should not become a function reference\n{out}"
+    );
+}
+
+/// Param named `size` should not resolve to Dict.size (an FFI to maps:size).
+/// This was the original bug report: adding @external functions to a stdlib
+/// module caused the name to leak into scope even without importing it.
+#[test]
+fn param_shadows_ffi_function() {
+    let src = r#"
+describe size = case size {
+  0 -> "none"
+  1 -> "one"
+  _ -> "many"
+}
+
+main () = describe 0
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        !out.contains("'maps':'size'"),
+        "param 'size' should not resolve to maps:size FFI\n{out}"
+    );
+    assert!(
+        !out.contains("'size'/1"),
+        "param 'size' should not become a function reference\n{out}"
+    );
+}
+
+/// Param named `reverse` should not resolve to List.reverse (@external to lists:reverse).
+#[test]
+fn param_shadows_exposed_ffi() {
+    let src = r#"
+import Std.List (reverse)
+
+apply_or_default reverse xs = case xs {
+  [] -> []
+  _ -> reverse xs
+}
+
+main () = apply_or_default (fun x -> x) [1, 2, 3]
+"#;
+    let out = emit_elaborated_with_std(src);
+    // Inside the function body, `reverse` is the param, not lists:reverse
+    assert!(
+        !out.contains("call 'lists':'reverse'"),
+        "param 'reverse' should not resolve to lists:reverse\n{out}"
+    );
+}
+
+/// Param named `map` should not resolve to List.map when called as a function.
+/// This tests the App handler saturation gate — the param is applied to args.
+#[test]
+fn param_shadows_stdlib_in_call_position() {
+    let src = r#"
+import Std.List (map)
+
+apply_fn map xs = map xs
+
+main () = apply_fn (fun x -> x) [1, 2, 3]
+"#;
+    let out = emit_elaborated_with_std(src);
+    // `map xs` inside apply_fn should be a local variable apply, not std_list:map
+    assert!(
+        !out.contains("call 'std_list':'map'"),
+        "param 'map' in call position should not resolve to std_list:map\n{out}"
+    );
+}
+
+/// Let binding named `get` should shadow Dict.get FFI.
+#[test]
+fn let_shadows_dict_ffi() {
+    let src = r#"
+main () = {
+  let get = 42
+  get + 1
+}
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        !out.contains("'std_dict_bridge':'get'"),
+        "let-bound 'get' should not resolve to std_dict_bridge:get\n{out}"
+    );
+}
+
+/// Case binding named `filter` should shadow List.filter in guard and body.
+#[test]
+fn case_binding_shadows_stdlib_function() {
+    let src = r#"
+import Std.List (filter)
+
+check filter = case filter {
+  0 -> "zero"
+  filter | filter > 0 -> "positive"
+  _ -> "negative"
+}
+
+main () = check 5
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        !out.contains("'std_list':'filter'"),
+        "case binding 'filter' should not resolve to std_list:filter\n{out}"
+    );
+}
+
+/// LetFun named `length` should shadow imported length AND still work as a callable function.
+#[test]
+fn letfun_shadows_import_and_is_callable() {
+    let src = r#"
+import Std.List (length)
+
+main () = {
+  let length x = x + 1
+  length 5
+}
+"#;
+    let out = emit_elaborated_with_std(src);
+    // Should NOT call the imported length
+    assert!(
+        !out.contains("call 'erlang':'length'"),
+        "LetFun 'length' should shadow imported length\n{out}"
+    );
+    // Should be a letrec with a local function call
+    assert!(
+        out.contains("letrec"),
+        "LetFun should emit a letrec\n{out}"
+    );
+}
+
+/// Multiple binding forms all shadowing the same import in nested scopes.
+#[test]
+fn nested_shadowing() {
+    let src = r#"
+import Std.List (length)
+
+outer length = {
+  let f = fun length -> {
+    let length = length + 1
+    length
+  }
+  f length
+}
+
+main () = outer 10
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        !out.contains("'erlang':'length'"),
+        "nested shadowing should prevent all resolution to erlang:length\n{out}"
+    );
+    assert!(
+        !out.contains("'length'/1"),
+        "no occurrence of 'length' should become a function reference\n{out}"
     );
 }

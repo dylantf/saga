@@ -502,6 +502,9 @@ fn find_in_type_expr(ty: &TypeExpr, offset: usize) -> Found {
         TypeExpr::Record { fields, span, .. } if contains_ident(span, offset) => {
             find_in_typed_params(fields, offset)
         }
+        TypeExpr::Labeled { inner, span, .. } if contains_ident(span, offset) => {
+            find_in_type_expr(inner, offset)
+        }
         _ => None,
     }
 }

@@ -1,0 +1,426 @@
+import Std.List as List
+import Std.Test (
+  describe,
+  test,
+  assert_eq,
+  assert_true,
+  assert_false,
+  assert_just,
+  assert_nothing,
+  assert_panics
+)
+
+describe "List" {
+
+  describe "head" {
+    test "returns first element" {
+      assert_eq (List.head [1, 2, 3]) 1
+    }
+    test "panics on empty list" {
+      assert_panics (fun () -> List.head [])
+    }
+  }
+
+  describe "tail" {
+    test "returns rest of list" {
+      assert_eq (List.tail [1, 2, 3]) [2, 3]
+    }
+
+    test "single element gives empty" {
+      assert_eq (List.tail [1]) []
+    }
+
+    test "panics on empty list" {
+      assert_panics (fun () -> List.tail [])
+    }
+  }
+
+  describe "last" {
+    test "returns last element" {
+      assert_eq (List.last [1, 2, 3]) 3
+    }
+
+    test "single element" {
+      assert_eq (List.last [42]) 42
+    }
+
+    test "panics on empty list" {
+      assert_panics (fun () -> List.last [])
+    }
+  }
+
+  describe "length" {
+    test "empty list" {
+      assert_eq (List.length []) 0
+    }
+
+    test "non-empty list" {
+      assert_eq (List.length [1, 2, 3]) 3
+    }
+  }
+
+  describe "is_empty" {
+    test "empty list" {
+      assert_true (List.is_empty [])
+    }
+
+    test "non-empty list" {
+      assert_false (List.is_empty [1])
+    }
+  }
+
+  describe "map" {
+    test "applies function to each element" {
+      assert_eq (List.map (fun x -> x * 2) [1, 2, 3]) [2, 4, 6]
+    }
+
+    test "empty list" {
+      assert_eq (List.map (fun x -> x + 1) []) []
+    }
+  }
+
+  describe "filter" {
+    test "keeps matching elements" {
+      assert_eq (List.filter (fun x -> x > 2) [1, 2, 3, 4]) [3, 4]
+    }
+
+    test "no matches gives empty" {
+      assert_eq (List.filter (fun x -> x > 10) [1, 2, 3]) []
+    }
+  }
+
+  describe "foldl" {
+    test "left fold" {
+      assert_eq (List.foldl (fun acc x -> acc - x) 10 [1, 2, 3]) 4
+    }
+
+    test "empty list returns accumulator" {
+      assert_eq (List.foldl (fun acc x -> acc + x) 0 []) 0
+    }
+  }
+
+  describe "foldr" {
+    test "right fold" {
+      assert_eq (List.foldr (fun x acc -> x - acc) 0 [1, 2, 3]) 2
+    }
+  }
+
+  describe "reverse" {
+    test "reverses a list" {
+      assert_eq (List.reverse [1, 2, 3]) [3, 2, 1]
+    }
+  }
+
+  describe "append" {
+    test "appends two lists" {
+      assert_eq (List.append [1, 2] [3, 4]) [1, 2, 3, 4]
+    }
+
+    test "append empty" {
+      assert_eq (List.append [] [1, 2]) [1, 2]
+    }
+  }
+
+  describe "flat_map" {
+    test "maps and flattens" {
+      assert_eq (List.flat_map (fun x ->
+        [x, x * 10]) [1, 2, 3]) [1, 10, 2, 20, 3, 30]
+    }
+  }
+
+  describe "take" {
+    test "takes n elements" {
+      assert_eq (List.take 2 [1, 2, 3, 4]) [1, 2]
+    }
+
+    test "take more than length" {
+      assert_eq (List.take 10 [1, 2]) [1, 2]
+    }
+
+    test "take zero" {
+      assert_eq (List.take 0 [1, 2, 3]) []
+    }
+  }
+
+  describe "drop" {
+    test "drops n elements" {
+      assert_eq (List.drop 2 [1, 2, 3, 4]) [3, 4]
+    }
+
+    test "drop more than length" {
+      assert_eq (List.drop 10 [1, 2]) []
+    }
+
+    test "drop zero" {
+      assert_eq (List.drop 0 [1, 2, 3]) [1, 2, 3]
+    }
+  }
+
+  describe "zip" {
+    test "zips two lists" {
+      assert_eq (List.zip [1, 2, 3] [10, 20, 30]) [(1, 10), (2, 20), (3, 30)]
+    }
+
+    test "different lengths truncates" {
+      assert_eq (List.zip [1, 2] [10, 20, 30]) [(1, 10), (2, 20)]
+    }
+  }
+
+  describe "any" {
+    test "true when predicate matches" {
+      assert_true (List.any (fun x -> x > 3) [1, 2, 3, 4])
+    }
+
+    test "false when no match" {
+      assert_false (List.any (fun x -> x > 10) [1, 2, 3])
+    }
+
+    test "empty list" {
+      assert_false (List.any (fun x -> x > 0) [])
+    }
+  }
+
+  describe "all" {
+    test "true when all match" {
+      assert_true (List.all (fun x -> x > 0) [1, 2, 3])
+    }
+
+    test "false when one fails" {
+      assert_false (List.all (fun x -> x > 2) [1, 2, 3])
+    }
+
+    test "empty list" {
+      assert_true (List.all (fun x -> x > 0) [])
+    }
+  }
+
+  describe "range" {
+    test "creates inclusive range" {
+      assert_eq (List.range 1 5) [1, 2, 3, 4, 5]
+    }
+
+    test "single element range" {
+      assert_eq (List.range 3 3) [3]
+    }
+
+    test "empty when start > end" {
+      assert_eq (List.range 5 1) []
+    }
+  }
+
+  # --- New functions ---
+
+  describe "sort" {
+    test "sorts integers" {
+      assert_eq (List.sort [3, 1, 4, 1, 5, 9, 2, 6]) [1, 1, 2, 3, 4, 5, 6, 9]
+    }
+
+    test "already sorted" {
+      assert_eq (List.sort [1, 2, 3]) [1, 2, 3]
+    }
+
+    test "sorts strings" {
+      assert_eq (List.sort [
+        "banana",
+        "apple",
+        "cherry",
+      ]) ["apple", "banana", "cherry"]
+    }
+  }
+
+  describe "sort_with" {
+    test "descending with custom comparator" {
+      assert_eq (List.sort_with (fun a b ->
+        compare b a) [3, 1, 4, 1, 5]) [5, 4, 3, 1, 1]
+    }
+  }
+
+  describe "sort_by" {
+    test "sorts by key function" {
+      assert_eq (List.sort_by (fun x -> 0 - x) [3, 1, 4, 1, 5]) [5, 4, 3, 1, 1]
+    }
+  }
+
+  describe "find" {
+    test "finds first matching element" {
+      assert_eq (List.find (fun x -> x > 3) [1, 2, 3, 4, 5]) (Just 4)
+    }
+
+    test "returns Nothing when not found" {
+      assert_nothing (List.find (fun x -> x > 100) [1, 2, 3])
+    }
+
+    test "empty list" {
+      assert_nothing (List.find (fun x -> x > 0) [])
+    }
+  }
+
+  describe "contains" {
+    test "true when element present" {
+      assert_true (List.contains 3 [1, 2, 3, 4])
+    }
+
+    test "false when element absent" {
+      assert_false (List.contains 5 [1, 2, 3, 4])
+    }
+
+    test "empty list" {
+      assert_false (List.contains 1 [])
+    }
+  }
+
+  describe "nth" {
+    test "returns element at index" {
+      assert_eq (List.nth 0 [10, 20, 30]) (Just 10)
+    }
+
+    test "returns last element" {
+      assert_eq (List.nth 2 [10, 20, 30]) (Just 30)
+    }
+
+    test "out of bounds returns Nothing" {
+      assert_nothing (List.nth 5 [10, 20, 30])
+    }
+
+    test "negative index returns Nothing" {
+      assert_nothing (List.nth (-1) [10, 20, 30])
+    }
+  }
+
+  describe "zip_with" {
+    test "zips with function" {
+      assert_eq (List.zip_with (fun a b ->
+        a + b) [1, 2, 3] [10, 20, 30]) [11, 22, 33]
+    }
+
+    test "different lengths" {
+      assert_eq (List.zip_with (fun a b -> a * b) [1, 2] [10, 20, 30]) [10, 40]
+    }
+  }
+
+  describe "unzip" {
+    test "unzips a list of pairs" {
+      assert_eq (List.unzip [
+        (1, 10),
+        (2, 20),
+        (3, 30),
+      ]) ([1, 2, 3], [10, 20, 30])
+    }
+  }
+
+  describe "partition" {
+    test "splits by predicate" {
+      assert_eq (List.partition (fun x ->
+        x > 3) [1, 5, 2, 4, 3]) ([5, 4], [1, 2, 3])
+    }
+
+    test "all match" {
+      assert_eq (List.partition (fun x -> x > 0) [1, 2, 3]) ([1, 2, 3], [])
+    }
+
+    test "none match" {
+      assert_eq (List.partition (fun x -> x > 10) [1, 2, 3]) ([], [1, 2, 3])
+    }
+  }
+
+  describe "enumerate" {
+    test "pairs elements with 0-based indices" {
+      assert_eq (List.enumerate [10, 20, 30]) [(0, 10), (1, 20), (2, 30)]
+    }
+  }
+
+  describe "intersperse" {
+    test "inserts separator" {
+      assert_eq (List.intersperse 0 [1, 2, 3]) [1, 0, 2, 0, 3]
+    }
+
+    test "single element" {
+      assert_eq (List.intersperse 0 [1]) [1]
+    }
+
+    test "empty list" {
+      assert_eq (List.intersperse 0 []) []
+    }
+  }
+
+  describe "unique" {
+    test "removes duplicates preserving order" {
+      assert_eq (List.unique [
+        3,
+        1,
+        4,
+        1,
+        5,
+        9,
+        2,
+        6,
+        5,
+        3,
+      ]) [3, 1, 4, 5, 9, 2, 6]
+    }
+
+    test "no duplicates" {
+      assert_eq (List.unique [1, 2, 3]) [1, 2, 3]
+    }
+  }
+
+  describe "concat" {
+    test "flattens one level" {
+      assert_eq (List.concat [[1, 2], [3, 4], [5]]) [1, 2, 3, 4, 5]
+    }
+
+    test "with empty sublists" {
+      assert_eq (List.concat [[1], [], [2, 3], []]) [1, 2, 3]
+    }
+  }
+
+  describe "iter" {
+    test "applies function to each element" {
+      List.iter (fun _ -> ()) [1, 2, 3]
+    }
+  }
+
+  describe "scan" {
+    test "running sum" {
+      assert_eq (List.scan (fun acc x -> acc + x) 0 [1, 2, 3, 4]) [1, 3, 6, 10]
+    }
+
+    test "empty list" {
+      assert_eq (List.scan (fun acc x -> acc + x) 0 []) []
+    }
+  }
+
+  describe "chunks" {
+    test "even split" {
+      assert_eq (List.chunks 2 [1, 2, 3, 4]) [[1, 2], [3, 4]]
+    }
+
+    test "uneven last chunk" {
+      assert_eq (List.chunks 2 [1, 2, 3]) [[1, 2], [3]]
+    }
+
+    test "chunk size larger than list" {
+      assert_eq (List.chunks 10 [1, 2]) [[1, 2]]
+    }
+  }
+
+  describe "window" {
+    test "sliding window" {
+      assert_eq (List.window 2 [1, 2, 3, 4]) [[1, 2], [2, 3], [3, 4]]
+    }
+
+    test "window size 3" {
+      assert_eq (List.window 3 [
+        1,
+        2,
+        3,
+        4,
+        5,
+      ]) [[1, 2, 3], [2, 3, 4], [3, 4, 5]]
+    }
+
+    test "window larger than list" {
+      assert_eq (List.window 5 [1, 2]) []
+    }
+  }
+}

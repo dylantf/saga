@@ -321,6 +321,14 @@ pub enum Decl {
         span: Span,
     },
 
+    /// A bare expression at the top level (test/describe sugar in test files).
+    /// Converted to `Let { name: "_", .. }` by the desugar pass.
+    TopExpr {
+        id: NodeId,
+        value: Expr,
+        span: Span,
+    },
+
     // --- Elaboration-only (never produced by the parser) ---
     /// Synthesized dictionary constructor function for a trait impl.
     /// e.g. `__dict_Describe_User` returns a tuple of method functions.
@@ -817,6 +825,14 @@ pub enum TypeExpr {
         multiline: bool,
         span: Span,
     },
+
+    /// Labeled parameter in a type expression: `(label: Type)`.
+    /// Documentation-only — the label does not affect type semantics.
+    Labeled {
+        label: String,
+        inner: Box<TypeExpr>,
+        span: Span,
+    },
 }
 
 impl TypeExpr {
@@ -826,7 +842,8 @@ impl TypeExpr {
             | TypeExpr::Var { span, .. }
             | TypeExpr::App { span, .. }
             | TypeExpr::Arrow { span, .. }
-            | TypeExpr::Record { span, .. } => *span,
+            | TypeExpr::Record { span, .. }
+            | TypeExpr::Labeled { span, .. } => *span,
         }
     }
 }
@@ -860,6 +877,7 @@ impl PartialEq for TypeExpr {
                 },
             ) => f1 == f2 && t1 == t2 && e1 == e2,
             (TypeExpr::Record { fields: f1, .. }, TypeExpr::Record { fields: f2, .. }) => f1 == f2,
+            (TypeExpr::Labeled { label: l1, inner: i1, .. }, TypeExpr::Labeled { label: l2, inner: i2, .. }) => l1 == l2 && i1 == i2,
             _ => false,
         }
     }

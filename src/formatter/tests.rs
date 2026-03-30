@@ -284,6 +284,13 @@ fn normalize_decl(d: &mut Decl) {
             *id = NID;
             *span = S;
         }
+        Decl::TopExpr {
+            id, value, span, ..
+        } => {
+            *id = NID;
+            *span = S;
+            normalize_expr(value);
+        }
         Decl::DictConstructor {
             id, methods, span, ..
         } => {
@@ -618,6 +625,10 @@ fn normalize_type_expr(te: &mut TypeExpr) {
             for (_, te) in fields.iter_mut() {
                 normalize_type_expr(te);
             }
+        }
+        TypeExpr::Labeled { inner, span, .. } => {
+            *span = S;
+            normalize_type_expr(inner);
         }
     }
 }

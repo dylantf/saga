@@ -336,7 +336,24 @@ impl Checker {
                 if name.starts_with(|c: char| c.is_uppercase()) {
                     self.lsp.type_references.push((*span, name.clone()));
                 }
-                Type::Con(name.clone(), vec![])
+                // Resolve qualified type names (e.g. "M.Maybe" -> "Maybe") through
+                // the type alias map populated during import processing.
+                let resolved = if name.contains('.') {
+                    match self.type_aliases.get(name) {
+                        Some(canonical) => canonical.clone(),
+                        None => {
+                            self.collected_diagnostics.push(Diagnostic {
+                                severity: Severity::Error,
+                                message: format!("unknown qualified type '{}'", name),
+                                span: Some(*span),
+                            });
+                            return Type::Error;
+                        }
+                    }
+                } else {
+                    name.clone()
+                };
+                Type::Con(resolved, vec![])
             }
             crate::ast::TypeExpr::Var { name, .. } => {
                 if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
@@ -427,6 +444,9 @@ impl Checker {
                     .collect();
                 typed_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
                 Type::Record(typed_fields)
+            }
+            crate::ast::TypeExpr::Labeled { inner, .. } => {
+                self.convert_type_expr(inner, params)
             }
         }
     }

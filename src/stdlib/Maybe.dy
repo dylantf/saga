@@ -3,7 +3,7 @@ module Std.Maybe
 impl Debug for Maybe a where {a: Debug} {
   debug m = case m {
     Nothing -> "Nothing"
-    Just(x) -> "Just(" <> debug x <> ")"
+    Just x -> "Just(" <> debug x <> ")"
   }
 }
 
@@ -11,20 +11,51 @@ pub type Maybe a =
   | Nothing
   | Just(a)
 
+#@ Returns True if the value is Just.
+pub fun is_just : Maybe a -> Bool
+is_just m = case m {
+  Just _ -> True
+  Nothing -> False
+}
+
+#@ Returns True if the value is Nothing.
+pub fun is_nothing : Maybe a -> Bool
+is_nothing m = case m {
+  Nothing -> True
+  Just _ -> False
+}
+
+#@ Applies a function to the inner value if Just, otherwise returns Nothing.
 pub fun map : (f: a -> b) -> (m: Maybe a) -> Maybe b
 map f m = case m {
   Nothing -> Nothing
-  Just(x) -> Just(f x)
+  Just x -> Just (f x)
 }
 
+#@ Returns the inner value or a default if Nothing.
 pub fun unwrap_or : (default: a) -> (m: Maybe a) -> a
 unwrap_or default m = case m {
   Nothing -> default
-  Just(x) -> x
+  Just x -> x
 }
 
+#@ Returns the inner value. Panics on Nothing.
+pub fun unwrap : (m: Maybe a) -> a where {a: Debug}
+unwrap m = case m {
+  Just x -> x
+  Nothing -> panic "Trying to unwrap Nothing"
+}
+
+#@ Chains a function that returns Maybe. Returns Nothing if the input is Nothing.
 pub fun and_then : (f: a -> Maybe b) -> (m: Maybe a) -> Maybe b
 and_then f m = case m {
   Nothing -> Nothing
-  Just(x) -> f x
+  Just x -> f x
+}
+
+#@ Returns the first Just value, or Nothing if both are Nothing.
+pub fun or_else : (fallback: Maybe a) -> (m: Maybe a) -> Maybe a
+or_else fallback m = case m {
+  Just _ -> m
+  Nothing -> fallback
 }

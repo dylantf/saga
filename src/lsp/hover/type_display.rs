@@ -442,5 +442,8 @@ pub(crate) fn format_type_expr(ty: &TypeExpr) -> String {
                 .collect();
             format!("{{ {} }}", field_strs.join(", "))
         }
+        TypeExpr::Labeled { label, inner, .. } => {
+            format!("({}: {})", label, format_type_expr(inner))
+        }
     }
 }

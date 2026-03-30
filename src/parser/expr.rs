@@ -379,27 +379,33 @@ impl Parser {
         while matches!(self.peek(), Token::Dot) {
             self.advance(); // consume '.'
 
-            // Qualified effect call: `Cache.get! key`
-            if let Token::EffectCall(name) = self.peek().clone()
-                && let ExprKind::Constructor {
-                    name: qualifier, ..
-                } = &expr.kind
-            {
-                let qualifier = qualifier.clone();
-                let start_span = expr.span;
-                let effect_span = self.tokens[self.pos].span;
-                self.advance(); // consume effect call token
-                let span = start_span.to(effect_span);
-                expr = Expr {
-                    id: self.next_id(),
-                    span,
-                    kind: ExprKind::EffectCall {
-                        name,
-                        qualifier: Some(qualifier),
-                        args: Vec::new(),
-                    },
+            // Qualified effect call: `Cache.get! key` or `Std.Cache.get! key`
+            if let Token::EffectCall(name) = self.peek().clone() {
+                let qualifier = match &expr.kind {
+                    ExprKind::Constructor { name: q, .. } => Some(q.clone()),
+                    ExprKind::QualifiedName { module, name: prev_name, .. }
+                        if prev_name.starts_with(|c: char| c.is_uppercase()) =>
+                    {
+                        Some(format!("{}.{}", module, prev_name))
+                    }
+                    _ => None,
                 };
-                continue;
+                if let Some(qualifier) = qualifier {
+                    let start_span = expr.span;
+                    let effect_span = self.tokens[self.pos].span;
+                    self.advance(); // consume effect call token
+                    let span = start_span.to(effect_span);
+                    expr = Expr {
+                        id: self.next_id(),
+                        span,
+                        kind: ExprKind::EffectCall {
+                            name,
+                            qualifier: Some(qualifier),
+                            args: Vec::new(),
+                        },
+                    };
+                    continue;
+                }
             }
 
             let start = expr.span.start;
@@ -462,6 +468,56 @@ impl Parser {
                     id: self.next_id(),
                     span: qspan,
                     kind: ExprKind::QualifiedName { module, name },
+                };
+                continue;
+            }
+            // Multi-level module access: `Std.String.replace` when LHS is already QualifiedName
+            // and its name part is uppercase (a module segment, not a function).
+            if let ExprKind::QualifiedName { module: prev_module, name: prev_name, .. } = &expr.kind
+                && prev_name.starts_with(|c: char| c.is_uppercase())
+            {
+                let extended_module = format!("{}.{}", prev_module, prev_name);
+                let name = match self.peek().clone() {
+                    Token::Ident(n) => { self.advance(); n }
+                    Token::UpperIdent(n) => { self.advance(); n }
+                    _ => {
+                        let end = self.tokens[self.pos - 1].span;
+                        let qspan = Span { start, end: end.end };
+                        expr = Expr {
+                            id: self.next_id(),
+                            span: qspan,
+                            kind: ExprKind::QualifiedName {
+                                module: extended_module,
+                                name: String::new(),
+                            },
+                        };
+                        continue;
+                    }
+                };
+                let end = self.tokens[self.pos - 1].span;
+                let qspan = Span { start, end: end.end };
+
+                // Qualified record create with multi-level module path
+                if name.chars().next().is_some_and(|c| c.is_uppercase())
+                    && matches!(self.peek(), Token::LBrace)
+                {
+                    self.advance(); // consume '{'
+                    let fields = self.parse_record_fields()?;
+                    let end = self.tokens[self.pos].span;
+                    self.expect(Token::RBrace)?;
+                    let span = qspan.to(end);
+                    expr = Expr {
+                        id: self.next_id(),
+                        span,
+                        kind: ExprKind::RecordCreate { name, fields },
+                    };
+                    continue;
+                }
+
+                expr = Expr {
+                    id: self.next_id(),
+                    span: qspan,
+                    kind: ExprKind::QualifiedName { module: extended_module, name },
                 };
                 continue;
             }
@@ -692,26 +748,14 @@ impl Parser {
                     && (i == "test" || i == "describe" || i == "skip" || i == "only")
                     && matches!(self.peek(), Token::String(..)) =>
             {
-                // Desugar: test "name" { body } -> test "name" (fun () -> { body })
-                //          describe "name" { body } -> describe "name" (fun () -> { body })
+                // Parse test/describe sugar, preserving the block body as-is.
+                // Lambda wrapping (fun () -> body) happens in desugar.rs so
+                // the formatter can round-trip the original syntax.
                 let func_name = i.clone();
                 let name_str = self.expect_string()?;
                 let name_span = self.tokens[self.pos - 1].span;
                 let body = self.parse_expr(0)?;
                 let body_span = body.span;
-
-                let lambda = Expr {
-                    id: self.next_id(),
-                    span: body_span,
-                    kind: ExprKind::Lambda {
-                        params: vec![Pat::Lit {
-                            id: NodeId::fresh(),
-                            value: Lit::Unit,
-                            span: body_span,
-                        }],
-                        body: Box::new(body),
-                    },
-                };
 
                 let func = Expr {
                     id: self.next_id(),
@@ -738,7 +782,7 @@ impl Parser {
                     span: span.to(body_span),
                     kind: ExprKind::App {
                         func: Box::new(app1),
-                        arg: Box::new(lambda),
+                        arg: Box::new(body),
                     },
                 })
             }

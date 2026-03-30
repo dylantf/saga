@@ -28,7 +28,7 @@ pub struct Parser {
     /// When true, `{` is not treated as starting a function argument.
     /// Used when parsing case scrutinees where `{` begins the branch block.
     pub(super) no_brace_app: bool,
-    /// When true, `test`, `describe`, and `skip` followed by a string literal
+    /// When true, `test` and `describe` followed by a string literal
     /// are desugared into function calls. Only enabled for test files.
     pub test_mode: bool,
 }

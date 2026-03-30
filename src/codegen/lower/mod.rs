@@ -5,15 +5,16 @@ pub(crate) mod init;
 mod pats;
 pub mod util;
 
-use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Pat};
+use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Lit, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use std::collections::HashMap;
 
 use init::{PendingAnnotation, extract_external};
 use pats::{lower_params, lower_pat};
 use util::{
-    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_qualified_call,
-    core_var, field_access_record_name, has_nested_effect_call, lower_lit,
+    binary_prepend, cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call,
+    collect_qualified_call, core_var, field_access_record_name, has_nested_effect_call, lower_lit,
+    lower_string_to_binary, process_string_escapes,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -221,8 +222,8 @@ impl<'a> Lowerer<'a> {
             .filter(|e| !e.is_empty())
     }
 
-    /// Emit a call expression using the resolution map, falling back to old lookup maps.
-    /// Get a function's effects from the resolution map, falling back to fun_info.
+    /// Get a function's effects from the resolution map, falling back to fun_info
+    /// for resolved names whose effect list was empty in the resolver.
     fn resolved_effects(&self, node_id: crate::ast::NodeId, name: &str) -> Option<Vec<String>> {
         use super::resolve::ResolvedName;
         match self.resolved.get(&node_id) {
@@ -232,8 +233,14 @@ impl<'a> Lowerer<'a> {
             {
                 Some(effects.clone())
             }
+            Some(ResolvedName::ImportedFun { .. }) | Some(ResolvedName::LocalFun { .. }) => {
+                // Resolved as a function but effects were empty in the resolver.
+                // Fall back to fun_info which has CPS-expanded effect info.
+                self.fun_effects(name).cloned()
+            }
             Some(ResolvedName::ExternalFun { .. }) => None,
-            _ => self.fun_effects(name).cloned(),
+            // Not in resolution map → local variable, no effects.
+            None => None,
         }
     }
 
@@ -699,7 +706,17 @@ impl<'a> Lowerer<'a> {
 
     pub(super) fn lower_expr(&mut self, expr: &Expr) -> CExpr {
         match &expr.kind {
-            ExprKind::Lit { value, .. } => CExpr::Lit(lower_lit(value)),
+            ExprKind::Lit { value, .. } => match value {
+                Lit::String(s, kind) => {
+                    let resolved = if kind.is_multiline() {
+                        process_string_escapes(s)
+                    } else {
+                        s.clone()
+                    };
+                    lower_string_to_binary(&resolved)
+                }
+                _ => CExpr::Lit(lower_lit(value)),
+            },
 
             ExprKind::Var { name, .. } => {
                 use super::resolve::ResolvedName;
@@ -754,19 +771,12 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                     _ => {
-                        // Not in resolution map: check inline_vals, then fun_info
-                        // for local top-level functions, otherwise treat as local variable.
+                        // Not in resolution map: this is a local variable
+                        // (function param, let binding, lambda param, case binding, etc.).
+                        // The resolver is authoritative — if it didn't resolve the name,
+                        // it's not a module-level or imported function.
                         if let Some(inlined) = self.inline_vals.get(name) {
                             inlined.clone()
-                        } else if let Some(arity) = self.fun_arity(name) {
-                            if arity == 0 {
-                                CExpr::Apply(
-                                    Box::new(CExpr::FunRef(name.clone(), 0)),
-                                    vec![],
-                                )
-                            } else {
-                                CExpr::FunRef(name.clone(), arity)
-                            }
                         } else {
                             CExpr::Var(core_var(name))
                         }
@@ -791,7 +801,20 @@ impl<'a> Lowerer<'a> {
 
                 // Check for a qualified call: App(QualifiedName { module, name }, arg1, ...)
                 // e.g. `Math.abs x` -> call 'math':'abs'(X)
+                // Intercept Process.catch_panic as a builtin before general qualified call handling.
+                if let Some((_module, func_name, _head, args)) = collect_qualified_call(expr)
+                    && func_name == "catch_panic" && args.len() == 1
+                {
+                    return self.lower_catch_panic(args[0]);
+                }
                 if let Some((module, func_name, head, args)) = collect_qualified_call(expr) {
+                    // Check if this is a qualified constructor (e.g. M.Just, Std.Maybe.Just)
+                    let qualified = format!("{}.{}", module, func_name);
+                    if self.constructor_atoms.contains_key(&qualified)
+                        || self.constructor_atoms.contains_key(func_name)
+                    {
+                        return self.lower_ctor(func_name, args);
+                    }
                     return self.lower_qualified_call(module, func_name, head, &args);
                 }
 
@@ -810,62 +833,45 @@ impl<'a> Lowerer<'a> {
                     }
                 }
 
-                // Lower `panic msg` / `todo ()` to stderr print + erlang:halt(1)
+                // Lower `panic msg` / `todo ()` to erlang:error({dylang_panic, Msg})
+                // The entry point wrapper catches this and prints nicely + exits.
+                // catch_panic can also intercept it for recovery boundaries.
                 if let Some((func_name, _head, args)) = collect_fun_call(expr)
                     && (func_name == "panic" || func_name == "todo")
                     && args.len() == 1
                 {
                     let v = self.fresh();
                     let prefixed = self.fresh();
-                    let dummy = self.fresh();
                     let (arg, prepend) = if func_name == "todo" {
-                        // todo () - just print "todo: not implemented"
-                        let arg = CExpr::Lit(CLit::Str("not implemented".into()));
-                        let prep = cerl_call(
-                            "erlang",
-                            "++",
-                            vec![
-                                CExpr::Lit(CLit::Str("todo: ".into())),
-                                CExpr::Var(v.clone()),
-                            ],
-                        );
+                        let arg = lower_string_to_binary("not implemented");
+                        let prep = binary_prepend("todo: ", CExpr::Var(v.clone()));
                         (arg, prep)
                     } else {
-                        // panic msg - prepend "panic: " to the message
                         let arg = self.lower_expr(args[0]);
-                        let prep = cerl_call(
-                            "erlang",
-                            "++",
-                            vec![
-                                CExpr::Lit(CLit::Str("panic: ".into())),
-                                CExpr::Var(v.clone()),
-                            ],
-                        );
+                        let prep = binary_prepend("panic: ", CExpr::Var(v.clone()));
                         (arg, prep)
                     };
-                    // io:format(standard_error, "~ts~n", [Msg])
-                    let print_stderr = cerl_call(
-                        "io",
-                        "format",
-                        vec![
-                            CExpr::Lit(CLit::Atom("standard_error".into())),
-                            CExpr::Lit(CLit::Str("~ts~n".into())),
-                            CExpr::Cons(
-                                Box::new(CExpr::Var(prefixed.clone())),
-                                Box::new(CExpr::Nil),
-                            ),
-                        ],
+                    let error = cerl_call(
+                        "erlang",
+                        "error",
+                        vec![CExpr::Tuple(vec![
+                            CExpr::Lit(CLit::Atom("dylang_panic".into())),
+                            CExpr::Var(prefixed.clone()),
+                        ])],
                     );
-                    let halt = cerl_call("erlang", "halt", vec![CExpr::Lit(CLit::Int(1))]);
                     return CExpr::Let(
                         v,
                         Box::new(arg),
-                        Box::new(CExpr::Let(
-                            prefixed,
-                            Box::new(prepend),
-                            Box::new(CExpr::Let(dummy, Box::new(print_stderr), Box::new(halt))),
-                        )),
+                        Box::new(CExpr::Let(prefixed, Box::new(prepend), Box::new(error))),
                     );
+                }
+
+                // Lower `catch_panic thunk` to a Core Erlang try/catch (unqualified call).
+                if let Some((func_name, _head, args)) = collect_fun_call(expr)
+                    && func_name == "catch_panic"
+                    && args.len() == 1
+                {
+                    return self.lower_catch_panic(args[0]);
                 }
 
                 // Check for a saturated call to a known top-level function.
@@ -873,7 +879,14 @@ impl<'a> Lowerer<'a> {
                 // For effectful functions, the user provides N args but the function
                 // takes N+M where M is the number of handler params. We thread
                 // the caller's handler params through automatically.
-                if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
+                //
+                // Only attempt saturation/partial-application if the resolver
+                // confirmed the head is a function (top-level, imported, external,
+                // or LetFun). If the head Var is not in the resolution map, it's a
+                // local variable — fall through to generic apply.
+                if let Some((func_name, head_expr, args)) = collect_fun_call(expr)
+                    && self.resolved.contains_key(&head_expr.id)
+                {
                     let callee_effects = self.resolved_effects(head_expr.id, func_name);
                     let callee_ops = callee_effects
                         .as_ref()
@@ -1081,8 +1094,13 @@ impl<'a> Lowerer<'a> {
 
                 // Check if callee is a known function with mismatched arity.
                 // If so, split into a saturated call + apply of remaining args.
+                // Only consult fun_info if the resolver confirmed this is a function.
                 let callee_arity = match &callee.kind {
-                    ExprKind::Var { name, .. } => self.fun_arity(name),
+                    ExprKind::Var { name, .. }
+                        if self.resolved.contains_key(&callee.id) =>
+                    {
+                        self.fun_arity(name)
+                    }
                     _ => None,
                 };
 
@@ -1147,7 +1165,6 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Constructor { name, .. } => match name.as_str() {
                 "Nil" => CExpr::Nil,
-                "Nothing" => CExpr::Lit(CLit::Atom("undefined".to_string())),
                 // Booleans are bare atoms to match Erlang's native true/false
                 "True" => CExpr::Lit(CLit::Atom("true".to_string())),
                 "False" => CExpr::Lit(CLit::Atom("false".to_string())),
@@ -1431,16 +1448,17 @@ impl<'a> Lowerer<'a> {
                             //   'shutdown' -> Shutdown
                             //   'killed' -> Killed
                             //   'noproc' -> Noproc
-                            //   {'error', Msg, _} -> Error(Msg)
-                            //   Other -> Other(lists:flatten(io_lib:format("~p", [Other])))
+                            //   {dylang_panic, Msg} -> Error(Msg)
+                            //   {_, Msg, _Stacktrace} -> Error(Msg)
+                            //   Other -> Other(io_lib:format("~p", [Other]))
                             let other_var = self.fresh();
                             let fmt_var = self.fresh();
-                            let stringify = CExpr::Call(
-                                "lists".into(),
-                                "flatten".into(),
-                                vec![CExpr::Call(
-                                    "io_lib".into(),
-                                    "format".into(),
+                            let stringify = cerl_call(
+                                "unicode",
+                                "characters_to_binary",
+                                vec![cerl_call(
+                                    "io_lib",
+                                    "format",
                                     vec![
                                         CExpr::Lit(CLit::Str("~p".into())),
                                         CExpr::Cons(
@@ -1474,16 +1492,39 @@ impl<'a> Lowerer<'a> {
                                         guard: None,
                                         body: CExpr::Lit(CLit::Atom(noproc.clone())),
                                     },
+                                    // {{dylang_panic, Msg}, _Stacktrace} -> Error(Msg)
                                     CArm {
                                         pat: CPat::Tuple(vec![
-                                            CPat::Var(error_msg_var.clone()),
+                                            CPat::Tuple(vec![
+                                                CPat::Lit(CLit::Atom("dylang_panic".into())),
+                                                CPat::Var(error_msg_var.clone()),
+                                            ]),
                                             CPat::Wildcard, // stacktrace
                                         ]),
                                         guard: None,
                                         body: CExpr::Tuple(vec![
                                             CExpr::Lit(CLit::Atom(error.clone())),
-                                            CExpr::Var(error_msg_var),
+                                            CExpr::Var(error_msg_var.clone()),
                                         ]),
+                                    },
+                                    // {Msg, _Stacktrace} when is_binary(Msg) -> Error(Msg)
+                                    {
+                                        let error_msg_var2 = self.fresh();
+                                        CArm {
+                                            pat: CPat::Tuple(vec![
+                                                CPat::Var(error_msg_var2.clone()),
+                                                CPat::Wildcard, // stacktrace
+                                            ]),
+                                            guard: Some(cerl_call(
+                                                "erlang",
+                                                "is_binary",
+                                                vec![CExpr::Var(error_msg_var2.clone())],
+                                            )),
+                                            body: CExpr::Tuple(vec![
+                                                CExpr::Lit(CLit::Atom(error.clone())),
+                                                CExpr::Var(error_msg_var2),
+                                            ]),
+                                        }
                                     },
                                     CArm {
                                         pat: CPat::Var(other_var.clone()),
@@ -1521,7 +1562,14 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Tuple { elements, .. } => self.lower_tuple_elems(elements),
 
-            ExprKind::QualifiedName { module: _, name, .. } => {
+            ExprKind::QualifiedName { module, name, .. } => {
+                // Check if this is a qualified constructor with no args (e.g. M.Nothing)
+                let qualified = format!("{}.{}", module, name);
+                if self.constructor_atoms.contains_key(&qualified)
+                    || self.constructor_atoms.contains_key(name.as_str())
+                {
+                    return self.lower_ctor(name, vec![]);
+                }
                 use super::resolve::ResolvedName;
                 if let Some(resolved) = self.resolved.get(&expr.id) {
                     match resolved {

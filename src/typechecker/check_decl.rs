@@ -4,8 +4,8 @@ use crate::ast::{self, Decl, ExprKind, Lit};
 
 use super::result::CheckResult;
 use super::{
-    find_effect_call, Checker, Diagnostic, EffectDefInfo, EffectOpSig, EffectRow, HandlerInfo,
-    RecordInfo, Scheme, Span, Type,
+    Checker, Diagnostic, EffectDefInfo, EffectOpSig, EffectRow, HandlerInfo, RecordInfo, Scheme,
+    Span, Type, find_effect_call,
 };
 
 /// Check if an expression is a compile-time inlineable value:
@@ -21,9 +21,7 @@ fn is_inlineable_expr(expr: &ast::Expr) -> bool {
         ExprKind::ListLit { elements, .. } => elements.iter().all(is_inlineable_expr),
         ExprKind::Tuple { elements, .. } => elements.iter().all(is_inlineable_expr),
         ExprKind::Constructor { .. } => true, // Nil, True, etc.
-        ExprKind::App { func, arg, .. } => {
-            is_inlineable_expr(func) && is_inlineable_expr(arg)
-        }
+        ExprKind::App { func, arg, .. } => is_inlineable_expr(func) && is_inlineable_expr(arg),
         ExprKind::Var { .. } => true, // reference to another val (validated at use site)
         ExprKind::UnaryMinus { expr: inner, .. } => is_inlineable_expr(inner),
         _ => false,
@@ -73,8 +71,12 @@ impl Checker {
         self.register_externals(program)?;
         let (annotations, annotation_constraints) = self.collect_annotations(program)?;
         let fun_vars = self.pre_bind_functions(program, &annotations);
-        self.register_all_impls(program)?;
-        self.check_supertrait_impls().map_err(|e| vec![e])?;
+        if let Err(errors) = self.register_all_impls(program) {
+            self.collected_diagnostics.extend(errors);
+        }
+        if let Err(e) = self.check_supertrait_impls() {
+            self.collected_diagnostics.push(e);
+        }
 
         // Main pass: group multi-clause function bindings, then check everything.
         // Collect errors instead of failing on the first one.
@@ -167,7 +169,11 @@ impl Checker {
         if let Some(scheme) = self.env.get("main")
             && !scheme.constraints.is_empty()
         {
-            let traits: Vec<_> = scheme.constraints.iter().map(|(t, _, _)| t.as_str()).collect();
+            let traits: Vec<_> = scheme
+                .constraints
+                .iter()
+                .map(|(t, _, _)| t.as_str())
+                .collect();
             let span = program
                 .iter()
                 .find_map(|d| {
@@ -277,7 +283,10 @@ impl Checker {
                     let err_span = find_effect_call(value).unwrap_or(*span);
                     return Err(Diagnostic::error_at(
                         err_span,
-                        format!("'val' bindings must be pure (no effects), but '{}' uses effects", name),
+                        format!(
+                            "'val' bindings must be pure (no effects), but '{}' uses effects",
+                            name
+                        ),
                     ));
                 }
 
@@ -291,9 +300,7 @@ impl Checker {
                 }
 
                 // @inline vals must have compile-time inlineable RHS
-                if annotations.iter().any(|a| a.name == "inline")
-                    && !is_inlineable_expr(value)
-                {
+                if annotations.iter().any(|a| a.name == "inline") && !is_inlineable_expr(value) {
                     return Err(Diagnostic::error_at(
                         *span,
                         format!(
@@ -453,7 +460,9 @@ impl Checker {
                                     .iter()
                                     .map(|arg_name| {
                                         // Type variable (lowercase) -> Type::Var, concrete type (uppercase) -> Type::Con
-                                        if let Some((_, id)) = params_list.iter().find(|(n, _)| n == arg_name) {
+                                        if let Some((_, id)) =
+                                            params_list.iter().find(|(n, _)| n == arg_name)
+                                        {
                                             Type::Var(*id)
                                         } else {
                                             Type::Con(arg_name.clone(), vec![])
@@ -489,7 +498,8 @@ impl Checker {
         program: &[Decl],
     ) -> std::result::Result<Annotations, Vec<Diagnostic>> {
         let mut annotations: HashMap<String, (Type, Span)> = HashMap::new();
-        let mut annotation_constraints: HashMap<String, Vec<(String, u32, Vec<Type>)>> = HashMap::new();
+        let mut annotation_constraints: HashMap<String, Vec<(String, u32, Vec<Type>)>> =
+            HashMap::new();
 
         for decl in program {
             if let Decl::FunSignature {
@@ -597,7 +607,9 @@ impl Checker {
                                 let extra_types: Vec<Type> = trait_type_args
                                     .iter()
                                     .map(|arg_name| {
-                                        if let Some((_, id)) = params_list.iter().find(|(n, _)| n == arg_name) {
+                                        if let Some((_, id)) =
+                                            params_list.iter().find(|(n, _)| n == arg_name)
+                                        {
                                             Type::Var(*id)
                                         } else {
                                             Type::Con(arg_name.clone(), vec![])
@@ -675,6 +687,7 @@ impl Checker {
 
     /// Pass 6: Register trait impls.
     fn register_all_impls(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
+        let mut errors: Vec<Diagnostic> = Vec::new();
         for decl in program {
             if let Decl::ImplDef {
                 trait_name,
@@ -701,7 +714,7 @@ impl Checker {
                     self.record_effect_ref(eff);
                 }
                 let plain_methods: Vec<_> = methods.iter().map(|a| a.node.clone()).collect();
-                self.register_impl(
+                if let Err(e) = self.register_impl(
                     trait_name,
                     trait_type_args,
                     target_type,
@@ -710,11 +723,16 @@ impl Checker {
                     needs,
                     &plain_methods,
                     *span,
-                )
-                .map_err(|e| vec![e])?;
+                ) {
+                    errors.push(e);
+                }
             }
         }
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     /// Check a group of function clauses that share the same name.
@@ -1020,6 +1038,33 @@ impl Checker {
         Ok(())
     }
 
+    /// Look up the source-level type variable name for a resolved type var ID.
+    /// `where_bound_var_names` is keyed by original (pre-substitution) var IDs,
+    /// so we resolve each bound ID through substitution to find the match.
+    fn resolve_where_var_name(&self, trait_name: &str, resolved_id: u32) -> Option<String> {
+        self.trait_state
+            .where_bounds
+            .iter()
+            .find_map(|(bound_id, traits)| {
+                if traits.contains(trait_name) {
+                    match self.sub.apply(&Type::Var(*bound_id)) {
+                        Type::Var(r) if r == resolved_id => {
+                            self.trait_state.where_bound_var_names.get(bound_id).cloned()
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                self.trait_state
+                    .where_bound_var_names
+                    .get(&resolved_id)
+                    .cloned()
+            })
+    }
+
     /// Partition pending constraints into scheme-level (polymorphic) vs global
     /// (concrete), then generalize the function type into a scheme with constraints.
     fn build_fun_scheme(
@@ -1059,7 +1104,7 @@ impl Checker {
                                     }
                             });
                     if in_where {
-                        let var_name = self.trait_state.where_bound_var_names.get(&id).cloned();
+                        let var_name = self.resolve_where_var_name(&trait_name, id);
                         self.evidence.push(super::TraitEvidence {
                             node_id,
                             trait_name: trait_name.clone(),
@@ -1094,11 +1139,7 @@ impl Checker {
                                 Type::Var(rid) => rid,
                                 _ => id,
                             };
-                            let var_name = self
-                                .trait_state
-                                .where_bound_var_names
-                                .get(&resolved_id)
-                                .cloned();
+                            let var_name = self.resolve_where_var_name(&trait_name, resolved_id);
                             self.evidence.push(super::TraitEvidence {
                                 node_id,
                                 trait_name: trait_name.clone(),
@@ -1121,7 +1162,7 @@ impl Checker {
                     }
                     // Record evidence for inferred constraints too, so the
                     // elaborator can resolve trait method calls (DictMethodAccess).
-                    let var_name = self.trait_state.where_bound_var_names.get(&id).cloned();
+                    let var_name = self.resolve_where_var_name(&trait_name, id);
                     self.evidence.push(super::TraitEvidence {
                         node_id,
                         trait_name: trait_name.clone(),
@@ -1132,9 +1173,13 @@ impl Checker {
                     scheme_constraints.push((trait_name, id, span));
                 }
                 _ => {
-                    self.trait_state
-                        .pending_constraints
-                        .push((trait_name, trait_type_arg_types, ty, span, node_id));
+                    self.trait_state.pending_constraints.push((
+                        trait_name,
+                        trait_type_arg_types,
+                        ty,
+                        span,
+                        node_id,
+                    ));
                 }
             }
         }
@@ -1148,11 +1193,11 @@ impl Checker {
                 _ => continue,
             };
             if scheme.forall.contains(&resolved_id) {
-                let resolved_extras: Vec<Type> = extra_types
-                    .iter()
-                    .map(|ty| self.sub.apply(ty))
-                    .collect();
-                scheme.constraints.push((trait_name.clone(), resolved_id, resolved_extras));
+                let resolved_extras: Vec<Type> =
+                    extra_types.iter().map(|ty| self.sub.apply(ty)).collect();
+                scheme
+                    .constraints
+                    .push((trait_name.clone(), resolved_id, resolved_extras));
             }
         }
 
@@ -1777,7 +1822,10 @@ impl Checker {
                                     let extra_var_ids: Vec<u32> = trait_type_args
                                         .iter()
                                         .filter_map(|arg_name| {
-                                            type_var_params.iter().find(|(n, _)| n == arg_name).map(|(_, id)| *id)
+                                            type_var_params
+                                                .iter()
+                                                .find(|(n, _)| n == arg_name)
+                                                .map(|(_, id)| *id)
                                         })
                                         .collect();
                                     entry.push((trait_name.clone(), extra_var_ids));
@@ -1862,19 +1910,22 @@ impl Checker {
                 match &resolved {
                     // Concrete type (includes primitives): check that an impl exists
                     Type::Con(type_name, args) => {
-                        let impl_info = self
-                            .trait_state
-                            .impls
-                            .get(&(trait_name.clone(), resolved_trait_type_args.clone(), type_name.clone()));
+                        let impl_info = self.trait_state.impls.get(&(
+                            trait_name.clone(),
+                            resolved_trait_type_args.clone(),
+                            type_name.clone(),
+                        ));
                         match impl_info {
                             None => {
                                 // Check if this might be caused by a user function
                                 // shadowing a trait method that would have worked.
                                 let mut hint = String::new();
                                 for (t_name, t_info) in &self.trait_state.traits {
-                                    let has_impl = self.trait_state.impls.keys().any(
-                                        |(tn, _, tt)| tn == t_name && tt == type_name,
-                                    );
+                                    let has_impl = self
+                                        .trait_state
+                                        .impls
+                                        .keys()
+                                        .any(|(tn, _, tt)| tn == t_name && tt == type_name);
                                     if has_impl {
                                         for (m_name, _, _, _) in &t_info.methods {
                                             if let Some(scheme) = self.env.get(m_name) {
@@ -1953,7 +2004,7 @@ impl Checker {
                             return Err(Diagnostic::error_at(
                                 span,
                                 format!(
-                                    "trait {} required but no impl or where clause bound for this type",
+                                    "ambiguous type variable requires {}. Add a type annotation to pin the unconstrained type variable",
                                     trait_name
                                 ),
                             ));
@@ -1996,11 +2047,11 @@ impl Checker {
             if let Some(trait_info) = self.trait_state.traits.get(trait_name) {
                 for supertrait in &trait_info.supertraits {
                     // Supertraits are always single-param (no type args)
-                    if !self
-                        .trait_state
-                        .impls
-                        .contains_key(&(supertrait.clone(), vec![], target_type.clone()))
-                    {
+                    if !self.trait_state.impls.contains_key(&(
+                        supertrait.clone(),
+                        vec![],
+                        target_type.clone(),
+                    )) {
                         let msg = format!(
                             "impl {} for {} requires impl {} for {} (supertrait)",
                             trait_name, target_type, supertrait, target_type

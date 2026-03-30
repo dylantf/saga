@@ -1,5 +1,5 @@
 use crate::ast::{BinOp, Expr, ExprKind, Lit, Pat, Stmt, TypeExpr};
-use crate::codegen::cerl::{CExpr, CLit};
+use crate::codegen::cerl::{CBinSeg, CExpr, CLit};
 use crate::typechecker::Type;
 use std::collections::{BTreeSet, HashMap};
 
@@ -40,8 +40,20 @@ pub(super) fn lower_lit(lit: &Lit) -> CLit {
     }
 }
 
+/// Lower a string value to a binary expression.
+pub(super) fn lower_string_to_binary(s: &str) -> CExpr {
+    CExpr::Binary(s.as_bytes().iter().map(|&b| CBinSeg::Byte(b)).collect())
+}
+
+/// Build a binary that prepends a literal prefix to a variable expression.
+pub(super) fn binary_prepend(prefix: &str, var: CExpr) -> CExpr {
+    let mut segs: Vec<CBinSeg<CExpr>> = prefix.as_bytes().iter().map(|&b| CBinSeg::Byte(b)).collect();
+    segs.push(CBinSeg::BinaryAll(var));
+    CExpr::Binary(segs)
+}
+
 /// Process escape sequences in a raw string (multiline strings store raw source).
-fn process_string_escapes(s: &str) -> String {
+pub(super) fn process_string_escapes(s: &str) -> String {
     let mut out = String::new();
     let mut chars = s.chars();
     while let Some(ch) = chars.next() {
@@ -109,7 +121,7 @@ pub(super) fn binop_call(op: &BinOp, left: &str, right: &str) -> CExpr {
         BinOp::Gt => cerl_call("erlang", ">", vec![l, r]),
         BinOp::LtEq => cerl_call("erlang", "=<", vec![l, r]),
         BinOp::GtEq => cerl_call("erlang", ">=", vec![l, r]),
-        BinOp::Concat => cerl_call("erlang", "++", vec![l, r]),
+        BinOp::Concat => CExpr::Binary(vec![CBinSeg::BinaryAll(l), CBinSeg::BinaryAll(r)]),
         BinOp::And | BinOp::Or => unreachable!(),
     }
 }
@@ -270,6 +282,7 @@ pub(super) fn collect_type_effects(ty: &TypeExpr) -> BTreeSet<String> {
             }
             effects
         }
+        TypeExpr::Labeled { inner, .. } => collect_type_effects(inner),
         TypeExpr::Named { .. } | TypeExpr::Var { .. } => BTreeSet::new(),
     }
 }

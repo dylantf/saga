@@ -1,0 +1,251 @@
+import Std.Test (describe, test, assert_eq, assert_true, assert_false, assert_just, assert_nothing)
+import Std.String as Str
+
+describe "String" {
+
+  describe "length" {
+    test "empty string" {
+      "" |> Str.length |> assert_eq 0
+    }
+
+    test "ascii string" {
+      "hello" |> Str.length |> assert_eq 5
+    }
+  }
+
+  describe "is_empty" {
+    test "empty string" {
+      "" |> Str.is_empty |> assert_true
+    }
+
+    test "non-empty string" {
+      "hi" |> Str.is_empty |> assert_false
+    }
+  }
+
+  describe "trim" {
+    test "removes whitespace" {
+      "  hello  " |> Str.trim |> assert_eq "hello"
+    }
+  }
+
+  describe "to_lower and to_upper" {
+    test "to_lower" {
+      "Hello World" |> Str.to_lower |> assert_eq "hello world"
+    }
+
+    test "to_upper" {
+      "Hello World" |> Str.to_upper |> assert_eq "HELLO WORLD"
+    }
+  }
+
+  describe "reverse" {
+    test "reverses a string" {
+      "hello" |> Str.reverse |> assert_eq "olleh"
+    }
+  }
+
+  describe "contains" {
+    test "true when present" {
+      "hello world" |> Str.contains "world" |> assert_true
+    }
+
+    test "false when absent" {
+      "hello world" |> Str.contains "xyz" |> assert_false
+    }
+  }
+
+  describe "starts_with" {
+    test "true" {
+      "hello world" |> Str.starts_with "hello" |> assert_true
+    }
+
+    test "false" {
+      "hello world" |> Str.starts_with "world" |> assert_false
+    }
+  }
+
+  describe "ends_with" {
+    test "true" {
+      "hello world" |> Str.ends_with "world" |> assert_true
+    }
+
+    test "false" {
+      "hello world" |> Str.ends_with "hello" |> assert_false
+    }
+  }
+
+  describe "split" {
+    test "splits by separator" {
+      "a,b,c" |> Str.split "," |> assert_eq ["a", "b", "c"]
+    }
+
+    test "no separator found" {
+      "hello" |> Str.split "," |> assert_eq ["hello"]
+    }
+  }
+
+  describe "replace" {
+    test "replaces first occurrence" {
+      "aaa" |> Str.replace "a" "b" |> assert_eq "baa"
+    }
+  }
+
+  describe "replace_all" {
+    test "replaces all occurrences" {
+      "aaa" |> Str.replace_all "a" "b" |> assert_eq "bbb"
+    }
+
+    test "no match is a no-op" {
+      "hello" |> Str.replace_all "x" "y" |> assert_eq "hello"
+    }
+  }
+
+  describe "join" {
+    test "joins with separator" {
+      Str.join ", " ["a", "b", "c"] |> assert_eq "a, b, c"
+    }
+
+    test "single element" {
+      Str.join ", " ["a"] |> assert_eq "a"
+    }
+
+    test "empty list" {
+      Str.join ", " [] |> assert_eq ""
+    }
+  }
+
+  describe "slice" {
+    test "extracts substring" {
+      "hello world" |> Str.slice 6 5 |> assert_eq "world"
+    }
+
+    test "from start" {
+      "hello world" |> Str.slice 0 5 |> assert_eq "hello"
+    }
+  }
+
+  describe "find" {
+    test "finds substring" {
+      "hello world" |> Str.find "world" |> assert_just
+    }
+
+    test "returns Nothing when absent" {
+      "hello" |> Str.find "xyz" |> assert_nothing
+    }
+  }
+
+  describe "strip_prefix" {
+    test "strips matching prefix" {
+      "hello world" |> Str.strip_prefix "hello " |> assert_eq (Just "world")
+    }
+
+    test "no match returns Nothing" {
+      "hello" |> Str.strip_prefix "xyz" |> assert_nothing
+    }
+  }
+
+  describe "repeat" {
+    test "repeats string" {
+      "ab" |> Str.repeat 3 |> assert_eq "ababab"
+    }
+
+    test "zero times" {
+      "ab" |> Str.repeat 0 |> assert_eq ""
+    }
+  }
+
+  describe "pad_left" {
+    test "pads to width" {
+      "42" |> Str.pad_left 5 "0" |> assert_eq "00042"
+    }
+
+    test "no padding needed" {
+      "hello" |> Str.pad_left 3 " " |> assert_eq "hello"
+    }
+  }
+
+  describe "pad_right" {
+    test "pads to width" {
+      "hi" |> Str.pad_right 5 "." |> assert_eq "hi..."
+    }
+
+    test "no padding needed" {
+      "hello" |> Str.pad_right 3 " " |> assert_eq "hello"
+    }
+  }
+
+  describe "graphemes" {
+    test "splits into characters" {
+      "abc" |> Str.graphemes |> assert_eq ["a", "b", "c"]
+    }
+  }
+
+  describe "is_alpha" {
+    test "all letters" {
+      "hello" |> Str.is_alpha |> assert_true
+    }
+
+    test "contains digits" {
+      "hello1" |> Str.is_alpha |> assert_false
+    }
+
+    test "empty string" {
+      "" |> Str.is_alpha |> assert_false
+    }
+  }
+
+  describe "is_digit" {
+    test "all digits" {
+      "12345" |> Str.is_digit |> assert_true
+    }
+
+    test "contains letters" {
+      "123a" |> Str.is_digit |> assert_false
+    }
+
+    test "empty string" {
+      "" |> Str.is_digit |> assert_false
+    }
+  }
+
+  describe "is_alphanumeric" {
+    test "letters and digits" {
+      "abc123" |> Str.is_alphanumeric |> assert_true
+    }
+
+    test "contains punctuation" {
+      "abc!" |> Str.is_alphanumeric |> assert_false
+    }
+  }
+
+  describe "is_upper" {
+    test "all uppercase" {
+      "HELLO" |> Str.is_upper |> assert_true
+    }
+
+    test "mixed case" {
+      "Hello" |> Str.is_upper |> assert_false
+    }
+  }
+
+  describe "is_lower" {
+    test "all lowercase" {
+      "hello" |> Str.is_lower |> assert_true
+    }
+
+    test "mixed case" {
+      "Hello" |> Str.is_lower |> assert_false
+    }
+  }
+
+  describe "is_whitespace" {
+    test "spaces and tabs" {
+      "  \t " |> Str.is_whitespace |> assert_true
+    }
+
+    test "contains non-whitespace" {
+      " a " |> Str.is_whitespace |> assert_false
+    }
+  }
+}

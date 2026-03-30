@@ -818,11 +818,14 @@ print <| show <| add 1 2
     it requires. The handler can be attached at any level - the direct
     caller, or further up.
 
-12. **`panic`, `todo`, and process control** - `panic "msg"` and `todo "msg"`
-    are language builtins, not effects. They print to stderr and halt with
-    exit code 1 -- no handler, no propagation, no `!`. Return type is
-    `Never` so they work in any position. `panic` is for unreachable code /
-    logic errors. `todo` is for unfinished code.
+12. **`panic`, `todo`, and process control** - `panic "msg"` and `todo ()`
+    are language builtins, not effects. They crash the program by default --
+    no handler, no propagation, no `!`. Return type is `Never` so they work
+    in any position. `panic` is for unreachable code / logic errors. `todo`
+    is for unfinished code.
+
+    Unhandled panics print to stderr and exit with code 1. Panics can be
+    caught at recovery boundaries with `catch_panic` (see item 13).
 
     For explicit exit codes, `Std.Process` provides `exit : Int -> Never`
     (immediate halt) and `shutdown : Int -> Never` (graceful VM shutdown).
@@ -833,9 +836,58 @@ print <| show <| add 1 2
     Process.exit 0        # success
     Process.exit 1        # failure
     panic "unreachable"   # prints "panic: unreachable" to stderr, exits 1
+    todo ()               # prints "todo: not implemented" to stderr, exits 1
     ```
 
-13. **Negative literals as arguments** - require parentheses, same as Elm/Haskell.
+13. **Panic recovery** - `catch_panic` is an opt-in recovery boundary, similar
+    to Rust's `std::panic::catch_unwind`. It runs a function and returns
+    `Ok(value)` if it completes normally, or `Err(message)` if it panicked.
+
+    ```
+    import Std.Process (catch_panic)
+
+    # Basic recovery
+    case catch_panic (fun () -> might_blow_up ()) {
+      Ok(result) -> use_result result
+      Err(msg) -> log! $"recovered from panic: {msg}"
+    }
+    ```
+
+    `catch_panic` is not for error handling -- use the `Fail` effect for
+    recoverable errors. It exists for two cases: protecting a boundary
+    (server loop, request handler) from crashing the whole process, and
+    testing that code panics when it should.
+
+    Effects work inside the thunk. Handler parameters from the surrounding
+    scope are captured by the lambda, so effectful code runs normally:
+
+    ```
+    fun safe_process : Request -> Response needs {Log, Database}
+    safe_process req = {
+      case catch_panic (fun () -> handle_request req) {
+        Ok(resp) -> resp
+        Err(msg) -> {
+          log! $"request panicked: {msg}"
+          error_response 500
+        }
+      }
+    }
+    ```
+
+    The return value is `Result a String` -- you get the panic message as a
+    string, nothing more. You can't match on structured error types or build
+    control flow around panic messages. For structured errors, use `Fail`.
+
+    ```
+    # In tests
+    import Std.Test (assert_panics)
+
+    test "head of empty list panics" {
+      assert_panics (fun () -> List.head [])
+    }
+    ```
+
+14. **Negative literals as arguments** - require parentheses, same as Elm/Haskell.
     `-` is always binary minus in application position; wrap negatives in parens.
 
 ```

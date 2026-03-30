@@ -412,6 +412,9 @@ impl<'a> Lowerer<'a> {
                 Self::collect_anon_records_from_type_expr(from, record_fields);
                 Self::collect_anon_records_from_type_expr(to, record_fields);
             }
+            ast::TypeExpr::Labeled { inner, .. } => {
+                Self::collect_anon_records_from_type_expr(inner, record_fields);
+            }
             ast::TypeExpr::Named { .. } | ast::TypeExpr::Var { .. } => {}
         }
     }

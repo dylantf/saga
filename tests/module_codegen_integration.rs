@@ -687,11 +687,12 @@ main () = case Just(42) {
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // Just(v) compiles to bare value, Nothing compiles to 'undefined' (BEAM convention)
-    assert_contains(&out, "'undefined'");
-    // Just(42) should compile to just 42 (bare value, no tag tuple)
-    assert!(!out.contains("'std_maybe_Just'"), "Just should not produce a tagged tuple");
-    assert!(!out.contains("'std_maybe_Nothing'"), "Nothing should use 'undefined' not a tagged tuple");
+    // Just(v) compiles to {'just', v}, Nothing compiles to {'nothing'} (tagged tuples)
+    assert_contains(&out, "'just'");
+    assert_contains(&out, "'nothing'");
+    // Should use BEAM override atoms, not module-prefixed versions
+    assert!(!out.contains("'std_maybe_Just'"), "Just should use 'just' not module-prefixed atom");
+    assert!(!out.contains("'std_maybe_Nothing'"), "Nothing should use 'nothing' not module-prefixed atom");
 }
 
 #[test]
