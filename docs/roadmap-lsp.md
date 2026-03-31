@@ -49,7 +49,7 @@ lock-free hover/goto/completion.
 
 ## Phase 4: Editing support
 
-- [ ] Code actions -- add missing import
+- [x] Code actions -- add missing import
 - [ ] Code actions -- add `needs` clause
 - [ ] Code actions -- add missing pattern arm
 - [x] Code actions -- add missing handler methods

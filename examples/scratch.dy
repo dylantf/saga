@@ -1,6 +1,5 @@
-import Std.Time
+import Std.String (reverse)
 
 main () = {
-  let foo = monotonic_ms
-  println (show foo)
+  Std.String.reverse "hello"
 }

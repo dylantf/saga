@@ -737,13 +737,19 @@ impl LanguageServer for Backend {
             li.line_col_to_offset(position.line as usize, position.character as usize, source);
         let prefix = completion::extract_prefix(source, offset);
 
-        // Dot-completion: record field access, supports chaining (e.g. `a.b.c.`).
+        // Dot-completion: record field access or module-qualified names.
         // Type resolution uses the snapshot's source (where spans are valid).
-        if let Some(chain) = completion::extract_dot_chain(source, offset)
-            && let Some(items) =
+        if let Some(chain) = completion::extract_dot_chain(source, offset) {
+            if let Some(items) =
                 completion::collect_field_completions(&snap.tc_result, &chain, prefix, &snap.source)
-        {
-            return Ok(Some(CompletionResponse::Array(items)));
+            {
+                return Ok(Some(CompletionResponse::Array(items)));
+            }
+            if let Some(items) =
+                completion::collect_module_completions(&snap.tc_result, &chain, prefix)
+            {
+                return Ok(Some(CompletionResponse::Array(items)));
+            }
         }
 
         // Record construction completion: `House { a|` or `House { address: { n|`

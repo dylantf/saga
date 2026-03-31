@@ -354,6 +354,108 @@ pub fn collect_record_construction_completions(
     Some(items)
 }
 
+/// Collect completion items for module-qualified access (e.g. `List.` or `Std.`).
+/// `chain` is the dot-chain before the cursor (e.g. `["List"]` or `["Std"]`).
+///
+/// Completes the *next* path segment only:
+/// - `List.` → `map`, `reverse`, ... (leaf names)
+/// - `Std.` → `List`, `Dict`, `Time`, ... (sub-modules)
+/// - `Std.List.` → `map`, `reverse`, ... (leaf names via canonical path)
+pub fn collect_module_completions(
+    result: &CheckResult,
+    chain: &[String],
+    prefix: &str,
+) -> Option<Vec<CompletionItem>> {
+    if chain.is_empty() {
+        return None;
+    }
+    // Build the dot-prefixes to match against. Try both the full chain
+    // ("Std.List.") and the short form ("List.") since the env uses short prefixes.
+    let full_prefix = chain.join(".");
+    let dot_full = format!("{}.", full_prefix);
+    let mut dot_prefixes = vec![dot_full.clone()];
+    if chain.len() > 1 {
+        let short = format!("{}.", chain[chain.len() - 1]);
+        dot_prefixes.push(short);
+    }
+
+    let prefix_lower = prefix.to_lowercase();
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+
+    // Scan env for qualified names matching our prefix, extracting only the next segment.
+    for (name, scheme) in result.env.iter() {
+        let remainder = dot_prefixes
+            .iter()
+            .find_map(|p| name.strip_prefix(p.as_str()));
+        let Some(remainder) = remainder else {
+            continue;
+        };
+        // Take only the first segment (before any further dots)
+        let next_segment = remainder.split('.').next().unwrap_or(remainder);
+        if next_segment.is_empty() {
+            continue;
+        }
+        if !prefix.is_empty() && !next_segment.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+        if !seen.insert(next_segment.to_string()) {
+            continue;
+        }
+        // If remainder has more dots, this is a sub-module; otherwise it's a leaf name
+        let is_leaf = !remainder.contains('.');
+        if is_leaf {
+            let detail = scheme.display_with_constraints(&result.sub);
+            items.push(CompletionItem {
+                label: next_segment.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(detail),
+                ..Default::default()
+            });
+        } else {
+            items.push(CompletionItem {
+                label: next_segment.to_string(),
+                kind: Some(CompletionItemKind::MODULE),
+                detail: Some("module".to_string()),
+                ..Default::default()
+            });
+        }
+    }
+
+    // Also scan constructors
+    for (name, scheme) in &result.constructors {
+        let remainder = dot_prefixes
+            .iter()
+            .find_map(|p| name.strip_prefix(p.as_str()));
+        let Some(remainder) = remainder else {
+            continue;
+        };
+        let next_segment = remainder.split('.').next().unwrap_or(remainder);
+        if next_segment.is_empty() || remainder.contains('.') {
+            continue; // constructors are always leaf names
+        }
+        if !prefix.is_empty() && !next_segment.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+        if !seen.insert(next_segment.to_string()) {
+            continue;
+        }
+        let detail = scheme.display_with_constraints(&result.sub);
+        items.push(CompletionItem {
+            label: next_segment.to_string(),
+            kind: Some(CompletionItemKind::CONSTRUCTOR),
+            detail: Some(detail),
+            ..Default::default()
+        });
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    Some(items)
+}
+
 /// Collect completion items from the checker's environment.
 pub fn collect_completions(
     result: &CheckResult,
@@ -383,6 +485,9 @@ pub fn collect_completions(
 
     // Type constructors
     for (name, scheme) in &result.constructors {
+        if name.contains('.') {
+            continue; // skip qualified constructors (e.g. Std.Maybe.Just)
+        }
         if !prefix.is_empty() && !name.to_lowercase().starts_with(&prefix_lower) {
             continue;
         }
@@ -397,6 +502,32 @@ pub fn collect_completions(
             detail: Some(detail),
             ..Default::default()
         });
+    }
+
+    // Module namespace prefixes (e.g. "List", "Dict", "Std") from qualified env names
+    {
+        let mut module_prefixes = HashSet::new();
+        for (name, _) in result.env.iter() {
+            if let Some(dot) = name.find('.') {
+                module_prefixes.insert(&name[..dot]);
+            }
+        }
+        for (name, _) in &result.constructors {
+            if let Some(dot) = name.find('.') {
+                module_prefixes.insert(&name[..dot]);
+            }
+        }
+        for module_prefix in module_prefixes {
+            if !prefix.is_empty() && !module_prefix.to_lowercase().starts_with(&prefix_lower) {
+                continue;
+            }
+            items.push(CompletionItem {
+                label: module_prefix.to_string(),
+                kind: Some(CompletionItemKind::MODULE),
+                detail: Some("module".to_string()),
+                ..Default::default()
+            });
+        }
     }
 
     // Effect names

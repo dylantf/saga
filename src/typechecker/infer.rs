@@ -370,6 +370,7 @@ impl Checker {
                             self.trait_state.pending_constraints
                                 .push((trait_name, extra_types, trait_ty, span, node_id));
                         }
+                        self.record_type(node_id, &ty);
                         if let Some(def_id) = self.env.def_id(&key) {
                             self.record_reference(node_id, span, def_id);
                         }
