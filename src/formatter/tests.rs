@@ -551,6 +551,11 @@ fn normalize_pat(p: &mut Pat) {
             normalize_pat(head);
             normalize_pat(tail);
         }
+        Pat::Or { id, patterns, span } => {
+            *id = NID;
+            *span = S;
+            for p in patterns { normalize_pat(p); }
+        }
     }
 }
 

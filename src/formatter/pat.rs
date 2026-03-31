@@ -64,6 +64,10 @@ pub fn format_pat(pat: &Pat) -> Doc {
         Pat::ConsPat { head, tail, .. } => {
             docs![format_pat(head), Doc::text(" :: "), format_pat(tail)]
         }
+        Pat::Or { patterns, .. } => {
+            let pat_docs: Vec<Doc> = patterns.iter().map(format_pat).collect();
+            Doc::join(Doc::text(" | "), pat_docs)
+        }
     }
 }
 

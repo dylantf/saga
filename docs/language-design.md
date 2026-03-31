@@ -95,12 +95,12 @@ eval expr = case expr {
   Mul(a, b) -> eval a * eval b
 }
 
-# Guards use `|` in both case arms and function definitions
+# Guards use `when` in both case arms and function definitions
 # Any pure function (no effects) can be used in guards
 pub fun clamp : Int -> Int
 clamp n = case n {
-  n | n < 0 -> 0
-  n | n > 100 -> 100
+  n when n < 0 -> 0
+  n when n > 100 -> 100
   n -> n
 }
 
@@ -109,13 +109,13 @@ is_valid s = String.length s > 0 && String.length s < 100
 
 pub fun describe : String -> String
 describe s = case s {
-  s | is_valid s -> "valid: " <> s
+  s when is_valid s -> "valid: " <> s
   _ -> "invalid"
 }
 
-# Guards on function definitions use `|`
+# Guards on function definitions use `when`
 pub fun abs : Int -> Int
-abs n | n < 0 = -n
+abs n when n < 0 = -n
 abs n = n
 ```
 
@@ -411,7 +411,7 @@ module Foo.Bar.SomeModule
 
 # pub fun = public, fun = private annotation, bare = private inferred
 pub fun abs : Int -> Int
-abs n | n < 0 = -n
+abs n when n < 0 = -n
 abs n = n
 
 pub fun max : Int -> Int -> Int

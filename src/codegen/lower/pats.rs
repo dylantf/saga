@@ -119,7 +119,7 @@ pub(super) fn lower_pat(
             segs.push(CBinSeg::BinaryAll(tail));
             CPat::Binary(segs)
         }
-        Pat::ListPat { .. } | Pat::ConsPat { .. } => {
+        Pat::ListPat { .. } | Pat::ConsPat { .. } | Pat::Or { .. } => {
             unreachable!("surface syntax should be desugared before codegen")
         }
     }

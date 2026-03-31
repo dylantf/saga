@@ -4,12 +4,12 @@ type Animal =
   deriving (Show, Eq)
 
 speak animal = case animal {
-  Dog age | age > 15 -> "im tired"
+  Dog age when age > 15 -> "im tired"
   Dog _ -> "woof"
   Cat -> "meow"
 }
 
-comp a1 a2 | a1 == a2 = "✅ Equal!"
+comp a1 a2 when a1 == a2 = "✅ Equal!"
 comp _ _ = "🚫 Not equal!"
 
 # Deriving Ord: constructors are compared by declaration order,

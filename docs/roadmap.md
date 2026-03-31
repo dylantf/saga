@@ -66,7 +66,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `needs` on impl blocks (parsing + type checking)
 - [x] `deriving` syntax to auto-generate trait impls from ADT structure (e.g. `type Color = Red | Green deriving (Show)`)
 - [x] `deriving (Eq, Ord)` for ADTs (constructor declaration order defines ordering, then fields lexicographically)
-- [ ] Trait type parameters (`trait ConvertTo b { ... }`, `impl ConvertTo NOK for USD { ... }`, `where {a: ConvertTo b}`) - enables multi-param trait patterns without full multi-param traits or fundeps
+- [x] Trait type parameters (`trait ConvertTo b { ... }`, `impl ConvertTo NOK for USD { ... }`, `where {a: ConvertTo b}`) - enables multi-param trait patterns without full multi-param traits or fundeps
 
 ## Type System
 
@@ -277,11 +277,10 @@ Checkbox = implemented and working. Unchecked = not yet done.
   - [x] `only` (run a single test, ignore others)
   - [x] `assert_panics` (test that a panic is raised, via `catch_panic` builtin)
   - [ ] Test timing (suite duration)
-- [ ] Formatter
+- [x] Formatter
   - [x] Wadler-Lindig Doc algebra with proper `Nest`/`Group` indentation
   - [x] Token-level trivia attachment (comments/blank lines on tokens, promoted to AST)
   - [x] Trailing trivia splitting (blank line = paragraph break heuristic)
-  - [ ] Audit program-level `split_inter_decl_trivia` - may be redundant now that expression parsers steal their own trailing trivia via `steal_trailing_trivia`
   - [~] (Split into two lines, its ugly) Semicolon-separated single-line blocks (e.g. `{ println msg; resume () }`)
   - [x] Configurable line width
 - [ ] Docstrings/generated docs
@@ -293,6 +292,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [ ] Remove `emit` usage in integration tests. It skips typechecking and therefore elaboration cannot be performed. It should be replaced with emit_elaborated usage instead.
 - [ ] Union-find for substitution: replace `HashMap<u32, Type>` with union-find + path compression. Drop-in replacement inside `Substitution`, no interface changes. Current recursive follow-through is O(path length) per application; union-find makes it nearly O(1) amortized. Not urgent but avoids scaling issues as programs grow.
 - [ ] Builtin resolution via ResolutionMap: builtins (panic, todo, print, catch_panic, etc.) are currently matched by string name in the lowerer, with separate checks for qualified and unqualified calls. The resolution map should tag these so the lowerer can check a single `Builtin { name, .. }` variant instead of string matching in multiple places.
+- [ ] Parser/Formatter: program-level `split_inter_decl_trivia` - may be redundant now that expression parsers steal their own trailing trivia via `steal_trailing_trivia`
 
 ## Out of Scope (?)
 

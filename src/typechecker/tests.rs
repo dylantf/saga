@@ -186,7 +186,7 @@ fn case_binds_pattern_vars() {
 
 #[test]
 fn case_with_guard() {
-    let ty = infer_expr_type("case 5 {\n  x | x > 0 -> \"positive\"\n  _ -> \"non-positive\"\n}")
+    let ty = infer_expr_type("case 5 {\n  x when x > 0 -> \"positive\"\n  _ -> \"non-positive\"\n}")
         .unwrap();
     assert_eq!(ty, Type::string());
 }
@@ -224,7 +224,7 @@ fn recursive_function() {
 
 #[test]
 fn multi_clause_with_guards() {
-    let checker = check("abs n | n < 0 = 0 - n\nabs n = n").unwrap();
+    let checker = check("abs n when n < 0 = 0 - n\nabs n = n").unwrap();
     let scheme = checker.env.get("abs").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
     assert_eq!(ty, Type::arrow(Type::int(), Type::int()));
@@ -1801,7 +1801,7 @@ fn exhaustive_case_guard_with_wildcard_fallback() {
     check(
         "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
-  Just(n) | n > 0 -> n
+  Just(n) when n > 0 -> n
   _ -> 0
 }",
     )
@@ -1814,7 +1814,7 @@ fn non_exhaustive_case_only_guarded_arm() {
     let result = check(
         "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
-  Just(n) | n > 0 -> n
+  Just(n) when n > 0 -> n
   Nothing -> 0
 }",
     );
@@ -1949,7 +1949,7 @@ fn guarded_arm_not_redundant() {
     check(
         "type Maybe a = Just(a) | Nothing
 let x = case Just 42 {
-  Just(n) | n > 0 -> n
+  Just(n) when n > 0 -> n
   Just(n) -> 0
   Nothing -> 0
 }",
@@ -2276,7 +2276,7 @@ fn effect_call_in_case_guard_rejected() {
 
 fun filter : (x: Int) -> Int needs {Check}
 filter x = case x {
-  n | check! n -> n
+  n when check! n -> n
   _ -> 0
 }",
     );
@@ -2297,7 +2297,7 @@ fn effect_call_in_multi_clause_guard_rejected() {
 }
 
 fun filter : (x: Int) -> Int needs {Check}
-filter x | check! x = x
+filter x when check! x = x
 filter _ = 0",
     );
     assert!(result.is_err());
@@ -2315,7 +2315,7 @@ fn pure_guard_still_works() {
     assert!(
         check(
             "clamp x = case x {
-  n | n < 0 -> 0
+  n when n < 0 -> 0
   n -> n
 }"
         )

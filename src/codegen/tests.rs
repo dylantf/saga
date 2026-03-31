@@ -289,7 +289,7 @@ fn simple_guard_emitted_directly() {
     // Comparison guards are safe and go directly into the Core Erlang arm guard.
     let src = "
 clamp x = case x {
-  n | n < 0 -> 0
+  n when n < 0 -> 0
   n -> n
 }
 ";
@@ -307,7 +307,7 @@ fn complex_guard_desugared_to_body() {
     let src = "
 is_pos x = x > 0
 filter_pos n = case n {
-  x | is_pos x -> x
+  x when is_pos x -> x
   _ -> 0
 }
 ";

@@ -95,10 +95,7 @@ pub fn collect_code_actions(
                 };
 
                 actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: format!(
-                        "Add all missing arms to '{}'",
-                        name
-                    ),
+                    title: format!("Add all missing arms to '{}'", name),
                     kind: Some(CodeActionKind::QUICKFIX),
                     edit: Some(WorkspaceEdit {
                         changes: Some([(uri.clone(), vec![edit])].into_iter().collect()),

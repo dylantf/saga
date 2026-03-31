@@ -925,11 +925,11 @@ impl Parser {
         let name = self.expect_ident()?;
 
         let mut params = Vec::new();
-        while !matches!(self.peek(), Token::Eq | Token::Bar | Token::Eof) {
+        while !matches!(self.peek(), Token::Eq | Token::When | Token::Eof) {
             params.push(self.parse_pattern()?);
         }
 
-        let guard = if matches!(self.peek(), Token::Bar) {
+        let guard = if matches!(self.peek(), Token::When) {
             self.advance();
             Some(Box::new(self.parse_expr(0)?))
         } else {

@@ -70,7 +70,7 @@ pub(crate) fn simplify_pat(pat: &Pat) -> SPat {
             // Treat as wildcard so exhaustiveness requires a catch-all arm
             SPat::Wildcard
         }
-        Pat::ListPat { .. } | Pat::ConsPat { .. } => {
+        Pat::ListPat { .. } | Pat::ConsPat { .. } | Pat::Or { .. } => {
             unreachable!("surface syntax should be desugared before exhaustiveness checking")
         }
     }

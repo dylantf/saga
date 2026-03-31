@@ -130,6 +130,7 @@ fn desugar_expr(expr: &mut Expr) {
         }
         ExprKind::Case { scrutinee, arms, .. } => {
             desugar_expr(scrutinee);
+            expand_or_patterns(arms);
             for ann_arm in arms {
                 desugar_pat(&mut ann_arm.node.pattern);
                 if let Some(g) = &mut ann_arm.node.guard {
@@ -180,6 +181,7 @@ fn desugar_expr(expr: &mut Expr) {
                 desugar_expr(e);
             }
             desugar_expr(success);
+            expand_or_patterns(else_arms);
             for ann_arm in else_arms {
                 desugar_pat(&mut ann_arm.node.pattern);
                 if let Some(g) = &mut ann_arm.node.guard {
@@ -189,6 +191,7 @@ fn desugar_expr(expr: &mut Expr) {
             }
         }
         ExprKind::Receive { arms, after_clause, .. } => {
+            expand_or_patterns(arms);
             for ann_arm in arms {
                 desugar_pat(&mut ann_arm.node.pattern);
                 if let Some(g) = &mut ann_arm.node.guard {
@@ -410,6 +413,27 @@ fn desugar_stmt(stmt: &mut Stmt) {
     }
 }
 
+/// Expand or-patterns in a list of case arms.
+/// `A | B when g -> body` becomes `A when g -> body`, `B when g -> body`.
+fn expand_or_patterns(arms: &mut Vec<Annotated<CaseArm>>) {
+    let mut i = 0;
+    while i < arms.len() {
+        if let Pat::Or { patterns, .. } = &arms[i].node.pattern {
+            let count = patterns.len();
+            let patterns = patterns.clone();
+            let original = arms.remove(i);
+            for (j, pat) in patterns.into_iter().enumerate() {
+                let mut arm = original.clone();
+                arm.node.pattern = pat;
+                arms.insert(i + j, arm);
+            }
+            i += count;
+        } else {
+            i += 1;
+        }
+    }
+}
+
 fn desugar_pat(pat: &mut Pat) {
     // Recurse first (bottom-up)
     match pat {
@@ -437,6 +461,9 @@ fn desugar_pat(pat: &mut Pat) {
         Pat::ConsPat { head, tail, .. } => {
             desugar_pat(head);
             desugar_pat(tail);
+        }
+        Pat::Or { patterns, .. } => {
+            for p in patterns { desugar_pat(p); }
         }
     }
 

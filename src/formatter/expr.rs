@@ -515,12 +515,12 @@ pub fn format_expr(expr: &Expr) -> Doc {
     }
 }
 
-/// Format a case arm: `pattern [| guard] -> body`.
+/// Format a case arm: `pattern [when guard] -> body`.
 /// Block-like bodies stay on the arrow line; other bodies break after `->` when too wide.
 fn format_case_arm_doc(arm: &CaseArm) -> Doc {
     let mut lhs = format_pat(&arm.pattern);
     if let Some(g) = &arm.guard {
-        lhs = lhs.append(Doc::text(" | ")).append(format_expr(g));
+        lhs = lhs.append(Doc::text(" when ")).append(format_expr(g));
     }
     let body_doc = format_expr(&arm.body);
     if is_block_like(&arm.body) {
@@ -673,7 +673,7 @@ pub fn format_stmt(stmt: &Stmt) -> Doc {
                 lhs = lhs.append(Doc::text(" ")).append(format_pat(p));
             }
             if let Some(g) = guard {
-                lhs = lhs.append(Doc::text(" | ")).append(format_expr(g));
+                lhs = lhs.append(Doc::text(" when ")).append(format_expr(g));
             }
             super::decl::format_binding(lhs, body)
         }

@@ -56,7 +56,7 @@ pub fn format_fun_binding(
         lhs = lhs.append(Doc::text(" ")).append(format_pat_atom(p));
     }
     if let Some(g) = guard {
-        lhs = lhs.append(Doc::text(" | ")).append(format_expr(g));
+        lhs = lhs.append(Doc::text(" when ")).append(format_expr(g));
     }
     format_binding(lhs, body)
 }

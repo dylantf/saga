@@ -1084,7 +1084,7 @@ fn fun_binding_simple() {
 
 #[test]
 fn fun_binding_with_guard() {
-    let decls = parse("abs n | n < 0 = -n");
+    let decls = parse("abs n when n < 0 = -n");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::FunBinding { name, guard, .. } => {
@@ -1145,7 +1145,7 @@ fn case_simple() {
 
 #[test]
 fn case_with_guard() {
-    let expr = parse_expr("case x {\n  n | n > 0 -> n\n  _ -> 0\n}");
+    let expr = parse_expr("case x {\n  n when n > 0 -> n\n  _ -> 0\n}");
     match expr {
         Expr {
             kind: ExprKind::Case { arms, .. },
@@ -1275,7 +1275,7 @@ fn annotation_and_binding() {
 
 #[test]
 fn multiple_bindings_pattern_match() {
-    let decls = parse("abs n | n < 0 = -n\nabs n = n");
+    let decls = parse("abs n when n < 0 = -n\nabs n = n");
     assert_eq!(decls.len(), 2);
     match &decls[0] {
         Decl::FunBinding { guard, .. } => assert!(guard.is_some()),
@@ -3025,7 +3025,7 @@ fn receive_with_after() {
 
 #[test]
 fn receive_with_guard() {
-    let expr = parse_expr("receive {\n  Msg(x) | x > 0 -> x\n  _ -> 0\n}");
+    let expr = parse_expr("receive {\n  Msg(x) when x > 0 -> x\n  _ -> 0\n}");
     match expr {
         Expr {
             kind: ExprKind::Receive { arms, .. },

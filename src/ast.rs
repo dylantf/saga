@@ -757,6 +757,13 @@ pub enum Pat {
         tail: Box<Pat>,
         span: Span,
     },
+
+    /// `A | B | C` -- or-pattern (desugars to duplicate arms)
+    Or {
+        id: NodeId,
+        patterns: Vec<Pat>,
+        span: Span,
+    },
 }
 
 impl Pat {
@@ -771,7 +778,8 @@ impl Pat {
             | Pat::Tuple { id, .. }
             | Pat::StringPrefix { id, .. }
             | Pat::ListPat { id, .. }
-            | Pat::ConsPat { id, .. } => *id,
+            | Pat::ConsPat { id, .. }
+            | Pat::Or { id, .. } => *id,
         }
     }
 
@@ -786,7 +794,8 @@ impl Pat {
             | Pat::Tuple { span, .. }
             | Pat::StringPrefix { span, .. }
             | Pat::ListPat { span, .. }
-            | Pat::ConsPat { span, .. } => *span,
+            | Pat::ConsPat { span, .. }
+            | Pat::Or { span, .. } => *span,
         }
     }
 }
