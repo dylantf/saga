@@ -371,8 +371,8 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
     let mut compiled_modules = compile_std_modules(&result);
 
     // Elaborate user modules
-    let user_modules: Vec<String> = result
-        .codegen_info()
+    let codegen_info_map = result.codegen_info();
+    let user_modules: Vec<String> = codegen_info_map
         .keys()
         .filter(|name| !name.starts_with("Std."))
         .cloned()
@@ -421,16 +421,18 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
         }
 
         let elaborated = elaborate::elaborate_module(&program, &mod_result, module_name);
+        let normalized = codegen::normalize::normalize_effects(&elaborated);
+        let resolution =
+            codegen::resolve::resolve_names(&normalized, codegen_info_map, &result.prelude_imports);
         compiled_modules.insert(
             module_name.clone(),
             codegen::CompiledModule {
-                codegen_info: result
-                    .codegen_info()
+                codegen_info: codegen_info_map
                     .get(module_name)
                     .cloned()
                     .unwrap_or_default(),
                 elaborated,
-                resolution: codegen::resolve::ResolutionMap::new(),
+                resolution,
             },
         );
     }
