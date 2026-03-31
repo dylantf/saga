@@ -750,11 +750,13 @@ impl Checker {
             // all resolve to the bare type name "Maybe" and pass arity checks
             let canonical = format!("{}.{}", module_name, name);
             self.type_arity.entry(canonical.clone()).or_insert(*arity);
-            self.type_aliases.insert(canonical, name.clone());
+            self.type_aliases.insert(canonical.clone(), name.clone());
+            self.scope_map.types.entry(canonical).or_insert_with(|| name.clone());
             if prefix != module_name {
                 let aliased = format!("{}.{}", prefix, name);
                 self.type_arity.entry(aliased.clone()).or_insert(*arity);
-                self.type_aliases.insert(aliased, name.clone());
+                self.type_aliases.insert(aliased.clone(), name.clone());
+                self.scope_map.types.entry(aliased).or_insert_with(|| name.clone());
             }
         }
 
@@ -832,8 +834,10 @@ impl Checker {
             }
             // Doc comments: register under canonical form
             if let Some(doc) = doc_comments.get(name) {
-                self.lsp.imported_docs.entry(canonical).or_insert_with(|| doc.clone());
+                self.lsp.imported_docs.entry(canonical.clone()).or_insert_with(|| doc.clone());
             }
+            // ScopeMap: canonical -> canonical
+            self.scope_map.values.entry(canonical.clone()).or_insert_with(|| canonical.clone());
             // Alias: if prefix differs from module_name, also register short form (e.g. "String.replace")
             if prefix != module_name {
                 let aliased = format!("{}.{}", prefix, name);
@@ -843,8 +847,10 @@ impl Checker {
                     self.env.insert(aliased.clone(), scheme.clone());
                 }
                 if let Some(doc) = doc_comments.get(name) {
-                    self.lsp.imported_docs.entry(aliased).or_insert_with(|| doc.clone());
+                    self.lsp.imported_docs.entry(aliased.clone()).or_insert_with(|| doc.clone());
                 }
+                // ScopeMap: aliased -> canonical
+                self.scope_map.values.entry(aliased).or_insert_with(|| canonical.clone());
             }
         }
 
@@ -855,11 +861,15 @@ impl Checker {
                 // Canonical: full module path (e.g. "Std.File.NotFound")
                 let canonical = format!("{}.{}", module_name, ctor);
                 if let Some(&scheme) = binding_map.get(ctor.as_str()) {
-                    self.constructors.insert(canonical, scheme.clone());
+                    self.constructors.insert(canonical.clone(), scheme.clone());
+                    // ScopeMap: canonical -> canonical
+                    self.scope_map.constructors.entry(canonical.clone()).or_insert_with(|| canonical.clone());
                     // Alias: short prefix (e.g. "File.NotFound")
                     if prefix != module_name {
                         let aliased = format!("{}.{}", prefix, ctor);
-                        self.constructors.insert(aliased, scheme.clone());
+                        self.constructors.insert(aliased.clone(), scheme.clone());
+                        // ScopeMap: aliased -> canonical
+                        self.scope_map.constructors.entry(aliased).or_insert_with(|| canonical.clone());
                     }
                     variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
                 }
@@ -890,7 +900,12 @@ impl Checker {
                         } else {
                             self.env.insert(name.clone(), scheme.clone());
                         }
+                        // ScopeMap: bare type value -> canonical
+                        let type_canonical = format!("{}.{}", module_name, name);
+                        self.scope_map.values.entry(name.clone()).or_insert(type_canonical);
                     }
+                    // ScopeMap: bare type name resolves to itself (types use bare canonical names)
+                    self.scope_map.types.entry(name.clone()).or_insert_with(|| name.clone());
                     // If it's a record type, register its fields
                     if let Some(fields) = record_defs.get(name.as_str()) {
                         self.records.insert(name.clone(), fields.clone());
@@ -912,6 +927,10 @@ impl Checker {
                                     self.env.insert(ctor.clone(), scheme.clone());
                                 }
                                 self.constructors.insert(ctor.clone(), scheme.clone());
+                                // ScopeMap: bare constructor -> canonical
+                                let ctor_canonical = format!("{}.{}", module_name, ctor);
+                                self.scope_map.constructors.entry(ctor.clone()).or_insert_with(|| ctor_canonical.clone());
+                                self.scope_map.values.entry(ctor.clone()).or_insert(ctor_canonical);
                                 variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
                                 found = true;
                             }
@@ -933,6 +952,10 @@ impl Checker {
                             self.env.insert(name.clone(), scheme.clone());
                         }
                         self.constructors.insert(name.clone(), scheme.clone());
+                        // ScopeMap: bare constructor -> canonical
+                        let ctor_canonical = format!("{}.{}", module_name, name);
+                        self.scope_map.constructors.entry(name.clone()).or_insert_with(|| ctor_canonical.clone());
+                        self.scope_map.values.entry(name.clone()).or_insert(ctor_canonical);
                         found = true;
                     }
                     // Register doc comments under the exposed (bare) name
@@ -965,6 +988,8 @@ impl Checker {
                             if let Some(doc) = doc_comments.get(name.as_str()) {
                                 self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
                             }
+                            // ScopeMap: bare value -> canonical
+                            self.scope_map.values.entry(name.clone()).or_insert(canonical);
                         }
                         None => {
                             return Err(Diagnostic::error_at(

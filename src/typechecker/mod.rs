@@ -743,6 +743,8 @@ pub struct Checker {
     /// Qualified type name -> canonical type name (for resolving M.Maybe -> Maybe etc).
     /// Populated during import processing. Bare names map to themselves.
     pub(crate) type_aliases: HashMap<String, String>,
+    /// Name resolution map: user-visible names -> canonical names.
+    pub(crate) scope_map: ScopeMap,
     /// Evidence collected during constraint solving for the elaboration pass.
     pub(crate) evidence: Vec<TraitEvidence>,
     /// Dict params for let bindings with trait constraints: name -> (params, value_arity).
@@ -760,6 +762,39 @@ pub struct Checker {
     pub(crate) current_module: Option<String>,
     /// Import declarations from the prelude (passed through to lowerer).
     pub prelude_imports: Vec<crate::ast::Decl>,
+}
+
+/// Maps user-visible name forms to canonical (module-qualified) names.
+///
+/// When `import Std.List as List exposing (map)` is processed, the ScopeMap gets:
+///   values["Std.List.map"] = "Std.List.map"   (canonical)
+///   values["List.map"]     = "Std.List.map"   (aliased)
+///   values["map"]          = "Std.List.map"   (bare, because exposed)
+///
+/// This allows each binding to be stored once in the env under its canonical name,
+/// with the ScopeMap handling all user-facing name form resolution.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ScopeMap {
+    /// User-visible name -> canonical name for value bindings (functions, let bindings).
+    pub values: HashMap<String, String>,
+    /// User-visible name -> canonical (bare) name for type names.
+    pub types: HashMap<String, String>,
+    /// User-visible name -> canonical name for constructors.
+    pub constructors: HashMap<String, String>,
+}
+
+impl ScopeMap {
+    pub fn resolve_value(&self, name: &str) -> Option<&str> {
+        self.values.get(name).map(|s| s.as_str())
+    }
+
+    pub fn resolve_type(&self, name: &str) -> Option<&str> {
+        self.types.get(name).map(|s| s.as_str())
+    }
+
+    pub fn resolve_constructor(&self, name: &str) -> Option<&str> {
+        self.constructors.get(name).map(|s| s.as_str())
+    }
 }
 
 /// Trait system state: definitions, impl registry, deferred constraints, where bounds.
@@ -904,6 +939,7 @@ impl Checker {
             adt_variants: HashMap::new(),
             type_arity: HashMap::new(),
             type_aliases: HashMap::new(),
+            scope_map: ScopeMap::default(),
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
             collected_diagnostics: Vec::new(),

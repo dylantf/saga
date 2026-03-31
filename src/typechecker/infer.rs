@@ -22,10 +22,15 @@ impl Checker {
             }),
 
             ExprKind::Var { name, .. } => {
-                if let Some(scheme) = self.env.get(name) {
+                let resolved_name = self.scope_map.resolve_value(name)
+                    .map(|s| s.to_string()).unwrap_or_else(|| name.clone());
+                // Try bare name first (locals), then resolved name (imports)
+                let env_lookup = self.env.get(name).or_else(|| self.env.get(&resolved_name));
+                if let Some(scheme) = env_lookup {
                     let scheme = scheme.clone();
                     // Propagate effect type params from callee's annotations.
-                    if let Some(constraints) = self.effect_meta.fun_type_constraints.get(name).cloned() {
+                    let effect_key = if self.effect_meta.fun_type_constraints.contains_key(name) { name.clone() } else { resolved_name.clone() };
+                    if let Some(constraints) = self.effect_meta.fun_type_constraints.get(&effect_key).cloned() {
                         for (effect_name, concrete_types) in &constraints {
                             if let Some(info) = self.effects.get(effect_name).cloned() {
                                 let mapping: std::collections::HashMap<u32, Type> = info
@@ -45,7 +50,7 @@ impl Checker {
                             .push((trait_name, extra_types, trait_ty, span, node_id));
                     }
                     if let Some(eff_constraints) =
-                        self.effect_meta.fun_type_constraints.get(name).cloned()
+                        self.effect_meta.fun_type_constraints.get(&effect_key).cloned()
                         && let Type::Fun(a, b, _) = ty
                     {
                         let eff_refs: Vec<(String, Vec<Type>)> =
@@ -53,7 +58,8 @@ impl Checker {
                         ty = Type::Fun(a, b, super::EffectRow::closed(eff_refs));
                     }
                     self.record_type(node_id, &ty);
-                    if let Some(def_id) = self.env.def_id(name) {
+                    let def_id = self.env.def_id(name).or_else(|| self.env.def_id(&resolved_name));
+                    if let Some(def_id) = def_id {
                         self.record_reference(node_id, span, def_id);
                     }
                     Ok(ty)
@@ -66,11 +72,17 @@ impl Checker {
             }
 
             ExprKind::Constructor { name, .. } => {
-                if let Some(scheme) = self.constructors.get(name) {
+                let resolved_ctor = self.scope_map.resolve_constructor(name)
+                    .map(|s| s.to_string()).unwrap_or_else(|| name.clone());
+                let ctor_lookup = self.constructors.get(name).or_else(|| self.constructors.get(&resolved_ctor));
+                if let Some(scheme) = ctor_lookup {
                     let scheme = scheme.clone();
                     let (ty, _) = self.instantiate(&scheme);
                     self.record_type(node_id, &ty);
-                    if let Some(def_id) = self.lsp.constructor_def_ids.get(name).copied() {
+                    let def_id = self.lsp.constructor_def_ids.get(name)
+                        .or_else(|| self.lsp.constructor_def_ids.get(&resolved_ctor))
+                        .copied();
+                    if let Some(def_id) = def_id {
                         self.record_reference(node_id, span, def_id);
                     }
                     Ok(ty)
@@ -363,7 +375,8 @@ impl Checker {
                         }
                     }
                 }
-                match self.env.get(&key).cloned() {
+                let resolved_key = self.scope_map.resolve_value(&key).map(|s| s.to_string()).unwrap_or_else(|| key.clone());
+                match self.env.get(&key).or_else(|| self.env.get(&resolved_key)).cloned() {
                     Some(scheme) => {
                         let (ty, constraints) = self.instantiate(&scheme);
                         for (trait_name, trait_ty, extra_types) in constraints {
@@ -371,7 +384,8 @@ impl Checker {
                                 .push((trait_name, extra_types, trait_ty, span, node_id));
                         }
                         self.record_type(node_id, &ty);
-                        if let Some(def_id) = self.env.def_id(&key) {
+                        let def_id = self.env.def_id(&key).or_else(|| self.env.def_id(&resolved_key));
+                        if let Some(def_id) = def_id {
                             self.record_reference(node_id, span, def_id);
                         }
                         Ok(ty)

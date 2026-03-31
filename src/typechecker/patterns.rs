@@ -40,12 +40,12 @@ impl Checker {
             Pat::Constructor {
                 id, name, args, span, ..
             } => {
-                // Look up constructor by name; if the name is qualified (e.g.
-                // "Std.File.NotFound"), try progressively shorter suffixes since
-                // constructors may be registered as "File.NotFound" or "NotFound"
-                // depending on how the module was imported.
+                // Look up constructor by name. Try scope_map resolution first,
+                // then fall back to suffix-stripping for backwards compatibility.
+                let resolved_ctor = self.scope_map.resolve_constructor(name).map(|s| s.to_string());
                 let ctor_scheme = {
-                    let mut result = self.constructors.get(name);
+                    let mut result = self.constructors.get(name)
+                        .or_else(|| resolved_ctor.as_ref().and_then(|r| self.constructors.get(r.as_str())));
                     let mut suffix = name.as_str();
                     while result.is_none() {
                         if let Some(pos) = suffix.find('.') {
@@ -64,16 +64,22 @@ impl Checker {
                 };
                 // Record reference to constructor definition for find-references/rename
                 {
-                    let mut lookup = name.as_str();
-                    loop {
-                        if let Some(def_id) = self.lsp.constructor_def_ids.get(lookup).copied() {
-                            self.record_reference(*id, *span, def_id);
-                            break;
-                        }
-                        if let Some(pos) = lookup.find('.') {
-                            lookup = &lookup[pos + 1..];
-                        } else {
-                            break;
+                    let def_id = resolved_ctor.as_ref().and_then(|r| self.lsp.constructor_def_ids.get(r.as_str()).copied())
+                        .or_else(|| self.lsp.constructor_def_ids.get(name).copied());
+                    if let Some(def_id) = def_id {
+                        self.record_reference(*id, *span, def_id);
+                    } else {
+                        let mut lookup = name.as_str();
+                        loop {
+                            if let Some(did) = self.lsp.constructor_def_ids.get(lookup).copied() {
+                                self.record_reference(*id, *span, did);
+                                break;
+                            }
+                            if let Some(pos) = lookup.find('.') {
+                                lookup = &lookup[pos + 1..];
+                            } else {
+                                break;
+                            }
                         }
                     }
                 }
