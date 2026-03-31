@@ -62,7 +62,10 @@ impl<'a> Lowerer<'a> {
                 }
                 Some(guard) => {
                     // Complex guard: desugar into the arm body.
-                    // Remaining arms become the fallthrough.
+                    // Remaining arms become the fallthrough when the pattern
+                    // matches but the guard evaluates to false. We still keep
+                    // the remaining arms in the outer case so pattern
+                    // mismatches continue trying later arms normally.
                     let remaining = &arms[i + 1..];
                     let fallthrough = if remaining.is_empty() {
                         CExpr::Call(
@@ -99,8 +102,6 @@ impl<'a> Lowerer<'a> {
                         guard: None,
                         body: complex_body,
                     });
-                    // Remaining arms are consumed into the fallthrough above.
-                    break;
                 }
             }
         }
