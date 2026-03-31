@@ -63,7 +63,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
         ExprKind::Lit { value } => super::helpers::format_lit(value),
         ExprKind::Var { name } => Doc::text(name),
         ExprKind::Constructor { name } => Doc::text(name),
-        ExprKind::QualifiedName { module, name } => Doc::text(format!("{}.{}", module, name)),
+        ExprKind::QualifiedName { module, name, .. } => Doc::text(format!("{}.{}", module, name)),
 
         ExprKind::App { .. } => {
             // Flatten nested App chain: App(App(App(f, a), b), c) -> [f, a, b, c]

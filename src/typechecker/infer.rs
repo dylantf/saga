@@ -350,11 +350,14 @@ impl Checker {
                 Ok(Type::Con("Tuple".into(), tys))
             }
 
-            ExprKind::QualifiedName { module, name, .. } => {
+            ExprKind::QualifiedName { module, name, canonical_module } => {
                 if name.is_empty() {
                     return Ok(self.fresh_var());
                 }
-                let key = format!("{}.{}", module, name);
+                // Use canonical_module from resolve pass if available,
+                // otherwise fall back to user-written module (for auto-imports)
+                let effective_module = canonical_module.as_deref().unwrap_or(module);
+                let key = format!("{}.{}", effective_module, name);
                 // If not in env, try auto-importing the stdlib module on demand.
                 // This allows Std.X.y to work without an explicit import.
                 if self.env.get(&key).is_none() {

@@ -435,6 +435,7 @@ impl Parser {
                             kind: ExprKind::QualifiedName {
                                 module,
                                 name: String::new(),
+                                canonical_module: None,
                             },
                         };
                         continue;
@@ -467,7 +468,7 @@ impl Parser {
                 expr = Expr {
                     id: self.next_id(),
                     span: qspan,
-                    kind: ExprKind::QualifiedName { module, name },
+                    kind: ExprKind::QualifiedName { module, name, canonical_module: None },
                 };
                 continue;
             }
@@ -489,6 +490,7 @@ impl Parser {
                             kind: ExprKind::QualifiedName {
                                 module: extended_module,
                                 name: String::new(),
+                                canonical_module: None,
                             },
                         };
                         continue;
@@ -517,7 +519,7 @@ impl Parser {
                 expr = Expr {
                     id: self.next_id(),
                     span: qspan,
-                    kind: ExprKind::QualifiedName { module: extended_module, name },
+                    kind: ExprKind::QualifiedName { module: extended_module, name, canonical_module: None },
                 };
                 continue;
             }

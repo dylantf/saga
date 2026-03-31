@@ -1069,7 +1069,7 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::QualifiedName { module, name } => {
+            ExprKind::QualifiedName { module, name, .. } => {
                 let qualified = format!("{}.{}", module, name);
                 // Dict-parameterized function used as a bare value (not directly applied).
                 if let Some(dict_param_info) = self.fun_dict_params.get(&qualified).cloned() {

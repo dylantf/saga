@@ -83,10 +83,16 @@ fn resolve_decl(decl: &mut Decl, scope: &ScopeMap) {
 
 fn resolve_expr(expr: &mut Expr, scope: &ScopeMap) {
     match &mut expr.kind {
-        // QualifiedName: not rewritten — the codegen resolver handles these with
-        // its own module_aliases and qualified_scope. The typechecker's scope_map
-        // resolves them at lookup time in infer.rs.
-        ExprKind::QualifiedName { .. } => {}
+        // Resolve the canonical module path for qualified names.
+        // `module` is preserved for codegen; `canonical_module` is used by the typechecker.
+        ExprKind::QualifiedName { module, name, canonical_module } => {
+            let key = format!("{}.{}", module, name);
+            if let Some(canonical) = scope.resolve_value(&key)
+                && let Some(dot_pos) = canonical.rfind('.')
+            {
+                *canonical_module = Some(canonical[..dot_pos].to_string());
+            }
+        }
 
         ExprKind::Constructor { name } => {
             if let Some(canonical) = scope.resolve_constructor(name) {
