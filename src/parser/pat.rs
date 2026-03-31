@@ -82,11 +82,12 @@ impl Parser {
                         id: NodeId::fresh(),
                         name,
                         fields: vec![],
+                        rest: true,
                         as_name: Some(as_ident),
                         span: span.to(end),
                     });
                 }
-                Pat::Record { id, name, fields, span, .. } => {
+                Pat::Record { id, name, fields, rest, span, .. } => {
                     self.advance(); // consume 'as'
                     let as_ident = self.expect_ident()?;
                     let end = self.tokens[self.pos - 1].span;
@@ -94,6 +95,7 @@ impl Parser {
                         id,
                         name,
                         fields,
+                        rest,
                         as_name: Some(as_ident),
                         span: span.to(end),
                     });
@@ -174,10 +176,20 @@ impl Parser {
                         span: span.to(end),
                     })
                 } else if matches!(self.peek(), Token::LBrace) {
-                    // Record pattern: User { name, age: a }
+                    // Record pattern: User { name, age: a } or User { name, .. }
                     self.advance(); // consume '{'
                     let mut fields = Vec::new();
+                    let mut rest = false;
                     while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                        if matches!(self.peek(), Token::DotDot) {
+                            self.advance();
+                            rest = true;
+                            // consume optional trailing comma
+                            if matches!(self.peek(), Token::Comma) {
+                                self.advance();
+                            }
+                            break;
+                        }
                         let field_name = self.expect_ident()?;
                         let alias = if matches!(self.peek(), Token::Colon) {
                             self.advance();
@@ -189,13 +201,14 @@ impl Parser {
                         if matches!(self.peek(), Token::Comma) {
                             self.advance();
                         }
-                        }
+                    }
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBrace)?;
                     Ok(Pat::Record {
                         id: NodeId::fresh(),
                         name,
                         fields,
+                        rest,
                         as_name: None,
                         span: span.to(end),
                     })
@@ -220,9 +233,18 @@ impl Parser {
                 }
             }
             Token::LBrace => {
-                // Anonymous record pattern: { field, field: pat, ... }
+                // Anonymous record pattern: { field, field: pat, .. }
                 let mut fields = Vec::new();
+                let mut rest = false;
                 while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                    if matches!(self.peek(), Token::DotDot) {
+                        self.advance();
+                        rest = true;
+                        if matches!(self.peek(), Token::Comma) {
+                            self.advance();
+                        }
+                        break;
+                    }
                     let field_name = self.expect_ident()?;
                     let alias = if matches!(self.peek(), Token::Colon) {
                         self.advance();
@@ -240,6 +262,7 @@ impl Parser {
                 Ok(Pat::AnonRecord {
                     id: NodeId::fresh(),
                     fields,
+                    rest,
                     span: span.to(end),
                 })
             }

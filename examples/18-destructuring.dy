@@ -33,6 +33,9 @@ main () = {
   let Point { x, y } = origin
   println $"origin: ({x}, {y})"
 
+  let Point { x: just_x, .. } = origin
+  println $"Just x: ({just_x}, [not destructured])"
+
   # Let with single-constructor types (irrefutable)
   let Wrapped inner = Wrapped 42
   println $"inner: {inner}"

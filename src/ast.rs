@@ -712,18 +712,22 @@ pub enum Pat {
 
     /// `Success { status, body }` or `ApiError { code: c }`
     /// Optional `as` binding: `Student { name } as s` or `Student as s`
+    /// `rest` is true when `..` is present: `User { name, .. }`
     Record {
         id: NodeId,
         name: String,
         fields: Vec<(String, Option<Pat>)>, // (field_name, optional alias pattern)
+        rest: bool,
         as_name: Option<String>,
         span: Span,
     },
 
     /// `{ street, city }` (anonymous record destructure)
+    /// `rest` is true when `..` is present: `{ street, .. }`
     AnonRecord {
         id: NodeId,
         fields: Vec<(String, Option<Pat>)>,
+        rest: bool,
         span: Span,
     },
 

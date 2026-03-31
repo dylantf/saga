@@ -2021,6 +2021,123 @@ fn string_case_only_guarded_arms() {
     assert!(err.message.contains("String"));
 }
 
+// --- Record exhaustiveness ---
+
+#[test]
+fn record_pattern_with_literal_field_non_exhaustive() {
+    let result = check(
+        r#"record User { name: String, age: Int }
+let u = User "Dylan" 25
+let x = case u {
+  User { name: "Dylan", .. } -> 1
+}"#,
+    );
+    let err = result.err().expect("expected type error");
+    assert!(
+        err.message.contains("non-exhaustive"),
+        "expected non-exhaustive error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn record_pattern_with_wildcard_field_exhaustive() {
+    check(
+        r#"record User { name: String, age: Int }
+let u = User "Dylan" 25
+let x = case u {
+  User { name: "Dylan", .. } -> 1
+  User { .. } -> 2
+}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn record_pattern_bare_binding_exhaustive() {
+    // User { name, age } lists all fields -- should be exhaustive
+    check(
+        r#"record User { name: String, age: Int }
+let u = User "Dylan" 25
+let x = case u {
+  User { name, age } -> 1
+}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn record_pattern_partial_without_rest_is_error() {
+    let result = check(
+        r#"record User { name: String, age: Int }
+let u = User "Dylan" 25
+let x = case u {
+  User { name } -> 1
+}"#,
+    );
+    let err = result.err().expect("expected type error");
+    assert!(
+        err.message.contains("missing fields"),
+        "expected missing fields error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn record_pattern_partial_with_rest() {
+    // User { name, .. } is allowed -- `..` means ignore remaining fields
+    check(
+        r#"record User { name: String, age: Int }
+let u = User "Dylan" 25
+let x = case u {
+  User { name, .. } -> 1
+}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn record_nested_anon_record_literal_non_exhaustive() {
+    let result = check(
+        r#"record House { address: { street: String, city: String }, bedrooms: Int }
+let h = House { address: { street: "250th", city: "NYC" }, bedrooms: 3 }
+let x = case h {
+  House { address: { street: "250th Street", city }, .. } -> 1
+}"#,
+    );
+    let err = result.err().expect("expected type error");
+    assert!(
+        err.message.contains("non-exhaustive"),
+        "expected non-exhaustive error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn record_nested_anon_record_with_catchall() {
+    check(
+        r#"record House { address: { street: String, city: String }, bedrooms: Int }
+let h = House { address: { street: "250th", city: "NYC" }, bedrooms: 3 }
+let x = case h {
+  House { address: { street: "250th Street", city }, .. } -> 1
+  House { .. } -> 2
+}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn anon_record_partial_with_rest() {
+    check(
+        r#"record House { address: { street: String, city: String }, bedrooms: Int }
+let h = House { address: { street: "250th", city: "NYC" }, bedrooms: 3 }
+let x = case h {
+  House { address: { street, .. }, .. } -> street
+}"#,
+    )
+    .unwrap();
+}
+
 // --- Nested pattern exhaustiveness (Maranget) ---
 
 #[test]
@@ -2145,6 +2262,40 @@ f xs = case xs {
 }",
     )
     .unwrap();
+}
+
+#[test]
+fn list_non_exhaustive_missing_nil() {
+    let result = check(
+        "fun f : (xs: List Int) -> Int
+f xs = case xs {
+  Cons(_, _) -> 1
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(
+        err.message.contains("non-exhaustive"),
+        "expected non-exhaustive error, got: {}",
+        err.message
+    );
+    assert!(err.message.contains("Nil"));
+}
+
+#[test]
+fn list_non_exhaustive_missing_cons() {
+    let result = check(
+        "fun f : (xs: List Int) -> Int
+f xs = case xs {
+  Nil -> 0
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(
+        err.message.contains("non-exhaustive"),
+        "expected non-exhaustive error, got: {}",
+        err.message
+    );
+    assert!(err.message.contains("Cons"));
 }
 
 #[test]

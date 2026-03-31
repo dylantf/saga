@@ -34,7 +34,7 @@ fake_school () = {
   School { name: "Some school", students: students }
 }
 
-enroll_student (Student {} as student) (School {} as school) = {
+enroll_student (Student { .. } as student) (School { .. } as school) = {
   { school | students: student :: school.students }
 }
 
@@ -93,7 +93,7 @@ main () = {
   println house2.address.street
 
   # Pattern matching on anonymous record fields
-  let House { address: { number, street } } = house
+  let House { address: { number, street }, .. } = house
   println (show number)
   println street
   # let incomplete_house = House { year_built: 2005 }

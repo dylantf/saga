@@ -20,31 +20,39 @@ pub fn format_pat(pat: &Pat) -> Doc {
                 docs![Doc::text(format!("{}(", name)), Doc::join(Doc::text(", "), arg_docs), Doc::text(")")]
             }
         }
-        Pat::Record { name, fields, as_name, .. } => {
-            let mut d = if fields.is_empty() {
+        Pat::Record { name, fields, rest, as_name, .. } => {
+            let mut d = if fields.is_empty() && *rest {
+                Doc::text(format!("{} {{ .. }}", name))
+            } else if fields.is_empty() {
                 Doc::text(format!("{} {{}}", name))
             } else {
-                let field_docs: Vec<Doc> = fields.iter().map(|(fname, alias)| {
+                let mut parts: Vec<Doc> = fields.iter().map(|(fname, alias)| {
                     match alias {
                         Some(p) => docs![Doc::text(format!("{}: ", fname)), format_pat(p)],
                         None => Doc::text(fname),
                     }
                 }).collect();
-                docs![Doc::text(format!("{} {{ ", name)), Doc::join(Doc::text(", "), field_docs), Doc::text(" }")]
+                if *rest {
+                    parts.push(Doc::text(".."));
+                }
+                docs![Doc::text(format!("{} {{ ", name)), Doc::join(Doc::text(", "), parts), Doc::text(" }")]
             };
             if let Some(a) = as_name {
                 d = d.append(Doc::text(format!(" as {}", a)));
             }
             d
         }
-        Pat::AnonRecord { fields, .. } => {
-            let field_docs: Vec<Doc> = fields.iter().map(|(fname, alias)| {
+        Pat::AnonRecord { fields, rest, .. } => {
+            let mut parts: Vec<Doc> = fields.iter().map(|(fname, alias)| {
                 match alias {
                     Some(p) => docs![Doc::text(format!("{}: ", fname)), format_pat(p)],
                     None => Doc::text(fname),
                 }
             }).collect();
-            docs![Doc::text("{ "), Doc::join(Doc::text(", "), field_docs), Doc::text(" }")]
+            if *rest {
+                parts.push(Doc::text(".."));
+            }
+            docs![Doc::text("{ "), Doc::join(Doc::text(", "), parts), Doc::text(" }")]
         }
         Pat::Tuple { elements, .. } => {
             let elem_docs: Vec<Doc> = elements.iter().map(format_pat).collect();
@@ -89,8 +97,8 @@ pub fn format_pat_atom(pat: &Pat) -> Doc {
         | Pat::ListPat { .. } => format_pat(pat),
         // Constructor with no args is just a name - no parens needed
         Pat::Constructor { args, .. } if args.is_empty() => format_pat(pat),
-        // Record with no as_name and no fields is just `Name {}` - no parens needed
-        Pat::Record { fields, as_name: None, .. } if fields.is_empty() => format_pat(pat),
+        // Record with no as_name is just `Name {}` or `Name { .. }` - no parens needed
+        Pat::Record { as_name: None, .. } => format_pat(pat),
         _ => docs![Doc::text("("), format_pat(pat), Doc::text(")")],
     }
 }

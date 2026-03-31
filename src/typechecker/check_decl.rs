@@ -1256,6 +1256,7 @@ impl Checker {
         let ctx = ExhaustivenessCtx {
             adt_variants: &self.adt_variants,
         };
+        let sctx = self.simplify_ctx();
 
         // Build pattern matrix: one row per clause, one column per param
         let mut matrix: Vec<Vec<SPat>> = Vec::new();
@@ -1271,7 +1272,11 @@ impl Checker {
                 unreachable!()
             };
 
-            let row: Vec<SPat> = params.iter().map(exh::simplify_pat).collect();
+            let row: Vec<SPat> = params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| exh::simplify_pat(p, resolved_types.get(i), &sctx))
+                .collect();
 
             // Redundancy check
             if guard.is_none() && !exh::useful(&ctx, &matrix, &row) {
@@ -1434,6 +1439,7 @@ impl Checker {
         );
         self.lsp.constructor_def_ids.insert(name.into(), def_id);
 
+        let num_fields = field_types.len();
         self.records.insert(
             name.into(),
             RecordInfo {
@@ -1441,6 +1447,9 @@ impl Checker {
                 fields: field_types,
             },
         );
+        // Register as a single-constructor ADT for exhaustiveness checking
+        self.adt_variants
+            .insert(name.into(), vec![(name.into(), num_fields)]);
         self.type_arity.insert(name.into(), type_params.len());
         Ok(())
     }
