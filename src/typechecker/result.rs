@@ -119,6 +119,11 @@ impl CheckResult {
         self.modules.map.as_ref()
     }
 
+    /// Cached module exports (module name -> exports) for all typechecked modules.
+    pub fn module_exports(&self) -> &std::collections::HashMap<String, super::ModuleExports> {
+        &self.modules.exports
+    }
+
     /// Look up the resolved type at a node ID, applying the substitution.
     /// Remaining free type variables are prettified (a, b, c, ...).
     pub fn type_at_node(&self, node_id: &crate::ast::NodeId) -> Option<String> {

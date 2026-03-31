@@ -22,9 +22,9 @@ pub struct ModuleExports {
     /// (trait_name, trait_type_args, target_type) -> impl info.
     pub trait_impls: HashMap<(String, Vec<String>, String), ImplInfo>,
     /// Effect name -> effect def info.
-    pub(crate) effects: HashMap<String, EffectDefInfo>,
+    pub effects: HashMap<String, EffectDefInfo>,
     /// Handler name -> handler info.
-    pub(crate) handlers: HashMap<String, HandlerInfo>,
+    pub handlers: HashMap<String, HandlerInfo>,
     /// Type name -> declared parameter count (for arity checking across modules).
     pub type_arity: HashMap<String, usize>,
     /// Names of effectful functions (for cross-module is_known_local checks).
@@ -360,36 +360,37 @@ fn extract_module_name(path: &Path) -> Result<Option<String>, String> {
 }
 
 /// Returns the embedded source for a builtin stdlib module, if it exists.
+/// All builtin stdlib modules: (module name, source).
+pub const BUILTIN_MODULES: &[(&str, &str)] = &[
+    ("Std.Base", include_str!("../stdlib/Base.dy")),
+    ("Std.Maybe", include_str!("../stdlib/Maybe.dy")),
+    ("Std.Result", include_str!("../stdlib/Result.dy")),
+    ("Std.List", include_str!("../stdlib/List.dy")),
+    ("Std.Bool", include_str!("../stdlib/Bool.dy")),
+    ("Std.Dict", include_str!("../stdlib/Dict.dy")),
+    ("Std.Int", include_str!("../stdlib/Int.dy")),
+    ("Std.Float", include_str!("../stdlib/Float.dy")),
+    ("Std.String", include_str!("../stdlib/String.dy")),
+    ("Std.Regex", include_str!("../stdlib/Regex.dy")),
+    ("Std.Tuple", include_str!("../stdlib/Tuple.dy")),
+    ("Std.Actor", include_str!("../stdlib/Actor.dy")),
+    ("Std.Fail", include_str!("../stdlib/Fail.dy")),
+    ("Std.Supervisor", include_str!("../stdlib/Supervisor.dy")),
+    ("Std.Async", include_str!("../stdlib/Async.dy")),
+    ("Std.IO", include_str!("../stdlib/IO.dy")),
+    ("Std.Math", include_str!("../stdlib/Math.dy")),
+    ("Std.Test", include_str!("../stdlib/Test.dy")),
+    ("Std.Process", include_str!("../stdlib/Process.dy")),
+    ("Std.File", include_str!("../stdlib/File.dy")),
+    ("Std.Set", include_str!("../stdlib/Set.dy")),
+    ("Std.Time", include_str!("../stdlib/Time.dy")),
+];
+
 pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
-    if module_path.len() == 2 && module_path[0] == "Std" {
-        match module_path[1].as_str() {
-            "Base" => Some(include_str!("../stdlib/Base.dy")),
-            "Maybe" => Some(include_str!("../stdlib/Maybe.dy")),
-            "Result" => Some(include_str!("../stdlib/Result.dy")),
-            "List" => Some(include_str!("../stdlib/List.dy")),
-            "Bool" => Some(include_str!("../stdlib/Bool.dy")),
-            "Dict" => Some(include_str!("../stdlib/Dict.dy")),
-            "Int" => Some(include_str!("../stdlib/Int.dy")),
-            "Float" => Some(include_str!("../stdlib/Float.dy")),
-            "String" => Some(include_str!("../stdlib/String.dy")),
-            "Regex" => Some(include_str!("../stdlib/Regex.dy")),
-            "Tuple" => Some(include_str!("../stdlib/Tuple.dy")),
-            "Actor" => Some(include_str!("../stdlib/Actor.dy")),
-            "Fail" => Some(include_str!("../stdlib/Fail.dy")),
-            "Supervisor" => Some(include_str!("../stdlib/Supervisor.dy")),
-            "Async" => Some(include_str!("../stdlib/Async.dy")),
-            "IO" => Some(include_str!("../stdlib/IO.dy")),
-            "Math" => Some(include_str!("../stdlib/Math.dy")),
-            "Test" => Some(include_str!("../stdlib/Test.dy")),
-            "Process" => Some(include_str!("../stdlib/Process.dy")),
-            "File" => Some(include_str!("../stdlib/File.dy")),
-            "Set" => Some(include_str!("../stdlib/Set.dy")),
-            "Time" => Some(include_str!("../stdlib/Time.dy")),
-            _ => None,
-        }
-    } else {
-        None
-    }
+    let name = module_path.join(".");
+    BUILTIN_MODULES.iter()
+        .find(|(mod_name, _)| *mod_name == name)
+        .map(|(_, src)| *src)
 }
 
 impl Checker {

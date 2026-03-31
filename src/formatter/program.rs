@@ -5,15 +5,39 @@ use super::type_expr::*;
 use crate::ast::*;
 use crate::docs;
 
+/// Which section of the file a declaration belongs to.
+#[derive(PartialEq)]
+enum DeclSection {
+    ModuleDecl,
+    Import,
+    Code,
+}
+
+fn decl_section(decl: &Decl) -> DeclSection {
+    match decl {
+        Decl::ModuleDecl { .. } => DeclSection::ModuleDecl,
+        Decl::Import { .. } => DeclSection::Import,
+        _ => DeclSection::Code,
+    }
+}
+
+/// Whether trivia already contains a blank line.
+fn has_blank_line(trivia: &[Trivia]) -> bool {
+    trivia.iter().any(|t| matches!(t, Trivia::BlankLines(_)))
+}
+
 /// Format an entire program (list of annotated declarations).
 pub fn format_program(program: &AnnotatedProgram) -> Doc {
     let decls = sort_imports(&program.declarations);
     let mut result = Doc::Nil;
     let mut first = true;
+    let mut prev_section: Option<DeclSection> = None;
     for ann in &decls {
         if matches!(ann.node, Decl::DictConstructor { .. }) {
             continue;
         }
+
+        let section = decl_section(&ann.node);
 
         if first {
             // First declaration: emit leading trivia without separator
@@ -21,10 +45,19 @@ pub fn format_program(program: &AnnotatedProgram) -> Doc {
         } else {
             // Newline to end previous declaration
             result = result.append(Doc::hardline());
+
+            // Ensure a blank line between sections (module decl -> imports -> code)
+            // even if the source didn't have one.
+            let section_changed = prev_section.as_ref() != Some(&section);
+            if section_changed && !has_blank_line(&ann.leading_trivia) {
+                result = result.append(Doc::hardline());
+            }
+
             // Leading trivia (blank lines, comments) between declarations
             result = result.append(format_trivia(&ann.leading_trivia));
         }
         first = false;
+        prev_section = Some(section);
 
         // The declaration itself
         result = result.append(format_decl(&ann.node));

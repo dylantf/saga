@@ -343,6 +343,26 @@ impl Checker {
                     return Ok(self.fresh_var());
                 }
                 let key = format!("{}.{}", module, name);
+                // If not in env, try auto-importing the stdlib module on demand.
+                // This allows Std.X.y to work without an explicit import.
+                if self.env.get(&key).is_none() {
+                    let parts: Vec<String> = module.split('.').map(String::from).collect();
+                    if crate::typechecker::check_module::builtin_module_source(&parts).is_some()
+                        && !self.modules.exports.contains_key(module.as_str())
+                    {
+                        // Alias = full module name so only Std.X.y is registered
+                        if self.typecheck_import(&parts, Some(module), None, span).is_ok() {
+                            // Register synthetic import so resolver/codegen can see it
+                            self.prelude_imports.push(crate::ast::Decl::Import {
+                                id: crate::ast::NodeId::fresh(),
+                                module_path: parts,
+                                alias: Some(module.clone()),
+                                exposing: None,
+                                span,
+                            });
+                        }
+                    }
+                }
                 match self.env.get(&key).cloned() {
                     Some(scheme) => {
                         let (ty, constraints) = self.instantiate(&scheme);

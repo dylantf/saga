@@ -1,11 +1,6 @@
-import Std.List (length)
+import Std.Time
 
-# foo size = size + 1
-# main () = println (debug (foo 3))
-
-length_status length = case length {
-  0 -> "empty"
-  _ -> "not empty"
+main () = {
+  let foo = monotonic_ms
+  println (show foo)
 }
-
-main () = length_status (List.length []) |> println
