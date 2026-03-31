@@ -198,6 +198,24 @@ impl<'a> Lowerer<'a> {
         cerl_call("erlang", "error", vec![error_term])
     }
 
+    /// Wrap a CExpr with a source location annotation for BEAM stack traces.
+    /// No-op if source info is unavailable or span is missing.
+    pub(super) fn annotate(&self, expr: CExpr, span: Option<&crate::token::Span>) -> CExpr {
+        if let Some(si) = &self.source_info
+            && let Some(span) = span
+        {
+            let line = si.line_number(span);
+            if line > 0 {
+                return CExpr::Annotated {
+                    expr: Box::new(expr),
+                    line,
+                    file: si.file.clone(),
+                };
+            }
+        }
+        expr
+    }
+
     /// Known BEAM-native handlers: (module, handler_name) pairs.
     /// These handlers' effects are lowered to direct BEAM calls instead of CPS.
     const BEAM_NATIVE_HANDLERS: &'static [(&'static str, &'static str)] =
@@ -297,9 +315,10 @@ impl<'a> Lowerer<'a> {
         head_node_id: crate::ast::NodeId,
         arity: usize,
         call_args: Vec<CExpr>,
+        span: Option<&crate::token::Span>,
     ) -> CExpr {
         use super::resolve::ResolvedName;
-        match self.resolved.get(&head_node_id) {
+        let call = match self.resolved.get(&head_node_id) {
             Some(ResolvedName::ExternalFun {
                 erlang_mod,
                 erlang_func,
@@ -336,7 +355,8 @@ impl<'a> Lowerer<'a> {
                     call_args,
                 )
             }
-        }
+        };
+        self.annotate(call, span)
     }
 
     /// Get a function's param absorbed effects.
@@ -375,7 +395,7 @@ impl<'a> Lowerer<'a> {
 
         // Group FunBindings by name, preserving declaration order, and simultaneously
         // populate top_level_funs. Handler params are added to the arity for effectful funs.
-        let mut clause_groups: Vec<(String, usize, Vec<Clause>)> = Vec::new();
+        let mut clause_groups: Vec<(String, usize, Vec<Clause>, crate::token::Span)> = Vec::new();
         let mut dict_constructors: Vec<(&str, &[String], &[Expr])> = Vec::new();
         let mut val_bindings: Vec<(&str, bool, &Expr)> = Vec::new(); // (name, is_inline, value)
         for decl in program {
@@ -385,6 +405,7 @@ impl<'a> Lowerer<'a> {
                     params,
                     guard,
                     body,
+                    span,
                     ..
                 } => {
                     let PendingAnnotation {
@@ -398,7 +419,7 @@ impl<'a> Lowerer<'a> {
                         });
                     let base_arity = lower_params(params).len() + count_lambda_params(body);
                     let arity = self.expanded_arity(base_arity, &effects);
-                    if let Some(group) = clause_groups.iter_mut().find(|(n, _, _)| n == name) {
+                    if let Some(group) = clause_groups.iter_mut().find(|(n, _, _, _)| n == name) {
                         // Additional clause: just add to existing group
                         group.2.push((params, guard, body));
                     } else {
@@ -411,7 +432,7 @@ impl<'a> Lowerer<'a> {
                                 param_absorbed_effects,
                             },
                         );
-                        clause_groups.push((name.clone(), arity, vec![(params, guard, body)]));
+                        clause_groups.push((name.clone(), arity, vec![(params, guard, body)], *span));
                     }
                 }
                 Decl::DictConstructor {
@@ -487,7 +508,7 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        for (name, arity, clauses) in clause_groups {
+        for (name, arity, clauses, fun_span) in clause_groups {
             self.current_function = name.clone();
             if !is_module || self.pub_names.contains(&name) {
                 exports.push((name.clone(), arity));
@@ -707,6 +728,8 @@ impl<'a> Lowerer<'a> {
             self.current_handler_params = saved_handler_params;
             self.current_effectful_vars = saved_effectful_vars;
 
+            // fun_span is available for future use (e.g. function-level metadata)
+            let _ = fun_span;
             fun_defs.push(CFunDef {
                 name,
                 arity,
@@ -863,7 +886,7 @@ impl<'a> Lowerer<'a> {
                     {
                         return self.lower_ctor(func_name, args);
                     }
-                    return self.lower_qualified_call(module, func_name, head, &args);
+                    return self.lower_qualified_call(module, func_name, head, &args, Some(&expr.span));
                 }
 
                 // Lower print/println/eprint/eprintln to io:format, dbg to stderr+passthrough
@@ -989,7 +1012,7 @@ impl<'a> Lowerer<'a> {
                         }
                         let call_args: Vec<CExpr> =
                             arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-                        let call = self.emit_call(func_name, head_expr.id, arity, call_args);
+                        let call = self.emit_call(func_name, head_expr.id, arity, call_args, Some(&expr.span));
                         return bindings.into_iter().rev().fold(call, |body, (var, val)| {
                             CExpr::Let(var, Box::new(val), Box::new(body))
                         });
@@ -1033,7 +1056,7 @@ impl<'a> Lowerer<'a> {
                                 params.push(rk.clone());
                                 call_args.push(CExpr::Var(rk));
                             }
-                            let call = self.emit_call(func_name, head_expr.id, arity, call_args);
+                            let call = self.emit_call(func_name, head_expr.id, arity, call_args, Some(&expr.span));
                             let lambda = CExpr::Fun(params, Box::new(call));
                             return bindings.into_iter().rev().fold(lambda, |body, (var, val)| {
                                 CExpr::Let(var, Box::new(val), Box::new(body))
@@ -1214,7 +1237,7 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::BinOp {
                 op, left, right, ..
-            } => self.lower_binop(op, left, right),
+            } => self.lower_binop(op, left, right, Some(&expr.span)),
 
             ExprKind::UnaryMinus { expr, .. } => {
                 let v = self.fresh();
@@ -1937,6 +1960,7 @@ impl<'a> Lowerer<'a> {
         func_name: &str,
         head: &Expr,
         args: &[&Expr],
+        call_span: Option<&crate::token::Span>,
     ) -> CExpr {
         let erlang_module = self
             .module_aliases
@@ -2011,6 +2035,7 @@ impl<'a> Lowerer<'a> {
             }) => CExpr::Call(erlang_mod.clone(), name.clone(), call_args),
             _ => CExpr::Call(erlang_module, func_name.to_string(), call_args),
         };
+        let call = self.annotate(call, call_span);
 
         bindings.into_iter().rev().fold(call, |body, (var, val)| {
             CExpr::Let(var, Box::new(val), Box::new(body))

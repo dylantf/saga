@@ -151,7 +151,13 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(super) fn lower_binop(&mut self, op: &BinOp, left: &Expr, right: &Expr) -> CExpr {
+    pub(super) fn lower_binop(
+        &mut self,
+        op: &BinOp,
+        left: &Expr,
+        right: &Expr,
+        span: Option<&crate::token::Span>,
+    ) -> CExpr {
         match op {
             BinOp::And => return self.lower_short_circuit(left, right, true),
             BinOp::Or => return self.lower_short_circuit(left, right, false),
@@ -162,7 +168,7 @@ impl<'a> Lowerer<'a> {
         let right_var = self.fresh();
         let left_ce = self.lower_expr(left);
         let right_ce = self.lower_expr(right);
-        let call = binop_call(op, &left_var, &right_var);
+        let call = self.annotate(binop_call(op, &left_var, &right_var), span);
 
         CExpr::Let(
             left_var.clone(),

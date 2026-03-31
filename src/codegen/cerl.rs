@@ -52,6 +52,14 @@ pub enum CExpr {
     },
     /// `#{seg1,seg2,...}#` -- binary construction
     Binary(Vec<CBinSeg<CExpr>>),
+    /// `( Expr -| [Line, {'file', "filename"}] )` -- source location annotation.
+    /// Tells erlc to associate this expression with the given file and line,
+    /// so stack traces show meaningful source locations.
+    Annotated {
+        expr: Box<CExpr>,
+        line: usize,
+        file: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +172,7 @@ impl CExpr {
                     }
                 }
             }
+            CExpr::Annotated { expr, .. } => expr.collect_handle_refs(out),
         }
     }
 }
@@ -398,6 +407,17 @@ impl Printer {
             }
 
             CExpr::Binary(segs) => self.print_binary_segs_expr(segs),
+
+            CExpr::Annotated { expr, line, file } => {
+                self.push("( ");
+                self.print_expr(expr);
+                self.newline();
+                self.push(&format!(
+                    "  -| [{}, {{'file', \"{}\"}}] )",
+                    line,
+                    escape_str(file)
+                ));
+            }
         }
     }
 
