@@ -337,12 +337,9 @@ impl Checker {
                     self.lsp.type_references.push((*span, name.clone()));
                 }
                 // Resolve qualified type names (e.g. "M.Maybe" -> "Maybe") through
-                // the scope map, falling back to type_aliases.
+                // the scope map.
                 let resolved = if name.contains('.') {
-                    match self.scope_map.resolve_type(name)
-                        .map(|s| s.to_string())
-                        .or_else(|| self.type_aliases.get(name).cloned())
-                    {
+                    match self.scope_map.resolve_type(name).map(|s| s.to_string()) {
                         Some(canonical) => canonical,
                         None => {
                             self.collected_diagnostics.push(Diagnostic {

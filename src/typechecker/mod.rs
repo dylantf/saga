@@ -740,9 +740,6 @@ pub struct Checker {
     /// Type name -> number of declared type parameters (for arity checking).
     /// Absent entries (e.g. Tuple) are unchecked.
     pub(crate) type_arity: HashMap<String, usize>,
-    /// Qualified type name -> canonical type name (for resolving M.Maybe -> Maybe etc).
-    /// Populated during import processing. Bare names map to themselves.
-    pub(crate) type_aliases: HashMap<String, String>,
     /// Name resolution map: user-visible names -> canonical names.
     pub(crate) scope_map: ScopeMap,
     /// Evidence collected during constraint solving for the elaboration pass.
@@ -774,7 +771,7 @@ pub struct Checker {
 /// This allows each binding to be stored once in the env under its canonical name,
 /// with the ScopeMap handling all user-facing name form resolution.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ScopeMap {
+pub struct ScopeMap {
     /// User-visible name -> canonical name for value bindings (functions, let bindings).
     pub values: HashMap<String, String>,
     /// User-visible name -> canonical (bare) name for type names.
@@ -938,7 +935,6 @@ impl Checker {
             modules: ModuleContext::default(),
             adt_variants: HashMap::new(),
             type_arity: HashMap::new(),
-            type_aliases: HashMap::new(),
             scope_map: ScopeMap::default(),
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),

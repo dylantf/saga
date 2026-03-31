@@ -1,5 +1,3 @@
-import Std.String (reverse)
-
 main () = {
-  Std.String.reverse "hello"
+  List.map (fun x -> x * x) [1, 2, 3]
 }

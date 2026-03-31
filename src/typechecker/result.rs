@@ -71,6 +71,8 @@ pub struct CheckResult {
     /// Import declarations from the prelude (so the lowerer knows which
     /// stdlib names are actually in scope for user code).
     pub prelude_imports: Vec<crate::ast::Decl>,
+    /// Name resolution map: user-visible names -> canonical names.
+    pub scope_map: super::ScopeMap,
 }
 
 impl CheckResult {
@@ -296,6 +298,7 @@ impl Checker {
             constructor_def_ids: self.lsp.constructor_def_ids.clone(),
             imported_docs: self.lsp.imported_docs.clone(),
             prelude_imports: self.prelude_imports.clone(),
+            scope_map: self.scope_map.clone(),
         }
     }
 }

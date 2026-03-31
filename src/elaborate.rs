@@ -81,6 +81,16 @@ impl Elaborator {
                 }
             }
         }
+        // Register dict params under all user-facing name forms that resolve
+        // to a canonical name with dict params (so "List.sort" finds the params
+        // registered under "Std.List.sort").
+        for (user_name, canonical) in &result.scope_map.values {
+            if user_name != canonical
+                && let Some(params) = inferred_dict_params.get(canonical).cloned()
+            {
+                inferred_dict_params.entry(user_name.clone()).or_insert(params);
+            }
+        }
 
         // Merge let-binding dict params (from local let bindings with trait constraints)
         let mut let_binding_arities: HashMap<String, usize> = HashMap::new();

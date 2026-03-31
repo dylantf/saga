@@ -422,7 +422,37 @@ pub fn collect_module_completions(
         }
     }
 
-    // Also scan constructors
+    // Also scan scope_map for aliased names (e.g. "List.map" -> "Std.List.map")
+    // so completions work for short-form qualified access.
+    for (user_name, canonical) in &result.scope_map.values {
+        let remainder = dot_prefixes
+            .iter()
+            .find_map(|p| user_name.strip_prefix(p.as_str()));
+        let Some(remainder) = remainder else {
+            continue;
+        };
+        let next_segment = remainder.split('.').next().unwrap_or(remainder);
+        if next_segment.is_empty() || remainder.contains('.') {
+            continue;
+        }
+        if !prefix.is_empty() && !next_segment.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+        if !seen.insert(next_segment.to_string()) {
+            continue;
+        }
+        if let Some(scheme) = result.env.get(canonical) {
+            let detail = scheme.display_with_constraints(&result.sub);
+            items.push(CompletionItem {
+                label: next_segment.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(detail),
+                ..Default::default()
+            });
+        }
+    }
+
+    // Also scan constructors (canonical forms in constructors map)
     for (name, scheme) in &result.constructors {
         let remainder = dot_prefixes
             .iter()
@@ -447,6 +477,35 @@ pub fn collect_module_completions(
             detail: Some(detail),
             ..Default::default()
         });
+    }
+
+    // Scan scope_map for aliased constructors (e.g. "File.NotFound" -> "Std.File.NotFound")
+    for (user_name, canonical) in &result.scope_map.constructors {
+        let remainder = dot_prefixes
+            .iter()
+            .find_map(|p| user_name.strip_prefix(p.as_str()));
+        let Some(remainder) = remainder else {
+            continue;
+        };
+        let next_segment = remainder.split('.').next().unwrap_or(remainder);
+        if next_segment.is_empty() || remainder.contains('.') {
+            continue;
+        }
+        if !prefix.is_empty() && !next_segment.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+        if !seen.insert(next_segment.to_string()) {
+            continue;
+        }
+        if let Some(scheme) = result.constructors.get(canonical) {
+            let detail = scheme.display_with_constraints(&result.sub);
+            items.push(CompletionItem {
+                label: next_segment.to_string(),
+                kind: Some(CompletionItemKind::CONSTRUCTOR),
+                detail: Some(detail),
+                ..Default::default()
+            });
+        }
     }
 
     if items.is_empty() {

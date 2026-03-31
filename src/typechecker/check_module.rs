@@ -738,7 +738,7 @@ impl Checker {
             }
         }
 
-        // Type arities and type aliases (for resolving qualified type names)
+        // Type arities and scope_map entries for qualified type name resolution
         for (name, arity) in type_arity {
             // Bare name (canonical internal form)
             self.type_arity.entry(name.clone()).or_insert(*arity);
@@ -746,34 +746,20 @@ impl Checker {
                 .entry(name.clone())
                 .or_insert_with(|| module_name.to_string());
 
-            // Register qualified forms so M.Maybe, Maybe.Maybe, Std.Maybe.Maybe
-            // all resolve to the bare type name "Maybe" and pass arity checks
+            // ScopeMap resolves qualified forms to bare type name
             let canonical = format!("{}.{}", module_name, name);
-            self.type_arity.entry(canonical.clone()).or_insert(*arity);
-            self.type_aliases.insert(canonical.clone(), name.clone());
             self.scope_map.types.entry(canonical).or_insert_with(|| name.clone());
             if prefix != module_name {
                 let aliased = format!("{}.{}", prefix, name);
-                self.type_arity.entry(aliased.clone()).or_insert(*arity);
-                self.type_aliases.insert(aliased.clone(), name.clone());
                 self.scope_map.types.entry(aliased).or_insert_with(|| name.clone());
             }
         }
 
         // Function effects (for cross-module `with` validation and effect propagation).
-        // Register canonical ("Std.Logger.greet"), alias ("Logger.greet"), and
-        // unqualified ("greet") forms so all call styles are covered.
+        // Only the canonical form is registered; scope_map resolves aliases/bare names.
         for name in effectful_funs {
-            // Canonical: full module path
             let canonical = format!("{}.{}", module_name, name);
             self.effect_meta.known_funs.insert(canonical);
-            // Alias: short prefix (if different)
-            if prefix != module_name {
-                let aliased = format!("{}.{}", prefix, name);
-                self.effect_meta.known_funs.insert(aliased);
-            }
-            // Bare name (for exposed imports)
-            self.effect_meta.known_funs.insert(name.clone());
         }
 
         // Bindings, type constructors, records (qualified + exposing)
@@ -838,14 +824,10 @@ impl Checker {
             }
             // ScopeMap: canonical -> canonical
             self.scope_map.values.entry(canonical.clone()).or_insert_with(|| canonical.clone());
-            // Alias: if prefix differs from module_name, also register short form (e.g. "String.replace")
+            // Alias: if prefix differs from module_name, register scope_map entry
+            // (no longer duplicated in env — scope_map resolves aliased -> canonical)
             if prefix != module_name {
                 let aliased = format!("{}.{}", prefix, name);
-                if let Some(&did) = def_ids.get(name.as_str()) {
-                    self.env.insert_with_def(aliased.clone(), scheme.clone(), did);
-                } else {
-                    self.env.insert(aliased.clone(), scheme.clone());
-                }
                 if let Some(doc) = doc_comments.get(name) {
                     self.lsp.imported_docs.entry(aliased.clone()).or_insert_with(|| doc.clone());
                 }
@@ -864,11 +846,9 @@ impl Checker {
                     self.constructors.insert(canonical.clone(), scheme.clone());
                     // ScopeMap: canonical -> canonical
                     self.scope_map.constructors.entry(canonical.clone()).or_insert_with(|| canonical.clone());
-                    // Alias: short prefix (e.g. "File.NotFound")
+                    // Alias: scope_map only (no longer duplicated in constructors)
                     if prefix != module_name {
                         let aliased = format!("{}.{}", prefix, ctor);
-                        self.constructors.insert(aliased.clone(), scheme.clone());
-                        // ScopeMap: aliased -> canonical
                         self.scope_map.constructors.entry(aliased).or_insert_with(|| canonical.clone());
                     }
                     variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
