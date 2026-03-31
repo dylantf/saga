@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
 
 pub fn parse_and_typecheck(
@@ -166,6 +167,10 @@ fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
             "dylang_runtime.erl",
             include_str!("../stdlib/runtime.erl"),
         ),
+        (
+            "std_time_bridge.erl",
+            include_str!("../stdlib/Time.bridge.erl"),
+        ),
     ]
 }
 
@@ -270,7 +275,7 @@ pub fn run_erlc(build_dir: &Path, build_start: Instant) {
     }
 
     let elapsed = build_start.elapsed();
-    eprintln!("  Built in {:.2}s", elapsed.as_secs_f64());
+    eprintln!("  {} in {:.2}s", color::green("Built"), elapsed.as_secs_f64());
 }
 
 /// Run a compiled module on the BEAM.
@@ -360,7 +365,7 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
     });
 
     // Phase 2: Elaborate all modules
-    eprintln!("  Compiling stdlib...");
+    eprintln!("  {} stdlib...", color::dim("Compiling"));
     let mut compiled_modules = compile_std_modules(&result);
 
     // Elaborate user modules
@@ -372,7 +377,7 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
         .collect();
 
     for module_name in &user_modules {
-        eprintln!("  Compiling {}...", module_name);
+        eprintln!("  {} {}...", color::dim("Compiling"), module_name);
         let mut program = if let Some(cached) = result.programs().get(module_name) {
             cached.clone()
         } else {
@@ -432,7 +437,7 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
 
     // Elaborate Main (if this is a bin project)
     if let Some(main_program) = &main_program {
-        eprintln!("  Compiling Main...");
+        eprintln!("  {} Main...", color::dim("Compiling"));
         let main_elaborated = elaborate::elaborate_module(main_program, &result, "Main");
         compiled_modules.insert(
             "Main".to_string(),
@@ -486,7 +491,7 @@ pub fn build_script(file: &str, profile: &str) -> PathBuf {
         .ok()
         .and_then(|cwd| Path::new(file).strip_prefix(&cwd).ok().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from(file));
-    eprintln!("  Compiling {}...", display_path.display());
+    eprintln!("  {} {}...", color::dim("Compiling"), display_path.display());
     let mut checker = make_checker(None);
     let (program, _) = parse_and_typecheck(&source, file, &mut checker);
     let result = checker.to_result();

@@ -5,6 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use super::build::*;
+use super::color;
 
 pub fn cmd_run(file: Option<&str>, release: bool) {
     if release {
@@ -74,8 +75,16 @@ pub fn cmd_check(file: Option<&str>) {
                 std::process::exit(1);
             });
             let mut checker = make_checker(None);
-            let _ = parse_and_typecheck(&source, f, &mut checker);
-            eprintln!("OK");
+            let (_, result) = parse_and_typecheck(&source, f, &mut checker);
+            let warning_count = result.warnings().len();
+            if warning_count > 0 {
+                eprintln!(
+                    "{}",
+                    color::yellow(&format!("OK with {} warning(s)", warning_count))
+                );
+            } else {
+                eprintln!("{}", color::green("OK"));
+            }
         }
         None => {
             let project_root = super::find_project_root().unwrap_or_else(|| {
@@ -101,8 +110,16 @@ pub fn cmd_check(file: Option<&str>) {
                 eprintln!("Error resolving dependencies: {}", e);
                 std::process::exit(1);
             }
-            let _ = parse_and_typecheck(&source, main_file, &mut checker);
-            eprintln!("OK");
+            let (_, result) = parse_and_typecheck(&source, main_file, &mut checker);
+            let warning_count = result.warnings().len();
+            if warning_count > 0 {
+                eprintln!(
+                    "{}",
+                    color::yellow(&format!("OK with {} warning(s)", warning_count))
+                );
+            } else {
+                eprintln!("{}", color::green("OK"));
+            }
         }
     }
 }
