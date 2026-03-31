@@ -16,6 +16,11 @@ fn emit(src: &str) -> String {
 
 /// Parse, typecheck, elaborate, and emit Core Erlang - mirrors the real compiler pipeline.
 fn emit_full(src: &str) -> String {
+    emit_full_with_source(src, None)
+}
+
+/// Like emit_full but with source file info for location annotations.
+fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> String {
     let tokens = Lexer::new(src).lex().expect("lex error");
     let mut program = Parser::new(tokens).parse_program().expect("parse error");
     derive::expand_derives(&mut program);
@@ -31,7 +36,7 @@ fn emit_full(src: &str) -> String {
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    emit_module_with_context("_script", &elaborated, &ctx)
+    emit_module_with_context("_script", &elaborated, &ctx, source_file)
 }
 
 /// Assert that `emit(src)` contains `needle` as a substring.
@@ -704,5 +709,87 @@ main () = case read_file "/etc/hostname" {
     assert!(
         out.contains("'error'"),
         "Expected error atom for Err pattern in:\n{out}"
+    );
+}
+
+// --- Error terms and source annotations ---
+
+#[test]
+fn panic_emits_structured_error_term() {
+    let out = emit_full(r#"main () = panic "boom""#);
+    assert!(
+        out.contains("'dylang_error'"),
+        "Expected dylang_error atom in:\n{out}"
+    );
+    assert!(
+        out.contains("'panic'"),
+        "Expected panic kind atom in:\n{out}"
+    );
+}
+
+#[test]
+fn todo_emits_structured_error_term() {
+    let out = emit_full("main () = todo ()");
+    assert!(
+        out.contains("'dylang_error'"),
+        "Expected dylang_error atom in:\n{out}"
+    );
+    assert!(
+        out.contains("'todo'"),
+        "Expected todo kind atom in:\n{out}"
+    );
+}
+
+#[test]
+fn let_assert_emits_structured_error_term() {
+    let out = emit_full(
+        "main () = {\n  let assert 1 = 2\n  1\n}",
+    );
+    assert!(
+        out.contains("'dylang_error'"),
+        "Expected dylang_error atom in:\n{out}"
+    );
+    assert!(
+        out.contains("'assert_fail'"),
+        "Expected assert_fail kind atom in:\n{out}"
+    );
+}
+
+#[test]
+fn source_annotations_emitted_with_source_info() {
+    let src = "fun add : Int -> Int -> Int\nadd x y = x + y\n\nmain () = add 1 2";
+    let sf = super::SourceFile {
+        path: "test.dy".to_string(),
+        source: src.to_string(),
+    };
+    let out = emit_full_with_source(src, Some(&sf));
+    // The add call on line 4 should have an annotation
+    assert!(
+        out.contains("-| [4, {'file', \"test.dy\"}]"),
+        "Expected line annotation for add call in:\n{out}"
+    );
+}
+
+#[test]
+fn binop_annotation_on_inner_call() {
+    let src = "main () = 1 + 2";
+    let sf = super::SourceFile {
+        path: "test.dy".to_string(),
+        source: src.to_string(),
+    };
+    let out = emit_full_with_source(src, Some(&sf));
+    // The + operation should produce an annotated erlang:'+' call
+    assert!(
+        out.contains("-| [1, {'file', \"test.dy\"}]"),
+        "Expected line annotation on binop call in:\n{out}"
+    );
+}
+
+#[test]
+fn no_annotations_without_source_info() {
+    let out = emit_full("main () = 1 + 2");
+    assert!(
+        !out.contains("-|"),
+        "Expected no annotations without source info in:\n{out}"
     );
 }

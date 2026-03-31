@@ -47,13 +47,22 @@ impl CodegenContext {
 
 pub fn emit_module(module_name: &str, program: &ast::Program) -> String {
     let ctx = CodegenContext::default();
-    emit_module_with_context(module_name, program, &ctx)
+    emit_module_with_context(module_name, program, &ctx, None)
+}
+
+/// Source file path and source text for error location tracking.
+pub struct SourceFile {
+    /// Relative path to the source file (e.g. "src/server.dy").
+    pub path: String,
+    /// Full source text (used to compute line numbers).
+    pub source: String,
 }
 
 pub fn emit_module_with_context(
     module_name: &str,
     program: &ast::Program,
     ctx: &CodegenContext,
+    source_file: Option<&SourceFile>,
 ) -> String {
     let codegen_info = ctx.codegen_info();
     let program = normalize::normalize_effects(program);
@@ -69,7 +78,9 @@ pub fn emit_module_with_context(
     for compiled in ctx.modules.values() {
         resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
     }
-    let cmod = lower::Lowerer::new(ctx, constructor_atoms, resolution_map)
+    let source_info =
+        source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source));
+    let cmod = lower::Lowerer::new(ctx, constructor_atoms, resolution_map, source_info)
         .lower_module(module_name, &program);
     cerl::print_module(&cmod)
 }

@@ -45,13 +45,6 @@ pub(super) fn lower_string_to_binary(s: &str) -> CExpr {
     CExpr::Binary(s.as_bytes().iter().map(|&b| CBinSeg::Byte(b)).collect())
 }
 
-/// Build a binary that prepends a literal prefix to a variable expression.
-pub(super) fn binary_prepend(prefix: &str, var: CExpr) -> CExpr {
-    let mut segs: Vec<CBinSeg<CExpr>> = prefix.as_bytes().iter().map(|&b| CBinSeg::Byte(b)).collect();
-    segs.push(CBinSeg::BinaryAll(var));
-    CExpr::Binary(segs)
-}
-
 /// Process escape sequences in a raw string (multiline strings store raw source).
 pub(super) fn process_string_escapes(s: &str) -> String {
     let mut out = String::new();

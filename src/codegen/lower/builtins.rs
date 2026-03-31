@@ -126,10 +126,16 @@ impl Lowerer<'_> {
         let catch_body = CExpr::Case(
             Box::new(CExpr::Var(reason_var.clone())),
             vec![
+                // Match {dylang_error, _Kind, Msg, _Module, _Fun, _File, _Line}
                 CArm {
                     pat: CPat::Tuple(vec![
-                        CPat::Lit(CLit::Atom("dylang_panic".into())),
+                        CPat::Lit(CLit::Atom("dylang_error".into())),
+                        CPat::Wildcard,          // kind
                         CPat::Var(msg_var.clone()),
+                        CPat::Wildcard,          // module
+                        CPat::Wildcard,          // function
+                        CPat::Wildcard,          // file
+                        CPat::Wildcard,          // line
                     ]),
                     guard: None,
                     body: CExpr::Tuple(vec![

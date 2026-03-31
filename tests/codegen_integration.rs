@@ -103,7 +103,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    codegen::emit_module_with_context("_script", &elaborated, &ctx)
+    codegen::emit_module_with_context("_script", &elaborated, &ctx, None)
 }
 
 /// Emit Core Erlang and compile it with erlc, asserting no compilation errors.

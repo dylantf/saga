@@ -4,11 +4,46 @@
 %% Format a BEAM runtime crash into a user-friendly error message.
 %% Called from the exec_erl catch-all clause.
 format_crash(Class, Reason, StackTrace) ->
-    ReasonStr = format_reason(Class, Reason),
+    case Reason of
+        {dylang_error, Kind, Msg, Module, Function, File, Line} ->
+            format_dylang_error(Kind, Msg, Module, Function, File, Line, StackTrace);
+        _ ->
+            ReasonStr = format_reason(Class, Reason),
+            TraceStr = format_stacktrace(StackTrace),
+            case TraceStr of
+                "" -> io:format(standard_error, "Runtime error: ~ts~n", [ReasonStr]);
+                _  -> io:format(standard_error, "Runtime error: ~ts~n~ts", [ReasonStr, TraceStr])
+            end
+    end.
+
+%% Format a structured dylang error with source location.
+format_dylang_error(Kind, Msg, Module, Function, File, Line, StackTrace) ->
+    KindStr = case Kind of
+        panic -> <<"panic">>;
+        todo -> <<"todo">>;
+        assert_fail -> <<"assertion failed">>;
+        _ -> atom_to_binary(Kind)
+    end,
+    %% Print the error message
+    io:format(standard_error, "~ts: ~ts~n", [KindStr, Msg]),
+    %% Print source location if available
+    case {File, Line} of
+        {<<>>, _} -> ok;
+        {_, 0} -> ok;
+        _ ->
+            Qualified = case Module of
+                <<"_script">> -> Function;
+                <<"_test">> -> Function;
+                _ -> <<Module/binary, ".", Function/binary>>
+            end,
+            io:format(standard_error, "  at ~ts (~ts:~B)~n",
+                      [Qualified, File, Line])
+    end,
+    %% Print remaining stack trace (skip internal frames)
     TraceStr = format_stacktrace(StackTrace),
     case TraceStr of
-        "" -> io:format(standard_error, "Runtime error: ~ts~n", [ReasonStr]);
-        _  -> io:format(standard_error, "Runtime error: ~ts~n~ts", [ReasonStr, TraceStr])
+        "" -> ok;
+        _  -> io:format(standard_error, "~ts", [TraceStr])
     end.
 
 format_reason(error, badarith) ->
@@ -52,12 +87,40 @@ format_stacktrace(Trace) ->
 
 format_frame({Mod, Fun, Arity, Opts}) when is_integer(Arity) ->
     Loc = format_location(Opts),
-    io_lib:format("    ~ts:~ts/~B~ts~n", [format_mod(Mod), Fun, Arity, Loc]);
+    FunStr = case parse_cps_name(atom_to_list(Fun)) of
+        {ok, ParentFun} -> ParentFun;
+        none -> io_lib:format("~ts/~B", [Fun, Arity])
+    end,
+    io_lib:format("    ~ts~ts~n", [format_qualified(Mod, FunStr), Loc]);
 format_frame({Mod, Fun, Args, Opts}) when is_list(Args) ->
     Loc = format_location(Opts),
-    io_lib:format("    ~ts:~ts/~B~ts~n", [format_mod(Mod), Fun, length(Args), Loc]);
+    FunStr = case parse_cps_name(atom_to_list(Fun)) of
+        {ok, ParentFun} -> ParentFun;
+        none -> io_lib:format("~ts/~B", [Fun, length(Args)])
+    end,
+    io_lib:format("    ~ts~ts~n", [format_qualified(Mod, FunStr), Loc]);
 format_frame(_) ->
     "".
+
+%% Format "Module:Function" or just "Function" for scripts.
+format_qualified(Mod, FunStr) ->
+    case format_mod(Mod) of
+        "" -> FunStr;
+        ModStr -> io_lib:format("~ts:~ts", [ModStr, FunStr])
+    end.
+
+%% Detect BEAM-generated CPS continuation names like "-worker/3-anonymous-1-"
+%% and extract the parent function name.
+parse_cps_name([$-|Rest]) ->
+    case string:split(Rest, "/") of
+        [FunName, AfterSlash] ->
+            case string:find(AfterSlash, "-anonymous-") of
+                nomatch -> none;
+                _ -> {ok, FunName}
+            end;
+        _ -> none
+    end;
+parse_cps_name(_) -> none.
 
 format_location(Opts) ->
     case proplists:get_value(file, Opts) of
@@ -69,14 +132,28 @@ format_location(Opts) ->
             end
     end.
 
+format_mod('_script') -> "";
+format_mod('_test') -> "";
 format_mod(Mod) ->
-    atom_to_list(Mod).
+    %% Convert mangled Erlang module name back to dylang style.
+    %% e.g. "myapp_server" stays as-is (we can't recover "MyApp.Server"
+    %% without metadata), but at least strip the "std_" prefix for stdlib.
+    Name = atom_to_list(Mod),
+    case lists:prefix("std_", Name) of
+        true -> "Std." ++ capitalize(lists:nthtail(4, Name));
+        false -> Name
+    end.
+
+capitalize([]) -> [];
+capitalize([H|T]) when H >= $a, H =< $z -> [H - 32 | T];
+capitalize(S) -> S.
 
 %% Filter out internal frames the user doesn't care about.
 filter_frames(Trace) ->
     [F || F = {Mod, _, _, _} <- Trace,
           not is_internal_frame(Mod)].
 
+is_internal_frame(erlang) -> true;
 is_internal_frame(erl_eval) -> true;
 is_internal_frame(init) -> true;
 is_internal_frame(dylang_runtime) -> true;

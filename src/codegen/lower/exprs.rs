@@ -151,7 +151,13 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(super) fn lower_binop(&mut self, op: &BinOp, left: &Expr, right: &Expr) -> CExpr {
+    pub(super) fn lower_binop(
+        &mut self,
+        op: &BinOp,
+        left: &Expr,
+        right: &Expr,
+        span: Option<&crate::token::Span>,
+    ) -> CExpr {
         match op {
             BinOp::And => return self.lower_short_circuit(left, right, true),
             BinOp::Or => return self.lower_short_circuit(left, right, false),
@@ -162,7 +168,7 @@ impl<'a> Lowerer<'a> {
         let right_var = self.fresh();
         let left_ce = self.lower_expr(left);
         let right_ce = self.lower_expr(right);
-        let call = binop_call(op, &left_var, &right_var);
+        let call = self.annotate(binop_call(op, &left_var, &right_var), span);
 
         CExpr::Let(
             left_var.clone(),
@@ -253,22 +259,15 @@ impl<'a> Lowerer<'a> {
             body,
         }];
         if is_assert {
-            // Add wildcard arm that panics with file/line info
-            let msg = if let Some(s) = span {
-                format!(
-                    "Assertion failed: pattern did not match at offset {}",
-                    s.start
-                )
-            } else {
-                "Assertion failed: pattern did not match".to_string()
-            };
+            // Add wildcard arm that panics with structured error info
+            let msg = lower_string_to_binary("Assertion failed: pattern did not match");
             arms.push(CArm {
                 pat: CPat::Wildcard,
                 guard: None,
-                body: CExpr::Call(
-                    "erlang".into(),
-                    "error".into(),
-                    vec![lower_string_to_binary(&msg)],
+                body: self.make_error(
+                    super::errors::ErrorKind::AssertFail,
+                    msg,
+                    span.as_ref(),
                 ),
             });
         }
