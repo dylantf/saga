@@ -827,47 +827,9 @@ impl Checker {
             self.effect_meta.known_funs.insert(canonical);
         }
 
-        // Bindings, type constructors, records (qualified + exposing)
-        self.inject_scoped_bindings(
-            bindings,
-            type_constructors,
-            record_defs,
-            def_ids,
-            doc_comments,
-            module_name,
-            prefix,
-            exposing,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn inject_scoped_bindings(
-        &mut self,
-        bindings: &[(String, Scheme)],
-        ctors_map: &std::collections::HashMap<String, Vec<String>>,
-        record_defs: &std::collections::HashMap<String, super::RecordInfo>,
-        def_ids: &HashMap<String, crate::ast::NodeId>,
-        doc_comments: &HashMap<String, Vec<String>>,
-        module_name: &str,
-        prefix: &str,
-        exposing: Option<&[crate::ast::ExposedItem]>,
-    ) -> Result<(), Diagnostic> {
-        // Build a lookup map for fast access
-        let binding_map: std::collections::HashMap<&str, &Scheme> =
-            bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
-
-        // Build reverse map: constructor name -> type name (for exposing constructors by name)
-        let mut ctor_to_type: std::collections::HashMap<&str, &str> =
-            std::collections::HashMap::new();
-        for (type_name, ctors) in ctors_map {
-            for ctor in ctors {
-                ctor_to_type.insert(ctor.as_str(), type_name.as_str());
-            }
-        }
+        // --- Inject bindings, constructors, records into checker state ---
 
         // Record import origins for all bindings from this module.
-        // Both qualified (Prefix.name) and unqualified (exposed) forms
-        // map back to the same source module.
         for (name, _) in bindings {
             self.lsp
                 .import_origins
@@ -883,17 +845,14 @@ impl Checker {
             } else {
                 self.env.insert(canonical.clone(), scheme.clone());
             }
-            // Doc comments: register under canonical form
+            // Doc comments: canonical + aliased forms
             if let Some(doc) = doc_comments.get(name) {
                 self.lsp
                     .imported_docs
-                    .entry(canonical.clone())
+                    .entry(canonical)
                     .or_insert_with(|| doc.clone());
-            }
-            // Doc comments: aliased form
-            if prefix != module_name {
-                let aliased = format!("{}.{}", prefix, name);
-                if let Some(doc) = doc_comments.get(name) {
+                if prefix != module_name {
+                    let aliased = format!("{}.{}", prefix, name);
                     self.lsp
                         .imported_docs
                         .entry(aliased)
@@ -902,14 +861,13 @@ impl Checker {
             }
         }
 
-        // Always inject constructors qualified for pattern matching (e.g. File.NotFound)
-        for (type_name, ctors) in ctors_map {
+        // Constructors: canonical form only
+        for (type_name, ctors) in type_constructors {
             let mut variants = Vec::new();
             for ctor in ctors {
-                // Canonical: full module path (e.g. "Std.File.NotFound")
                 let canonical = format!("{}.{}", module_name, ctor);
                 if let Some(&scheme) = binding_map.get(ctor.as_str()) {
-                    self.constructors.insert(canonical.clone(), scheme.clone());
+                    self.constructors.insert(canonical, scheme.clone());
                     variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
                 }
             }
@@ -918,16 +876,25 @@ impl Checker {
             }
         }
 
-        // Always inject record definitions for qualified access
+        // Record definitions
         for (rec_name, fields) in record_defs {
             self.records
                 .entry(rec_name.clone())
                 .or_insert_with(|| fields.clone());
         }
 
-        // Exposed items: register checker-specific state (LSP metadata, records, adt_variants).
+        // Exposed items: LSP metadata, records, adt_variants.
         // Validation and scope_map entries are handled by resolve_import above.
         if let Some(exposed) = exposing {
+            // Build reverse map for constructor-as-name detection
+            let mut ctor_to_type: std::collections::HashMap<&str, &str> =
+                std::collections::HashMap::new();
+            for (type_name, ctors) in type_constructors {
+                for ctor in ctors {
+                    ctor_to_type.insert(ctor.as_str(), type_name.as_str());
+                }
+            }
+
             for name in exposed {
                 let is_type = name.starts_with(|c: char| c.is_uppercase());
                 if is_type {
@@ -937,7 +904,7 @@ impl Checker {
                     if let Some(fields) = record_defs.get(name.as_str()) {
                         self.records.insert(name.clone(), fields.clone());
                     }
-                    if let Some(ctors) = ctors_map.get(name) {
+                    if let Some(ctors) = type_constructors.get(name) {
                         let mut variants = Vec::new();
                         for ctor in ctors {
                             if let Some(&scheme) = binding_map.get(ctor.as_str()) {
@@ -971,6 +938,7 @@ impl Checker {
                 }
             }
         }
+
         Ok(())
     }
 }
