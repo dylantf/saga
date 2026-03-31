@@ -263,6 +263,11 @@ Checkbox = implemented and working. Unchecked = not yet done.
 ## Tooling
 
 - [x] Error messages with file:line:column and source context (currently byte offsets only)
+- [x] BEAM runtime crash translation (readable error messages instead of raw Erlang dumps)
+- [x] Build progress output and timing (`Compiling MathLib...`, `Built in 3.05s`)
+- [x] Suppress erlc warnings (captured stderr, only shown on failure)
+- [x] Colored CLI output (errors red, warnings yellow, build progress dim, success green)
+- [ ] Runtime stack traces with source locations (see `docs/cli-improvements.md`)
 - [ ] REPL (interactive expression evaluation, type display, effect handling)
 - [x] Library compilation mode (`dylang build --lib`): compile modules to `.beam` without
       an entry point, serialize type info (types, effects, handlers, trait impls) alongside
@@ -276,7 +281,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
   - [x] Test filtering (`dylang test --filter "name"`)
   - [x] `only` (run a single test, ignore others)
   - [x] `assert_panics` (test that a panic is raised, via `catch_panic` builtin)
-  - [ ] Test timing (suite duration)
+  - [x] Test timing (per-test and suite duration via `Std.Time.monotonic_ms`)
 - [x] Formatter
   - [x] Wadler-Lindig Doc algebra with proper `Nest`/`Group` indentation
   - [x] Token-level trivia attachment (comments/blank lines on tokens, promoted to AST)
@@ -293,6 +298,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [ ] Union-find for substitution: replace `HashMap<u32, Type>` with union-find + path compression. Drop-in replacement inside `Substitution`, no interface changes. Current recursive follow-through is O(path length) per application; union-find makes it nearly O(1) amortized. Not urgent but avoids scaling issues as programs grow.
 - [ ] Builtin resolution via ResolutionMap: builtins (panic, todo, print, catch_panic, etc.) are currently matched by string name in the lowerer, with separate checks for qualified and unqualified calls. The resolution map should tag these so the lowerer can check a single `Builtin { name, .. }` variant instead of string matching in multiple places.
 - [ ] Parser/Formatter: program-level `split_inter_decl_trivia` - may be redundant now that expression parsers steal their own trailing trivia via `steal_trailing_trivia`
+- [ ] Structured error types: replace `Diagnostic { message: String }` with an enum of typed error variants (e.g. `TypeError::Mismatch { expected, actual }`, `TypeError::UnboundVar { name }`) and a separate rendering pass. Enables error codes, "did you mean?" suggestions, LSP quick-fix code actions, and testable error assertions without string matching. Currently ~100+ `Diagnostic::error_at(span, format!(...))` call sites across the typechecker.
 
 ## Out of Scope (?)
 
