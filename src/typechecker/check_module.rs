@@ -617,6 +617,16 @@ impl Checker {
         for (key, info) in &self.modules.base_trait_impls {
             mc.trait_state.impls.entry(key.clone()).or_insert_with(|| info.clone());
         }
+        // Share scope_map so builtin modules can resolve bare names to canonical forms
+        for (k, v) in &self.scope_map.values {
+            mc.scope_map.values.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &self.scope_map.types {
+            mc.scope_map.types.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &self.scope_map.constructors {
+            mc.scope_map.constructors.entry(k.clone()).or_insert_with(|| v.clone());
+        }
     }
 
     /// Create a module checker seeded with this checker's caches.
@@ -873,14 +883,8 @@ impl Checker {
                     let mut found = binding_map.contains_key(name.as_str());
                     self.lsp.type_import_origins
                         .insert(name.clone(), module_name.to_string());
-                    // Hoist the type name itself if it's in bindings
-                    if let Some(&scheme) = binding_map.get(name.as_str()) {
-                        if let Some(&did) = def_ids.get(name.as_str()) {
-                            self.env.insert_with_def(name.clone(), scheme.clone(), did);
-                        } else {
-                            self.env.insert(name.clone(), scheme.clone());
-                        }
-                        // ScopeMap: bare type value -> canonical
+                    // ScopeMap: bare type value -> canonical (no longer inserted into env)
+                    if binding_map.contains_key(name.as_str()) {
                         let type_canonical = format!("{}.{}", module_name, name);
                         self.scope_map.values.entry(name.clone()).or_insert(type_canonical);
                     }
@@ -899,15 +903,11 @@ impl Checker {
                         for ctor in ctors {
                             if let Some(&scheme) = binding_map.get(ctor.as_str()) {
                                 if let Some(&did) = def_ids.get(ctor.as_str()) {
-                                    self.env.insert_with_def(ctor.clone(), scheme.clone(), did);
                                     self.lsp.constructor_def_ids
                                         .entry(ctor.clone())
                                         .or_insert(did);
-                                } else {
-                                    self.env.insert(ctor.clone(), scheme.clone());
                                 }
-                                self.constructors.insert(ctor.clone(), scheme.clone());
-                                // ScopeMap: bare constructor -> canonical
+                                // ScopeMap: bare constructor -> canonical (no longer inserted into env/constructors)
                                 let ctor_canonical = format!("{}.{}", module_name, ctor);
                                 self.scope_map.constructors.entry(ctor.clone()).or_insert_with(|| ctor_canonical.clone());
                                 self.scope_map.values.entry(ctor.clone()).or_insert(ctor_canonical);
@@ -919,20 +919,15 @@ impl Checker {
                             self.adt_variants.insert(name.clone(), variants);
                         }
                     }
-                    // If the exposed name is a constructor (not a type), also add to constructors
+                    // If the exposed name is a constructor (not a type), register in scope_map
                     if ctor_to_type.contains_key(name.as_str())
-                        && let Some(&scheme) = binding_map.get(name.as_str())
+                        && binding_map.contains_key(name.as_str())
                     {
                         if let Some(&did) = def_ids.get(name.as_str()) {
-                            self.env.insert_with_def(name.clone(), scheme.clone(), did);
                             self.lsp.constructor_def_ids
                                 .entry(name.clone())
                                 .or_insert(did);
-                        } else {
-                            self.env.insert(name.clone(), scheme.clone());
                         }
-                        self.constructors.insert(name.clone(), scheme.clone());
-                        // ScopeMap: bare constructor -> canonical
                         let ctor_canonical = format!("{}.{}", module_name, name);
                         self.scope_map.constructors.entry(name.clone()).or_insert_with(|| ctor_canonical.clone());
                         self.scope_map.values.entry(name.clone()).or_insert(ctor_canonical);
@@ -955,20 +950,12 @@ impl Checker {
                     let lookup = self.env.get(&canonical).cloned()
                         .or_else(|| self.env.get(&alias_key).cloned());
                     match lookup {
-                        Some(scheme) => {
-                            // Use the same def_id as the qualified form
-                            let did = self.env.def_id(&canonical)
-                                .or_else(|| self.env.def_id(&alias_key));
-                            if let Some(did) = did {
-                                self.env.insert_with_def(name.clone(), scheme, did);
-                            } else {
-                                self.env.insert(name.clone(), scheme);
-                            }
+                        Some(_scheme) => {
                             // Register doc comments under the exposed (bare) name
                             if let Some(doc) = doc_comments.get(name.as_str()) {
                                 self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
                             }
-                            // ScopeMap: bare value -> canonical
+                            // ScopeMap: bare value -> canonical (no longer inserted into env)
                             self.scope_map.values.entry(name.clone()).or_insert(canonical);
                         }
                         None => {
