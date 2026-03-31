@@ -339,6 +339,7 @@ fn collect_pat_vars_into(pat: &Pat, vars: &mut HashSet<String>) {
             }
         }
         Pat::Wildcard { .. } | Pat::Lit { .. } => {}
+        Pat::Or { .. } => unreachable!("or-patterns should be desugared before resolve"),
     }
 }
 

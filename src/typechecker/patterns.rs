@@ -203,7 +203,7 @@ impl Checker {
                 }
                 Ok(())
             }
-            Pat::ListPat { .. } | Pat::ConsPat { .. } => {
+            Pat::ListPat { .. } | Pat::ConsPat { .. } | Pat::Or { .. } => {
                 unreachable!("surface syntax should be desugared before typechecking")
             }
         }

@@ -5,12 +5,36 @@ use crate::token::Token;
 impl Parser {
     pub fn parse_pattern(&mut self) -> Result<Pat, ParseError> {
         let start = self.tokens[self.pos].span;
+        let pat = self.parse_pattern_branch()?;
+
+        // Or-pattern: A | B | C
+        if matches!(self.peek(), Token::Bar) {
+            let mut patterns = vec![pat];
+            while matches!(self.peek(), Token::Bar) {
+                self.advance(); // consume |
+                patterns.push(self.parse_pattern_branch()?);
+            }
+            let end = patterns.last().unwrap().span();
+            return Ok(Pat::Or {
+                id: NodeId::fresh(),
+                patterns,
+                span: start.to(end),
+            });
+        }
+
+        Ok(pat)
+    }
+
+    /// Parse a single pattern branch (everything except or-patterns).
+    /// Or-patterns are handled by `parse_pattern` which chains branches with `|`.
+    fn parse_pattern_branch(&mut self) -> Result<Pat, ParseError> {
+        let start = self.tokens[self.pos].span;
         let pat = self.parse_pattern_atom()?;
 
         // x :: xs  -> ConsPat (desugars to Cons(x, xs) before typechecking)
         if matches!(self.peek(), Token::DoubleColon) {
             self.advance(); // consume ::
-            let tail = self.parse_pattern()?;
+            let tail = self.parse_pattern_branch()?;
             let end = self.tokens[self.pos - 1].span;
             return Ok(Pat::ConsPat {
                 id: NodeId::fresh(),
@@ -28,7 +52,7 @@ impl Parser {
                     value: Lit::String(prefix, _),
                     ..
                 } => {
-                    let rest = self.parse_pattern()?;
+                    let rest = self.parse_pattern_branch()?;
                     let end = self.tokens[self.pos - 1].span;
                     return Ok(Pat::StringPrefix {
                         id: NodeId::fresh(),

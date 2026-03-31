@@ -100,7 +100,7 @@
       "patterns": [
         {
           "name": "keyword.control.dylang",
-          "match": "\\b(if|then|else|case|with|return)\\b"
+          "match": "\\b(if|then|else|case|when|with|return)\\b"
         },
         {
           "name": "keyword.declaration.dylang",

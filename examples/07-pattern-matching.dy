@@ -64,6 +64,21 @@ classify_log msg = case msg {
   _ -> "unknown: " <> msg
 }
 
+# Disjunctive patterns/or-patterns (multiple cases in one arm)
+is_shape_fun shape = case shape {
+  Circle _ | Rect(_, _) -> True
+  Triangle(_, _, _) -> False
+}
+
+is_big_shape (Circle r) when r > 10.0 = True
+is_big_shape (Rect(w, h)) when w > 10.0 || h > 10.0 = True
+is_big_shape _ = False
+
+is_big_fun_shape shape = case shape {
+  Circle _ | Rect(_, _) when is_big_shape shape -> True
+  _ -> False
+}
+
 main () = {
   # Custom type patterns
   let c = Circle 5.0
