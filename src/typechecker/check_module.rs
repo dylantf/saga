@@ -722,7 +722,8 @@ impl Checker {
         span: Span,
     ) -> Result<(), Diagnostic> {
         // Build and merge scope_map from the standalone resolver
-        let import_scope = resolve_import(exports, module_name, prefix, exposing);
+        let import_scope = resolve_import(exports, module_name, prefix, exposing)
+            .map_err(|msg| Diagnostic::error_at(span, msg))?;
         self.scope_map.merge(&import_scope);
 
         let ModuleExports {
@@ -836,7 +837,6 @@ impl Checker {
             module_name,
             prefix,
             exposing,
-            span,
         )
     }
 
@@ -851,7 +851,6 @@ impl Checker {
         module_name: &str,
         prefix: &str,
         exposing: Option<&[crate::ast::ExposedItem]>,
-        span: Span,
     ) -> Result<(), Diagnostic> {
         // Build a lookup map for fast access
         let binding_map: std::collections::HashMap<&str, &Scheme> =
@@ -926,23 +925,19 @@ impl Checker {
                 .or_insert_with(|| fields.clone());
         }
 
+        // Exposed items: register checker-specific state (LSP metadata, records, adt_variants).
+        // Validation and scope_map entries are handled by resolve_import above.
         if let Some(exposed) = exposing {
             for name in exposed {
                 let is_type = name.starts_with(|c: char| c.is_uppercase());
                 if is_type {
-                    let mut found = binding_map.contains_key(name.as_str());
                     self.lsp
                         .type_import_origins
                         .insert(name.clone(), module_name.to_string());
-                    // If it's a record type, register its fields
                     if let Some(fields) = record_defs.get(name.as_str()) {
                         self.records.insert(name.clone(), fields.clone());
-                        found = true;
                     }
-                    // Hoist all constructors belonging to this type
-                    // (for opaque types, ctors is empty but the type name is still valid)
                     if let Some(ctors) = ctors_map.get(name) {
-                        found = true;
                         let mut variants = Vec::new();
                         for ctor in ctors {
                             if let Some(&scheme) = binding_map.get(ctor.as_str()) {
@@ -953,64 +948,26 @@ impl Checker {
                                         .or_insert(did);
                                 }
                                 variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
-                                found = true;
                             }
                         }
                         if !variants.is_empty() {
                             self.adt_variants.insert(name.clone(), variants);
                         }
                     }
-                    // If the exposed name is a constructor (not a type)
                     if ctor_to_type.contains_key(name.as_str())
-                        && binding_map.contains_key(name.as_str())
+                        && let Some(&did) = def_ids.get(name.as_str())
                     {
-                        if let Some(&did) = def_ids.get(name.as_str()) {
-                            self.lsp
-                                .constructor_def_ids
-                                .entry(name.clone())
-                                .or_insert(did);
-                        }
-                        found = true;
-                    }
-                    // Register doc comments under the exposed (bare) name
-                    if let Some(doc) = doc_comments.get(name.as_str()) {
                         self.lsp
-                            .imported_docs
+                            .constructor_def_ids
                             .entry(name.clone())
-                            .or_insert_with(|| doc.clone());
+                            .or_insert(did);
                     }
-                    if !found {
-                        return Err(Diagnostic::error_at(
-                            span,
-                            format!("'{}' is not exported by module '{}'", name, prefix),
-                        ));
-                    }
-                } else {
-                    // Look up via canonical (full module path) first, then alias
-                    let canonical = format!("{}.{}", module_name, name);
-                    let alias_key = format!("{}.{}", prefix, name);
-                    let lookup = self
-                        .env
-                        .get(&canonical)
-                        .cloned()
-                        .or_else(|| self.env.get(&alias_key).cloned());
-                    match lookup {
-                        Some(_scheme) => {
-                            // Register doc comments under the exposed (bare) name
-                            if let Some(doc) = doc_comments.get(name.as_str()) {
-                                self.lsp
-                                    .imported_docs
-                                    .entry(name.clone())
-                                    .or_insert_with(|| doc.clone());
-                            }
-                        }
-                        None => {
-                            return Err(Diagnostic::error_at(
-                                span,
-                                format!("'{}' is not exported by module '{}'", name, prefix),
-                            ));
-                        }
-                    }
+                }
+                if let Some(doc) = doc_comments.get(name.as_str()) {
+                    self.lsp
+                        .imported_docs
+                        .entry(name.clone())
+                        .or_insert_with(|| doc.clone());
                 }
             }
         }
@@ -1024,6 +981,9 @@ impl Checker {
 /// parameters (module name, alias prefix, exposing list), compute all the
 /// user-visible-name → canonical-name mappings.
 ///
+/// Validates that all exposed names actually exist in the module's exports.
+/// Returns an error message for the first invalid exposed name found.
+///
 /// Separated from `inject_exports` so name resolution can eventually run as
 /// an independent pass before typechecking.
 pub(super) fn resolve_import(
@@ -1031,7 +991,7 @@ pub(super) fn resolve_import(
     module_name: &str,
     prefix: &str,
     exposing: Option<&[crate::ast::ExposedItem]>,
-) -> super::ScopeMap {
+) -> Result<super::ScopeMap, String> {
     let mut scope = super::ScopeMap::default();
 
     let binding_map: std::collections::HashMap<&str, &Scheme> = exports
@@ -1094,13 +1054,14 @@ pub(super) fn resolve_import(
         }
     }
 
-    // Exposed items: bare -> canonical
+    // Exposed items: bare -> canonical, with validation
     if let Some(exposed) = exposing {
         for name in exposed {
             let is_type = name.starts_with(|c: char| c.is_uppercase());
             if is_type {
+                let mut found = binding_map.contains_key(name.as_str());
                 // Bare type value -> canonical
-                if binding_map.contains_key(name.as_str()) {
+                if found {
                     let type_canonical = format!("{}.{}", module_name, name);
                     scope.values.entry(name.clone()).or_insert(type_canonical);
                 }
@@ -1109,8 +1070,13 @@ pub(super) fn resolve_import(
                     .types
                     .entry(name.clone())
                     .or_insert_with(|| name.clone());
+                // Record types count as found
+                if exports.record_defs.contains_key(name.as_str()) {
+                    found = true;
+                }
                 // Constructors belonging to this type
                 if let Some(ctors) = exports.type_constructors.get(name) {
+                    found = true;
                     for ctor in ctors {
                         if binding_map.contains_key(ctor.as_str()) {
                             let ctor_canonical = format!("{}.{}", module_name, ctor);
@@ -1132,16 +1098,31 @@ pub(super) fn resolve_import(
                         .entry(name.clone())
                         .or_insert_with(|| ctor_canonical.clone());
                     scope.values.entry(name.clone()).or_insert(ctor_canonical);
+                    found = true;
+                }
+                if !found {
+                    return Err(format!(
+                        "'{}' is not exported by module '{}'",
+                        name, prefix
+                    ));
                 }
             } else {
                 // Bare value -> canonical
                 let canonical = format!("{}.{}", module_name, name);
+                // Validate: the canonical form must exist in the scope
+                // (it was registered in the bindings loop above)
+                if !scope.values.contains_key(&canonical) {
+                    return Err(format!(
+                        "'{}' is not exported by module '{}'",
+                        name, prefix
+                    ));
+                }
                 scope.values.entry(name.clone()).or_insert(canonical);
             }
         }
     }
 
-    scope
+    Ok(scope)
 }
 
 /// Collect codegen-relevant info from a module's public declarations.
