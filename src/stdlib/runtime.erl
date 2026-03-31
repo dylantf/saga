@@ -4,11 +4,41 @@
 %% Format a BEAM runtime crash into a user-friendly error message.
 %% Called from the exec_erl catch-all clause.
 format_crash(Class, Reason, StackTrace) ->
-    ReasonStr = format_reason(Class, Reason),
+    case Reason of
+        {dylang_error, Kind, Msg, Module, Function, File, Line} ->
+            format_dylang_error(Kind, Msg, Module, Function, File, Line, StackTrace);
+        _ ->
+            ReasonStr = format_reason(Class, Reason),
+            TraceStr = format_stacktrace(StackTrace),
+            case TraceStr of
+                "" -> io:format(standard_error, "Runtime error: ~ts~n", [ReasonStr]);
+                _  -> io:format(standard_error, "Runtime error: ~ts~n~ts", [ReasonStr, TraceStr])
+            end
+    end.
+
+%% Format a structured dylang error with source location.
+format_dylang_error(Kind, Msg, Module, Function, File, Line, StackTrace) ->
+    KindStr = case Kind of
+        panic -> <<"panic">>;
+        todo -> <<"todo">>;
+        assert_fail -> <<"assertion failed">>;
+        _ -> atom_to_binary(Kind)
+    end,
+    %% Print the error message
+    io:format(standard_error, "~ts: ~ts~n", [KindStr, Msg]),
+    %% Print source location if available
+    case {File, Line} of
+        {<<>>, _} -> ok;
+        {_, 0} -> ok;
+        _ ->
+            io:format(standard_error, "  at ~ts.~ts (~ts:~B)~n",
+                      [Module, Function, File, Line])
+    end,
+    %% Print remaining stack trace (skip internal frames)
     TraceStr = format_stacktrace(StackTrace),
     case TraceStr of
-        "" -> io:format(standard_error, "Runtime error: ~ts~n", [ReasonStr]);
-        _  -> io:format(standard_error, "Runtime error: ~ts~n~ts", [ReasonStr, TraceStr])
+        "" -> ok;
+        _  -> io:format(standard_error, "~ts", [TraceStr])
     end.
 
 format_reason(error, badarith) ->

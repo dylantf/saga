@@ -1,5 +1,6 @@
 mod builtins;
 mod effects;
+pub mod errors;
 mod exprs;
 pub(crate) mod init;
 mod pats;
@@ -9,10 +10,11 @@ use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Lit, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use std::collections::HashMap;
 
+use errors::{ErrorInfo, ErrorKind, SourceInfo};
 use init::{PendingAnnotation, extract_external};
 use pats::{lower_params, lower_pat};
 use util::{
-    binary_prepend, cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call,
+    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call,
     collect_qualified_call, core_var, field_access_record_name, has_nested_effect_call, lower_lit,
     lower_string_to_binary, process_string_escapes,
 };
@@ -66,6 +68,12 @@ pub struct Lowerer<'a> {
     counter: usize,
     /// Cross-module codegen context (compiled modules, effect bindings, prelude imports).
     ctx: &'a super::CodegenContext,
+    /// Source location info for error terms. None for stdlib modules (no user source).
+    source_info: Option<SourceInfo>,
+    /// Current dylang module name (e.g. "MyApp.Server"). Set in lower_module.
+    current_module: String,
+    /// Current function being lowered (e.g. "handle_request"). Set per function.
+    current_function: String,
     /// Maps module alias -> Erlang module atom (e.g. "List" -> "std_list").
     /// Used by lower_qualified_call as a fallback for unresolved qualified names.
     module_aliases: HashMap<String, String>,
@@ -122,10 +130,14 @@ impl<'a> Lowerer<'a> {
         ctx: &'a super::CodegenContext,
         constructor_atoms: super::resolve::ConstructorAtoms,
         resolved: super::resolve::ResolutionMap,
+        source_info: Option<SourceInfo>,
     ) -> Self {
         Lowerer {
             counter: 0,
             ctx,
+            source_info,
+            current_module: String::new(),
+            current_function: String::new(),
             module_aliases: HashMap::new(),
             pub_names: std::collections::HashSet::new(),
             record_fields: HashMap::new(),
@@ -150,6 +162,40 @@ impl<'a> Lowerer<'a> {
         let n = self.counter;
         self.counter += 1;
         format!("_Cor{}", n)
+    }
+
+    /// Build a structured error term and wrap it in `erlang:error(Term)`.
+    /// Falls back to the old `{dylang_panic, Msg}` tuple when no source info is available.
+    pub(super) fn make_error(
+        &self,
+        kind: ErrorKind,
+        message: CExpr,
+        span: Option<&crate::token::Span>,
+    ) -> CExpr {
+        let error_term = if let Some(si) = &self.source_info {
+            let line = span.map_or(0, |s| si.line_number(s));
+            ErrorInfo {
+                kind,
+                message,
+                module: self.current_module.clone(),
+                function: self.current_function.clone(),
+                file: si.file.clone(),
+                line,
+            }
+            .to_cexpr()
+        } else {
+            // Stdlib modules don't have source info — use the old format
+            CExpr::Tuple(vec![
+                CExpr::Lit(CLit::Atom("dylang_error".into())),
+                CExpr::Lit(CLit::Atom(kind.as_atom().into())),
+                message,
+                lower_string_to_binary(&self.current_module),
+                lower_string_to_binary(&self.current_function),
+                lower_string_to_binary(""),
+                CExpr::Lit(CLit::Int(0)),
+            ])
+        };
+        cerl_call("erlang", "error", vec![error_term])
     }
 
     /// Known BEAM-native handlers: (module, handler_name) pairs.
@@ -324,6 +370,7 @@ impl<'a> Lowerer<'a> {
     }
 
     pub fn lower_module(&mut self, module_name: &str, program: &ast::Program) -> CModule {
+        self.current_module = module_name.to_string();
         let mut pending_annotations = self.init_module(module_name, program);
 
         // Group FunBindings by name, preserving declaration order, and simultaneously
@@ -441,6 +488,7 @@ impl<'a> Lowerer<'a> {
         }
 
         for (name, arity, clauses) in clause_groups {
+            self.current_function = name.clone();
             if !is_module || self.pub_names.contains(&name) {
                 exports.push((name.clone(), arity));
             }
@@ -833,7 +881,7 @@ impl<'a> Lowerer<'a> {
                     }
                 }
 
-                // Lower `panic msg` / `todo ()` to erlang:error({dylang_panic, Msg})
+                // Lower `panic msg` / `todo ()` to erlang:error({dylang_error, ...})
                 // The entry point wrapper catches this and prints nicely + exits.
                 // catch_panic can also intercept it for recovery boundaries.
                 if let Some((func_name, _head, args)) = collect_fun_call(expr)
@@ -841,29 +889,13 @@ impl<'a> Lowerer<'a> {
                     && args.len() == 1
                 {
                     let v = self.fresh();
-                    let prefixed = self.fresh();
-                    let (arg, prepend) = if func_name == "todo" {
-                        let arg = lower_string_to_binary("not implemented");
-                        let prep = binary_prepend("todo: ", CExpr::Var(v.clone()));
-                        (arg, prep)
+                    let (kind, arg) = if func_name == "todo" {
+                        (ErrorKind::Todo, lower_string_to_binary("not implemented"))
                     } else {
-                        let arg = self.lower_expr(args[0]);
-                        let prep = binary_prepend("panic: ", CExpr::Var(v.clone()));
-                        (arg, prep)
+                        (ErrorKind::Panic, self.lower_expr(args[0]))
                     };
-                    let error = cerl_call(
-                        "erlang",
-                        "error",
-                        vec![CExpr::Tuple(vec![
-                            CExpr::Lit(CLit::Atom("dylang_panic".into())),
-                            CExpr::Var(prefixed.clone()),
-                        ])],
-                    );
-                    return CExpr::Let(
-                        v,
-                        Box::new(arg),
-                        Box::new(CExpr::Let(prefixed, Box::new(prepend), Box::new(error))),
-                    );
+                    let error = self.make_error(kind, CExpr::Var(v.clone()), Some(&expr.span));
+                    return CExpr::Let(v, Box::new(arg), Box::new(error));
                 }
 
                 // Lower `catch_panic thunk` to a Core Erlang try/catch (unqualified call).
@@ -1492,12 +1524,17 @@ impl<'a> Lowerer<'a> {
                                         guard: None,
                                         body: CExpr::Lit(CLit::Atom(noproc.clone())),
                                     },
-                                    // {{dylang_panic, Msg}, _Stacktrace} -> Error(Msg)
+                                    // {{dylang_error, _Kind, Msg, ...}, _Stacktrace} -> Error(Msg)
                                     CArm {
                                         pat: CPat::Tuple(vec![
                                             CPat::Tuple(vec![
-                                                CPat::Lit(CLit::Atom("dylang_panic".into())),
+                                                CPat::Lit(CLit::Atom("dylang_error".into())),
+                                                CPat::Wildcard,          // kind
                                                 CPat::Var(error_msg_var.clone()),
+                                                CPat::Wildcard,          // module
+                                                CPat::Wildcard,          // function
+                                                CPat::Wildcard,          // file
+                                                CPat::Wildcard,          // line
                                             ]),
                                             CPat::Wildcard, // stacktrace
                                         ]),

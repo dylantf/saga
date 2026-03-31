@@ -31,7 +31,7 @@ fn emit_full(src: &str) -> String {
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    emit_module_with_context("_script", &elaborated, &ctx)
+    emit_module_with_context("_script", &elaborated, &ctx, None)
 }
 
 /// Assert that `emit(src)` contains `needle` as a substring.

@@ -80,9 +80,10 @@ pub fn emit_module(
     elaborated: &ast::Program,
     ctx: &codegen::CodegenContext,
     build_dir: &Path,
+    source_file: Option<&codegen::SourceFile>,
 ) {
     let erlang_name = module_name.to_lowercase().replace('.', "_");
-    let core_src = codegen::emit_module_with_context(&erlang_name, elaborated, ctx);
+    let core_src = codegen::emit_module_with_context(&erlang_name, elaborated, ctx, source_file);
     let core_path = build_dir.join(format!("{}.core", erlang_name));
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
@@ -281,7 +282,7 @@ pub fn run_erlc(build_dir: &Path, build_start: Instant) {
 /// Run a compiled module on the BEAM.
 pub fn exec_erl(build_dir: &Path, entry_module: &str) {
     let eval = format!(
-        "try '{}':main() of _ -> init:stop() catch error:{{dylang_panic, Msg}} -> io:format(standard_error, \"~ts~n\", [Msg]), init:stop(1); C:R:S -> dylang_runtime:format_crash(C, R, S), init:stop(1) end",
+        "try '{}':main() of _ -> init:stop() catch C:R:S -> dylang_runtime:format_crash(C, R, S), init:stop(1) end",
         entry_module
     );
     let status = std::process::Command::new("erl")
@@ -376,19 +377,25 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
         .cloned()
         .collect();
 
+    let mut source_files: HashMap<String, codegen::SourceFile> = HashMap::new();
+
     for module_name in &user_modules {
         eprintln!("  {} {}...", color::dim("Compiling"), module_name);
+
+        // Resolve file path for this module (needed for source info and fresh parse)
+        let file_path = result
+            .module_map()
+            .and_then(|m| m.get(module_name))
+            .unwrap_or_else(|| {
+                eprintln!("Module '{}' not found in module map", module_name);
+                std::process::exit(1);
+            })
+            .clone();
+
         let mut program = if let Some(cached) = result.programs().get(module_name) {
             cached.clone()
         } else {
-            let file_path = result
-                .module_map()
-                .and_then(|m| m.get(module_name))
-                .unwrap_or_else(|| {
-                    eprintln!("Module '{}' not found in module map", module_name);
-                    std::process::exit(1);
-                });
-            let source = fs::read_to_string(file_path).unwrap_or_else(|e| {
+            let source = fs::read_to_string(&file_path).unwrap_or_else(|e| {
                 eprintln!("Error reading {}: {}", file_path.display(), e);
                 std::process::exit(1);
             });
@@ -403,6 +410,21 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
                     std::process::exit(1);
                 })
         };
+
+        // Read source for error location tracking
+        let source_text = fs::read_to_string(&file_path).unwrap_or_default();
+        let display_path = file_path
+            .strip_prefix(&project_root)
+            .unwrap_or(&file_path)
+            .to_string_lossy()
+            .to_string();
+        source_files.insert(
+            module_name.clone(),
+            codegen::SourceFile {
+                path: display_path,
+                source: source_text,
+            },
+        );
         derive::expand_derives(&mut program);
         desugar::desugar_program(&mut program);
 
@@ -447,6 +469,16 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
                 resolution: codegen::resolve::ResolutionMap::new(),
             },
         );
+        let main_file = config.main_file();
+        let main_path = project_root.join(main_file);
+        let main_source = fs::read_to_string(&main_path).unwrap_or_default();
+        source_files.insert(
+            "Main".to_string(),
+            codegen::SourceFile {
+                path: main_file.to_string(),
+                source: main_source,
+            },
+        );
     }
 
     // Phase 3: Lower and emit all modules
@@ -461,7 +493,8 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
         } else {
             module_name.to_lowercase().replace('.', "_")
         };
-        emit_module(&erlang_name, &compiled.elaborated, &ctx, &build_dir);
+        let sf = source_files.get(module_name);
+        emit_module(&erlang_name, &compiled.elaborated, &ctx, &build_dir, sf);
     }
 
     // Copy bridge (.erl) files into build dir
@@ -525,8 +558,17 @@ pub fn build_script(file: &str, profile: &str) -> PathBuf {
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
+    let script_source = codegen::SourceFile {
+        path: file.to_string(),
+        source: source.clone(),
+    };
     for (module_name, compiled) in &compiled_modules {
-        emit_module(module_name, &compiled.elaborated, &ctx, &build_dir);
+        let sf = if module_name == "_script" {
+            Some(&script_source)
+        } else {
+            None
+        };
+        emit_module(module_name, &compiled.elaborated, &ctx, &build_dir, sf);
     }
 
     // Copy stdlib bridge (.erl) files into build dir

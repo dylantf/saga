@@ -161,7 +161,7 @@ pub fn cmd_emit(file: &str) {
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    let core_src = codegen::emit_module_with_context("_script", &elaborated, &ctx);
+    let core_src = codegen::emit_module_with_context("_script", &elaborated, &ctx, None);
     print!("{}", core_src);
 }
 
@@ -289,7 +289,7 @@ pub fn cmd_test(filter: Option<&str>) {
         for (name, compiled) in &test_std_modules {
             if !all_modules.contains_key(name) {
                 let erlang_name = name.to_lowercase().replace('.', "_");
-                emit_module(&erlang_name, &compiled.elaborated, &std_ctx, &build_dir);
+                emit_module(&erlang_name, &compiled.elaborated, &std_ctx, &build_dir, None);
                 run_erlc_file(&build_dir.join(format!("{}.core", erlang_name)), &build_dir);
                 all_modules.insert(name.clone(), compiled.clone());
             }
@@ -312,7 +312,7 @@ pub fn cmd_test(filter: Option<&str>) {
             let_effect_bindings: result.let_effect_bindings.clone(),
             prelude_imports: result.prelude_imports.clone(),
         };
-        let core_src = codegen::emit_module_with_context("_test", &elaborated, &test_ctx);
+        let core_src = codegen::emit_module_with_context("_test", &elaborated, &test_ctx, None);
         let core_path = build_dir.join("_test.core");
         fs::write(&core_path, &core_src).unwrap_or_else(|e| {
             eprintln!("Error writing {}: {}", core_path.display(), e);

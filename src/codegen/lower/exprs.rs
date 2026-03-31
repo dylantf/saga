@@ -253,22 +253,15 @@ impl<'a> Lowerer<'a> {
             body,
         }];
         if is_assert {
-            // Add wildcard arm that panics with file/line info
-            let msg = if let Some(s) = span {
-                format!(
-                    "Assertion failed: pattern did not match at offset {}",
-                    s.start
-                )
-            } else {
-                "Assertion failed: pattern did not match".to_string()
-            };
+            // Add wildcard arm that panics with structured error info
+            let msg = lower_string_to_binary("Assertion failed: pattern did not match");
             arms.push(CArm {
                 pat: CPat::Wildcard,
                 guard: None,
-                body: CExpr::Call(
-                    "erlang".into(),
-                    "error".into(),
-                    vec![lower_string_to_binary(&msg)],
+                body: self.make_error(
+                    super::errors::ErrorKind::AssertFail,
+                    msg,
+                    span.as_ref(),
                 ),
             });
         }
