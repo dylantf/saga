@@ -59,7 +59,7 @@ fn typecheck_source(source: &str, checker: &mut typechecker::Checker) -> Vec<dyl
         .parse_program()
         .expect("parse error");
     dylang::desugar::desugar_program(&mut program);
-    let result = checker.check_program(&program);
+    let result = checker.check_program(&mut program);
     assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());
     program
 }
@@ -86,7 +86,7 @@ fn make_project_checker() -> typechecker::Checker {
         .filter(|d| matches!(d, dylang::ast::Decl::Import { .. }))
         .cloned()
         .collect();
-    let result = checker.check_program(&prelude_program);
+    let result = checker.check_program(&mut prelude_program);
     assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
     checker
 }

@@ -9,6 +9,7 @@ mod handlers;
 mod infer;
 mod patterns;
 mod records;
+mod resolve;
 mod result;
 mod unify;
 pub use result::CheckResult;
@@ -1004,7 +1005,7 @@ impl Checker {
         crate::derive::expand_derives(&mut prelude_program);
         crate::desugar::desugar_program(&mut prelude_program);
         checker
-            .check_program_inner(&prelude_program)
+            .check_program_inner(&mut prelude_program)
             .map_err(|errs| errs.into_iter().next().unwrap())?;
 
         // Save the prelude's import declarations so the lowerer can register

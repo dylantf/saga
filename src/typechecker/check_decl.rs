@@ -48,7 +48,7 @@ impl Checker {
 
     /// Typecheck a program and return the public result.
     /// This is the main entry point for external callers.
-    pub fn check_program(&mut self, program: &[Decl]) -> CheckResult {
+    pub fn check_program(&mut self, program: &mut [Decl]) -> CheckResult {
         if let Err(errors) = self.check_program_inner(program) {
             for e in errors {
                 self.collected_diagnostics.push(e);
@@ -65,10 +65,11 @@ impl Checker {
     /// Non-fatal diagnostics are accumulated in collected_diagnostics.
     pub(crate) fn check_program_inner(
         &mut self,
-        program: &[Decl],
+        program: &mut [Decl],
     ) -> std::result::Result<(), Vec<Diagnostic>> {
         self.register_definitions(program)?;
         self.process_imports(program)?;
+        super::resolve::resolve_names(program, &self.scope_map);
         self.register_externals(program)?;
         let (annotations, annotation_constraints) = self.collect_annotations(program)?;
         let fun_vars = self.pre_bind_functions(program, &annotations);

@@ -11,7 +11,7 @@ fn bootstrap() -> typechecker::Checker {
         .parse_program()
         .expect("prelude parse error");
     desugar::desugar_program(&mut prelude_program);
-    let result = checker.check_program(&prelude_program);
+    let result = checker.check_program(&mut prelude_program);
     assert!(
         !result.has_errors(),
         "prelude typecheck error: {:?}",
@@ -49,7 +49,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         .expect("parse error");
     desugar::desugar_program(&mut program);
     let mut checker = bootstrap();
-    let result = checker.check_program(&program);
+    let result = checker.check_program(&mut program);
     assert!(
         !result.has_errors(),
         "typecheck error: {:?}",

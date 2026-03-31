@@ -81,7 +81,7 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckSnapshot {
     derive::expand_derives(&mut program);
     desugar::desugar_program(&mut program);
 
-    let tc_result = checker.check_program(&program);
+    let tc_result = checker.check_program(&mut program);
     let diagnostics = tc_result.diagnostics.iter()
         .map(|d| tc_to_lsp_diagnostic(&line_index, &source, d))
         .collect();

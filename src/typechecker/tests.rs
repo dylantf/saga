@@ -19,10 +19,10 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
     crate::derive::expand_derives(&mut prelude_program);
     crate::desugar::desugar_program(&mut prelude_program);
     checker
-        .check_program_inner(&prelude_program)
+        .check_program_inner(&mut prelude_program)
         .map_err(|e| e.into_iter().next().unwrap())?;
     checker
-        .check_program_inner(&program)
+        .check_program_inner(&mut program)
         .map_err(|e| e.into_iter().next().unwrap())?;
     Ok(checker)
 }

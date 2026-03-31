@@ -27,7 +27,7 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
     desugar::desugar_program(&mut program);
 
     let mut checker = typechecker::Checker::with_prelude(None).expect("prelude error");
-    let result = checker.check_program(&program);
+    let result = checker.check_program(&mut program);
     assert!(!result.has_errors(), "Type errors: {:?}", result.errors());
 
     let elaborated = elaborate::elaborate(&program, &result);

@@ -54,7 +54,7 @@ pub fn parse_and_typecheck_inner(
     if test_mode {
         synthesize_test_main(&mut program);
     }
-    let result = checker.check_program(&program);
+    let result = checker.check_program(&mut program);
     for w in result.warnings() {
         print_tc_diagnostic(source, source_path, w);
     }
@@ -429,7 +429,7 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
         desugar::desugar_program(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
-        let mod_result = mod_checker.check_program(&program);
+        let mod_result = mod_checker.check_program(&mut program);
         for w in mod_result.warnings() {
             eprintln!("Warning in module {}: {}", module_name, w);
         }
