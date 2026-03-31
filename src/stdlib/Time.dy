@@ -1,0 +1,7 @@
+module Std.Time
+
+#@ Returns the current monotonic time in milliseconds.
+#@ Useful for measuring elapsed time between two points.
+#@ The absolute value is meaningless -- only differences matter.
+@external("erlang", "std_time_bridge", "monotonic_ms")
+pub fun monotonic_ms : Unit -> Int

@@ -6,7 +6,9 @@ use project_config::ProjectConfig;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
+use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
 
 pub fn parse_and_typecheck(
@@ -161,6 +163,14 @@ fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
             "std_set_bridge.erl",
             include_str!("../stdlib/Set.bridge.erl"),
         ),
+        (
+            "dylang_runtime.erl",
+            include_str!("../stdlib/runtime.erl"),
+        ),
+        (
+            "std_time_bridge.erl",
+            include_str!("../stdlib/Time.bridge.erl"),
+        ),
     ]
 }
 
@@ -188,9 +198,7 @@ fn copy_project_bridges(roots: &[&Path], build_dir: &Path) {
             std::process::exit(1);
         }
     }
-    if count > 0 {
-        eprintln!("Copied {} bridge file(s)", count);
-    }
+    // Bridge file count is an internal detail -- don't show to user.
 }
 
 fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Result<(), String> {
@@ -223,26 +231,34 @@ fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Res
     Ok(())
 }
 
-/// Compile a single .core file with erlc.
+/// Compile a single .core file with erlc, suppressing warnings.
 pub fn run_erlc_file(core_file: &Path, build_dir: &Path) {
-    let status = std::process::Command::new("erlc")
+    let output = std::process::Command::new("erlc")
         .arg("-o")
         .arg(build_dir)
         .arg(core_file)
-        .status()
+        .stderr(std::process::Stdio::piped())
+        .output()
         .unwrap_or_else(|e| {
             eprintln!("Failed to run erlc: {}", e);
             std::process::exit(1);
         });
 
-    if !status.success() {
+    if !output.status.success() {
+        // Show erlc stderr only on failure
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.is_empty() {
+            eprintln!("{}", stderr.trim());
+        }
         eprintln!("erlc failed on {}", core_file.display());
         std::process::exit(1);
     }
+    // Warnings on success are suppressed -- they're either redundant with
+    // our own diagnostics or refer to BEAM internals the user can't act on.
 }
 
 /// Compile all .core and .erl files in a directory with erlc.
-pub fn run_erlc(build_dir: &Path) {
+pub fn run_erlc(build_dir: &Path, build_start: Instant) {
     let compilable_files: Vec<_> = fs::read_dir(build_dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -258,17 +274,14 @@ pub fn run_erlc(build_dir: &Path) {
         run_erlc_file(file, build_dir);
     }
 
-    eprintln!(
-        "Built {} module(s) in {}",
-        compilable_files.len(),
-        build_dir.display()
-    );
+    let elapsed = build_start.elapsed();
+    eprintln!("  {} in {:.2}s", color::green("Built"), elapsed.as_secs_f64());
 }
 
 /// Run a compiled module on the BEAM.
 pub fn exec_erl(build_dir: &Path, entry_module: &str) {
     let eval = format!(
-        "try '{}':main() of _ -> init:stop() catch error:{{dylang_panic, Msg}} -> io:format(standard_error, \"~ts~n\", [Msg]), init:stop(1); C:R:S -> io:format(\"~p: ~p~n~p~n\", [C,R,S]), init:stop(1) end",
+        "try '{}':main() of _ -> init:stop() catch error:{{dylang_panic, Msg}} -> io:format(standard_error, \"~ts~n\", [Msg]), init:stop(1); C:R:S -> dylang_runtime:format_crash(C, R, S), init:stop(1) end",
         entry_module
     );
     let status = std::process::Command::new("erl")
@@ -291,6 +304,7 @@ pub fn exec_erl(build_dir: &Path, entry_module: &str) {
 /// Build a project (with project.toml) into the given build directory.
 /// Returns the build directory path, elaborated modules, and codegen info.
 pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::CompiledModule>) {
+    let build_start = Instant::now();
     let project_root = super::find_project_root().unwrap_or_else(|| {
         eprintln!("No project.toml found. Use `dylang build <file.dy>` for single files.");
         std::process::exit(1);
@@ -351,17 +365,19 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
     });
 
     // Phase 2: Elaborate all modules
+    eprintln!("  {} stdlib...", color::dim("Compiling"));
     let mut compiled_modules = compile_std_modules(&result);
 
     // Elaborate user modules
-    let user_modules: Vec<String> = result
-        .codegen_info()
+    let codegen_info_map = result.codegen_info();
+    let user_modules: Vec<String> = codegen_info_map
         .keys()
         .filter(|name| !name.starts_with("Std."))
         .cloned()
         .collect();
 
     for module_name in &user_modules {
+        eprintln!("  {} {}...", color::dim("Compiling"), module_name);
         let mut program = if let Some(cached) = result.programs().get(module_name) {
             cached.clone()
         } else {
@@ -403,22 +419,25 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
         }
 
         let elaborated = elaborate::elaborate_module(&program, &mod_result, module_name);
+        let normalized = codegen::normalize::normalize_effects(&elaborated);
+        let resolution =
+            codegen::resolve::resolve_names(&normalized, codegen_info_map, &result.prelude_imports);
         compiled_modules.insert(
             module_name.clone(),
             codegen::CompiledModule {
-                codegen_info: result
-                    .codegen_info()
+                codegen_info: codegen_info_map
                     .get(module_name)
                     .cloned()
                     .unwrap_or_default(),
                 elaborated,
-                resolution: codegen::resolve::ResolutionMap::new(),
+                resolution,
             },
         );
     }
 
     // Elaborate Main (if this is a bin project)
     if let Some(main_program) = &main_program {
+        eprintln!("  {} Main...", color::dim("Compiling"));
         let main_elaborated = elaborate::elaborate_module(main_program, &result, "Main");
         compiled_modules.insert(
             "Main".to_string(),
@@ -456,17 +475,23 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
     bridge_roots.extend(dep_roots.iter().map(|p| p.as_path()));
     copy_project_bridges(&bridge_roots, &build_dir);
 
-    run_erlc(&build_dir);
+    run_erlc(&build_dir, build_start);
     (build_dir, compiled_modules)
 }
 
 /// Build a single script file into the given build directory.
 /// Returns the build directory path.
 pub fn build_script(file: &str, profile: &str) -> PathBuf {
+    let build_start = Instant::now();
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
+    let display_path = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| Path::new(file).strip_prefix(&cwd).ok().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from(file));
+    eprintln!("  {} {}...", color::dim("Compiling"), display_path.display());
     let mut checker = make_checker(None);
     let (program, _) = parse_and_typecheck(&source, file, &mut checker);
     let result = checker.to_result();
@@ -507,7 +532,7 @@ pub fn build_script(file: &str, profile: &str) -> PathBuf {
     // Copy stdlib bridge (.erl) files into build dir
     write_stdlib_bridges(&build_dir);
 
-    run_erlc(&build_dir);
+    run_erlc(&build_dir, build_start);
     build_dir
 }
 

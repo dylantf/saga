@@ -1,6 +1,8 @@
 use dylang::token;
 use dylang::typechecker;
 
+use super::color;
+
 pub fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
     let mut line = 1;
     let mut col = 1;
@@ -59,8 +61,8 @@ pub fn print_diagnostic(source: &str, source_path: &str, label: &str, span: Opti
 
 pub fn print_tc_diagnostic(source: &str, source_path: &str, d: &typechecker::Diagnostic) {
     let label = match d.severity {
-        typechecker::Severity::Error => "Type error",
-        typechecker::Severity::Warning => "Warning",
+        typechecker::Severity::Error => &color::red("Type error"),
+        typechecker::Severity::Warning => &color::yellow("Warning"),
     };
     print_diagnostic(source, source_path, label, d.span, &d.message);
 }

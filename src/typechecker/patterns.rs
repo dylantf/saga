@@ -98,6 +98,7 @@ impl Checker {
             Pat::Record {
                 name,
                 fields,
+                rest,
                 as_name,
                 span,
                 ..
@@ -114,6 +115,26 @@ impl Checker {
                     crate::token::Span { start: span.start, end: name_end },
                     name.to_string(),
                 ));
+                // When `..` is absent, all fields must be listed
+                if !rest {
+                    let pat_fields: HashSet<&str> =
+                        fields.iter().map(|(f, _)| f.as_str()).collect();
+                    let missing: Vec<&str> = info
+                        .fields
+                        .iter()
+                        .filter(|(f, _)| !pat_fields.contains(f.as_str()))
+                        .map(|(f, _)| f.as_str())
+                        .collect();
+                    if !missing.is_empty() {
+                        return Err(Diagnostic::error_at(
+                            *span,
+                            format!(
+                                "missing fields in record pattern: {}. Use `.. ` to ignore remaining fields",
+                                missing.join(", ")
+                            ),
+                        ));
+                    }
+                }
                 let (inst_fields, result_ty) = self.instantiate_record(name, &info);
                 self.unify_at(ty, &result_ty, *span)?;
 
@@ -174,30 +195,82 @@ impl Checker {
                 self.bind_pattern(rest, &Type::string())
             }
 
-            Pat::AnonRecord { fields, span, .. } => {
-                let mut field_tys: Vec<(String, Type)> = fields
-                    .iter()
-                    .map(|(fname, _)| (fname.clone(), self.fresh_var()))
-                    .collect();
-                field_tys.sort_by(|(a, _), (b, _)| a.cmp(b));
-                let record_ty = Type::Record(field_tys.clone());
-                self.unify_at(ty, &record_ty, *span)?;
+            Pat::AnonRecord {
+                fields,
+                rest,
+                span,
+                ..
+            } => {
+                if *rest {
+                    // With `..`: unify against the expected type, then bind
+                    // only the mentioned fields. This allows partial matching
+                    // on anonymous records (e.g. `{ street, .. }` against
+                    // `{ street: String, city: String }`).
+                    self.unify_at(ty, ty, *span)?; // force resolution
+                    let resolved = self.sub.apply(ty);
+                    let all_fields = match &resolved {
+                        Type::Record(fs) => fs.clone(),
+                        _ => {
+                            return Err(Diagnostic::error_at(
+                                *span,
+                                "anonymous record pattern with `..` requires a record type",
+                            ));
+                        }
+                    };
+                    for (fname, alias_pat) in fields {
+                        let field_ty = all_fields
+                            .iter()
+                            .find(|(n, _)| n == fname)
+                            .map(|(_, t)| t)
+                            .ok_or_else(|| {
+                                Diagnostic::error_at(
+                                    *span,
+                                    format!("unknown field '{}' in anonymous record", fname),
+                                )
+                            })?;
+                        let resolved_field_ty = self.sub.apply(field_ty);
+                        match alias_pat {
+                            Some(pat) => self.bind_pattern(pat, &resolved_field_ty)?,
+                            None => {
+                                self.env.insert(
+                                    fname.clone(),
+                                    Scheme {
+                                        forall: vec![],
+                                        constraints: vec![],
+                                        ty: resolved_field_ty.clone(),
+                                    },
+                                );
+                                self.record_type_at_span(*span, &resolved_field_ty);
+                            }
+                        }
+                    }
+                } else {
+                    // Without `..`: build exact record type from mentioned fields
+                    let mut field_tys: Vec<(String, Type)> = fields
+                        .iter()
+                        .map(|(fname, _)| (fname.clone(), self.fresh_var()))
+                        .collect();
+                    field_tys.sort_by(|(a, _), (b, _)| a.cmp(b));
+                    let record_ty = Type::Record(field_tys.clone());
+                    self.unify_at(ty, &record_ty, *span)?;
 
-                for (fname, alias_pat) in fields {
-                    let (_, field_ty) = field_tys.iter().find(|(n, _)| n == fname).unwrap();
-                    let resolved_field_ty = self.sub.apply(field_ty);
-                    match alias_pat {
-                        Some(pat) => self.bind_pattern(pat, &resolved_field_ty)?,
-                        None => {
-                            self.env.insert(
-                                fname.clone(),
-                                Scheme {
-                                    forall: vec![],
-                                    constraints: vec![],
-                                    ty: resolved_field_ty.clone(),
-                                },
-                            );
-                            self.record_type_at_span(*span, &resolved_field_ty);
+                    for (fname, alias_pat) in fields {
+                        let (_, field_ty) =
+                            field_tys.iter().find(|(n, _)| n == fname).unwrap();
+                        let resolved_field_ty = self.sub.apply(field_ty);
+                        match alias_pat {
+                            Some(pat) => self.bind_pattern(pat, &resolved_field_ty)?,
+                            None => {
+                                self.env.insert(
+                                    fname.clone(),
+                                    Scheme {
+                                        forall: vec![],
+                                        constraints: vec![],
+                                        ty: resolved_field_ty.clone(),
+                                    },
+                                );
+                                self.record_type_at_span(*span, &resolved_field_ty);
+                            }
                         }
                     }
                 }
@@ -210,6 +283,14 @@ impl Checker {
     }
 
     // --- Exhaustiveness checking ---
+
+    /// Build a `SimplifyCtx` for converting patterns into simplified form.
+    pub(crate) fn simplify_ctx(&self) -> super::exhaustiveness::SimplifyCtx<'_> {
+        super::exhaustiveness::SimplifyCtx {
+            records: &self.records,
+            sub: &self.sub,
+        }
+    }
 
     /// Check that a `let` binding pattern is irrefutable (covers all values of
     /// the type). Refutable patterns like `Ok(x)` in `let Ok(x) = expr` are
@@ -244,7 +325,8 @@ impl Checker {
             adt_variants: &self.adt_variants,
         };
 
-        let spat = exh::simplify_pat(pat);
+        let sctx = self.simplify_ctx();
+        let spat = exh::simplify_pat(pat, Some(&resolved), &sctx);
         let matrix = vec![vec![spat]];
         let wildcard_row = vec![SPat::Wildcard];
 
@@ -282,53 +364,60 @@ impl Checker {
 
         let resolved = self.sub.apply(scrutinee_ty);
 
-        // Skip exhaustiveness for unresolved type variables and arrow types
-        match &resolved {
-            Type::Con(_, _) => {}
-            _ => return Ok(()),
-        };
+        // Anonymous record types: go straight to Maranget (single-constructor,
+        // but field sub-patterns may be refutable).
+        let is_anon_record = matches!(&resolved, Type::Record(_));
+
+        if !is_anon_record {
+            // Skip exhaustiveness for unresolved type variables and arrow types
+            match &resolved {
+                Type::Con(_, _) => {}
+                _ => return Ok(()),
+            };
+        }
 
         let type_name = match &resolved {
             Type::Con(name, _) => name.clone(),
+            Type::Record(_) => String::new(), // anonymous records have no type name
             _ => unreachable!(),
         };
 
-        // For primitive types with infinite value sets, keep the simple check:
-        // require a wildcard/variable fallback if any literal patterns are used.
-        if !self.adt_variants.contains_key(&type_name)
+        // For primitive types with infinite value sets (Int, Float, String),
+        // exhaustiveness requires an unguarded wildcard/variable catchall arm.
+        if !is_anon_record
+            && !self.adt_variants.contains_key(&type_name)
             && matches!(type_name.as_str(), "Int" | "Float" | "String")
         {
-            let has_lit = arms
-                .iter()
-                .any(|arm| matches!(&arm.node.pattern, Pat::Lit { .. }));
-            if has_lit {
-                let has_catchall = arms.iter().any(|arm| {
-                    arm.node.guard.is_none()
-                        && matches!(&arm.node.pattern, Pat::Wildcard { .. } | Pat::Var { .. })
-                });
-                if !has_catchall {
-                    return Err(Diagnostic::error_at(
-                        span,
-                        format!(
-                            "non-exhaustive pattern match on {}: add a wildcard `_` or variable pattern",
-                            type_name
-                        ),
-                    ));
-                }
+            let has_catchall = arms.iter().any(|arm| {
+                arm.node.guard.is_none()
+                    && matches!(&arm.node.pattern, Pat::Wildcard { .. } | Pat::Var { .. })
+            });
+            if !has_catchall {
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "non-exhaustive pattern match on {}: add a wildcard `_` or variable pattern",
+                        type_name
+                    ),
+                ));
             }
             return Ok(());
         }
 
-        // For non-ADT, non-primitive types (e.g. Unit, records), skip.
-        // Tuples are allowed through -- they're single-constructor types
-        // handled natively by the Maranget algorithm.
-        if !self.adt_variants.contains_key(&type_name) && type_name != "Tuple" {
+        // For non-ADT, non-primitive types (e.g. Unit), skip.
+        // Tuples and anonymous records are allowed through -- they're
+        // single-constructor types handled by the Maranget algorithm.
+        if !is_anon_record
+            && !self.adt_variants.contains_key(&type_name)
+            && type_name != "Tuple"
+        {
             return Ok(());
         }
 
         let ctx = ExhaustivenessCtx {
             adt_variants: &self.adt_variants,
         };
+        let sctx = self.simplify_ctx();
 
         // Build pattern matrix from arms (skip guarded arms for coverage,
         // but include them for redundancy checking)
@@ -336,7 +425,7 @@ impl Checker {
 
         for arm in arms {
             let arm = &arm.node;
-            let spat = exh::simplify_pat(&arm.pattern);
+            let spat = exh::simplify_pat(&arm.pattern, Some(&resolved), &sctx);
             let row = vec![spat.clone()];
 
             // Redundancy check: is this arm useful w.r.t. prior unguarded arms?
@@ -433,12 +522,13 @@ impl Checker {
         let ctx = ExhaustivenessCtx {
             adt_variants: &self.adt_variants,
         };
+        let sctx = self.simplify_ctx();
 
         // Build a matrix from else arms (each is a single-column pattern)
         let matrix: Vec<Vec<SPat>> = else_arms
             .iter()
             .filter(|arm| arm.node.guard.is_none())
-            .map(|arm| vec![exh::simplify_pat(&arm.node.pattern)])
+            .map(|arm| vec![exh::simplify_pat(&arm.node.pattern, None, &sctx)])
             .collect();
 
         // Check that each needed bail constructor is covered

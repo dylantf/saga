@@ -13,6 +13,8 @@ use std::collections::HashMap;
 
 use crate::ast::{Lit, Pat};
 
+use super::{RecordInfo, Substitution, Type};
+
 /// A simplified pattern for the matrix algorithm.
 /// We strip spans and normalize booleans to constructors.
 #[derive(Debug, Clone)]
@@ -33,13 +35,24 @@ pub(crate) struct ExhaustivenessCtx<'a> {
     pub adt_variants: &'a HashMap<String, Vec<(String, usize)>>,
 }
 
+/// Context for simplifying patterns -- provides record type info so that
+/// named and anonymous record patterns can be converted into positional
+/// constructors with correct arity and sub-pattern types.
+pub(crate) struct SimplifyCtx<'a> {
+    pub records: &'a HashMap<String, RecordInfo>,
+    pub sub: &'a Substitution,
+}
+
 /// A row in the pattern matrix (one case arm's worth of patterns).
 type PatRow = Vec<SPat>;
 /// The pattern matrix: rows of pattern vectors.
 type PatMatrix = Vec<PatRow>;
 
 /// Convert an AST pattern to a simplified pattern.
-pub(crate) fn simplify_pat(pat: &Pat) -> SPat {
+///
+/// `ty` is the (optional) resolved type of the value being matched. It is used
+/// to determine the full field set for anonymous record patterns.
+pub(crate) fn simplify_pat(pat: &Pat, ty: Option<&Type>, ctx: &SimplifyCtx) -> SPat {
     match pat {
         Pat::Wildcard { .. } | Pat::Var { .. } => SPat::Wildcard,
         Pat::Lit {
@@ -57,13 +70,35 @@ pub(crate) fn simplify_pat(pat: &Pat) -> SPat {
             // Use bare constructor name (last segment) so qualified patterns
             // like `Std.File.FileError` match adt_variants which use bare names.
             let bare = name.rsplit('.').next().unwrap_or(name);
-            SPat::Constructor(bare.to_string(), args.iter().map(simplify_pat).collect())
+            SPat::Constructor(
+                bare.to_string(),
+                args.iter()
+                    .map(|p| simplify_pat(p, None, ctx))
+                    .collect(),
+            )
         }
-        Pat::Tuple { elements, .. } => SPat::Tuple(elements.iter().map(simplify_pat).collect()),
-        Pat::Record { .. } | Pat::AnonRecord { .. } => {
-            // Records are structural, not ADT constructors -- treat as wildcard
-            // (record exhaustiveness would require field-level analysis)
-            SPat::Wildcard
+        Pat::Tuple { elements, .. } => {
+            // Extract element types from Tuple type if available
+            let elem_types: Option<Vec<Type>> = ty.and_then(|t| match t {
+                Type::Con(name, args) if name == "Tuple" => Some(args.clone()),
+                _ => None,
+            });
+            SPat::Tuple(
+                elements
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let elem_ty = elem_types.as_ref().and_then(|ts| ts.get(i));
+                        simplify_pat(p, elem_ty, ctx)
+                    })
+                    .collect(),
+            )
+        }
+        Pat::Record { name, fields, .. } => {
+            simplify_record_pat(name, fields, ctx)
+        }
+        Pat::AnonRecord { fields, .. } => {
+            simplify_anon_record_pat(fields, ty, ctx)
         }
         Pat::StringPrefix { .. } => {
             // String prefix patterns are non-covering (infinite string domain)
@@ -74,6 +109,77 @@ pub(crate) fn simplify_pat(pat: &Pat) -> SPat {
             unreachable!("surface syntax should be desugared before exhaustiveness checking")
         }
     }
+}
+
+/// Simplify a named record pattern into a positional constructor.
+/// Looks up the record definition to get the canonical field order and types.
+fn simplify_record_pat(
+    name: &str,
+    fields: &[(String, Option<Pat>)],
+    ctx: &SimplifyCtx,
+) -> SPat {
+    let Some(info) = ctx.records.get(name) else {
+        return SPat::Wildcard;
+    };
+    let field_map: HashMap<&str, Option<&Pat>> = fields
+        .iter()
+        .map(|(fname, opt_pat)| (fname.as_str(), opt_pat.as_ref()))
+        .collect();
+    let sub_pats: Vec<SPat> = info
+        .fields
+        .iter()
+        .map(|(fname, field_ty)| {
+            match field_map.get(fname.as_str()) {
+                Some(Some(pat)) => {
+                    let resolved = ctx.sub.apply(field_ty);
+                    simplify_pat(pat, Some(&resolved), ctx)
+                }
+                _ => SPat::Wildcard, // unmentioned or bare binding
+            }
+        })
+        .collect();
+    SPat::Constructor(name.to_string(), sub_pats)
+}
+
+/// Simplify an anonymous record pattern. Requires the type to know the full
+/// field set; without it, falls back to Wildcard.
+fn simplify_anon_record_pat(
+    fields: &[(String, Option<Pat>)],
+    ty: Option<&Type>,
+    ctx: &SimplifyCtx,
+) -> SPat {
+    // The type must be Type::Record(all_fields) so we know every field.
+    let Some(Type::Record(all_fields)) = ty else {
+        return SPat::Wildcard;
+    };
+    let field_map: HashMap<&str, Option<&Pat>> = fields
+        .iter()
+        .map(|(fname, opt_pat)| (fname.as_str(), opt_pat.as_ref()))
+        .collect();
+    // Use a synthetic constructor name for anonymous records.
+    // All anonymous record patterns of the same type will share this name
+    // because Type::Record fields are sorted.
+    let ctor_name = format!(
+        "__anon_record_{}",
+        all_fields
+            .iter()
+            .map(|(f, _)| f.as_str())
+            .collect::<Vec<_>>()
+            .join("_")
+    );
+    let sub_pats: Vec<SPat> = all_fields
+        .iter()
+        .map(|(fname, field_ty)| {
+            match field_map.get(fname.as_str()) {
+                Some(Some(pat)) => {
+                    let resolved = ctx.sub.apply(field_ty);
+                    simplify_pat(pat, Some(&resolved), ctx)
+                }
+                _ => SPat::Wildcard,
+            }
+        })
+        .collect();
+    SPat::Constructor(ctor_name, sub_pats)
 }
 
 /// Specialize the matrix for a given constructor.
@@ -230,8 +336,11 @@ fn is_complete_signature(ctx: &ExhaustivenessCtx, head_ctors: &[(String, usize)]
         return false;
     }
 
-    // Special case: tuples always form a complete signature (one constructor)
-    if head_ctors.len() == 1 && head_ctors[0].0 == "__tuple" {
+    // Special case: tuples and anonymous records always form a complete
+    // signature (single constructor)
+    if head_ctors.len() == 1
+        && (head_ctors[0].0 == "__tuple" || head_ctors[0].0.starts_with("__anon_record_"))
+    {
         return true;
     }
 

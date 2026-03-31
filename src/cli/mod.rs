@@ -1,4 +1,5 @@
 pub mod build;
+pub mod color;
 pub mod commands;
 pub mod diagnostics;
 
