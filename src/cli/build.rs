@@ -193,9 +193,7 @@ fn copy_project_bridges(roots: &[&Path], build_dir: &Path) {
             std::process::exit(1);
         }
     }
-    if count > 0 {
-        eprintln!("Copied {} bridge file(s)", count);
-    }
+    // Bridge file count is an internal detail -- don't show to user.
 }
 
 fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Result<(), String> {
@@ -272,12 +270,7 @@ pub fn run_erlc(build_dir: &Path, build_start: Instant) {
     }
 
     let elapsed = build_start.elapsed();
-    eprintln!(
-        "Built {} module(s) in {} ({:.2}s)",
-        compilable_files.len(),
-        build_dir.display(),
-        elapsed.as_secs_f64()
-    );
+    eprintln!("  Built in {:.2}s", elapsed.as_secs_f64());
 }
 
 /// Run a compiled module on the BEAM.
@@ -489,7 +482,11 @@ pub fn build_script(file: &str, profile: &str) -> PathBuf {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    eprintln!("  Compiling {}...", file);
+    let display_path = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| Path::new(file).strip_prefix(&cwd).ok().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from(file));
+    eprintln!("  Compiling {}...", display_path.display());
     let mut checker = make_checker(None);
     let (program, _) = parse_and_typecheck(&source, file, &mut checker);
     let result = checker.to_result();
