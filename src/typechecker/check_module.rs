@@ -73,7 +73,8 @@ impl ModuleExports {
                     if *opaque {
                         type_constructors.insert(name.clone(), vec![]);
                     } else {
-                        let ctors: Vec<String> = variants.iter().map(|v| v.node.name.clone()).collect();
+                        let ctors: Vec<String> =
+                            variants.iter().map(|v| v.node.name.clone()).collect();
                         type_constructors.insert(name.clone(), ctors);
                     }
                 }
@@ -115,7 +116,11 @@ impl ModuleExports {
                     target_type,
                     ..
                 } => {
-                    let key = (trait_name.clone(), trait_type_args.clone(), target_type.clone());
+                    let key = (
+                        trait_name.clone(),
+                        trait_type_args.clone(),
+                        target_type.clone(),
+                    );
                     if let Some(info) = checker.trait_state.impls.get(&key) {
                         trait_impls.insert(key, info.clone());
                     }
@@ -162,13 +167,48 @@ impl ModuleExports {
         let mut doc_comments: HashMap<String, Vec<String>> = HashMap::new();
         for decl in program {
             let (name, doc) = match decl {
-                Decl::FunSignature { public: true, name, doc, .. } => (name, doc),
-                Decl::Val { public: true, name, doc, .. } => (name, doc),
-                Decl::TypeDef { public: true, name, doc, .. } => (name, doc),
-                Decl::RecordDef { public: true, name, doc, .. } => (name, doc),
-                Decl::EffectDef { public: true, name, doc, .. } => (name, doc),
-                Decl::HandlerDef { public: true, name, doc, .. } => (name, doc),
-                Decl::TraitDef { public: true, name, doc, .. } => (name, doc),
+                Decl::FunSignature {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::Val {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::TypeDef {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::RecordDef {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::EffectDef {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::HandlerDef {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::TraitDef {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
                 _ => continue,
             };
             if !doc.is_empty() {
@@ -273,7 +313,10 @@ fn scan_dir(dir: &Path, root: &Path, map: &mut ModuleMap) -> Result<(), String> 
         let path = entry.path();
         if path.is_dir() {
             // Skip _build and tests directories
-            if path.file_name().is_some_and(|n| n == "_build" || n == "tests") {
+            if path
+                .file_name()
+                .is_some_and(|n| n == "_build" || n == "tests")
+            {
                 continue;
             }
             scan_dir(&path, root, map)?;
@@ -388,7 +431,8 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
 
 pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
     let name = module_path.join(".");
-    BUILTIN_MODULES.iter()
+    BUILTIN_MODULES
+        .iter()
         .find(|(mod_name, _)| *mod_name == name)
         .map(|(_, src)| *src)
 }
@@ -536,7 +580,9 @@ impl Checker {
 
         // Cache the CheckResult for elaboration (avoids re-typechecking in compile_std_modules)
         let mod_result = mod_checker.to_result();
-        self.modules.check_results.insert(module_name.clone(), mod_result);
+        self.modules
+            .check_results
+            .insert(module_name.clone(), mod_result);
 
         // Advance the parent's var counter past the module's to keep IDs disjoint.
         if mod_checker.next_var > self.next_var {
@@ -610,23 +656,20 @@ impl Checker {
             }
         }
         for (name, variants) in &self.adt_variants {
-            mc.adt_variants.entry(name.clone()).or_insert_with(|| variants.clone());
+            mc.adt_variants
+                .entry(name.clone())
+                .or_insert_with(|| variants.clone());
         }
         // Share trait impls from all previously loaded Std modules so stdlib modules
         // can use traits on standard types (e.g. Show for String, Ord for Int).
         for (key, info) in &self.modules.base_trait_impls {
-            mc.trait_state.impls.entry(key.clone()).or_insert_with(|| info.clone());
+            mc.trait_state
+                .impls
+                .entry(key.clone())
+                .or_insert_with(|| info.clone());
         }
         // Share scope_map so builtin modules can resolve bare names to canonical forms
-        for (k, v) in &self.scope_map.values {
-            mc.scope_map.values.entry(k.clone()).or_insert_with(|| v.clone());
-        }
-        for (k, v) in &self.scope_map.types {
-            mc.scope_map.types.entry(k.clone()).or_insert_with(|| v.clone());
-        }
-        for (k, v) in &self.scope_map.constructors {
-            mc.scope_map.constructors.entry(k.clone()).or_insert_with(|| v.clone());
-        }
+        mc.scope_map.merge(&self.scope_map);
     }
 
     /// Create a module checker seeded with this checker's caches.
@@ -678,6 +721,10 @@ impl Checker {
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        // Build and merge scope_map from the standalone resolver
+        let import_scope = resolve_import(exports, module_name, prefix, exposing);
+        self.scope_map.merge(&import_scope);
+
         let ModuleExports {
             bindings,
             type_constructors,
@@ -696,23 +743,29 @@ impl Checker {
         let binding_map: std::collections::HashMap<&str, &Scheme> =
             bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
         for (name, info) in traits {
-            self.trait_state.traits
+            self.trait_state
+                .traits
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
             // Register doc comments for the trait itself
             if let Some(doc) = doc_comments.get(name) {
-                self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
+                self.lsp
+                    .imported_docs
+                    .entry(name.clone())
+                    .or_insert_with(|| doc.clone());
             }
             for (method_name, _, _, _) in &info.methods {
                 if let Some(&scheme) = binding_map.get(method_name.as_str())
                     && self.env.get(method_name).is_none()
                 {
                     if let Some(&did) = def_ids.get(method_name.as_str()) {
-                        self.env.insert_with_def(method_name.clone(), scheme.clone(), did);
+                        self.env
+                            .insert_with_def(method_name.clone(), scheme.clone(), did);
                     } else {
                         self.env.insert(method_name.clone(), scheme.clone());
                     }
-                    self.lsp.import_origins
+                    self.lsp
+                        .import_origins
                         .insert(method_name.clone(), module_name.to_string());
                 }
             }
@@ -720,7 +773,8 @@ impl Checker {
 
         // Trait impls
         for (key, info) in trait_impls {
-            self.trait_state.impls
+            self.trait_state
+                .impls
                 .entry(key.clone())
                 .or_insert_with(|| info.clone());
         }
@@ -730,11 +784,15 @@ impl Checker {
             self.effects
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
-            self.lsp.type_import_origins
+            self.lsp
+                .type_import_origins
                 .entry(name.clone())
                 .or_insert_with(|| module_name.to_string());
             if let Some(doc) = doc_comments.get(name) {
-                self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
+                self.lsp
+                    .imported_docs
+                    .entry(name.clone())
+                    .or_insert_with(|| doc.clone());
             }
         }
 
@@ -744,7 +802,10 @@ impl Checker {
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
             if let Some(doc) = doc_comments.get(name) {
-                self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
+                self.lsp
+                    .imported_docs
+                    .entry(name.clone())
+                    .or_insert_with(|| doc.clone());
             }
         }
 
@@ -752,17 +813,10 @@ impl Checker {
         for (name, arity) in type_arity {
             // Bare name (canonical internal form)
             self.type_arity.entry(name.clone()).or_insert(*arity);
-            self.lsp.type_import_origins
+            self.lsp
+                .type_import_origins
                 .entry(name.clone())
                 .or_insert_with(|| module_name.to_string());
-
-            // ScopeMap resolves qualified forms to bare type name
-            let canonical = format!("{}.{}", module_name, name);
-            self.scope_map.types.entry(canonical).or_insert_with(|| name.clone());
-            if prefix != module_name {
-                let aliased = format!("{}.{}", prefix, name);
-                self.scope_map.types.entry(aliased).or_insert_with(|| name.clone());
-            }
         }
 
         // Function effects (for cross-module `with` validation and effect propagation).
@@ -816,7 +870,8 @@ impl Checker {
         // Both qualified (Prefix.name) and unqualified (exposed) forms
         // map back to the same source module.
         for (name, _) in bindings {
-            self.lsp.import_origins
+            self.lsp
+                .import_origins
                 .insert(name.clone(), module_name.to_string());
         }
 
@@ -824,25 +879,27 @@ impl Checker {
             // Canonical: always register under full module path (e.g. "Std.String.replace")
             let canonical = format!("{}.{}", module_name, name);
             if let Some(&did) = def_ids.get(name.as_str()) {
-                self.env.insert_with_def(canonical.clone(), scheme.clone(), did);
+                self.env
+                    .insert_with_def(canonical.clone(), scheme.clone(), did);
             } else {
                 self.env.insert(canonical.clone(), scheme.clone());
             }
             // Doc comments: register under canonical form
             if let Some(doc) = doc_comments.get(name) {
-                self.lsp.imported_docs.entry(canonical.clone()).or_insert_with(|| doc.clone());
+                self.lsp
+                    .imported_docs
+                    .entry(canonical.clone())
+                    .or_insert_with(|| doc.clone());
             }
-            // ScopeMap: canonical -> canonical
-            self.scope_map.values.entry(canonical.clone()).or_insert_with(|| canonical.clone());
-            // Alias: if prefix differs from module_name, register scope_map entry
-            // (no longer duplicated in env — scope_map resolves aliased -> canonical)
+            // Doc comments: aliased form
             if prefix != module_name {
                 let aliased = format!("{}.{}", prefix, name);
                 if let Some(doc) = doc_comments.get(name) {
-                    self.lsp.imported_docs.entry(aliased.clone()).or_insert_with(|| doc.clone());
+                    self.lsp
+                        .imported_docs
+                        .entry(aliased)
+                        .or_insert_with(|| doc.clone());
                 }
-                // ScopeMap: aliased -> canonical
-                self.scope_map.values.entry(aliased).or_insert_with(|| canonical.clone());
             }
         }
 
@@ -854,13 +911,6 @@ impl Checker {
                 let canonical = format!("{}.{}", module_name, ctor);
                 if let Some(&scheme) = binding_map.get(ctor.as_str()) {
                     self.constructors.insert(canonical.clone(), scheme.clone());
-                    // ScopeMap: canonical -> canonical
-                    self.scope_map.constructors.entry(canonical.clone()).or_insert_with(|| canonical.clone());
-                    // Alias: scope_map only (no longer duplicated in constructors)
-                    if prefix != module_name {
-                        let aliased = format!("{}.{}", prefix, ctor);
-                        self.scope_map.constructors.entry(aliased).or_insert_with(|| canonical.clone());
-                    }
                     variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
                 }
             }
@@ -881,15 +931,9 @@ impl Checker {
                 let is_type = name.starts_with(|c: char| c.is_uppercase());
                 if is_type {
                     let mut found = binding_map.contains_key(name.as_str());
-                    self.lsp.type_import_origins
+                    self.lsp
+                        .type_import_origins
                         .insert(name.clone(), module_name.to_string());
-                    // ScopeMap: bare type value -> canonical (no longer inserted into env)
-                    if binding_map.contains_key(name.as_str()) {
-                        let type_canonical = format!("{}.{}", module_name, name);
-                        self.scope_map.values.entry(name.clone()).or_insert(type_canonical);
-                    }
-                    // ScopeMap: bare type name resolves to itself (types use bare canonical names)
-                    self.scope_map.types.entry(name.clone()).or_insert_with(|| name.clone());
                     // If it's a record type, register its fields
                     if let Some(fields) = record_defs.get(name.as_str()) {
                         self.records.insert(name.clone(), fields.clone());
@@ -903,14 +947,11 @@ impl Checker {
                         for ctor in ctors {
                             if let Some(&scheme) = binding_map.get(ctor.as_str()) {
                                 if let Some(&did) = def_ids.get(ctor.as_str()) {
-                                    self.lsp.constructor_def_ids
+                                    self.lsp
+                                        .constructor_def_ids
                                         .entry(ctor.clone())
                                         .or_insert(did);
                                 }
-                                // ScopeMap: bare constructor -> canonical (no longer inserted into env/constructors)
-                                let ctor_canonical = format!("{}.{}", module_name, ctor);
-                                self.scope_map.constructors.entry(ctor.clone()).or_insert_with(|| ctor_canonical.clone());
-                                self.scope_map.values.entry(ctor.clone()).or_insert(ctor_canonical);
                                 variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
                                 found = true;
                             }
@@ -919,23 +960,24 @@ impl Checker {
                             self.adt_variants.insert(name.clone(), variants);
                         }
                     }
-                    // If the exposed name is a constructor (not a type), register in scope_map
+                    // If the exposed name is a constructor (not a type)
                     if ctor_to_type.contains_key(name.as_str())
                         && binding_map.contains_key(name.as_str())
                     {
                         if let Some(&did) = def_ids.get(name.as_str()) {
-                            self.lsp.constructor_def_ids
+                            self.lsp
+                                .constructor_def_ids
                                 .entry(name.clone())
                                 .or_insert(did);
                         }
-                        let ctor_canonical = format!("{}.{}", module_name, name);
-                        self.scope_map.constructors.entry(name.clone()).or_insert_with(|| ctor_canonical.clone());
-                        self.scope_map.values.entry(name.clone()).or_insert(ctor_canonical);
                         found = true;
                     }
                     // Register doc comments under the exposed (bare) name
                     if let Some(doc) = doc_comments.get(name.as_str()) {
-                        self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
+                        self.lsp
+                            .imported_docs
+                            .entry(name.clone())
+                            .or_insert_with(|| doc.clone());
                     }
                     if !found {
                         return Err(Diagnostic::error_at(
@@ -947,16 +989,20 @@ impl Checker {
                     // Look up via canonical (full module path) first, then alias
                     let canonical = format!("{}.{}", module_name, name);
                     let alias_key = format!("{}.{}", prefix, name);
-                    let lookup = self.env.get(&canonical).cloned()
+                    let lookup = self
+                        .env
+                        .get(&canonical)
+                        .cloned()
                         .or_else(|| self.env.get(&alias_key).cloned());
                     match lookup {
                         Some(_scheme) => {
                             // Register doc comments under the exposed (bare) name
                             if let Some(doc) = doc_comments.get(name.as_str()) {
-                                self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
+                                self.lsp
+                                    .imported_docs
+                                    .entry(name.clone())
+                                    .or_insert_with(|| doc.clone());
                             }
-                            // ScopeMap: bare value -> canonical (no longer inserted into env)
-                            self.scope_map.values.entry(name.clone()).or_insert(canonical);
                         }
                         None => {
                             return Err(Diagnostic::error_at(
@@ -970,6 +1016,132 @@ impl Checker {
         }
         Ok(())
     }
+}
+
+/// Build scope_map entries for a module import.
+///
+/// This is the name resolution logic: given a module's exports and the import
+/// parameters (module name, alias prefix, exposing list), compute all the
+/// user-visible-name → canonical-name mappings.
+///
+/// Separated from `inject_exports` so name resolution can eventually run as
+/// an independent pass before typechecking.
+pub(super) fn resolve_import(
+    exports: &ModuleExports,
+    module_name: &str,
+    prefix: &str,
+    exposing: Option<&[crate::ast::ExposedItem]>,
+) -> super::ScopeMap {
+    let mut scope = super::ScopeMap::default();
+
+    let binding_map: std::collections::HashMap<&str, &Scheme> = exports
+        .bindings
+        .iter()
+        .map(|(n, s)| (n.as_str(), s))
+        .collect();
+
+    // Build reverse map: constructor name -> type name
+    let mut ctor_to_type: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for (type_name, ctors) in &exports.type_constructors {
+        for ctor in ctors {
+            ctor_to_type.insert(ctor.as_str(), type_name.as_str());
+        }
+    }
+
+    // Value bindings: canonical + aliased
+    for (name, _) in &exports.bindings {
+        let canonical = format!("{}.{}", module_name, name);
+        scope
+            .values
+            .entry(canonical.clone())
+            .or_insert_with(|| canonical.clone());
+        if prefix != module_name {
+            let aliased = format!("{}.{}", prefix, name);
+            scope
+                .values
+                .entry(aliased)
+                .or_insert_with(|| canonical.clone());
+        }
+    }
+
+    // Constructors: canonical + aliased
+    for ctors in exports.type_constructors.values() {
+        for ctor in ctors {
+            if binding_map.contains_key(ctor.as_str()) {
+                let canonical = format!("{}.{}", module_name, ctor);
+                scope
+                    .constructors
+                    .entry(canonical.clone())
+                    .or_insert_with(|| canonical.clone());
+                if prefix != module_name {
+                    let aliased = format!("{}.{}", prefix, ctor);
+                    scope
+                        .constructors
+                        .entry(aliased)
+                        .or_insert_with(|| canonical.clone());
+                }
+            }
+        }
+    }
+
+    // Type names: qualified -> bare
+    for name in exports.type_arity.keys() {
+        let canonical = format!("{}.{}", module_name, name);
+        scope.types.entry(canonical).or_insert_with(|| name.clone());
+        if prefix != module_name {
+            let aliased = format!("{}.{}", prefix, name);
+            scope.types.entry(aliased).or_insert_with(|| name.clone());
+        }
+    }
+
+    // Exposed items: bare -> canonical
+    if let Some(exposed) = exposing {
+        for name in exposed {
+            let is_type = name.starts_with(|c: char| c.is_uppercase());
+            if is_type {
+                // Bare type value -> canonical
+                if binding_map.contains_key(name.as_str()) {
+                    let type_canonical = format!("{}.{}", module_name, name);
+                    scope.values.entry(name.clone()).or_insert(type_canonical);
+                }
+                // Bare type name resolves to itself
+                scope
+                    .types
+                    .entry(name.clone())
+                    .or_insert_with(|| name.clone());
+                // Constructors belonging to this type
+                if let Some(ctors) = exports.type_constructors.get(name) {
+                    for ctor in ctors {
+                        if binding_map.contains_key(ctor.as_str()) {
+                            let ctor_canonical = format!("{}.{}", module_name, ctor);
+                            scope
+                                .constructors
+                                .entry(ctor.clone())
+                                .or_insert_with(|| ctor_canonical.clone());
+                            scope.values.entry(ctor.clone()).or_insert(ctor_canonical);
+                        }
+                    }
+                }
+                // Exposed constructor-as-name
+                if ctor_to_type.contains_key(name.as_str())
+                    && binding_map.contains_key(name.as_str())
+                {
+                    let ctor_canonical = format!("{}.{}", module_name, name);
+                    scope
+                        .constructors
+                        .entry(name.clone())
+                        .or_insert_with(|| ctor_canonical.clone());
+                    scope.values.entry(name.clone()).or_insert(ctor_canonical);
+                }
+            } else {
+                // Bare value -> canonical
+                let canonical = format!("{}.{}", module_name, name);
+                scope.values.entry(name.clone()).or_insert(canonical);
+            }
+        }
+    }
+
+    scope
 }
 
 /// Collect codegen-relevant info from a module's public declarations.
@@ -1025,9 +1197,7 @@ fn collect_codegen_info(
                 record_fields.push((name.clone(), field_names));
             }
             Decl::HandlerDef {
-                public: true,
-                name,
-                ..
+                public: true, name, ..
             } => {
                 handler_defs.push(name.clone());
             }
@@ -1063,8 +1233,10 @@ fn collect_codegen_info(
                 // Private externals are needed for handler body inlining.
                 if let Some(ext) = annotations.iter().find(|a| a.name == "external")
                     && ext.args.len() >= 3
-                    && let (crate::ast::Lit::String(erl_mod, _), crate::ast::Lit::String(erl_func, _)) =
-                        (&ext.args[1], &ext.args[2])
+                    && let (
+                        crate::ast::Lit::String(erl_mod, _),
+                        crate::ast::Lit::String(erl_func, _),
+                    ) = (&ext.args[1], &ext.args[2])
                 {
                     external_funs.push((
                         name.clone(),
@@ -1088,7 +1260,10 @@ fn collect_codegen_info(
                 } else {
                     format!("_{}", trait_type_args.join("_"))
                 };
-                let dict_name = format!("__dict_{}{}_{}_{}", trait_name, type_args_suffix, erlang_module, target_type);
+                let dict_name = format!(
+                    "__dict_{}{}_{}_{}",
+                    trait_name, type_args_suffix, erlang_module, target_type
+                );
                 let arity = where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
                 let var_to_idx: std::collections::HashMap<&str, usize> = type_params
                     .iter()
@@ -1098,7 +1273,10 @@ fn collect_codegen_info(
                 let param_constraints: Vec<(String, usize)> = where_clause
                     .iter()
                     .flat_map(|bound| {
-                        let idx = var_to_idx.get(bound.type_var.as_str()).copied().unwrap_or(0);
+                        let idx = var_to_idx
+                            .get(bound.type_var.as_str())
+                            .copied()
+                            .unwrap_or(0);
                         bound.traits.iter().map(move |(t, _, _)| (t.clone(), idx))
                     })
                     .collect();

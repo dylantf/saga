@@ -792,6 +792,19 @@ impl ScopeMap {
     pub fn resolve_constructor(&self, name: &str) -> Option<&str> {
         self.constructors.get(name).map(|s| s.as_str())
     }
+
+    /// Merge another scope_map into this one (first-insert-wins).
+    pub fn merge(&mut self, other: &ScopeMap) {
+        for (k, v) in &other.values {
+            self.values.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.types {
+            self.types.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.constructors {
+            self.constructors.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
 }
 
 /// Trait system state: definitions, impl registry, deferred constraints, where bounds.
