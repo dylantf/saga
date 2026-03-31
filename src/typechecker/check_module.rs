@@ -689,6 +689,10 @@ impl Checker {
             self.trait_state.traits
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
+            // Register doc comments for the trait itself
+            if let Some(doc) = doc_comments.get(name) {
+                self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
+            }
             for (method_name, _, _, _) in &info.methods {
                 if let Some(&scheme) = binding_map.get(method_name.as_str())
                     && self.env.get(method_name).is_none()
@@ -719,6 +723,9 @@ impl Checker {
             self.lsp.type_import_origins
                 .entry(name.clone())
                 .or_insert_with(|| module_name.to_string());
+            if let Some(doc) = doc_comments.get(name) {
+                self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
+            }
         }
 
         // Handlers
@@ -726,6 +733,9 @@ impl Checker {
             self.handlers
                 .entry(name.clone())
                 .or_insert_with(|| info.clone());
+            if let Some(doc) = doc_comments.get(name) {
+                self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
+            }
         }
 
         // Type arities and type aliases (for resolving qualified type names)
@@ -764,17 +774,13 @@ impl Checker {
             self.effect_meta.known_funs.insert(name.clone());
         }
 
-        // Doc comments for imported declarations
-        for (name, doc) in doc_comments {
-            self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
-        }
-
         // Bindings, type constructors, records (qualified + exposing)
         self.inject_scoped_bindings(
             bindings,
             type_constructors,
             record_defs,
             def_ids,
+            doc_comments,
             module_name,
             prefix,
             exposing,
@@ -789,6 +795,7 @@ impl Checker {
         ctors_map: &std::collections::HashMap<String, Vec<String>>,
         record_defs: &std::collections::HashMap<String, super::RecordInfo>,
         def_ids: &HashMap<String, crate::ast::NodeId>,
+        doc_comments: &HashMap<String, Vec<String>>,
         module_name: &str,
         prefix: &str,
         exposing: Option<&[crate::ast::ExposedItem]>,
@@ -823,13 +830,20 @@ impl Checker {
             } else {
                 self.env.insert(canonical.clone(), scheme.clone());
             }
+            // Doc comments: register under canonical form
+            if let Some(doc) = doc_comments.get(name) {
+                self.lsp.imported_docs.entry(canonical).or_insert_with(|| doc.clone());
+            }
             // Alias: if prefix differs from module_name, also register short form (e.g. "String.replace")
             if prefix != module_name {
                 let aliased = format!("{}.{}", prefix, name);
                 if let Some(&did) = def_ids.get(name.as_str()) {
-                    self.env.insert_with_def(aliased, scheme.clone(), did);
+                    self.env.insert_with_def(aliased.clone(), scheme.clone(), did);
                 } else {
-                    self.env.insert(aliased, scheme.clone());
+                    self.env.insert(aliased.clone(), scheme.clone());
+                }
+                if let Some(doc) = doc_comments.get(name) {
+                    self.lsp.imported_docs.entry(aliased).or_insert_with(|| doc.clone());
                 }
             }
         }
@@ -921,6 +935,10 @@ impl Checker {
                         self.constructors.insert(name.clone(), scheme.clone());
                         found = true;
                     }
+                    // Register doc comments under the exposed (bare) name
+                    if let Some(doc) = doc_comments.get(name.as_str()) {
+                        self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
+                    }
                     if !found {
                         return Err(Diagnostic::error_at(
                             span,
@@ -942,6 +960,10 @@ impl Checker {
                                 self.env.insert_with_def(name.clone(), scheme, did);
                             } else {
                                 self.env.insert(name.clone(), scheme);
+                            }
+                            // Register doc comments under the exposed (bare) name
+                            if let Some(doc) = doc_comments.get(name.as_str()) {
+                                self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
                             }
                         }
                         None => {

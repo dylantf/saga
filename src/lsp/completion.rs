@@ -512,7 +512,7 @@ pub fn collect_completions(
                 module_prefixes.insert(&name[..dot]);
             }
         }
-        for (name, _) in &result.constructors {
+        for name in result.constructors.keys() {
             if let Some(dot) = name.find('.') {
                 module_prefixes.insert(&name[..dot]);
             }
@@ -558,7 +558,8 @@ pub fn collect_completions(
 
     // Built-in type names
     let type_names = [
-        "Int", "Float", "String", "Bool", "Unit", "List", "Maybe", "Result", "Tuple", "Pid", "Dict", "Set",
+        "Int", "Float", "String", "Bool", "Unit", "List", "Maybe", "Result", "Tuple", "Pid",
+        "Dict", "Set",
     ];
     for type_name in type_names {
         if !prefix.is_empty() && !type_name.to_lowercase().starts_with(&prefix_lower) {
