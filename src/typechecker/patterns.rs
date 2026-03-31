@@ -293,28 +293,23 @@ impl Checker {
             _ => unreachable!(),
         };
 
-        // For primitive types with infinite value sets, keep the simple check:
-        // require a wildcard/variable fallback if any literal patterns are used.
+        // For primitive types with infinite value sets (Int, Float, String),
+        // exhaustiveness requires an unguarded wildcard/variable catchall arm.
         if !self.adt_variants.contains_key(&type_name)
             && matches!(type_name.as_str(), "Int" | "Float" | "String")
         {
-            let has_lit = arms
-                .iter()
-                .any(|arm| matches!(&arm.node.pattern, Pat::Lit { .. }));
-            if has_lit {
-                let has_catchall = arms.iter().any(|arm| {
-                    arm.node.guard.is_none()
-                        && matches!(&arm.node.pattern, Pat::Wildcard { .. } | Pat::Var { .. })
-                });
-                if !has_catchall {
-                    return Err(Diagnostic::error_at(
-                        span,
-                        format!(
-                            "non-exhaustive pattern match on {}: add a wildcard `_` or variable pattern",
-                            type_name
-                        ),
-                    ));
-                }
+            let has_catchall = arms.iter().any(|arm| {
+                arm.node.guard.is_none()
+                    && matches!(&arm.node.pattern, Pat::Wildcard { .. } | Pat::Var { .. })
+            });
+            if !has_catchall {
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "non-exhaustive pattern match on {}: add a wildcard `_` or variable pattern",
+                        type_name
+                    ),
+                ));
             }
             return Ok(());
         }

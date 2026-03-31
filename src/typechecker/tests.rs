@@ -1983,6 +1983,44 @@ fn int_case_with_var_fallback() {
     .unwrap();
 }
 
+#[test]
+fn int_case_only_guarded_arms() {
+    let result = check(
+        "let x = case 42 {
+  n when n > 0 -> \"positive\"
+  n when n < 0 -> \"negative\"
+}",
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive"));
+    assert!(err.message.contains("Int"));
+}
+
+#[test]
+fn string_case_without_wildcard() {
+    let result = check(
+        r#"let x = case "hello" {
+  "hello" -> 1
+  "world" -> 2
+}"#,
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive"));
+    assert!(err.message.contains("String"));
+}
+
+#[test]
+fn string_case_only_guarded_arms() {
+    let result = check(
+        r#"let x = case "hello" {
+  s when s == "hello" -> 1
+}"#,
+    );
+    let err = result.err().expect("expected type error");
+    assert!(err.message.contains("non-exhaustive"));
+    assert!(err.message.contains("String"));
+}
+
 // --- Nested pattern exhaustiveness (Maranget) ---
 
 #[test]
