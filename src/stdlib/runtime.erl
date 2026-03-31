@@ -31,8 +31,13 @@ format_dylang_error(Kind, Msg, Module, Function, File, Line, StackTrace) ->
         {<<>>, _} -> ok;
         {_, 0} -> ok;
         _ ->
-            io:format(standard_error, "  at ~ts.~ts (~ts:~B)~n",
-                      [Module, Function, File, Line])
+            Qualified = case Module of
+                <<"_script">> -> Function;
+                <<"_test">> -> Function;
+                _ -> <<Module/binary, ".", Function/binary>>
+            end,
+            io:format(standard_error, "  at ~ts (~ts:~B)~n",
+                      [Qualified, File, Line])
     end,
     %% Print remaining stack trace (skip internal frames)
     TraceStr = format_stacktrace(StackTrace),
@@ -82,23 +87,27 @@ format_stacktrace(Trace) ->
 
 format_frame({Mod, Fun, Arity, Opts}) when is_integer(Arity) ->
     Loc = format_location(Opts),
-    case parse_cps_name(atom_to_list(Fun)) of
-        {ok, ParentFun} ->
-            %% CPS continuation lambda: show parent function name
-            io_lib:format("    ~ts:~ts~ts~n", [format_mod(Mod), ParentFun, Loc]);
-        none ->
-            io_lib:format("    ~ts:~ts/~B~ts~n", [format_mod(Mod), Fun, Arity, Loc])
-    end;
+    FunStr = case parse_cps_name(atom_to_list(Fun)) of
+        {ok, ParentFun} -> ParentFun;
+        none -> io_lib:format("~ts/~B", [Fun, Arity])
+    end,
+    io_lib:format("    ~ts~ts~n", [format_qualified(Mod, FunStr), Loc]);
 format_frame({Mod, Fun, Args, Opts}) when is_list(Args) ->
     Loc = format_location(Opts),
-    case parse_cps_name(atom_to_list(Fun)) of
-        {ok, ParentFun} ->
-            io_lib:format("    ~ts:~ts~ts~n", [format_mod(Mod), ParentFun, Loc]);
-        none ->
-            io_lib:format("    ~ts:~ts/~B~ts~n", [format_mod(Mod), Fun, length(Args), Loc])
-    end;
+    FunStr = case parse_cps_name(atom_to_list(Fun)) of
+        {ok, ParentFun} -> ParentFun;
+        none -> io_lib:format("~ts/~B", [Fun, length(Args)])
+    end,
+    io_lib:format("    ~ts~ts~n", [format_qualified(Mod, FunStr), Loc]);
 format_frame(_) ->
     "".
+
+%% Format "Module:Function" or just "Function" for scripts.
+format_qualified(Mod, FunStr) ->
+    case format_mod(Mod) of
+        "" -> FunStr;
+        ModStr -> io_lib:format("~ts:~ts", [ModStr, FunStr])
+    end.
 
 %% Detect BEAM-generated CPS continuation names like "-worker/3-anonymous-1-"
 %% and extract the parent function name.
@@ -123,14 +132,28 @@ format_location(Opts) ->
             end
     end.
 
+format_mod('_script') -> "";
+format_mod('_test') -> "";
 format_mod(Mod) ->
-    atom_to_list(Mod).
+    %% Convert mangled Erlang module name back to dylang style.
+    %% e.g. "myapp_server" stays as-is (we can't recover "MyApp.Server"
+    %% without metadata), but at least strip the "std_" prefix for stdlib.
+    Name = atom_to_list(Mod),
+    case lists:prefix("std_", Name) of
+        true -> "Std." ++ capitalize(lists:nthtail(4, Name));
+        false -> Name
+    end.
+
+capitalize([]) -> [];
+capitalize([H|T]) when H >= $a, H =< $z -> [H - 32 | T];
+capitalize(S) -> S.
 
 %% Filter out internal frames the user doesn't care about.
 filter_frames(Trace) ->
     [F || F = {Mod, _, _, _} <- Trace,
           not is_internal_frame(Mod)].
 
+is_internal_frame(erlang) -> true;
 is_internal_frame(erl_eval) -> true;
 is_internal_frame(init) -> true;
 is_internal_frame(dylang_runtime) -> true;
