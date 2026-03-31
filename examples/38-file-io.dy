@@ -25,7 +25,7 @@ process () = {
   let missing = File.read! "nonexistent.txt"
   case missing {
     Ok _ -> println "unexpected"
-    Err(Std.File.NotFound) -> println "correctly got NotFound"
+    Err(File.NotFound) -> println "correctly got NotFound"
     Err e -> println $"wrong error {debug e}"
   }
 }

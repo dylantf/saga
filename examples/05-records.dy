@@ -6,10 +6,10 @@ record Point {
 translate dx dy p = { p | x: p.x + dx, y: p.y + dy }
 
 quadrant p = case p {
-  Point { x, y } | x > 0 && y > 0 -> "I"
-  Point { x, y } | x < 0 && y > 0 -> "II"
-  Point { x, y } | x < 0 && y < 0 -> "III"
-  Point { x, y } | x > 0 && y < 0 -> "IV"
+  Point { x, y } when x > 0 && y > 0 -> "I"
+  Point { x, y } when x < 0 && y > 0 -> "II"
+  Point { x, y } when x < 0 && y < 0 -> "III"
+  Point { x, y } when x > 0 && y < 0 -> "IV"
   _ -> "origin or axis"
 }
 

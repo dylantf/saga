@@ -42,6 +42,7 @@ pub enum Token {
     Deriving,
     Receive,
     After,
+    When,
     EffectCall(String),
 
     // Operators

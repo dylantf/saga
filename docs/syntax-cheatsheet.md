@@ -205,15 +205,15 @@ case shape {
   Point -> 0.0
 }
 
-# Guards (| in both case arms and function definitions)
+# Guards (when in both case arms and function definitions)
 case n {
-  n | n < 0 -> 0
-  n | n > 100 -> 100
+  n when n < 0 -> 0
+  n when n > 100 -> 100
   n -> n
 }
 
 # Guard on function definition
-abs n | n < 0 = -n
+abs n when n < 0 = -n
 abs n = n
 
 # Wildcard

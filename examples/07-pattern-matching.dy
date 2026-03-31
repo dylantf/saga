@@ -25,10 +25,10 @@ describe_shape shape = case shape {
 record Point { x: Int, y: Int }
 
 quadrant p = case p {
-  Point { x, y } | x > 0 && y > 0 -> "Q1"
-  Point { x, y } | x < 0 && y > 0 -> "Q2"
-  Point { x, y } | x < 0 && y < 0 -> "Q3"
-  Point { x, y } | x > 0 && y < 0 -> "Q4"
+  Point { x, y } when x > 0 && y > 0 -> "Q1"
+  Point { x, y } when x < 0 && y > 0 -> "Q2"
+  Point { x, y } when x < 0 && y < 0 -> "Q3"
+  Point { x, y } when x > 0 && y < 0 -> "Q4"
   _ -> "origin or axis"
 }
 

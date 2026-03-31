@@ -2074,7 +2074,7 @@ import Std.List (filter)
 
 check filter = case filter {
   0 -> "zero"
-  filter | filter > 0 -> "positive"
+  filter when filter > 0 -> "positive"
   _ -> "negative"
 }
 

@@ -1,7 +1,7 @@
 # Multiple function heads with guards are supported and checked for exhaustiveness
-fizzbuzz n | n % 15 == 0 = "FizzBuzz"
-fizzbuzz n | n % 3 == 0 = "Fizz"
-fizzbuzz n | n % 5 == 0 = "Buzz"
+fizzbuzz n when n % 15 == 0 = "FizzBuzz"
+fizzbuzz n when n % 3 == 0 = "Fizz"
+fizzbuzz n when n % 5 == 0 = "Buzz"
 fizzbuzz n = show n
 
 loop i max =
