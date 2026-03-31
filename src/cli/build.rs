@@ -161,6 +161,10 @@ fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
             "std_set_bridge.erl",
             include_str!("../stdlib/Set.bridge.erl"),
         ),
+        (
+            "dylang_runtime.erl",
+            include_str!("../stdlib/runtime.erl"),
+        ),
     ]
 }
 
@@ -268,7 +272,7 @@ pub fn run_erlc(build_dir: &Path) {
 /// Run a compiled module on the BEAM.
 pub fn exec_erl(build_dir: &Path, entry_module: &str) {
     let eval = format!(
-        "try '{}':main() of _ -> init:stop() catch error:{{dylang_panic, Msg}} -> io:format(standard_error, \"~ts~n\", [Msg]), init:stop(1); C:R:S -> io:format(\"~p: ~p~n~p~n\", [C,R,S]), init:stop(1) end",
+        "try '{}':main() of _ -> init:stop() catch error:{{dylang_panic, Msg}} -> io:format(standard_error, \"~ts~n\", [Msg]), init:stop(1); C:R:S -> dylang_runtime:format_crash(C, R, S), init:stop(1) end",
         entry_module
     );
     let status = std::process::Command::new("erl")

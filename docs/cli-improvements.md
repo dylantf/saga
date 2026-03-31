@@ -5,6 +5,29 @@ for the alpha release.
 
 ---
 
+## Stack traces
+
+Runtime errors currently show Erlang-internal names (`'_script':main/0`)
+with no connection to the user's source code. We need to embed source
+location metadata at compile time so errors can point back to dylang code.
+
+- During lowering, attach source location info (file, line, function name)
+  to error-producing expressions. Gleam does this by throwing maps with
+  metadata: `#{gleam_error => panic, file => "...", line => 123, ...}`.
+  We could do similar for `panic`, `assert_eq`, and effect-related crashes.
+- Capture BEAM stack traces at runtime (`Class:Reason:StackTrace` in the
+  catch block) and translate Erlang MFA tuples into dylang function names.
+- Filter out internal frames (erl_eval, init, runtime wrapper, CPS
+  continuation scaffolding) so the trace shows only user-relevant calls.
+- Display format should show function name + file:line, e.g.:
+  ```
+  Stack trace:
+    main        src/App.dy:14
+    helper      src/Lib.dy:8
+  ```
+
+---
+
 ## BEAM crash translation
 
 The most impactful single change. When a runtime error occurs on the BEAM,
@@ -58,6 +81,7 @@ no_file: Warning: evaluation of operator 'div'/2 will fail with a 'badarith' exc
 ```
 
 Capture `erlc` stderr and either:
+
 - Suppress warnings that are redundant with our own diagnostics
 - Rewrite useful ones into dylang-style format with file:line:col
 - Drop `no_file:` prefix at minimum
