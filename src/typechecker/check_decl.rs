@@ -54,6 +54,7 @@ impl Checker {
                 self.collected_diagnostics.push(e);
             }
         }
+        self.check_unused_functions();
         self.check_unused_variables();
         self.zonk_warnings();
         self.to_result()
@@ -504,6 +505,7 @@ impl Checker {
         for decl in program {
             if let Decl::FunSignature {
                 id,
+                public,
                 name,
                 name_span,
                 params,
@@ -637,6 +639,9 @@ impl Checker {
                 }
                 self.env.insert_with_def(name.clone(), scheme, *id);
                 self.lsp.node_spans.insert(*id, *name_span);
+                self.lsp
+                    .fun_definitions
+                    .push((*id, name.clone(), *name_span, *public));
             }
         }
 
@@ -680,6 +685,9 @@ impl Checker {
                     *id,
                 );
                 self.lsp.node_spans.insert(*id, *name_span);
+                self.lsp
+                    .fun_definitions
+                    .push((*id, name.clone(), *name_span, false));
             }
         }
         fun_vars

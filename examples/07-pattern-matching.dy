@@ -100,6 +100,8 @@ main () = {
   describe [1, 2] |> println
   describe [1, 2, 3] |> println
 
+  let foo = "Hello"
+
   show (sum_two [3, 4]) |> println
 
   first_two [10, 20, 30] |> println

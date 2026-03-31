@@ -693,6 +693,8 @@ pub enum PendingWarning {
     DiscardedValue { span: Span, ty: Type },
     /// A local variable binding was never referenced.
     UnusedVariable { span: Span, name: String },
+    /// A module-level function was never referenced.
+    UnusedFunction { span: Span, name: String },
     /// A function declares effects in its `needs` clause that it never uses.
     UnusedEffects {
         span: Span,
@@ -813,6 +815,8 @@ pub(crate) struct LspState {
     pub constructor_def_ids: HashMap<String, crate::ast::NodeId>,
     /// All variable/param definitions: (NodeId, name, span) for unused variable detection.
     pub definitions: Vec<(crate::ast::NodeId, String, Span)>,
+    /// Top-level function definitions: (NodeId, name, span, is_public) for unused function detection.
+    pub fun_definitions: Vec<(crate::ast::NodeId, String, Span, bool)>,
     /// Stack of (op_name -> (arm_span, source_module)) maps for nested `with` expressions.
     /// Innermost handler is last. Used to record which arm handles each effect call.
     pub with_arm_stacks: Vec<HashMap<String, (Span, Option<String>)>>,
@@ -1014,6 +1018,23 @@ impl Checker {
         ));
     }
 
+    /// Emit warnings for module-level functions that are never referenced.
+    pub(crate) fn check_unused_functions(&mut self) {
+        let used: std::collections::HashSet<crate::ast::NodeId> =
+            self.lsp.references.values().copied().collect();
+        for (def_id, name, span, public) in &self.lsp.fun_definitions {
+            if *public || name == "main" || name.starts_with('_') {
+                continue;
+            }
+            if !used.contains(def_id) {
+                self.pending_warnings.push(PendingWarning::UnusedFunction {
+                    span: *span,
+                    name: name.clone(),
+                });
+            }
+        }
+    }
+
     /// Emit warnings for local variable bindings that are never referenced.
     pub(crate) fn check_unused_variables(&mut self) {
         let used: std::collections::HashSet<crate::ast::NodeId> =
@@ -1054,6 +1075,12 @@ impl Checker {
                     self.collected_diagnostics.push(Diagnostic::warning_at(
                         span,
                         format!("unused variable: `{}`", name),
+                    ));
+                }
+                PendingWarning::UnusedFunction { span, name } => {
+                    self.collected_diagnostics.push(Diagnostic::warning_at(
+                        span,
+                        format!("unused function: `{}`", name),
                     ));
                 }
                 PendingWarning::UnusedEffects {
