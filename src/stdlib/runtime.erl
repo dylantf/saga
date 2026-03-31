@@ -82,12 +82,36 @@ format_stacktrace(Trace) ->
 
 format_frame({Mod, Fun, Arity, Opts}) when is_integer(Arity) ->
     Loc = format_location(Opts),
-    io_lib:format("    ~ts:~ts/~B~ts~n", [format_mod(Mod), Fun, Arity, Loc]);
+    case parse_cps_name(atom_to_list(Fun)) of
+        {ok, ParentFun} ->
+            %% CPS continuation lambda: show parent function name
+            io_lib:format("    ~ts:~ts~ts~n", [format_mod(Mod), ParentFun, Loc]);
+        none ->
+            io_lib:format("    ~ts:~ts/~B~ts~n", [format_mod(Mod), Fun, Arity, Loc])
+    end;
 format_frame({Mod, Fun, Args, Opts}) when is_list(Args) ->
     Loc = format_location(Opts),
-    io_lib:format("    ~ts:~ts/~B~ts~n", [format_mod(Mod), Fun, length(Args), Loc]);
+    case parse_cps_name(atom_to_list(Fun)) of
+        {ok, ParentFun} ->
+            io_lib:format("    ~ts:~ts~ts~n", [format_mod(Mod), ParentFun, Loc]);
+        none ->
+            io_lib:format("    ~ts:~ts/~B~ts~n", [format_mod(Mod), Fun, length(Args), Loc])
+    end;
 format_frame(_) ->
     "".
+
+%% Detect BEAM-generated CPS continuation names like "-worker/3-anonymous-1-"
+%% and extract the parent function name.
+parse_cps_name([$-|Rest]) ->
+    case string:split(Rest, "/") of
+        [FunName, AfterSlash] ->
+            case string:find(AfterSlash, "-anonymous-") of
+                nomatch -> none;
+                _ -> {ok, FunName}
+            end;
+        _ -> none
+    end;
+parse_cps_name(_) -> none.
 
 format_location(Opts) ->
     case proplists:get_value(file, Opts) of
