@@ -340,10 +340,14 @@ impl Checker {
     // --- check_program_inner passes ---
 
     /// Pass 1: Register type, record, effect, and trait definitions.
+    /// Effects are registered in two sub-passes: stubs first (name + type params),
+    /// then op signatures. This allows forward references between effects
+    /// (e.g. Process referencing Actor in Std.Actor).
     fn register_definitions(
         &mut self,
         program: &[Decl],
     ) -> std::result::Result<(), Vec<Diagnostic>> {
+        // Sub-pass 1a: types, records, effect stubs, traits
         for decl in program {
             match decl {
                 Decl::TypeDef {
@@ -368,14 +372,9 @@ impl Checker {
                         .map_err(|e| vec![e])?;
                 }
                 Decl::EffectDef {
-                    name,
-                    type_params,
-                    operations,
-                    ..
+                    name, type_params, ..
                 } => {
-                    let plain_ops: Vec<_> = operations.iter().map(|a| &a.node).collect();
-                    self.register_effect_def(name, type_params, &plain_ops)
-                        .map_err(|e| vec![e])?;
+                    self.register_effect_stub(name, type_params);
                 }
                 Decl::TraitDef {
                     name,
@@ -389,6 +388,20 @@ impl Checker {
                         .map_err(|e| vec![e])?;
                 }
                 _ => {}
+            }
+        }
+        // Sub-pass 1b: fill in effect op signatures (all effect names now known)
+        for decl in program {
+            if let Decl::EffectDef {
+                name,
+                type_params,
+                operations,
+                ..
+            } = decl
+            {
+                let plain_ops: Vec<_> = operations.iter().map(|a| &a.node).collect();
+                self.register_effect_ops(name, type_params, &plain_ops)
+                    .map_err(|e| vec![e])?;
             }
         }
         Ok(())
@@ -1490,31 +1503,67 @@ impl Checker {
         Ok(())
     }
 
-    pub(crate) fn register_effect_def(
+    /// Phase 1: Register effect name and type params (stub with empty ops).
+    /// Called first for ALL effects so that forward references between effects
+    /// (e.g. Process referencing Actor) resolve during op signature processing.
+    pub(crate) fn register_effect_stub(
         &mut self,
         name: &str,
         effect_type_params: &[String],
-        operations: &[&ast::EffectOp],
-    ) -> Result<(), Diagnostic> {
-        // Create fresh vars for the effect's type params, shared across all operations.
-        // E.g. for `effect State s { get () -> s; put (val: s) -> Unit }`,
-        // a single var ID for `s` is used by both `get` and `put`.
-        let mut shared_params: Vec<(String, u32)> = vec![];
+    ) {
         let mut type_param_ids = Vec::new();
-        for tp in effect_type_params {
+        for _tp in effect_type_params {
             let var = self.fresh_var();
             let id = match &var {
                 Type::Var(id) => *id,
                 _ => unreachable!(),
             };
-            shared_params.push((tp.clone(), id));
             type_param_ids.push(id);
         }
+        let key = if let Some(module) = &self.current_module {
+            format!("{}.{}", module, name)
+        } else {
+            name.into()
+        };
+        self.effects.insert(
+            key,
+            EffectDefInfo {
+                type_params: type_param_ids,
+                ops: vec![],
+                op_spans: std::collections::HashMap::new(),
+                source_module: self.current_module.clone(),
+            },
+        );
+        self.type_arity
+            .insert(name.into(), effect_type_params.len());
+    }
+
+    /// Phase 2: Fill in effect op signatures (after all effect stubs are registered).
+    pub(crate) fn register_effect_ops(
+        &mut self,
+        name: &str,
+        effect_type_params: &[String],
+        operations: &[&ast::EffectOp],
+    ) -> Result<(), Diagnostic> {
+        let key = if let Some(module) = &self.current_module {
+            format!("{}.{}", module, name)
+        } else {
+            name.to_string()
+        };
+        // Retrieve the type param IDs created during stub registration.
+        let type_param_ids = self.effects.get(&key)
+            .map(|info| info.type_params.clone())
+            .unwrap_or_default();
+
+        let shared_params: Vec<(String, u32)> = effect_type_params
+            .iter()
+            .zip(type_param_ids.iter())
+            .map(|(tp, &id)| (tp.clone(), id))
+            .collect();
 
         let mut ops = Vec::new();
         let mut op_spans = std::collections::HashMap::new();
         for op in operations {
-            // Start with the shared effect type params, then add op-local type vars
             let mut params_list = shared_params.clone();
             let param_types: Vec<(String, Type)> = op
                 .params
@@ -1534,22 +1583,10 @@ impl Checker {
                 return_type,
             });
         }
-        let info = EffectDefInfo {
-            type_params: type_param_ids,
-            ops,
-            op_spans,
-            source_module: self.current_module.clone(),
-        };
-        // Register under canonical form only (Module.Effect).
-        // For standalone files (no module), use bare name.
-        let key = if let Some(module) = &self.current_module {
-            format!("{}.{}", module, name)
-        } else {
-            name.into()
-        };
-        self.effects.insert(key, info);
-        self.type_arity
-            .insert(name.into(), effect_type_params.len());
+        if let Some(info) = self.effects.get_mut(&key) {
+            info.ops = ops;
+            info.op_spans = op_spans;
+        }
         Ok(())
     }
 

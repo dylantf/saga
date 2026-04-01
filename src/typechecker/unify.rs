@@ -429,15 +429,11 @@ impl Checker {
                                         }
                                     })
                             } else {
-                                // Don't error here — this may be a forward reference
-                                // to an effect defined later in the same module.
-                                // The needs clause on the function will catch truly
-                                // undefined effects.
-                                if let Some(m) = &self.current_module {
-                                    format!("{}.{}", m, e.name)
-                                } else {
-                                    e.name.clone()
-                                }
+                                self.collected_diagnostics.push(Diagnostic::error_at(
+                                    e.span,
+                                    format!("undefined effect: {}", e.name),
+                                ));
+                                e.name.clone()
                             };
                             (name, args)
                         })
