@@ -56,6 +56,8 @@ struct Elaborator {
     erlang_module: String,
     /// Arity of let-bound values with trait constraints (for eta-expansion)
     let_binding_arities: HashMap<String, usize>,
+    /// Scope map values for canonical name bridging (user name -> canonical)
+    scope_map_values: HashMap<String, String>,
 }
 
 impl Elaborator {
@@ -161,6 +163,7 @@ impl Elaborator {
             current_dict_params_by_var: HashMap::new(),
             erlang_module,
             let_binding_arities,
+            scope_map_values: result.scope_map.values.clone(),
         }
     }
 
@@ -311,11 +314,24 @@ impl Elaborator {
 
         // Register trait methods from checker's trait info (for traits not
         // defined in the current program, e.g. Show in Std modules).
+        // Register under both bare name and canonical name so lookups work
+        // before and after the resolve pass rewrites Var nodes.
         for (trait_name, info) in &self.traits {
             for (idx, (method_name, _, _, _)) in info.methods.iter().enumerate() {
                 self.trait_methods
                     .entry(method_name.clone())
                     .or_insert_with(|| (trait_name.clone(), idx));
+            }
+        }
+        // Add canonical-name entries from scope_map: if "show" -> "Std.Base.Show.show",
+        // register "Std.Base.Show.show" -> ("Show", idx) too.
+        for (bare_name, canonical) in &self.scope_map_values {
+            if bare_name != canonical
+                && let Some(entry) = self.trait_methods.get(bare_name).cloned()
+            {
+                self.trait_methods
+                    .entry(canonical.clone())
+                    .or_insert(entry);
             }
         }
 

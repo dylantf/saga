@@ -194,10 +194,12 @@ impl<'a> Lowerer<'a> {
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
                     let expanded_arity =
                         self.expanded_arity(base_arity, &effects) + dict_param_count;
+                    let param_absorbed =
+                        util::param_absorbed_effects_from_type(&scheme.ty);
                     let fi = FunInfo {
                         arity: expanded_arity,
                         effects,
-                        param_absorbed_effects: HashMap::new(),
+                        param_absorbed_effects: param_absorbed,
                     };
                     // Register under short alias (e.g. "List.map") and canonical (e.g. "Std.List.map")
                     let alias_qualified = format!("{}.{}", mod_path.last().unwrap(), name);

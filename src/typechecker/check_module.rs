@@ -643,10 +643,20 @@ impl Checker {
             if !mc.trait_state.traits.contains_key(name) {
                 mc.trait_state.traits.insert(name.clone(), info.clone());
                 for (method_name, _, _, _) in &info.methods {
-                    if let Some(scheme) = self.env.get(method_name)
-                        && mc.env.get(method_name).is_none()
-                    {
-                        mc.env.insert(method_name.clone(), scheme.clone());
+                    if let Some(scheme) = self.env.get(method_name) {
+                        if mc.env.get(method_name).is_none() {
+                            mc.env.insert(method_name.clone(), scheme.clone());
+                        }
+                        // Also copy canonical name entries so the resolve pass
+                        // can rewrite bare Var names to canonical form.
+                        for (user, canonical) in &self.scope_map.values {
+                            if user == method_name
+                                && canonical != method_name
+                                && mc.env.get(canonical).is_none()
+                            {
+                                mc.env.insert(canonical.clone(), scheme.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -742,7 +752,8 @@ impl Checker {
             doc_comments,
         } = exports;
 
-        // Traits and their methods (unqualified, so impl bodies can reference them)
+        // Traits and their methods: registered under both bare name (for local
+        // impl bodies) and canonical name (for the resolve pass to rewrite to).
         let binding_map: std::collections::HashMap<&str, &Scheme> =
             bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
         for (name, info) in traits {
@@ -758,18 +769,24 @@ impl Checker {
                     .or_insert_with(|| doc.clone());
             }
             for (method_name, _, _, _) in &info.methods {
-                if let Some(&scheme) = binding_map.get(method_name.as_str())
-                    && self.env.get(method_name).is_none()
-                {
-                    if let Some(&did) = def_ids.get(method_name.as_str()) {
-                        self.env
-                            .insert_with_def(method_name.clone(), scheme.clone(), did);
-                    } else {
-                        self.env.insert(method_name.clone(), scheme.clone());
+                if let Some(&scheme) = binding_map.get(method_name.as_str()) {
+                    // Bare name (for local references and impl bodies)
+                    if self.env.get(method_name).is_none() {
+                        if let Some(&did) = def_ids.get(method_name.as_str()) {
+                            self.env
+                                .insert_with_def(method_name.clone(), scheme.clone(), did);
+                        } else {
+                            self.env.insert(method_name.clone(), scheme.clone());
+                        }
+                        self.lsp
+                            .import_origins
+                            .insert(method_name.clone(), module_name.to_string());
                     }
-                    self.lsp
-                        .import_origins
-                        .insert(method_name.clone(), module_name.to_string());
+                    // Canonical name (Module.Trait.method) for after resolve pass rewrites
+                    let canonical = format!("{}.{}.{}", module_name, name, method_name);
+                    if self.env.get(&canonical).is_none() {
+                        self.env.insert(canonical, scheme.clone());
+                    }
                 }
             }
         }
@@ -980,7 +997,7 @@ pub(super) fn resolve_import(
 
     // Trait methods: bare -> Module.Trait.method
     // Trait methods are always unqualified in user code; the canonical form
-    // records their origin for future use by the elaborator/evidence system.
+    // is used by the resolve pass to rewrite Var nodes.
     for (trait_name, info) in &exports.traits {
         for (method_name, _, _, _) in &info.methods {
             let canonical = format!("{}.{}.{}", module_name, trait_name, method_name);
