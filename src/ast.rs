@@ -1007,8 +1007,8 @@ pub enum Handler {
     Named(String, Span),
     /// `expr with { h1, h2, op args = body }`
     Inline {
-        /// Named handler references (e.g. `h1, h2`)
-        named: Vec<String>,
+        /// Named handler references (e.g. `h1, h2`) with their spans
+        named: Vec<(String, Span)>,
         /// Inline handler arms (e.g. `op args = body`)
         arms: Vec<Annotated<HandlerArm>>,
         /// `return value = Ok(value)` clause

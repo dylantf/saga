@@ -1,5 +1,5 @@
-import Std.Actor
-import Std.Async
+import Std.Actor (beam_actor)
+import Std.Async (Async, async_handler)
 
 fun run : Unit -> List Int needs {Async}
 run () = {

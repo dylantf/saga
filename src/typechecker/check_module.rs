@@ -1299,26 +1299,17 @@ fn collect_codegen_info(
                         )
                     })
                     .map(|e| {
-                        // Resolve bare/aliased effect name to canonical.
-                        // effects_map keys are canonical (e.g. "Std.Test.TestRunner"),
-                        // so try exact match first, then suffix match.
-                        let found = effects_map.get(&e.name).or_else(|| {
-                            let suffix = format!(".{}", e.name);
-                            effects_map
-                                .iter()
-                                .find(|(k, _)| k.ends_with(&suffix))
-                                .map(|(_, v)| v)
-                        });
-                        if let Some(info) = found {
-                            if let Some(src) = &info.source_module {
-                                let short = e.name.rsplit('.').next().unwrap_or(&e.name);
-                                format!("{}.{}", src, short)
-                            } else {
-                                format!("{}.{}", module_name, e.name)
-                            }
-                        } else {
-                            e.name.clone()
-                        }
+                        // Resolve effect name to canonical via scope_map
+                        scope_map.resolve_effect(&e.name)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| {
+                                // Fallback: try effects_map directly, or qualify with module
+                                if effects_map.contains_key(&e.name) {
+                                    e.name.clone()
+                                } else {
+                                    format!("{}.{}", module_name, e.name)
+                                }
+                            })
                     })
                     .collect();
                 sorted.sort();

@@ -17,26 +17,17 @@ impl Checker {
         if let Some(info) = self.effects.get(name) {
             return Some(info.clone());
         }
-        if name.contains('.') {
-            // Qualified name: suffix match (e.g. "Fail.Fail" matches "Std.Fail.Fail")
-            let suffix = format!(".{}", name);
-            for (key, info) in &self.effects {
-                if key.ends_with(&suffix) {
-                    return Some(info.clone());
-                }
-            }
-        } else {
-            // Bare name: check scope_map (exposed imports), then local module
-            if let Some(canonical) = self.scope_map.resolve_effect(name).map(|s| s.to_string())
-                && let Some(info) = self.effects.get(&canonical)
-            {
+        // Resolve through scope_map (handles bare, aliased, and qualified names)
+        if let Some(canonical) = self.scope_map.resolve_effect(name).map(|s| s.to_string())
+            && let Some(info) = self.effects.get(&canonical)
+        {
+            return Some(info.clone());
+        }
+        // Local module: Module.Name
+        if let Some(module) = &self.current_module.clone() {
+            let local_key = format!("{}.{}", module, name);
+            if let Some(info) = self.effects.get(&local_key) {
                 return Some(info.clone());
-            }
-            if let Some(module) = &self.current_module.clone() {
-                let local_key = format!("{}.{}", module, name);
-                if let Some(info) = self.effects.get(&local_key) {
-                    return Some(info.clone());
-                }
             }
         }
         // Try auto-importing for fully-qualified Std effect names
@@ -146,7 +137,7 @@ impl Checker {
                 }
             }
             ast::Handler::Inline { named, arms, .. } => {
-                for name in named {
+                for (name, _) in named {
                     if let Some(info) = self.handlers.get(name) {
                         handled.extend(info.effects.iter().cloned());
                     }
@@ -271,9 +262,13 @@ impl Checker {
         span: Span,
     ) -> Result<EffectOpSig, Diagnostic> {
         if let Some(effect_name) = qualifier {
+            // Resolve qualifier through scope_map (bare/aliased → canonical)
+            let canonical = self.scope_map.resolve_effect(effect_name)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| effect_name.to_string());
             let info = self
                 .effects
-                .get(effect_name)
+                .get(&canonical)
                 .ok_or_else(|| {
                     Diagnostic::error_at(span, format!("undefined effect: {}", effect_name))
                 })?
@@ -284,7 +279,7 @@ impl Checker {
                     format!("effect '{}' has no operation '{}'", effect_name, op_name),
                 )
             })?;
-            Ok(self.instantiate_effect_op(effect_name, op, &info.type_params))
+            Ok(self.instantiate_effect_op(&canonical, op, &info.type_params))
         } else {
             let mut found: Option<(String, EffectOpSig, Vec<u32>)> = None;
             for (eff_name, info) in &self.effects {

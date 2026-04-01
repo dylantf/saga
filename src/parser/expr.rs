@@ -573,6 +573,7 @@ impl Parser {
                             && matches!(self.peek_at(2), Token::Ident(_))
                             && matches!(self.peek_at(3), Token::Comma | Token::RBrace)));
                 if is_named_ref {
+                    let name_start = self.tokens[self.pos].span;
                     let name = self.expect_ident()?;
                     let name = if matches!(self.peek(), Token::Dot)
                         && matches!(self.peek_at(1), Token::Ident(_))
@@ -583,7 +584,8 @@ impl Parser {
                     } else {
                         name
                     };
-                    named.push(name);
+                    let name_end = self.tokens[self.pos - 1].span;
+                    named.push((name, name_start.to(name_end)));
                     if matches!(self.peek(), Token::Comma) {
                         self.advance();
                     }

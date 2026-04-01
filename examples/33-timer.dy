@@ -1,4 +1,4 @@
-import Std.Actor
+import Std.Actor (beam_actor)
 
 main () = {
   println "Sleeping for 1 second..."

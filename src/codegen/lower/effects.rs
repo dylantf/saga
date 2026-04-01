@@ -28,9 +28,9 @@ impl<'a> Lowerer<'a> {
         args: &[Expr],
         continuation: Option<CExpr>,
     ) -> CExpr {
-        // Find which effect this op belongs to
+        // Find which effect this op belongs to, resolved to canonical form
         let effect_name = if let Some(q) = qualifier {
-            q.to_string()
+            self.canonicalize_effect(q)
         } else {
             self.op_to_effect
                 .get(op_name)
@@ -171,8 +171,8 @@ impl<'a> Lowerer<'a> {
             }
             Handler::Inline { named, .. } => named
                 .iter()
-                .filter(|n| self.is_beam_native_handler(n))
-                .flat_map(|n| {
+                .filter(|(n, _)| self.is_beam_native_handler(n))
+                .flat_map(|(n, _)| {
                     let canonical = self.resolve_handler_name(n);
                     self.handler_defs[&canonical].effects.clone()
                 })
@@ -409,7 +409,7 @@ impl<'a> Lowerer<'a> {
                 let mut resolved_return = return_clause.clone();
                 let mut handled_effects = Vec::new();
 
-                for name in named {
+                for (name, _) in named {
                     let canonical = self.resolve_handler_name(name);
                     let info = self
                         .handler_defs

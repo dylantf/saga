@@ -1,4 +1,4 @@
-import Std.Actor
+import Std.Actor (Actor, Process, beam_actor, Monitor)
 
 type WorkerMsg = Go | Crash
 

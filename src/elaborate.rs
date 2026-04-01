@@ -932,8 +932,9 @@ impl Elaborator {
                                         let mut lambda_params = Vec::new();
 
                                         for (trait_name, type_var) in &dict_param_info {
+                                            let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
                                             let param_name =
-                                                format!("__dict_{}_{}", trait_name, type_var);
+                                                format!("__dict_{}_{}", bare, type_var);
                                             self.current_dict_params
                                                 .insert(trait_name.clone(), param_name.clone());
                                             self.current_dict_params_by_var.insert(
@@ -1177,7 +1178,8 @@ impl Elaborator {
                         let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                         for (trait_name, type_var) in &dict_param_info {
                             let occ = trait_occurrences.entry(trait_name).or_insert(0);
-                            let dict_var = format!("__dict_{}_{}", trait_name, type_var);
+                            let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                            let dict_var = format!("__dict_{}_{}", bare, type_var);
                             if let Some(dict_expr) =
                                 self.resolve_dict_nth(trait_name, node_id, span, *occ)
                             {

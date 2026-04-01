@@ -1,6 +1,6 @@
 module Std.Supervisor
 
-import Std.Fail
+import Std.Fail (Fail)
 import Std.Result (Result, Ok, Err)
 
 # Catch failures and retry up to `retries` times.
@@ -8,13 +8,13 @@ import Std.Result (Result, Ok, Err)
 pub fun supervised : (retries: Int) -> (f: Unit -> a needs {Fail e}) -> Result a e
 supervised 0 f = {
   f () with {
-    return value = Ok value
     fail reason = Err reason
+    return value = Ok value
   }
 }
 supervised n f = {
   f () with {
-    return value = Ok value
     fail _reason = supervised (n - 1) f
+    return value = Ok value
   }
 }

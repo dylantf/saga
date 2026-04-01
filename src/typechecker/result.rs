@@ -92,16 +92,6 @@ impl CheckResult {
         self.effects.get(name).or_else(|| {
             self.scope_map.resolve_effect(name)
                 .and_then(|canonical| self.effects.get(canonical))
-        }).or_else(|| {
-            // Suffix match for qualified names (e.g. "Fail.Fail" -> "Std.Fail.Fail")
-            if name.contains('.') {
-                let suffix = format!(".{}", name);
-                self.effects.iter()
-                    .find(|(k, _)| k.ends_with(&suffix))
-                    .map(|(_, v)| v)
-            } else {
-                None
-            }
         })
     }
 

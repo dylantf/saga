@@ -480,9 +480,13 @@ impl Checker {
                 _ => {}
             }
 
-            // Find which constructor the binding pattern matches
+            // Find which constructor the binding pattern matches.
+            // Constructor names may be canonical (e.g. "Std.Result.Ok") after the
+            // resolve pass, but adt_variants stores bare names ("Ok"). Use bare form.
             let matched = match pat {
-                Pat::Constructor { name, .. } => Some(name.as_str()),
+                Pat::Constructor { name, .. } => {
+                    Some(name.rsplit('.').next().unwrap_or(name.as_str()))
+                }
                 Pat::Lit {
                     value: Lit::Bool(b),
                     ..
