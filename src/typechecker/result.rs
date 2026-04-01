@@ -58,12 +58,8 @@ pub struct CheckResult {
     pub references: HashMap<crate::ast::NodeId, crate::ast::NodeId>,
     /// NodeId -> Span map for recorded nodes (for resolving NodeIds to locations).
     pub node_spans: HashMap<crate::ast::NodeId, crate::token::Span>,
-    /// Import origins: binding name -> source module name (for cross-module find-references).
-    pub import_origins: HashMap<String, String>,
     /// Type/effect name references: (span, name) for find-references on types.
     pub type_references: Vec<(crate::token::Span, String)>,
-    /// Import origins for type names: type_name -> source module name.
-    pub type_import_origins: HashMap<String, String>,
     /// Constructor name -> definition NodeId (for symbol index).
     pub constructor_def_ids: HashMap<String, crate::ast::NodeId>,
     /// Doc comments from imported declarations: name -> doc lines.
@@ -327,9 +323,7 @@ impl Checker {
             records: self.records.clone(),
             references: self.lsp.references.clone(),
             node_spans: self.lsp.node_spans.clone(),
-            import_origins: self.lsp.import_origins.clone(),
             type_references: self.lsp.type_references.clone(),
-            type_import_origins: self.lsp.type_import_origins.clone(),
             constructor_def_ids: self.lsp.constructor_def_ids.clone(),
             imported_docs: self.lsp.imported_docs.clone(),
             prelude_imports: self.prelude_imports.clone(),

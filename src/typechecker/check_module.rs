@@ -669,7 +669,6 @@ impl Checker {
         for (name, scheme) in &self.constructors {
             if !mc.constructors.contains_key(name) {
                 mc.constructors.insert(name.clone(), scheme.clone());
-                mc.env.insert(name.clone(), scheme.clone());
             }
         }
         for (name, variants) in &self.adt_variants {
@@ -783,9 +782,6 @@ impl Checker {
                         } else {
                             self.env.insert(method_name.clone(), scheme.clone());
                         }
-                        self.lsp
-                            .import_origins
-                            .insert(method_name.clone(), module_name.to_string());
                     }
                     // Canonical name (Module.Trait.method) for after resolve pass rewrites
                     let canonical = format!("{}.{}.{}", module_name, name, method_name);
@@ -817,10 +813,6 @@ impl Checker {
             self.effects
                 .entry(canonical)
                 .or_insert_with(|| info.clone());
-            self.lsp
-                .type_import_origins
-                .entry(name.clone())
-                .or_insert_with(|| module_name.to_string());
             if let Some(doc) = doc_comments.get(name) {
                 self.lsp
                     .imported_docs
@@ -854,10 +846,6 @@ impl Checker {
         for (name, arity) in type_arity {
             // Bare name (canonical internal form)
             self.type_arity.entry(name.clone()).or_insert(*arity);
-            self.lsp
-                .type_import_origins
-                .entry(name.clone())
-                .or_insert_with(|| module_name.to_string());
         }
 
         // Function effects (for cross-module `with` validation and effect propagation).
@@ -868,13 +856,6 @@ impl Checker {
         }
 
         // --- Inject bindings, constructors, records into checker state ---
-
-        // Record import origins for all bindings from this module.
-        for (name, _) in bindings {
-            self.lsp
-                .import_origins
-                .insert(name.clone(), module_name.to_string());
-        }
 
         for (name, scheme) in bindings {
             // Canonical: always register under full module path (e.g. "Std.String.replace")
@@ -907,7 +888,10 @@ impl Checker {
             for ctor in ctors {
                 let canonical = format!("{}.{}", module_name, ctor);
                 if let Some(&scheme) = binding_map.get(ctor.as_str()) {
-                    self.constructors.insert(canonical, scheme.clone());
+                    self.constructors.insert(canonical.clone(), scheme.clone());
+                    if let Some(&did) = def_ids.get(ctor.as_str()) {
+                        self.lsp.constructor_def_ids.insert(canonical, did);
+                    }
                     variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
                 }
             }
@@ -938,9 +922,6 @@ impl Checker {
             for name in exposed {
                 let is_type = name.starts_with(|c: char| c.is_uppercase());
                 if is_type {
-                    self.lsp
-                        .type_import_origins
-                        .insert(name.clone(), module_name.to_string());
                     if let Some(fields) = record_defs.get(name.as_str()) {
                         self.records.insert(name.clone(), fields.clone());
                     }
@@ -1157,6 +1138,23 @@ pub(super) fn resolve_import(
                 }
             }
         }
+    }
+
+    // Record origins: every canonical name from this module maps to module_name.
+    // Collect all canonical names from the maps we just built.
+    let module = module_name.to_string();
+    for canonical in scope.values.values() {
+        scope.origins.entry(canonical.clone()).or_insert_with(|| module.clone());
+    }
+    for canonical in scope.constructors.values() {
+        scope.origins.entry(canonical.clone()).or_insert_with(|| module.clone());
+    }
+    for canonical in scope.effects.values() {
+        scope.origins.entry(canonical.clone()).or_insert_with(|| module.clone());
+    }
+    // Types use bare canonical names, but still originate from this module
+    for bare_name in scope.types.values() {
+        scope.origins.entry(bare_name.clone()).or_insert_with(|| module.clone());
     }
 
     Ok(scope)

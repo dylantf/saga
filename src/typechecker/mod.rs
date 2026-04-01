@@ -781,6 +781,9 @@ pub struct ScopeMap {
     pub constructors: HashMap<String, String>,
     /// User-visible name -> canonical name for effects.
     pub effects: HashMap<String, String>,
+    /// Canonical name -> source module name (e.g. "Std.List.map" -> "Std.List").
+    /// Used by LSP to determine import origins without a separate parallel map.
+    pub origins: HashMap<String, String>,
 }
 
 impl ScopeMap {
@@ -800,6 +803,26 @@ impl ScopeMap {
         self.effects.get(name).map(|s| s.as_str())
     }
 
+    /// Get the source module for a user-visible name, checking all name kinds.
+    pub fn origin_of(&self, name: &str) -> Option<&str> {
+        // Resolve the user-visible name to canonical, then look up origin
+        let canonical = self.values.get(name)
+            .or_else(|| self.constructors.get(name))
+            .or_else(|| self.effects.get(name))
+            .or_else(|| self.types.get(name));
+        if let Some(canon) = canonical {
+            self.origins.get(canon).map(|s| s.as_str())
+        } else {
+            // Name might already be canonical
+            self.origins.get(name).map(|s| s.as_str())
+        }
+    }
+
+    /// Check if a user-visible name is an import (has an origin in scope_map).
+    pub fn is_import(&self, name: &str) -> bool {
+        self.origin_of(name).is_some()
+    }
+
     /// Merge another scope_map into this one (first-insert-wins).
     pub fn merge(&mut self, other: &ScopeMap) {
         for (k, v) in &other.values {
@@ -813,6 +836,9 @@ impl ScopeMap {
         }
         for (k, v) in &other.effects {
             self.effects.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.origins {
+            self.origins.entry(k.clone()).or_insert_with(|| v.clone());
         }
     }
 }
@@ -879,14 +905,9 @@ pub(crate) struct LspState {
     pub effect_call_targets: HashMap<Span, (Span, Option<String>)>,
     /// Maps handler arm span -> (effect op definition span, source module) (for LSP go-to-def, level 2).
     pub handler_arm_targets: HashMap<Span, (Span, Option<String>)>,
-    /// Import origins: binding name -> source module name (for cross-module find-references).
-    /// Populated by inject_scoped_bindings when importing modules.
-    pub import_origins: HashMap<String, String>,
     /// Type/effect name references: (span, name) pairs for all type names in annotations,
     /// type expressions, effect refs, etc. Used for find-references on type/effect names.
     pub type_references: Vec<(Span, String)>,
-    /// Import origins for type names: type_name -> source module name.
-    pub type_import_origins: HashMap<String, String>,
     /// Doc comments from imported declarations: name -> doc lines.
     pub imported_docs: HashMap<String, Vec<String>>,
 }

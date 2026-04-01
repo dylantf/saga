@@ -216,7 +216,8 @@ pub fn type_definition_summary(
 
     // Check imported types: prefer AST from cached module programs (preserves user-written
     // type variable names), fall back to CheckResult data with prettified vars.
-    if let Some(source_module) = result.type_import_origins.get(name) {
+    if let Some(source_module) = result.scope_map.origin_of(name) {
+        let source_module = &source_module.to_string();
         if let Some(module_program) = result.programs().get(source_module) {
             // Recurse into the module's AST -- this hits the Decl matching above
             if let Some(summary) = type_definition_summary(result, name, module_program) {

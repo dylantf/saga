@@ -168,12 +168,8 @@ impl Backend {
         }
 
         // Resolve the symbol key: (module, name).
-        let module = if let Some(origin) = tc_result
-            .import_origins
-            .get(name)
-            .or_else(|| tc_result.type_import_origins.get(name))
-        {
-            origin.clone()
+        let module = if let Some(origin) = tc_result.scope_map.origin_of(name) {
+            origin.to_string()
         } else {
             let local_module = program.iter().find_map(|decl| {
                 if let dylang::ast::Decl::ModuleDecl { path, .. } = decl {
@@ -942,8 +938,7 @@ impl LanguageServer for Backend {
         }
         // Reject imported symbols that aren't locally redefined
         let tc_result = &snap.tc_result;
-        let is_imported = tc_result.import_origins.contains_key(&name)
-            || tc_result.type_import_origins.contains_key(&name);
+        let is_imported = tc_result.scope_map.is_import(&name);
         let is_locally_defined = definition::find_definition(program, &name, tc_result)
             .is_some_and(|d| d.file_path.is_none());
         if is_imported && !is_locally_defined {

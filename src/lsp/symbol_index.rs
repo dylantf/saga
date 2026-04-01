@@ -85,14 +85,14 @@ impl SymbolIndex {
         // Build reverse map: def_id -> (module, name) so we can resolve each reference.
         let mut def_id_to_symbol: HashMap<NodeId, SymbolKey> = HashMap::new();
 
-        // Imported names: use import_origins
-        for (name, module) in &tc_result.import_origins {
-            if let Some(did) = tc_result.env.def_id(name) {
+        // Imported names: use scope_map origins
+        for (name, did) in tc_result.env.all_def_ids() {
+            if let Some(module) = tc_result.scope_map.origin_of(&name) {
                 def_id_to_symbol.insert(
                     did,
                     SymbolKey {
-                        module: module.clone(),
-                        name: name.clone(),
+                        module: module.to_string(),
+                        name,
                     },
                 );
             }
@@ -102,7 +102,7 @@ impl SymbolIndex {
         if let Some(ref local_mod) = local_module {
             for (name, did) in tc_result.env.all_def_ids() {
                 if !def_id_to_symbol.contains_key(&did)
-                    && !tc_result.import_origins.contains_key(&name)
+                    && !tc_result.scope_map.is_import(&name)
                 {
                     def_id_to_symbol.insert(
                         did,
@@ -120,10 +120,10 @@ impl SymbolIndex {
             for (name, &did) in &tc_result.constructor_def_ids {
                 def_id_to_symbol.entry(did).or_insert_with(|| {
                     let module = tc_result
-                        .import_origins
-                        .get(name)
-                        .cloned()
-                        .unwrap_or_else(|| local_mod.clone());
+                        .scope_map
+                        .origin_of(name)
+                        .unwrap_or(local_mod.as_str())
+                        .to_string();
                     SymbolKey {
                         module,
                         name: name.clone(),
@@ -144,11 +144,11 @@ impl SymbolIndex {
 
         // Type/effect name references (from annotations, handler `for` clauses, etc.)
         for (span, type_name) in &tc_result.type_references {
-            // Determine the module: check type_import_origins first, then local
+            // Determine the module: check scope_map origins first, then local
             let module = tc_result
-                .type_import_origins
-                .get(type_name)
-                .cloned()
+                .scope_map
+                .origin_of(type_name)
+                .map(|s| s.to_string())
                 .unwrap_or_else(|| local_module.clone().unwrap_or_else(|| uri.to_string()));
             let key = SymbolKey {
                 module,

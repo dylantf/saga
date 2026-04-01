@@ -40,47 +40,24 @@ impl Checker {
             Pat::Constructor {
                 id, name, args, span, ..
             } => {
-                // Look up constructor by name. Try scope_map resolution first,
-                // then fall back to suffix-stripping for backwards compatibility.
+                // Look up constructor by name, with scope_map resolution as fallback.
                 let resolved_ctor = self.scope_map.resolve_constructor(name).map(|s| s.to_string());
-                let ctor_scheme = {
-                    let mut result = self.constructors.get(name)
-                        .or_else(|| resolved_ctor.as_ref().and_then(|r| self.constructors.get(r.as_str())));
-                    let mut suffix = name.as_str();
-                    while result.is_none() {
-                        if let Some(pos) = suffix.find('.') {
-                            suffix = &suffix[pos + 1..];
-                            result = self.constructors.get(suffix);
-                        } else {
-                            break;
-                        }
-                    }
-                    result.cloned().ok_or_else(|| {
+                let ctor_scheme = self.constructors.get(name)
+                    .or_else(|| resolved_ctor.as_ref().and_then(|r| self.constructors.get(r.as_str())))
+                    .cloned()
+                    .ok_or_else(|| {
                         Diagnostic::error_at(
                             *span,
                             format!("undefined constructor in pattern: {}", name),
                         )
-                    })?
-                };
+                    })?;
                 // Record reference to constructor definition for find-references/rename
                 {
-                    let def_id = resolved_ctor.as_ref().and_then(|r| self.lsp.constructor_def_ids.get(r.as_str()).copied())
-                        .or_else(|| self.lsp.constructor_def_ids.get(name).copied());
+                    let def_id = self.lsp.constructor_def_ids.get(name)
+                        .or_else(|| resolved_ctor.as_ref().and_then(|r| self.lsp.constructor_def_ids.get(r.as_str())))
+                        .copied();
                     if let Some(def_id) = def_id {
                         self.record_reference(*id, *span, def_id);
-                    } else {
-                        let mut lookup = name.as_str();
-                        loop {
-                            if let Some(did) = self.lsp.constructor_def_ids.get(lookup).copied() {
-                                self.record_reference(*id, *span, did);
-                                break;
-                            }
-                            if let Some(pos) = lookup.find('.') {
-                                lookup = &lookup[pos + 1..];
-                            } else {
-                                break;
-                            }
-                        }
                     }
                 }
                 let (ctor_ty, _) = self.instantiate(&ctor_scheme);
