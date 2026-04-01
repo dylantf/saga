@@ -193,8 +193,10 @@ impl Checker {
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
+                        let ord_name = self.resolve_trait_name("Ord")
+                            .unwrap_or_else(|| "Ord".into());
                         self.trait_state.pending_constraints.push((
-                            "Ord".into(),
+                            ord_name,
                             vec![],
                             left_ty.clone(),
                             span,

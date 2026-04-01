@@ -106,7 +106,13 @@ impl ModuleExports {
                 Decl::TraitDef {
                     public: true, name, ..
                 } => {
-                    if let Some(info) = checker.trait_state.traits.get(name.as_str()) {
+                    // Traits are stored under canonical key (Module.Trait)
+                    let canonical = checker
+                        .current_module
+                        .as_ref()
+                        .map(|m| format!("{}.{}", m, name))
+                        .unwrap_or_else(|| name.clone());
+                    if let Some(info) = checker.trait_state.traits.get(&canonical) {
                         traits.insert(name.clone(), info.clone());
                     }
                 }
@@ -116,11 +122,11 @@ impl ModuleExports {
                     target_type,
                     ..
                 } => {
-                    let key = (
-                        trait_name.clone(),
-                        trait_type_args.clone(),
-                        target_type.clone(),
-                    );
+                    // Resolve trait name to canonical form for impl key lookup
+                    let resolved = checker
+                        .resolve_trait_name(trait_name)
+                        .unwrap_or_else(|| trait_name.clone());
+                    let key = (resolved, trait_type_args.clone(), target_type.clone());
                     if let Some(info) = checker.trait_state.impls.get(&key) {
                         trait_impls.insert(key, info.clone());
                     }
@@ -129,7 +135,9 @@ impl ModuleExports {
                     public: true, name, ..
                 } => {
                     // Effects are stored under canonical key (Module.Effect)
-                    let canonical = checker.current_module.as_ref()
+                    let canonical = checker
+                        .current_module
+                        .as_ref()
                         .map(|m| format!("{}.{}", m, name))
                         .unwrap_or_else(|| name.clone());
                     if let Some(info) = checker.effects.get(&canonical) {
@@ -613,7 +621,8 @@ impl Checker {
 
         // Build codegen info from the module's public declarations.
         // Pass the effects map so fun_effects can use canonical effect names.
-        let codegen_info = collect_codegen_info(&module_name, &program, &exports, &mod_checker.effects);
+        let codegen_info =
+            collect_codegen_info(&module_name, &program, &exports, &mod_checker.effects, &mod_checker.scope_map);
         self.modules
             .codegen_info
             .insert(module_name.clone(), codegen_info);
@@ -761,9 +770,10 @@ impl Checker {
         let binding_map: std::collections::HashMap<&str, &Scheme> =
             bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
         for (name, info) in traits {
+            let trait_canonical = format!("{}.{}", module_name, name);
             self.trait_state
                 .traits
-                .entry(name.clone())
+                .entry(trait_canonical)
                 .or_insert_with(|| info.clone());
             // Register doc comments for the trait itself
             if let Some(doc) = doc_comments.get(name) {
@@ -804,9 +814,8 @@ impl Checker {
         // self.effects (the bare form is needed for internal type checking —
         // the type system stores bare effect names in EffectRows). The
         // scope_map controls which names users can write in `needs` clauses.
-        let is_exposed = |item: &str| -> bool {
-            exposing.is_some_and(|list| list.iter().any(|e| e == item))
-        };
+        let is_exposed =
+            |item: &str| -> bool { exposing.is_some_and(|list| list.iter().any(|e| e == item)) };
         for (name, info) in effects {
             // One canonical entry: Module.Effect (e.g. Std.Fail.Fail)
             let canonical = format!("{}.{}", module_name, name);
@@ -997,6 +1006,27 @@ pub(super) fn resolve_import(
         }
     }
 
+    // Traits: canonical + aliased + bare (traits are always available for impl/where
+    // when the module is imported, regardless of exposing clause)
+    for trait_name in exports.traits.keys() {
+        let trait_canonical = format!("{}.{}", module_name, trait_name);
+        scope
+            .traits
+            .entry(trait_canonical.clone())
+            .or_insert_with(|| trait_canonical.clone());
+        scope
+            .traits
+            .entry(trait_name.clone())
+            .or_insert_with(|| trait_canonical.clone());
+        if prefix != module_name {
+            let aliased = format!("{}.{}", prefix, trait_name);
+            scope
+                .traits
+                .entry(aliased)
+                .or_insert_with(|| trait_canonical.clone());
+        }
+    }
+
     // Trait methods: bare -> Module.Trait.method
     // Trait methods are always unqualified in user code; the canonical form
     // is used by the resolve pass to rewrite Var nodes.
@@ -1017,10 +1047,16 @@ pub(super) fn resolve_import(
         }
         // Effects: canonical + aliased qualified forms
         let effect_canonical = format!("{}.{}", module_name, effect_name);
-        scope.effects.entry(effect_canonical.clone()).or_insert_with(|| effect_canonical.clone());
+        scope
+            .effects
+            .entry(effect_canonical.clone())
+            .or_insert_with(|| effect_canonical.clone());
         if prefix != module_name {
             let aliased = format!("{}.{}", prefix, effect_name);
-            scope.effects.entry(aliased).or_insert_with(|| effect_canonical.clone());
+            scope
+                .effects
+                .entry(aliased)
+                .or_insert_with(|| effect_canonical.clone());
         }
     }
 
@@ -1119,7 +1155,16 @@ pub(super) fn resolve_import(
                 // Effects can be exposed by name
                 if exports.effects.contains_key(name) {
                     let effect_canonical = format!("{}.{}", module_name, name);
-                    scope.effects.entry(name.clone()).or_insert(effect_canonical);
+                    scope
+                        .effects
+                        .entry(name.clone())
+                        .or_insert(effect_canonical);
+                    found = true;
+                }
+                // Traits can be exposed by name
+                if exports.traits.contains_key(name) {
+                    let trait_canonical = format!("{}.{}", module_name, name);
+                    scope.traits.entry(name.clone()).or_insert(trait_canonical);
                     found = true;
                 }
                 if !found {
@@ -1144,17 +1189,35 @@ pub(super) fn resolve_import(
     // Collect all canonical names from the maps we just built.
     let module = module_name.to_string();
     for canonical in scope.values.values() {
-        scope.origins.entry(canonical.clone()).or_insert_with(|| module.clone());
+        scope
+            .origins
+            .entry(canonical.clone())
+            .or_insert_with(|| module.clone());
     }
     for canonical in scope.constructors.values() {
-        scope.origins.entry(canonical.clone()).or_insert_with(|| module.clone());
+        scope
+            .origins
+            .entry(canonical.clone())
+            .or_insert_with(|| module.clone());
     }
     for canonical in scope.effects.values() {
-        scope.origins.entry(canonical.clone()).or_insert_with(|| module.clone());
+        scope
+            .origins
+            .entry(canonical.clone())
+            .or_insert_with(|| module.clone());
+    }
+    for canonical in scope.traits.values() {
+        scope
+            .origins
+            .entry(canonical.clone())
+            .or_insert_with(|| module.clone());
     }
     // Types use bare canonical names, but still originate from this module
     for bare_name in scope.types.values() {
-        scope.origins.entry(bare_name.clone()).or_insert_with(|| module.clone());
+        scope
+            .origins
+            .entry(bare_name.clone())
+            .or_insert_with(|| module.clone());
     }
 
     Ok(scope)
@@ -1166,6 +1229,7 @@ fn collect_codegen_info(
     program: &[crate::ast::Decl],
     exports: &ModuleExports,
     effects_map: &std::collections::HashMap<String, EffectDefInfo>,
+    scope_map: &super::ScopeMap,
 ) -> ModuleCodegenInfo {
     use crate::ast::Decl;
     let mut effect_defs = Vec::new();
@@ -1240,7 +1304,8 @@ fn collect_codegen_info(
                         // so try exact match first, then suffix match.
                         let found = effects_map.get(&e.name).or_else(|| {
                             let suffix = format!(".{}", e.name);
-                            effects_map.iter()
+                            effects_map
+                                .iter()
                                 .find(|(k, _)| k.ends_with(&suffix))
                                 .map(|(_, v)| v)
                         });
@@ -1315,11 +1380,20 @@ fn collect_codegen_info(
                             .get(bound.type_var.as_str())
                             .copied()
                             .unwrap_or(0);
-                        bound.traits.iter().map(move |(t, _, _)| (t.clone(), idx))
+                        bound.traits.iter().map(move |(t, _, _)| {
+                            let resolved = scope_map.resolve_trait(t)
+                                .unwrap_or(t.as_str())
+                                .to_string();
+                            (resolved, idx)
+                        })
                     })
                     .collect();
+                // Resolve trait name to canonical form via scope_map
+                let canonical_trait = scope_map.resolve_trait(trait_name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("{}.{}", module_name, trait_name));
                 trait_impl_dicts.push(TraitImplDict {
-                    trait_name: trait_name.clone(),
+                    trait_name: canonical_trait,
                     trait_type_args: trait_type_args.clone(),
                     target_type: target_type.clone(),
                     dict_name,

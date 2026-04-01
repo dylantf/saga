@@ -781,6 +781,8 @@ pub struct ScopeMap {
     pub constructors: HashMap<String, String>,
     /// User-visible name -> canonical name for effects.
     pub effects: HashMap<String, String>,
+    /// User-visible name -> canonical name for traits.
+    pub traits: HashMap<String, String>,
     /// Canonical name -> source module name (e.g. "Std.List.map" -> "Std.List").
     /// Used by LSP to determine import origins without a separate parallel map.
     pub origins: HashMap<String, String>,
@@ -803,12 +805,17 @@ impl ScopeMap {
         self.effects.get(name).map(|s| s.as_str())
     }
 
+    pub fn resolve_trait(&self, name: &str) -> Option<&str> {
+        self.traits.get(name).map(|s| s.as_str())
+    }
+
     /// Get the source module for a user-visible name, checking all name kinds.
     pub fn origin_of(&self, name: &str) -> Option<&str> {
         // Resolve the user-visible name to canonical, then look up origin
         let canonical = self.values.get(name)
             .or_else(|| self.constructors.get(name))
             .or_else(|| self.effects.get(name))
+            .or_else(|| self.traits.get(name))
             .or_else(|| self.types.get(name));
         if let Some(canon) = canonical {
             self.origins.get(canon).map(|s| s.as_str())
@@ -836,6 +843,9 @@ impl ScopeMap {
         }
         for (k, v) in &other.effects {
             self.effects.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.traits {
+            self.traits.entry(k.clone()).or_insert_with(|| v.clone());
         }
         for (k, v) in &other.origins {
             self.origins.entry(k.clone()).or_insert_with(|| v.clone());

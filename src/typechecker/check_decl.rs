@@ -463,14 +463,18 @@ impl Checker {
                 if !where_clause.is_empty() {
                     for bound in where_clause {
                         for (trait_name, _, trait_span) in &bound.traits {
+                            let resolved = self.resolve_trait_name(trait_name)
+                                .unwrap_or_else(|| trait_name.clone());
                             self.lsp
                                 .type_references
-                                .push((*trait_span, trait_name.clone()));
+                                .push((*trait_span, resolved));
                         }
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
                         {
                             for (trait_name, trait_type_args, _) in &bound.traits {
+                                let resolved_trait = self.resolve_trait_name(trait_name)
+                                    .unwrap_or_else(|| trait_name.clone());
                                 let extra_types: Vec<Type> = trait_type_args
                                     .iter()
                                     .map(|arg_name| {
@@ -484,7 +488,7 @@ impl Checker {
                                         }
                                     })
                                     .collect();
-                                scheme_constraints.push((trait_name.clone(), *var_id, extra_types));
+                                scheme_constraints.push((resolved_trait, *var_id, extra_types));
                             }
                         } else {
                             return Err(vec![Diagnostic::error_at(
@@ -644,9 +648,11 @@ impl Checker {
                     let mut constraints = Vec::new();
                     for bound in where_clause {
                         for (trait_name, _, trait_span) in &bound.traits {
+                            let resolved = self.resolve_trait_name(trait_name)
+                                .unwrap_or_else(|| trait_name.clone());
                             self.lsp
                                 .type_references
-                                .push((*trait_span, trait_name.clone()));
+                                .push((*trait_span, resolved));
                         }
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
@@ -655,6 +661,8 @@ impl Checker {
                                 .where_bound_var_names
                                 .insert(*var_id, bound.type_var.clone());
                             for (trait_name, trait_type_args, _) in &bound.traits {
+                                let resolved_trait = self.resolve_trait_name(trait_name)
+                                    .unwrap_or_else(|| trait_name.clone());
                                 let extra_types: Vec<Type> = trait_type_args
                                     .iter()
                                     .map(|arg_name| {
@@ -667,7 +675,7 @@ impl Checker {
                                         }
                                     })
                                     .collect();
-                                constraints.push((trait_name.clone(), *var_id, extra_types));
+                                constraints.push((resolved_trait, *var_id, extra_types));
                             }
                         } else {
                             return Err(vec![Diagnostic::error_at(
@@ -1260,11 +1268,12 @@ impl Checker {
 
         for (trait_name, var_id, span) in scheme_constraints {
             if !type_vars.contains(&var_id) {
+                let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                 return Err(Diagnostic::error_at(
                     span,
                     format!(
                         "ambiguous type variable requires {} but has no concrete type in '{}'",
-                        trait_name, name
+                        display, name
                     ),
                 ));
             }
@@ -1644,14 +1653,16 @@ impl Checker {
                     .where_bound_var_names
                     .insert(*var_id, bound.type_var.clone());
                 for (trait_req, _, trait_span) in &bound.traits {
+                    let resolved_req = self.resolve_trait_name(trait_req)
+                        .unwrap_or_else(|| trait_req.clone());
                     self.lsp
                         .type_references
-                        .push((*trait_span, trait_req.clone()));
+                        .push((*trait_span, resolved_req.clone()));
                     self.trait_state
                         .where_bounds
                         .entry(*var_id)
                         .or_default()
-                        .insert(trait_req.clone());
+                        .insert(resolved_req);
                 }
             } else {
                 self.collected_diagnostics.push(Diagnostic::error_at(
@@ -1932,6 +1943,8 @@ impl Checker {
                                     .entry((effect_ref.name.clone(), i))
                                     .or_default();
                                 for (trait_name, trait_type_args, _) in &bound.traits {
+                                    let resolved_trait = self.resolve_trait_name(trait_name)
+                                        .unwrap_or_else(|| trait_name.clone());
                                     let extra_var_ids: Vec<u32> = trait_type_args
                                         .iter()
                                         .filter_map(|arg_name| {
@@ -1941,7 +1954,7 @@ impl Checker {
                                                 .map(|(_, id)| *id)
                                         })
                                         .collect();
-                                    entry.push((trait_name.clone(), extra_var_ids));
+                                    entry.push((resolved_trait, extra_var_ids));
                                 }
                             }
                         }
@@ -2036,13 +2049,28 @@ impl Checker {
                     })
                     .collect();
                 match &resolved {
-                    // Concrete type (includes primitives): check that an impl exists
+                    // Concrete type (includes primitives): check that an impl exists.
+                    // Try canonical form first, then resolve through scope_map.
                     Type::Con(type_name, args) => {
+                        let resolved_trait = self.resolve_trait_name(&trait_name)
+                            .unwrap_or_else(|| trait_name.clone());
                         let impl_info = self.trait_state.impls.get(&(
-                            trait_name.clone(),
+                            resolved_trait.clone(),
                             resolved_trait_type_args.clone(),
                             type_name.clone(),
-                        ));
+                        )).or_else(|| {
+                            // Fallback: try bare trait name for builtin impls (Num, Eq, Show for Tuple, etc.)
+                            let bare = resolved_trait.rsplit('.').next().unwrap_or(&resolved_trait);
+                            if bare != resolved_trait {
+                                self.trait_state.impls.get(&(
+                                    bare.to_string(),
+                                    resolved_trait_type_args.clone(),
+                                    type_name.clone(),
+                                ))
+                            } else {
+                                None
+                            }
+                        });
                         match impl_info {
                             None => {
                                 // Check if this might be caused by a user function
@@ -2075,9 +2103,11 @@ impl Checker {
                                         }
                                     }
                                 }
+                                let display_trait = resolved_trait.rsplit('.').next()
+                                    .unwrap_or(&resolved_trait);
                                 return Err(Diagnostic::error_at(
                                     span,
-                                    format!("no impl of {} for {}{}", trait_name, type_name, hint),
+                                    format!("no impl of {} for {}{}", display_trait, type_name, hint),
                                 ));
                             }
                             Some(info) => {
@@ -2129,11 +2159,12 @@ impl Checker {
                             .get(id)
                             .is_some_and(|b| b.contains(&trait_name));
                         if !covered {
+                            let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                             return Err(Diagnostic::error_at(
                                 span,
                                 format!(
                                     "ambiguous type variable requires {}. Add a type annotation to pin the unconstrained type variable",
-                                    trait_name
+                                    display
                                 ),
                             ));
                         }
@@ -2148,15 +2179,17 @@ impl Checker {
                         });
                     }
                     Type::Fun(_, _, _) => {
+                        let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                         return Err(Diagnostic::error_at(
                             span,
-                            format!("no impl of {} for function type", trait_name),
+                            format!("no impl of {} for function type", display),
                         ));
                     }
                     Type::Record(_) => {
+                        let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                         return Err(Diagnostic::error_at(
                             span,
-                            format!("no impl of {} for anonymous record type", trait_name),
+                            format!("no impl of {} for anonymous record type", display),
                         ));
                     }
                     // Error/Never type: skip trait checking

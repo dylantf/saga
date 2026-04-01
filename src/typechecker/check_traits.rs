@@ -1,7 +1,7 @@
 use crate::ast;
 use crate::token::Span;
 
-use super::{Checker, ImplInfo, Scheme, Type, Diagnostic};
+use super::{Checker, Diagnostic, ImplInfo, Scheme, Type};
 
 impl Checker {
     // --- Trait & impl helpers ---
@@ -10,7 +10,12 @@ impl Checker {
     /// Used when checking impl bodies: if the trait says `(x: a) -> String`
     /// and the impl is `for User`, we substitute a -> User to get `(x: User) -> String`.
     /// `trait_param_id` identifies which specific var to replace; other free vars are left alone.
-    pub(crate) fn substitute_trait_param(&self, trait_param_id: Option<u32>, replacement: &Type, ty: &Type) -> Type {
+    pub(crate) fn substitute_trait_param(
+        &self,
+        trait_param_id: Option<u32>,
+        replacement: &Type,
+        ty: &Type,
+    ) -> Type {
         match ty {
             Type::Var(id) => {
                 let resolved = self.sub.apply(ty);
@@ -30,17 +35,23 @@ impl Checker {
                 Box::new(self.substitute_trait_param(trait_param_id, replacement, a)),
                 Box::new(self.substitute_trait_param(trait_param_id, replacement, b)),
                 super::EffectRow {
-                    effects: row.effects.iter()
+                    effects: row
+                        .effects
+                        .iter()
                         .map(|(name, args)| {
                             (
                                 name.clone(),
                                 args.iter()
-                                    .map(|t| self.substitute_trait_param(trait_param_id, replacement, t))
+                                    .map(|t| {
+                                        self.substitute_trait_param(trait_param_id, replacement, t)
+                                    })
                                     .collect(),
                             )
                         })
                         .collect(),
-                    tail: row.tail.as_ref().map(|t| Box::new(self.substitute_trait_param(trait_param_id, replacement, t))),
+                    tail: row.tail.as_ref().map(|t| {
+                        Box::new(self.substitute_trait_param(trait_param_id, replacement, t))
+                    }),
                 },
             ),
             Type::Con(name, args) => Type::Con(
@@ -52,11 +63,40 @@ impl Checker {
             Type::Record(fields) => Type::Record(
                 fields
                     .iter()
-                    .map(|(fname, ty)| (fname.clone(), self.substitute_trait_param(trait_param_id, replacement, ty)))
+                    .map(|(fname, ty)| {
+                        (
+                            fname.clone(),
+                            self.substitute_trait_param(trait_param_id, replacement, ty),
+                        )
+                    })
                     .collect(),
             ),
             Type::Error => Type::Error,
         }
+    }
+
+    /// Resolve a trait name to its canonical form.
+    /// Tries: exact match in traits → scope_map.traits → current_module.Name.
+    pub(crate) fn resolve_trait_name(&self, name: &str) -> Option<String> {
+        // Exact match (already canonical)
+        if self.trait_state.traits.contains_key(name) {
+            return Some(name.to_string());
+        }
+        // Scope map resolution (bare or aliased → canonical)
+        if let Some(canonical) = self.scope_map.resolve_trait(name)
+            && self.trait_state.traits.contains_key(canonical)
+        {
+            return Some(canonical.to_string());
+        }
+        // Local module: Module.Name
+        if let Some(module) = &self.current_module {
+            let canonical = format!("{}.{}", module, name);
+            if self.trait_state.traits.contains_key(&canonical) {
+                return Some(canonical);
+            }
+        }
+        // Builtin traits (Num, Semigroup, Eq) are registered under bare names
+        None
     }
 
     // --- Trait & impl registration ---
@@ -68,6 +108,13 @@ impl Checker {
         supertraits: &[(String, crate::token::Span)],
         methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
+        // Compute canonical name early — used in scheme constraints below
+        let canonical_name = if let Some(module) = &self.current_module {
+            format!("{}.{}", module, name)
+        } else {
+            name.to_string()
+        };
+
         let self_param = type_params.first().map(|s| s.as_str()).unwrap_or("a");
         let mut method_sigs = Vec::new();
 
@@ -100,7 +147,8 @@ impl Checker {
         // For phantom type params (not mentioned in the method signature), we create
         // fresh vars and add them to forall so the constraint flows through instantiation.
         let mut trait_method_sigs = Vec::new();
-        for (method_name, param_types, return_type, trait_param_id, mut params_list) in method_sigs {
+        for (method_name, param_types, return_type, trait_param_id, mut params_list) in method_sigs
+        {
             let mut fun_ty = return_type.clone();
             for pt in param_types.iter().rev() {
                 fun_ty = Type::arrow(pt.clone(), fun_ty);
@@ -113,7 +161,10 @@ impl Checker {
             for tp_name in type_params {
                 if !params_list.iter().any(|(n, _)| n == tp_name) {
                     let fresh = self.fresh_var();
-                    let id = match fresh { Type::Var(id) => id, _ => unreachable!() };
+                    let id = match fresh {
+                        Type::Var(id) => id,
+                        _ => unreachable!(),
+                    };
                     params_list.push((tp_name.clone(), id));
                     forall.push(id);
                 }
@@ -127,16 +178,24 @@ impl Checker {
             let extra_types: Vec<Type> = type_params[1..]
                 .iter()
                 .filter_map(|tp_name| {
-                    params_list.iter().find(|(n, _)| n == tp_name).map(|(_, id)| Type::Var(*id))
+                    params_list
+                        .iter()
+                        .find(|(n, _)| n == tp_name)
+                        .map(|(_, id)| Type::Var(*id))
                 })
                 .collect();
             let constraints = match self_id {
-                Some(id) => vec![(name.to_string(), id, extra_types)],
+                Some(id) => vec![(canonical_name.clone(), id, extra_types)],
                 None => vec![],
             };
 
             // Preserve original data for TraitInfo storage
-            trait_method_sigs.push((method_name.clone(), param_types, return_type, trait_param_id));
+            trait_method_sigs.push((
+                method_name.clone(),
+                param_types,
+                return_type,
+                trait_param_id,
+            ));
 
             self.env.insert(
                 method_name,
@@ -153,11 +212,27 @@ impl Checker {
             self.lsp.type_references.push((*st_span, st_name.clone()));
         }
 
+        // Also register scope_map entry for local traits: bare -> canonical
+        if canonical_name != name {
+            self.scope_map
+                .traits
+                .entry(name.to_string())
+                .or_insert_with(|| canonical_name.clone());
+            self.scope_map
+                .traits
+                .entry(canonical_name.clone())
+                .or_insert_with(|| canonical_name.clone());
+        }
+        // Resolve supertrait names to canonical form
+        let resolved_supertraits: Vec<String> = supertraits
+            .iter()
+            .map(|(n, _)| self.resolve_trait_name(n).unwrap_or_else(|| n.clone()))
+            .collect();
         self.trait_state.traits.insert(
-            name.into(),
+            canonical_name,
             super::TraitInfo {
                 type_params: type_params.to_vec(),
-                supertraits: supertraits.iter().map(|(n, _)| n.clone()).collect(),
+                supertraits: resolved_supertraits,
                 methods: trait_method_sigs,
             },
         );
@@ -177,10 +252,20 @@ impl Checker {
         methods: &[ast::ImplMethod],
         span: Span,
     ) -> Result<(), Diagnostic> {
+        // Resolve trait name to canonical form
+        let trait_name = self
+            .resolve_trait_name(trait_name)
+            .unwrap_or_else(|| trait_name.to_string());
+        let trait_name = trait_name.as_str();
         // Check the trait exists
-        let trait_info = self.trait_state.traits.get(trait_name).cloned().ok_or_else(|| {
-            Diagnostic::error_at(span, format!("impl for undefined trait: {}", trait_name))
-        })?;
+        let trait_info = self
+            .trait_state
+            .traits
+            .get(trait_name)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::error_at(span, format!("impl for undefined trait: {}", trait_name))
+            })?;
 
         // Validate trait type arg arity: extra type params (all except the self param at index 0)
         let expected_extra = trait_info.type_params.len().saturating_sub(1);
@@ -189,7 +274,9 @@ impl Checker {
                 span,
                 format!(
                     "trait {} expects {} type argument(s), but {} were provided",
-                    trait_name, expected_extra, trait_type_args.len()
+                    trait_name,
+                    expected_extra,
+                    trait_type_args.len()
                 ),
             ));
         }
@@ -248,26 +335,36 @@ impl Checker {
                 if let Some(idx) = type_params.iter().position(|p| p == &bound.type_var)
                     && let Some(Type::Var(var_id)) = param_vars.get(idx)
                 {
-                    self.trait_state.where_bound_var_names
+                    self.trait_state
+                        .where_bound_var_names
                         .insert(*var_id, bound.type_var.clone());
                     for (trait_req, _, trait_span) in &bound.traits {
-                        self.lsp.type_references.push((*trait_span, trait_req.clone()));
-                        self.trait_state.where_bounds
+                        let resolved_req = self
+                            .resolve_trait_name(trait_req)
+                            .unwrap_or_else(|| trait_req.clone());
+                        self.lsp
+                            .type_references
+                            .push((*trait_span, resolved_req.clone()));
+                        self.trait_state
+                            .where_bounds
                             .entry(*var_id)
                             .or_default()
-                            .insert(trait_req.clone());
+                            .insert(resolved_req);
                     }
                 }
             }
             Type::Con(target_type.into(), param_vars)
         };
 
-        let declared_effects: std::collections::HashSet<String> =
-            needs.iter().map(|e| {
+        let declared_effects: std::collections::HashSet<String> = needs
+            .iter()
+            .map(|e| {
                 self.resolve_effect(&e.name)
                     .and_then(|info| {
                         let short = e.name.rsplit('.').next().unwrap_or(&e.name);
-                        info.source_module.as_ref().map(|m| format!("{}.{}", m, short))
+                        info.source_module
+                            .as_ref()
+                            .map(|m| format!("{}.{}", m, short))
                     })
                     .unwrap_or_else(|| {
                         if let Some(m) = &self.current_module {
@@ -276,7 +373,8 @@ impl Checker {
                             e.name.clone()
                         }
                     })
-            }).collect();
+            })
+            .collect();
 
         for m in methods {
             let (method_name, params, body) = (&m.name, &m.params, &m.body);
@@ -292,7 +390,8 @@ impl Checker {
                 .iter()
                 .map(|t| self.substitute_trait_param(trait_param_id, &target, t))
                 .collect();
-            let expected_return = self.substitute_trait_param(trait_param_id, &target, &trait_method.2);
+            let expected_return =
+                self.substitute_trait_param(trait_param_id, &target, &trait_method.2);
 
             let saved_env = self.env.clone();
             let body_scope = self.enter_scope();
@@ -315,7 +414,11 @@ impl Checker {
                     .collect();
                 self.env.insert(
                     m_name.clone(),
-                    Scheme { forall, constraints, ty: fun_ty },
+                    Scheme {
+                        forall,
+                        constraints,
+                        ty: fun_ty,
+                    },
                 );
             }
 
@@ -343,10 +446,13 @@ impl Checker {
             let body_effs = self.restore_effects(trait_saved_effs);
             let scope_result = self.exit_scope(body_scope);
             let body_field_candidates = scope_result.field_candidates;
-            let body_effects: std::collections::HashSet<String> = body_effs
-                .effects.iter().map(|(n, _)| n.clone()).collect();
+            let body_effects: std::collections::HashSet<String> =
+                body_effs.effects.iter().map(|(n, _)| n.clone()).collect();
             if !body_effects.is_empty() || !declared_effects.is_empty() {
-                let undeclared: Vec<String> = body_effects.difference(&declared_effects).cloned().collect();
+                let undeclared: Vec<String> = body_effects
+                    .difference(&declared_effects)
+                    .cloned()
+                    .collect();
                 if !undeclared.is_empty() {
                     let mut sorted = undeclared;
                     sorted.sort();
@@ -357,12 +463,20 @@ impl Checker {
                     if declared_effects.is_empty() {
                         return Err(Diagnostic::error_at(
                             body.span,
-                            format!("{} uses effects {{{}}} but has no 'needs' declaration", label, sorted.join(", ")),
+                            format!(
+                                "{} uses effects {{{}}} but has no 'needs' declaration",
+                                label,
+                                sorted.join(", ")
+                            ),
                         ));
                     } else {
                         return Err(Diagnostic::error_at(
                             body.span,
-                            format!("{} uses effects {{{}}} not declared in its 'needs' clause", label, sorted.join(", ")),
+                            format!(
+                                "{} uses effects {{{}}} not declared in its 'needs' clause",
+                                label,
+                                sorted.join(", ")
+                            ),
                         ));
                     }
                 }
@@ -400,7 +514,10 @@ impl Checker {
             match param_idx {
                 Some(idx) => {
                     for (trait_req, _, _) in &bound.traits {
-                        param_constraints.push((trait_req.clone(), idx));
+                        let resolved_req = self
+                            .resolve_trait_name(trait_req)
+                            .unwrap_or_else(|| trait_req.clone());
+                        param_constraints.push((resolved_req, idx));
                     }
                 }
                 None => {
@@ -415,7 +532,11 @@ impl Checker {
             }
         }
 
-        let key = (trait_name.to_string(), trait_type_args.to_vec(), target_type.to_string());
+        let key = (
+            trait_name.to_string(),
+            trait_type_args.to_vec(),
+            target_type.to_string(),
+        );
         if self.trait_state.impls.contains_key(&key) {
             let args_str = if trait_type_args.is_empty() {
                 String::new()

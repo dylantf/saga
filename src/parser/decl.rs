@@ -36,16 +36,16 @@ impl Parser {
         })
     }
 
-    // Parse `Name` or `Module.Name`, returning only the base name.
-    // Used where runtime/typechecker keys are bare names (traits, types, effects).
+    // Parse `Name` or `Module.Name.Etc`, preserving the full qualified path.
+    // Resolution to canonical names happens in the typechecker, not the parser.
     fn parse_upper_name(&mut self) -> Result<String, ParseError> {
-        let name = self.expect_upper_ident()?;
-        if matches!(self.peek(), Token::Dot) {
+        let mut name = self.expect_upper_ident()?;
+        while matches!(self.peek(), Token::Dot) {
             self.advance(); // consume '.'
-            Ok(self.expect_upper_ident()?) // discard module prefix, return base name
-        } else {
-            Ok(name)
+            let segment = self.expect_upper_ident()?;
+            name = format!("{}.{}", name, segment);
         }
+        Ok(name)
     }
 
     // --- Declarations ---
@@ -207,7 +207,7 @@ impl Parser {
             self.advance();
             self.expect(Token::LParen)?;
             loop {
-                deriving.push(self.expect_upper_ident()?);
+                deriving.push(self.parse_upper_name()?);
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
                 } else {
@@ -288,7 +288,7 @@ impl Parser {
             self.advance(); // consume 'deriving'
             self.expect(Token::LParen)?;
             loop {
-                deriving.push(self.expect_upper_ident()?);
+                deriving.push(self.parse_upper_name()?);
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
                 } else {

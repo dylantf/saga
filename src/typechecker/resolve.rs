@@ -59,6 +59,11 @@ pub(crate) fn resolve_names(program: &mut [Decl], scope_map: &ScopeMap) {
             Decl::Val { name, .. } => {
                 local_funs.insert(name.clone());
             }
+            Decl::TraitDef { methods, .. } => {
+                for method in methods {
+                    local_funs.insert(method.node.name.clone());
+                }
+            }
             _ => {}
         }
     }

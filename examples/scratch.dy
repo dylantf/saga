@@ -1,3 +1,8 @@
+type Example =
+  | Example(String)
+  | Other(Int)
+  deriving (Std.Base.Show)
+
 main () = {
   List.map (fun x -> x * x) [1, 2, 3]
 }
