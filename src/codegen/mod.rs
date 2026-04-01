@@ -7,6 +7,7 @@ mod tests;
 
 use crate::ast;
 use crate::typechecker::ModuleCodegenInfo;
+use crate::typechecker::Type;
 use std::collections::HashMap;
 
 /// Result of compiling a single module: codegen metadata, elaborated AST,
@@ -43,11 +44,12 @@ impl CodegenContext {
     pub fn elaborated_module(&self, name: &str) -> Option<&ast::Program> {
         self.modules.get(name).map(|m| &m.elaborated)
     }
+
 }
 
 pub fn emit_module(module_name: &str, program: &ast::Program) -> String {
     let ctx = CodegenContext::default();
-    emit_module_with_context(module_name, program, &ctx, None)
+    emit_module_with_context(module_name, program, &ctx, HashMap::new(), None)
 }
 
 /// Source file path and source text for error location tracking.
@@ -62,17 +64,18 @@ pub fn emit_module_with_context(
     module_name: &str,
     program: &ast::Program,
     ctx: &CodegenContext,
+    current_resolved_types: HashMap<ast::NodeId, Type>,
     source_file: Option<&SourceFile>,
 ) -> String {
     let codegen_info = ctx.codegen_info();
     let program = normalize::normalize_effects(program);
-    let constructor_atoms =
-        resolve::build_constructor_atoms(module_name, &program, &codegen_info, &ctx.prelude_imports);
-    let mut resolution_map = resolve::resolve_names(
+    let constructor_atoms = resolve::build_constructor_atoms(
+        module_name,
         &program,
         &codegen_info,
         &ctx.prelude_imports,
     );
+    let mut resolution_map = resolve::resolve_names(&program, &codegen_info, &ctx.prelude_imports);
     // Merge in pre-computed resolution maps from all compiled modules.
     // Their NodeIds don't overlap with ours, so this is a simple extend.
     for compiled in ctx.modules.values() {
@@ -80,7 +83,13 @@ pub fn emit_module_with_context(
     }
     let source_info =
         source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source));
-    let cmod = lower::Lowerer::new(ctx, constructor_atoms, resolution_map, source_info)
+    let cmod = lower::Lowerer::new(
+        ctx,
+        constructor_atoms,
+        resolution_map,
+        current_resolved_types,
+        source_info,
+    )
         .lower_module(module_name, &program);
     cerl::print_module(&cmod)
 }

@@ -36,7 +36,13 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    emit_module_with_context("_script", &elaborated, &ctx, source_file)
+    emit_module_with_context(
+        "_script",
+        &elaborated,
+        &ctx,
+        result.resolved_type_at_node_map(),
+        source_file,
+    )
 }
 
 /// Assert that `emit(src)` contains `needle` as a substring.
@@ -64,6 +70,154 @@ fn assert_contains_full(src: &str, needle: &str) {
 #[test]
 fn full_pipeline_smoke() {
     assert_contains_full("main () = 42", "42");
+}
+
+#[test]
+fn eta_reduced_effectful_callback_uses_lowered_fun_arity() {
+    let src = r#"
+effect State s {
+  fun get : Unit -> s
+  fun put : s -> Unit
+}
+
+fun run_state : s -> (Unit -> a needs {State s}) -> (a, s)
+run_state init f = {
+  let state_fn = f () with {
+    get () = fun s -> (resume s) s
+    put new_s = fun _ -> (resume ()) new_s
+    return value = fun s -> (value, s)
+  }
+  state_fn init
+}
+
+fun build_msg : Unit -> String needs {State String}
+build_msg () = get! ()
+
+main () = {
+  let (msg, _) = run_state "" build_msg
+  msg
+}
+"#;
+    let out = emit_full(src);
+    assert!(
+        out.contains("'build_msg'/3"),
+        "expected eta-reduced effectful function ref to use lowered arity\n{out}"
+    );
+    assert!(
+        !out.contains("'build_msg'/1"),
+        "effectful function ref used source arity instead of lowered arity\n{out}"
+    );
+}
+
+#[test]
+fn alias_of_eta_reduced_effectful_callback_uses_lowered_fun_arity() {
+    let src = r#"
+effect State s {
+  fun get : Unit -> s
+  fun put : s -> Unit
+}
+
+fun run_state : s -> (Unit -> a needs {State s}) -> (a, s)
+run_state init f = {
+  let state_fn = f () with {
+    get () = fun s -> (resume s) s
+    put new_s = fun _ -> (resume ()) new_s
+    return value = fun s -> (value, s)
+  }
+  state_fn init
+}
+
+fun build_msg : Unit -> String needs {State String}
+build_msg () = get! ()
+
+main () = {
+  let f = build_msg
+  let (msg, _) = run_state "" f
+  msg
+}
+"#;
+    let out = emit_full(src);
+    assert!(
+        out.contains("'build_msg'/3"),
+        "expected aliased effectful function ref to use lowered arity\n{out}"
+    );
+    assert!(
+        !out.contains("'build_msg'/1"),
+        "aliased effectful function ref used source arity instead of lowered arity\n{out}"
+    );
+}
+
+#[test]
+fn block_local_effectful_let_fun_value_uses_lowered_fun_arity() {
+    let src = r#"
+effect State s {
+  fun get : Unit -> s
+  fun put : s -> Unit
+}
+
+fun run_state : s -> (Unit -> a needs {State s}) -> (a, s)
+run_state init f = {
+  let state_fn = f () with {
+    get () = fun s -> (resume s) s
+    put new_s = fun _ -> (resume ()) new_s
+    return value = fun s -> (value, s)
+  }
+  state_fn init
+}
+
+main () = {
+  let build_msg () = get! ()
+  let (msg, _) = run_state "" build_msg
+  msg
+}
+    "#;
+    let out = emit_full(src);
+    assert!(
+        out.contains("'build_msg'/3"),
+        "expected block-local effectful let-fun to use lowered arity\n{out}"
+    );
+    assert!(
+        !out.contains("'build_msg'/1"),
+        "block-local effectful let-fun used source arity instead of lowered arity\n{out}"
+    );
+}
+
+#[test]
+fn recursive_block_local_effectful_let_fun_uses_lowered_fun_arity() {
+    let src = r#"
+effect State s {
+  fun get : Unit -> s
+  fun put : s -> Unit
+}
+
+fun run_state : s -> (Unit -> a needs {State s}) -> (a, s)
+run_state init f = {
+  let state_fn = f () with {
+    get () = fun s -> (resume s) s
+    put new_s = fun _ -> (resume ()) new_s
+    return value = fun s -> (value, s)
+  }
+  state_fn init
+}
+
+main () = {
+  let count_down n =
+    if n == 0 then get! ()
+    else count_down (n - 1)
+
+  let (value, _) = run_state 2 (fun () -> count_down 2)
+  value
+}
+"#;
+    let out = emit_full(src);
+    assert!(
+        out.contains("'count_down'/4"),
+        "expected recursive block-local effectful let-fun to use lowered arity\n{out}"
+    );
+    assert!(
+        !out.contains("'count_down'/2"),
+        "recursive block-local effectful let-fun used source arity instead of lowered arity\n{out}"
+    );
 }
 
 // --- Literals ---

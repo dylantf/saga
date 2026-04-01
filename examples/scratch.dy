@@ -1,8 +1,11 @@
-type Example =
-  | Example(String)
-  | Other(Int)
-  deriving (Show)
+effect Logger {
+  fun log : String -> Unit
+}
 
 main () = {
-  List.map (fun x -> x * x) [1, 2, 3]
+  let console_log s = log! s with {
+    log s = println s
+  }
+
+  console_log "Hello world"
 }

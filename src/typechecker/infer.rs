@@ -761,6 +761,7 @@ impl Checker {
                     }
 
                     let scheme = self.generalize(&fun_ty);
+                    self.record_type(fun_id, &fun_ty);
                     self.env.insert(fun_name, scheme);
                     last_ty = Type::unit();
                     // Don't increment i -- the while loop already advanced it

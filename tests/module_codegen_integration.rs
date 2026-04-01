@@ -6,11 +6,7 @@ fn fixtures_root() -> PathBuf {
 }
 
 /// Parse, typecheck, elaborate, and emit Core Erlang for a module in project mode.
-fn emit_project_module(
-    source: &str,
-    module_name: &str,
-    checker: &typechecker::Checker,
-) -> String {
+fn emit_project_module(source: &str, module_name: &str, checker: &typechecker::Checker) -> String {
     let tokens = lexer::Lexer::new(source).lex().expect("lex error");
     let mut program = parser::Parser::new(tokens)
         .parse_program()
@@ -25,29 +21,41 @@ fn emit_from_program(
     module_name: &str,
     checker: &typechecker::Checker,
 ) -> String {
-    let original_module_name = program.iter().find_map(|d| {
-        if let dylang::ast::Decl::ModuleDecl { path, .. } = d {
-            Some(path.join("."))
-        } else {
-            None
-        }
-    }).unwrap_or_default();
+    let original_module_name = program
+        .iter()
+        .find_map(|d| {
+            if let dylang::ast::Decl::ModuleDecl { path, .. } = d {
+                Some(path.join("."))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
     let result = checker.to_result();
     let elaborated = elaborate::elaborate_module(program, &result, &original_module_name);
     // Populate modules with codegen_info so the resolver can find dicts/exports
     let mut modules = std::collections::HashMap::new();
     for (name, info) in result.codegen_info().iter() {
-        modules.insert(name.clone(), codegen::CompiledModule {
-            codegen_info: info.clone(),
-            ..Default::default()
-        });
+        modules.insert(
+            name.clone(),
+            codegen::CompiledModule {
+                codegen_info: info.clone(),
+                ..Default::default()
+            },
+        );
     }
     let ctx = codegen::CodegenContext {
         modules,
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    codegen::emit_module_with_context(module_name, &elaborated, &ctx, None)
+    codegen::emit_module_with_context(
+        module_name,
+        &elaborated,
+        &ctx,
+        result.resolved_type_at_node_map(),
+        None,
+    )
 }
 
 /// Parse and typecheck a source file with the given checker (project mode).
@@ -60,7 +68,11 @@ fn typecheck_source(source: &str, checker: &mut typechecker::Checker) -> Vec<dyl
         .expect("parse error");
     dylang::desugar::desugar_program(&mut program);
     let result = checker.check_program(&mut program);
-    assert!(!result.has_errors(), "typecheck error: {:?}", result.errors());
+    assert!(
+        !result.has_errors(),
+        "typecheck error: {:?}",
+        result.errors()
+    );
     program
 }
 
@@ -87,7 +99,11 @@ fn make_project_checker() -> typechecker::Checker {
         .cloned()
         .collect();
     let result = checker.check_program(&mut prelude_program);
-    assert!(!result.has_errors(), "prelude typecheck error: {:?}", result.errors());
+    assert!(
+        !result.has_errors(),
+        "prelude typecheck error: {:?}",
+        result.errors()
+    );
     checker
 }
 
@@ -142,6 +158,40 @@ main () = Math.add 10 20
     assert!(
         !out.contains("apply 'add'"),
         "should use inter-module call, not local apply\n{out}"
+    );
+}
+
+#[test]
+fn imported_effectful_function_value_uses_cps_expanded_arity() {
+    let main_src = r#"
+module Main
+import Logger (Log, greet)
+
+fun run_log : (f: (String -> String needs {Log})) -> String
+run_log f =
+  f "Dylan" with {
+    log msg = resume ()
+    return value = value
+  }
+
+main () = run_log greet
+"#;
+
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&main_program, "main", &checker);
+
+    assert!(
+        out.contains("call 'erlang':'make_fun'"),
+        "expected imported effectful function value to lower as a first-class imported fun\n{out}"
+    );
+    assert!(
+        out.contains("'logger', 'greet', 3"),
+        "expected imported effectful function value to use CPS-expanded arity 3\n{out}"
+    );
+    assert!(
+        !out.contains("'greet'/1"),
+        "imported effectful function value fell back to source arity\n{out}"
     );
 }
 
@@ -242,9 +292,18 @@ main () = add 1 2
     let out = codegen::emit_module("test", &program);
 
     let export_line = out.lines().next().unwrap();
-    assert!(export_line.contains("'add'/2"), "add should be exported\n{export_line}");
-    assert!(export_line.contains("'double'/1"), "double should be exported\n{export_line}");
-    assert!(export_line.contains("'main'/0"), "main should be exported\n{export_line}");
+    assert!(
+        export_line.contains("'add'/2"),
+        "add should be exported\n{export_line}"
+    );
+    assert!(
+        export_line.contains("'double'/1"),
+        "double should be exported\n{export_line}"
+    );
+    assert!(
+        export_line.contains("'main'/0"),
+        "main should be exported\n{export_line}"
+    );
 }
 
 // ---- Module name mapping ----
@@ -673,8 +732,14 @@ main () = case Just(42) {
     assert_contains(&out, "'just'");
     assert_contains(&out, "'nothing'");
     // Should use BEAM override atoms, not module-prefixed versions
-    assert!(!out.contains("'std_maybe_Just'"), "Just should use 'just' not module-prefixed atom");
-    assert!(!out.contains("'std_maybe_Nothing'"), "Nothing should use 'nothing' not module-prefixed atom");
+    assert!(
+        !out.contains("'std_maybe_Just'"),
+        "Just should use 'just' not module-prefixed atom"
+    );
+    assert!(
+        !out.contains("'std_maybe_Nothing'"),
+        "Nothing should use 'nothing' not module-prefixed atom"
+    );
 }
 
 #[test]

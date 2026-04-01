@@ -137,6 +137,21 @@ impl CheckResult {
         Some(format!("{}", self.prettify(ty)))
     }
 
+    /// Resolved type map keyed by node id. Intended for downstream compiler passes.
+    pub fn resolved_type_at_node_map(&self) -> HashMap<crate::ast::NodeId, super::Type> {
+        self.type_at_node
+            .iter()
+            .map(|(id, ty)| (*id, self.sub.apply(ty)))
+            .collect()
+    }
+
+    /// Look up a resolved type by node id for downstream compiler passes.
+    pub fn resolved_type_for_node(&self, node_id: crate::ast::NodeId) -> Option<super::Type> {
+        self.type_at_node
+            .get(&node_id)
+            .map(|ty| self.sub.apply(ty))
+    }
+
     /// Look up the resolved type at a span (for Pat bindings), applying the substitution.
     /// Remaining free type variables are prettified (a, b, c, ...).
     pub fn type_at_span(&self, span: &crate::token::Span) -> Option<String> {

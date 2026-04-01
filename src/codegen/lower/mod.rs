@@ -129,6 +129,11 @@ pub struct Lowerer<'a> {
     /// Bare effect name -> canonical effect name (e.g. "Assert" -> "Std.Test.Assert").
     /// Built during init_module for canonicalizing effect names from the type system.
     effect_canonical: HashMap<String, String>,
+    /// Resolved node types for the module currently being lowered.
+    /// This is intentionally current-module-only: local `let fun` lowering needs
+    /// direct access to resolved types, while cross-module eta-reduction relies on
+    /// imported function resolution/codegen info rather than another module's AST types.
+    current_resolved_types: HashMap<crate::ast::NodeId, crate::typechecker::Type>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -136,6 +141,7 @@ impl<'a> Lowerer<'a> {
         ctx: &'a super::CodegenContext,
         constructor_atoms: super::resolve::ConstructorAtoms,
         resolved: super::resolve::ResolutionMap,
+        current_resolved_types: HashMap<crate::ast::NodeId, crate::typechecker::Type>,
         source_info: Option<SourceInfo>,
     ) -> Self {
         Lowerer {
@@ -163,6 +169,7 @@ impl<'a> Lowerer<'a> {
             inline_vals: HashMap::new(),
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
+            current_resolved_types,
         }
     }
 
@@ -872,7 +879,8 @@ impl<'a> Lowerer<'a> {
                                 )
                             }
                         } else {
-                            CExpr::FunRef(name.clone(), *arity)
+                            let lowered_arity = self.fun_arity(name).unwrap_or(*arity);
+                            CExpr::FunRef(name.clone(), lowered_arity)
                         }
                     }
                     _ => {
@@ -1711,7 +1719,8 @@ impl<'a> Lowerer<'a> {
                                     )
                                 }
                             } else {
-                                CExpr::FunRef(name.clone(), *arity)
+                                let lowered_arity = self.fun_arity(name).unwrap_or(*arity);
+                                CExpr::FunRef(name.clone(), lowered_arity)
                             }
                         }
                     }
