@@ -2,10 +2,11 @@
 
 ## Current State
 
-Name resolution is handled by a `ScopeMap` on the `Checker` struct that maps user-visible name forms to canonical (module-qualified) names. The resolution logic lives in two places:
+Name resolution is handled by a `ScopeMap` on the `Checker` struct that maps user-visible name forms to canonical (module-qualified) names. The resolution logic lives in three places:
 
 - **`resolve_import`** (pure function in `check_module.rs`) — builds a `ScopeMap` from module exports and import parameters
-- **`resolve_names`** (AST pass in `resolve.rs`) — rewrites constructor names and fills `canonical_module` on `QualifiedName` nodes
+- **`resolve_names`** (AST pass in `resolve.rs`) — rewrites Var names, constructor names, and fills `canonical_module` on `QualifiedName` nodes
+- **Typechecker lookups** (`infer.rs`) — resolve remaining names through scope_map at inference time (fallback for names not rewritten in the AST)
 
 ### How it works
 
@@ -20,18 +21,21 @@ When `import Std.List as List exposing (map)` is processed:
 2. **`inject_exports`** merges the scope_map, then registers checker state:
    - Canonical bindings in `TypeEnv` (one entry per import)
    - Canonical constructors in `constructors` map
+   - Trait method schemes under both bare and canonical names in env
    - Traits, effects, handlers, type arities
    - LSP metadata (import_origins, doc_comments, constructor_def_ids)
 
 3. **`resolve_names`** rewrites the AST after all imports are processed:
+   - `Var { name: "map" }` → `Var { name: "Std.List.map" }` (if not locally bound)
+   - `Var { name: "show" }` → `Var { name: "Std.Base.Show.show" }` (trait methods too)
    - `Constructor { name: "Just" }` → `Constructor { name: "Std.Maybe.Just" }` (unless locally defined)
    - `Pat::Constructor` — same treatment
    - `QualifiedName { module: "List", name: "map", canonical_module: None }` → fills `canonical_module: Some("Std.List")`
-   - Bare `Var` nodes are NOT rewritten (see "What's not resolved yet" below)
+   - The pass is **scope-aware**: local bindings (function params, let bindings, lambda params, case pattern bindings) shadow imports
 
 4. **Typechecker lookups** resolve remaining names through scope_map at inference time:
-   - `Var "map"` → scope_map resolves to `"Std.List.map"` → found in env
-   - `QualifiedName` → uses `canonical_module` if set, falls back to scope_map
+   - `Var "Std.List.map"` → env.get("Std.List.map") (found directly, since resolve pass rewrote it)
+   - Fallback: `env.get(name).or_else(|| env.get(scope_map.resolve(name)))` handles any names not rewritten
    - Local definitions (function params, let bindings) are found directly by bare name in env, taking priority
 
 ### Canonical name forms
@@ -46,45 +50,30 @@ Every imported name has a canonical form in the scope_map:
 | Trait method | `show` from `Show` in `Std.Base` | `Std.Base.Show.show` |
 | Effect op | `log` from `Log` in `Std.IO` | `Std.IO.Log.log` |
 
-Trait methods and effect ops have canonical names recorded in the scope_map but are still registered under bare names in `env`. The canonical forms are available for future use when the elaborator and effect system are updated.
+Trait methods and effect ops have canonical names recorded in the scope_map. Trait methods are fully resolved (env has canonical entries, elaborator uses canonical keys). Effect ops use `EffectCall` syntax (not `Var`), so they aren't rewritten by the resolve pass.
 
 ### Key files
 
 - `src/typechecker/mod.rs` — `ScopeMap` struct with `resolve_value`, `resolve_type`, `resolve_constructor`, `merge`
-- `src/typechecker/check_module.rs` — `resolve_import` (standalone resolver + validation), `inject_exports` (checker state)
-- `src/typechecker/resolve.rs` — AST name rewriting pass (constructors, `canonical_module`)
+- `src/typechecker/check_module.rs` — `resolve_import` (standalone resolver + validation), `inject_exports` (checker state), `seed_builtin_checker` (copies canonical entries)
+- `src/typechecker/resolve.rs` — AST name rewriting pass (Vars, constructors, `canonical_module`), scope-aware with local binding tracking
 - `src/typechecker/infer.rs` — `Var`/`Constructor`/`QualifiedName` lookups use scope_map
 - `src/typechecker/unify.rs` — qualified type name resolution uses `scope_map.types`
 - `src/typechecker/patterns.rs` — constructor pattern resolution uses `scope_map.constructors`
 - `src/typechecker/result.rs` — `CheckResult` includes scope_map for elaborator
-- `src/elaborate.rs` — uses scope_map to bridge aliased names to canonical dict params
+- `src/elaborate.rs` — uses scope_map to bridge canonical names to trait_methods and dict params
 - `src/lsp/completion.rs` — scans scope_map for aliased qualified completions
+- `src/codegen/resolve.rs` — resolves canonical Var names via `qualified_scope`, CPS-expanded arity for imports
+- `src/codegen/lower/init.rs` — `param_absorbed_effects` computed from type for imported functions
 
 ### Design decisions
 
 - **Shadowing**: `env.get(bare).or_else(|| env.get(scope_map.resolve(bare)))`. Local definitions use bare names in env; imports use canonical names. Locals naturally shadow imports.
 - **Auto-imports**: The mechanism in `infer.rs` calls `typecheck_import` → `inject_exports` which populates both env and scope_map automatically.
 - **`canonical_module` on QualifiedName**: The AST node carries both the user-written `module` (for codegen) and the resolved `canonical_module` (for typechecker). This avoids breaking the codegen resolver which depends on the original alias.
-
-## What's Not Resolved Yet
-
-### Bare Var names
-
-`Var { name: "map" }` is NOT rewritten to `Var { name: "Std.List.map" }` in the AST. Instead, it's resolved at lookup time via the scope_map in `infer.rs`. This is because:
-
-1. The **codegen resolver** expects bare names in `Var` nodes and looks them up in its own `scope` map. Canonical-form Var names (containing dots) would need the codegen resolver updated to check `qualified_scope` as well.
-2. **Trait methods** (`show`, `compare`, etc.) have canonical names in scope_map (`Std.Base.Show.show`) but are still registered under bare names in `env`. Rewriting the Var would point to a name that doesn't exist in env yet.
-
-Both blockers resolve with the same work: updating the codegen resolver and the trait method / effect op registration to use canonical names.
-
-### Trait methods and effect ops
-
-These are registered in `env` under bare names (`"show"`, `"log"`) and dispatched through the evidence system (trait methods) or effect call syntax (effect ops). The scope_map records their canonical forms (`Std.Base.Show.show`, `Std.IO.Log.log`) but nothing uses them yet. Switching to canonical names requires updating:
-
-- The elaborator's `trait_methods` map (keyed by bare name → needs canonical keys)
-- The `resolve_trait_method` lookup in the elaborator
-- The effect operation lookup in `effects.rs`
-- The `seed_builtin_checker` function (copies trait methods by bare name)
+- **Trait methods under both names**: env has both bare (`show`) and canonical (`Std.Base.Show.show`) entries. Bare entries are needed for impl bodies; canonical entries are needed after the resolve pass rewrites Var nodes.
+- **CPS arity in codegen resolver**: `ImportedFun` arity includes handler params and ReturnK (not just type arity + dict params). This ensures `make_fun` references the correct BEAM function arity.
+- **`param_absorbed_effects` for imports**: Computed from the type scheme so lambdas passed to HOFs like `run_collected` get effect handler params added.
 
 ## Why This Works for Our Language
 
@@ -96,36 +85,27 @@ In our language, name visibility is purely structural — determined by module i
 
 The codegen resolver (`src/codegen/resolve.rs`) is a separate concern. It runs post-elaboration and maps NodeIds to `ResolvedName` variants (`LocalFun`, `ImportedFun`, `ExternalFun`) with Erlang-specific info. It answers "what Erlang call target does this node map to?" — a codegen question, not a scoping question.
 
-The codegen resolver currently depends on the original user-written name forms in the AST (`module` field on QualifiedName, bare names on Var). As the pre-typecheck resolve pass rewrites more names to canonical form, the codegen resolver will need to handle canonical names too — either by checking `qualified_scope` for dot-containing Var names, or by using the `canonical_module` field on QualifiedName.
+The codegen resolver handles canonical Var names: when a Var name contains `.` (from the pre-typecheck resolve pass), it looks up in `qualified_scope`. The `ImportedFun` arity includes CPS expansion (handler params + ReturnK).
 
-## Follow-up Work
+## Remaining Work
 
 ### CPS transform: filter handled effects in saturated calls
 
-**Blocker for:** bare Var rewriting in the resolve pass.
+When the saturated call path threads handler params for an effectful callee, it checks `current_handler_params` for each `(effect, op)` pair. If a handler param isn't found (because the effect is handled by an enclosing `with` block), the code falls through to generic apply via a `handler_params_available` flag.
 
-When the resolve pass rewrites `"assert_eq"` → `"Std.Test.assert_eq"`, the lowerer's `fun_arity` now finds the function (canonical key in `fun_info`) and enters the saturated call path. This path threads handler params for the callee's effects. But when the callee is inside an enclosing `with` block that already handles those effects, the handler params aren't in the caller's scope — causing a panic or wrong-arity call.
+This fallback works correctly but is suboptimal — the function is called through `make_fun` + `apply` instead of a direct saturated call. The proper fix: when computing `callee_ops`, filter out effects whose handler params are already provided by an enclosing `with` (i.e., not in `current_handler_params`). This requires understanding which effects are "handled elsewhere" vs "need to be threaded."
 
-Before canonical names, `fun_arity("assert_eq")` returned `None` (bare name not in `fun_info`), so the saturated path was skipped entirely. The function was called via generic `apply`, which happened to work because the `with` handler intercepted the effect at runtime.
+With the `param_absorbed_effects` fix for imports, this fallback is hit less often — lambdas now get their effect params from HOF callers. But the fallback still triggers for direct calls to effectful imported functions outside a `with` block.
 
-**Fix:** In the saturated call path (`src/codegen/lower/mod.rs` ~line 992), when computing `callee_ops`, filter out effects that are already handled by an enclosing `with`. The lowerer already tracks `current_handler_params` — if a param isn't there, the effect is handled elsewhere and shouldn't be threaded.
+### Effect codegen canonical names
 
-A partial fix is in place (`handler_params_available` check that falls through to generic apply), but the real fix should properly detect handled-vs-unhandled effects at the CPS level.
+The CPS transform (lowerer) uses bare effect names throughout:
+- `effect_defs` keyed by bare name
+- `op_to_effect` maps bare op → bare effect
+- `current_handler_params` keyed by `"Effect.op"`
+- `fun_info.effects` stores bare names
 
-### Elaborator: canonical trait method names
-
-The elaborator's `trait_methods` map and `fun_dict_params` map are keyed by bare names. When bare Vars are rewritten to canonical form, these lookups fail. Update:
-- `trait_methods`: key by canonical form (`Std.Base.Show.show`)
-- `fun_dict_params`: already has scope_map bridging for aliased forms, needs canonical bridging too
-- `resolve_trait_method`: use canonical name to look up
-
-### Elaborator: canonical names in App detection
-
-The elaborator's `App` handler (line ~600 of `elaborate.rs`) checks `func.kind` for `Var { name }` and looks up the name in `fun_dict_params` and `trait_methods`. With canonical Var names, these lookups need to work with canonical keys.
-
-### Builtin IO functions
-
-`print`, `println`, `eprint`, `eprintln`, `dbg` are from `Std.IO` but have no proper `@external` routing — they're hardcoded in the lowerer's builtin matching. The lowerer matches on canonical forms (`"Std.IO.println"`) alongside bare forms. This works but should eventually be replaced with proper `@external` declarations in `Std.IO` that route to `io:format` directly, eliminating the need for hardcoded builtin matching.
+This works because effect ops use `EffectCall` syntax (not `Var`), so the resolve pass doesn't touch them. Canonicalizing would be a consistency improvement but isn't blocking anything.
 
 ### @external functions as values
 

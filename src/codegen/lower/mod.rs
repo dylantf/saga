@@ -990,33 +990,32 @@ impl<'a> Lowerer<'a> {
                             bindings.push((v, ce));
                         }
                         // Append per-op handler params for effectful callees.
-                        // If a handler param isn't in scope, the effect is handled
-                        // by an enclosing `with` — skip the saturated call path and
-                        // fall through to generic apply below.
-                        let mut handler_params_available = true;
+                        // Every effect op must have a handler param in scope — either
+                        // from the enclosing function's `needs` clause or from a `with` block.
+                        // If one is missing, it's a compiler bug (the type system should
+                        // have ensured all effects are handled).
                         if !callee_ops.is_empty() {
                             for (eff, op) in &callee_ops {
                                 let key = format!("{}.{}", eff, op);
-                                if let Some(param) = self.current_handler_params.get(&key) {
-                                    arg_vars.push(param.clone());
-                                } else {
-                                    handler_params_available = false;
-                                    break;
-                                }
+                                let param = self.current_handler_params.get(&key)
+                                    .unwrap_or_else(|| panic!(
+                                        "ICE: saturated call to '{}' needs handler for '{}.{}' \
+                                         but no handler param in scope",
+                                        func_name, eff, op,
+                                    ));
+                                arg_vars.push(param.clone());
                             }
-                            if handler_params_available {
-                                // Pass _ReturnK: take from pending (set by `with`), or identity
-                                let return_k =
-                                    self.pending_callee_return_k.take().unwrap_or_else(|| {
-                                        let p = self.fresh();
-                                        CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
-                                    });
-                                let rk_var = self.fresh();
-                                bindings.push((rk_var.clone(), return_k));
-                                arg_vars.push(rk_var);
-                            }
+                            // Pass _ReturnK: take from pending (set by `with`), or identity
+                            let return_k =
+                                self.pending_callee_return_k.take().unwrap_or_else(|| {
+                                    let p = self.fresh();
+                                    CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
+                                });
+                            let rk_var = self.fresh();
+                            bindings.push((rk_var.clone(), return_k));
+                            arg_vars.push(rk_var);
                         }
-                        if handler_params_available {
+                        {
                             let call_args: Vec<CExpr> =
                                 arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
                             let call = self.emit_call(func_name, head_expr.id, arity, call_args, Some(&expr.span));
