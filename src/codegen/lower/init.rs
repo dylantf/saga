@@ -194,12 +194,16 @@ impl<'a> Lowerer<'a> {
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
                     let expanded_arity =
                         self.expanded_arity(base_arity, &effects) + dict_param_count;
-                    let qualified = format!("{}.{}", mod_path.last().unwrap(), name);
-                    self.fun_info.entry(qualified).or_insert(FunInfo {
+                    let fi = FunInfo {
                         arity: expanded_arity,
                         effects,
                         param_absorbed_effects: HashMap::new(),
-                    });
+                    };
+                    // Register under short alias (e.g. "List.map") and canonical (e.g. "Std.List.map")
+                    let alias_qualified = format!("{}.{}", mod_path.last().unwrap(), name);
+                    self.fun_info.entry(alias_qualified).or_insert(fi.clone());
+                    let canonical = format!("{}.{}", mod_name, name);
+                    self.fun_info.entry(canonical).or_insert(fi);
                 }
                 // Register Std handler bodies and external functions from elaborated programs
                 if let Some(elab_program) = self.ctx.elaborated_module(mod_name) {
@@ -293,16 +297,16 @@ impl<'a> Lowerer<'a> {
             let expanded_arity = self.expanded_arity(base_arity, &effects) + dict_param_count;
             let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
 
-            // Always register qualified form
-            let qualified = format!("{}.{}", prefix, name);
-            self.fun_info.insert(
-                qualified,
-                FunInfo {
-                    arity: expanded_arity,
-                    effects: effects.clone(),
-                    param_absorbed_effects: param_effs.clone(),
-                },
-            );
+            // Register under alias form (e.g. "String.reverse") and canonical (e.g. "Std.String.reverse")
+            let alias_qualified = format!("{}.{}", prefix, name);
+            let fi = FunInfo {
+                arity: expanded_arity,
+                effects: effects.clone(),
+                param_absorbed_effects: param_effs.clone(),
+            };
+            self.fun_info.insert(alias_qualified, fi.clone());
+            let canonical = format!("{}.{}", module_name, name);
+            self.fun_info.entry(canonical).or_insert(fi);
 
             // Register unqualified form only for exposed names
             if is_exposed(name) && exported_names.contains(name.as_str()) {

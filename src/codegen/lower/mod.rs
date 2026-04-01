@@ -889,14 +889,17 @@ impl<'a> Lowerer<'a> {
                     return self.lower_qualified_call(module, func_name, head, &args, Some(&expr.span));
                 }
 
-                // Lower print/println/eprint/eprintln to io:format, dbg to stderr+passthrough
+                // Lower print/println/eprint/eprintln to io:format, dbg to stderr+passthrough.
+                // Match both bare names (builtins) and canonical names (after resolve pass).
                 if let Some((func_name, _head, args)) = collect_fun_call(expr) {
                     let lowered = match func_name {
-                        "print" => self.lower_builtin_print(&args, false, false),
-                        "println" => self.lower_builtin_print(&args, false, true),
-                        "eprint" => self.lower_builtin_print(&args, true, false),
-                        "eprintln" => self.lower_builtin_print(&args, true, true),
-                        "dbg" => self.lower_builtin_dbg(&args),
+                        "print" | "Std.IO.print" => self.lower_builtin_print(&args, false, false),
+                        "println" | "Std.IO.println" => self.lower_builtin_print(&args, false, true),
+                        "eprint" | "Std.IO.eprint" => self.lower_builtin_print(&args, true, false),
+                        "eprintln" | "Std.IO.eprintln" => {
+                            self.lower_builtin_print(&args, true, true)
+                        }
+                        "dbg" | "Std.IO.dbg" => self.lower_builtin_dbg(&args),
                         _ => None,
                     };
                     if let Some(ce) = lowered {
@@ -905,8 +908,7 @@ impl<'a> Lowerer<'a> {
                 }
 
                 // Lower `panic msg` / `todo ()` to erlang:error({dylang_error, ...})
-                // The entry point wrapper catches this and prints nicely + exits.
-                // catch_panic can also intercept it for recovery boundaries.
+                // These are true builtins (no module), so only bare names.
                 if let Some((func_name, _head, args)) = collect_fun_call(expr)
                     && (func_name == "panic" || func_name == "todo")
                     && args.len() == 1
@@ -921,9 +923,9 @@ impl<'a> Lowerer<'a> {
                     return CExpr::Let(v, Box::new(arg), Box::new(error));
                 }
 
-                // Lower `catch_panic thunk` to a Core Erlang try/catch (unqualified call).
+                // Lower `catch_panic thunk` to a Core Erlang try/catch.
                 if let Some((func_name, _head, args)) = collect_fun_call(expr)
-                    && func_name == "catch_panic"
+                    && (func_name == "catch_panic" || func_name == "Std.Process.catch_panic")
                     && args.len() == 1
                 {
                     return self.lower_catch_panic(args[0]);
@@ -987,35 +989,41 @@ impl<'a> Lowerer<'a> {
                             arg_vars.push(v.clone());
                             bindings.push((v, ce));
                         }
-                        // Append per-op handler params for effectful callees
+                        // Append per-op handler params for effectful callees.
+                        // If a handler param isn't in scope, the effect is handled
+                        // by an enclosing `with` — skip the saturated call path and
+                        // fall through to generic apply below.
+                        let mut handler_params_available = true;
                         if !callee_ops.is_empty() {
                             for (eff, op) in &callee_ops {
                                 let key = format!("{}.{}", eff, op);
                                 if let Some(param) = self.current_handler_params.get(&key) {
                                     arg_vars.push(param.clone());
                                 } else {
-                                    panic!(
-                                        "function '{}' needs handler for '{}.{}' but no handler param in scope",
-                                        func_name, eff, op
-                                    );
+                                    handler_params_available = false;
+                                    break;
                                 }
                             }
-                            // Pass _ReturnK: take from pending (set by `with`), or identity
-                            let return_k =
-                                self.pending_callee_return_k.take().unwrap_or_else(|| {
-                                    let p = self.fresh();
-                                    CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
-                                });
-                            let rk_var = self.fresh();
-                            bindings.push((rk_var.clone(), return_k));
-                            arg_vars.push(rk_var);
+                            if handler_params_available {
+                                // Pass _ReturnK: take from pending (set by `with`), or identity
+                                let return_k =
+                                    self.pending_callee_return_k.take().unwrap_or_else(|| {
+                                        let p = self.fresh();
+                                        CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
+                                    });
+                                let rk_var = self.fresh();
+                                bindings.push((rk_var.clone(), return_k));
+                                arg_vars.push(rk_var);
+                            }
                         }
-                        let call_args: Vec<CExpr> =
-                            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-                        let call = self.emit_call(func_name, head_expr.id, arity, call_args, Some(&expr.span));
-                        return bindings.into_iter().rev().fold(call, |body, (var, val)| {
-                            CExpr::Let(var, Box::new(val), Box::new(body))
-                        });
+                        if handler_params_available {
+                            let call_args: Vec<CExpr> =
+                                arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
+                            let call = self.emit_call(func_name, head_expr.id, arity, call_args, Some(&expr.span));
+                            return bindings.into_iter().rev().fold(call, |body, (var, val)| {
+                                CExpr::Let(var, Box::new(val), Box::new(body))
+                            });
+                        }
                     }
 
                     // Partial application: fewer user args than user-arg slots.

@@ -97,3 +97,36 @@ In our language, name visibility is purely structural — determined by module i
 The codegen resolver (`src/codegen/resolve.rs`) is a separate concern. It runs post-elaboration and maps NodeIds to `ResolvedName` variants (`LocalFun`, `ImportedFun`, `ExternalFun`) with Erlang-specific info. It answers "what Erlang call target does this node map to?" — a codegen question, not a scoping question.
 
 The codegen resolver currently depends on the original user-written name forms in the AST (`module` field on QualifiedName, bare names on Var). As the pre-typecheck resolve pass rewrites more names to canonical form, the codegen resolver will need to handle canonical names too — either by checking `qualified_scope` for dot-containing Var names, or by using the `canonical_module` field on QualifiedName.
+
+## Follow-up Work
+
+### CPS transform: filter handled effects in saturated calls
+
+**Blocker for:** bare Var rewriting in the resolve pass.
+
+When the resolve pass rewrites `"assert_eq"` → `"Std.Test.assert_eq"`, the lowerer's `fun_arity` now finds the function (canonical key in `fun_info`) and enters the saturated call path. This path threads handler params for the callee's effects. But when the callee is inside an enclosing `with` block that already handles those effects, the handler params aren't in the caller's scope — causing a panic or wrong-arity call.
+
+Before canonical names, `fun_arity("assert_eq")` returned `None` (bare name not in `fun_info`), so the saturated path was skipped entirely. The function was called via generic `apply`, which happened to work because the `with` handler intercepted the effect at runtime.
+
+**Fix:** In the saturated call path (`src/codegen/lower/mod.rs` ~line 992), when computing `callee_ops`, filter out effects that are already handled by an enclosing `with`. The lowerer already tracks `current_handler_params` — if a param isn't there, the effect is handled elsewhere and shouldn't be threaded.
+
+A partial fix is in place (`handler_params_available` check that falls through to generic apply), but the real fix should properly detect handled-vs-unhandled effects at the CPS level.
+
+### Elaborator: canonical trait method names
+
+The elaborator's `trait_methods` map and `fun_dict_params` map are keyed by bare names. When bare Vars are rewritten to canonical form, these lookups fail. Update:
+- `trait_methods`: key by canonical form (`Std.Base.Show.show`)
+- `fun_dict_params`: already has scope_map bridging for aliased forms, needs canonical bridging too
+- `resolve_trait_method`: use canonical name to look up
+
+### Elaborator: canonical names in App detection
+
+The elaborator's `App` handler (line ~600 of `elaborate.rs`) checks `func.kind` for `Var { name }` and looks up the name in `fun_dict_params` and `trait_methods`. With canonical Var names, these lookups need to work with canonical keys.
+
+### Builtin IO functions
+
+`print`, `println`, `eprint`, `eprintln`, `dbg` are from `Std.IO` but have no proper `@external` routing — they're hardcoded in the lowerer's builtin matching. The lowerer matches on canonical forms (`"Std.IO.println"`) alongside bare forms. This works but should eventually be replaced with proper `@external` declarations in `Std.IO` that route to `io:format` directly, eliminating the need for hardcoded builtin matching.
+
+### @external functions as values
+
+Pre-existing bug (not from this refactor): `@external` functions used as values (not directly applied) generate `make_fun('std_io', 'println', 1)`, but the `std_io.beam` module doesn't export `println/1` because externals are forwarded to bridge modules. The `make_fun` should target the actual Erlang function, not the dylang module.

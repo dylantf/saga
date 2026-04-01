@@ -623,6 +623,17 @@ fn resolve_expr(
         ExprKind::Var { name, .. } => {
             if let Some(scoped) = scope.resolve_unqualified(name) {
                 map.insert(expr.id, scoped_to_resolved(scoped));
+            } else if name.contains('.') {
+                // Canonical-form Var from the pre-typecheck resolve pass
+                // (e.g. "Std.List.map" rewritten from bare "map").
+                if let Some(scoped) = scope.resolve_qualified(name) {
+                    if name.contains("reverse") {
+                        eprintln!("[codegen-var] resolved '{}' -> {:?}", name, scoped);
+                    }
+                    map.insert(expr.id, scoped_to_resolved(scoped));
+                } else if name.contains("reverse") {
+                    eprintln!("[codegen-var] FAILED to resolve '{}'", name);
+                }
             }
             // If locally bound or not in module scope → not in map →
             // lowerer treats as local variable (CExpr::Var).
