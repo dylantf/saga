@@ -1037,15 +1037,8 @@ pub(super) fn resolve_import(
         }
     }
 
-    // Effect operations: bare -> Module.Effect.op
-    // Effect ops are called via EffectCall syntax, not Var, but recording the
-    // canonical form in scope_map makes them available for future resolution.
-    for (effect_name, info) in &exports.effects {
-        for op in &info.ops {
-            let canonical = format!("{}.{}.{}", module_name, effect_name, op.name);
-            scope.values.entry(op.name.clone()).or_insert(canonical);
-        }
-        // Effects: canonical + aliased qualified forms
+    // Effects: canonical + aliased qualified forms
+    for effect_name in exports.effects.keys() {
         let effect_canonical = format!("{}.{}", module_name, effect_name);
         scope
             .effects

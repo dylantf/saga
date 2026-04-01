@@ -36,6 +36,28 @@ fn collect_pat_bindings(pat: &Pat, out: &mut HashSet<String>) {
             collect_pat_bindings(head, out);
             collect_pat_bindings(tail, out);
         }
+        Pat::Record { fields, as_name, .. } => {
+            for (field_name, alias) in fields {
+                match alias {
+                    Some(p) => collect_pat_bindings(p, out),
+                    None => { out.insert(field_name.clone()); }
+                }
+            }
+            if let Some(name) = as_name {
+                out.insert(name.clone());
+            }
+        }
+        Pat::AnonRecord { fields, .. } => {
+            for (field_name, alias) in fields {
+                match alias {
+                    Some(p) => collect_pat_bindings(p, out),
+                    None => { out.insert(field_name.clone()); }
+                }
+            }
+        }
+        Pat::StringPrefix { rest, .. } => {
+            collect_pat_bindings(rest, out);
+        }
         _ => {}
     }
 }

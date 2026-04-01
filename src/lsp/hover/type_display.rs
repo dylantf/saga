@@ -218,16 +218,17 @@ pub fn type_definition_summary(
     // type variable names), fall back to CheckResult data with prettified vars.
     if let Some(source_module) = result.scope_map.origin_of(name) {
         let source_module = &source_module.to_string();
+        // Module ASTs use bare names for their own declarations, so strip the module prefix
+        let bare_name = name.rsplit('.').next().unwrap_or(name);
         if let Some(module_program) = result.programs().get(source_module) {
-            // Recurse into the module's AST -- this hits the Decl matching above
-            if let Some(summary) = type_definition_summary(result, name, module_program) {
+            if let Some(summary) = type_definition_summary(result, bare_name, module_program) {
                 return Some(summary);
             }
         }
         // Also check per-module CheckResults for transitive imports
         if let Some(module_result) = result.module_check_results().get(source_module)
             && let Some(module_program) = module_result.programs().get(source_module)
-            && let Some(summary) = type_definition_summary(result, name, module_program)
+            && let Some(summary) = type_definition_summary(result, bare_name, module_program)
         {
             return Some(summary);
         }

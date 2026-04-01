@@ -181,7 +181,10 @@ fn generate_derive(
     variants: &[Annotated<TypeConstructor>],
     span: Span,
 ) -> Option<Decl> {
-    match trait_name {
+    // Use bare trait name — deriving works with well-known traits only.
+    // The parser may produce qualified names (e.g. "Std.Base.Show") if written that way.
+    let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+    match bare {
         "Show" => Some(derive_stringify("Show", "show", type_name, type_params, variants, span)),
         "Debug" => Some(derive_stringify("Debug", "debug", type_name, type_params, variants, span)),
         "Eq" => Some(derive_marker_trait("Eq", type_name, type_params, span)),
