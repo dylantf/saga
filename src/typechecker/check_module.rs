@@ -568,12 +568,14 @@ impl Checker {
         mod_checker.modules.programs = self.modules.programs.clone();
         mod_checker.modules.map = self.modules.map.clone();
         mod_checker.current_module = Some(module_name.clone());
-        mod_checker.check_program_inner(&mut program).map_err(|errs| {
-            Diagnostic::error_at(
-                span,
-                format!("type error in module '{}': {}", module_name, errs[0]),
-            )
-        })?;
+        mod_checker
+            .check_program_inner(&mut program)
+            .map_err(|errs| {
+                Diagnostic::error_at(
+                    span,
+                    format!("type error in module '{}': {}", module_name, errs[0]),
+                )
+            })?;
 
         // Collect all public exports into a single struct
         let exports = ModuleExports::collect(&program, &mod_checker);
@@ -976,6 +978,26 @@ pub(super) fn resolve_import(
         }
     }
 
+    // Trait methods: bare -> Module.Trait.method
+    // Trait methods are always unqualified in user code; the canonical form
+    // records their origin for future use by the elaborator/evidence system.
+    for (trait_name, info) in &exports.traits {
+        for (method_name, _, _, _) in &info.methods {
+            let canonical = format!("{}.{}.{}", module_name, trait_name, method_name);
+            scope.values.entry(method_name.clone()).or_insert(canonical);
+        }
+    }
+
+    // Effect operations: bare -> Module.Effect.op
+    // Effect ops are called via EffectCall syntax, not Var, but recording the
+    // canonical form in scope_map makes them available for future resolution.
+    for (effect_name, info) in &exports.effects {
+        for op in &info.ops {
+            let canonical = format!("{}.{}.{}", module_name, effect_name, op.name);
+            scope.values.entry(op.name.clone()).or_insert(canonical);
+        }
+    }
+
     // Value bindings: canonical + aliased
     for (name, _) in &exports.bindings {
         let canonical = format!("{}.{}", module_name, name);
@@ -1069,10 +1091,7 @@ pub(super) fn resolve_import(
                     found = true;
                 }
                 if !found {
-                    return Err(format!(
-                        "'{}' is not exported by module '{}'",
-                        name, prefix
-                    ));
+                    return Err(format!("'{}' is not exported by module '{}'", name, prefix));
                 }
             } else {
                 // Bare value -> canonical
@@ -1080,10 +1099,7 @@ pub(super) fn resolve_import(
                 // Validate: the canonical form must exist in the scope
                 // (it was registered in the bindings loop above)
                 if !scope.values.contains_key(&canonical) {
-                    return Err(format!(
-                        "'{}' is not exported by module '{}'",
-                        name, prefix
-                    ));
+                    return Err(format!("'{}' is not exported by module '{}'", name, prefix));
                 }
                 scope.values.entry(name.clone()).or_insert(canonical);
             }
