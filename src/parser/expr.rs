@@ -435,6 +435,7 @@ impl Parser {
                             kind: ExprKind::QualifiedName {
                                 module,
                                 name: String::new(),
+                                canonical_module: None,
                             },
                         };
                         continue;
@@ -467,7 +468,7 @@ impl Parser {
                 expr = Expr {
                     id: self.next_id(),
                     span: qspan,
-                    kind: ExprKind::QualifiedName { module, name },
+                    kind: ExprKind::QualifiedName { module, name, canonical_module: None },
                 };
                 continue;
             }
@@ -489,6 +490,7 @@ impl Parser {
                             kind: ExprKind::QualifiedName {
                                 module: extended_module,
                                 name: String::new(),
+                                canonical_module: None,
                             },
                         };
                         continue;
@@ -517,7 +519,7 @@ impl Parser {
                 expr = Expr {
                     id: self.next_id(),
                     span: qspan,
-                    kind: ExprKind::QualifiedName { module: extended_module, name },
+                    kind: ExprKind::QualifiedName { module: extended_module, name, canonical_module: None },
                 };
                 continue;
             }
@@ -560,17 +562,30 @@ impl Parser {
             let mut return_clause = None;
 
             // Phase 1: Parse comma-separated named handler refs.
-            // Named refs must come before inline arms.
+            // Named refs must come before inline arms. Supports both bare
+            // (console_log) and qualified (Logger.console_log) forms.
             while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                // A named ref is an ident followed by `,` or `}`
-                if matches!(self.peek(), Token::Ident(_))
-                    && matches!(
-                        self.peek_at(1),
-                        Token::Comma | Token::RBrace
-                    )
-                {
+                // A named ref is an ident followed by `,` or `}`,
+                // or an ident.ident followed by `,` or `}`
+                let is_named_ref = matches!(self.peek(), Token::Ident(_))
+                    && (matches!(self.peek_at(1), Token::Comma | Token::RBrace)
+                        || (matches!(self.peek_at(1), Token::Dot)
+                            && matches!(self.peek_at(2), Token::Ident(_))
+                            && matches!(self.peek_at(3), Token::Comma | Token::RBrace)));
+                if is_named_ref {
+                    let name_start = self.tokens[self.pos].span;
                     let name = self.expect_ident()?;
-                    named.push(name);
+                    let name = if matches!(self.peek(), Token::Dot)
+                        && matches!(self.peek_at(1), Token::Ident(_))
+                    {
+                        self.advance(); // consume '.'
+                        let qualified = self.expect_ident()?;
+                        format!("{}.{}", name, qualified)
+                    } else {
+                        name
+                    };
+                    let name_end = self.tokens[self.pos - 1].span;
+                    named.push((name, name_start.to(name_end)));
                     if matches!(self.peek(), Token::Comma) {
                         self.advance();
                     }
@@ -663,9 +678,18 @@ impl Parser {
                 dangling_trivia,
             })
         } else {
-            // Single named handler: `with console_log`
+            // Single named handler: `with console_log` or `with Logger.console_log`
             let handler_span = self.tokens[self.pos].span;
             let name = self.expect_ident()?;
+            let name = if matches!(self.peek(), Token::Dot)
+                && matches!(self.peek_at(1), Token::Ident(_))
+            {
+                self.advance(); // consume '.'
+                let qualified = self.expect_ident()?;
+                format!("{}.{}", name, qualified)
+            } else {
+                name
+            };
             Ok(Handler::Named(name, handler_span))
         }
     }

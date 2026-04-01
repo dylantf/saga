@@ -323,7 +323,7 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
         {
             Some((name.clone(), span, Some(node_id)))
         }
-        ExprKind::QualifiedName { module, name } => {
+        ExprKind::QualifiedName { module, name, .. } => {
             let dot_offset = span.start + module.len();
             if offset <= dot_offset {
                 Some((format!("module:{}", module), span, Some(node_id)))

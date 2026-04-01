@@ -54,7 +54,7 @@ pub fn parse_and_typecheck_inner(
     if test_mode {
         synthesize_test_main(&mut program);
     }
-    let result = checker.check_program(&program);
+    let result = checker.check_program(&mut program);
     for w in result.warnings() {
         print_tc_diagnostic(source, source_path, w);
     }
@@ -79,11 +79,18 @@ pub fn emit_module(
     module_name: &str,
     elaborated: &ast::Program,
     ctx: &codegen::CodegenContext,
+    current_resolved_types: std::collections::HashMap<ast::NodeId, typechecker::Type>,
     build_dir: &Path,
     source_file: Option<&codegen::SourceFile>,
 ) {
     let erlang_name = module_name.to_lowercase().replace('.', "_");
-    let core_src = codegen::emit_module_with_context(&erlang_name, elaborated, ctx, source_file);
+    let core_src = codegen::emit_module_with_context(
+        &erlang_name,
+        elaborated,
+        ctx,
+        current_resolved_types,
+        source_file,
+    );
     let core_path = build_dir.join(format!("{}.core", erlang_name));
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
@@ -429,7 +436,7 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
         desugar::desugar_program(&mut program);
 
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
-        let mod_result = mod_checker.check_program(&program);
+        let mod_result = mod_checker.check_program(&mut program);
         for w in mod_result.warnings() {
             eprintln!("Warning in module {}: {}", module_name, w);
         }
@@ -494,7 +501,23 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
             module_name.to_lowercase().replace('.', "_")
         };
         let sf = source_files.get(module_name);
-        emit_module(&erlang_name, &compiled.elaborated, &ctx, &build_dir, sf);
+        let current_resolved_types = if module_name == "Main" {
+            result.resolved_type_at_node_map()
+        } else {
+            result
+                .module_check_results()
+                .get(module_name)
+                .map(|check| check.resolved_type_at_node_map())
+                .unwrap_or_default()
+        };
+        emit_module(
+            &erlang_name,
+            &compiled.elaborated,
+            &ctx,
+            current_resolved_types,
+            &build_dir,
+            sf,
+        );
     }
 
     // Copy bridge (.erl) files into build dir
@@ -568,7 +591,23 @@ pub fn build_script(file: &str, profile: &str) -> PathBuf {
         } else {
             None
         };
-        emit_module(module_name, &compiled.elaborated, &ctx, &build_dir, sf);
+        let current_resolved_types = if module_name == "_script" {
+            result.resolved_type_at_node_map()
+        } else {
+            result
+                .module_check_results()
+                .get(module_name)
+                .map(|check| check.resolved_type_at_node_map())
+                .unwrap_or_default()
+        };
+        emit_module(
+            module_name,
+            &compiled.elaborated,
+            &ctx,
+            current_resolved_types,
+            &build_dir,
+            sf,
+        );
     }
 
     // Copy stdlib bridge (.erl) files into build dir

@@ -414,6 +414,17 @@ pub fn resolve_names(
         );
     }
 
+    // Build effect op count map from all modules for CPS arity calculation.
+    // Effect names -> number of ops (e.g. "TestRunner" -> 3).
+    let mut effect_op_counts: HashMap<String, usize> = HashMap::new();
+    for info in codegen_info.values() {
+        for eff_def in &info.effect_defs {
+            effect_op_counts
+                .entry(eff_def.name.clone())
+                .or_insert(eff_def.ops.len());
+        }
+    }
+
     // Step 2: Register imports (lower priority than local, prelude < user)
     // Process prelude imports first, then user imports override them.
     let import_decls: Vec<&Decl> = prelude_imports
@@ -472,12 +483,18 @@ pub fn resolve_names(
                 );
                 let dict_params =
                     crate::codegen::lower::util::dict_param_count(&scheme.constraints);
-                let expanded_arity = arity + dict_params;
                 let effects = fun_effects_map
                     .get(name.as_str())
                     .cloned()
                     .cloned()
                     .unwrap_or_default();
+                // Compute CPS-expanded arity: user args + dict params + handler params + ReturnK
+                let handler_param_count: usize = effects
+                    .iter()
+                    .map(|eff| effect_op_counts.get(eff).copied().unwrap_or(0))
+                    .sum();
+                let return_k = if handler_param_count > 0 { 1 } else { 0 };
+                let expanded_arity = arity + dict_params + handler_param_count + return_k;
 
                 // Check if this is an @external function
                 let scoped = if let Some((erl_mod, erl_func, ext_arity)) = ext_map.get(name) {
@@ -623,6 +640,12 @@ fn resolve_expr(
         ExprKind::Var { name, .. } => {
             if let Some(scoped) = scope.resolve_unqualified(name) {
                 map.insert(expr.id, scoped_to_resolved(scoped));
+            } else if name.contains('.') {
+                // Canonical-form Var from the pre-typecheck resolve pass
+                // (e.g. "Std.List.map" rewritten from bare "map").
+                if let Some(scoped) = scope.resolve_qualified(name) {
+                    map.insert(expr.id, scoped_to_resolved(scoped));
+                }
             }
             // If locally bound or not in module scope → not in map →
             // lowerer treats as local variable (CExpr::Var).

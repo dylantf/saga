@@ -148,7 +148,7 @@ fn find_call_in_expr(expr: &Expr, offset: usize) -> Option<(String, usize)> {
             // Determine which argument is active.
             let name = match &func_name.kind {
                 ExprKind::Var { name } => name.clone(),
-                ExprKind::QualifiedName { module, name } => format!("{}.{}", module, name),
+                ExprKind::QualifiedName { module, name, .. } => format!("{}.{}", module, name),
                 _ => return None,
             };
 

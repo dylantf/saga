@@ -9,6 +9,7 @@ mod handlers;
 mod infer;
 mod patterns;
 mod records;
+mod resolve;
 mod result;
 mod unify;
 pub use result::CheckResult;
@@ -740,9 +741,8 @@ pub struct Checker {
     /// Type name -> number of declared type parameters (for arity checking).
     /// Absent entries (e.g. Tuple) are unchecked.
     pub(crate) type_arity: HashMap<String, usize>,
-    /// Qualified type name -> canonical type name (for resolving M.Maybe -> Maybe etc).
-    /// Populated during import processing. Bare names map to themselves.
-    pub(crate) type_aliases: HashMap<String, String>,
+    /// Name resolution map: user-visible names -> canonical names.
+    pub(crate) scope_map: ScopeMap,
     /// Evidence collected during constraint solving for the elaboration pass.
     pub(crate) evidence: Vec<TraitEvidence>,
     /// Dict params for let bindings with trait constraints: name -> (params, value_arity).
@@ -760,6 +760,97 @@ pub struct Checker {
     pub(crate) current_module: Option<String>,
     /// Import declarations from the prelude (passed through to lowerer).
     pub prelude_imports: Vec<crate::ast::Decl>,
+}
+
+/// Maps user-visible name forms to canonical (module-qualified) names.
+///
+/// When `import Std.List as List exposing (map)` is processed, the ScopeMap gets:
+///   values["Std.List.map"] = "Std.List.map"   (canonical)
+///   values["List.map"]     = "Std.List.map"   (aliased)
+///   values["map"]          = "Std.List.map"   (bare, because exposed)
+///
+/// This allows each binding to be stored once in the env under its canonical name,
+/// with the ScopeMap handling all user-facing name form resolution.
+#[derive(Debug, Clone, Default)]
+pub struct ScopeMap {
+    /// User-visible name -> canonical name for value bindings (functions, let bindings).
+    pub values: HashMap<String, String>,
+    /// User-visible name -> canonical (bare) name for type names.
+    pub types: HashMap<String, String>,
+    /// User-visible name -> canonical name for constructors.
+    pub constructors: HashMap<String, String>,
+    /// User-visible name -> canonical name for effects.
+    pub effects: HashMap<String, String>,
+    /// User-visible name -> canonical name for traits.
+    pub traits: HashMap<String, String>,
+    /// Canonical name -> source module name (e.g. "Std.List.map" -> "Std.List").
+    /// Used by LSP to determine import origins without a separate parallel map.
+    pub origins: HashMap<String, String>,
+}
+
+impl ScopeMap {
+    pub fn resolve_value(&self, name: &str) -> Option<&str> {
+        self.values.get(name).map(|s| s.as_str())
+    }
+
+    pub fn resolve_type(&self, name: &str) -> Option<&str> {
+        self.types.get(name).map(|s| s.as_str())
+    }
+
+    pub fn resolve_constructor(&self, name: &str) -> Option<&str> {
+        self.constructors.get(name).map(|s| s.as_str())
+    }
+
+    pub fn resolve_effect(&self, name: &str) -> Option<&str> {
+        self.effects.get(name).map(|s| s.as_str())
+    }
+
+    pub fn resolve_trait(&self, name: &str) -> Option<&str> {
+        self.traits.get(name).map(|s| s.as_str())
+    }
+
+    /// Get the source module for a user-visible name, checking all name kinds.
+    pub fn origin_of(&self, name: &str) -> Option<&str> {
+        // Resolve the user-visible name to canonical, then look up origin
+        let canonical = self.values.get(name)
+            .or_else(|| self.constructors.get(name))
+            .or_else(|| self.effects.get(name))
+            .or_else(|| self.traits.get(name))
+            .or_else(|| self.types.get(name));
+        if let Some(canon) = canonical {
+            self.origins.get(canon).map(|s| s.as_str())
+        } else {
+            // Name might already be canonical
+            self.origins.get(name).map(|s| s.as_str())
+        }
+    }
+
+    /// Check if a user-visible name is an import (has an origin in scope_map).
+    pub fn is_import(&self, name: &str) -> bool {
+        self.origin_of(name).is_some()
+    }
+
+    /// Merge another scope_map into this one (first-insert-wins).
+    pub fn merge(&mut self, other: &ScopeMap) {
+        for (k, v) in &other.values {
+            self.values.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.types {
+            self.types.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.constructors {
+            self.constructors.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.effects {
+            self.effects.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.traits {
+            self.traits.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.origins {
+            self.origins.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
 }
 
 /// Trait system state: definitions, impl registry, deferred constraints, where bounds.
@@ -824,14 +915,9 @@ pub(crate) struct LspState {
     pub effect_call_targets: HashMap<Span, (Span, Option<String>)>,
     /// Maps handler arm span -> (effect op definition span, source module) (for LSP go-to-def, level 2).
     pub handler_arm_targets: HashMap<Span, (Span, Option<String>)>,
-    /// Import origins: binding name -> source module name (for cross-module find-references).
-    /// Populated by inject_scoped_bindings when importing modules.
-    pub import_origins: HashMap<String, String>,
     /// Type/effect name references: (span, name) pairs for all type names in annotations,
     /// type expressions, effect refs, etc. Used for find-references on type/effect names.
     pub type_references: Vec<(Span, String)>,
-    /// Import origins for type names: type_name -> source module name.
-    pub type_import_origins: HashMap<String, String>,
     /// Doc comments from imported declarations: name -> doc lines.
     pub imported_docs: HashMap<String, Vec<String>>,
 }
@@ -903,7 +989,7 @@ impl Checker {
             modules: ModuleContext::default(),
             adt_variants: HashMap::new(),
             type_arity: HashMap::new(),
-            type_aliases: HashMap::new(),
+            scope_map: ScopeMap::default(),
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
             collected_diagnostics: Vec::new(),
@@ -959,7 +1045,7 @@ impl Checker {
         crate::derive::expand_derives(&mut prelude_program);
         crate::desugar::desugar_program(&mut prelude_program);
         checker
-            .check_program_inner(&prelude_program)
+            .check_program_inner(&mut prelude_program)
             .map_err(|errs| errs.into_iter().next().unwrap())?;
 
         // Save the prelude's import declarations so the lowerer can register
@@ -1162,15 +1248,20 @@ impl Checker {
         (fields, result_ty)
     }
 
-    /// Push effects onto the accumulator. This is the primary way effects
-    /// are recorded during inference -- callers don't need to handle EffectRow returns.
+    /// Push effects onto the accumulator, deduplicating by name.
     pub(crate) fn emit_effects(&mut self, effs: &EffectRow) {
-        self.effect_row.effects.extend(effs.effects.clone());
+        for (name, args) in &effs.effects {
+            if !self.effect_row.effects.iter().any(|(n, _)| n == name) {
+                self.effect_row.effects.push((name.clone(), args.clone()));
+            }
+        }
     }
 
-    /// Push a single named effect onto the accumulator.
+    /// Push a single named effect onto the accumulator, deduplicating by name.
     pub(crate) fn emit_effect(&mut self, name: String, args: Vec<Type>) {
-        self.effect_row.effects.push((name, args));
+        if !self.effect_row.effects.iter().any(|(n, _)| n == &name) {
+            self.effect_row.effects.push((name, args));
+        }
     }
 
     /// Save the current effect accumulator and start a fresh one.

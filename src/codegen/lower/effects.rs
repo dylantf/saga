@@ -28,9 +28,9 @@ impl<'a> Lowerer<'a> {
         args: &[Expr],
         continuation: Option<CExpr>,
     ) -> CExpr {
-        // Find which effect this op belongs to
+        // Find which effect this op belongs to, resolved to canonical form
         let effect_name = if let Some(q) = qualifier {
-            q.to_string()
+            self.canonicalize_effect(q)
         } else {
             self.op_to_effect
                 .get(op_name)
@@ -166,12 +166,16 @@ impl<'a> Lowerer<'a> {
         // Collect effects from BEAM-native handlers in this `with` block.
         let beam_native_effects: std::collections::HashSet<String> = match handler {
             Handler::Named(name, _) if self.is_beam_native_handler(name) => {
-                self.handler_defs[name].effects.iter().cloned().collect()
+                let canonical = self.resolve_handler_name(name);
+                self.handler_defs[&canonical].effects.iter().cloned().collect()
             }
             Handler::Inline { named, .. } => named
                 .iter()
-                .filter(|n| self.is_beam_native_handler(n))
-                .flat_map(|n| self.handler_defs[n].effects.clone())
+                .filter(|(n, _)| self.is_beam_native_handler(n))
+                .flat_map(|(n, _)| {
+                    let canonical = self.resolve_handler_name(n);
+                    self.handler_defs[&canonical].effects.clone()
+                })
                 .collect(),
             _ => std::collections::HashSet::new(),
         };
@@ -384,10 +388,11 @@ impl<'a> Lowerer<'a> {
     ) -> (Vec<HandlerArm>, Option<Box<HandlerArm>>, Vec<String>) {
         match handler {
             Handler::Named(name, _) => {
+                let canonical = self.resolve_handler_name(name);
                 let info = self
                     .handler_defs
-                    .get(name)
-                    .unwrap_or_else(|| panic!("unknown handler: {}", name));
+                    .get(&canonical)
+                    .unwrap_or_else(|| panic!("unknown handler: {} (canonical: {})", name, canonical));
                 (
                     info.arms.clone(),
                     info.return_clause.clone(),
@@ -404,11 +409,12 @@ impl<'a> Lowerer<'a> {
                 let mut resolved_return = return_clause.clone();
                 let mut handled_effects = Vec::new();
 
-                for name in named {
+                for (name, _) in named {
+                    let canonical = self.resolve_handler_name(name);
                     let info = self
                         .handler_defs
-                        .get(name)
-                        .unwrap_or_else(|| panic!("unknown handler: {}", name));
+                        .get(&canonical)
+                        .unwrap_or_else(|| panic!("unknown handler: {} (canonical: {})", name, canonical));
                     all_arms.extend(info.arms.iter().cloned());
                     handled_effects.extend(info.effects.iter().cloned());
                     if resolved_return.is_none() {

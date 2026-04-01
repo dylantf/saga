@@ -11,14 +11,15 @@ impl Parser {
     // Used where we want to preserve the qualification (e.g. needs lists).
     fn parse_effect_ref(&mut self) -> Result<EffectRef, ParseError> {
         let start = self.tokens[self.pos].span;
-        let name = self.expect_upper_ident()?;
-        let name = if matches!(self.peek(), Token::Dot) {
+        let mut name = self.expect_upper_ident()?;
+        // Support multi-level qualification: Std.Fail.Fail, Logger.Log, etc.
+        while matches!(self.peek(), Token::Dot)
+            && matches!(self.peek_at(1), Token::UpperIdent(_) | Token::Ident(_))
+        {
             self.advance(); // consume '.'
-            let qualifier = self.expect_upper_ident()?;
-            format!("{}.{}", name, qualifier)
-        } else {
-            name
-        };
+            let next = self.expect_upper_ident()?;
+            name = format!("{}.{}", name, next);
+        }
         let mut type_args = Vec::new();
         while self.can_start_type_atom_no_brace() {
             type_args.push(self.parse_type_atom()?);
@@ -35,16 +36,16 @@ impl Parser {
         })
     }
 
-    // Parse `Name` or `Module.Name`, returning only the base name.
-    // Used where runtime/typechecker keys are bare names (traits, types, effects).
+    // Parse `Name` or `Module.Name.Etc`, preserving the full qualified path.
+    // Resolution to canonical names happens in the typechecker, not the parser.
     fn parse_upper_name(&mut self) -> Result<String, ParseError> {
-        let name = self.expect_upper_ident()?;
-        if matches!(self.peek(), Token::Dot) {
+        let mut name = self.expect_upper_ident()?;
+        while matches!(self.peek(), Token::Dot) {
             self.advance(); // consume '.'
-            Ok(self.expect_upper_ident()?) // discard module prefix, return base name
-        } else {
-            Ok(name)
+            let segment = self.expect_upper_ident()?;
+            name = format!("{}.{}", name, segment);
         }
+        Ok(name)
     }
 
     // --- Declarations ---
@@ -206,7 +207,7 @@ impl Parser {
             self.advance();
             self.expect(Token::LParen)?;
             loop {
-                deriving.push(self.expect_upper_ident()?);
+                deriving.push(self.parse_upper_name()?);
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
                 } else {
@@ -287,7 +288,7 @@ impl Parser {
             self.advance(); // consume 'deriving'
             self.expect(Token::LParen)?;
             loop {
-                deriving.push(self.expect_upper_ident()?);
+                deriving.push(self.parse_upper_name()?);
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
                 } else {

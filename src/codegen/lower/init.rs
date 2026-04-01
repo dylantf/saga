@@ -40,6 +40,62 @@ impl<'a> Lowerer<'a> {
     ) -> HashMap<String, PendingAnnotation> {
         let mut pending_annotations: HashMap<String, PendingAnnotation> = HashMap::new();
 
+        // Build bare→canonical effect name resolver from all sources.
+        // Local effects: "Log" → "MyModule.Log"
+        // Imported effects: "Assert" → "Std.Test.Assert" (from codegen_info)
+        let mut effect_canonical: HashMap<String, String> = HashMap::new();
+        for decl in program {
+            if let Decl::EffectDef { name, .. } = decl {
+                effect_canonical.insert(name.clone(), format!("{}.{}", module_name, name));
+            }
+        }
+        for info in self.ctx.modules.values() {
+            for eff_def in &info.codegen_info.effect_defs {
+                // codegen_info effect names are already canonical
+                if let Some(dot_pos) = eff_def.name.rfind('.') {
+                    let bare = &eff_def.name[dot_pos + 1..];
+                    effect_canonical
+                        .entry(bare.to_string())
+                        .or_insert_with(|| eff_def.name.clone());
+                }
+            }
+        }
+        // Also build bare→canonical for handler names.
+        let mut handler_canonical: HashMap<String, String> = HashMap::new();
+        for decl in program {
+            if let Decl::HandlerDef { name, .. } = decl {
+                handler_canonical.insert(name.clone(), format!("{}.{}", module_name, name));
+            }
+        }
+        for info in self.ctx.modules.values() {
+            for handler_name in &info.codegen_info.handler_defs {
+                if let Some(dot_pos) = handler_name.rfind('.') {
+                    let bare = &handler_name[dot_pos + 1..];
+                    handler_canonical
+                        .entry(bare.to_string())
+                        .or_insert_with(|| handler_name.clone());
+                }
+            }
+        }
+
+        // Store the canonical maps on self now so methods like
+        // canonicalize_effect/canonicalize_effects work during init.
+        self.effect_canonical = effect_canonical.clone();
+        self.handler_canonical = handler_canonical.clone();
+
+        let canonicalize_effect = |bare: &str| -> String {
+            effect_canonical
+                .get(bare)
+                .cloned()
+                .unwrap_or_else(|| bare.to_string())
+        };
+        let canonicalize_handler = |bare: &str| -> String {
+            handler_canonical
+                .get(bare)
+                .cloned()
+                .unwrap_or_else(|| bare.to_string())
+        };
+
         // Collect record field orders, effect definitions, handler definitions,
         // and function effect requirements.
         for decl in program {
@@ -54,12 +110,15 @@ impl<'a> Lowerer<'a> {
                 Decl::EffectDef {
                     name, operations, ..
                 } => {
+                    let canonical_effect = format!("{}.{}", module_name, name);
                     let mut ops = HashMap::new();
                     for op in operations {
                         ops.insert(op.node.name.clone(), op.node.params.len());
-                        self.op_to_effect.insert(op.node.name.clone(), name.clone());
+                        self.op_to_effect
+                            .insert(op.node.name.clone(), canonical_effect.clone());
                     }
-                    self.effect_defs.insert(name.clone(), EffectInfo { ops });
+                    self.effect_defs
+                        .insert(canonical_effect, EffectInfo { ops });
                 }
                 Decl::HandlerDef {
                     name,
@@ -68,10 +127,14 @@ impl<'a> Lowerer<'a> {
                     return_clause,
                     ..
                 } => {
+                    let canonical_handler = format!("{}.{}", module_name, name);
                     self.handler_defs.insert(
-                        name.clone(),
+                        canonical_handler,
                         HandlerInfo {
-                            effects: effects.iter().map(|e| e.name.clone()).collect(),
+                            effects: effects
+                                .iter()
+                                .map(|e| canonicalize_effect(&e.name))
+                                .collect(),
                             arms: arms.iter().map(|a| a.node.clone()).collect(),
                             return_clause: return_clause.clone(),
                             source_module: Some(module_name.to_string()),
@@ -94,7 +157,7 @@ impl<'a> Lowerer<'a> {
                         let real_arity = params.len();
                         let mut sorted_effects = Vec::new();
                         if !effects.is_empty() {
-                            sorted_effects = effects.iter().map(|e| e.name.clone()).collect();
+                            sorted_effects = effects.iter().map(|e| canonicalize_effect(&e.name)).collect();
                             sorted_effects.sort();
                         }
                         let expanded_arity = self.expanded_arity(real_arity, &sorted_effects);
@@ -110,14 +173,17 @@ impl<'a> Lowerer<'a> {
                         // Regular function signature
                         let mut sorted_effects = Vec::new();
                         if !effects.is_empty() {
-                            sorted_effects = effects.iter().map(|e| e.name.clone()).collect();
+                            sorted_effects = effects.iter().map(|e| canonicalize_effect(&e.name)).collect();
                             sorted_effects.sort();
                         }
                         let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
                         for (i, (_param_name, type_expr)) in params.iter().enumerate() {
                             let effs = collect_type_effects(type_expr);
                             if !effs.is_empty() {
-                                let mut sorted: Vec<String> = effs.into_iter().collect();
+                                let mut sorted: Vec<String> = effs
+                                    .into_iter()
+                                    .map(|e| canonicalize_effect(&e))
+                                    .collect();
                                 sorted.sort();
                                 param_effs.insert(i, sorted);
                             }
@@ -191,15 +257,26 @@ impl<'a> Lowerer<'a> {
                 // exposing lists, handled by the user import processing below.
                 for (name, scheme) in &info.exports {
                     let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
+                    let effects = self.canonicalize_effects(effects);
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
                     let expanded_arity =
                         self.expanded_arity(base_arity, &effects) + dict_param_count;
-                    let qualified = format!("{}.{}", mod_path.last().unwrap(), name);
-                    self.fun_info.entry(qualified).or_insert(FunInfo {
+                    let param_absorbed =
+                        util::param_absorbed_effects_from_type(&scheme.ty);
+                    let param_absorbed: HashMap<usize, Vec<String>> = param_absorbed
+                        .into_iter()
+                        .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
+                        .collect();
+                    let fi = FunInfo {
                         arity: expanded_arity,
                         effects,
-                        param_absorbed_effects: HashMap::new(),
-                    });
+                        param_absorbed_effects: param_absorbed,
+                    };
+                    // Register under short alias (e.g. "List.map") and canonical (e.g. "Std.List.map")
+                    let alias_qualified = format!("{}.{}", mod_path.last().unwrap(), name);
+                    self.fun_info.entry(alias_qualified).or_insert(fi.clone());
+                    let canonical = format!("{}.{}", mod_name, name);
+                    self.fun_info.entry(canonical).or_insert(fi);
                 }
                 // Register Std handler bodies and external functions from elaborated programs
                 if let Some(elab_program) = self.ctx.elaborated_module(mod_name) {
@@ -212,10 +289,11 @@ impl<'a> Lowerer<'a> {
                                 return_clause,
                                 ..
                             } => {
+                                let canonical_handler = canonicalize_handler(name);
                                 self.handler_defs
-                                    .entry(name.clone())
+                                    .entry(canonical_handler)
                                     .or_insert(HandlerInfo {
-                                        effects: effects.iter().map(|e| e.name.clone()).collect(),
+                                        effects: effects.iter().map(|e| canonicalize_effect(&e.name)).collect(),
                                         arms: arms.iter().map(|a| a.node.clone()).collect(),
                                         return_clause: return_clause.clone(),
                                         source_module: Some(mod_name.clone()),
@@ -283,38 +361,7 @@ impl<'a> Lowerer<'a> {
             }
         };
 
-        let exported_names: std::collections::HashSet<&str> =
-            info.exports.iter().map(|(n, _)| n.as_str()).collect();
-
-        // Register imported functions
-        for (name, scheme) in &info.exports {
-            let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
-            let dict_param_count = util::dict_param_count(&scheme.constraints);
-            let expanded_arity = self.expanded_arity(base_arity, &effects) + dict_param_count;
-            let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
-
-            // Always register qualified form
-            let qualified = format!("{}.{}", prefix, name);
-            self.fun_info.insert(
-                qualified,
-                FunInfo {
-                    arity: expanded_arity,
-                    effects: effects.clone(),
-                    param_absorbed_effects: param_effs.clone(),
-                },
-            );
-
-            // Register unqualified form only for exposed names
-            if is_exposed(name) && exported_names.contains(name.as_str()) {
-                self.fun_info.entry(name.clone()).or_insert(FunInfo {
-                    arity: expanded_arity,
-                    effects,
-                    param_absorbed_effects: param_effs,
-                });
-            }
-        }
-
-        // Register imported effect definitions
+        // Register imported effect definitions FIRST so expanded_arity can look them up.
         for eff_def in &info.effect_defs {
             let mut ops_map = HashMap::new();
             for op in &eff_def.ops {
@@ -324,6 +371,43 @@ impl<'a> Lowerer<'a> {
             }
             self.effect_defs
                 .insert(eff_def.name.clone(), EffectInfo { ops: ops_map });
+        }
+
+        let exported_names: std::collections::HashSet<&str> =
+            info.exports.iter().map(|(n, _)| n.as_str()).collect();
+
+        // Register imported functions
+        for (name, scheme) in &info.exports {
+            let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
+            let effects = self.canonicalize_effects(effects);
+            let dict_param_count = util::dict_param_count(&scheme.constraints);
+            let expanded_arity = self.expanded_arity(base_arity, &effects) + dict_param_count;
+            let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
+            // Canonicalize absorbed effect names too
+            let param_effs: HashMap<usize, Vec<String>> = param_effs
+                .into_iter()
+                .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
+                .collect();
+
+            // Register under alias form (e.g. "String.reverse") and canonical (e.g. "Std.String.reverse")
+            let alias_qualified = format!("{}.{}", prefix, name);
+            let fi = FunInfo {
+                arity: expanded_arity,
+                effects: effects.clone(),
+                param_absorbed_effects: param_effs.clone(),
+            };
+            self.fun_info.insert(alias_qualified, fi.clone());
+            let canonical = format!("{}.{}", module_name, name);
+            self.fun_info.entry(canonical).or_insert(fi);
+
+            // Register unqualified form only for exposed names
+            if is_exposed(name) && exported_names.contains(name.as_str()) {
+                self.fun_info.entry(name.clone()).or_insert(FunInfo {
+                    arity: expanded_arity,
+                    effects,
+                    param_absorbed_effects: param_effs,
+                });
+            }
         }
 
         // Register imported record field orders
@@ -352,10 +436,14 @@ impl<'a> Lowerer<'a> {
                         return_clause,
                         ..
                     } => {
+                        let canonical_effects: Vec<String> = effects
+                            .iter()
+                            .map(|e| self.canonicalize_effect(&e.name))
+                            .collect();
                         self.handler_defs
                             .entry(name.clone())
                             .or_insert(HandlerInfo {
-                                effects: effects.iter().map(|e| e.name.clone()).collect(),
+                                effects: canonical_effects,
                                 arms: arms.iter().map(|a| a.node.clone()).collect(),
                                 return_clause: return_clause.clone(),
                                 source_module: Some(module_name.clone()),

@@ -10,9 +10,10 @@ Source (.dy)
   -> Derive Expansion (src/derive.rs)
   -> Desugar (src/desugar.rs)
   -> Typecheck (src/typechecker/)
+     includes: Name Resolution (src/typechecker/resolve.rs)
   -> Elaborate (src/elaborate.rs)
   -> Normalize (src/codegen/normalize.rs)
-  -> Resolve (src/codegen/resolve.rs)
+  -> Codegen Resolve (src/codegen/resolve.rs)
   -> Lower (src/codegen/lower/)
   -> Core Erlang AST (src/codegen/cerl.rs)
   -> Print -> .core file
@@ -34,8 +35,10 @@ Transforms sugar nodes into core AST forms: pipes, composition, list literals, s
 ### Typecheck
 HM-style inference with traits, effects, and exhaustiveness checking. Multi-module: scans all `.dy` files to build a module map, resolves imports by declared module name.
 
+Includes a **name resolution** sub-pass (`src/typechecker/resolve.rs`) that runs after imports are processed and before inference. It rewrites bare names in the AST to canonical (module-qualified) form using the `ScopeMap` built from imports. For example, `Var { name: "map" }` becomes `Var { name: "Std.List.map" }`. The pass is scope-aware: local bindings shadow imports. See `docs/name-resolution.md` for full details.
+
 Key outputs:
-- `CheckResult`: type environment, trait evidence, diagnostics
+- `CheckResult`: type environment, trait evidence, scope_map, diagnostics
 - `ModuleCodegenInfo` per module: exports, constructors, external functions, trait impl dicts, effect definitions, handler definitions
 - Prelude import declarations (stored in `CheckResult.prelude_imports`)
 
@@ -49,7 +52,7 @@ Transforms trait method calls into explicit dictionary passing. Runs per-module.
 ### Normalize
 Effect normalization pre-pass. Adjusts the AST for CPS transformation in the lowerer.
 
-### Resolve (src/codegen/resolve.rs)
+### Codegen Resolve (src/codegen/resolve.rs)
 Pre-computes two lookup tables consumed by the lowerer:
 
 **ConstructorAtoms** (`HashMap<String, String>`): Maps constructor names to their mangled Erlang atoms. Handles BEAM convention overrides (Ok->ok, Err->error, Nothing->undefined, True->true, etc.), module-prefixed mangling (NotFound -> std_file_NotFound), and qualified forms (Std.File.NotFound -> std_file_NotFound).

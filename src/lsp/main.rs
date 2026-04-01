@@ -168,12 +168,8 @@ impl Backend {
         }
 
         // Resolve the symbol key: (module, name).
-        let module = if let Some(origin) = tc_result
-            .import_origins
-            .get(name)
-            .or_else(|| tc_result.type_import_origins.get(name))
-        {
-            origin.clone()
+        let module = if let Some(origin) = tc_result.scope_map.origin_of(name) {
+            origin.to_string()
         } else {
             let local_module = program.iter().find_map(|decl| {
                 if let dylang::ast::Decl::ModuleDecl { path, .. } = decl {
@@ -560,7 +556,17 @@ impl LanguageServer for Backend {
         if let Some(type_str) =
             hover::type_at_name(tc_result, &name, Some(&span), node_id.as_ref(), program)
         {
-            let code = format!("{}: {}", name, type_str);
+            // Use source text for display name (the AST name may be canonical after resolve)
+            let display_name = if span.end > span.start
+                && span.end <= snap.source.len()
+                && snap.source.is_char_boundary(span.start)
+                && snap.source.is_char_boundary(span.end)
+            {
+                &snap.source[span.start..span.end]
+            } else {
+                &name
+            };
+            let code = format!("{}: {}", display_name, type_str);
             let value = match hover::doc_for_name(program, &name, tc_result) {
                 Some(doc) => format!("{}\n\n---\n\n```dylang\n{}\n```", doc, code),
                 None => format!("```dylang\n{}\n```", code),
@@ -942,8 +948,7 @@ impl LanguageServer for Backend {
         }
         // Reject imported symbols that aren't locally redefined
         let tc_result = &snap.tc_result;
-        let is_imported = tc_result.import_origins.contains_key(&name)
-            || tc_result.type_import_origins.contains_key(&name);
+        let is_imported = tc_result.scope_map.is_import(&name);
         let is_locally_defined = definition::find_definition(program, &name, tc_result)
             .is_some_and(|d| d.file_path.is_none());
         if is_imported && !is_locally_defined {

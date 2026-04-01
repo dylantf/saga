@@ -1,4 +1,4 @@
-import Std.Fail
+import Std.Fail (Fail)
 import Std.Result
 import Std.Supervisor (supervised)
 

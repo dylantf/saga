@@ -1,4 +1,4 @@
-import Std.Actor
+import Std.Actor (Process, Actor, beam_actor)
 
 type PingMsg = Ping(Pid PongMsg)
 
@@ -32,5 +32,5 @@ run () = {
 }
 
 main () = {
-  run () with beam_actor
-}
+  run ()
+} with beam_actor

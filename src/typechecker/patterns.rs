@@ -40,41 +40,24 @@ impl Checker {
             Pat::Constructor {
                 id, name, args, span, ..
             } => {
-                // Look up constructor by name; if the name is qualified (e.g.
-                // "Std.File.NotFound"), try progressively shorter suffixes since
-                // constructors may be registered as "File.NotFound" or "NotFound"
-                // depending on how the module was imported.
-                let ctor_scheme = {
-                    let mut result = self.constructors.get(name);
-                    let mut suffix = name.as_str();
-                    while result.is_none() {
-                        if let Some(pos) = suffix.find('.') {
-                            suffix = &suffix[pos + 1..];
-                            result = self.constructors.get(suffix);
-                        } else {
-                            break;
-                        }
-                    }
-                    result.cloned().ok_or_else(|| {
+                // Look up constructor by name, with scope_map resolution as fallback.
+                let resolved_ctor = self.scope_map.resolve_constructor(name).map(|s| s.to_string());
+                let ctor_scheme = self.constructors.get(name)
+                    .or_else(|| resolved_ctor.as_ref().and_then(|r| self.constructors.get(r.as_str())))
+                    .cloned()
+                    .ok_or_else(|| {
                         Diagnostic::error_at(
                             *span,
                             format!("undefined constructor in pattern: {}", name),
                         )
-                    })?
-                };
+                    })?;
                 // Record reference to constructor definition for find-references/rename
                 {
-                    let mut lookup = name.as_str();
-                    loop {
-                        if let Some(def_id) = self.lsp.constructor_def_ids.get(lookup).copied() {
-                            self.record_reference(*id, *span, def_id);
-                            break;
-                        }
-                        if let Some(pos) = lookup.find('.') {
-                            lookup = &lookup[pos + 1..];
-                        } else {
-                            break;
-                        }
+                    let def_id = self.lsp.constructor_def_ids.get(name)
+                        .or_else(|| resolved_ctor.as_ref().and_then(|r| self.lsp.constructor_def_ids.get(r.as_str())))
+                        .copied();
+                    if let Some(def_id) = def_id {
+                        self.record_reference(*id, *span, def_id);
                     }
                 }
                 let (ctor_ty, _) = self.instantiate(&ctor_scheme);
@@ -497,9 +480,13 @@ impl Checker {
                 _ => {}
             }
 
-            // Find which constructor the binding pattern matches
+            // Find which constructor the binding pattern matches.
+            // Constructor names may be canonical (e.g. "Std.Result.Ok") after the
+            // resolve pass, but adt_variants stores bare names ("Ok"). Use bare form.
             let matched = match pat {
-                Pat::Constructor { name, .. } => Some(name.as_str()),
+                Pat::Constructor { name, .. } => {
+                    Some(name.rsplit('.').next().unwrap_or(name.as_str()))
+                }
                 Pat::Lit {
                     value: Lit::Bool(b),
                     ..

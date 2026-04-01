@@ -337,10 +337,10 @@ impl Checker {
                     self.lsp.type_references.push((*span, name.clone()));
                 }
                 // Resolve qualified type names (e.g. "M.Maybe" -> "Maybe") through
-                // the type alias map populated during import processing.
+                // the scope map.
                 let resolved = if name.contains('.') {
-                    match self.type_aliases.get(name) {
-                        Some(canonical) => canonical.clone(),
+                    match self.scope_map.resolve_type(name).map(|s| s.to_string()) {
+                        Some(canonical) => canonical,
                         None => {
                             self.collected_diagnostics.push(Diagnostic {
                                 severity: Severity::Error,
@@ -416,7 +416,26 @@ impl Checker {
                                 .iter()
                                 .map(|te| self.convert_type_expr(te, params))
                                 .collect();
-                            (e.name.clone(), args)
+                            // Canonicalize effect name so it matches canonical-only self.effects
+                            let name = if let Some(info) = self.resolve_effect(&e.name) {
+                                let short = e.name.rsplit('.').next().unwrap_or(&e.name);
+                                info.source_module.as_ref()
+                                    .map(|m| format!("{}.{}", m, short))
+                                    .unwrap_or_else(|| {
+                                        if let Some(m) = &self.current_module {
+                                            format!("{}.{}", m, e.name)
+                                        } else {
+                                            e.name.clone()
+                                        }
+                                    })
+                            } else {
+                                self.collected_diagnostics.push(Diagnostic::error_at(
+                                    e.span,
+                                    format!("undefined effect: {}", e.name),
+                                ));
+                                e.name.clone()
+                            };
+                            (name, args)
                         })
                         .collect();
                     let tail = effect_row_var.as_ref().map(|(name, _)| {

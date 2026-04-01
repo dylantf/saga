@@ -559,6 +559,7 @@ fn desugar_comprehension(body: Expr, qualifiers: &[ComprehensionQualifier], span
             let flat_map = Expr::synth(span, ExprKind::QualifiedName {
                 module: "List".into(),
                 name: "flat_map".into(),
+                canonical_module: None,
             });
             let app1 = Expr::synth(span, ExprKind::App {
                 func: Box::new(flat_map),

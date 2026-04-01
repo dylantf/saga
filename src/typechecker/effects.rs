@@ -6,6 +6,59 @@ use crate::token::Span;
 use super::{Checker, Diagnostic, EffectOpSig, EffectRow, Type};
 
 impl Checker {
+    // --- Effect lookup ---
+
+    /// Look up an effect by name. Effects are stored under canonical names
+    /// (e.g. "Std.Fail.Fail"). This resolves bare ("Fail"), aliased ("Fail.Fail"),
+    /// and canonical ("Std.Fail.Fail") forms by suffix-matching against keys.
+    /// For fully-qualified Std names, triggers auto-import if the module isn't loaded.
+    pub(crate) fn resolve_effect(&mut self, name: &str) -> Option<super::EffectDefInfo> {
+        // Try exact match first (canonical)
+        if let Some(info) = self.effects.get(name) {
+            return Some(info.clone());
+        }
+        // Resolve through scope_map (handles bare, aliased, and qualified names)
+        if let Some(canonical) = self.scope_map.resolve_effect(name).map(|s| s.to_string())
+            && let Some(info) = self.effects.get(&canonical)
+        {
+            return Some(info.clone());
+        }
+        // Local module: Module.Name
+        if let Some(module) = &self.current_module.clone() {
+            let local_key = format!("{}.{}", module, name);
+            if let Some(info) = self.effects.get(&local_key) {
+                return Some(info.clone());
+            }
+        }
+        // Try auto-importing for fully-qualified Std effect names
+        if let Some(dot_pos) = name.rfind('.') {
+            let module_path = &name[..dot_pos];
+            let parts: Vec<String> = module_path.split('.').map(String::from).collect();
+            if crate::typechecker::check_module::builtin_module_source(&parts).is_some()
+                && !self.modules.exports.contains_key(module_path)
+            {
+                let span = Span { start: 0, end: 0 };
+                if self
+                    .typecheck_import(&parts, Some(module_path), None, span)
+                    .is_ok()
+                {
+                    self.prelude_imports.push(crate::ast::Decl::Import {
+                        id: crate::ast::NodeId::fresh(),
+                        module_path: parts,
+                        alias: Some(module_path.to_string()),
+                        exposing: None,
+                        span,
+                    });
+                }
+                // Retry after auto-import
+                if let Some(info) = self.effects.get(name) {
+                    return Some(info.clone());
+                }
+            }
+        }
+        None
+    }
+
     // --- Effect tracking ---
 
     /// Check body effects against a declared effect row.
@@ -58,7 +111,8 @@ impl Checker {
         }
     }
 
-    /// Find which effect an operation belongs to.
+    /// Find which effect an operation belongs to. Returns the canonical
+    /// (module-qualified) effect name, e.g. "Std.Fail.Fail".
     pub(crate) fn effect_for_op(&self, op_name: &str, qualifier: Option<&str>) -> Option<String> {
         if let Some(effect_name) = qualifier
             && self.effects.contains_key(effect_name)
@@ -83,7 +137,7 @@ impl Checker {
                 }
             }
             ast::Handler::Inline { named, arms, .. } => {
-                for name in named {
+                for (name, _) in named {
                     if let Some(info) = self.handlers.get(name) {
                         handled.extend(info.effects.iter().cloned());
                     }
@@ -152,8 +206,8 @@ impl Checker {
                 return_type: self.replace_vars(&op.return_type, &mapping),
             };
         }
-        // Reuse cached mapping or create fresh vars
-        let mapping = if let Some(cached) = self.effect_meta.type_param_cache.get(effect_name) {
+        // Reuse cached mapping or create fresh vars for effect-level type params
+        let mut mapping = if let Some(cached) = self.effect_meta.type_param_cache.get(effect_name) {
             cached.clone()
         } else {
             let mapping: std::collections::HashMap<u32, Type> = type_params
@@ -164,6 +218,30 @@ impl Checker {
                 .insert(effect_name.to_string(), mapping.clone());
             mapping
         };
+        // Also freshen any free vars NOT in the type_params (e.g. `a` in
+        // `Fail e { fun fail : e -> a }`). These must be fresh per call
+        // site, unlike effect-level params which are shared across ops.
+        let type_param_set: std::collections::HashSet<u32> =
+            type_params.iter().copied().collect();
+        let mut free_vars = std::collections::HashSet::new();
+        fn collect_vars2(ty: &Type, vars: &mut std::collections::HashSet<u32>) {
+            match ty {
+                Type::Var(id) => { vars.insert(*id); }
+                Type::Fun(a, b, _) => { collect_vars2(a, vars); collect_vars2(b, vars); }
+                Type::Con(_, args) => { for a in args { collect_vars2(a, vars); } }
+                Type::Record(fields) => { for (_, ty) in fields { collect_vars2(ty, vars); } }
+                Type::Error => {}
+            }
+        }
+        for (_, t) in &op.params {
+            collect_vars2(t, &mut free_vars);
+        }
+        collect_vars2(&op.return_type, &mut free_vars);
+        for id in free_vars {
+            if !type_param_set.contains(&id) && !mapping.contains_key(&id) {
+                mapping.insert(id, self.fresh_var());
+            }
+        }
         EffectOpSig {
             name: op.name.clone(),
             params: op
@@ -184,9 +262,13 @@ impl Checker {
         span: Span,
     ) -> Result<EffectOpSig, Diagnostic> {
         if let Some(effect_name) = qualifier {
+            // Resolve qualifier through scope_map (bare/aliased → canonical)
+            let canonical = self.scope_map.resolve_effect(effect_name)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| effect_name.to_string());
             let info = self
                 .effects
-                .get(effect_name)
+                .get(&canonical)
                 .ok_or_else(|| {
                     Diagnostic::error_at(span, format!("undefined effect: {}", effect_name))
                 })?
@@ -197,7 +279,7 @@ impl Checker {
                     format!("effect '{}' has no operation '{}'", effect_name, op_name),
                 )
             })?;
-            Ok(self.instantiate_effect_op(effect_name, op, &info.type_params))
+            Ok(self.instantiate_effect_op(&canonical, op, &info.type_params))
         } else {
             let mut found: Option<(String, EffectOpSig, Vec<u32>)> = None;
             for (eff_name, info) in &self.effects {

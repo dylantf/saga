@@ -462,8 +462,15 @@ pub enum ExprKind {
     /// `(a, b)`, `(1, "hello", True)`
     Tuple { elements: Vec<Expr> },
 
-    /// `Math.abs` - module-qualified name lookup
-    QualifiedName { module: String, name: String },
+    /// `Math.abs` - module-qualified name lookup.
+    /// `module` is the user-written alias (e.g. "List"), used by codegen.
+    /// `canonical_module` is filled by the resolve pass (e.g. "Std.List"), used by typechecker.
+    QualifiedName {
+        module: String,
+        name: String,
+        /// Set by the resolve pass. None = not yet resolved (e.g. auto-imports).
+        canonical_module: Option<String>,
+    },
 
     /// `do { Pat <- expr ... SuccessExpr } else { Pat -> expr ... }`
     Do {
@@ -1000,8 +1007,8 @@ pub enum Handler {
     Named(String, Span),
     /// `expr with { h1, h2, op args = body }`
     Inline {
-        /// Named handler references (e.g. `h1, h2`)
-        named: Vec<String>,
+        /// Named handler references (e.g. `h1, h2`) with their spans
+        named: Vec<(String, Span)>,
         /// Inline handler arms (e.g. `op args = body`)
         arms: Vec<Annotated<HandlerArm>>,
         /// `return value = Ok(value)` clause

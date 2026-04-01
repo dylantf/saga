@@ -58,12 +58,8 @@ pub struct CheckResult {
     pub references: HashMap<crate::ast::NodeId, crate::ast::NodeId>,
     /// NodeId -> Span map for recorded nodes (for resolving NodeIds to locations).
     pub node_spans: HashMap<crate::ast::NodeId, crate::token::Span>,
-    /// Import origins: binding name -> source module name (for cross-module find-references).
-    pub import_origins: HashMap<String, String>,
     /// Type/effect name references: (span, name) for find-references on types.
     pub type_references: Vec<(crate::token::Span, String)>,
-    /// Import origins for type names: type_name -> source module name.
-    pub type_import_origins: HashMap<String, String>,
     /// Constructor name -> definition NodeId (for symbol index).
     pub constructor_def_ids: HashMap<String, crate::ast::NodeId>,
     /// Doc comments from imported declarations: name -> doc lines.
@@ -71,6 +67,8 @@ pub struct CheckResult {
     /// Import declarations from the prelude (so the lowerer knows which
     /// stdlib names are actually in scope for user code).
     pub prelude_imports: Vec<crate::ast::Decl>,
+    /// Name resolution map: user-visible names -> canonical names.
+    pub scope_map: super::ScopeMap,
 }
 
 impl CheckResult {
@@ -87,6 +85,14 @@ impl CheckResult {
     /// All warnings.
     pub fn warnings(&self) -> Vec<&Diagnostic> {
         self.diagnostics.iter().filter(|d| matches!(d.severity, Severity::Warning)).collect()
+    }
+
+    /// Look up an effect by name, resolving bare/aliased names through the scope_map.
+    pub fn resolve_effect(&self, name: &str) -> Option<&EffectDefInfo> {
+        self.effects.get(name).or_else(|| {
+            self.scope_map.resolve_effect(name)
+                .and_then(|canonical| self.effects.get(canonical))
+        })
     }
 
     /// Effect names for LSP completion.
@@ -129,6 +135,21 @@ impl CheckResult {
     pub fn type_at_node(&self, node_id: &crate::ast::NodeId) -> Option<String> {
         let ty = self.type_at_node.get(node_id)?;
         Some(format!("{}", self.prettify(ty)))
+    }
+
+    /// Resolved type map keyed by node id. Intended for downstream compiler passes.
+    pub fn resolved_type_at_node_map(&self) -> HashMap<crate::ast::NodeId, super::Type> {
+        self.type_at_node
+            .iter()
+            .map(|(id, ty)| (*id, self.sub.apply(ty)))
+            .collect()
+    }
+
+    /// Look up a resolved type by node id for downstream compiler passes.
+    pub fn resolved_type_for_node(&self, node_id: crate::ast::NodeId) -> Option<super::Type> {
+        self.type_at_node
+            .get(&node_id)
+            .map(|ty| self.sub.apply(ty))
     }
 
     /// Look up the resolved type at a span (for Pat bindings), applying the substitution.
@@ -262,6 +283,23 @@ impl Checker {
                     if let Some(scheme) = self.env.get(name) {
                         let resolved = self.sub.apply(&scheme.ty);
                         let effects = super::effects_from_type(&resolved);
+                        // Canonicalize bare effect names using the effects map
+                        let effects: HashSet<String> = effects
+                            .into_iter()
+                            .map(|e| {
+                                if let Some(info) = self.effects.get(&e) {
+                                    if let Some(src) = &info.source_module {
+                                        format!("{}.{}", src, e)
+                                    } else if let Some(m) = &self.current_module {
+                                        format!("{}.{}", m, e)
+                                    } else {
+                                        e
+                                    }
+                                } else {
+                                    e
+                                }
+                            })
+                            .collect();
                         fun_effects.insert(name.clone(), effects);
                     }
                 }
@@ -290,12 +328,11 @@ impl Checker {
             records: self.records.clone(),
             references: self.lsp.references.clone(),
             node_spans: self.lsp.node_spans.clone(),
-            import_origins: self.lsp.import_origins.clone(),
             type_references: self.lsp.type_references.clone(),
-            type_import_origins: self.lsp.type_import_origins.clone(),
             constructor_def_ids: self.lsp.constructor_def_ids.clone(),
             imported_docs: self.lsp.imported_docs.clone(),
             prelude_imports: self.prelude_imports.clone(),
+            scope_map: self.scope_map.clone(),
         }
     }
 }

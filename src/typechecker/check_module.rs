@@ -73,7 +73,8 @@ impl ModuleExports {
                     if *opaque {
                         type_constructors.insert(name.clone(), vec![]);
                     } else {
-                        let ctors: Vec<String> = variants.iter().map(|v| v.node.name.clone()).collect();
+                        let ctors: Vec<String> =
+                            variants.iter().map(|v| v.node.name.clone()).collect();
                         type_constructors.insert(name.clone(), ctors);
                     }
                 }
@@ -105,7 +106,13 @@ impl ModuleExports {
                 Decl::TraitDef {
                     public: true, name, ..
                 } => {
-                    if let Some(info) = checker.trait_state.traits.get(name.as_str()) {
+                    // Traits are stored under canonical key (Module.Trait)
+                    let canonical = checker
+                        .current_module
+                        .as_ref()
+                        .map(|m| format!("{}.{}", m, name))
+                        .unwrap_or_else(|| name.clone());
+                    if let Some(info) = checker.trait_state.traits.get(&canonical) {
                         traits.insert(name.clone(), info.clone());
                     }
                 }
@@ -115,7 +122,11 @@ impl ModuleExports {
                     target_type,
                     ..
                 } => {
-                    let key = (trait_name.clone(), trait_type_args.clone(), target_type.clone());
+                    // Resolve trait name to canonical form for impl key lookup
+                    let resolved = checker
+                        .resolve_trait_name(trait_name)
+                        .unwrap_or_else(|| trait_name.clone());
+                    let key = (resolved, trait_type_args.clone(), target_type.clone());
                     if let Some(info) = checker.trait_state.impls.get(&key) {
                         trait_impls.insert(key, info.clone());
                     }
@@ -123,7 +134,13 @@ impl ModuleExports {
                 Decl::EffectDef {
                     public: true, name, ..
                 } => {
-                    if let Some(info) = checker.effects.get(name) {
+                    // Effects are stored under canonical key (Module.Effect)
+                    let canonical = checker
+                        .current_module
+                        .as_ref()
+                        .map(|m| format!("{}.{}", m, name))
+                        .unwrap_or_else(|| name.clone());
+                    if let Some(info) = checker.effects.get(&canonical) {
                         effects.insert(name.clone(), info.clone());
                     }
                 }
@@ -162,13 +179,48 @@ impl ModuleExports {
         let mut doc_comments: HashMap<String, Vec<String>> = HashMap::new();
         for decl in program {
             let (name, doc) = match decl {
-                Decl::FunSignature { public: true, name, doc, .. } => (name, doc),
-                Decl::Val { public: true, name, doc, .. } => (name, doc),
-                Decl::TypeDef { public: true, name, doc, .. } => (name, doc),
-                Decl::RecordDef { public: true, name, doc, .. } => (name, doc),
-                Decl::EffectDef { public: true, name, doc, .. } => (name, doc),
-                Decl::HandlerDef { public: true, name, doc, .. } => (name, doc),
-                Decl::TraitDef { public: true, name, doc, .. } => (name, doc),
+                Decl::FunSignature {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::Val {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::TypeDef {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::RecordDef {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::EffectDef {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::HandlerDef {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::TraitDef {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
                 _ => continue,
             };
             if !doc.is_empty() {
@@ -273,7 +325,10 @@ fn scan_dir(dir: &Path, root: &Path, map: &mut ModuleMap) -> Result<(), String> 
         let path = entry.path();
         if path.is_dir() {
             // Skip _build and tests directories
-            if path.file_name().is_some_and(|n| n == "_build" || n == "tests") {
+            if path
+                .file_name()
+                .is_some_and(|n| n == "_build" || n == "tests")
+            {
                 continue;
             }
             scan_dir(&path, root, map)?;
@@ -388,7 +443,8 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
 
 pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
     let name = module_path.join(".");
-    BUILTIN_MODULES.iter()
+    BUILTIN_MODULES
+        .iter()
         .find(|(mod_name, _)| *mod_name == name)
         .map(|(_, src)| *src)
 }
@@ -501,7 +557,7 @@ impl Checker {
                 crate::derive::expand_derives(&mut prelude_program);
                 crate::desugar::desugar_program(&mut prelude_program);
                 snapshot
-                    .check_program_inner(&prelude_program)
+                    .check_program_inner(&mut prelude_program)
                     .expect("prelude type errors");
                 self.modules.prelude_snapshot = Some(Box::new(snapshot));
             }
@@ -524,19 +580,23 @@ impl Checker {
         mod_checker.modules.programs = self.modules.programs.clone();
         mod_checker.modules.map = self.modules.map.clone();
         mod_checker.current_module = Some(module_name.clone());
-        mod_checker.check_program_inner(&program).map_err(|errs| {
-            Diagnostic::error_at(
-                span,
-                format!("type error in module '{}': {}", module_name, errs[0]),
-            )
-        })?;
+        mod_checker
+            .check_program_inner(&mut program)
+            .map_err(|errs| {
+                Diagnostic::error_at(
+                    span,
+                    format!("type error in module '{}': {}", module_name, errs[0]),
+                )
+            })?;
 
         // Collect all public exports into a single struct
         let exports = ModuleExports::collect(&program, &mod_checker);
 
         // Cache the CheckResult for elaboration (avoids re-typechecking in compile_std_modules)
         let mod_result = mod_checker.to_result();
-        self.modules.check_results.insert(module_name.clone(), mod_result);
+        self.modules
+            .check_results
+            .insert(module_name.clone(), mod_result);
 
         // Advance the parent's var counter past the module's to keep IDs disjoint.
         if mod_checker.next_var > self.next_var {
@@ -559,8 +619,10 @@ impl Checker {
 
         self.modules.loading.remove(&module_name);
 
-        // Build codegen info from the module's public declarations
-        let codegen_info = collect_codegen_info(&module_name, &program, &exports);
+        // Build codegen info from the module's public declarations.
+        // Pass the effects map so fun_effects can use canonical effect names.
+        let codegen_info =
+            collect_codegen_info(&module_name, &program, &exports, &mod_checker.effects, &mod_checker.scope_map);
         self.modules
             .codegen_info
             .insert(module_name.clone(), codegen_info);
@@ -595,10 +657,20 @@ impl Checker {
             if !mc.trait_state.traits.contains_key(name) {
                 mc.trait_state.traits.insert(name.clone(), info.clone());
                 for (method_name, _, _, _) in &info.methods {
-                    if let Some(scheme) = self.env.get(method_name)
-                        && mc.env.get(method_name).is_none()
-                    {
-                        mc.env.insert(method_name.clone(), scheme.clone());
+                    if let Some(scheme) = self.env.get(method_name) {
+                        if mc.env.get(method_name).is_none() {
+                            mc.env.insert(method_name.clone(), scheme.clone());
+                        }
+                        // Also copy canonical name entries so the resolve pass
+                        // can rewrite bare Var names to canonical form.
+                        for (user, canonical) in &self.scope_map.values {
+                            if user == method_name
+                                && canonical != method_name
+                                && mc.env.get(canonical).is_none()
+                            {
+                                mc.env.insert(canonical.clone(), scheme.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -606,17 +678,23 @@ impl Checker {
         for (name, scheme) in &self.constructors {
             if !mc.constructors.contains_key(name) {
                 mc.constructors.insert(name.clone(), scheme.clone());
-                mc.env.insert(name.clone(), scheme.clone());
             }
         }
         for (name, variants) in &self.adt_variants {
-            mc.adt_variants.entry(name.clone()).or_insert_with(|| variants.clone());
+            mc.adt_variants
+                .entry(name.clone())
+                .or_insert_with(|| variants.clone());
         }
         // Share trait impls from all previously loaded Std modules so stdlib modules
         // can use traits on standard types (e.g. Show for String, Ord for Int).
         for (key, info) in &self.modules.base_trait_impls {
-            mc.trait_state.impls.entry(key.clone()).or_insert_with(|| info.clone());
+            mc.trait_state
+                .impls
+                .entry(key.clone())
+                .or_insert_with(|| info.clone());
         }
+        // Share scope_map so builtin modules can resolve bare names to canonical forms
+        mc.scope_map.merge(&self.scope_map);
     }
 
     /// Create a module checker seeded with this checker's caches.
@@ -668,6 +746,11 @@ impl Checker {
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        // Build and merge scope_map from the standalone resolver
+        let import_scope = resolve_import(exports, module_name, prefix, exposing)
+            .map_err(|msg| Diagnostic::error_at(span, msg))?;
+        self.scope_map.merge(&import_scope);
+
         let ModuleExports {
             bindings,
             type_constructors,
@@ -682,184 +765,141 @@ impl Checker {
             doc_comments,
         } = exports;
 
-        // Traits and their methods (unqualified, so impl bodies can reference them)
+        // Traits and their methods: registered under both bare name (for local
+        // impl bodies) and canonical name (for the resolve pass to rewrite to).
         let binding_map: std::collections::HashMap<&str, &Scheme> =
             bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
         for (name, info) in traits {
-            self.trait_state.traits
-                .entry(name.clone())
+            let trait_canonical = format!("{}.{}", module_name, name);
+            self.trait_state
+                .traits
+                .entry(trait_canonical)
                 .or_insert_with(|| info.clone());
             // Register doc comments for the trait itself
             if let Some(doc) = doc_comments.get(name) {
-                self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
+                self.lsp
+                    .imported_docs
+                    .entry(name.clone())
+                    .or_insert_with(|| doc.clone());
             }
             for (method_name, _, _, _) in &info.methods {
-                if let Some(&scheme) = binding_map.get(method_name.as_str())
-                    && self.env.get(method_name).is_none()
-                {
-                    if let Some(&did) = def_ids.get(method_name.as_str()) {
-                        self.env.insert_with_def(method_name.clone(), scheme.clone(), did);
-                    } else {
-                        self.env.insert(method_name.clone(), scheme.clone());
+                if let Some(&scheme) = binding_map.get(method_name.as_str()) {
+                    // Bare name (for local references and impl bodies)
+                    if self.env.get(method_name).is_none() {
+                        if let Some(&did) = def_ids.get(method_name.as_str()) {
+                            self.env
+                                .insert_with_def(method_name.clone(), scheme.clone(), did);
+                        } else {
+                            self.env.insert(method_name.clone(), scheme.clone());
+                        }
                     }
-                    self.lsp.import_origins
-                        .insert(method_name.clone(), module_name.to_string());
+                    // Canonical name (Module.Trait.method) for after resolve pass rewrites
+                    let canonical = format!("{}.{}.{}", module_name, name, method_name);
+                    if self.env.get(&canonical).is_none() {
+                        self.env.insert(canonical, scheme.clone());
+                    }
                 }
             }
         }
 
         // Trait impls
         for (key, info) in trait_impls {
-            self.trait_state.impls
+            self.trait_state
+                .impls
                 .entry(key.clone())
                 .or_insert_with(|| info.clone());
         }
 
-        // Effects
+        // Effects: always register under both bare and qualified forms in
+        // self.effects (the bare form is needed for internal type checking —
+        // the type system stores bare effect names in EffectRows). The
+        // scope_map controls which names users can write in `needs` clauses.
+        let is_exposed =
+            |item: &str| -> bool { exposing.is_some_and(|list| list.iter().any(|e| e == item)) };
         for (name, info) in effects {
+            // One canonical entry: Module.Effect (e.g. Std.Fail.Fail)
+            let canonical = format!("{}.{}", module_name, name);
             self.effects
-                .entry(name.clone())
+                .entry(canonical)
                 .or_insert_with(|| info.clone());
-            self.lsp.type_import_origins
-                .entry(name.clone())
-                .or_insert_with(|| module_name.to_string());
             if let Some(doc) = doc_comments.get(name) {
-                self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
+                self.lsp
+                    .imported_docs
+                    .entry(name.clone())
+                    .or_insert_with(|| doc.clone());
             }
         }
 
-        // Handlers
+        // Handlers: qualified always, bare only when exposed.
+        // Unlike effects, handlers are values explicitly referenced in `with`
+        // expressions, not implicitly referenced by the type system.
         for (name, info) in handlers {
+            let qualified = format!("{}.{}", prefix, name);
             self.handlers
-                .entry(name.clone())
+                .entry(qualified)
                 .or_insert_with(|| info.clone());
+            if is_exposed(name) {
+                self.handlers
+                    .entry(name.clone())
+                    .or_insert_with(|| info.clone());
+            }
             if let Some(doc) = doc_comments.get(name) {
-                self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
+                self.lsp
+                    .imported_docs
+                    .entry(name.clone())
+                    .or_insert_with(|| doc.clone());
             }
         }
 
-        // Type arities and type aliases (for resolving qualified type names)
+        // Type arities and scope_map entries for qualified type name resolution
         for (name, arity) in type_arity {
             // Bare name (canonical internal form)
             self.type_arity.entry(name.clone()).or_insert(*arity);
-            self.lsp.type_import_origins
-                .entry(name.clone())
-                .or_insert_with(|| module_name.to_string());
-
-            // Register qualified forms so M.Maybe, Maybe.Maybe, Std.Maybe.Maybe
-            // all resolve to the bare type name "Maybe" and pass arity checks
-            let canonical = format!("{}.{}", module_name, name);
-            self.type_arity.entry(canonical.clone()).or_insert(*arity);
-            self.type_aliases.insert(canonical, name.clone());
-            if prefix != module_name {
-                let aliased = format!("{}.{}", prefix, name);
-                self.type_arity.entry(aliased.clone()).or_insert(*arity);
-                self.type_aliases.insert(aliased, name.clone());
-            }
         }
 
         // Function effects (for cross-module `with` validation and effect propagation).
-        // Register canonical ("Std.Logger.greet"), alias ("Logger.greet"), and
-        // unqualified ("greet") forms so all call styles are covered.
+        // Only the canonical form is registered; scope_map resolves aliases/bare names.
         for name in effectful_funs {
-            // Canonical: full module path
             let canonical = format!("{}.{}", module_name, name);
             self.effect_meta.known_funs.insert(canonical);
-            // Alias: short prefix (if different)
-            if prefix != module_name {
-                let aliased = format!("{}.{}", prefix, name);
-                self.effect_meta.known_funs.insert(aliased);
-            }
-            // Bare name (for exposed imports)
-            self.effect_meta.known_funs.insert(name.clone());
         }
 
-        // Bindings, type constructors, records (qualified + exposing)
-        self.inject_scoped_bindings(
-            bindings,
-            type_constructors,
-            record_defs,
-            def_ids,
-            doc_comments,
-            module_name,
-            prefix,
-            exposing,
-            span,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn inject_scoped_bindings(
-        &mut self,
-        bindings: &[(String, Scheme)],
-        ctors_map: &std::collections::HashMap<String, Vec<String>>,
-        record_defs: &std::collections::HashMap<String, super::RecordInfo>,
-        def_ids: &HashMap<String, crate::ast::NodeId>,
-        doc_comments: &HashMap<String, Vec<String>>,
-        module_name: &str,
-        prefix: &str,
-        exposing: Option<&[crate::ast::ExposedItem]>,
-        span: Span,
-    ) -> Result<(), Diagnostic> {
-        // Build a lookup map for fast access
-        let binding_map: std::collections::HashMap<&str, &Scheme> =
-            bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
-
-        // Build reverse map: constructor name -> type name (for exposing constructors by name)
-        let mut ctor_to_type: std::collections::HashMap<&str, &str> =
-            std::collections::HashMap::new();
-        for (type_name, ctors) in ctors_map {
-            for ctor in ctors {
-                ctor_to_type.insert(ctor.as_str(), type_name.as_str());
-            }
-        }
-
-        // Record import origins for all bindings from this module.
-        // Both qualified (Prefix.name) and unqualified (exposed) forms
-        // map back to the same source module.
-        for (name, _) in bindings {
-            self.lsp.import_origins
-                .insert(name.clone(), module_name.to_string());
-        }
+        // --- Inject bindings, constructors, records into checker state ---
 
         for (name, scheme) in bindings {
             // Canonical: always register under full module path (e.g. "Std.String.replace")
             let canonical = format!("{}.{}", module_name, name);
             if let Some(&did) = def_ids.get(name.as_str()) {
-                self.env.insert_with_def(canonical.clone(), scheme.clone(), did);
+                self.env
+                    .insert_with_def(canonical.clone(), scheme.clone(), did);
             } else {
                 self.env.insert(canonical.clone(), scheme.clone());
             }
-            // Doc comments: register under canonical form
+            // Doc comments: canonical + aliased forms
             if let Some(doc) = doc_comments.get(name) {
-                self.lsp.imported_docs.entry(canonical).or_insert_with(|| doc.clone());
-            }
-            // Alias: if prefix differs from module_name, also register short form (e.g. "String.replace")
-            if prefix != module_name {
-                let aliased = format!("{}.{}", prefix, name);
-                if let Some(&did) = def_ids.get(name.as_str()) {
-                    self.env.insert_with_def(aliased.clone(), scheme.clone(), did);
-                } else {
-                    self.env.insert(aliased.clone(), scheme.clone());
-                }
-                if let Some(doc) = doc_comments.get(name) {
-                    self.lsp.imported_docs.entry(aliased).or_insert_with(|| doc.clone());
+                self.lsp
+                    .imported_docs
+                    .entry(canonical)
+                    .or_insert_with(|| doc.clone());
+                if prefix != module_name {
+                    let aliased = format!("{}.{}", prefix, name);
+                    self.lsp
+                        .imported_docs
+                        .entry(aliased)
+                        .or_insert_with(|| doc.clone());
                 }
             }
         }
 
-        // Always inject constructors qualified for pattern matching (e.g. File.NotFound)
-        for (type_name, ctors) in ctors_map {
+        // Constructors: canonical form only
+        for (type_name, ctors) in type_constructors {
             let mut variants = Vec::new();
             for ctor in ctors {
-                // Canonical: full module path (e.g. "Std.File.NotFound")
                 let canonical = format!("{}.{}", module_name, ctor);
                 if let Some(&scheme) = binding_map.get(ctor.as_str()) {
-                    self.constructors.insert(canonical, scheme.clone());
-                    // Alias: short prefix (e.g. "File.NotFound")
-                    if prefix != module_name {
-                        let aliased = format!("{}.{}", prefix, ctor);
-                        self.constructors.insert(aliased, scheme.clone());
+                    self.constructors.insert(canonical.clone(), scheme.clone());
+                    if let Some(&did) = def_ids.get(ctor.as_str()) {
+                        self.lsp.constructor_def_ids.insert(canonical, did);
                     }
                     variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
                 }
@@ -869,115 +909,311 @@ impl Checker {
             }
         }
 
-        // Always inject record definitions for qualified access
+        // Record definitions
         for (rec_name, fields) in record_defs {
             self.records
                 .entry(rec_name.clone())
                 .or_insert_with(|| fields.clone());
         }
 
+        // Exposed items: LSP metadata, records, adt_variants.
+        // Validation and scope_map entries are handled by resolve_import above.
         if let Some(exposed) = exposing {
+            // Build reverse map for constructor-as-name detection
+            let mut ctor_to_type: std::collections::HashMap<&str, &str> =
+                std::collections::HashMap::new();
+            for (type_name, ctors) in type_constructors {
+                for ctor in ctors {
+                    ctor_to_type.insert(ctor.as_str(), type_name.as_str());
+                }
+            }
+
             for name in exposed {
                 let is_type = name.starts_with(|c: char| c.is_uppercase());
                 if is_type {
-                    let mut found = binding_map.contains_key(name.as_str());
-                    self.lsp.type_import_origins
-                        .insert(name.clone(), module_name.to_string());
-                    // Hoist the type name itself if it's in bindings
-                    if let Some(&scheme) = binding_map.get(name.as_str()) {
-                        if let Some(&did) = def_ids.get(name.as_str()) {
-                            self.env.insert_with_def(name.clone(), scheme.clone(), did);
-                        } else {
-                            self.env.insert(name.clone(), scheme.clone());
-                        }
-                    }
-                    // If it's a record type, register its fields
                     if let Some(fields) = record_defs.get(name.as_str()) {
                         self.records.insert(name.clone(), fields.clone());
-                        found = true;
                     }
-                    // Hoist all constructors belonging to this type
-                    // (for opaque types, ctors is empty but the type name is still valid)
-                    if let Some(ctors) = ctors_map.get(name) {
-                        found = true;
+                    if let Some(ctors) = type_constructors.get(name) {
                         let mut variants = Vec::new();
                         for ctor in ctors {
                             if let Some(&scheme) = binding_map.get(ctor.as_str()) {
                                 if let Some(&did) = def_ids.get(ctor.as_str()) {
-                                    self.env.insert_with_def(ctor.clone(), scheme.clone(), did);
-                                    self.lsp.constructor_def_ids
+                                    self.lsp
+                                        .constructor_def_ids
                                         .entry(ctor.clone())
                                         .or_insert(did);
-                                } else {
-                                    self.env.insert(ctor.clone(), scheme.clone());
                                 }
-                                self.constructors.insert(ctor.clone(), scheme.clone());
                                 variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
-                                found = true;
                             }
                         }
                         if !variants.is_empty() {
                             self.adt_variants.insert(name.clone(), variants);
                         }
                     }
-                    // If the exposed name is a constructor (not a type), also add to constructors
                     if ctor_to_type.contains_key(name.as_str())
-                        && let Some(&scheme) = binding_map.get(name.as_str())
+                        && let Some(&did) = def_ids.get(name.as_str())
                     {
-                        if let Some(&did) = def_ids.get(name.as_str()) {
-                            self.env.insert_with_def(name.clone(), scheme.clone(), did);
-                            self.lsp.constructor_def_ids
-                                .entry(name.clone())
-                                .or_insert(did);
-                        } else {
-                            self.env.insert(name.clone(), scheme.clone());
-                        }
-                        self.constructors.insert(name.clone(), scheme.clone());
-                        found = true;
+                        self.lsp
+                            .constructor_def_ids
+                            .entry(name.clone())
+                            .or_insert(did);
                     }
-                    // Register doc comments under the exposed (bare) name
-                    if let Some(doc) = doc_comments.get(name.as_str()) {
-                        self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
-                    }
-                    if !found {
-                        return Err(Diagnostic::error_at(
-                            span,
-                            format!("'{}' is not exported by module '{}'", name, prefix),
-                        ));
-                    }
-                } else {
-                    // Look up via canonical (full module path) first, then alias
-                    let canonical = format!("{}.{}", module_name, name);
-                    let alias_key = format!("{}.{}", prefix, name);
-                    let lookup = self.env.get(&canonical).cloned()
-                        .or_else(|| self.env.get(&alias_key).cloned());
-                    match lookup {
-                        Some(scheme) => {
-                            // Use the same def_id as the qualified form
-                            let did = self.env.def_id(&canonical)
-                                .or_else(|| self.env.def_id(&alias_key));
-                            if let Some(did) = did {
-                                self.env.insert_with_def(name.clone(), scheme, did);
-                            } else {
-                                self.env.insert(name.clone(), scheme);
-                            }
-                            // Register doc comments under the exposed (bare) name
-                            if let Some(doc) = doc_comments.get(name.as_str()) {
-                                self.lsp.imported_docs.entry(name.clone()).or_insert_with(|| doc.clone());
-                            }
-                        }
-                        None => {
-                            return Err(Diagnostic::error_at(
-                                span,
-                                format!("'{}' is not exported by module '{}'", name, prefix),
-                            ));
-                        }
-                    }
+                }
+                if let Some(doc) = doc_comments.get(name.as_str()) {
+                    self.lsp
+                        .imported_docs
+                        .entry(name.clone())
+                        .or_insert_with(|| doc.clone());
                 }
             }
         }
+
         Ok(())
     }
+}
+
+/// Build scope_map entries for a module import.
+///
+/// This is the name resolution logic: given a module's exports and the import
+/// parameters (module name, alias prefix, exposing list), compute all the
+/// user-visible-name → canonical-name mappings.
+///
+/// Validates that all exposed names actually exist in the module's exports.
+/// Returns an error message for the first invalid exposed name found.
+///
+/// Separated from `inject_exports` so name resolution can eventually run as
+/// an independent pass before typechecking.
+pub(super) fn resolve_import(
+    exports: &ModuleExports,
+    module_name: &str,
+    prefix: &str,
+    exposing: Option<&[crate::ast::ExposedItem]>,
+) -> Result<super::ScopeMap, String> {
+    let mut scope = super::ScopeMap::default();
+
+    let binding_map: std::collections::HashMap<&str, &Scheme> = exports
+        .bindings
+        .iter()
+        .map(|(n, s)| (n.as_str(), s))
+        .collect();
+
+    // Build reverse map: constructor name -> type name
+    let mut ctor_to_type: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for (type_name, ctors) in &exports.type_constructors {
+        for ctor in ctors {
+            ctor_to_type.insert(ctor.as_str(), type_name.as_str());
+        }
+    }
+
+    // Traits: canonical + aliased + bare (traits are always available for impl/where
+    // when the module is imported, regardless of exposing clause)
+    for trait_name in exports.traits.keys() {
+        let trait_canonical = format!("{}.{}", module_name, trait_name);
+        scope
+            .traits
+            .entry(trait_canonical.clone())
+            .or_insert_with(|| trait_canonical.clone());
+        scope
+            .traits
+            .entry(trait_name.clone())
+            .or_insert_with(|| trait_canonical.clone());
+        if prefix != module_name {
+            let aliased = format!("{}.{}", prefix, trait_name);
+            scope
+                .traits
+                .entry(aliased)
+                .or_insert_with(|| trait_canonical.clone());
+        }
+    }
+
+    // Trait methods: bare -> Module.Trait.method
+    // Trait methods are always unqualified in user code; the canonical form
+    // is used by the resolve pass to rewrite Var nodes.
+    for (trait_name, info) in &exports.traits {
+        for (method_name, _, _, _) in &info.methods {
+            let canonical = format!("{}.{}.{}", module_name, trait_name, method_name);
+            scope.values.entry(method_name.clone()).or_insert(canonical);
+        }
+    }
+
+    // Effects: canonical + aliased qualified forms
+    for effect_name in exports.effects.keys() {
+        let effect_canonical = format!("{}.{}", module_name, effect_name);
+        scope
+            .effects
+            .entry(effect_canonical.clone())
+            .or_insert_with(|| effect_canonical.clone());
+        if prefix != module_name {
+            let aliased = format!("{}.{}", prefix, effect_name);
+            scope
+                .effects
+                .entry(aliased)
+                .or_insert_with(|| effect_canonical.clone());
+        }
+    }
+
+    // Value bindings: canonical + aliased
+    for (name, _) in &exports.bindings {
+        let canonical = format!("{}.{}", module_name, name);
+        scope
+            .values
+            .entry(canonical.clone())
+            .or_insert_with(|| canonical.clone());
+        if prefix != module_name {
+            let aliased = format!("{}.{}", prefix, name);
+            scope
+                .values
+                .entry(aliased)
+                .or_insert_with(|| canonical.clone());
+        }
+    }
+
+    // Constructors: canonical + aliased
+    for ctors in exports.type_constructors.values() {
+        for ctor in ctors {
+            if binding_map.contains_key(ctor.as_str()) {
+                let canonical = format!("{}.{}", module_name, ctor);
+                scope
+                    .constructors
+                    .entry(canonical.clone())
+                    .or_insert_with(|| canonical.clone());
+                if prefix != module_name {
+                    let aliased = format!("{}.{}", prefix, ctor);
+                    scope
+                        .constructors
+                        .entry(aliased)
+                        .or_insert_with(|| canonical.clone());
+                }
+            }
+        }
+    }
+
+    // Type names: qualified -> bare
+    for name in exports.type_arity.keys() {
+        let canonical = format!("{}.{}", module_name, name);
+        scope.types.entry(canonical).or_insert_with(|| name.clone());
+        if prefix != module_name {
+            let aliased = format!("{}.{}", prefix, name);
+            scope.types.entry(aliased).or_insert_with(|| name.clone());
+        }
+    }
+
+    // Exposed items: bare -> canonical, with validation
+    if let Some(exposed) = exposing {
+        for name in exposed {
+            let is_type = name.starts_with(|c: char| c.is_uppercase());
+            if is_type {
+                let mut found = binding_map.contains_key(name.as_str());
+                // Bare type value -> canonical
+                if found {
+                    let type_canonical = format!("{}.{}", module_name, name);
+                    scope.values.entry(name.clone()).or_insert(type_canonical);
+                }
+                // Bare type name resolves to itself
+                scope
+                    .types
+                    .entry(name.clone())
+                    .or_insert_with(|| name.clone());
+                // Record types count as found
+                if exports.record_defs.contains_key(name.as_str()) {
+                    found = true;
+                }
+                // Constructors belonging to this type
+                if let Some(ctors) = exports.type_constructors.get(name) {
+                    found = true;
+                    for ctor in ctors {
+                        if binding_map.contains_key(ctor.as_str()) {
+                            let ctor_canonical = format!("{}.{}", module_name, ctor);
+                            scope
+                                .constructors
+                                .entry(ctor.clone())
+                                .or_insert_with(|| ctor_canonical.clone());
+                            scope.values.entry(ctor.clone()).or_insert(ctor_canonical);
+                        }
+                    }
+                }
+                // Exposed constructor-as-name
+                if ctor_to_type.contains_key(name.as_str())
+                    && binding_map.contains_key(name.as_str())
+                {
+                    let ctor_canonical = format!("{}.{}", module_name, name);
+                    scope
+                        .constructors
+                        .entry(name.clone())
+                        .or_insert_with(|| ctor_canonical.clone());
+                    scope.values.entry(name.clone()).or_insert(ctor_canonical);
+                    found = true;
+                }
+                // Effects can be exposed by name
+                if exports.effects.contains_key(name) {
+                    let effect_canonical = format!("{}.{}", module_name, name);
+                    scope
+                        .effects
+                        .entry(name.clone())
+                        .or_insert(effect_canonical);
+                    found = true;
+                }
+                // Traits can be exposed by name
+                if exports.traits.contains_key(name) {
+                    let trait_canonical = format!("{}.{}", module_name, name);
+                    scope.traits.entry(name.clone()).or_insert(trait_canonical);
+                    found = true;
+                }
+                if !found {
+                    return Err(format!("'{}' is not exported by module '{}'", name, prefix));
+                }
+            } else {
+                // Bare value -> canonical
+                let canonical = format!("{}.{}", module_name, name);
+                // Validate: must be a function/value in scope, or a handler name
+                let is_handler = exports.handlers.contains_key(name);
+                if !scope.values.contains_key(&canonical) && !is_handler {
+                    return Err(format!("'{}' is not exported by module '{}'", name, prefix));
+                }
+                if scope.values.contains_key(&canonical) {
+                    scope.values.entry(name.clone()).or_insert(canonical);
+                }
+            }
+        }
+    }
+
+    // Record origins: every canonical name from this module maps to module_name.
+    // Collect all canonical names from the maps we just built.
+    let module = module_name.to_string();
+    for canonical in scope.values.values() {
+        scope
+            .origins
+            .entry(canonical.clone())
+            .or_insert_with(|| module.clone());
+    }
+    for canonical in scope.constructors.values() {
+        scope
+            .origins
+            .entry(canonical.clone())
+            .or_insert_with(|| module.clone());
+    }
+    for canonical in scope.effects.values() {
+        scope
+            .origins
+            .entry(canonical.clone())
+            .or_insert_with(|| module.clone());
+    }
+    for canonical in scope.traits.values() {
+        scope
+            .origins
+            .entry(canonical.clone())
+            .or_insert_with(|| module.clone());
+    }
+    // Types use bare canonical names, but still originate from this module
+    for bare_name in scope.types.values() {
+        scope
+            .origins
+            .entry(bare_name.clone())
+            .or_insert_with(|| module.clone());
+    }
+
+    Ok(scope)
 }
 
 /// Collect codegen-relevant info from a module's public declarations.
@@ -985,6 +1221,8 @@ fn collect_codegen_info(
     module_name: &str,
     program: &[crate::ast::Decl],
     exports: &ModuleExports,
+    effects_map: &std::collections::HashMap<String, EffectDefInfo>,
+    scope_map: &super::ScopeMap,
 ) -> ModuleCodegenInfo {
     use crate::ast::Decl;
     let mut effect_defs = Vec::new();
@@ -1010,6 +1248,7 @@ fn collect_codegen_info(
                 operations,
                 ..
             } => {
+                let canonical_effect = format!("{}.{}", module_name, name);
                 let ops = operations
                     .iter()
                     .map(|op| EffectOpDef {
@@ -1018,7 +1257,7 @@ fn collect_codegen_info(
                     })
                     .collect();
                 effect_defs.push(EffectDef {
-                    name: name.clone(),
+                    name: canonical_effect,
                     ops,
                     type_param_count: type_params.len(),
                 });
@@ -1033,11 +1272,9 @@ fn collect_codegen_info(
                 record_fields.push((name.clone(), field_names));
             }
             Decl::HandlerDef {
-                public: true,
-                name,
-                ..
+                public: true, name, ..
             } => {
-                handler_defs.push(name.clone());
+                handler_defs.push(format!("{}.{}", module_name, name));
             }
             Decl::FunSignature {
                 public: true,
@@ -1045,15 +1282,27 @@ fn collect_codegen_info(
                 effects,
                 ..
             } if !effects.is_empty() => {
-                // Strip beam-native effects (same as elaboration)
+                // Strip beam-native effects (same as elaboration), canonicalize names
                 let mut sorted: Vec<String> = effects
                     .iter()
-                    .map(|e| e.name.clone())
-                    .filter(|n| {
+                    .filter(|e| {
                         !matches!(
-                            n.as_str(),
+                            e.name.as_str(),
                             "Actor" | "Process" | "Monitor" | "Link" | "Timer"
                         )
+                    })
+                    .map(|e| {
+                        // Resolve effect name to canonical via scope_map
+                        scope_map.resolve_effect(&e.name)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| {
+                                // Fallback: try effects_map directly, or qualify with module
+                                if effects_map.contains_key(&e.name) {
+                                    e.name.clone()
+                                } else {
+                                    format!("{}.{}", module_name, e.name)
+                                }
+                            })
                     })
                     .collect();
                 sorted.sort();
@@ -1071,8 +1320,10 @@ fn collect_codegen_info(
                 // Private externals are needed for handler body inlining.
                 if let Some(ext) = annotations.iter().find(|a| a.name == "external")
                     && ext.args.len() >= 3
-                    && let (crate::ast::Lit::String(erl_mod, _), crate::ast::Lit::String(erl_func, _)) =
-                        (&ext.args[1], &ext.args[2])
+                    && let (
+                        crate::ast::Lit::String(erl_mod, _),
+                        crate::ast::Lit::String(erl_func, _),
+                    ) = (&ext.args[1], &ext.args[2])
                 {
                     external_funs.push((
                         name.clone(),
@@ -1096,7 +1347,10 @@ fn collect_codegen_info(
                 } else {
                     format!("_{}", trait_type_args.join("_"))
                 };
-                let dict_name = format!("__dict_{}{}_{}_{}", trait_name, type_args_suffix, erlang_module, target_type);
+                let dict_name = format!(
+                    "__dict_{}{}_{}_{}",
+                    trait_name, type_args_suffix, erlang_module, target_type
+                );
                 let arity = where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
                 let var_to_idx: std::collections::HashMap<&str, usize> = type_params
                     .iter()
@@ -1106,12 +1360,24 @@ fn collect_codegen_info(
                 let param_constraints: Vec<(String, usize)> = where_clause
                     .iter()
                     .flat_map(|bound| {
-                        let idx = var_to_idx.get(bound.type_var.as_str()).copied().unwrap_or(0);
-                        bound.traits.iter().map(move |(t, _, _)| (t.clone(), idx))
+                        let idx = var_to_idx
+                            .get(bound.type_var.as_str())
+                            .copied()
+                            .unwrap_or(0);
+                        bound.traits.iter().map(move |(t, _, _)| {
+                            let resolved = scope_map.resolve_trait(t)
+                                .unwrap_or(t.as_str())
+                                .to_string();
+                            (resolved, idx)
+                        })
                     })
                     .collect();
+                // Resolve trait name to canonical form via scope_map
+                let canonical_trait = scope_map.resolve_trait(trait_name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("{}.{}", module_name, trait_name));
                 trait_impl_dicts.push(TraitImplDict {
-                    trait_name: trait_name.clone(),
+                    trait_name: canonical_trait,
                     trait_type_args: trait_type_args.clone(),
                     target_type: target_type.clone(),
                     dict_name,

@@ -11,7 +11,7 @@ fn bootstrap() -> typechecker::Checker {
         .parse_program()
         .expect("prelude parse error");
     desugar::desugar_program(&mut prelude_program);
-    let result = checker.check_program(&prelude_program);
+    let result = checker.check_program(&mut prelude_program);
     assert!(
         !result.has_errors(),
         "prelude typecheck error: {:?}",
@@ -49,7 +49,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         .expect("parse error");
     desugar::desugar_program(&mut program);
     let mut checker = bootstrap();
-    let result = checker.check_program(&program);
+    let result = checker.check_program(&mut program);
     assert!(
         !result.has_errors(),
         "typecheck error: {:?}",
@@ -103,7 +103,13 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    codegen::emit_module_with_context("_script", &elaborated, &ctx, None)
+    codegen::emit_module_with_context(
+        "_script",
+        &elaborated,
+        &ctx,
+        result.resolved_type_at_node_map(),
+        None,
+    )
 }
 
 /// Emit Core Erlang and compile it with erlc, asserting no compilation errors.
@@ -513,7 +519,7 @@ do_work () = 42
     let out = emit_elaborated(src);
     // do_work takes 0 user params + 1 handler param + 1 _ReturnK = arity 2
     assert_contains(&out, "'do_work'/2");
-    assert_contains(&out, "_Handle_Log_log");
+    assert_contains(&out, "_Handle__script_Log_log");
 }
 
 #[test]
@@ -528,7 +534,7 @@ fun do_work : Unit -> Unit needs {Log}
 do_work () = log! "hello"
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle_Log_log(");
+    assert_contains(&out, "apply _Handle__script_Log_log(");
     // String "hello" is now a binary: #{#<104>...}#
     assert_contains(&out, "#{#<104>(8,1,'integer',['unsigned'|['big']])");
 }
@@ -549,7 +555,7 @@ do_work () = {
 "#;
     let out = emit_elaborated(src);
     // Should have handler apply with a fun (continuation) as last arg
-    assert_contains(&out, "apply _Handle_Log_log(");
+    assert_contains(&out, "apply _Handle__script_Log_log(");
     // The continuation should contain 42
     assert_contains(&out, "fun (");
     assert_contains(&out, "42");
@@ -570,7 +576,7 @@ use_state () = {
 }
 ";
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle_State_get(");
+    assert_contains(&out, "apply _Handle__script_State_get(");
 }
 
 #[test]
@@ -594,7 +600,7 @@ main () = do_work () with silent
 "#;
     let out = emit_elaborated(src);
     // main should bind _HandleLog from the silent handler and call do_work
-    assert_contains(&out, "_Handle_Log_log");
+    assert_contains(&out, "_Handle__script_Log_log");
     assert_contains(&out, "apply 'do_work'/2");
 }
 
@@ -614,7 +620,7 @@ main () = risky () with {
 "#;
     let out = emit_elaborated(src);
     // Should have an inline handler function bound to _HandleFail
-    assert_contains(&out, "_Handle_Fail_fail");
+    assert_contains(&out, "_Handle__script_Fail_fail");
     assert_contains(&out, "apply 'risky'/2");
 }
 
@@ -662,7 +668,7 @@ main () = risky () with {
     let out = emit_elaborated(src);
     // The inline handler body should just return 0, no _K call
     // (the arm body is `0`, which doesn't reference _K)
-    assert_contains(&out, "_Handle_Fail_fail");
+    assert_contains(&out, "_Handle__script_Fail_fail");
 }
 
 #[test]
@@ -740,7 +746,7 @@ main () = do_work () with silent
     let out = emit_elaborated(src);
     // Should have two nested handler applies with continuations
     // Count occurrences of apply _HandleLog
-    let count = out.matches("apply _Handle_Log_log").count();
+    let count = out.matches("apply _Handle__script_Log_log").count();
     assert!(
         count >= 2,
         "expected at least 2 handler applies, got {count}\n{out}"
@@ -773,7 +779,7 @@ main () = do_work () with silent
     // do_work should have nested handler applies with continuations
     // wrapping the let bindings and final value
     assert_contains(&out, "'do_work'/2");
-    assert_contains(&out, "apply _Handle_Log_log(");
+    assert_contains(&out, "apply _Handle__script_Log_log(");
     // x = 10 + 20 should appear inside a continuation
     assert_contains(&out, "call 'erlang':'+'");
 }
@@ -802,8 +808,8 @@ main () = {
 }
 "#;
     let out = emit_elaborated(src);
-    // Should have two with-expression lowerings, each with _Handle_Fail_fail
-    assert_contains(&out, "_Handle_Fail_fail");
+    // Should have two with-expression lowerings, each with _Handle__script_Fail_fail
+    assert_contains(&out, "_Handle__script_Fail_fail");
     // The fail arm should not call _K
     // The return clause should appear
 }
@@ -840,7 +846,7 @@ main () = outer () with silent
     assert_contains(&out, "'inner'/2");
     assert_contains(&out, "'outer'/2");
     // outer's body should call inner with _HandleLog and _ReturnK passed through
-    assert_contains(&out, "apply 'inner'/2(_Handle_Log_log");
+    assert_contains(&out, "apply 'inner'/2(_Handle__script_Log_log");
 }
 
 #[test]
@@ -880,8 +886,8 @@ main () = risky_work () with {
     // risky_work needs 2 handler params + 1 _ReturnK (Fail + Log, sorted alphabetically)
     assert_contains(&out, "'risky_work'/3");
     // Both handler params should be present
-    assert_contains(&out, "_Handle_Fail_fail");
-    assert_contains(&out, "_Handle_Log_log");
+    assert_contains(&out, "_Handle__script_Fail_fail");
+    assert_contains(&out, "_Handle__script_Log_log");
 }
 
 #[test]
@@ -946,10 +952,10 @@ main () = risky () with { silent, logging_fail }
 "#;
     let out = emit_elaborated(src);
     // The Fail handler arm body contains log!, which should reference _HandleLog
-    assert_contains(&out, "_Handle_Log_log");
-    assert_contains(&out, "_Handle_Fail_fail");
+    assert_contains(&out, "_Handle__script_Log_log");
+    assert_contains(&out, "_Handle__script_Fail_fail");
     // The fail arm body should apply _HandleLog for the log! call
-    assert_contains(&out, "apply _Handle_Log_log(");
+    assert_contains(&out, "apply _Handle__script_Log_log(");
 }
 
 #[test]
@@ -986,8 +992,8 @@ main () = do_work () with { silent, logging_fail }
 "#;
     let out = emit_elaborated(src);
     // logging_fail's arm body uses log!, should reference _HandleLog
-    assert_contains(&out, "apply _Handle_Log_log(");
-    assert_contains(&out, "_Handle_Fail_fail");
+    assert_contains(&out, "apply _Handle__script_Log_log(");
+    assert_contains(&out, "_Handle__script_Fail_fail");
 }
 
 #[test]
@@ -1010,7 +1016,7 @@ main () = safe_div 10 0 with {
     let out = emit_elaborated(src);
     // safe_div takes 2 user params + 1 handler param + 1 _ReturnK = arity 4
     assert_contains(&out, "'safe_div'/4");
-    assert_contains(&out, "_Handle_Fail_fail");
+    assert_contains(&out, "_Handle__script_Fail_fail");
 }
 
 // --- Effect calls in non-block positions ---
@@ -1035,7 +1041,7 @@ main () = compute () with {
 "#;
     let out = emit_elaborated(src);
     // The ask! should be CPS-transformed with a continuation that does the addition
-    assert_contains(&out, "apply _Handle_Ask_ask(");
+    assert_contains(&out, "apply _Handle__script_Ask_ask(");
     // The addition should still happen
     assert_contains(&out, "call 'erlang':'+'");
 }
@@ -1061,7 +1067,7 @@ main () = compute () with {
 }
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle_Ask_ask(");
+    assert_contains(&out, "apply _Handle__script_Ask_ask(");
     assert_contains(&out, "'double'");
 }
 
@@ -1083,7 +1089,7 @@ main () = decide () with {
 }
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle_Ask_ask(");
+    assert_contains(&out, "apply _Handle__script_Ask_ask(");
 }
 
 #[test]
@@ -1106,7 +1112,7 @@ main () = compute () with {
 "#;
     let out = emit_elaborated(src);
     // Should have two separate handler applies for the two ask! calls
-    let count = out.matches("apply _Handle_Ask_ask(").count();
+    let count = out.matches("apply _Handle__script_Ask_ask(").count();
     assert!(
         count >= 2,
         "expected at least 2 handler applies, got {count}\n{out}"
@@ -1157,7 +1163,7 @@ main () = try_it (fun () -> fail! "oops")
 "#;
     let out = emit_elaborated(src);
     // The lambda should have _HandleFail as a parameter
-    assert_contains(&out, "_Handle_Fail_fail");
+    assert_contains(&out, "_Handle__script_Fail_fail");
     // try_it's body should call computation with the handler param
     assert_contains(&out, "apply Computation(");
 }
@@ -1184,7 +1190,7 @@ main () = try_it (fun () -> {
 })
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "_Handle_Fail_fail");
+    assert_contains(&out, "_Handle__script_Fail_fail");
     assert_contains(&out, "apply Computation(");
 }
 
@@ -1231,7 +1237,7 @@ try_it computation = computation () with {
     // Return clause (Ok wrapper) should be inside the CPS chain
     assert_contains(&out, "'ok'");
     // Note: the fail handler is correctly pruned -- `computation` is a HOF
-    // parameter without handler param passing, so `_Handle_Fail_fail` is
+    // parameter without handler param passing, so `_Handle__script_Fail_fail` is
     // never referenced in the lowered body.
 }
 
@@ -1803,7 +1809,7 @@ main () = {
     let out = emit_elaborated(src);
     // The partial application lambda should include handler params
     assert!(
-        out.contains("_Handle_Logger_log"),
+        out.contains("_Handle__script_Logger_log"),
         "expected handler param in partial application lambda:\n{out}"
     );
     assert!(

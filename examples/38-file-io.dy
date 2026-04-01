@@ -1,4 +1,4 @@
-import Std.File (FileError)
+import Std.File (File, FileError, fs)
 
 fun process : Unit -> Unit needs {File}
 process () = {

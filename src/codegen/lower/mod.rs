@@ -123,6 +123,17 @@ pub struct Lowerer<'a> {
     resolved: super::resolve::ResolutionMap,
     /// @inline val name -> lowered expression. Substituted at reference sites.
     inline_vals: HashMap<String, CExpr>,
+    /// Bare handler name -> canonical handler name (e.g. "collect_handler" -> "Std.Test.collect_handler").
+    /// Built during init_module for resolving handler references in `with` expressions.
+    handler_canonical: HashMap<String, String>,
+    /// Bare effect name -> canonical effect name (e.g. "Assert" -> "Std.Test.Assert").
+    /// Built during init_module for canonicalizing effect names from the type system.
+    effect_canonical: HashMap<String, String>,
+    /// Resolved node types for the module currently being lowered.
+    /// This is intentionally current-module-only: local `let fun` lowering needs
+    /// direct access to resolved types, while cross-module eta-reduction relies on
+    /// imported function resolution/codegen info rather than another module's AST types.
+    current_resolved_types: HashMap<crate::ast::NodeId, crate::typechecker::Type>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -130,6 +141,7 @@ impl<'a> Lowerer<'a> {
         ctx: &'a super::CodegenContext,
         constructor_atoms: super::resolve::ConstructorAtoms,
         resolved: super::resolve::ResolutionMap,
+        current_resolved_types: HashMap<crate::ast::NodeId, crate::typechecker::Type>,
         source_info: Option<SourceInfo>,
     ) -> Self {
         Lowerer {
@@ -155,6 +167,9 @@ impl<'a> Lowerer<'a> {
             resolved,
             current_handler_k: None,
             inline_vals: HashMap::new(),
+            handler_canonical: HashMap::new(),
+            effect_canonical: HashMap::new(),
+            current_resolved_types,
         }
     }
 
@@ -219,17 +234,42 @@ impl<'a> Lowerer<'a> {
     /// Known BEAM-native handlers: (module, handler_name) pairs.
     /// These handlers' effects are lowered to direct BEAM calls instead of CPS.
     const BEAM_NATIVE_HANDLERS: &'static [(&'static str, &'static str)] =
-        &[("Std.Actor", "beam_actor")];
+        &[("Std.Actor", "Std.Actor.beam_actor")];
+
+    /// Resolve a bare effect name to its canonical form.
+    fn canonicalize_effect(&self, bare: &str) -> String {
+        self.effect_canonical
+            .get(bare)
+            .cloned()
+            .unwrap_or_else(|| bare.to_string())
+    }
+
+    /// Canonicalize a list of effect names from the type system (which uses bare names).
+    fn canonicalize_effects(&self, effects: Vec<String>) -> Vec<String> {
+        effects
+            .into_iter()
+            .map(|e| self.canonicalize_effect(&e))
+            .collect()
+    }
+
+    /// Resolve a bare handler name to its canonical form.
+    fn resolve_handler_name(&self, name: &str) -> String {
+        self.handler_canonical
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
 
     /// Check if a handler is BEAM-native (should be lowered to direct BEAM calls).
     pub(super) fn is_beam_native_handler(&self, name: &str) -> bool {
+        let canonical = self.resolve_handler_name(name);
         self.handler_defs
-            .get(name)
+            .get(&canonical)
             .and_then(|info| info.source_module.as_deref())
             .is_some_and(|module| {
                 Self::BEAM_NATIVE_HANDLERS
                     .iter()
-                    .any(|(m, h)| *m == module && *h == name)
+                    .any(|(m, h)| *m == module && *h == canonical.as_str())
             })
     }
 
@@ -252,9 +292,10 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Generate the handler param variable name for a specific effect op.
-    /// e.g. ("Process", "spawn") -> "_Handle_Process_spawn"
+    /// e.g. ("Std.Process.Process", "spawn") -> "_Handle_Std_Process_Process_spawn"
+    /// Dots are replaced with underscores for valid Core Erlang variable names.
     pub(super) fn handler_param_name(effect: &str, op: &str) -> String {
-        format!("_Handle_{}_{}", effect, op)
+        format!("_Handle_{}_{}", effect.replace('.', "_"), op)
     }
 
     /// Compute the expanded arity for a function with the given base arity
@@ -838,7 +879,8 @@ impl<'a> Lowerer<'a> {
                                 )
                             }
                         } else {
-                            CExpr::FunRef(name.clone(), *arity)
+                            let lowered_arity = self.fun_arity(name).unwrap_or(*arity);
+                            CExpr::FunRef(name.clone(), lowered_arity)
                         }
                     }
                     _ => {
@@ -889,14 +931,17 @@ impl<'a> Lowerer<'a> {
                     return self.lower_qualified_call(module, func_name, head, &args, Some(&expr.span));
                 }
 
-                // Lower print/println/eprint/eprintln to io:format, dbg to stderr+passthrough
+                // Lower print/println/eprint/eprintln to io:format, dbg to stderr+passthrough.
+                // Match both bare names (builtins) and canonical names (after resolve pass).
                 if let Some((func_name, _head, args)) = collect_fun_call(expr) {
                     let lowered = match func_name {
-                        "print" => self.lower_builtin_print(&args, false, false),
-                        "println" => self.lower_builtin_print(&args, false, true),
-                        "eprint" => self.lower_builtin_print(&args, true, false),
-                        "eprintln" => self.lower_builtin_print(&args, true, true),
-                        "dbg" => self.lower_builtin_dbg(&args),
+                        "print" | "Std.IO.print" => self.lower_builtin_print(&args, false, false),
+                        "println" | "Std.IO.println" => self.lower_builtin_print(&args, false, true),
+                        "eprint" | "Std.IO.eprint" => self.lower_builtin_print(&args, true, false),
+                        "eprintln" | "Std.IO.eprintln" => {
+                            self.lower_builtin_print(&args, true, true)
+                        }
+                        "dbg" | "Std.IO.dbg" => self.lower_builtin_dbg(&args),
                         _ => None,
                     };
                     if let Some(ce) = lowered {
@@ -905,8 +950,7 @@ impl<'a> Lowerer<'a> {
                 }
 
                 // Lower `panic msg` / `todo ()` to erlang:error({dylang_error, ...})
-                // The entry point wrapper catches this and prints nicely + exits.
-                // catch_panic can also intercept it for recovery boundaries.
+                // These are true builtins (no module), so only bare names.
                 if let Some((func_name, _head, args)) = collect_fun_call(expr)
                     && (func_name == "panic" || func_name == "todo")
                     && args.len() == 1
@@ -921,9 +965,9 @@ impl<'a> Lowerer<'a> {
                     return CExpr::Let(v, Box::new(arg), Box::new(error));
                 }
 
-                // Lower `catch_panic thunk` to a Core Erlang try/catch (unqualified call).
+                // Lower `catch_panic thunk` to a Core Erlang try/catch.
                 if let Some((func_name, _head, args)) = collect_fun_call(expr)
-                    && func_name == "catch_panic"
+                    && (func_name == "catch_panic" || func_name == "Std.Process.catch_panic")
                     && args.len() == 1
                 {
                     return self.lower_catch_panic(args[0]);
@@ -987,18 +1031,21 @@ impl<'a> Lowerer<'a> {
                             arg_vars.push(v.clone());
                             bindings.push((v, ce));
                         }
-                        // Append per-op handler params for effectful callees
+                        // Append per-op handler params for effectful callees.
+                        // Every effect op must have a handler param in scope — either
+                        // from the enclosing function's `needs` clause or from a `with` block.
+                        // If one is missing, it's a compiler bug (the type system should
+                        // have ensured all effects are handled).
                         if !callee_ops.is_empty() {
                             for (eff, op) in &callee_ops {
                                 let key = format!("{}.{}", eff, op);
-                                if let Some(param) = self.current_handler_params.get(&key) {
-                                    arg_vars.push(param.clone());
-                                } else {
-                                    panic!(
-                                        "function '{}' needs handler for '{}.{}' but no handler param in scope",
-                                        func_name, eff, op
-                                    );
-                                }
+                                let param = self.current_handler_params.get(&key)
+                                    .unwrap_or_else(|| panic!(
+                                        "ICE: saturated call to '{}' needs handler for '{}.{}' \
+                                         but no handler param in scope",
+                                        func_name, eff, op,
+                                    ));
+                                arg_vars.push(param.clone());
                             }
                             // Pass _ReturnK: take from pending (set by `with`), or identity
                             let return_k =
@@ -1010,12 +1057,14 @@ impl<'a> Lowerer<'a> {
                             bindings.push((rk_var.clone(), return_k));
                             arg_vars.push(rk_var);
                         }
-                        let call_args: Vec<CExpr> =
-                            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-                        let call = self.emit_call(func_name, head_expr.id, arity, call_args, Some(&expr.span));
-                        return bindings.into_iter().rev().fold(call, |body, (var, val)| {
-                            CExpr::Let(var, Box::new(val), Box::new(body))
-                        });
+                        {
+                            let call_args: Vec<CExpr> =
+                                arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
+                            let call = self.emit_call(func_name, head_expr.id, arity, call_args, Some(&expr.span));
+                            return bindings.into_iter().rev().fold(call, |body, (var, val)| {
+                                CExpr::Let(var, Box::new(val), Box::new(body))
+                            });
+                        }
                     }
 
                     // Partial application: fewer user args than user-arg slots.
@@ -1670,7 +1719,8 @@ impl<'a> Lowerer<'a> {
                                     )
                                 }
                             } else {
-                                CExpr::FunRef(name.clone(), *arity)
+                                let lowered_arity = self.fun_arity(name).unwrap_or(*arity);
+                                CExpr::FunRef(name.clone(), lowered_arity)
                             }
                         }
                     }

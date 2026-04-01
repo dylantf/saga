@@ -1,8 +1,8 @@
 module Std.Async
 
-import Std.Actor
+import Std.Actor (Process, Actor)
 
-pub opaque type Future a = Future(Pid a)
+opaque type Future a = Future(Pid a)
 
 pub effect Async {
   fun async : (f: Unit -> a) -> Future a
@@ -16,7 +16,7 @@ pub handler async_handler for Async needs {Process, Actor a} {
       let result = f ()
       send! caller result
     })
-    resume (Future pid)
+    resume Future pid
   }
   await _future = {
     receive {

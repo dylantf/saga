@@ -13,6 +13,11 @@ use crate::ast::*;
 use crate::token::{Span, StringKind};
 use crate::typechecker::{CheckResult, TraitEvidence, TraitInfo, Type};
 
+/// Well-known canonical trait names used for special-cased codegen.
+const SHOW: &str = "Std.Base.Show";
+const DEBUG: &str = "Std.Base.Debug";
+const ORD: &str = "Std.Base.Ord";
+
 /// Impl key: (trait_name, trait_type_args, target_type).
 /// e.g. ("ConvertTo", ["NOK"], "USD") or ("Show", [], "Int").
 type ImplKey = (String, Vec<String>, String);
@@ -56,6 +61,10 @@ struct Elaborator {
     erlang_module: String,
     /// Arity of let-bound values with trait constraints (for eta-expansion)
     let_binding_arities: HashMap<String, usize>,
+    /// Scope map values for canonical name bridging (user name -> canonical)
+    scope_map_values: HashMap<String, String>,
+    /// Scope map traits for resolving bare trait names to canonical
+    scope_map_traits: HashMap<String, String>,
 }
 
 impl Elaborator {
@@ -79,6 +88,18 @@ impl Elaborator {
                 if !dict_params.is_empty() {
                     inferred_dict_params.insert(name.to_string(), dict_params);
                 }
+            }
+        }
+        // Register dict params under all user-facing name forms that resolve
+        // to a canonical name with dict params (so "List.sort" finds the params
+        // registered under "Std.List.sort").
+        for (user_name, canonical) in &result.scope_map.values {
+            if user_name != canonical
+                && let Some(params) = inferred_dict_params.get(canonical).cloned()
+            {
+                inferred_dict_params
+                    .entry(user_name.clone())
+                    .or_insert(params);
             }
         }
 
@@ -151,6 +172,8 @@ impl Elaborator {
             current_dict_params_by_var: HashMap::new(),
             erlang_module,
             let_binding_arities,
+            scope_map_values: result.scope_map.values.clone(),
+            scope_map_traits: result.scope_map.traits.clone(),
         }
     }
 
@@ -161,12 +184,15 @@ impl Elaborator {
     /// Dict params are keyed by (trait_name, self_type_var) - one dict per constraint.
     /// The extra type args (e.g. `b` in `a: ConvertTo b`) are resolved separately
     /// through TraitEvidence when looking up which concrete dict to pass at call sites.
-    fn dict_params_from_where(where_clause: &[TraitBound]) -> Vec<(String, String)> {
+    fn dict_params_from_where(&self, where_clause: &[TraitBound]) -> Vec<(String, String)> {
         let mut dict_params = Vec::new();
         for bound in where_clause {
             for (trait_name, _, _) in &bound.traits {
                 if trait_name != "Num" && trait_name != "Semigroup" && trait_name != "Eq" {
-                    dict_params.push((trait_name.clone(), bound.type_var.clone()));
+                    let resolved = self.scope_map_traits.get(trait_name)
+                        .cloned()
+                        .unwrap_or_else(|| trait_name.clone());
+                    dict_params.push((resolved, bound.type_var.clone()));
                 }
             }
         }
@@ -185,11 +211,16 @@ impl Elaborator {
         );
         for bound in where_clause {
             for (req_trait, _, _) in &bound.traits {
-                let param_name = format!("__dict_{}_{}", req_trait, bound.type_var);
+                let resolved = self.scope_map_traits.get(req_trait)
+                    .cloned()
+                    .unwrap_or_else(|| req_trait.clone());
+                // Use bare trait name in param name to avoid dots in Erlang identifiers
+                let bare = req_trait.rsplit('.').next().unwrap_or(req_trait);
+                let param_name = format!("__dict_{}_{}", bare, bound.type_var);
                 self.current_dict_params
-                    .insert(req_trait.clone(), param_name.clone());
+                    .insert(resolved.clone(), param_name.clone());
                 self.current_dict_params_by_var
-                    .insert((req_trait.clone(), bound.type_var.clone()), param_name);
+                    .insert((resolved, bound.type_var.clone()), param_name);
             }
         }
         saved
@@ -224,7 +255,7 @@ impl Elaborator {
                 Decl::FunSignature {
                     name, where_clause, ..
                 } => {
-                    let dict_params = Self::dict_params_from_where(where_clause);
+                    let dict_params = self.dict_params_from_where(where_clause);
                     if !dict_params.is_empty() {
                         self.fun_dict_params.insert(name.clone(), dict_params);
                     }
@@ -237,6 +268,10 @@ impl Elaborator {
                     where_clause,
                     ..
                 } => {
+                    // Resolve trait name to canonical form
+                    let canonical_trait = self.scope_map_traits.get(trait_name)
+                        .cloned()
+                        .unwrap_or_else(|| trait_name.clone());
                     // Include trait type args in dict name for uniqueness
                     let type_args_suffix = if trait_type_args.is_empty() {
                         String::new()
@@ -253,7 +288,7 @@ impl Elaborator {
                     };
                     self.dict_names.insert(
                         (
-                            trait_name.clone(),
+                            canonical_trait.clone(),
                             trait_type_args.clone(),
                             target_type.clone(),
                         ),
@@ -268,6 +303,7 @@ impl Elaborator {
                         .enumerate()
                         .map(|(i, name)| (name.as_str(), i))
                         .collect();
+                    let scope_traits = &self.scope_map_traits;
                     let params: Vec<(String, usize)> = where_clause
                         .iter()
                         .flat_map(|bound| {
@@ -275,12 +311,16 @@ impl Elaborator {
                                 .get(bound.type_var.as_str())
                                 .copied()
                                 .unwrap_or(0);
-                            bound.traits.iter().map(move |(t, _, _)| (t.clone(), idx))
+                            bound.traits.iter().map(move |(t, _, _)| {
+                                let resolved = scope_traits.get(t).cloned()
+                                    .unwrap_or_else(|| t.clone());
+                                (resolved, idx)
+                            })
                         })
                         .collect();
                     self.impl_dict_params.insert(
                         (
-                            trait_name.clone(),
+                            canonical_trait,
                             trait_type_args.clone(),
                             target_type.clone(),
                         ),
@@ -290,7 +330,7 @@ impl Elaborator {
                 Decl::HandlerDef {
                     name, where_clause, ..
                 } => {
-                    let dict_params = Self::dict_params_from_where(where_clause);
+                    let dict_params = self.dict_params_from_where(where_clause);
                     if !dict_params.is_empty() {
                         self.handler_dict_params.insert(name.clone(), dict_params);
                     }
@@ -301,11 +341,22 @@ impl Elaborator {
 
         // Register trait methods from checker's trait info (for traits not
         // defined in the current program, e.g. Show in Std modules).
+        // Register under both bare name and canonical name so lookups work
+        // before and after the resolve pass rewrites Var nodes.
         for (trait_name, info) in &self.traits {
             for (idx, (method_name, _, _, _)) in info.methods.iter().enumerate() {
                 self.trait_methods
                     .entry(method_name.clone())
                     .or_insert_with(|| (trait_name.clone(), idx));
+            }
+        }
+        // Add canonical-name entries from scope_map: if "show" -> "Std.Base.Show.show",
+        // register "Std.Base.Show.show" -> ("Show", idx) too.
+        for (bare_name, canonical) in &self.scope_map_values {
+            if bare_name != canonical
+                && let Some(entry) = self.trait_methods.get(bare_name).cloned()
+            {
+                self.trait_methods.entry(canonical.clone()).or_insert(entry);
             }
         }
 
@@ -325,17 +376,20 @@ impl Elaborator {
                     span,
                     ..
                 } => {
+                    let canonical_trait = self.scope_map_traits.get(trait_name)
+                        .cloned()
+                        .unwrap_or_else(|| trait_name.clone());
                     let dict_name = self
                         .dict_names
                         .get(&(
-                            trait_name.clone(),
+                            canonical_trait.clone(),
                             trait_type_args.clone(),
                             target_type.clone(),
                         ))
                         .cloned()
                         .unwrap();
 
-                    let trait_info = self.traits.get(trait_name).cloned();
+                    let trait_info = self.traits.get(&canonical_trait).cloned();
 
                     // Build dict_params for conditional impls
                     let mut dict_params = Vec::new();
@@ -411,7 +465,9 @@ impl Elaborator {
 
                     if let Some(dict_param_info) = self.fun_dict_params.get(name) {
                         for (trait_name, type_var) in dict_param_info {
-                            let param_name = format!("__dict_{}_{}", trait_name, type_var);
+                            // Use bare trait name in param name to avoid dots in Erlang identifiers
+                            let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                            let param_name = format!("__dict_{}_{}", bare, type_var);
                             self.current_dict_params
                                 .insert(trait_name.clone(), param_name.clone());
                             self.current_dict_params_by_var
@@ -543,6 +599,7 @@ impl Elaborator {
                 // Evidence-first: only treat as a trait method if the typechecker
                 // recorded evidence at this node. This correctly handles shadowing
                 // (a user function named `compare` won't be mistaken for Ord.compare).
+
                 if let Some((trait_name, method_index)) = self.resolve_trait_method(name, node_id) {
                     if let Some(dict_expr) = self.resolve_dict(&trait_name, node_id, span) {
                         return Expr::synth(
@@ -569,7 +626,9 @@ impl Elaborator {
                     let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                     for (trait_name, _type_var) in &dict_param_info {
                         let occ = trait_occurrences.entry(trait_name).or_insert(0);
-                        if let Some(dict_expr) = self.resolve_dict_nth(trait_name, node_id, span, *occ) {
+                        if let Some(dict_expr) =
+                            self.resolve_dict_nth(trait_name, node_id, span, *occ)
+                        {
                             result = Expr::synth(
                                 span,
                                 ExprKind::App {
@@ -741,7 +800,7 @@ impl Elaborator {
                     let is_primitive = self
                         .evidence_by_node
                         .get(&node_id)
-                        .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Ord"))
+                        .and_then(|evs| evs.iter().find(|ev| ev.trait_name == ORD))
                         .and_then(|ev| ev.resolved_type.as_ref())
                         .is_some_and(|(name, _)| {
                             matches!(name.as_str(), "Int" | "Float" | "String")
@@ -873,8 +932,9 @@ impl Elaborator {
                                         let mut lambda_params = Vec::new();
 
                                         for (trait_name, type_var) in &dict_param_info {
+                                            let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
                                             let param_name =
-                                                format!("__dict_{}_{}", trait_name, type_var);
+                                                format!("__dict_{}_{}", bare, type_var);
                                             self.current_dict_params
                                                 .insert(trait_name.clone(), param_name.clone());
                                             self.current_dict_params_by_var.insert(
@@ -1059,7 +1119,7 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::QualifiedName { module, name } => {
+            ExprKind::QualifiedName { module, name, .. } => {
                 let qualified = format!("{}.{}", module, name);
                 // Dict-parameterized function used as a bare value (not directly applied).
                 if let Some(dict_param_info) = self.fun_dict_params.get(&qualified).cloned() {
@@ -1067,7 +1127,9 @@ impl Elaborator {
                     let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                     for (trait_name, _type_var) in &dict_param_info {
                         let occ = trait_occurrences.entry(trait_name).or_insert(0);
-                        if let Some(dict_expr) = self.resolve_dict_nth(trait_name, node_id, span, *occ) {
+                        if let Some(dict_expr) =
+                            self.resolve_dict_nth(trait_name, node_id, span, *occ)
+                        {
                             result = Expr::synth(
                                 span,
                                 ExprKind::App {
@@ -1116,8 +1178,11 @@ impl Elaborator {
                         let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                         for (trait_name, type_var) in &dict_param_info {
                             let occ = trait_occurrences.entry(trait_name).or_insert(0);
-                            let dict_var = format!("__dict_{}_{}", trait_name, type_var);
-                            if let Some(dict_expr) = self.resolve_dict_nth(trait_name, node_id, span, *occ) {
+                            let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                            let dict_var = format!("__dict_{}_{}", bare, type_var);
+                            if let Some(dict_expr) =
+                                self.resolve_dict_nth(trait_name, node_id, span, *occ)
+                            {
                                 stmts.push(Annotated::bare(Stmt::Let {
                                     pattern: Pat::Var {
                                         id: NodeId::fresh(),
@@ -1280,7 +1345,7 @@ impl Elaborator {
         node_id: crate::ast::NodeId,
         span: Span,
     ) -> Option<Expr> {
-        let dict_expr = self.resolve_dict("Ord", node_id, span)?;
+        let dict_expr = self.resolve_dict(ORD, node_id, span)?;
 
         // Build: (DictMethodAccess(dict, 0)) left right
         // compare is method index 0 in Ord
@@ -1384,7 +1449,8 @@ impl Elaborator {
                             // specific dict param name (handles multiple where-clause
                             // bounds for the same trait, e.g. `where {e: Show, a: Show}`).
                             if let Some(ref var_name) = ev.type_var_name {
-                                let param_name = format!("__dict_{}_{}", trait_name, var_name);
+                                let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                                let param_name = format!("__dict_{}_{}", bare, var_name);
                                 Some(Expr::synth(span, ExprKind::Var { name: param_name }))
                             } else {
                                 self.current_dict_params.get(trait_name).map(|name| {
@@ -1433,7 +1499,8 @@ impl Elaborator {
     ) -> Option<Expr> {
         match ty {
             Type::Con(name, args)
-                if name == "Tuple" && (trait_name == "Show" || trait_name == "Debug") =>
+                if name == "Tuple"
+                    && (trait_name == SHOW || trait_name == DEBUG) =>
             {
                 // Tuples don't have a dict constructor; build an inline dict
                 // containing the show lambda: {fun t -> "(" ++ ... ++ ")"}
@@ -1526,7 +1593,7 @@ impl Elaborator {
         node_id: crate::ast::NodeId,
         span: Span,
     ) -> Option<Expr> {
-        if trait_name != "Show" && trait_name != "Debug" {
+        if trait_name != SHOW && trait_name != DEBUG {
             return None;
         }
         let evidence_list = self.evidence_by_node.get(&node_id)?;

@@ -1,4 +1,4 @@
-import Std.Actor
+import Std.Actor (Actor, Process, Monitor, beam_actor)
 
 type WorkerMsg =
   | Work(Int)

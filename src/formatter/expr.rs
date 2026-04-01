@@ -63,7 +63,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
         ExprKind::Lit { value } => super::helpers::format_lit(value),
         ExprKind::Var { name } => Doc::text(name),
         ExprKind::Constructor { name } => Doc::text(name),
-        ExprKind::QualifiedName { module, name } => Doc::text(format!("{}.{}", module, name)),
+        ExprKind::QualifiedName { module, name, .. } => Doc::text(format!("{}.{}", module, name)),
 
         ExprKind::App { .. } => {
             // Flatten nested App chain: App(App(App(f, a), b), c) -> [f, a, b, c]
@@ -609,13 +609,13 @@ fn format_handler(handler: &Handler) -> Doc {
 
             // Named-only handlers can go on one line: `{ h1, h2 }`
             if !has_inline && dangling_trivia.is_empty() {
-                let named_docs: Vec<Doc> = named.iter().map(Doc::text).collect();
+                let named_docs: Vec<Doc> = named.iter().map(|(n, _)| Doc::text(n)).collect();
                 let joined = Doc::join(Doc::text(", "), named_docs);
                 return docs![Doc::text("{"), joined, Doc::text("}")];
             }
 
             let mut body_items = Vec::new();
-            for (i, name) in named.iter().enumerate() {
+            for (i, (name, _)) in named.iter().enumerate() {
                 body_items.push(Doc::hardline());
                 let needs_comma = i < named.len() - 1 || !has_inline;
                 if needs_comma {

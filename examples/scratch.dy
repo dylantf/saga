@@ -1,5 +1,11 @@
-import Std.String (reverse)
+effect Logger {
+  fun log : String -> Unit
+}
 
 main () = {
-  Std.String.reverse "hello"
+  let console_log s = log! s with {
+    log s = println s
+  }
+
+  console_log "Hello world"
 }

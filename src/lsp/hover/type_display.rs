@@ -216,17 +216,19 @@ pub fn type_definition_summary(
 
     // Check imported types: prefer AST from cached module programs (preserves user-written
     // type variable names), fall back to CheckResult data with prettified vars.
-    if let Some(source_module) = result.type_import_origins.get(name) {
-        if let Some(module_program) = result.programs().get(source_module) {
-            // Recurse into the module's AST -- this hits the Decl matching above
-            if let Some(summary) = type_definition_summary(result, name, module_program) {
-                return Some(summary);
-            }
+    if let Some(source_module) = result.scope_map.origin_of(name) {
+        let source_module = &source_module.to_string();
+        // Module ASTs use bare names for their own declarations, so strip the module prefix
+        let bare_name = name.rsplit('.').next().unwrap_or(name);
+        if let Some(module_program) = result.programs().get(source_module)
+            && let Some(summary) = type_definition_summary(result, bare_name, module_program)
+        {
+            return Some(summary);
         }
         // Also check per-module CheckResults for transitive imports
         if let Some(module_result) = result.module_check_results().get(source_module)
             && let Some(module_program) = module_result.programs().get(source_module)
-            && let Some(summary) = type_definition_summary(result, name, module_program)
+            && let Some(summary) = type_definition_summary(result, bare_name, module_program)
         {
             return Some(summary);
         }
@@ -249,11 +251,15 @@ pub fn type_definition_summary(
             params,
             field_strs.join(",\n")
         );
-        let doc = result.imported_docs.get(name).map(|d| d.as_slice()).unwrap_or(&[]);
+        let doc = result
+            .imported_docs
+            .get(name)
+            .map(|d| d.as_slice())
+            .unwrap_or(&[]);
         return Some(with_doc(doc, &code));
     }
 
-    if let Some(info) = result.effects.get(name) {
+    if let Some(info) = result.resolve_effect(name) {
         let prettified = result.prettify_effect(info);
         let ops: Vec<String> = prettified
             .iter()
@@ -267,7 +273,11 @@ pub fn type_definition_summary(
             })
             .collect();
         let code = format!("effect {} {{\n{}\n}}", name, ops.join("\n"));
-        let doc = result.imported_docs.get(name).map(|d| d.as_slice()).unwrap_or(&[]);
+        let doc = result
+            .imported_docs
+            .get(name)
+            .map(|d| d.as_slice())
+            .unwrap_or(&[]);
         return Some(with_doc(doc, &code));
     }
 
@@ -389,7 +399,11 @@ fn format_type_params(params: &[String]) -> String {
 }
 
 /// Format an operation/method signature from AST types: `name : params -> return`.
-pub(crate) fn format_signature(name: &str, params: &[(String, TypeExpr)], return_type: &TypeExpr) -> String {
+pub(crate) fn format_signature(
+    name: &str,
+    params: &[(String, TypeExpr)],
+    return_type: &TypeExpr,
+) -> String {
     let param_strs: Vec<String> = params
         .iter()
         .map(|(label, ty)| format_labeled_param(label, &format_type_expr(ty)))
