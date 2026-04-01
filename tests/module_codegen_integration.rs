@@ -441,19 +441,13 @@ fn cross_module_effectful_qualified_call() {
 module Main
 import Logger
 
-effect Log {
-  fun log : (msg: String) -> Unit
-}
-
-handler console_log for Log {
+pub fun main : Unit -> String
+main () = Logger.greet \"world\" with {
   log msg = {
     print msg
     resume ()
   }
 }
-
-pub fun main : Unit -> String
-main () = Logger.greet \"world\" with console_log
 ";
     let mut checker = make_project_checker();
     let program = typecheck_source(main_src, &mut checker);
@@ -472,19 +466,13 @@ fn cross_module_effectful_exposed_call() {
 module Main
 import Logger (greet)
 
-effect Log {
-  fun log : (msg: String) -> Unit
-}
-
-handler console_log for Log {
+pub fun main : Unit -> String
+main () = greet \"world\" with {
   log msg = {
     print msg
     resume ()
   }
 }
-
-pub fun main : Unit -> String
-main () = greet \"world\" with console_log
 ";
     let mut checker = make_project_checker();
     let program = typecheck_source(main_src, &mut checker);
@@ -513,19 +501,13 @@ fn cross_module_effectful_compiles_with_erlc() {
 module Main
 import Logger
 
-effect Log {
-  fun log : (msg: String) -> Unit
-}
-
-handler console_log for Log {
+pub fun main : Unit -> String
+main () = Logger.greet \"world\" with {
   log msg = {
     print msg
     resume ()
   }
 }
-
-pub fun main : Unit -> String
-main () = Logger.greet \"world\" with console_log
 ";
     let mut checker = make_project_checker();
     let main_program = typecheck_source(main_src, &mut checker);

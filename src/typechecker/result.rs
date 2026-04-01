@@ -264,6 +264,23 @@ impl Checker {
                     if let Some(scheme) = self.env.get(name) {
                         let resolved = self.sub.apply(&scheme.ty);
                         let effects = super::effects_from_type(&resolved);
+                        // Canonicalize bare effect names using the effects map
+                        let effects: HashSet<String> = effects
+                            .into_iter()
+                            .map(|e| {
+                                if let Some(info) = self.effects.get(&e) {
+                                    if let Some(src) = &info.source_module {
+                                        format!("{}.{}", src, e)
+                                    } else if let Some(m) = &self.current_module {
+                                        format!("{}.{}", m, e)
+                                    } else {
+                                        e
+                                    }
+                                } else {
+                                    e
+                                }
+                            })
+                            .collect();
                         fun_effects.insert(name.clone(), effects);
                     }
                 }

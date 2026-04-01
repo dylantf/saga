@@ -123,6 +123,12 @@ pub struct Lowerer<'a> {
     resolved: super::resolve::ResolutionMap,
     /// @inline val name -> lowered expression. Substituted at reference sites.
     inline_vals: HashMap<String, CExpr>,
+    /// Bare handler name -> canonical handler name (e.g. "collect_handler" -> "Std.Test.collect_handler").
+    /// Built during init_module for resolving handler references in `with` expressions.
+    handler_canonical: HashMap<String, String>,
+    /// Bare effect name -> canonical effect name (e.g. "Assert" -> "Std.Test.Assert").
+    /// Built during init_module for canonicalizing effect names from the type system.
+    effect_canonical: HashMap<String, String>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -155,6 +161,8 @@ impl<'a> Lowerer<'a> {
             resolved,
             current_handler_k: None,
             inline_vals: HashMap::new(),
+            handler_canonical: HashMap::new(),
+            effect_canonical: HashMap::new(),
         }
     }
 
@@ -219,17 +227,42 @@ impl<'a> Lowerer<'a> {
     /// Known BEAM-native handlers: (module, handler_name) pairs.
     /// These handlers' effects are lowered to direct BEAM calls instead of CPS.
     const BEAM_NATIVE_HANDLERS: &'static [(&'static str, &'static str)] =
-        &[("Std.Actor", "beam_actor")];
+        &[("Std.Actor", "Std.Actor.beam_actor")];
+
+    /// Resolve a bare effect name to its canonical form.
+    fn canonicalize_effect(&self, bare: &str) -> String {
+        self.effect_canonical
+            .get(bare)
+            .cloned()
+            .unwrap_or_else(|| bare.to_string())
+    }
+
+    /// Canonicalize a list of effect names from the type system (which uses bare names).
+    fn canonicalize_effects(&self, effects: Vec<String>) -> Vec<String> {
+        effects
+            .into_iter()
+            .map(|e| self.canonicalize_effect(&e))
+            .collect()
+    }
+
+    /// Resolve a bare handler name to its canonical form.
+    fn resolve_handler_name(&self, name: &str) -> String {
+        self.handler_canonical
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
 
     /// Check if a handler is BEAM-native (should be lowered to direct BEAM calls).
     pub(super) fn is_beam_native_handler(&self, name: &str) -> bool {
+        let canonical = self.resolve_handler_name(name);
         self.handler_defs
-            .get(name)
+            .get(&canonical)
             .and_then(|info| info.source_module.as_deref())
             .is_some_and(|module| {
                 Self::BEAM_NATIVE_HANDLERS
                     .iter()
-                    .any(|(m, h)| *m == module && *h == name)
+                    .any(|(m, h)| *m == module && *h == canonical.as_str())
             })
     }
 
@@ -252,9 +285,10 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Generate the handler param variable name for a specific effect op.
-    /// e.g. ("Process", "spawn") -> "_Handle_Process_spawn"
+    /// e.g. ("Std.Process.Process", "spawn") -> "_Handle_Std_Process_Process_spawn"
+    /// Dots are replaced with underscores for valid Core Erlang variable names.
     pub(super) fn handler_param_name(effect: &str, op: &str) -> String {
-        format!("_Handle_{}_{}", effect, op)
+        format!("_Handle_{}_{}", effect.replace('.', "_"), op)
     }
 
     /// Compute the expanded arity for a function with the given base arity

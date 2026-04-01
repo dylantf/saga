@@ -482,13 +482,14 @@ middle body = {
     //
     // Strategy: split output at the handler binding, check the handler fun
     // doesn't contain _ReturnK.
+    // With canonical effect names, "_script.Inner" becomes "_Handle__script_Inner_inner_op"
     assert!(
-        out.contains("_Handle_Inner_inner_op"),
+        out.contains("_Handle__script_Inner_inner_op"),
         "expected Inner handler param in output\n{out}"
     );
-    // The handler function for inner_op is between "_Handle_Inner_inner_op"
+    // The handler function for inner_op is between the handler param binding
     // and the string literal "handled". _ReturnK must not appear in that region.
-    if let Some(start) = out.find("_Handle_Inner_inner_op")
+    if let Some(start) = out.find("_Handle__script_Inner_inner_op")
         && let Some(end) = out[start..].find("\"handled\"")
     {
         let handler_body = &out[start..start + end];

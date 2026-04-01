@@ -607,8 +607,9 @@ impl Checker {
 
         self.modules.loading.remove(&module_name);
 
-        // Build codegen info from the module's public declarations
-        let codegen_info = collect_codegen_info(&module_name, &program, &exports);
+        // Build codegen info from the module's public declarations.
+        // Pass the effects map so fun_effects can use canonical effect names.
+        let codegen_info = collect_codegen_info(&module_name, &program, &exports, &mod_checker.effects);
         self.modules
             .codegen_info
             .insert(module_name.clone(), codegen_info);
@@ -1131,6 +1132,7 @@ fn collect_codegen_info(
     module_name: &str,
     program: &[crate::ast::Decl],
     exports: &ModuleExports,
+    effects_map: &std::collections::HashMap<String, EffectDefInfo>,
 ) -> ModuleCodegenInfo {
     use crate::ast::Decl;
     let mut effect_defs = Vec::new();
@@ -1156,6 +1158,7 @@ fn collect_codegen_info(
                 operations,
                 ..
             } => {
+                let canonical_effect = format!("{}.{}", module_name, name);
                 let ops = operations
                     .iter()
                     .map(|op| EffectOpDef {
@@ -1164,7 +1167,7 @@ fn collect_codegen_info(
                     })
                     .collect();
                 effect_defs.push(EffectDef {
-                    name: name.clone(),
+                    name: canonical_effect,
                     ops,
                     type_param_count: type_params.len(),
                 });
@@ -1181,7 +1184,7 @@ fn collect_codegen_info(
             Decl::HandlerDef {
                 public: true, name, ..
             } => {
-                handler_defs.push(name.clone());
+                handler_defs.push(format!("{}.{}", module_name, name));
             }
             Decl::FunSignature {
                 public: true,
@@ -1189,15 +1192,27 @@ fn collect_codegen_info(
                 effects,
                 ..
             } if !effects.is_empty() => {
-                // Strip beam-native effects (same as elaboration)
+                // Strip beam-native effects (same as elaboration), canonicalize names
                 let mut sorted: Vec<String> = effects
                     .iter()
-                    .map(|e| e.name.clone())
-                    .filter(|n| {
+                    .filter(|e| {
                         !matches!(
-                            n.as_str(),
+                            e.name.as_str(),
                             "Actor" | "Process" | "Monitor" | "Link" | "Timer"
                         )
+                    })
+                    .map(|e| {
+                        // Resolve bare effect name to canonical using effects_map
+                        if let Some(info) = effects_map.get(&e.name) {
+                            if let Some(src) = &info.source_module {
+                                format!("{}.{}", src, e.name)
+                            } else {
+                                // Defined in current module
+                                format!("{}.{}", module_name, e.name)
+                            }
+                        } else {
+                            e.name.clone()
+                        }
                     })
                     .collect();
                 sorted.sort();

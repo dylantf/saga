@@ -89,14 +89,6 @@ The codegen resolver handles canonical Var names: when a Var name contains `.` (
 
 ## Remaining Work
 
-### CPS transform: filter handled effects in saturated calls
-
-When the saturated call path threads handler params for an effectful callee, it checks `current_handler_params` for each `(effect, op)` pair. If a handler param isn't found (because the effect is handled by an enclosing `with` block), the code falls through to generic apply via a `handler_params_available` flag.
-
-This fallback works correctly but is suboptimal — the function is called through `make_fun` + `apply` instead of a direct saturated call. The proper fix: when computing `callee_ops`, filter out effects whose handler params are already provided by an enclosing `with` (i.e., not in `current_handler_params`). This requires understanding which effects are "handled elsewhere" vs "need to be threaded."
-
-With the `param_absorbed_effects` fix for imports, this fallback is hit less often — lambdas now get their effect params from HOF callers. But the fallback still triggers for direct calls to effectful imported functions outside a `with` block.
-
 ### Effect codegen canonical names
 
 The CPS transform (lowerer) uses bare effect names throughout:
