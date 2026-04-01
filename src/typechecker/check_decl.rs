@@ -531,7 +531,28 @@ impl Checker {
                                 .iter()
                                 .map(|te| self.convert_type_expr(te, &mut params_list))
                                 .collect();
-                            (e.name.clone(), args)
+                            // Resolve to canonical effect name. resolve_effect
+                            // handles bare, aliased, and fully-qualified forms.
+                            let name = if let Some(info) = self.resolve_effect(&e.name) {
+                                info.source_module
+                                    .as_ref()
+                                    .map(|m| format!("{}.{}", m, e.name.rsplit('.').next().unwrap_or(&e.name)))
+                                    .unwrap_or_else(|| {
+                                        // Local effect: qualify with current module
+                                        if let Some(m) = &self.current_module {
+                                            format!("{}.{}", m, e.name)
+                                        } else {
+                                            e.name.clone()
+                                        }
+                                    })
+                            } else {
+                                self.collected_diagnostics.push(Diagnostic::error_at(
+                                    e.span,
+                                    format!("undefined effect: {}", e.name),
+                                ));
+                                e.name.clone()
+                            };
+                            (name, args)
                         })
                         .collect();
                     let tail = effect_row_var.as_ref().map(|(rv_name, _)| {
@@ -582,7 +603,21 @@ impl Checker {
                                 .iter()
                                 .map(|ta| self.convert_type_expr(ta, &mut params_list))
                                 .collect();
-                            constraints.push((eff.name.clone(), concrete_types));
+                            // Use canonical effect name so lookups against
+                            // canonical-only self.effects succeed later.
+                            let canonical = self.resolve_effect(&eff.name)
+                                .and_then(|info| {
+                                    let short = eff.name.rsplit('.').next().unwrap_or(&eff.name);
+                                    info.source_module.as_ref().map(|m| format!("{}.{}", m, short))
+                                })
+                                .unwrap_or_else(|| {
+                                    if let Some(m) = &self.current_module {
+                                        format!("{}.{}", m, eff.name)
+                                    } else {
+                                        eff.name.clone()
+                                    }
+                                });
+                            constraints.push((canonical, concrete_types));
                         }
                     }
                     if !constraints.is_empty() {
@@ -1499,15 +1534,20 @@ impl Checker {
                 return_type,
             });
         }
-        self.effects.insert(
-            name.into(),
-            EffectDefInfo {
-                type_params: type_param_ids,
-                ops,
-                op_spans,
-                source_module: self.current_module.clone(),
-            },
-        );
+        let info = EffectDefInfo {
+            type_params: type_param_ids,
+            ops,
+            op_spans,
+            source_module: self.current_module.clone(),
+        };
+        // Register under canonical form only (Module.Effect).
+        // For standalone files (no module), use bare name.
+        let key = if let Some(module) = &self.current_module {
+            format!("{}.{}", module, name)
+        } else {
+            name.into()
+        };
+        self.effects.insert(key, info);
         self.type_arity
             .insert(name.into(), effect_type_params.len());
         Ok(())
@@ -1542,7 +1582,7 @@ impl Checker {
         let mut type_var_params: Vec<(String, u32)> = Vec::new();
         for effect_ref in effect_names {
             self.record_effect_ref(effect_ref);
-            if let Some(info) = self.effects.get(&effect_ref.name) {
+            if let Some(info) = self.resolve_effect(&effect_ref.name) {
                 let info = info.clone();
                 for (i, &param_id) in info.type_params.iter().enumerate() {
                     if let Some(type_arg_expr) = effect_ref.type_args.get(i) {
@@ -1551,6 +1591,11 @@ impl Checker {
                         handler_type_mapping.insert(param_id, concrete_ty);
                     }
                 }
+            } else {
+                self.collected_diagnostics.push(Diagnostic::error_at(
+                    effect_ref.span,
+                    format!("undefined effect: {}", effect_ref.name),
+                ));
             }
         }
 
@@ -1604,7 +1649,7 @@ impl Checker {
             let mut belongs_to_declared = false;
             let mut matched_op: Option<EffectOpSig> = None;
             for effect_ref in effect_names {
-                if let Some(info) = self.effects.get(&effect_ref.name)
+                if let Some(info) = self.resolve_effect(&effect_ref.name)
                     && let Some(op) = info.ops.iter().find(|o| o.name == arm.op_name)
                 {
                     if belongs_to_declared {
@@ -1744,7 +1789,20 @@ impl Checker {
         let all_handler_effs = self.restore_effects(handler_saved_effs);
         let _scope_result = self.exit_scope(body_scope);
         let declared_effects: std::collections::HashSet<String> =
-            needs.iter().map(|e| e.name.clone()).collect();
+            needs.iter().map(|e| {
+                self.resolve_effect(&e.name)
+                    .and_then(|info| {
+                        let short = e.name.rsplit('.').next().unwrap_or(&e.name);
+                        info.source_module.as_ref().map(|m| format!("{}.{}", m, short))
+                    })
+                    .unwrap_or_else(|| {
+                        if let Some(m) = &self.current_module {
+                            format!("{}.{}", m, e.name)
+                        } else {
+                            e.name.clone()
+                        }
+                    })
+            }).collect();
 
         let body_effects: std::collections::HashSet<String> = all_handler_effs
             .effects
@@ -1788,7 +1846,7 @@ impl Checker {
             let handled_ops: std::collections::HashSet<&str> =
                 arms.iter().map(|a| a.node.op_name.as_str()).collect();
             for effect_ref in effect_names {
-                if let Some(info) = self.effects.get(&effect_ref.name) {
+                if let Some(info) = self.resolve_effect(&effect_ref.name) {
                     let missing: Vec<_> = info
                         .ops
                         .iter()
@@ -1828,7 +1886,7 @@ impl Checker {
             if let Some((_, var_id)) = type_var_params.iter().find(|(n, _)| n == &bound.type_var) {
                 // Find which effect and param index this var corresponds to
                 for effect_ref in effect_names {
-                    if let Some(info) = self.effects.get(&effect_ref.name) {
+                    if let Some(info) = self.resolve_effect(&effect_ref.name) {
                         for (i, &param_id) in info.type_params.iter().enumerate() {
                             if let Some(mapped_ty) = handler_type_mapping.get(&param_id)
                                 && matches!(mapped_ty, Type::Var(id) if *id == *var_id)
@@ -1855,10 +1913,25 @@ impl Checker {
             }
         }
 
+        // Canonicalize effect names so they match canonical names in effect rows.
+        let canonical_effects: Vec<String> = effect_names.iter().map(|e| {
+            self.resolve_effect(&e.name)
+                .and_then(|info| {
+                    let short = e.name.rsplit('.').next().unwrap_or(&e.name);
+                    info.source_module.as_ref().map(|m| format!("{}.{}", m, short))
+                })
+                .unwrap_or_else(|| {
+                    if let Some(m) = &self.current_module {
+                        format!("{}.{}", m, e.name)
+                    } else {
+                        e.name.clone()
+                    }
+                })
+        }).collect();
         self.handlers.insert(
             name.into(),
             HandlerInfo {
-                effects: effect_names.iter().map(|e| e.name.clone()).collect(),
+                effects: canonical_effects,
                 return_type: handler_return_type,
                 forall,
                 arm_spans,

@@ -687,7 +687,7 @@ pub fn collect_completions(
                 .map(|a| a.node.op_name.as_str())
                 .collect();
             for effect_ref in effects {
-                if let Some(info) = result.effects.get(&effect_ref.name) {
+                if let Some(info) = result.resolve_effect(&effect_ref.name) {
                     for op in &info.ops {
                         if handled.contains(op.name.as_str()) {
                             continue;

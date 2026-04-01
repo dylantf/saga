@@ -128,7 +128,11 @@ impl ModuleExports {
                 Decl::EffectDef {
                     public: true, name, ..
                 } => {
-                    if let Some(info) = checker.effects.get(name) {
+                    // Effects are stored under canonical key (Module.Effect)
+                    let canonical = checker.current_module.as_ref()
+                        .map(|m| format!("{}.{}", m, name))
+                        .unwrap_or_else(|| name.clone());
+                    if let Some(info) = checker.effects.get(&canonical) {
                         effects.insert(name.clone(), info.clone());
                     }
                 }
@@ -800,10 +804,18 @@ impl Checker {
                 .or_insert_with(|| info.clone());
         }
 
-        // Effects
+        // Effects: always register under both bare and qualified forms in
+        // self.effects (the bare form is needed for internal type checking —
+        // the type system stores bare effect names in EffectRows). The
+        // scope_map controls which names users can write in `needs` clauses.
+        let is_exposed = |item: &str| -> bool {
+            exposing.is_some_and(|list| list.iter().any(|e| e == item))
+        };
         for (name, info) in effects {
+            // One canonical entry: Module.Effect (e.g. Std.Fail.Fail)
+            let canonical = format!("{}.{}", module_name, name);
             self.effects
-                .entry(name.clone())
+                .entry(canonical)
                 .or_insert_with(|| info.clone());
             self.lsp
                 .type_import_origins
@@ -817,11 +829,19 @@ impl Checker {
             }
         }
 
-        // Handlers
+        // Handlers: qualified always, bare only when exposed.
+        // Unlike effects, handlers are values explicitly referenced in `with`
+        // expressions, not implicitly referenced by the type system.
         for (name, info) in handlers {
+            let qualified = format!("{}.{}", prefix, name);
             self.handlers
-                .entry(name.clone())
+                .entry(qualified)
                 .or_insert_with(|| info.clone());
+            if is_exposed(name) {
+                self.handlers
+                    .entry(name.clone())
+                    .or_insert_with(|| info.clone());
+            }
             if let Some(doc) = doc_comments.get(name) {
                 self.lsp
                     .imported_docs
@@ -1014,6 +1034,13 @@ pub(super) fn resolve_import(
             let canonical = format!("{}.{}.{}", module_name, effect_name, op.name);
             scope.values.entry(op.name.clone()).or_insert(canonical);
         }
+        // Effects: canonical + aliased qualified forms
+        let effect_canonical = format!("{}.{}", module_name, effect_name);
+        scope.effects.entry(effect_canonical.clone()).or_insert_with(|| effect_canonical.clone());
+        if prefix != module_name {
+            let aliased = format!("{}.{}", prefix, effect_name);
+            scope.effects.entry(aliased).or_insert_with(|| effect_canonical.clone());
+        }
     }
 
     // Value bindings: canonical + aliased
@@ -1108,18 +1135,26 @@ pub(super) fn resolve_import(
                     scope.values.entry(name.clone()).or_insert(ctor_canonical);
                     found = true;
                 }
+                // Effects can be exposed by name
+                if exports.effects.contains_key(name) {
+                    let effect_canonical = format!("{}.{}", module_name, name);
+                    scope.effects.entry(name.clone()).or_insert(effect_canonical);
+                    found = true;
+                }
                 if !found {
                     return Err(format!("'{}' is not exported by module '{}'", name, prefix));
                 }
             } else {
                 // Bare value -> canonical
                 let canonical = format!("{}.{}", module_name, name);
-                // Validate: the canonical form must exist in the scope
-                // (it was registered in the bindings loop above)
-                if !scope.values.contains_key(&canonical) {
+                // Validate: must be a function/value in scope, or a handler name
+                let is_handler = exports.handlers.contains_key(name);
+                if !scope.values.contains_key(&canonical) && !is_handler {
                     return Err(format!("'{}' is not exported by module '{}'", name, prefix));
                 }
-                scope.values.entry(name.clone()).or_insert(canonical);
+                if scope.values.contains_key(&canonical) {
+                    scope.values.entry(name.clone()).or_insert(canonical);
+                }
             }
         }
     }
@@ -1202,12 +1237,20 @@ fn collect_codegen_info(
                         )
                     })
                     .map(|e| {
-                        // Resolve bare effect name to canonical using effects_map
-                        if let Some(info) = effects_map.get(&e.name) {
+                        // Resolve bare/aliased effect name to canonical.
+                        // effects_map keys are canonical (e.g. "Std.Test.TestRunner"),
+                        // so try exact match first, then suffix match.
+                        let found = effects_map.get(&e.name).or_else(|| {
+                            let suffix = format!(".{}", e.name);
+                            effects_map.iter()
+                                .find(|(k, _)| k.ends_with(&suffix))
+                                .map(|(_, v)| v)
+                        });
+                        if let Some(info) = found {
                             if let Some(src) = &info.source_module {
-                                format!("{}.{}", src, e.name)
+                                let short = e.name.rsplit('.').next().unwrap_or(&e.name);
+                                format!("{}.{}", src, short)
                             } else {
-                                // Defined in current module
                                 format!("{}.{}", module_name, e.name)
                             }
                         } else {

@@ -91,6 +91,24 @@ impl CheckResult {
         self.diagnostics.iter().filter(|d| matches!(d.severity, Severity::Warning)).collect()
     }
 
+    /// Look up an effect by name, resolving bare/aliased names through the scope_map.
+    pub fn resolve_effect(&self, name: &str) -> Option<&EffectDefInfo> {
+        self.effects.get(name).or_else(|| {
+            self.scope_map.resolve_effect(name)
+                .and_then(|canonical| self.effects.get(canonical))
+        }).or_else(|| {
+            // Suffix match for qualified names (e.g. "Fail.Fail" -> "Std.Fail.Fail")
+            if name.contains('.') {
+                let suffix = format!(".{}", name);
+                self.effects.iter()
+                    .find(|(k, _)| k.ends_with(&suffix))
+                    .map(|(_, v)| v)
+            } else {
+                None
+            }
+        })
+    }
+
     /// Effect names for LSP completion.
     pub fn effect_names(&self) -> Vec<String> {
         self.effects.keys().cloned().collect()

@@ -1,23 +1,27 @@
-effect Fail a {
-  fun fail : (msg: String) -> a
-}
+import Std.Fail (Fail)
+import Std.Process (catch_panic)
 
-handler abort for Fail a {
-  fail _ = panic "nooooo"
+# This is defined in the stdlib now, but here's a handy reference
+# effect Fail e {
+#   fun fail : e -> a
+# }
+
+handler abort for Std.Fail.Fail String {
+  fail msg = panic $"Panicking: {msg}"
 }
 
 #@ Converts a failure to a Result of the given type
-handler to_result for Fail a {
+handler to_result for Fail String {
   fail x = Err x
   return v = Ok v
 }
 
 #@ Continues a failed call with a default value of 0
-handler int_fallback for Fail Int {
+handler int_fallback for Fail String {
   fail _ = resume 0
 }
 
-fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail Int}
+fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail String}
 safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 
@@ -27,16 +31,25 @@ safe_str str = str
 
 main () = {
   let a = safe_div 10 2 with to_result
-  println (debug a)
+  println $"a: {debug a}"
 
-  let b = safe_div 10 0 with {
+  let b = safe_div 10 0 with int_fallback
+  println $"b: {debug b}"
+
+  let c = safe_div 10 0 with {
     fail _ = resume 0
   }
-  println (debug b)
+  println $"c: {debug c}"
 
-  let str = safe_str "Hello" with to_result
-  println (debug str)
+  let str_a = safe_str "Hello" with to_result
+  println $"String should be Hello: {debug str_a}"
 
-  let bad_result = safe_div 2 0 with abort
-  println $"You shouldn't see this: {debug bad_result}"
+  let str_b = safe_str "" with to_result
+  println $"String should have been aborted: {debug str_b}"
+
+  println "About to panic..."
+  case catch_panic (fun () -> safe_div 2 0 with abort) {
+    Ok v -> println $"You shouldn't see this: {debug v}"
+    Err msg -> println msg
+  }
 }

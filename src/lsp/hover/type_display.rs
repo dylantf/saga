@@ -253,7 +253,7 @@ pub fn type_definition_summary(
         return Some(with_doc(doc, &code));
     }
 
-    if let Some(info) = result.effects.get(name) {
+    if let Some(info) = result.resolve_effect(name) {
         let prettified = result.prettify_effect(info);
         let ops: Vec<String> = prettified
             .iter()

@@ -75,7 +75,7 @@ fn collect_missing_handler_arms(
 
             let mut all_missing: Vec<(String, String)> = Vec::new();
             for effect_ref in effects {
-                if let Some(info) = tc_result.effects.get(&effect_ref.name) {
+                if let Some(info) = tc_result.resolve_effect(&effect_ref.name) {
                     for op in &info.ops {
                         if handled.contains(op.name.as_str()) {
                             continue;

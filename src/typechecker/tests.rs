@@ -3305,7 +3305,7 @@ foo () = receive {
 fn receive_typechecks_with_actor() {
     check(
         r#"
-import Std.Actor
+import Std.Actor (Actor)
 
 type Msg = Ping | Stop
 
@@ -3342,7 +3342,7 @@ fn receive_no_exhaustiveness_error() {
     // Partial match in receive should not error (no exhaustiveness)
     check(
         r#"
-import Std.Actor
+import Std.Actor (Actor)
 
 type Msg = A | B | C
 

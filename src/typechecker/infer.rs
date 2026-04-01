@@ -537,8 +537,8 @@ impl Checker {
         span: Span,
     ) -> Result<Type, Diagnostic> {
         let msg_ty = match (
-            self.effect_meta.type_param_cache.get("Actor"),
-            self.effects.get("Actor"),
+            self.effect_meta.type_param_cache.get("Std.Actor.Actor"),
+            self.effects.get("Std.Actor.Actor"),
         ) {
             (Some(cache), Some(info)) => {
                 let param_id = info.type_params.first().ok_or_else(|| {
@@ -606,7 +606,7 @@ impl Checker {
             self.unify_at(&result_ty, &body_ty, body.span)?;
         }
 
-        self.emit_effect("Actor".to_string(), vec![]);
+        self.emit_effect("Std.Actor.Actor".to_string(), vec![]);
         Ok(result_ty)
     }
 

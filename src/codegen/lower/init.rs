@@ -436,10 +436,14 @@ impl<'a> Lowerer<'a> {
                         return_clause,
                         ..
                     } => {
+                        let canonical_effects: Vec<String> = effects
+                            .iter()
+                            .map(|e| self.canonicalize_effect(&e.name))
+                            .collect();
                         self.handler_defs
                             .entry(name.clone())
                             .or_insert(HandlerInfo {
-                                effects: effects.iter().map(|e| e.name.clone()).collect(),
+                                effects: canonical_effects,
                                 arms: arms.iter().map(|a| a.node.clone()).collect(),
                                 return_clause: return_clause.clone(),
                                 source_module: Some(module_name.clone()),

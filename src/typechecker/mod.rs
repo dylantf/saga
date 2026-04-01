@@ -779,6 +779,8 @@ pub struct ScopeMap {
     pub types: HashMap<String, String>,
     /// User-visible name -> canonical name for constructors.
     pub constructors: HashMap<String, String>,
+    /// User-visible name -> canonical name for effects.
+    pub effects: HashMap<String, String>,
 }
 
 impl ScopeMap {
@@ -794,6 +796,10 @@ impl ScopeMap {
         self.constructors.get(name).map(|s| s.as_str())
     }
 
+    pub fn resolve_effect(&self, name: &str) -> Option<&str> {
+        self.effects.get(name).map(|s| s.as_str())
+    }
+
     /// Merge another scope_map into this one (first-insert-wins).
     pub fn merge(&mut self, other: &ScopeMap) {
         for (k, v) in &other.values {
@@ -804,6 +810,9 @@ impl ScopeMap {
         }
         for (k, v) in &other.constructors {
             self.constructors.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.effects {
+            self.effects.entry(k.clone()).or_insert_with(|| v.clone());
         }
     }
 }
@@ -1208,15 +1217,20 @@ impl Checker {
         (fields, result_ty)
     }
 
-    /// Push effects onto the accumulator. This is the primary way effects
-    /// are recorded during inference -- callers don't need to handle EffectRow returns.
+    /// Push effects onto the accumulator, deduplicating by name.
     pub(crate) fn emit_effects(&mut self, effs: &EffectRow) {
-        self.effect_row.effects.extend(effs.effects.clone());
+        for (name, args) in &effs.effects {
+            if !self.effect_row.effects.iter().any(|(n, _)| n == name) {
+                self.effect_row.effects.push((name.clone(), args.clone()));
+            }
+        }
     }
 
-    /// Push a single named effect onto the accumulator.
+    /// Push a single named effect onto the accumulator, deduplicating by name.
     pub(crate) fn emit_effect(&mut self, name: String, args: Vec<Type>) {
-        self.effect_row.effects.push((name, args));
+        if !self.effect_row.effects.iter().any(|(n, _)| n == &name) {
+            self.effect_row.effects.push((name, args));
+        }
     }
 
     /// Save the current effect accumulator and start a fresh one.

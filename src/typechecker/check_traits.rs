@@ -263,7 +263,20 @@ impl Checker {
         };
 
         let declared_effects: std::collections::HashSet<String> =
-            needs.iter().map(|e| e.name.clone()).collect();
+            needs.iter().map(|e| {
+                self.resolve_effect(&e.name)
+                    .and_then(|info| {
+                        let short = e.name.rsplit('.').next().unwrap_or(&e.name);
+                        info.source_module.as_ref().map(|m| format!("{}.{}", m, short))
+                    })
+                    .unwrap_or_else(|| {
+                        if let Some(m) = &self.current_module {
+                            format!("{}.{}", m, e.name)
+                        } else {
+                            e.name.clone()
+                        }
+                    })
+            }).collect();
 
         for m in methods {
             let (method_name, params, body) = (&m.name, &m.params, &m.body);

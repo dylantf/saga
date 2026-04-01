@@ -416,7 +416,30 @@ impl Checker {
                                 .iter()
                                 .map(|te| self.convert_type_expr(te, params))
                                 .collect();
-                            (e.name.clone(), args)
+                            // Canonicalize effect name so it matches canonical-only self.effects
+                            let name = if let Some(info) = self.resolve_effect(&e.name) {
+                                let short = e.name.rsplit('.').next().unwrap_or(&e.name);
+                                info.source_module.as_ref()
+                                    .map(|m| format!("{}.{}", m, short))
+                                    .unwrap_or_else(|| {
+                                        if let Some(m) = &self.current_module {
+                                            format!("{}.{}", m, e.name)
+                                        } else {
+                                            e.name.clone()
+                                        }
+                                    })
+                            } else {
+                                // Don't error here — this may be a forward reference
+                                // to an effect defined later in the same module.
+                                // The needs clause on the function will catch truly
+                                // undefined effects.
+                                if let Some(m) = &self.current_module {
+                                    format!("{}.{}", m, e.name)
+                                } else {
+                                    e.name.clone()
+                                }
+                            };
+                            (name, args)
                         })
                         .collect();
                     let tail = effect_row_var.as_ref().map(|(name, _)| {
