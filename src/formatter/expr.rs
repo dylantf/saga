@@ -615,14 +615,9 @@ fn format_handler(handler: &Handler) -> Doc {
             }
 
             let mut body_items = Vec::new();
-            for (i, (name, _)) in named.iter().enumerate() {
+            for (name, _) in named {
                 body_items.push(Doc::hardline());
-                let needs_comma = i < named.len() - 1 || !has_inline;
-                if needs_comma {
-                    body_items.push(Doc::text(format!("{},", name)));
-                } else {
-                    body_items.push(Doc::text(name));
-                }
+                body_items.push(Doc::text(format!("{},", name)));
             }
             for ann in arms {
                 body_items.push(Doc::hardline());

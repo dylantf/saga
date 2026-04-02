@@ -1403,8 +1403,8 @@ fn named_handler_def_zero_arg_gets_unit() {
 fn inline_handler_named_then_inline_no_comma_before_inline() {
     let src = "f x = compute () with {\n  console,\n  fail msg = Err msg\n}";
     let result = fmt80(src);
-    // Named handler gets comma, but no comma before inline arm
-    assert!(result.contains("console\n"), "no comma before inline arm: {}", result);
+    // Named handler always gets trailing comma
+    assert!(result.contains("console,\n"), "named handler should have trailing comma: {}", result);
     assert!(!result.contains("Err msg,"), "no comma after inline arm: {}", result);
 }
 
