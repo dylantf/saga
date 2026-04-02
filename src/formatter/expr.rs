@@ -606,18 +606,26 @@ fn format_handler(handler: &Handler) -> Doc {
             dangling_trivia,
         } => {
             let has_inline = !arms.is_empty() || return_clause.is_some();
+            let has_trivia = named.iter().any(|a| {
+                a.trailing_comment.is_some() || !a.leading_trivia.is_empty()
+            });
 
             // Named-only handlers can go on one line: `{ h1, h2 }`
-            if !has_inline && dangling_trivia.is_empty() {
-                let named_docs: Vec<Doc> = named.iter().map(|(n, _)| Doc::text(n)).collect();
+            if !has_inline && !has_trivia && dangling_trivia.is_empty() {
+                let named_docs: Vec<Doc> = named
+                    .iter()
+                    .map(|a| Doc::text(&a.node.name))
+                    .collect();
                 let joined = Doc::join(Doc::text(", "), named_docs);
                 return docs![Doc::text("{"), joined, Doc::text("}")];
             }
 
             let mut body_items = Vec::new();
-            for (name, _) in named {
+            for ann in named {
                 body_items.push(Doc::hardline());
-                body_items.push(Doc::text(format!("{},", name)));
+                body_items.push(format_trivia(&ann.leading_trivia));
+                body_items.push(Doc::text(format!("{},", ann.node.name)));
+                body_items.push(format_trailing(&ann.trailing_comment));
             }
             for ann in arms {
                 body_items.push(Doc::hardline());

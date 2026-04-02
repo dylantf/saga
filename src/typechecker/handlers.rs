@@ -39,7 +39,8 @@ impl Checker {
                 }
                 ast::Handler::Inline { named, arms, .. } => {
                     let mut map = std::collections::HashMap::new();
-                    for (n, _span) in named {
+                    for ann in named {
+                        let n = &ann.node.name;
                         if let Some(def_id) = self.env.def_id(n) {
                             let usage_id = crate::ast::NodeId::fresh();
                             self.record_reference(usage_id, _with_span, def_id);
@@ -170,10 +171,12 @@ impl Checker {
                 return_clause,
                 ..
             } => {
-                for (name, name_span) in named {
+                for ann in named {
+                    let name = &ann.node.name;
+                    let name_span = ann.node.span;
                     if !self.handlers.contains_key(name) && self.env.get(name).is_none() {
                         return Err(Diagnostic::error_at(
-                            *name_span,
+                            name_span,
                             format!("undefined handler: {}", name),
                         ));
                     }

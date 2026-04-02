@@ -171,9 +171,9 @@ impl<'a> Lowerer<'a> {
             }
             Handler::Inline { named, .. } => named
                 .iter()
-                .filter(|(n, _)| self.is_beam_native_handler(n))
-                .flat_map(|(n, _)| {
-                    let canonical = self.resolve_handler_name(n);
+                .filter(|a| self.is_beam_native_handler(&a.node.name))
+                .flat_map(|a| {
+                    let canonical = self.resolve_handler_name(&a.node.name);
                     self.handler_defs[&canonical].effects.clone()
                 })
                 .collect(),
@@ -409,7 +409,8 @@ impl<'a> Lowerer<'a> {
                 let mut resolved_return = return_clause.clone();
                 let mut handled_effects = Vec::new();
 
-                for (name, _) in named {
+                for ann in named {
+                    let name = &ann.node.name;
                     let canonical = self.resolve_handler_name(name);
                     let info = self
                         .handler_defs

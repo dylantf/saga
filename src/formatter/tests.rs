@@ -667,11 +667,14 @@ fn normalize_handler(h: &mut Handler) {
     match h {
         Handler::Named(_, span) => *span = S,
         Handler::Inline {
+            named,
             arms,
             return_clause,
             dangling_trivia,
-            ..
         } => {
+            for ann in named.iter_mut() {
+                normalize_annotated(ann, |n| n.span = S);
+            }
             for arm in arms.iter_mut() {
                 normalize_annotated(arm, normalize_handler_arm);
             }
@@ -1414,6 +1417,15 @@ fn inline_handler_only_named_gets_commas() {
     let result = fmt80(src);
     // Named-only handlers go on one line: `{ console, to_result }`
     assert!(result.contains("{console, to_result}"), "result: {}", result);
+}
+
+#[test]
+fn inline_handler_named_with_comments_preserves_multiline() {
+    let src = "main () = {\n  f () with {\n    console_log,\n    console_log2,\n    # a comment\n  }\n}";
+    let result = fmt80(src);
+    // Comments inside the handler block must be preserved; block must NOT collapse
+    assert!(result.contains("# a comment"), "comment was dropped: {}", result);
+    assert!(result.contains("console_log,\n"), "must stay multiline: {}", result);
 }
 
 // --- Comments ---

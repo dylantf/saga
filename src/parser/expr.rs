@@ -550,6 +550,7 @@ impl Parser {
         Ok(expr)
     }
 
+
     /// Parses the handler reference after `with`:
     /// - `with console_log` -> Handler::Named
     /// - `with { h1, h2, op args -> body }` -> Handler::Inline
@@ -573,6 +574,7 @@ impl Parser {
                             && matches!(self.peek_at(2), Token::Ident(_))
                             && matches!(self.peek_at(3), Token::Comma | Token::RBrace)));
                 if is_named_ref {
+                    let start = self.pos;
                     let name_start = self.tokens[self.pos].span;
                     let name = self.expect_ident()?;
                     let name = if matches!(self.peek(), Token::Dot)
@@ -585,10 +587,20 @@ impl Parser {
                         name
                     };
                     let name_end = self.tokens[self.pos - 1].span;
-                    named.push((name, name_start.to(name_end)));
+                    let mut trailing_comment = None;
                     if matches!(self.peek(), Token::Comma) {
                         self.advance();
+                        trailing_comment = self.take_trailing_comment(self.pos - 1);
                     }
+                    named.push(Annotated {
+                        node: NamedHandlerRef {
+                            name,
+                            span: name_start.to(name_end),
+                        },
+                        leading_trivia: self.take_leading_trivia(start),
+                        trailing_comment,
+                        trailing_trivia: vec![],
+                    });
                 } else {
                     break;
                 }
@@ -981,7 +993,7 @@ impl Parser {
                 // We don't start with `let`, so try parsing an expression,
                 // then check if the next token is `|`
                 if !matches!(self.peek(), Token::Let | Token::RBrace) {
-                    let save = self.pos;
+                    let save = self.save();
                     let first_expr = self.parse_expr(0);
 
                     if let Ok(record) = first_expr
@@ -1002,7 +1014,7 @@ impl Parser {
                     }
 
                     // Not a record update - backtrack and parse as block
-                    self.pos = save;
+                    self.restore(save);
                 }
 
                 // Check for anonymous record create: { field: expr, ... }

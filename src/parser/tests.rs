@@ -2008,7 +2008,7 @@ fn with_mixed_handlers() {
             ..
         } => match handler.as_ref() {
             Handler::Inline { named, arms, .. } => {
-                let names: Vec<&str> = named.iter().map(|(n, _)| n.as_str()).collect();
+                let names: Vec<&str> = named.iter().map(|a| a.node.name.as_str()).collect();
                 assert_eq!(names, &["console_log"]);
                 assert_eq!(arms.len(), 1);
                 assert_eq!(arms[0].node.op_name, "get");

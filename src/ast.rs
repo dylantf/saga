@@ -1000,6 +1000,13 @@ pub struct TraitBound {
     pub traits: Vec<(String, Vec<String>, Span)>,
 }
 
+/// A named handler reference inside an inline `with` block (e.g. `console_log`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedHandlerRef {
+    pub name: String,
+    pub span: Span,
+}
+
 /// The handler in a `with` expression
 #[derive(Debug, Clone, PartialEq)]
 pub enum Handler {
@@ -1007,8 +1014,8 @@ pub enum Handler {
     Named(String, Span),
     /// `expr with { h1, h2, op args = body }`
     Inline {
-        /// Named handler references (e.g. `h1, h2`) with their spans
-        named: Vec<(String, Span)>,
+        /// Named handler references (e.g. `h1, h2`)
+        named: Vec<Annotated<NamedHandlerRef>>,
         /// Inline handler arms (e.g. `op args = body`)
         arms: Vec<Annotated<HandlerArm>>,
         /// `return value = Ok(value)` clause

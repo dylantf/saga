@@ -22,6 +22,14 @@ pub(super) fn split_trivia_at_blank_line(trivia: Vec<Trivia>) -> (Vec<Trivia>, V
     }
 }
 
+/// Snapshot of parser state for speculative parsing with backtracking.
+/// Captures position and all token trivia so destructive trivia operations
+/// can be undone on restore.
+pub(super) struct ParserSnapshot {
+    pos: usize,
+    trivia: Vec<(Vec<Trivia>, Option<String>)>,
+}
+
 pub struct Parser {
     pub(super) tokens: Vec<Spanned>,
     pub(super) pos: usize,
@@ -109,6 +117,29 @@ impl Parser {
                 message: format!("expected type, got {:?}", tok),
                 span: self.tokens[self.pos - 1].span,
             }),
+        }
+    }
+
+    /// Save parser state for speculative parsing. The returned snapshot
+    /// captures the current position and a clone of all token trivia, so
+    /// that `restore` can undo any destructive `take_leading_trivia` /
+    /// `take_trailing_comment` calls made during the speculative parse.
+    pub(super) fn save(&self) -> ParserSnapshot {
+        ParserSnapshot {
+            pos: self.pos,
+            trivia: self.tokens.iter().map(|t| {
+                (t.leading_trivia.clone(), t.trailing_comment.clone())
+            }).collect(),
+        }
+    }
+
+    /// Restore parser state from a snapshot, undoing any position and trivia
+    /// changes made since `save()`.
+    pub(super) fn restore(&mut self, snapshot: ParserSnapshot) {
+        self.pos = snapshot.pos;
+        for (i, (leading, trailing)) in snapshot.trivia.into_iter().enumerate() {
+            self.tokens[i].leading_trivia = leading;
+            self.tokens[i].trailing_comment = trailing;
         }
     }
 

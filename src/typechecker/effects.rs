@@ -137,8 +137,8 @@ impl Checker {
                 }
             }
             ast::Handler::Inline { named, arms, .. } => {
-                for (name, _) in named {
-                    if let Some(info) = self.handlers.get(name) {
+                for ann in named {
+                    if let Some(info) = self.handlers.get(&ann.node.name) {
                         handled.extend(info.effects.iter().cloned());
                     }
                 }
