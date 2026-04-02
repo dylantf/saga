@@ -81,9 +81,9 @@ impl Checker {
         }
         // Closed row: every body effect must appear in declared
         let mut undeclared = Vec::new();
-        for (eff_name, _) in &body_effs.effects {
-            if !declared.effects.iter().any(|(n, _)| n == eff_name) {
-                undeclared.push(eff_name.clone());
+        for entry in &body_effs.effects {
+            if !declared.effects.iter().any(|e| e.name == entry.name) {
+                undeclared.push(entry.name.clone());
             }
         }
         if undeclared.is_empty() {

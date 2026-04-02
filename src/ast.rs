@@ -109,10 +109,12 @@ impl NodeId {
     }
 }
 
-/// A reference to an effect, optionally with type arguments.
-/// e.g. `Log` (no args), `State Int`, `State (MVector a)`
+/// A reference to an effect, optionally with type arguments and instance name.
+/// e.g. `Log` (no args), `State Int`, `from: State Int` (named instance)
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectRef {
+    /// Optional instance name: `from` in `from: State Int`
+    pub instance: Option<String>,
     pub name: String,
     pub type_args: Vec<TypeExpr>,
     pub span: Span,

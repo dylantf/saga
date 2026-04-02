@@ -83,7 +83,7 @@ impl Checker {
         let inner_result = self.exit_scope(inner_scope);
 
         // Unnecessary handler check
-        if !handled.is_empty() && !inner_effs.effects.iter().any(|(n, _)| handled.contains(n)) {
+        if !handled.is_empty() && !inner_effs.effects.iter().any(|e| handled.contains(&e.name)) {
             let mut effects: Vec<_> = handled.iter().cloned().collect();
             effects.sort();
             self.collected_diagnostics.push(Diagnostic::warning_at(
@@ -156,11 +156,12 @@ impl Checker {
                         // Merge handler's needs effects into remaining, with fresh vars applied
                         let fresh_needs = EffectRow {
                             effects: handler_info.needs_effects.effects.iter()
-                                .map(|(name, args)| {
-                                    (
-                                        name.clone(),
-                                        args.iter().map(|t| self.replace_vars(t, &mapping)).collect(),
-                                    )
+                                .map(|entry| {
+                                    super::EffectEntry {
+                                        instance: entry.instance.clone(),
+                                        name: entry.name.clone(),
+                                        args: entry.args.iter().map(|t| self.replace_vars(t, &mapping)).collect(),
+                                    }
                                 })
                                 .collect(),
                             tail: None,

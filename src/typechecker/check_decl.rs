@@ -4,8 +4,8 @@ use crate::ast::{self, Decl, ExprKind, Lit};
 
 use super::result::CheckResult;
 use super::{
-    Checker, Diagnostic, EffectDefInfo, EffectOpSig, EffectRow, HandlerInfo, RecordInfo, Scheme,
-    Span, Type, find_effect_call,
+    Checker, Diagnostic, EffectDefInfo, EffectEntry, EffectOpSig, EffectRow, HandlerInfo,
+    RecordInfo, Scheme, Span, Type, find_effect_call,
 };
 
 /// Check if an expression is a compile-time inlineable value:
@@ -145,7 +145,7 @@ impl Checker {
             .env
             .get("main")
             .and_then(|s| innermost_effect_row(&self.sub.apply(&s.ty)))
-            .map(|r| r.effects.iter().map(|(n, _)| n.clone()).collect())
+            .map(|r| r.effects.iter().map(|e| e.name.clone()).collect())
             .unwrap_or_default();
         if !main_effects.is_empty() {
             let span = program.iter().find_map(|d| {
@@ -540,7 +540,7 @@ impl Checker {
 
                 // Build effect row from the function's `needs` clause.
                 let fun_effect_row = if !effects.is_empty() || effect_row_var.is_some() {
-                    let effect_refs: Vec<(String, Vec<Type>)> = effects
+                    let effect_refs: Vec<EffectEntry> = effects
                         .iter()
                         .map(|e| {
                             let args = e
@@ -569,7 +569,11 @@ impl Checker {
                                 ));
                                 e.name.clone()
                             };
-                            (name, args)
+                            if let Some(ref inst) = e.instance {
+                                EffectEntry::named(inst.clone(), name, args)
+                            } else {
+                                EffectEntry::unnamed(name, args)
+                            }
                         })
                         .collect();
                     let tail = effect_row_var.as_ref().map(|(rv_name, _)| {
@@ -915,9 +919,41 @@ impl Checker {
             }
 
             let saved_env = self.env.clone();
+            let saved_handlers = self.handlers.clone();
 
             for (pat, ty) in params.iter().zip(param_types.iter()) {
                 self.bind_pattern(pat, ty)?;
+            }
+
+            // Register named effect instances from the function's `needs` clause
+            // as handler bindings so `from.get!()` resolves inside the body.
+            if let Some(ann) = annotation {
+                let mut ty = ann;
+                while let Type::Fun(_, ret, row) = ty {
+                    for entry in &row.effects {
+                        if let Some(ref inst_name) = entry.instance {
+                            let handler_ty = Type::Con(
+                                "Handler".into(),
+                                vec![Type::Con(entry.name.clone(), entry.args.clone())],
+                            );
+                            let scheme = self.generalize(&handler_ty);
+                            self.env.insert(inst_name.clone(), scheme);
+                            self.handlers.insert(
+                                inst_name.clone(),
+                                super::HandlerInfo {
+                                    effects: vec![entry.name.clone()],
+                                    return_type: None,
+                                    needs_effects: EffectRow::empty(),
+                                    forall: vec![],
+                                    arm_spans: std::collections::HashMap::new(),
+                                    where_constraints: super::HandlerWhereConstraints::default(),
+                                    source_module: None,
+                                },
+                            );
+                        }
+                    }
+                    ty = ret;
+                }
             }
 
             if let Some(guard) = guard {
@@ -937,6 +973,7 @@ impl Checker {
             self.unify_at(&result_ty, &body_ty, body.span)?;
 
             self.env = saved_env;
+            self.handlers = saved_handlers;
         }
         // Collect accumulated effects and restore outer scope
         let all_body_effs = self.restore_effects(saved_effs);
@@ -1008,12 +1045,12 @@ impl Checker {
             let body_effect_names: std::collections::HashSet<String> = all_body_effs
                 .effects
                 .iter()
-                .map(|(n, _)| n.clone())
+                .map(|e| e.name.clone())
                 .collect();
             let declared_effects: std::collections::HashSet<String> = declared_row
                 .effects
                 .iter()
-                .map(|(n, _)| n.clone())
+                .map(|e| e.name.clone())
                 .collect();
             let unused: Vec<_> = declared_effects.difference(&body_effect_names).collect();
             if !unused.is_empty() {
@@ -1854,7 +1891,7 @@ impl Checker {
         let body_effects: std::collections::HashSet<String> = all_handler_effs
             .effects
             .iter()
-            .map(|(n, _)| n.clone())
+            .map(|e| e.name.clone())
             .collect();
         if !body_effects.is_empty() || !declared_effects.is_empty() {
             let err_span = arms.first().map(|a| a.node.span).unwrap_or(*span);
@@ -1924,8 +1961,8 @@ impl Checker {
         } else {
             vec![]
         };
-        for (_, args) in &all_handler_effs.effects {
-            for t in args {
+        for entry in &all_handler_effs.effects {
+            for t in &entry.args {
                 super::collect_free_vars(t, &mut forall);
             }
         }

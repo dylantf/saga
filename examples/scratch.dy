@@ -1,44 +1,21 @@
-# Test instance-qualified effect calls
+# Test named effect instances (Layer 2)
 
-effect Log {
-  fun log : String -> Unit
+effect State s {
+  fun get : Unit -> s
+  fun put : s -> Unit
 }
 
-handler console_log for Log {
-  log msg = {
-    println msg
-    resume ()
-  }
+handler make_state for State Int {
+  get () = resume 0
+  put _ = resume ()
 }
 
-handler prefix_log for Log {
-  log msg = {
-    println $"[PREFIX] {msg}"
-    resume ()
-  }
+# Function with named effect instances in needs
+fun transfer : Int -> Unit needs {from: State Int, to: State Int}
+transfer amount = {
+  let balance = from.get! ()
+  from.put! (balance - amount)
+  to.put! (to.get! () + amount)
 }
 
-handler quiet_log for Log {
-  log _ = resume ()
-}
-
-main () = {
-  # Two handlers for the same effect, disambiguated by instance name
-  handle loud = console_log
-  handle quiet = quiet_log
-
-  {
-    loud.log! "this prints"
-    quiet.log! "this is silent"
-    loud.log! "this also prints"
-  } with { loud, quiet }
-
-  # Mix with prefix handler
-  handle a = console_log
-  handle b = prefix_log
-
-  {
-    a.log! "plain"
-    b.log! "prefixed"
-  } with { a, b }
-}
+main () = ()

@@ -53,8 +53,8 @@ impl Checker {
                         self.effect_meta.fun_type_constraints.get(&effect_key).cloned()
                         && let Type::Fun(a, b, _) = ty
                     {
-                        let eff_refs: Vec<(String, Vec<Type>)> =
-                            eff_constraints.into_iter().collect();
+                        let eff_refs: Vec<super::EffectEntry> =
+                            eff_constraints.into_iter().map(|(n, a)| super::EffectEntry::unnamed(n, a)).collect();
                         ty = Type::Fun(a, b, super::EffectRow::closed(eff_refs));
                     }
                     self.record_type(node_id, &ty);
@@ -146,7 +146,7 @@ impl Checker {
                     let param_shallow = self.sub.resolve_var(p);
                     if let Type::Fun(_, _, row) = param_shallow {
                         let absorbed: std::collections::HashSet<String> = row
-                            .effects.iter().map(|(n, _)| n.clone()).collect();
+                            .effects.iter().map(|e| e.name.clone()).collect();
                         self.effect_row = self.effect_row.subtract(&absorbed);
                     }
                 }
@@ -1037,8 +1037,8 @@ impl Checker {
                 let mut extra_effects: Vec<&str> = actual_row
                     .effects
                     .iter()
-                    .filter(|(n, _)| !expected_row.effects.iter().any(|(en, _)| en == n))
-                    .map(|(n, _)| n.as_str())
+                    .filter(|e| !expected_row.effects.iter().any(|en| en.name == e.name))
+                    .map(|e| e.name.as_str())
                     .collect();
                 if !extra_effects.is_empty() {
                     extra_effects.sort();
@@ -1051,7 +1051,7 @@ impl Checker {
                         let mut expected_names: Vec<&str> = expected_row
                             .effects
                             .iter()
-                            .map(|(n, _)| n.as_str())
+                            .map(|e| e.name.as_str())
                             .collect();
                         expected_names.sort();
                         format!(

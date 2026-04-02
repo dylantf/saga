@@ -18,6 +18,21 @@ impl Parser {
     // Used where we want to preserve the qualification (e.g. needs lists).
     fn parse_effect_ref(&mut self) -> Result<EffectRef, ParseError> {
         let start = self.tokens[self.pos].span;
+
+        // Check for named instance: `from: State Int`
+        // Lookahead: lowercase ident followed by ':'
+        let instance = if let Token::Ident(inst_name) = self.peek().clone() {
+            if matches!(self.peek_at(1), Token::Colon) {
+                self.advance(); // consume instance name
+                self.advance(); // consume ':'
+                Some(inst_name)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let mut name = self.expect_upper_ident()?;
         // Support multi-level qualification: Std.Fail.Fail, Logger.Log, etc.
         while matches!(self.peek(), Token::Dot)
@@ -37,6 +52,7 @@ impl Parser {
             end: end.end,
         };
         Ok(EffectRef {
+            instance,
             name,
             type_args,
             span,
