@@ -1,34 +1,48 @@
-# Test named effect instances end-to-end
+# Scratch: named handler instances with fully state-threaded handlers.
+#
+# This currently demonstrates the raw runtime shape of threading two named
+# State handlers through one computation: the handled call returns a nested
+# state function, applied one state at a time.
 
-effect Log {
-  fun log : String -> Unit
+effect State s {
+  fun get : Unit -> s
+  fun put : s -> Unit
 }
 
-handler console_log for Log {
-  log msg = {
-    println msg
-    resume ()
-  }
+handler thread_state for State Int {
+  get () = fun s -> (resume s) s
+  put next = fun _ -> (resume ()) next
+  return value = fun s -> (value, s)
 }
 
-handler prefix_log for Log {
-  log msg = {
-    println $"[PREFIX] {msg}"
-    resume ()
-  }
-}
+fun transfer : Int -> (Int, Int) needs {from: State Int, to: State Int}
+transfer amount {from, to} = {
+  let from_balance = from.get! ()
+  let to_balance = to.get! ()
 
-fun greet : String -> Unit needs {out: Log}
-greet name {out} = out.log! $"hello {name}"
+  from.put! (from_balance - amount)
+  to.put! (to_balance + amount)
+
+  (from_balance - amount, to_balance + amount)
+}
 
 main () = {
-  handle c = console_log
-  handle p = prefix_log
+  handle checking = thread_state
+  handle savings = thread_state
 
-  greet "world" with {
-    out: c,
+  # The current shape is nested:
+  #   transfer ... with { from, to }
+  # becomes a state function that takes one initial state, returns another
+  # state function plus one final state, and so on.
+  let run_transfer = transfer 30 with {
+    from: checking,
+    to: savings,
   }
-  greet "world" with {
-    out: p,
-  }
+
+  let (finish_transfer, state_after_first) = run_transfer 100
+  let (balances, state_after_second) = finish_transfer 20
+
+  println (show balances)
+  println (show state_after_first)
+  println (show state_after_second)
 }

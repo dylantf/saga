@@ -15,6 +15,28 @@ use super::Lowerer;
 use super::util::{collect_fun_call, core_var};
 
 impl<'a> Lowerer<'a> {
+    fn build_return_lambda(&mut self, ret: &HandlerArm) -> CExpr {
+        let param = if ret.params.is_empty() {
+            self.fresh()
+        } else {
+            core_var(&ret.params[0].0)
+        };
+        let ret_body = self.lower_expr(&ret.body);
+        CExpr::Fun(vec![param], Box::new(ret_body))
+    }
+
+    fn compose_return_lambdas(&mut self, lambdas: Vec<CExpr>) -> Option<CExpr> {
+        let mut iter = lambdas.into_iter();
+        let first = iter.next()?;
+        Some(iter.fold(first, |inner, outer| {
+            let param = self.fresh();
+            let applied_inner =
+                CExpr::Apply(Box::new(inner), vec![CExpr::Var(param.clone())]);
+            let applied_outer = CExpr::Apply(Box::new(outer), vec![applied_inner]);
+            CExpr::Fun(vec![param], Box::new(applied_outer))
+        }))
+    }
+
     /// Lower an effect call: `op! args`.
     ///
     /// Emits: `apply _Handle_Effect_op(arg1, ..., argN, K)`
@@ -430,19 +452,29 @@ impl<'a> Lowerer<'a> {
             }
         }
 
+        // Build return clause lambdas from instance-bound handlers first,
+        // then the inline `return` clause if present.
+        let mut return_lambdas: Vec<CExpr> = Vec::new();
+        if let Handler::Inline { instance_bindings, .. } = handler {
+            for ann in instance_bindings {
+                let binding = &ann.node;
+                if let ExprKind::Var { name, .. } = &binding.handler.kind {
+                    let canonical = self.resolve_handler_name(name);
+                    if let Some(info) = self.handler_defs.get(&canonical).cloned()
+                        && let Some(ret) = info.return_clause.as_deref()
+                    {
+                        return_lambdas.push(self.build_return_lambda(ret));
+                    }
+                }
+            }
+        }
+
         // Build the return clause lambda (if present).
         let saved_return_k = self.current_return_k.take();
-        let return_k_lambda = if let Some(ret) = &return_clause {
-            let param = if ret.params.is_empty() {
-                self.fresh()
-            } else {
-                core_var(&ret.params[0].0)
-            };
-            let ret_body = self.lower_expr(&ret.body);
-            Some(CExpr::Fun(vec![param], Box::new(ret_body)))
-        } else {
-            None
-        };
+        if let Some(ret) = &return_clause {
+            return_lambdas.push(self.build_return_lambda(ret));
+        }
+        let return_k_lambda = self.compose_return_lambdas(return_lambdas);
 
         // Check if the inner expression is a direct effectful function call.
         // If so, pass the return clause as _ReturnK parameter instead of
@@ -743,4 +775,3 @@ impl<'a> Lowerer<'a> {
         CExpr::Tuple(tuple_elements)
     }
 }
-

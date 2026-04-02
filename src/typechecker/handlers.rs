@@ -207,6 +207,7 @@ impl Checker {
                 // Each binding maps an instance name to a handler and subtracts
                 // the corresponding named effect from the inner computation.
                 let mut instance_handled: HashSet<String> = HashSet::new();
+                let mut answer_ty = expr_ty.clone();
                 for ann in instance_bindings {
                     let binding = &ann.node;
                     let handler_ty = self.infer_expr(&binding.handler)?;
@@ -226,6 +227,23 @@ impl Checker {
                     // Build a key that matches the named effect entry:
                     // inner computation emits `from: State`, we subtract by instance name
                     instance_handled.insert(binding.instance.clone());
+
+                    // Named instance bindings can also transform the result type via
+                    // the bound handler's return clause (e.g. State threading).
+                    if let ast::ExprKind::Var { name } = &binding.handler.kind
+                        && let Some(handler_info) = self.handlers.get(name).cloned()
+                        && let Some((param_ty, ret_ty)) = handler_info.return_type
+                    {
+                        let mapping: std::collections::HashMap<u32, Type> = handler_info
+                            .forall
+                            .iter()
+                            .map(|&id| (id, self.fresh_var()))
+                            .collect();
+                        let fresh_param = self.replace_vars(&param_ty, &mapping);
+                        let fresh_ret = self.replace_vars(&ret_ty, &mapping);
+                        self.unify_at(&answer_ty, &fresh_param, binding.span)?;
+                        answer_ty = fresh_ret;
+                    }
                 }
 
                 // Subtract named effects from inner computation
@@ -259,12 +277,12 @@ impl Checker {
                             Scheme {
                                 forall: vec![],
                                 constraints: vec![],
-                                ty: expr_ty.clone(),
+                                ty: answer_ty.clone(),
                             },
                             param_id,
                         );
                         self.lsp.node_spans.insert(param_id, *param_span);
-                        self.lsp.type_at_span.insert(*param_span, expr_ty.clone());
+                        self.lsp.type_at_span.insert(*param_span, answer_ty.clone());
                         self.lsp
                             .definitions
                             .push((param_id, param_name.clone(), *param_span));
@@ -274,7 +292,7 @@ impl Checker {
                     self.env = saved_env;
                     ret_ty
                 } else {
-                    expr_ty.clone()
+                    answer_ty
                 };
 
                 for arm in arms {
