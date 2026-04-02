@@ -380,7 +380,9 @@ impl Parser {
             self.advance(); // consume '.'
 
             // Qualified effect call: `Cache.get! key` or `Std.Cache.get! key`
+            // Instance-qualified effect call: `counter.put! 5`
             if let Token::EffectCall(name) = self.peek().clone() {
+                // Check for effect qualifier (uppercase: Cache.get!)
                 let qualifier = match &expr.kind {
                     ExprKind::Constructor { name: q, .. } => Some(q.clone()),
                     ExprKind::QualifiedName { module, name: prev_name, .. }
@@ -390,7 +392,12 @@ impl Parser {
                     }
                     _ => None,
                 };
-                if let Some(qualifier) = qualifier {
+                // Check for instance qualifier (lowercase: counter.put!)
+                let instance = match &expr.kind {
+                    ExprKind::Var { name: var_name, .. } => Some(var_name.clone()),
+                    _ => None,
+                };
+                if qualifier.is_some() || instance.is_some() {
                     let start_span = expr.span;
                     let effect_span = self.tokens[self.pos].span;
                     self.advance(); // consume effect call token
@@ -400,7 +407,8 @@ impl Parser {
                         span,
                         kind: ExprKind::EffectCall {
                             name,
-                            qualifier: Some(qualifier),
+                            qualifier,
+                            instance,
                             args: Vec::new(),
                         },
                     };
@@ -1324,6 +1332,7 @@ impl Parser {
                 kind: ExprKind::EffectCall {
                     name,
                     qualifier: None,
+                    instance: None,
                     args: Vec::new(),
                 },
             }),

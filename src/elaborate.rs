@@ -1159,12 +1159,14 @@ impl Elaborator {
             ExprKind::EffectCall {
                 name,
                 qualifier,
+                instance,
                 args,
             } => Expr::synth(
                 span,
                 ExprKind::EffectCall {
                     name: name.clone(),
                     qualifier: qualifier.clone(),
+                    instance: instance.clone(),
                     args: args.iter().map(|a| self.elaborate_expr(a)).collect(),
                 },
             ),

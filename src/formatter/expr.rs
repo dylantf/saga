@@ -266,11 +266,15 @@ pub fn format_expr(expr: &Expr) -> Doc {
         ExprKind::EffectCall {
             name,
             qualifier,
+            instance,
             args,
         } => {
-            let mut d = match qualifier {
-                Some(q) => Doc::text(format!("{}.{}!", q, name)),
-                None => Doc::text(format!("{}!", name)),
+            let mut d = if let Some(inst) = instance {
+                Doc::text(format!("{}.{}!", inst, name))
+            } else if let Some(q) = qualifier {
+                Doc::text(format!("{}.{}!", q, name))
+            } else {
+                Doc::text(format!("{}!", name))
             };
             for arg in args {
                 d = d.append(Doc::text(" ")).append(format_expr_atom(arg));

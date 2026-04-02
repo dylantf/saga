@@ -291,9 +291,43 @@ impl Checker {
             }
 
             ExprKind::EffectCall {
-                name, qualifier, ..
+                name, qualifier, instance, ..
             } => {
-                let op_sig = self.lookup_effect_op(name, qualifier.as_deref(), span)?;
+                // For instance-qualified calls (e.g. `counter.put!`), resolve the
+                // effect qualifier from the handle binding's handler info.
+                let resolved_qualifier = if let Some(inst_name) = instance {
+                    if let Some(handler_info) = self.handlers.get(inst_name) {
+                        // Find which of the handler's effects contains this op
+                        let mut found = None;
+                        for eff_name in &handler_info.effects {
+                            if let Some(info) = self.effects.get(eff_name) {
+                                if info.ops.iter().any(|o| o.name == *name) {
+                                    found = Some(eff_name.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        if found.is_none() {
+                            return Err(Diagnostic::error_at(
+                                span,
+                                format!(
+                                    "handler '{}' does not handle an effect with operation '{}'",
+                                    inst_name, name
+                                ),
+                            ));
+                        }
+                        found
+                    } else {
+                        return Err(Diagnostic::error_at(
+                            span,
+                            format!("'{}' is not a handler binding", inst_name),
+                        ));
+                    }
+                } else {
+                    qualifier.clone()
+                };
+
+                let op_sig = self.lookup_effect_op(name, resolved_qualifier.as_deref(), span)?;
 
                 // Record call site -> handler arm for LSP go-to-def
                 if let Some((arm_span, arm_module)) = self
@@ -317,7 +351,7 @@ impl Checker {
                     }
                 }
                 // Emit the effect onto the accumulator
-                if let Some(effect_name) = self.effect_for_op(name, qualifier.as_deref()) {
+                if let Some(effect_name) = self.effect_for_op(name, resolved_qualifier.as_deref()) {
                     self.emit_effect(effect_name.clone(), vec![]);
                 }
                 Ok(ty)

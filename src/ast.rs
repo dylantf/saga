@@ -437,11 +437,13 @@ pub enum ExprKind {
         fields: Vec<(String, Span, Expr)>,
     },
 
-    /// `log! "hello"`, `Cache.get! key`
+    /// `log! "hello"`, `Cache.get! key`, `counter.put! 5`
     EffectCall {
         name: String,
         /// Optional namespace qualifier: `Cache` in `Cache.get!`
         qualifier: Option<String>,
+        /// Optional handle-binding instance: `counter` in `counter.put!`
+        instance: Option<String>,
         args: Vec<Expr>,
     },
 

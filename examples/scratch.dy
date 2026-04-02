@@ -1,25 +1,44 @@
-# Test: handler that re-performs the same effect (middleware pattern)
-# Does `handler X for Effect needs {Effect}` work?
+# Test instance-qualified effect calls
 
-effect Counter {
-  fun increment : Unit -> Int
+effect Log {
+  fun log : String -> Unit
 }
 
-handler simple_counter for Counter {
-  increment () = resume 1
-}
-
-# Middleware: wraps Counter, doubles the result
-handler double_counter for Counter needs {Counter} {
-  increment () = {
-    let n = increment! ()
-    resume n * 2
+handler console_log for Log {
+  log msg = {
+    println msg
+    resume ()
   }
 }
 
+handler prefix_log for Log {
+  log msg = {
+    println $"[PREFIX] {msg}"
+    resume ()
+  }
+}
+
+handler quiet_log for Log {
+  log _ = resume ()
+}
+
 main () = {
-  let result = {
-    increment! () with double_counter
-  } with simple_counter
-  println (show result)
+  # Two handlers for the same effect, disambiguated by instance name
+  handle loud = console_log
+  handle quiet = quiet_log
+
+  {
+    loud.log! "this prints"
+    quiet.log! "this is silent"
+    loud.log! "this also prints"
+  } with { loud, quiet }
+
+  # Mix with prefix handler
+  handle a = console_log
+  handle b = prefix_log
+
+  {
+    a.log! "plain"
+    b.log! "prefixed"
+  } with { a, b }
 }

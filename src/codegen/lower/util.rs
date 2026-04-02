@@ -188,8 +188,8 @@ pub(super) fn collect_ctor_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
 }
 
 /// Peel a chain of App nodes to find an EffectCall head and its arguments.
-/// Returns `Some((op_name, qualifier, args))` if found.
-pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Vec<&Expr>)> {
+/// Returns `Some((op_name, qualifier, instance, args))` if found.
+pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Option<&str>, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
@@ -201,6 +201,7 @@ pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Ve
             ExprKind::EffectCall {
                 name,
                 qualifier,
+                instance,
                 args: direct_args,
                 ..
             } => {
@@ -209,7 +210,7 @@ pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Ve
                     "EffectCall.args should be empty (args are wrapped via App nodes)"
                 );
                 args.reverse();
-                return Some((name.as_str(), qualifier.as_deref(), args));
+                return Some((name.as_str(), qualifier.as_deref(), instance.as_deref(), args));
             }
             _ => return None,
         }

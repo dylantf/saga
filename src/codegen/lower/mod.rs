@@ -653,11 +653,12 @@ impl<'a> Lowerer<'a> {
                 // Special case: if the body is a terminal effect call, pass _ReturnK
                 // directly as K so abort-style handlers skip the rest (proper CPS).
                 let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
-                    if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
+                    if let Some((op_name, qualifier, instance, args)) = collect_effect_call(body) {
                         let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                         self.lower_effect_call(
                             op_name,
                             qualifier,
+                            instance,
                             &args_owned,
                             self.current_return_k.clone(),
                         )
@@ -740,11 +741,12 @@ impl<'a> Lowerer<'a> {
                         let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
                         let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. })
                         {
-                            if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
+                            if let Some((op_name, qualifier, instance, args)) = collect_effect_call(body) {
                                 let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                                 self.lower_effect_call(
                                     op_name,
                                     qualifier,
+                            instance,
                                     &args_owned,
                                     self.current_return_k.clone(),
                                 )
@@ -925,10 +927,11 @@ impl<'a> Lowerer<'a> {
                 }
 
                 // Check for effect call: App(EffectCall { .. }, arg1, ...)
-                if let Some((op_name, qualifier, args)) = collect_effect_call(expr) {
+                if let Some((op_name, qualifier, instance, args)) = collect_effect_call(expr) {
                     return self.lower_effect_call(
                         op_name,
                         qualifier,
+                        instance,
                         &args.into_iter().cloned().collect::<Vec<_>>(),
                         None,
                     );
@@ -1398,11 +1401,12 @@ impl<'a> Lowerer<'a> {
                 }
                 let body_ce = if is_effectful_lambda && !matches!(body.kind, ExprKind::Block { .. })
                 {
-                    if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
+                    if let Some((op_name, qualifier, instance, args)) = collect_effect_call(body) {
                         let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                         self.lower_effect_call(
                             op_name,
                             qualifier,
+                            instance,
                             &args_owned,
                             self.current_return_k.clone(),
                         )
@@ -1989,9 +1993,10 @@ impl<'a> Lowerer<'a> {
             ExprKind::EffectCall {
                 name,
                 qualifier,
+                instance,
                 args,
                 ..
-            } => self.lower_effect_call(name, qualifier.as_deref(), args, None),
+            } => self.lower_effect_call(name, qualifier.as_deref(), instance.as_deref(), args, None),
 
             // `expr with handler` -- attaches handler(s) to a computation
             ExprKind::With { expr, handler, .. } => self.lower_with(expr, handler),
