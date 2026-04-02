@@ -430,6 +430,9 @@ impl Normalizer {
                 }),
             }),
 
+            // Handler expressions: clone as-is (arm bodies are normalized when lowered).
+            ExprKind::HandlerExpr { .. } => expr.clone(),
+
             // Leaves: no sub-expressions to normalize.
             ExprKind::Lit { .. }
             | ExprKind::Var { .. }
@@ -510,16 +513,11 @@ pub fn normalize_effects(program: &Program) -> Program {
                 public,
                 name,
                 name_span,
-                effects,
-                needs,
-                where_clause,
-                arms,
-                recovered_arms: _,
-                return_clause,
+                body,
                 span,
                 ..
             } => {
-                let new_arms = arms
+                let new_arms = body.arms
                     .iter()
                     .map(|ann| Annotated::bare(HandlerArm {
                         op_name: ann.node.op_name.clone(),
@@ -529,7 +527,7 @@ pub fn normalize_effects(program: &Program) -> Program {
                         span: ann.node.span,
                     }))
                     .collect();
-                let new_return = return_clause.as_ref().map(|rc| {
+                let new_return = body.return_clause.as_ref().map(|rc| {
                     Box::new(HandlerArm {
                         op_name: rc.op_name.clone(),
                         qualifier: rc.qualifier.clone(),
@@ -544,12 +542,14 @@ pub fn normalize_effects(program: &Program) -> Program {
                     public: *public,
                     name: name.clone(),
                     name_span: *name_span,
-                    effects: effects.clone(),
-                    needs: needs.clone(),
-                    where_clause: where_clause.clone(),
-                    arms: new_arms,
+                    body: HandlerBody {
+                        effects: body.effects.clone(),
+                        needs: body.needs.clone(),
+                        where_clause: body.where_clause.clone(),
+                        arms: new_arms,
+                        return_clause: new_return,
+                    },
                     recovered_arms: vec![],
-                    return_clause: new_return,
                     span: *span,
                     dangling_trivia: vec![],
                 }

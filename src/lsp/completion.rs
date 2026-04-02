@@ -672,8 +672,7 @@ pub fn collect_completions(
     // Missing handler operations: if cursor is inside a handler body, suggest unimplemented ops
     for decl in program {
         if let Decl::HandlerDef {
-            effects,
-            arms,
+            body,
             recovered_arms,
             span,
             ..
@@ -681,12 +680,12 @@ pub fn collect_completions(
             && offset >= span.start
             && offset <= span.end
         {
-            let handled: HashSet<&str> = arms
+            let handled: HashSet<&str> = body.arms
                 .iter()
                 .chain(recovered_arms.iter())
                 .map(|a| a.node.op_name.as_str())
                 .collect();
-            for effect_ref in effects {
+            for effect_ref in &body.effects {
                 if let Some(info) = result.resolve_effect(&effect_ref.name) {
                     for op in &info.ops {
                         if handled.contains(op.name.as_str()) {

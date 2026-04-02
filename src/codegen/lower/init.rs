@@ -122,21 +122,19 @@ impl<'a> Lowerer<'a> {
                 }
                 Decl::HandlerDef {
                     name,
-                    effects,
-                    arms,
-                    return_clause,
+                    body,
                     ..
                 } => {
                     let canonical_handler = format!("{}.{}", module_name, name);
                     self.handler_defs.insert(
                         canonical_handler,
                         HandlerInfo {
-                            effects: effects
+                            effects: body.effects
                                 .iter()
                                 .map(|e| canonicalize_effect(&e.name))
                                 .collect(),
-                            arms: arms.iter().map(|a| a.node.clone()).collect(),
-                            return_clause: return_clause.clone(),
+                            arms: body.arms.iter().map(|a| a.node.clone()).collect(),
+                            return_clause: body.return_clause.clone(),
                             source_module: Some(module_name.to_string()),
                         },
                     );
@@ -284,18 +282,16 @@ impl<'a> Lowerer<'a> {
                         match decl {
                             Decl::HandlerDef {
                                 name,
-                                effects,
-                                arms,
-                                return_clause,
+                                body,
                                 ..
                             } => {
                                 let canonical_handler = canonicalize_handler(name);
                                 self.handler_defs
                                     .entry(canonical_handler)
                                     .or_insert(HandlerInfo {
-                                        effects: effects.iter().map(|e| canonicalize_effect(&e.name)).collect(),
-                                        arms: arms.iter().map(|a| a.node.clone()).collect(),
-                                        return_clause: return_clause.clone(),
+                                        effects: body.effects.iter().map(|e| canonicalize_effect(&e.name)).collect(),
+                                        arms: body.arms.iter().map(|a| a.node.clone()).collect(),
+                                        return_clause: body.return_clause.clone(),
                                         source_module: Some(mod_name.clone()),
                                     });
                             }
@@ -431,12 +427,10 @@ impl<'a> Lowerer<'a> {
                 match edecl {
                     Decl::HandlerDef {
                         name,
-                        effects,
-                        arms,
-                        return_clause,
+                        body,
                         ..
                     } => {
-                        let canonical_effects: Vec<String> = effects
+                        let canonical_effects: Vec<String> = body.effects
                             .iter()
                             .map(|e| self.canonicalize_effect(&e.name))
                             .collect();
@@ -444,8 +438,8 @@ impl<'a> Lowerer<'a> {
                             .entry(name.clone())
                             .or_insert(HandlerInfo {
                                 effects: canonical_effects,
-                                arms: arms.iter().map(|a| a.node.clone()).collect(),
-                                return_clause: return_clause.clone(),
+                                arms: body.arms.iter().map(|a| a.node.clone()).collect(),
+                                return_clause: body.return_clause.clone(),
                                 source_module: Some(module_name.clone()),
                             });
                     }

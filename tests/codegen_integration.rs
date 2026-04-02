@@ -107,7 +107,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         "_script",
         &elaborated,
         &ctx,
-        result.resolved_type_at_node_map(),
+        Some(&result),
         None,
     )
 }

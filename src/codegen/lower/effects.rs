@@ -163,6 +163,12 @@ impl<'a> Lowerer<'a> {
     /// Builds handler function(s) from the handler definition and passes them
     /// as extra parameters to the effectful computation.
     pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
+        // Check for dynamic handler (tuple-of-lambdas) before static resolution.
+        // Dynamic handlers are variables bound via `handle name = some_func()`.
+        if let Some(dynamic_info) = self.check_dynamic_handler(handler) {
+            return self.lower_with_dynamic(expr, dynamic_info);
+        }
+
         // Collect effects from BEAM-native handlers in this `with` block.
         let beam_native_effects: std::collections::HashSet<String> = match handler {
             Handler::Named(name, _) if self.is_beam_native_handler(name) => {
@@ -526,6 +532,115 @@ impl<'a> Lowerer<'a> {
                 (all_arms, resolved_return, handled_effects)
             }
         }
+    }
+
+    /// Check if a handler reference is a dynamic handler (tuple-of-lambdas).
+    /// Returns Some((tuple_var, effects)) if so.
+    fn check_dynamic_handler(&self, handler: &Handler) -> Option<(String, Vec<String>)> {
+        let name = match handler {
+            Handler::Named(name, _) => name,
+            Handler::Inline { named, .. } if named.len() == 1 && !named[0].node.name.is_empty() => {
+                &named[0].node.name
+            }
+            _ => return None,
+        };
+        self.handle_dynamic_vars.get(name).cloned()
+    }
+
+    /// Lower a `with` expression for a dynamic handler (tuple-of-lambdas).
+    /// Destructures the handler tuple to extract per-op handler functions.
+    fn lower_with_dynamic(
+        &mut self,
+        expr: &Expr,
+        dynamic_info: (String, Vec<String>),
+    ) -> CExpr {
+        let (tuple_var, handled_effects) = dynamic_info;
+        let handler_ops = self.effect_handler_ops(&handled_effects);
+
+        // Save handler params and set up per-op params from tuple elements
+        let saved_handler_params = self.current_handler_params.clone();
+        let saved_no_resume_ops = self.no_resume_ops.clone();
+
+        let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
+        for (i, (eff, op)) in handler_ops.iter().enumerate() {
+            let var_name = Self::handler_param_name(eff, op);
+            let key = format!("{}.{}", eff, op);
+            self.current_handler_params.insert(key, var_name.clone());
+            // Extract from tuple: erlang:element(I+1, TupleVar)
+            let element_call = super::util::cerl_call(
+                "erlang",
+                "element",
+                vec![
+                    CExpr::Lit(CLit::Int(i as i64 + 1)),
+                    CExpr::Var(tuple_var.clone()),
+                ],
+            );
+            handler_bindings.push((var_name, element_call));
+        }
+
+        // Lower the inner expression
+        let saved_return_k = self.current_return_k.take();
+        let result = self.lower_expr(expr);
+        self.current_return_k = saved_return_k;
+
+        self.current_handler_params = saved_handler_params;
+        self.no_resume_ops = saved_no_resume_ops;
+
+        // Wrap handler bindings around the result
+        handler_bindings
+            .into_iter()
+            .rev()
+            .fold(result, |body, (var, val)| {
+                CExpr::Let(var, Box::new(val), Box::new(body))
+            })
+    }
+
+    /// Lower a handler expression to a tuple of per-op handler lambdas.
+    /// Used when a handler expression appears as a value (returned from function,
+    /// passed as argument, etc.) rather than in a `handle` binding.
+    ///
+    /// The tuple layout is: ops sorted alphabetically by "Effect.op" key,
+    /// with an optional return clause lambda as the last element.
+    pub(super) fn lower_handler_expr_to_tuple(
+        &mut self,
+        body: &crate::ast::HandlerBody,
+    ) -> CExpr {
+        let canonical_effects: Vec<String> = body.effects.iter()
+            .map(|e| self.canonicalize_effect(&e.name))
+            .collect();
+        let handler_ops = self.effect_handler_ops(&canonical_effects);
+
+        // Index arms by op name for quick lookup
+        let arms_by_op: std::collections::HashMap<&str, &crate::ast::HandlerArm> = body.arms.iter()
+            .map(|a| (a.node.op_name.as_str(), &a.node))
+            .collect();
+
+        let mut tuple_elements = Vec::new();
+        for (_eff, op) in &handler_ops {
+            if let Some(arm) = arms_by_op.get(op.as_str()) {
+                tuple_elements.push(self.build_op_handler_fun(arm));
+            } else {
+                // Passthrough: identity continuation
+                let k_param = self.fresh();
+                tuple_elements.push(CExpr::Fun(
+                    vec![k_param.clone()],
+                    Box::new(CExpr::Apply(
+                        Box::new(CExpr::Var(k_param)),
+                        vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
+                    )),
+                ));
+            }
+        }
+        if let Some(rc) = &body.return_clause {
+            let param = if rc.params.is_empty() {
+                self.fresh()
+            } else {
+                super::util::core_var(&rc.params[0].0)
+            };
+            let ret_body = self.lower_expr(&rc.body);
+            tuple_elements.push(CExpr::Fun(vec![param], Box::new(ret_body)));
+        }
+        CExpr::Tuple(tuple_elements)
     }
 }
 

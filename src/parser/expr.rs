@@ -1416,6 +1416,17 @@ impl Parser {
                 })
             }
 
+            Token::Handler => {
+                // handler for Effect { arms... } -- anonymous handler expression
+                let parsed = self.parse_handler_body()?;
+                let end = self.tokens[self.pos.saturating_sub(1)].span;
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: span.to(end),
+                    kind: ExprKind::HandlerExpr { body: parsed.body },
+                })
+            }
+
             tok => {
                 self.pos -= 1; // put back
                 Err(ParseError {

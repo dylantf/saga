@@ -125,20 +125,18 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             id,
             name,
             name_span,
-            effects,
-            arms,
+            body,
             recovered_arms,
-            return_clause,
             span,
             ..
         } => {
             if !contains(span, offset) {
                 return None;
             }
-            for arm_ann in arms.iter().chain(recovered_arms.iter()) {
+            for arm_ann in body.arms.iter().chain(recovered_arms.iter()) {
                 let arm = &arm_ann.node;
                 if contains(&arm.span, offset) {
-                    let qualifier_len = arm.qualifier.as_ref().map_or(0, |q| q.len() + 1); // +1 for '.'
+                    let qualifier_len = arm.qualifier.as_ref().map_or(0, |q: &String| q.len() + 1); // +1 for '.'
                     let op_name_end = arm.span.start + qualifier_len + arm.op_name.len();
                     if offset >= arm.span.start && offset <= op_name_end {
                         return Some((
@@ -161,7 +159,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                     return Some(r);
                 }
             }
-            if let Some(rc) = return_clause {
+            if let Some(rc) = &body.return_clause {
                 for (param_name, param_span) in &rc.params {
                     if contains_ident(param_span, offset) {
                         return Some((param_name.clone(), *param_span, None));
@@ -171,7 +169,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                     return Some(r);
                 }
             }
-            find_in_effect_refs(effects, offset).or_else(|| {
+            find_in_effect_refs(&body.effects, offset).or_else(|| {
                 contains_ident(name_span, offset).then(|| (name.clone(), *name_span, Some(*id)))
             })
         }

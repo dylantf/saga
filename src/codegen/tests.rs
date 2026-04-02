@@ -40,7 +40,7 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
         "_script",
         &elaborated,
         &ctx,
-        result.resolved_type_at_node_map(),
+        Some(&result),
         source_file,
     )
 }

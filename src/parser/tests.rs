@@ -1715,23 +1715,21 @@ fn handler_def_simple() {
     match &decls[0] {
         Decl::HandlerDef {
             name,
-            effects,
-            arms,
-            return_clause,
+            body,
             ..
         } => {
             assert_eq!(name, "console_log");
-            assert_eq!(effect_names(effects), vec!["Log"]);
-            assert_eq!(arms.len(), 1);
-            assert_eq!(arms[0].node.op_name, "log");
-            let param_names: Vec<&str> = arms[0]
+            assert_eq!(effect_names(&body.effects), vec!["Log"]);
+            assert_eq!(body.arms.len(), 1);
+            assert_eq!(body.arms[0].node.op_name, "log");
+            let param_names: Vec<&str> = body.arms[0]
                 .node
                 .params
                 .iter()
                 .map(|(n, _)| n.as_str())
                 .collect();
             assert_eq!(param_names, vec!["level", "msg"]);
-            assert!(return_clause.is_none());
+            assert!(body.return_clause.is_none());
         }
         _ => panic!("expected HandlerDef, got {:?}", decls[0]),
     }
@@ -1746,15 +1744,14 @@ fn handler_def_with_return_clause() {
     match &decls[0] {
         Decl::HandlerDef {
             name,
-            arms,
-            return_clause,
+            body,
             ..
         } => {
             assert_eq!(name, "to_result");
-            assert_eq!(arms.len(), 1);
-            assert_eq!(arms[0].node.op_name, "fail");
-            assert!(return_clause.is_some());
-            let rc = return_clause.as_ref().unwrap();
+            assert_eq!(body.arms.len(), 1);
+            assert_eq!(body.arms[0].node.op_name, "fail");
+            assert!(body.return_clause.is_some());
+            let rc = body.return_clause.as_ref().unwrap();
             let rc_names: Vec<&str> = rc.params.iter().map(|(n, _)| n.as_str()).collect();
             assert_eq!(rc_names, vec!["value"]);
         }
@@ -1769,9 +1766,9 @@ fn handler_def_multi_effect() {
     );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::HandlerDef { effects, arms, .. } => {
-            assert_eq!(effect_names(effects), vec!["Log", "Http"]);
-            assert_eq!(arms.len(), 2);
+        Decl::HandlerDef { body, .. } => {
+            assert_eq!(effect_names(&body.effects), vec!["Log", "Http"]);
+            assert_eq!(body.arms.len(), 2);
         }
         _ => panic!("expected HandlerDef, got {:?}", decls[0]),
     }
@@ -1786,16 +1783,14 @@ fn handler_def_with_needs() {
     match &decls[0] {
         Decl::HandlerDef {
             name,
-            effects,
-            needs,
-            arms,
+            body,
             ..
         } => {
             assert_eq!(name, "stripe");
-            assert_eq!(effect_names(effects), vec!["Billing"]);
-            assert_eq!(effect_names(needs), vec!["Log", "Http"]);
-            assert_eq!(arms.len(), 1);
-            assert_eq!(arms[0].node.op_name, "charge");
+            assert_eq!(effect_names(&body.effects), vec!["Billing"]);
+            assert_eq!(effect_names(&body.needs), vec!["Log", "Http"]);
+            assert_eq!(body.arms.len(), 1);
+            assert_eq!(body.arms[0].node.op_name, "charge");
         }
         _ => panic!("expected HandlerDef, got {:?}", decls[0]),
     }
@@ -1806,8 +1801,8 @@ fn handler_def_without_needs() {
     let decls =
         parse("handler mock for Billing {\n  charge account amount = resume (fake_receipt ())\n}");
     match &decls[0] {
-        Decl::HandlerDef { needs, .. } => {
-            assert!(needs.is_empty());
+        Decl::HandlerDef { body, .. } => {
+            assert!(body.needs.is_empty());
         }
         _ => panic!("expected HandlerDef"),
     }
@@ -1818,8 +1813,8 @@ fn handler_def_needs_trailing_comma() {
     let decls =
         parse("handler stripe for Billing needs {Log, Http,} {\n  charge a b = resume ()\n}");
     match &decls[0] {
-        Decl::HandlerDef { needs, .. } => {
-            assert_eq!(effect_names(needs), vec!["Log", "Http"]);
+        Decl::HandlerDef { body, .. } => {
+            assert_eq!(effect_names(&body.needs), vec!["Log", "Http"]);
         }
         _ => panic!("expected HandlerDef"),
     }
@@ -2732,22 +2727,21 @@ fn handler_for_parameterized_effect() {
     match &decls[0] {
         Decl::HandlerDef {
             name,
-            effects,
-            arms,
+            body,
             ..
         } => {
             assert_eq!(name, "counter");
-            assert_eq!(effects.len(), 1);
-            assert_eq!(effects[0].name, "State");
-            assert_eq!(effects[0].type_args.len(), 1);
+            assert_eq!(body.effects.len(), 1);
+            assert_eq!(body.effects[0].name, "State");
+            assert_eq!(body.effects[0].type_args.len(), 1);
             assert_eq!(
-                effects[0].type_args[0],
+                body.effects[0].type_args[0],
                 TypeExpr::Named {
                     name: "Int".into(),
                     span: Span { start: 0, end: 0 }
                 }
             );
-            assert_eq!(arms.len(), 2);
+            assert_eq!(body.arms.len(), 2);
         }
         _ => panic!("expected HandlerDef"),
     }
@@ -2762,19 +2756,17 @@ fn handler_with_where_clause() {
     match &decls[0] {
         Decl::HandlerDef {
             name,
-            effects,
-            where_clause,
-            arms,
+            body,
             ..
         } => {
             assert_eq!(name, "show_store");
-            assert_eq!(effects.len(), 1);
-            assert_eq!(effects[0].name, "Store");
-            assert_eq!(where_clause.len(), 1);
-            assert_eq!(where_clause[0].type_var, "a");
-            assert_eq!(where_clause[0].traits.len(), 1);
-            assert_eq!(where_clause[0].traits[0].0, "Show");
-            assert_eq!(arms.len(), 2);
+            assert_eq!(body.effects.len(), 1);
+            assert_eq!(body.effects[0].name, "Store");
+            assert_eq!(body.where_clause.len(), 1);
+            assert_eq!(body.where_clause[0].type_var, "a");
+            assert_eq!(body.where_clause[0].traits.len(), 1);
+            assert_eq!(body.where_clause[0].traits[0].0, "Show");
+            assert_eq!(body.arms.len(), 2);
         }
         _ => panic!("expected HandlerDef"),
     }
@@ -2789,17 +2781,15 @@ fn handler_with_needs_and_where_clause() {
     match &decls[0] {
         Decl::HandlerDef {
             name,
-            effects,
-            needs,
-            where_clause,
+            body,
             ..
         } => {
             assert_eq!(name, "logged_store");
-            assert_eq!(effects[0].name, "Store");
-            assert_eq!(effect_names(needs), vec!["Log"]);
-            assert_eq!(where_clause.len(), 1);
-            assert_eq!(where_clause[0].type_var, "a");
-            assert_eq!(where_clause[0].traits[0].0, "Show");
+            assert_eq!(body.effects[0].name, "Store");
+            assert_eq!(effect_names(&body.needs), vec!["Log"]);
+            assert_eq!(body.where_clause.len(), 1);
+            assert_eq!(body.where_clause[0].type_var, "a");
+            assert_eq!(body.where_clause[0].traits[0].0, "Show");
         }
         _ => panic!("expected HandlerDef"),
     }

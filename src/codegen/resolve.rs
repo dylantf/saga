@@ -593,26 +593,8 @@ fn resolve_decl(
         Decl::Let { value, .. } | Decl::Val { value, .. } => {
             resolve_expr(value, scope, map);
         }
-        Decl::HandlerDef {
-            arms,
-            return_clause,
-            ..
-        } => {
-            for arm in arms {
-                // Handler arm params shadow module names in the arm body
-                let param_names: HashSet<String> =
-                    arm.node.params.iter().map(|(name, _)| name.clone()).collect();
-                scope.push(param_names);
-                resolve_expr(&arm.node.body, scope, map);
-                scope.pop();
-            }
-            if let Some(rc) = return_clause {
-                let param_names: HashSet<String> =
-                    rc.params.iter().map(|(name, _)| name.clone()).collect();
-                scope.push(param_names);
-                resolve_expr(&rc.body, scope, map);
-                scope.pop();
-            }
+        Decl::HandlerDef { body, .. } => {
+            resolve_handler_body_names(&body, scope, map);
         }
         Decl::ImplDef { methods, .. } => {
             for method in methods {
@@ -628,6 +610,27 @@ fn resolve_decl(
             }
         }
         _ => {}
+    }
+}
+
+fn resolve_handler_body_names(
+    body: &ast::HandlerBody,
+    scope: &mut Scope<'_>,
+    map: &mut ResolutionMap,
+) {
+    for arm in &body.arms {
+        let param_names: HashSet<String> =
+            arm.node.params.iter().map(|(name, _)| name.clone()).collect();
+        scope.push(param_names);
+        resolve_expr(&arm.node.body, scope, map);
+        scope.pop();
+    }
+    if let Some(rc) = &body.return_clause {
+        let param_names: HashSet<String> =
+            rc.params.iter().map(|(name, _)| name.clone()).collect();
+        scope.push(param_names);
+        resolve_expr(&rc.body, scope, map);
+        scope.pop();
     }
 }
 
@@ -843,6 +846,9 @@ fn resolve_expr(
                 resolve_expr(timeout, scope, map);
                 resolve_expr(body, scope, map);
             }
+        }
+        ExprKind::HandlerExpr { body } => {
+            resolve_handler_body_names(body, scope, map);
         }
         ExprKind::DictMethodAccess { dict, .. } => {
             resolve_expr(dict, scope, map);

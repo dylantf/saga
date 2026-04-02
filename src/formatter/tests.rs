@@ -203,12 +203,8 @@ fn normalize_decl(d: &mut Decl) {
         Decl::HandlerDef {
             id,
             name_span,
-            effects,
-            needs,
-            where_clause,
-            arms,
+            body,
             recovered_arms,
-            return_clause,
             dangling_trivia,
             span,
             ..
@@ -217,16 +213,16 @@ fn normalize_decl(d: &mut Decl) {
             *name_span = S;
             *span = S;
             dangling_trivia.clear();
-            for er in effects.iter_mut().chain(needs.iter_mut()) {
+            for er in body.effects.iter_mut().chain(body.needs.iter_mut()) {
                 normalize_effect_ref(er);
             }
-            for tb in where_clause.iter_mut() {
+            for tb in body.where_clause.iter_mut() {
                 normalize_trait_bound(tb);
             }
-            for arm in arms.iter_mut().chain(recovered_arms.iter_mut()) {
+            for arm in body.arms.iter_mut().chain(recovered_arms.iter_mut()) {
                 normalize_annotated(arm, normalize_handler_arm);
             }
-            if let Some(rc) = return_clause {
+            if let Some(rc) = &mut body.return_clause {
                 normalize_handler_arm(rc);
             }
         }
@@ -474,6 +470,14 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
                     }
                     ComprehensionQualifier::Guard(e) => normalize_expr(e),
                 }
+            }
+        }
+        ExprKind::HandlerExpr { body } => {
+            for arm in body.arms.iter_mut() {
+                normalize_annotated(arm, normalize_handler_arm);
+            }
+            if let Some(rc) = &mut body.return_clause {
+                normalize_handler_arm(rc);
             }
         }
         ExprKind::DictMethodAccess { dict, .. } => normalize_expr(dict),

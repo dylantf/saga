@@ -508,6 +508,40 @@ pub fn format_expr(expr: &Expr) -> Doc {
             docs_from_vec(parts)
         }
 
+        ExprKind::HandlerExpr { body } => {
+            let mut parts = Vec::new();
+            parts.push(Doc::text("handler for "));
+            let eff_docs: Vec<Doc> = body.effects.iter()
+                .map(super::type_expr::format_effect_ref)
+                .collect();
+            parts.push(Doc::join(Doc::text(", "), eff_docs));
+            if !body.needs.is_empty() {
+                parts.push(Doc::text(" "));
+                parts.push(super::type_expr::format_needs(&body.needs, &None));
+            }
+            if !body.where_clause.is_empty() {
+                parts.push(Doc::text(" "));
+                parts.push(super::type_expr::format_where_clause(&body.where_clause));
+            }
+            parts.push(Doc::text(" {"));
+            let mut body_items = Vec::new();
+            for ann in &body.arms {
+                body_items.push(Doc::hardline());
+                body_items.push(format_trivia(&ann.leading_trivia));
+                body_items.push(format_handler_arm(&ann.node));
+                body_items.push(format_trailing(&ann.trailing_comment));
+            }
+            if let Some(rc) = &body.return_clause {
+                body_items.push(Doc::hardline());
+                body_items.push(format_handler_arm(rc));
+            }
+            let body_doc = format_braced_body(&body_items, &[]);
+            parts.push(Doc::nest(2, body_doc));
+            parts.push(Doc::hardline());
+            parts.push(Doc::text("}"));
+            docs_from_vec(parts)
+        }
+
         // Elaboration-only
         ExprKind::DictMethodAccess { .. }
         | ExprKind::DictRef { .. }

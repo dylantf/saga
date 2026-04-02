@@ -1,4 +1,4 @@
-use crate::ast::{Annotated, BinOp, CaseArm, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
+use crate::ast::{Annotated, BinOp, CaseArm, Decl, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
 
 use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
 use crate::token::Span;
@@ -460,6 +460,28 @@ impl Checker {
                 Ok(ann_ty)
             }
 
+            ExprKind::HandlerExpr { body } => {
+                // Create a synthetic HandlerDef and reuse register_handler
+                let synthetic_name = format!("__handler_expr_{}", node_id.0);
+                let synthetic_decl = Decl::HandlerDef {
+                    id: node_id,
+                    doc: vec![],
+                    public: false,
+                    name: synthetic_name.clone(),
+                    name_span: span,
+                    body: body.clone(),
+                    recovered_arms: vec![],
+                    dangling_trivia: vec![],
+                    span,
+                };
+                self.register_handler(&synthetic_decl)?;
+                // register_handler inserted the Handler type into self.env
+                let scheme = self.env.get(&synthetic_name).unwrap();
+                let ty = scheme.ty.clone();
+                self.record_type(node_id, &ty);
+                Ok(ty)
+            }
+
             ExprKind::DictMethodAccess { .. }
             | ExprKind::DictRef { .. }
             | ExprKind::ForeignCall { .. } => {
@@ -613,7 +635,7 @@ impl Checker {
     }
 
     /// Extract HandlerInfo from a handle binding's RHS expression.
-    /// Handles direct variable references and if/else conditionals.
+    /// Handles direct variable references, if/else conditionals, and handler expressions.
     fn extract_handler_info(&self, expr: &Expr) -> Option<super::HandlerInfo> {
         match &expr.kind {
             ExprKind::Var { name } => self.handlers.get(name).cloned(),
@@ -627,7 +649,50 @@ impl Checker {
                 self.extract_handler_info(then_branch)
                     .or_else(|| self.extract_handler_info(else_branch))
             }
+            ExprKind::HandlerExpr { .. } => {
+                // Handler expressions are registered under a synthetic name by infer_expr
+                let synthetic = format!("__handler_expr_{}", expr.id.0);
+                self.handlers.get(&synthetic).cloned()
+            }
             _ => None,
+        }
+    }
+
+    /// Build a minimal HandlerInfo from a Handler type.
+    /// Used for dynamic handle bindings where the handler arms aren't statically known.
+    fn handler_info_from_type(&self, ty: &Type) -> Option<super::HandlerInfo> {
+        let resolved = self.sub.apply(ty);
+        if let Type::Con(ref name, ref args) = resolved
+            && name == "Handler"
+        {
+            let effects: Vec<String> = args
+                .iter()
+                .filter_map(|arg| {
+                    if let Type::Con(eff_name, _) = self.sub.apply(arg) {
+                        // Try to find canonical name
+                        self.effects.keys()
+                            .find(|k| k.ends_with(&format!(".{}", eff_name)) || *k == &eff_name)
+                            .cloned()
+                            .or(Some(eff_name))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if effects.is_empty() {
+                return None;
+            }
+            Some(super::HandlerInfo {
+                effects,
+                return_type: None,
+                needs_effects: super::EffectRow { effects: vec![], tail: None },
+                forall: vec![],
+                arm_spans: std::collections::HashMap::new(),
+                where_constraints: std::collections::HashMap::new(),
+                source_module: self.current_module.clone(),
+            })
+        } else {
+            None
         }
     }
 
@@ -803,6 +868,11 @@ impl Checker {
                     // conditional), copy its HandlerInfo under the new name so
                     // `with name` works in handler resolution.
                     if let Some(info) = self.extract_handler_info(value) {
+                        self.handlers.insert(name.clone(), info);
+                    } else if let Some(info) = self.handler_info_from_type(&ty) {
+                        // Dynamic handler (e.g. factory function result): build
+                        // a minimal HandlerInfo from the Handler type so the
+                        // lowerer knows which effects to destructure.
                         self.handlers.insert(name.clone(), info);
                     }
                     let def_id = crate::ast::NodeId::fresh();

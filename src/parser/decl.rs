@@ -3,6 +3,13 @@ use crate::token::{Span, Token};
 
 use super::{ParseError, Parser};
 
+/// Result of parsing a handler body (shared by declarations and expressions).
+pub(super) struct ParsedHandlerBody {
+    pub body: HandlerBody,
+    pub recovered_arms: Vec<Annotated<HandlerArm>>,
+    pub dangling_trivia: Vec<Trivia>,
+}
+
 /// Parsed type annotation: labeled params, return type, and effect requirements.
 type AnnotatedSignature = (Vec<(String, TypeExpr)>, TypeExpr, Vec<EffectRef>, Option<(String, Span)>);
 
@@ -532,11 +539,12 @@ impl Parser {
     }
 
     // Parses: handler <name> for <Effect>, ... { <op> <params> -> <body> ... }
-    fn parse_handler_def(&mut self, public: bool) -> Result<Decl, ParseError> {
-        let start = self.tokens[self.pos].span;
-        self.advance(); // consume 'handler'
-        let name_span = self.tokens[self.pos].span;
-        let name = self.expect_ident()?;
+    /// Parse a handler body: `for Effect1, Effect2 needs {E3} where {a: Show} { arms... }`.
+    /// Shared by handler declarations and handler expressions.
+    /// Returns (HandlerBody, recovered_arms, dangling_trivia).
+    pub(super) fn parse_handler_body(
+        &mut self,
+    ) -> Result<ParsedHandlerBody, ParseError> {
         self.expect(Token::For)?;
 
         let mut effects = vec![self.parse_effect_ref()?];
@@ -667,8 +675,28 @@ impl Parser {
         }
 
         let dangling_trivia = self.take_leading_trivia(self.pos);
-        let end = self.tokens[self.pos].span;
         self.expect(Token::RBrace)?;
+
+        Ok(ParsedHandlerBody {
+            body: HandlerBody {
+                effects,
+                needs,
+                where_clause,
+                arms,
+                return_clause,
+            },
+            recovered_arms,
+            dangling_trivia,
+        })
+    }
+
+    fn parse_handler_def(&mut self, public: bool) -> Result<Decl, ParseError> {
+        let start = self.tokens[self.pos].span;
+        self.advance(); // consume 'handler'
+        let name_span = self.tokens[self.pos].span;
+        let name = self.expect_ident()?;
+        let parsed = self.parse_handler_body()?;
+        let end = self.tokens[self.pos.saturating_sub(1)].span;
 
         Ok(Decl::HandlerDef {
             id: NodeId::fresh(),
@@ -676,13 +704,9 @@ impl Parser {
             public,
             name,
             name_span,
-            effects,
-            needs,
-            where_clause,
-            arms,
-            recovered_arms,
-            return_clause,
-            dangling_trivia,
+            body: parsed.body,
+            recovered_arms: parsed.recovered_arms,
+            dangling_trivia: parsed.dangling_trivia,
             span: start.to(end),
         })
     }

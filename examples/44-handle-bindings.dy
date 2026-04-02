@@ -12,16 +12,15 @@ handler console_log for Log {
 }
 
 handler quiet_log for Log {
-  log msg = resume ()
+  log _ = resume ()
 }
 
 main () = {
   # Simple handle binding
   handle logger = console_log
   log! "hello from handle binding" with logger
-  log! "hello from inline block" with { logger }
+  log! "hello from inline block" with {logger}
 
-  # Conditional handle binding
   # Conditional handle binding (True branch)
   let dev = True
   handle cond_logger = if dev then console_log else quiet_log
@@ -30,4 +29,13 @@ main () = {
   # Conditional handle binding (False branch)
   handle cond_logger2 = if False then console_log else quiet_log
   log! "conditional false (should NOT print)" with cond_logger2
+
+  # Handler expression (Phase 1b)
+  handle prefixed =
+    handler for Log {
+      log msg = {
+        resume println $"[PREFIX] {msg}"
+      }
+    }
+  log! "hello from handler expression" with prefixed
 }

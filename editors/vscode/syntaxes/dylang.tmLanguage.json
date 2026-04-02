@@ -104,7 +104,7 @@
         },
         {
           "name": "keyword.declaration.dylang",
-          "match": "\\b(let|fun|pub|type|record|effect|handler|trait|impl|module|import|needs|where|resume)\\b"
+          "match": "\\b(let|fun|pub|type|record|effect|handler|handle|trait|impl|module|import|needs|where|resume)\\b"
         },
         {
           "name": "keyword.other.dylang",

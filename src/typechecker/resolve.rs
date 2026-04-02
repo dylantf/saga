@@ -137,27 +137,27 @@ fn resolve_decl(decl: &mut Decl, scope: &ScopeMap, local_funs: &HashSet<String>)
                 resolve_expr(&mut m.body, scope, &locals);
             }
         }
-        Decl::HandlerDef {
-            arms,
-            return_clause,
-            ..
-        } => {
-            for arm in arms.iter_mut() {
-                let mut locals = local_funs.clone();
-                for (param_name, _) in &arm.node.params {
-                    locals.insert(param_name.clone());
-                }
-                resolve_expr(&mut arm.node.body, scope, &locals);
-            }
-            if let Some(ret) = return_clause {
-                let mut locals = local_funs.clone();
-                for (param_name, _) in &ret.params {
-                    locals.insert(param_name.clone());
-                }
-                resolve_expr(&mut ret.body, scope, &locals);
-            }
+        Decl::HandlerDef { body, .. } => {
+            resolve_handler_body(body, scope, local_funs);
         }
         _ => {}
+    }
+}
+
+fn resolve_handler_body(body: &mut HandlerBody, scope: &ScopeMap, local_funs: &HashSet<String>) {
+    for arm in body.arms.iter_mut() {
+        let mut locals = local_funs.clone();
+        for (param_name, _) in &arm.node.params {
+            locals.insert(param_name.clone());
+        }
+        resolve_expr(&mut arm.node.body, scope, &locals);
+    }
+    if let Some(ret) = &mut body.return_clause {
+        let mut locals = local_funs.clone();
+        for (param_name, _) in &ret.params {
+            locals.insert(param_name.clone());
+        }
+        resolve_expr(&mut ret.body, scope, &locals);
     }
 }
 

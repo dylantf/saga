@@ -68,11 +68,11 @@ fn desugar_decl(decl: &mut Decl) {
         Decl::Let { value, .. } | Decl::Val { value, .. } => {
             desugar_expr(value);
         }
-        Decl::HandlerDef { arms, recovered_arms, return_clause, .. } => {
-            for ann_arm in arms.iter_mut().chain(recovered_arms.iter_mut()) {
+        Decl::HandlerDef { body, recovered_arms, .. } => {
+            for ann_arm in body.arms.iter_mut().chain(recovered_arms.iter_mut()) {
                 desugar_expr(&mut ann_arm.node.body);
             }
-            if let Some(rc) = return_clause {
+            if let Some(rc) = &mut body.return_clause {
                 desugar_expr(&mut rc.body);
             }
         }
@@ -170,6 +170,14 @@ fn desugar_expr(expr: &mut Expr) {
             desugar_handler(handler);
         }
         ExprKind::Resume { value } => desugar_expr(value),
+        ExprKind::HandlerExpr { body } => {
+            for arm in &mut body.arms {
+                desugar_expr(&mut arm.node.body);
+            }
+            if let Some(rc) = &mut body.return_clause {
+                desugar_expr(&mut rc.body);
+            }
+        }
         ExprKind::Tuple { elements } => {
             for e in elements {
                 desugar_expr(e);

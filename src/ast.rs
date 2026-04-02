@@ -253,14 +253,9 @@ pub enum Decl {
         public: bool,
         name: String,
         name_span: Span,
-        effects: Vec<EffectRef>,
-        needs: Vec<EffectRef>,
-        where_clause: Vec<TraitBound>,
-        arms: Vec<Annotated<HandlerArm>>,
+        body: HandlerBody,
         /// Partially parsed arms from error recovery (for LSP hover, not typechecked).
         recovered_arms: Vec<Annotated<HandlerArm>>,
-        /// `return value = Ok(value)` clause
-        return_clause: Option<Box<HandlerArm>>,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
         span: Span,
@@ -496,6 +491,9 @@ pub enum ExprKind {
         type_expr: TypeExpr,
     },
 
+    /// `handler for Effect { op param = body ... }` -- anonymous handler expression
+    HandlerExpr { body: HandlerBody },
+
     // --- Surface syntax (desugared before typechecking) ---
     /// `x |> f |> g` -- forward pipe chain.
     /// Stored as a flat list of annotated segments: [x, f, g].
@@ -620,6 +618,9 @@ impl Expr {
                         .is_some_and(|(t, b)| t.contains_resume() || b.contains_resume())
             }
             ExprKind::Ascription { expr, .. } => expr.contains_resume(),
+            // Handler expression arm bodies have their own resume context,
+            // similar to With -- don't look through them.
+            ExprKind::HandlerExpr { .. } => false,
             ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {
                 segments.iter().any(|s| s.node.contains_resume())
             }
@@ -999,6 +1000,18 @@ pub struct HandlerArm {
     pub params: Vec<(String, Span)>,
     pub body: Box<Expr>,
     pub span: Span,
+}
+
+/// Shared handler body used by both declarations (`Decl::HandlerDef`) and
+/// expressions (`ExprKind::HandlerExpr`). Contains only semantic fields;
+/// formatting/recovery concerns live on the wrapper.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandlerBody {
+    pub effects: Vec<EffectRef>,
+    pub needs: Vec<EffectRef>,
+    pub where_clause: Vec<TraitBound>,
+    pub arms: Vec<Annotated<HandlerArm>>,
+    pub return_clause: Option<Box<HandlerArm>>,
 }
 
 /// `a: Show + Eq` or `a: ConvertTo b` in a `where` clause

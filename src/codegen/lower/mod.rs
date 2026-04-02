@@ -130,14 +130,18 @@ pub struct Lowerer<'a> {
     /// Bare effect name -> canonical effect name (e.g. "Assert" -> "Std.Test.Assert").
     /// Built during init_module for canonicalizing effect names from the type system.
     effect_canonical: HashMap<String, String>,
-    /// Resolved node types for the module currently being lowered.
-    /// This is intentionally current-module-only: local `let fun` lowering needs
-    /// direct access to resolved types, while cross-module eta-reduction relies on
-    /// imported function resolution/codegen info rather than another module's AST types.
-    current_resolved_types: HashMap<crate::ast::NodeId, crate::typechecker::Type>,
+    /// Typechecker result for the module currently being lowered.
+    /// Provides resolved types, handler info, effect info, etc.
+    /// None for modules compiled without full typechecking (e.g. codegen tests).
+    check_result: Option<crate::typechecker::CheckResult>,
     /// Conditional handle bindings: name -> (cond_var, cond_expr, then_canonical, else_canonical).
     /// Used during lower_with to generate conditional handler dispatch.
     handle_cond_vars: HashMap<String, (String, CExpr, String, String)>,
+    /// Dynamic handle bindings: name -> (lowered_var, canonical_effect_names).
+    /// For `handle name = some_function_call()` where the handler isn't statically
+    /// resolvable, the RHS is lowered to a tuple-of-lambdas and bound to a variable.
+    /// At `with` sites, the tuple is destructured to extract per-op handler functions.
+    handle_dynamic_vars: HashMap<String, (String, Vec<String>)>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -145,7 +149,7 @@ impl<'a> Lowerer<'a> {
         ctx: &'a super::CodegenContext,
         constructor_atoms: super::resolve::ConstructorAtoms,
         resolved: super::resolve::ResolutionMap,
-        current_resolved_types: HashMap<crate::ast::NodeId, crate::typechecker::Type>,
+        check_result: Option<&crate::typechecker::CheckResult>,
         source_info: Option<SourceInfo>,
     ) -> Self {
         Lowerer {
@@ -173,8 +177,9 @@ impl<'a> Lowerer<'a> {
             inline_vals: HashMap::new(),
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
-            current_resolved_types,
+            check_result: check_result.cloned(),
             handle_cond_vars: HashMap::new(),
+            handle_dynamic_vars: HashMap::new(),
         }
     }
 
@@ -264,6 +269,18 @@ impl<'a> Lowerer<'a> {
             .cloned()
             .unwrap_or_else(|| name.to_string())
     }
+
+    /// Try to resolve a handler name to a known handler definition.
+    /// Returns Some(canonical) if the handler exists in handler_defs, None otherwise.
+    fn resolve_handler_name_opt(&self, name: &str) -> Option<String> {
+        let canonical = self.resolve_handler_name(name);
+        if self.handler_defs.contains_key(&canonical) {
+            Some(canonical)
+        } else {
+            None
+        }
+    }
+
 
     /// Check if a handler is BEAM-native (should be lowered to direct BEAM calls).
     pub(super) fn is_beam_native_handler(&self, name: &str) -> bool {
@@ -1995,6 +2012,12 @@ impl<'a> Lowerer<'a> {
                         vec![CExpr::Var(v)],
                     )),
                 )
+            }
+
+            // Handler expression as a value (e.g. returned from a function).
+            // Produce a tuple of per-op handler lambdas for runtime use.
+            ExprKind::HandlerExpr { body } => {
+                self.lower_handler_expr_to_tuple(body)
             }
 
             // StringInterpolation should be desugared before reaching the lowerer,

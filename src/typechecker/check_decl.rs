@@ -1605,17 +1605,14 @@ impl Checker {
             id: def_id,
             name,
             name_span,
-            effects: effect_names,
-            needs,
-            where_clause,
-            arms,
-            return_clause,
+            body,
             span,
             ..
         } = decl
         else {
             unreachable!("register_handler called with non-HandlerDef");
         };
+        let ast::HandlerBody { effects: effect_names, needs, where_clause, arms, return_clause } = body;
         let return_clause = return_clause.as_deref();
         // Save and clear effect/field tracking for this handler body
         let body_scope = self.enter_scope();

@@ -351,15 +351,16 @@ impl<'a> Lowerer<'a> {
                 // Build the function body (same logic as top-level multi-clause funs)
                 let source_arity = pats::lower_params(clauses[0].0).len();
                 let (arity, effects, param_absorbed_effects) = self
-                    .current_resolved_types
-                    .get(&fun_id)
+                    .check_result
+                    .as_ref()
+                    .and_then(|cr| cr.resolved_type_for_node(fun_id))
                     .map(|ty| {
-                        let (base_arity, effects) = arity_and_effects_from_type(ty);
+                        let (base_arity, effects) = arity_and_effects_from_type(&ty);
                         let effects = self.canonicalize_effects(effects);
                         let handler_count = self.effect_handler_ops(&effects).len();
                         let expanded_arity =
                             base_arity + handler_count + if handler_count > 0 { 1 } else { 0 };
-                        let param_absorbed_effects = param_absorbed_effects_from_type(ty)
+                        let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
                             .into_iter()
                             .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
                             .collect::<HashMap<usize, Vec<String>>>();
@@ -579,8 +580,16 @@ impl<'a> Lowerer<'a> {
                 // resolves correctly. For static references, this is purely a
                 // compile-time alias. For conditionals, we lower the condition
                 // and register a synthetic handler that dispatches at runtime.
+                // Dynamic handlers lower the RHS and bind it to a variable.
                 if let Stmt::Handle { name, value, .. } = first {
                     self.lower_handle_binding(name, value);
+                    // If this became a dynamic handler, we need to actually
+                    // lower the RHS and bind the result variable.
+                    if let Some((var, _effects)) = self.handle_dynamic_vars.get(name).cloned() {
+                        let rhs_ce = self.lower_expr(value);
+                        let rest_ce = self.lower_block(rest);
+                        return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
+                    }
                     return self.lower_block(rest);
                 }
 
@@ -1055,9 +1064,29 @@ impl<'a> Lowerer<'a> {
     /// arms wrapped in a conditional at runtime.
     fn lower_handle_binding(&mut self, name: &str, value: &Expr) {
         // Direct handler reference: compile-time alias
-        if let ExprKind::Var { name: handler_name } = &value.kind {
+        if let ExprKind::Var { name: handler_name } = &value.kind
+            && self.resolve_handler_name_opt(handler_name).is_some()
+        {
             let canonical = self.resolve_handler_name(handler_name);
             self.handler_canonical.insert(name.to_string(), canonical);
+            return;
+        }
+        // Handler expression: register arms directly under synthetic name
+        if let ExprKind::HandlerExpr { body } = &value.kind {
+            let synthetic = format!("__handler_expr_{}", value.id.0);
+            let canonical_effects = body.effects.iter()
+                .map(|e| self.canonicalize_effect(&e.name))
+                .collect();
+            self.handler_defs.insert(
+                synthetic.clone(),
+                super::HandlerInfo {
+                    effects: canonical_effects,
+                    arms: body.arms.iter().map(|a| a.node.clone()).collect(),
+                    return_clause: body.return_clause.clone(),
+                    source_module: None,
+                },
+            );
+            self.handler_canonical.insert(name.to_string(), synthetic);
             return;
         }
         // Conditional: generate runtime dispatch
@@ -1081,16 +1110,38 @@ impl<'a> Lowerer<'a> {
                 // Alias to then-branch for static resolution; conditional
                 // dispatch is handled in lower_with
                 self.handler_canonical.insert(name.to_string(), then_c);
+                return;
             }
+        }
+
+        // Dynamic handler: RHS is an arbitrary expression (e.g. function call).
+        // Look up effect names from the typechecker's check result.
+        if let Some(cr) = &self.check_result
+            && let Some(info) = cr.handlers.get(name)
+        {
+            let effects = info.effects.iter()
+                .map(|e| self.canonicalize_effect(e))
+                .collect();
+            let var = self.fresh();
+            self.handle_dynamic_vars.insert(name.to_string(), (var, effects));
         }
     }
 
     /// Resolve a handle binding's RHS to a canonical handler name.
-    /// Walks through variable references and if/else branches.
+    /// Walks through variable references, if/else branches, and handler expressions.
     fn resolve_handle_value(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
             ExprKind::Var { name } => {
                 Some(self.resolve_handler_name(name))
+            }
+            ExprKind::HandlerExpr { .. } => {
+                // Handler expressions registered under synthetic name
+                let synthetic = format!("__handler_expr_{}", expr.id.0);
+                if self.handler_defs.contains_key(&synthetic) {
+                    Some(synthetic)
+                } else {
+                    None
+                }
             }
             ExprKind::If {
                 then_branch,
