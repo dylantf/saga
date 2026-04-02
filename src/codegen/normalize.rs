@@ -507,6 +507,7 @@ pub fn normalize_effects(program: &Program) -> Program {
                     .iter()
                     .map(|ann| Annotated::bare(HandlerArm {
                         op_name: ann.node.op_name.clone(),
+                        qualifier: ann.node.qualifier.clone(),
                         params: ann.node.params.clone(),
                         body: Box::new(normalizer.normalize_expr(&ann.node.body)),
                         span: ann.node.span,
@@ -515,6 +516,7 @@ pub fn normalize_effects(program: &Program) -> Program {
                 let new_return = return_clause.as_ref().map(|rc| {
                     Box::new(HandlerArm {
                         op_name: rc.op_name.clone(),
+                        qualifier: rc.qualifier.clone(),
                         params: rc.params.clone(),
                         body: Box::new(normalizer.normalize_expr(&rc.body)),
                         span: rc.span,

@@ -584,6 +584,7 @@ impl Parser {
                     let arm_end = body.span;
                     return_clause = Some(Box::new(HandlerArm {
                         op_name: "return".to_string(),
+                        qualifier: None,
                         params: vec![(param, param_span)],
                         body: Box::new(body),
                         span: arm_start.to(arm_end),
@@ -610,6 +611,7 @@ impl Parser {
                     arms.push(Annotated {
                         node: HandlerArm {
                             op_name,
+                            qualifier: None,
                             params,
                             body: Box::new(body),
                             span: arm_start.to(arm_end),
@@ -644,6 +646,7 @@ impl Parser {
                     recovered_arms.push(Annotated {
                         node: HandlerArm {
                             op_name,
+                            qualifier: None,
                             params,
                             body: Box::new(Expr {
                                 id: NodeId::fresh(),

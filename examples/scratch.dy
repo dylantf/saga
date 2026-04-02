@@ -1,11 +1,35 @@
 effect Logger {
+  fun log : String -> String -> Unit
+}
+
+effect Logger2 {
   fun log : String -> Unit
 }
 
-main () = {
-  let console_log s = log! s with {
-    log s = println s
-  }
+handler console_log for Logger {
+  log level msg = println $"{level} {msg}"
+}
 
-  console_log "Hello world"
+handler console_log2 for Logger2 {
+  log msg = println msg
+}
+
+fun log_both : (level: String) -> (message: String) -> Unit
+  needs {Logger, Logger2}
+log_both level message = {
+  Logger.log! level message
+  Logger2.log! message
+}
+
+main () = {
+  log_both "debug" "oops" with {
+    Logger.log level message = {
+      println $"{level} {message}"
+      resume ()
+    }
+    Logger2.log message = {
+      println message
+      resume ()
+    }
+  }
 }

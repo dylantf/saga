@@ -213,7 +213,7 @@ impl Checker {
 
                 for arm in arms {
                     let arm = &arm.node;
-                    let op_sig = self.lookup_effect_op(&arm.op_name, None, arm.span).ok();
+                    let op_sig = self.lookup_effect_op(&arm.op_name, arm.qualifier.as_deref(), arm.span).ok();
 
                     let saved_env = self.env.clone();
                     let saved_resume = self.resume_type.take();

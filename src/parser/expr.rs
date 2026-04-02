@@ -621,12 +621,24 @@ impl Parser {
                     let arm_end = body.span;
                     return_clause = Some(Box::new(HandlerArm {
                         op_name: "return".to_string(),
+                        qualifier: None,
                         params: vec![(param, param_span)],
                         body: Box::new(body),
                         span: arm_start.to(arm_end),
                     }));
                 } else {
-                    let name = self.expect_ident()?;
+                    // Check for qualified name: `Effect.op` (UpperIdent.Ident)
+                    let (qualifier, name) = if matches!(self.peek(), Token::UpperIdent(_))
+                        && matches!(self.peek_at(1), Token::Dot)
+                        && matches!(self.peek_at(2), Token::Ident(_))
+                    {
+                        let q = self.expect_upper_ident()?;
+                        self.advance(); // consume '.'
+                        let op = self.expect_ident()?;
+                        (Some(q), op)
+                    } else {
+                        (None, self.expect_ident()?)
+                    };
 
                     if matches!(self.peek(), Token::Comma | Token::RBrace) {
                         // Named ref after inline arms
@@ -658,6 +670,7 @@ impl Parser {
                     arms.push(Annotated {
                         node: HandlerArm {
                             op_name: name,
+                            qualifier,
                             params,
                             body: Box::new(body),
                             span: arm_start.to(arm_end),

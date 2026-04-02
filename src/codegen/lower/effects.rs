@@ -183,11 +183,17 @@ impl<'a> Lowerer<'a> {
         // Resolve all handler arms, return clause, and which effects are handled
         let (all_arms, return_clause, handled_effects) = self.resolve_handler(handler);
 
-        // Index handler arms by op name for quick lookup
+        // Index handler arms by (effect.op or bare op) for quick lookup.
+        // Qualified arms use "EffectName.op" as key, unqualified use bare "op".
         let mut arms_by_op: std::collections::HashMap<String, &HandlerArm> =
             std::collections::HashMap::new();
         for arm in &all_arms {
-            arms_by_op.insert(arm.op_name.clone(), arm);
+            if let Some(ref q) = arm.qualifier {
+                let canonical = self.canonicalize_effect(q);
+                arms_by_op.insert(format!("{}.{}", canonical, arm.op_name), arm);
+            } else {
+                arms_by_op.insert(arm.op_name.clone(), arm);
+            }
         }
 
         // Collect all (effect, op) pairs for handled effects
@@ -207,7 +213,8 @@ impl<'a> Lowerer<'a> {
             let key = format!("{}.{}", eff, op);
             self.current_handler_params.insert(key.clone(), var_name.clone());
             // Track arms that never call resume so call sites can skip building a real continuation.
-            if let Some(arm) = arms_by_op.get(op.as_str())
+            let qualified_key = format!("{}.{}", eff, op);
+            if let Some(arm) = arms_by_op.get(&qualified_key).or_else(|| arms_by_op.get(op.as_str()))
                 && !arm.body.contains_resume()
             {
                 self.no_resume_ops.insert(key);
@@ -229,7 +236,8 @@ impl<'a> Lowerer<'a> {
         }
         for (eff, op, var_name) in &op_vars {
             if !beam_native_effects.contains(eff) {
-                if let Some(arm) = arms_by_op.get(op.as_str()) {
+                let qualified_key = format!("{}.{}", eff, op);
+                if let Some(arm) = arms_by_op.get(&qualified_key).or_else(|| arms_by_op.get(op.as_str())) {
                     let handler_fun = self.build_op_handler_fun(arm);
                     handler_bindings.push((var_name.clone(), handler_fun));
                 } else {
@@ -427,10 +435,15 @@ impl<'a> Lowerer<'a> {
 
                 // Determine effects from inline arms
                 for arm in arms {
-                    if let Some(eff) = self.op_to_effect.get(&arm.node.op_name)
-                        && !handled_effects.contains(eff)
+                    let eff = if let Some(ref q) = arm.node.qualifier {
+                        Some(self.canonicalize_effect(q))
+                    } else {
+                        self.op_to_effect.get(&arm.node.op_name).cloned()
+                    };
+                    if let Some(eff) = eff
+                        && !handled_effects.contains(&eff)
                     {
-                        handled_effects.push(eff.clone());
+                        handled_effects.push(eff);
                     }
                 }
 

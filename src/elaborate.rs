@@ -525,6 +525,7 @@ impl Elaborator {
                             let arm = &ann.node;
                             Annotated::bare(HandlerArm {
                                 op_name: arm.op_name.clone(),
+                                qualifier: arm.qualifier.clone(),
                                 params: arm.params.clone(),
                                 body: Box::new(self.elaborate_expr(&arm.body)),
                                 span: arm.span,
@@ -534,6 +535,7 @@ impl Elaborator {
                     let elab_return = return_clause.as_ref().map(|rc| {
                         Box::new(HandlerArm {
                             op_name: rc.op_name.clone(),
+                            qualifier: rc.qualifier.clone(),
                             params: rc.params.clone(),
                             body: Box::new(self.elaborate_expr(&rc.body)),
                             span: rc.span,
@@ -1296,6 +1298,7 @@ impl Elaborator {
                         let arm = &ann.node;
                         Annotated::bare(HandlerArm {
                             op_name: arm.op_name.clone(),
+                            qualifier: arm.qualifier.clone(),
                             params: arm.params.clone(),
                             body: Box::new(self.elaborate_expr(&arm.body)),
                             span: arm.span,
@@ -1305,6 +1308,7 @@ impl Elaborator {
                 return_clause: return_clause.as_ref().map(|arm| {
                     Box::new(HandlerArm {
                         op_name: arm.op_name.clone(),
+                        qualifier: arm.qualifier.clone(),
                         params: arm.params.clone(),
                         body: Box::new(self.elaborate_expr(&arm.body)),
                         span: arm.span,

@@ -166,7 +166,11 @@ pub fn format_trailing(comment: &Option<String>) -> Doc {
 /// Format a handler arm: `op_name params = body`.
 /// Zero-arg effect ops get explicit `()` since the parser strips it.
 pub fn format_handler_arm(arm: &crate::ast::HandlerArm) -> Doc {
-    let mut d = Doc::text(&arm.op_name);
+    let mut d = if let Some(ref q) = arm.qualifier {
+        Doc::text(format!("{}.{}", q, arm.op_name))
+    } else {
+        Doc::text(&arm.op_name)
+    };
     if arm.params.is_empty() {
         // Zero-arg effect ops need explicit () in handler arms
         d = d.append(Doc::text(" ()"));

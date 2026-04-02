@@ -985,6 +985,8 @@ pub struct EffectOp {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HandlerArm {
     pub op_name: String,
+    /// Optional effect qualifier for disambiguation (e.g. `Logger` in `Logger.log`)
+    pub qualifier: Option<String>,
     pub params: Vec<(String, Span)>,
     pub body: Box<Expr>,
     pub span: Span,

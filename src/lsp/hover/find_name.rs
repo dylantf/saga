@@ -138,7 +138,8 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             for arm_ann in arms.iter().chain(recovered_arms.iter()) {
                 let arm = &arm_ann.node;
                 if contains(&arm.span, offset) {
-                    let op_name_end = arm.span.start + arm.op_name.len();
+                    let qualifier_len = arm.qualifier.as_ref().map_or(0, |q| q.len() + 1); // +1 for '.'
+                    let op_name_end = arm.span.start + qualifier_len + arm.op_name.len();
                     if offset >= arm.span.start && offset <= op_name_end {
                         return Some((
                             arm.op_name.clone(),
@@ -394,7 +395,8 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
                                     return Some((param_name.clone(), *param_span, None));
                                 }
                             }
-                            let op_name_end = arm.span.start + arm.op_name.len();
+                            let qualifier_len = arm.qualifier.as_ref().map_or(0, |q| q.len() + 1);
+                            let op_name_end = arm.span.start + qualifier_len + arm.op_name.len();
                             if offset >= arm.span.start && offset <= op_name_end {
                                 return Some((
                                     arm.op_name.clone(),
