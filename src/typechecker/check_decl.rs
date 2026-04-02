@@ -1588,6 +1588,7 @@ impl Checker {
             op_spans.insert(op.name.clone(), op.span);
             ops.push(EffectOpSig {
                 name: op.name.clone(),
+                effect_name: name.to_string(),
                 params: param_types,
                 return_type,
             });
@@ -1720,6 +1721,7 @@ impl Checker {
                     // Apply handler type bindings to specialize the op signature
                     let specialized = EffectOpSig {
                         name: op.name.clone(),
+                        effect_name: op.effect_name.clone(),
                         params: op
                             .params
                             .iter()
@@ -1916,8 +1918,8 @@ impl Checker {
             }
         }
 
-        // Collect free vars from frozen return type as forall (polymorphic per usage).
-        let forall = if let Some((ref param_ty, ref ret_ty)) = handler_return_type {
+        // Collect free vars from frozen return type and needs effects as forall (polymorphic per usage).
+        let mut forall = if let Some((ref param_ty, ref ret_ty)) = handler_return_type {
             let mut vars = Vec::new();
             super::collect_free_vars(param_ty, &mut vars);
             super::collect_free_vars(ret_ty, &mut vars);
@@ -1925,6 +1927,11 @@ impl Checker {
         } else {
             vec![]
         };
+        for (_, args) in &all_handler_effs.effects {
+            for t in args {
+                super::collect_free_vars(t, &mut forall);
+            }
+        }
 
         // Build where_constraints map: (effect_name, param_index) -> trait constraints.
         // Links where clause type vars back to their position in the effect's type param list.
@@ -1983,6 +1990,7 @@ impl Checker {
             HandlerInfo {
                 effects: canonical_effects,
                 return_type: handler_return_type,
+                needs_effects: all_handler_effs,
                 forall,
                 arm_spans,
                 where_constraints,

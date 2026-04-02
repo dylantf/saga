@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::ast::{self, Expr};
 use crate::token::Span;
 
-use super::{Checker, Diagnostic, Scheme, Type};
+use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
 
 impl Checker {
     // --- Handler inference ---
@@ -153,11 +153,24 @@ impl Checker {
                             }
                         }
 
-                        // Emit remaining effects to the outer accumulator
-                        self.emit_effects(&remaining_effs);
+                        // Merge handler's needs effects into remaining, with fresh vars applied
+                        let fresh_needs = EffectRow {
+                            effects: handler_info.needs_effects.effects.iter()
+                                .map(|(name, args)| {
+                                    (
+                                        name.clone(),
+                                        args.iter().map(|t| self.replace_vars(t, &mapping)).collect(),
+                                    )
+                                })
+                                .collect(),
+                            tail: None,
+                        };
+                        let final_effs = remaining_effs.merge(&fresh_needs);
+                        self.emit_effects(&final_effs);
                         Ok(self.sub.apply(&fresh_ret))
                     } else {
-                        self.emit_effects(&remaining_effs);
+                        let final_effs = remaining_effs.merge(&handler_info.needs_effects);
+                        self.emit_effects(&final_effs);
                         Ok(expr_ty)
                     }
                 } else {
@@ -265,11 +278,18 @@ impl Checker {
                         }
                     }
 
-                    // Arm body: isolate to subtract handled, keep unhandled
+                    // Arm body: subtract effects handled by sibling handlers, but NOT
+                    // the effect this arm itself handles (re-entrant calls delegate
+                    // to an outer handler, not the current one)
                     let saved_effs = self.save_effects();
                     let arm_ty = self.infer_expr(&arm.body)?;
                     let arm_effs = self.restore_effects(saved_effs);
-                    let unhandled_arm_effs = arm_effs.subtract(&handled);
+                    let own_effect = op_sig.as_ref().map(|sig| sig.effect_name.clone());
+                    let sibling_handled: HashSet<String> = handled.iter()
+                        .filter(|e| own_effect.as_ref() != Some(e))
+                        .cloned()
+                        .collect();
+                    let unhandled_arm_effs = arm_effs.subtract(&sibling_handled);
                     self.emit_effects(&unhandled_arm_effs);
 
                     self.unify_at(&arm_ty, &answer_ty, arm.span)?;

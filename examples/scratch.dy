@@ -1,35 +1,25 @@
-effect Logger {
-  fun log : String -> String -> Unit
+# Test: handler that re-performs the same effect (middleware pattern)
+# Does `handler X for Effect needs {Effect}` work?
+
+effect Counter {
+  fun increment : Unit -> Int
 }
 
-effect Logger2 {
-  fun log : String -> Unit
+handler simple_counter for Counter {
+  increment () = resume 1
 }
 
-handler console_log for Logger {
-  log level msg = println $"{level} {msg}"
-}
-
-handler console_log2 for Logger2 {
-  log msg = println msg
-}
-
-fun log_both : (level: String) -> (message: String) -> Unit
-  needs {Logger, Logger2}
-log_both level message = {
-  Logger.log! level message
-  Logger2.log! message
+# Middleware: wraps Counter, doubles the result
+handler double_counter for Counter needs {Counter} {
+  increment () = {
+    let n = increment! ()
+    resume n * 2
+  }
 }
 
 main () = {
-  log_both "debug" "oops" with {
-    Logger.log level message = {
-      println $"{level} {message}"
-      resume ()
-    }
-    Logger2.log message = {
-      println message
-      resume ()
-    }
-  }
+  let result = {
+    increment! () with double_counter
+  } with simple_counter
+  println (show result)
 }

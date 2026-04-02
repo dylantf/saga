@@ -198,6 +198,7 @@ impl Checker {
                 free_vars.iter().map(|&id| (id, self.fresh_var())).collect();
             return EffectOpSig {
                 name: op.name.clone(),
+                effect_name: effect_name.to_string(),
                 params: op
                     .params
                     .iter()
@@ -244,6 +245,7 @@ impl Checker {
         }
         EffectOpSig {
             name: op.name.clone(),
+            effect_name: effect_name.to_string(),
             params: op
                 .params
                 .iter()

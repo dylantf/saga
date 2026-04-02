@@ -598,6 +598,8 @@ impl std::fmt::Display for Diagnostic {
 #[derive(Debug, Clone)]
 pub struct EffectOpSig {
     pub name: std::string::String,
+    /// Canonical name of the effect this op belongs to.
+    pub effect_name: std::string::String,
     pub params: Vec<(String, Type)>,
     pub return_type: Type,
 }
@@ -634,6 +636,9 @@ pub struct HandlerInfo {
     /// Frozen return clause: (param_type, body_type). Sub-applied at register time so
     /// internal handler vars are resolved but forall vars remain free.
     pub return_type: Option<(Type, Type)>,
+    /// Effects the handler's arm bodies perform (from `needs` clause).
+    /// Frozen at registration; free vars are in `forall` and instantiated fresh at each usage.
+    pub needs_effects: EffectRow,
     /// Type vars to instantiate fresh at each usage site (polymorphic handler params).
     pub forall: Vec<u32>,
     /// op_name -> span of the handler arm (for LSP go-to-def and with-stack)
