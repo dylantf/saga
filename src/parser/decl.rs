@@ -969,8 +969,36 @@ impl Parser {
         let name = self.expect_ident()?;
 
         let mut params = Vec::new();
-        while !matches!(self.peek(), Token::Eq | Token::When | Token::Eof) {
+        while !matches!(self.peek(), Token::Eq | Token::When | Token::LBrace | Token::Eof) {
             params.push(self.parse_pattern()?);
+        }
+
+        // Parse optional instance params: `{from, to}`
+        let mut instance_params = Vec::new();
+        if matches!(self.peek(), Token::LBrace) {
+            // Lookahead: `{ ident , ... }` (all lowercase idents)
+            let mut is_instance_block = true;
+            let mut look = 1;
+            loop {
+                match self.peek_at(look) {
+                    Token::Ident(_) => { look += 1; }
+                    Token::Comma => { look += 1; }
+                    Token::RBrace => break,
+                    _ => { is_instance_block = false; break; }
+                }
+            }
+            if is_instance_block {
+                self.advance(); // consume '{'
+                while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                    let param_span = self.tokens[self.pos].span;
+                    let param_name = self.expect_ident()?;
+                    instance_params.push((param_name, param_span));
+                    if matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                    }
+                }
+                self.expect(Token::RBrace)?;
+            }
         }
 
         let guard = if matches!(self.peek(), Token::When) {
@@ -989,6 +1017,7 @@ impl Parser {
             name,
             name_span,
             params,
+            instance_params,
             guard,
             body,
             span: name_span.to(end),

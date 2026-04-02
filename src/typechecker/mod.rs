@@ -1365,7 +1365,9 @@ pub fn effects_from_type(ty: &Type) -> HashSet<String> {
     fn walk(ty: &Type, out: &mut HashSet<String>) {
         if let Type::Fun(_, ret, row) = ty {
             for entry in &row.effects {
-                out.insert(entry.name.clone());
+                if entry.instance.is_none() {
+                    out.insert(entry.name.clone());
+                }
             }
             walk(ret, out);
         }

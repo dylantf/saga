@@ -449,6 +449,7 @@ impl Elaborator {
                 Decl::FunBinding {
                     name,
                     params,
+                    instance_params,
                     guard,
                     body,
                     span,
@@ -495,6 +496,7 @@ impl Elaborator {
                         name: name.clone(),
                         name_span: *span, // elaborated binding, reuse span
                         params: full_params,
+                        instance_params: instance_params.clone(),
                         guard: elab_guard,
                         body: elab_body,
                         span: *span,

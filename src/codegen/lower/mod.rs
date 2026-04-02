@@ -16,7 +16,7 @@ use pats::{lower_params, lower_pat};
 use util::{
     cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call,
     collect_qualified_call, core_var, field_access_record_name, has_nested_effect_call, lower_lit,
-    lower_string_to_binary, process_string_escapes,
+    lower_string_to_binary, named_instances_from_type, process_string_escapes,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -503,9 +503,9 @@ impl<'a> Lowerer<'a> {
                     ..
                 } => {
                     let PendingAnnotation {
-                        effects,
-                        named_instances,
-                        param_absorbed_effects,
+                        mut effects,
+                        mut named_instances,
+                        mut param_absorbed_effects,
                     } = pending_annotations
                         .remove(name.as_str())
                         .unwrap_or(PendingAnnotation {
@@ -513,6 +513,21 @@ impl<'a> Lowerer<'a> {
                             named_instances: vec![],
                             param_absorbed_effects: HashMap::new(),
                         });
+                    if effects.is_empty() && named_instances.is_empty()
+                        && let Some(cr) = &self.check_result
+                        && let Some(scheme) = cr.env.get(name)
+                    {
+                        let resolved_ty = cr.sub.apply(&scheme.ty);
+                        effects = self.canonicalize_effects(util::arity_and_effects_from_type(&resolved_ty).1);
+                        named_instances = named_instances_from_type(&resolved_ty)
+                            .into_iter()
+                            .map(|(inst, eff)| (inst, self.canonicalize_effect(&eff)))
+                            .collect();
+                        param_absorbed_effects = util::param_absorbed_effects_from_type(&resolved_ty)
+                            .into_iter()
+                            .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
+                            .collect();
+                    }
                     let base_arity = lower_params(params).len() + count_lambda_params(body);
                     let arity = self.expanded_arity_with_instances(base_arity, &effects, &named_instances);
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _, _)| n == name) {
@@ -612,37 +627,28 @@ impl<'a> Lowerer<'a> {
             }
 
             // Set up handler param context for effectful functions.
-            // One handler param per op (e.g. _Handle_Process_spawn, _Handle_Process_send).
+            // Build (lookup_key, param_name) pairs for both effect ops and instance ops.
             let effects = self.fun_effects(&name).cloned().unwrap_or_default();
-            let handler_ops = self.effect_handler_ops(&effects);
-            let handler_params: Vec<String> = handler_ops
-                .iter()
-                .map(|(eff, op)| Self::handler_param_name(eff, op))
-                .collect();
-            // Also set up instance handler params for named effect instances.
             let named_instances = self.fun_info.get(&name)
                 .map(|f| f.named_instances.clone())
                 .unwrap_or_default();
-            let instance_ops = self.instance_handler_ops(&named_instances);
-            let instance_params: Vec<String> = instance_ops
-                .iter()
-                .map(|(inst, _, op)| format!("_HInst_{}_{}", inst, op))
-                .collect();
-            let all_handler_params: Vec<String> = handler_params.iter()
-                .chain(instance_params.iter())
-                .cloned()
-                .collect();
+            let mut handler_entries: Vec<(String, String)> = Vec::new();
+            for (eff, op) in &self.effect_handler_ops(&effects) {
+                let key = format!("{}.{}", eff, op);
+                let param = Self::handler_param_name(eff, op);
+                handler_entries.push((key, param));
+            }
+            for (inst, _eff, op) in &self.instance_handler_ops(&named_instances) {
+                let key = format!("{}.{}", inst, op);
+                let param = format!("_HInst_{}_{}", inst, op);
+                handler_entries.push((key, param));
+            }
 
             let saved_handler_params = std::mem::take(&mut self.current_handler_params);
-            for ((eff, op), param) in handler_ops.iter().zip(handler_params.iter()) {
-                // Key by "Effect.op" for unambiguous lookup from lower_effect_call
-                let key = format!("{}.{}", eff, op);
-                self.current_handler_params.insert(key, param.clone());
+            for (key, param) in &handler_entries {
+                self.current_handler_params.insert(key.clone(), param.clone());
             }
-            for ((inst, _eff, op), param) in instance_ops.iter().zip(instance_params.iter()) {
-                let key = format!("{}.{}", inst, op);
-                self.current_handler_params.insert(key, param.clone());
-            }
+            let handler_param_names: Vec<String> = handler_entries.iter().map(|(_, p)| p.clone()).collect();
             // Set up effectful variable tracking for HOF absorption.
             // Map param indices to param names from the first clause's patterns.
             let saved_effectful_vars = std::mem::take(&mut self.current_effectful_vars);
@@ -658,8 +664,8 @@ impl<'a> Lowerer<'a> {
                 }
             }
 
-            let has_effects = !all_handler_params.is_empty();
-            let base_arity = arity - all_handler_params.len() - if has_effects { 1 } else { 0 };
+            let has_effects = !handler_param_names.is_empty();
+            let base_arity = arity - handler_param_names.len() - if has_effects { 1 } else { 0 };
 
             // For effectful functions, set _ReturnK as current_return_k so
             // lower_block applies it at terminal positions. Handler aborts
@@ -697,7 +703,7 @@ impl<'a> Lowerer<'a> {
                     params_ce.extend(lower_params(lam_params));
                     body = lam_body;
                 }
-                params_ce.extend(all_handler_params.iter().cloned());
+                params_ce.extend(handler_param_names.iter().cloned());
                 if has_effects {
                     params_ce.push("_ReturnK".to_string());
                 }
@@ -749,7 +755,7 @@ impl<'a> Lowerer<'a> {
                 // and case-match on them using proper Core Erlang values syntax.
                 let mut arg_vars: Vec<String> =
                     (0..base_arity).map(|i| format!("_Arg{}", i)).collect();
-                arg_vars.extend(all_handler_params.iter().cloned());
+                arg_vars.extend(handler_param_names.iter().cloned());
                 if has_effects {
                     arg_vars.push("_ReturnK".to_string());
                 }
@@ -1071,7 +1077,15 @@ impl<'a> Lowerer<'a> {
                     let callee_instance_ops = self.fun_info.get(func_name)
                         .map(|f| self.instance_handler_ops(&f.named_instances))
                         .unwrap_or_default();
-                    let effect_count = callee_ops.len() + callee_instance_ops.len();
+                    // Build unified (key, param_name) list for callee handler params
+                    let mut callee_handler_entries: Vec<(String, String)> = Vec::new();
+                    for (eff, op) in &callee_ops {
+                        callee_handler_entries.push((format!("{}.{}", eff, op), Self::handler_param_name(eff, op)));
+                    }
+                    for (inst, _, op) in &callee_instance_ops {
+                        callee_handler_entries.push((format!("{}.{}", inst, op), format!("_HInst_{}_{}", inst, op)));
+                    }
+                    let effect_count = callee_handler_entries.len();
                     let total_arity = self.fun_arity(func_name);
 
                     // Filter out unit literal args (they don't count toward arity)
@@ -1116,24 +1130,13 @@ impl<'a> Lowerer<'a> {
                         // from the enclosing function's `needs` clause or from a `with` block.
                         // If one is missing, it's a compiler bug (the type system should
                         // have ensured all effects are handled).
-                        if !callee_ops.is_empty() || !callee_instance_ops.is_empty() {
-                            for (eff, op) in &callee_ops {
-                                let key = format!("{}.{}", eff, op);
-                                let param = self.current_handler_params.get(&key)
+                        if !callee_handler_entries.is_empty() {
+                            for (key, _) in &callee_handler_entries {
+                                let param = self.current_handler_params.get(key)
                                     .unwrap_or_else(|| panic!(
-                                        "ICE: saturated call to '{}' needs handler for '{}.{}' \
-                                         but no handler param in scope",
-                                        func_name, eff, op,
-                                    ));
-                                arg_vars.push(param.clone());
-                            }
-                            for (inst, _eff, op) in &callee_instance_ops {
-                                let key = format!("{}.{}", inst, op);
-                                let param = self.current_handler_params.get(&key)
-                                    .unwrap_or_else(|| panic!(
-                                        "ICE: saturated call to '{}' needs instance handler for '{}.{}' \
-                                         but no handler param in scope",
-                                        func_name, inst, op,
+                                        "ICE: saturated call to '{}' needs handler for '{}' \
+                                         but no handler param in scope. params: {:?}",
+                                        func_name, key, self.current_handler_params,
                                     ));
                                 arg_vars.push(param.clone());
                             }
@@ -1185,16 +1188,10 @@ impl<'a> Lowerer<'a> {
                             // For effectful functions, include handler params and
                             // _ReturnK in the lambda. Handlers will be provided at
                             // the eventual call site via `with`.
-                            if !callee_ops.is_empty() || !callee_instance_ops.is_empty() {
-                                for (eff, op) in &callee_ops {
-                                    let p = Self::handler_param_name(eff, op);
+                            if !callee_handler_entries.is_empty() {
+                                for (_, p) in &callee_handler_entries {
                                     params.push(p.clone());
-                                    call_args.push(CExpr::Var(p));
-                                }
-                                for (inst, _, op) in &callee_instance_ops {
-                                    let p = format!("_HInst_{}_{}", inst, op);
-                                    params.push(p.clone());
-                                    call_args.push(CExpr::Var(p));
+                                    call_args.push(CExpr::Var(p.clone()));
                                 }
                                 let rk = "_ReturnK".to_string();
                                 params.push(rk.clone());

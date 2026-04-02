@@ -82,8 +82,11 @@ impl Checker {
         // Closed row: every body effect must appear in declared
         let mut undeclared = Vec::new();
         for entry in &body_effs.effects {
-            if !declared.effects.iter().any(|e| e.name == entry.name) {
-                undeclared.push(entry.name.clone());
+            if !declared.effects.iter().any(|e| e.matches(entry)) {
+                undeclared.push(match &entry.instance {
+                    Some(inst) => format!("{}: {}", inst, entry.name),
+                    None => entry.name.clone(),
+                });
             }
         }
         if undeclared.is_empty() {
@@ -158,7 +161,7 @@ impl Checker {
 
     /// Extract handled effect names from a `Handler(...)` type in the env.
     /// Used as a fallback when a name is not in `self.handlers` (e.g. handle bindings).
-    fn handler_effects_from_env(&self, name: &str) -> Option<Vec<String>> {
+    pub(crate) fn handler_effects_from_env(&self, name: &str) -> Option<Vec<String>> {
         let scheme = self.env.get(name)?;
         let ty = self.sub.apply(&scheme.ty);
         if let Type::Con(ref con_name, ref args) = ty
@@ -188,6 +191,9 @@ impl Checker {
                         }
                     })
                     .collect();
+                if effects.is_empty() {
+                    return None;
+                }
                 return Some(effects);
         }
         None

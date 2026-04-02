@@ -19,13 +19,16 @@ handler prefix_log for Log {
 }
 
 fun greet : String -> Unit needs {out: Log}
-greet name = out.log! $"hello {name}"
+greet name {out} = out.log! $"hello {name}"
 
 main () = {
   handle c = console_log
   handle p = prefix_log
+
   greet "world" with {
+    out: c,
   }
   greet "world" with {
+    out: p,
   }
 }

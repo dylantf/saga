@@ -265,10 +265,15 @@ impl<'a> Lowerer<'a> {
                 // exposing lists, handled by the user import processing below.
                 for (name, scheme) in &info.exports {
                     let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
+                    let named_instances: Vec<(String, String)> = util::named_instances_from_type(&scheme.ty)
+                        .into_iter()
+                        .map(|(inst, eff)| (inst, canonicalize_effect(&eff)))
+                        .collect();
                     let effects = self.canonicalize_effects(effects);
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
                     let expanded_arity =
-                        self.expanded_arity(base_arity, &effects) + dict_param_count;
+                        self.expanded_arity_with_instances(base_arity, &effects, &named_instances)
+                            + dict_param_count;
                     let param_absorbed =
                         util::param_absorbed_effects_from_type(&scheme.ty);
                     let param_absorbed: HashMap<usize, Vec<String>> = param_absorbed
@@ -278,7 +283,7 @@ impl<'a> Lowerer<'a> {
                     let fi = FunInfo {
                         arity: expanded_arity,
                         effects,
-                        named_instances: vec![],
+                        named_instances,
                         param_absorbed_effects: param_absorbed,
                     };
                     // Register under short alias (e.g. "List.map") and canonical (e.g. "Std.List.map")
@@ -386,9 +391,15 @@ impl<'a> Lowerer<'a> {
         // Register imported functions
         for (name, scheme) in &info.exports {
             let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
+            let named_instances: Vec<(String, String)> = util::named_instances_from_type(&scheme.ty)
+                .into_iter()
+                .map(|(inst, eff)| (inst, self.canonicalize_effect(&eff)))
+                .collect();
             let effects = self.canonicalize_effects(effects);
             let dict_param_count = util::dict_param_count(&scheme.constraints);
-            let expanded_arity = self.expanded_arity(base_arity, &effects) + dict_param_count;
+            let expanded_arity =
+                self.expanded_arity_with_instances(base_arity, &effects, &named_instances)
+                    + dict_param_count;
             let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
             // Canonicalize absorbed effect names too
             let param_effs: HashMap<usize, Vec<String>> = param_effs
@@ -401,7 +412,7 @@ impl<'a> Lowerer<'a> {
             let fi = FunInfo {
                 arity: expanded_arity,
                 effects: effects.clone(),
-                named_instances: vec![],
+                named_instances: named_instances.clone(),
                 param_absorbed_effects: param_effs.clone(),
             };
             self.fun_info.insert(alias_qualified, fi.clone());
@@ -413,7 +424,7 @@ impl<'a> Lowerer<'a> {
                 self.fun_info.entry(name.clone()).or_insert(FunInfo {
                     arity: expanded_arity,
                     effects,
-                    named_instances: vec![],
+                    named_instances,
                     param_absorbed_effects: param_effs,
                 });
             }

@@ -30,12 +30,13 @@ main () = {
   handle cond_logger2 = if False then console_log else quiet_log
   log! "conditional false (should NOT print)" with cond_logger2
 
-  # Handler expression (Phase 1b)
+  # Handler expression
   handle prefixed =
     handler for Log {
       log msg = {
         resume println $"[PREFIX] {msg}"
       }
     }
+
   log! "hello from handler expression" with prefixed
 }

@@ -316,11 +316,29 @@ pub fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
             arity += 1;
         }
         for entry in &row.effects {
-            effects.insert(entry.name.clone());
+            if entry.instance.is_none() {
+                effects.insert(entry.name.clone());
+            }
         }
         current = ret;
     }
     (arity, effects.into_iter().collect())
+}
+
+/// Extract named effect instances from a typechecker `Type`.
+/// Returns sorted `(instance_name, effect_name)` pairs from all function rows.
+pub fn named_instances_from_type(ty: &Type) -> Vec<(String, String)> {
+    let mut named = BTreeSet::new();
+    let mut current = ty;
+    while let Type::Fun(_, ret, row) = current {
+        for entry in &row.effects {
+            if let Some(instance) = &entry.instance {
+                named.insert((instance.clone(), entry.name.clone()));
+            }
+        }
+        current = ret;
+    }
+    named.into_iter().collect()
 }
 
 /// Extract per-parameter absorbed effects from a function type.

@@ -666,6 +666,14 @@ fn format_handler(handler: &Handler) -> Doc {
                 body_items.push(Doc::text(format!("{},", ann.node.name)));
                 body_items.push(format_trailing(&ann.trailing_comment));
             }
+            for ann in instance_bindings {
+                body_items.push(Doc::hardline());
+                body_items.push(format_trivia(&ann.leading_trivia));
+                body_items.push(Doc::text(format!("{}: ", ann.node.instance)));
+                body_items.push(super::expr::format_expr(&ann.node.handler));
+                body_items.push(Doc::text(","));
+                body_items.push(format_trailing(&ann.trailing_comment));
+            }
             for ann in arms {
                 body_items.push(Doc::hardline());
                 body_items.push(format_trivia(&ann.leading_trivia));

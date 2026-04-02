@@ -165,12 +165,14 @@ pub enum Decl {
         span: Span,
     },
 
-    /// `add x y = x + y` or `main () = { ... }`
+    /// `add x y = x + y` or `transfer amount {from, to} = { ... }`
     FunBinding {
         id: NodeId,
         name: String,
         name_span: Span,
         params: Vec<Pat>,
+        /// Named effect instance receivers: `{from, to}` in `transfer amount {from, to} = ...`
+        instance_params: Vec<(String, Span)>,
         guard: Option<Box<Expr>>,
         body: Expr,
         span: Span,

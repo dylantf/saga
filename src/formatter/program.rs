@@ -198,10 +198,11 @@ fn format_decl(decl: &Decl) -> Doc {
         Decl::FunBinding {
             name,
             params,
+            instance_params,
             guard,
             body,
             ..
-        } => format_fun_binding(name, params, guard, body),
+        } => format_fun_binding(name, params, instance_params, guard, body),
         Decl::Let {
             name,
             annotation,

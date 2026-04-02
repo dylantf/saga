@@ -48,12 +48,23 @@ pub fn format_annotation(ann: &Annotation) -> Doc {
 pub fn format_fun_binding(
     name: &str,
     params: &[Pat],
+    instance_params: &[(String, Span)],
     guard: &Option<Box<Expr>>,
     body: &Expr,
 ) -> Doc {
     let mut lhs = Doc::text(name.to_string());
     for p in params {
         lhs = lhs.append(Doc::text(" ")).append(format_pat_atom(p));
+    }
+    if !instance_params.is_empty() {
+        let names = instance_params
+            .iter()
+            .map(|(name, _)| Doc::text(name.clone()))
+            .collect::<Vec<_>>();
+        lhs = lhs
+            .append(Doc::text(" {"))
+            .append(Doc::join(docs![Doc::text(","), Doc::text(" ")], names))
+            .append(Doc::text("}"));
     }
     if let Some(g) = guard {
         lhs = lhs.append(Doc::text(" when ")).append(format_expr(g));
@@ -504,7 +515,7 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
 
     let body = format_annotated_body(
         methods,
-        |m| format_fun_binding(&m.name, &m.params, &None, &m.body),
+        |m| format_fun_binding(&m.name, &m.params, &[], &None, &m.body),
         dangling,
     );
     parts.push(Doc::nest(2, body));
