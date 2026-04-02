@@ -1,6 +1,6 @@
 # Handle Bindings
 
-Bind handlers to names for conditional selection and composition.
+Bind handlers to names for conditional selection, composition, and construction.
 
 ## Motivation
 
@@ -18,10 +18,51 @@ else
 This scales poorly. Three handlers means two branches; five handlers with
 independent choices means combinatorial duplication.
 
+Beyond selection, there's no way to write a handler factory -- a function that
+takes configuration and returns a handler -- because handlers aren't values
+with types.
+
+## The `Handler Effect` Type
+
+Handlers have a type: `Handler Effect`. At runtime this is just a function
+(the CPS handler lambda), but the type system tracks which effect it handles.
+
+```
+# Named handler declarations have type Handler Effect
+handler console_log for Log { ... }       # : Handler Log
+handler to_result for Fail { ... }        # : Handler Fail
+
+# Multi-effect handlers
+handler dev_env for Log, Db { ... }       # : Handler (Log, Db)
+
+# Handlers that need effects
+handler sentry_log for Log needs {Http} { ... }
+```
+
+This enables handler factory functions:
+
+```
+fun make_logger : String -> Handler Log
+make_logger path = handler for Log {
+  log level msg = {
+    write_file! path ($"[{level}] {msg}")
+    resume ()
+  }
+}
+
+fun make_db : ConnectionConfig -> Handler Database
+make_db config = handler for Database needs {Net} {
+  query sql = {
+    let conn = connect! config
+    pg_execute! conn sql |> resume
+  }
+}
+```
+
 ## The `handle` Keyword
 
 `handle` binds a handler to a name. The right-hand side is any expression that
-evaluates to a handler:
+evaluates to a `Handler`:
 
 ```
 handle logger = if dev then console_log else sentry_log
@@ -38,7 +79,7 @@ No duplication of `run_app ()`.
 
 Three related keywords, three distinct roles:
 
-- **`handler`** -- define a handler (existing)
+- **`handler`** -- define a handler (existing, now has type `Handler Effect`)
 - **`handle`** -- bind a handler to a name
 - **`with`** -- inject handlers into a computation
 
@@ -54,25 +95,12 @@ handler console_log for Log {
 # Bind (local, conditional)
 handle logger = if dev then console_log else sentry_log
 
+# Bind (from factory function)
+handle db = make_db production_config
+
 # Inject
-run_app () with logger
+run_app () with { logger, db }
 ```
-
-### Inline Handler Expressions
-
-The RHS of `handle` can also be an inline handler:
-
-```
-handle logger = handler for Log {
-  log level msg = {
-    println ($"[{level}] {msg}")
-    resume ()
-  }
-}
-```
-
-This is useful when the handler is one-off and doesn't warrant a module-level
-`handler` definition.
 
 ## Scoping
 
@@ -117,6 +145,33 @@ run_app () with {
   },
 }
 ```
+
+---
+
+## Implementation Notes
+
+### Runtime Representation
+
+`Handler Effect` has no special runtime representation. Handlers already
+compile to CPS handler lambdas (`fun(Op, Args..., K) -> ...`). The type is
+just the compiler tracking "this lambda is shaped like a handler for `Log`."
+
+### Type Checking
+
+- `handler` declarations and inline `handler` expressions produce values of
+  type `Handler Effect`
+- `handle` bindings infer the `Handler` type from the RHS
+- Conditional expressions require both branches to produce `Handler` for the
+  same effect
+- `with` validates that the provided handlers cover the computation's `needs`
+- Factory functions declare `Handler Effect` as their return type
+
+### No Changes to CPS Transform
+
+The lowerer doesn't change. `handle` bindings are desugared before lowering --
+a `handle` is just a let-binding for a handler lambda. `with` already passes
+handler lambdas; it just receives them from `handle` bindings instead of only
+from named `handler` declarations.
 
 ---
 
@@ -196,17 +251,121 @@ disambiguates with `with`:
 increment () with counter
 ```
 
+### Interaction with Re-entrant Effects
+
+Re-entrant effects (see `effects-guide.md`) allow a handler to delegate to an
+outer handler for the same effect. Today this works but the delegation is
+implicit -- the re-performed operation routes outward through `needs` with no
+syntactic indication:
+
+```
+handler double_counter for Counter needs {Counter} {
+  increment () = {
+    let n = increment! ()   # goes outward, but not obvious
+    resume (n * 2)
+  }
+}
+```
+
+Named instances make delegation explicit:
+
+```
+handler double_counter for Counter needs {inner: Counter} {
+  increment () {inner} = {
+    let n = inner.increment! ()   # clearly delegates to inner
+    resume (n * 2)
+  }
+}
+```
+
+This is especially valuable for middleware chains where multiple layers of the
+same effect are nested. Without named instances, each layer's `increment!()`
+silently routes one level out. With them, the delegation target is visible in
+the code.
+
+`handle` bindings also make middleware composition more ergonomic:
+
+```
+handle base = simple_counter
+handle wrapped = double_counter   # needs Counter, satisfied by nesting
+
+{ increment! () with wrapped } with base
+```
+
+### Name Matching and Propagation
+
+Named effects propagate through the call stack, like unnamed effects do today.
+Names are part of the effect identity -- `{from: State Int}` and
+`{to: State Int}` are distinct in the effect row even though the underlying
+effect type is the same.
+
+Names must match exactly at call boundaries. When calling a function that
+declares named effects, the caller must provide handlers with matching names:
+
+```
+fun transfer : Int -> Unit needs {from: State Int, to: State Int}
+
+# Direct -- names in scope match
+do_banking () {from, to} = transfer 50
+
+# Remapping -- caller has different names
+fun do_banking : Unit -> Unit needs {src: State Int, dst: State Int}
+do_banking () {src, dst} = {
+  transfer 50 with { from: src, to: dst }
+}
+```
+
+The `with` block remaps names explicitly. This is the same `:` syntax used to
+pass named instances, here serving as a rename. The type checker verifies that
+`src` has type `Handler (State Int)` and that `from` is what `transfer`
+expects.
+
+### Absorption with Named Instances
+
+Absorption (subtracting handled effects from a HOF callback's effect row)
+works by matching both name and type. This is a natural extension of existing
+absorption:
+
+```
+fun run_transfer : (Unit -> a needs {from: State Int, to: State Int, ..e})
+                -> a needs {..e}
+run_transfer f = f () with {
+  from: make_state 0,
+  to: make_state 100,
+}
+```
+
+The parameter expects `{from: State Int, to: State Int, ..e}`. The callback
+performs `{from: State Int, to: State Int}`. Absorption matches `from` to
+`from` and `to` to `to` (name + type), subtracts both. Only `..e` extras
+propagate.
+
+If names don't align, the caller remaps at the call site:
+
+```
+# transfer needs {from, to} but run_stuff expects {src, dst}
+run_stuff (fun () -> transfer 50 with { from: src, to: dst })
+```
+
+No name unification in the type checker -- names are concrete identifiers, not
+variables. Mismatch is a type error, not something the compiler solves.
+
 ### Design Notes
 
-- Named instances are primarily a **local scoping mechanism**. They don't need
-  to propagate through long call chains in most cases.
-- If distinct effect identities need to flow through many functions, defining
-  separate effect types (`effect Counter`, `effect Buffer`) is often clearer
-  and works with the existing system (propagation, absorption, HOFs) with zero
-  friction.
-- Named instance propagation through `needs` is heavier -- intermediate
-  functions must carry the names, and absorption becomes name-aware. This is
-  acceptable as opt-in cost for cases that genuinely need it.
-- This is **not** full "effects as values" (as in Koka's evidence passing).
-  Handlers bound with `handle` cannot be stored in data structures or returned
-  from functions. They are scoped bindings, not first-class values.
+- **Named instances are opt-in.** Unnamed effects work exactly as today. Most
+  effects (Log, Fail, Http) will never need names. Named instances are for
+  effects where identity matters (State, Ref, Channel).
+- **Names propagate through `needs`.** This adds annotation cost at
+  intermediate functions but makes the data flow explicit. In practice, named
+  effects tend to be used 1-2 levels deep.
+- **`Handler Effect` as a type** gives handlers value semantics (returnable,
+  bindable, storable). This covers most practical use cases without full
+  Koka-style evidence passing. The remaining gap is implicit evidence
+  threading -- our system requires explicit `with` attachment, which is
+  arguably more readable.
+
+### Future Convenience
+
+- **Effect row aliases**: A way to name a bundle of effects for reuse in
+  signatures. Reduces repetition when the same set of named effects appears
+  across many functions. Deferred until real code shows the need.

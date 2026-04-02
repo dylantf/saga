@@ -561,6 +561,69 @@ handlers are for.
 
 ---
 
+## Re-entrant Effects (Middleware Pattern)
+
+A handler can re-perform the same effect it handles by declaring it in its own
+`needs` clause. The re-performed operation routes to an outer handler, not back
+to itself. This enables middleware -- intercept an effect, delegate to the real
+implementation, and add behavior around it.
+
+```
+effect Counter {
+  fun increment : Unit -> Int
+}
+
+handler simple_counter for Counter {
+  increment () = resume 1
+}
+
+# double_counter handles Counter, but also needs Counter.
+# increment! inside the arm delegates to the outer handler.
+handler double_counter for Counter needs {Counter} {
+  increment () = {
+    let n = increment! ()
+    resume (n * 2)
+  }
+}
+
+main () = {
+  let result = {
+    increment! () with double_counter
+  } with simple_counter
+  println (show result)   # prints 2
+}
+```
+
+The nesting matters. The inner `with double_counter` intercepts `increment!`
+from the computation. When `double_counter`'s arm calls `increment!()`, its
+`needs {Counter}` is satisfied by the outer `with simple_counter`. The result
+flows back: `simple_counter` returns 1, `double_counter` doubles it to 2.
+
+This works for any effect -- logging wrappers, retry logic, caching layers,
+metrics. The pattern is always the same: handle the effect, re-perform it to
+delegate, wrap the result.
+
+```
+handler with_retry for Http needs {Http} {
+  get url = {
+    let result = get! url           # delegate to outer Http handler
+    if result == "" then get! url   # retry once on empty response
+    else resume result
+  }
+}
+
+# Stack it: with_retry wraps real_http
+{ fetch_data () with with_retry } with real_http
+```
+
+**Note:** Inside the handler arm, the re-performed effect operation (e.g.
+`increment!`, `get!`) is unqualified. It routes to the outer handler because
+the handler's `needs` clause puts it in scope. If this is unclear at the call
+site, the planned named effect instances feature will allow explicit
+qualification (e.g. `inner.increment!()`).
+
+---
+
 ## Summary
 
 | Concept               | Syntax                                                       |
