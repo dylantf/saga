@@ -682,6 +682,7 @@ fn normalize_handler(h: &mut Handler) {
             arms,
             return_clause,
             dangling_trivia,
+            ..
         } => {
             for ann in named.iter_mut() {
                 normalize_annotated(ann, |n| n.span = S);

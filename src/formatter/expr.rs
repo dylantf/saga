@@ -639,11 +639,12 @@ fn format_handler(handler: &Handler) -> Doc {
         Handler::Named(name, _) => Doc::text(name),
         Handler::Inline {
             named,
+            instance_bindings,
             arms,
             return_clause,
             dangling_trivia,
         } => {
-            let has_inline = !arms.is_empty() || return_clause.is_some();
+            let has_inline = !arms.is_empty() || return_clause.is_some() || !instance_bindings.is_empty();
             let has_trivia = named.iter().any(|a| {
                 a.trailing_comment.is_some() || !a.leading_trivia.is_empty()
             });

@@ -1035,15 +1035,28 @@ pub struct NamedHandlerRef {
     pub span: Span,
 }
 
+/// An instance binding in a `with` block: `from: counter` maps the instance
+/// name `from` to the handler expression `counter`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstanceBinding {
+    /// Instance name (e.g. `from` in `from: counter`)
+    pub instance: String,
+    /// Handler expression (e.g. `counter`)
+    pub handler: Expr,
+    pub span: Span,
+}
+
 /// The handler in a `with` expression
 #[derive(Debug, Clone, PartialEq)]
 pub enum Handler {
     /// `expr with handler_name`
     Named(String, Span),
-    /// `expr with { h1, h2, op args = body }`
+    /// `expr with { h1, h2, from: counter, op args = body }`
     Inline {
         /// Named handler references (e.g. `h1, h2`)
         named: Vec<Annotated<NamedHandlerRef>>,
+        /// Instance bindings (e.g. `from: counter, to: savings`)
+        instance_bindings: Vec<Annotated<InstanceBinding>>,
         /// Inline handler arms (e.g. `op args = body`)
         arms: Vec<Annotated<HandlerArm>>,
         /// `return value = Ok(value)` clause

@@ -1332,6 +1332,7 @@ impl Elaborator {
             } => Handler::Inline {
                 dangling_trivia: vec![],
                 named: named.clone(),
+                instance_bindings: vec![],
                 arms: arms
                     .iter()
                     .map(|ann| {

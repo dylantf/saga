@@ -1,6 +1,6 @@
 use crate::ast::{Annotated, BinOp, CaseArm, Decl, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
 
-use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
+use super::{Checker, Diagnostic, EffectEntry, EffectRow, Scheme, Type};
 use crate::token::Span;
 
 impl Checker {
@@ -22,15 +22,27 @@ impl Checker {
             }),
 
             ExprKind::Var { name, .. } => {
-                let resolved_name = self.scope_map.resolve_value(name)
-                    .map(|s| s.to_string()).unwrap_or_else(|| name.clone());
+                let resolved_name = self
+                    .scope_map
+                    .resolve_value(name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| name.clone());
                 // Try bare name first (locals), then resolved name (imports)
                 let env_lookup = self.env.get(name).or_else(|| self.env.get(&resolved_name));
                 if let Some(scheme) = env_lookup {
                     let scheme = scheme.clone();
                     // Propagate effect type params from callee's annotations.
-                    let effect_key = if self.effect_meta.fun_type_constraints.contains_key(name) { name.clone() } else { resolved_name.clone() };
-                    if let Some(constraints) = self.effect_meta.fun_type_constraints.get(&effect_key).cloned() {
+                    let effect_key = if self.effect_meta.fun_type_constraints.contains_key(name) {
+                        name.clone()
+                    } else {
+                        resolved_name.clone()
+                    };
+                    if let Some(constraints) = self
+                        .effect_meta
+                        .fun_type_constraints
+                        .get(&effect_key)
+                        .cloned()
+                    {
                         for (effect_name, concrete_types) in &constraints {
                             if let Some(info) = self.effects.get(effect_name).cloned() {
                                 let mapping: std::collections::HashMap<u32, Type> = info
@@ -39,26 +51,27 @@ impl Checker {
                                     .zip(concrete_types.iter())
                                     .map(|(&param_id, ty)| (param_id, ty.clone()))
                                     .collect();
-                                self.effect_meta.type_param_cache
+                                self.effect_meta
+                                    .type_param_cache
                                     .insert(effect_name.clone(), mapping);
                             }
                         }
                     }
-                    let (mut ty, constraints) = self.instantiate(&scheme);
+                    let (ty, constraints) = self.instantiate(&scheme);
                     for (trait_name, trait_ty, extra_types) in constraints {
-                        self.trait_state.pending_constraints
-                            .push((trait_name, extra_types, trait_ty, span, node_id));
-                    }
-                    if let Some(eff_constraints) =
-                        self.effect_meta.fun_type_constraints.get(&effect_key).cloned()
-                        && let Type::Fun(a, b, _) = ty
-                    {
-                        let eff_refs: Vec<super::EffectEntry> =
-                            eff_constraints.into_iter().map(|(n, a)| super::EffectEntry::unnamed(n, a)).collect();
-                        ty = Type::Fun(a, b, super::EffectRow::closed(eff_refs));
+                        self.trait_state.pending_constraints.push((
+                            trait_name,
+                            extra_types,
+                            trait_ty,
+                            span,
+                            node_id,
+                        ));
                     }
                     self.record_type(node_id, &ty);
-                    let def_id = self.env.def_id(name).or_else(|| self.env.def_id(&resolved_name));
+                    let def_id = self
+                        .env
+                        .def_id(name)
+                        .or_else(|| self.env.def_id(&resolved_name));
                     if let Some(def_id) = def_id {
                         self.record_reference(node_id, span, def_id);
                     }
@@ -72,14 +85,23 @@ impl Checker {
             }
 
             ExprKind::Constructor { name, .. } => {
-                let resolved_ctor = self.scope_map.resolve_constructor(name)
-                    .map(|s| s.to_string()).unwrap_or_else(|| name.clone());
-                let ctor_lookup = self.constructors.get(name).or_else(|| self.constructors.get(&resolved_ctor));
+                let resolved_ctor = self
+                    .scope_map
+                    .resolve_constructor(name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| name.clone());
+                let ctor_lookup = self
+                    .constructors
+                    .get(name)
+                    .or_else(|| self.constructors.get(&resolved_ctor));
                 if let Some(scheme) = ctor_lookup {
                     let scheme = scheme.clone();
                     let (ty, _) = self.instantiate(&scheme);
                     self.record_type(node_id, &ty);
-                    let def_id = self.lsp.constructor_def_ids.get(name)
+                    let def_id = self
+                        .lsp
+                        .constructor_def_ids
+                        .get(name)
                         .or_else(|| self.lsp.constructor_def_ids.get(&resolved_ctor))
                         .copied();
                     if let Some(def_id) = def_id {
@@ -106,7 +128,10 @@ impl Checker {
                         &Type::Fun(
                             Box::new(arg_ty),
                             Box::new(ret_ty.clone()),
-                            EffectRow { effects: vec![], tail: Some(Box::new(eff_row_var)) },
+                            EffectRow {
+                                effects: vec![],
+                                tail: Some(Box::new(eff_row_var)),
+                            },
                         ),
                         span,
                     )
@@ -145,8 +170,8 @@ impl Checker {
                 if let Type::Fun(p, _, _) = func_shallow {
                     let param_shallow = self.sub.resolve_var(p);
                     if let Type::Fun(_, _, row) = param_shallow {
-                        let absorbed: std::collections::HashSet<String> = row
-                            .effects.iter().map(|e| e.name.clone()).collect();
+                        let absorbed: std::collections::HashSet<String> =
+                            row.effects.iter().map(|e| e.name.clone()).collect();
                         self.effect_row = self.effect_row.subtract(&absorbed);
                     }
                 }
@@ -169,7 +194,13 @@ impl Checker {
                 let left_ty = self.infer_expr(left)?;
                 let right_ty = self.infer_expr(right)?;
                 match op {
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::IntDiv | BinOp::Mod | BinOp::FloatMod => {
+                    BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::FloatDiv
+                    | BinOp::IntDiv
+                    | BinOp::Mod
+                    | BinOp::FloatMod => {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.trait_state.pending_constraints.push((
                             "Num".into(),
@@ -193,7 +224,8 @@ impl Checker {
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
-                        let ord_name = self.resolve_trait_name("Ord")
+                        let ord_name = self
+                            .resolve_trait_name("Ord")
                             .unwrap_or_else(|| "Ord".into());
                         self.trait_state.pending_constraints.push((
                             ord_name,
@@ -225,8 +257,13 @@ impl Checker {
 
             ExprKind::UnaryMinus { expr: inner, .. } => {
                 let ty = self.infer_expr(inner)?;
-                self.trait_state.pending_constraints
-                    .push(("Num".into(), vec![], ty.clone(), span, node_id));
+                self.trait_state.pending_constraints.push((
+                    "Num".into(),
+                    vec![],
+                    ty.clone(),
+                    span,
+                    node_id,
+                ));
                 Ok(ty)
             }
 
@@ -276,22 +313,21 @@ impl Checker {
                 self.infer_record_create(name, fields, span)
             }
 
-            ExprKind::AnonRecordCreate { fields, .. } => {
-                self.infer_anon_record_create(fields)
-            }
+            ExprKind::AnonRecordCreate { fields, .. } => self.infer_anon_record_create(fields),
 
             ExprKind::FieldAccess {
                 expr: inner, field, ..
-            } => {
-                self.infer_field_access(inner, field, span)
-            }
+            } => self.infer_field_access(inner, field, span),
 
             ExprKind::RecordUpdate { record, fields, .. } => {
                 self.infer_record_update(record, fields, span)
             }
 
             ExprKind::EffectCall {
-                name, qualifier, instance, ..
+                name,
+                qualifier,
+                instance,
+                ..
             } => {
                 // For instance-qualified calls (e.g. `counter.put!`), resolve the
                 // effect qualifier from the handle binding's handler info.
@@ -300,11 +336,11 @@ impl Checker {
                         // Find which of the handler's effects contains this op
                         let mut found = None;
                         for eff_name in &handler_info.effects {
-                            if let Some(info) = self.effects.get(eff_name) {
-                                if info.ops.iter().any(|o| o.name == *name) {
-                                    found = Some(eff_name.clone());
-                                    break;
-                                }
+                            if let Some(info) = self.effects.get(eff_name)
+                                && info.ops.iter().any(|o| o.name == *name)
+                            {
+                                found = Some(eff_name.clone());
+                                break;
                             }
                         }
                         if found.is_none() {
@@ -337,7 +373,8 @@ impl Checker {
                     .rev()
                     .find_map(|map| map.get(name.as_str()))
                 {
-                    self.lsp.effect_call_targets
+                    self.lsp
+                        .effect_call_targets
                         .insert(span, (*arm_span, arm_module.clone()));
                 }
 
@@ -350,9 +387,19 @@ impl Checker {
                         ty = Type::arrow(param_ty.clone(), ty);
                     }
                 }
-                // Emit the effect onto the accumulator
+                // Emit the effect onto the accumulator.
+                // Instance-qualified calls emit named effects (e.g. `from: State`)
+                // so they propagate distinctly from unnamed effects.
                 if let Some(effect_name) = self.effect_for_op(name, resolved_qualifier.as_deref()) {
-                    self.emit_effect(effect_name.clone(), vec![]);
+                    if let Some(inst_name) = instance {
+                        let entry =
+                            EffectEntry::named(inst_name.clone(), effect_name.clone(), vec![]);
+                        if !self.effect_row.effects.iter().any(|e| e.matches(&entry)) {
+                            self.effect_row.effects.push(entry);
+                        }
+                    } else {
+                        self.emit_effect(effect_name.clone(), vec![]);
+                    }
                 }
                 Ok(ty)
             }
@@ -361,9 +408,7 @@ impl Checker {
                 expr: inner,
                 handler,
                 ..
-            } => {
-                self.infer_with(inner, handler, span, node_id)
-            }
+            } => self.infer_with(inner, handler, span, node_id),
 
             ExprKind::Resume { value, .. } => {
                 let val_ty = self.infer_expr(value)?;
@@ -386,7 +431,11 @@ impl Checker {
                 Ok(Type::Con("Tuple".into(), tys))
             }
 
-            ExprKind::QualifiedName { module, name, canonical_module } => {
+            ExprKind::QualifiedName {
+                module,
+                name,
+                canonical_module,
+            } => {
                 if name.is_empty() {
                     return Ok(self.fresh_var());
                 }
@@ -402,7 +451,10 @@ impl Checker {
                         && !self.modules.exports.contains_key(module.as_str())
                     {
                         // Alias = full module name so only Std.X.y is registered
-                        if self.typecheck_import(&parts, Some(module), None, span).is_ok() {
+                        if self
+                            .typecheck_import(&parts, Some(module), None, span)
+                            .is_ok()
+                        {
                             // Register synthetic import so resolver/codegen can see it
                             self.prelude_imports.push(crate::ast::Decl::Import {
                                 id: crate::ast::NodeId::fresh(),
@@ -414,16 +466,33 @@ impl Checker {
                         }
                     }
                 }
-                let resolved_key = self.scope_map.resolve_value(&key).map(|s| s.to_string()).unwrap_or_else(|| key.clone());
-                match self.env.get(&key).or_else(|| self.env.get(&resolved_key)).cloned() {
+                let resolved_key = self
+                    .scope_map
+                    .resolve_value(&key)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| key.clone());
+                match self
+                    .env
+                    .get(&key)
+                    .or_else(|| self.env.get(&resolved_key))
+                    .cloned()
+                {
                     Some(scheme) => {
                         let (ty, constraints) = self.instantiate(&scheme);
                         for (trait_name, trait_ty, extra_types) in constraints {
-                            self.trait_state.pending_constraints
-                                .push((trait_name, extra_types, trait_ty, span, node_id));
+                            self.trait_state.pending_constraints.push((
+                                trait_name,
+                                extra_types,
+                                trait_ty,
+                                span,
+                                node_id,
+                            ));
                         }
                         self.record_type(node_id, &ty);
-                        let def_id = self.env.def_id(&key).or_else(|| self.env.def_id(&resolved_key));
+                        let def_id = self
+                            .env
+                            .def_id(&key)
+                            .or_else(|| self.env.def_id(&resolved_key));
                         if let Some(def_id) = def_id {
                             self.record_reference(node_id, span, def_id);
                         }
@@ -474,13 +543,11 @@ impl Checker {
 
             ExprKind::Receive {
                 arms, after_clause, ..
-            } => {
-                self.infer_receive(
-                    arms,
-                    after_clause.as_ref().map(|(t, b)| (t.as_ref(), b.as_ref())),
-                    span,
-                )
-            }
+            } => self.infer_receive(
+                arms,
+                after_clause.as_ref().map(|(t, b)| (t.as_ref(), b.as_ref())),
+                span,
+            ),
 
             ExprKind::Ascription {
                 expr: inner,
@@ -704,7 +771,8 @@ impl Checker {
                 .filter_map(|arg| {
                     if let Type::Con(eff_name, _) = self.sub.apply(arg) {
                         // Try to find canonical name
-                        self.effects.keys()
+                        self.effects
+                            .keys()
                             .find(|k| k.ends_with(&format!(".{}", eff_name)) || *k == &eff_name)
                             .cloned()
                             .or(Some(eff_name))
@@ -719,7 +787,10 @@ impl Checker {
             Some(super::HandlerInfo {
                 effects,
                 return_type: None,
-                needs_effects: super::EffectRow { effects: vec![], tail: None },
+                needs_effects: super::EffectRow {
+                    effects: vec![],
+                    tail: None,
+                },
                 forall: vec![],
                 arm_spans: std::collections::HashMap::new(),
                 where_constraints: std::collections::HashMap::new(),
@@ -772,14 +843,17 @@ impl Checker {
                     } = pattern
                     {
                         self.generalize_let_binding(
-                            name, *pat_id, *var_span, &ty, has_deferred_effects,
+                            name,
+                            *pat_id,
+                            *var_span,
+                            &ty,
+                            has_deferred_effects,
                         );
                     } else {
                         if let Err(e) = self.bind_pattern(pattern, &ty) {
                             errors.push(e);
                         }
-                        if let Err(e) = self.check_let_pattern_irrefutable(pattern, &ty)
-                        {
+                        if let Err(e) = self.check_let_pattern_irrefutable(pattern, &ty) {
                             errors.push(e);
                         }
                     }
@@ -869,7 +943,11 @@ impl Checker {
                         let mut clause_ty = body_ty;
                         for (j, param_ty) in param_types.into_iter().rev().enumerate() {
                             if j == 0 && !body_effs.effects.is_empty() {
-                                clause_ty = Type::Fun(Box::new(param_ty), Box::new(clause_ty), body_effs.clone());
+                                clause_ty = Type::Fun(
+                                    Box::new(param_ty),
+                                    Box::new(clause_ty),
+                                    body_effs.clone(),
+                                );
                             } else {
                                 clause_ty = Type::arrow(param_ty, clause_ty);
                             }
@@ -924,10 +1002,11 @@ impl Checker {
                     match self.infer_expr(expr) {
                         Ok(ty) => {
                             if i + 1 < stmts.len() {
-                                self.pending_warnings.push(super::PendingWarning::DiscardedValue {
-                                    span: expr.span,
-                                    ty: ty.clone(),
-                                });
+                                self.pending_warnings
+                                    .push(super::PendingWarning::DiscardedValue {
+                                        span: expr.span,
+                                        ty: ty.clone(),
+                                    });
                             }
                             last_ty = ty;
                         }
@@ -959,8 +1038,8 @@ impl Checker {
     ) {
         let mut scheme = self.generalize(ty);
 
-        self.trait_state.pending_constraints
-            .retain(|(trait_name, _trait_type_args, cty, _span, node_id)| {
+        self.trait_state.pending_constraints.retain(
+            |(trait_name, _trait_type_args, cty, _span, node_id)| {
                 let resolved = self.sub.apply(cty);
                 if let Type::Var(id) = resolved
                     && scheme.forall.contains(&id)
@@ -971,11 +1050,11 @@ impl Checker {
                         .any(|(t, v, _)| t == trait_name && *v == id)
                     {
                         // Resolve extra type arg var IDs through substitution
-                        let extra_resolved: Vec<Type> = _trait_type_args
-                            .iter()
-                            .map(|t| self.sub.apply(t))
-                            .collect();
-                        scheme.constraints.push((trait_name.clone(), id, extra_resolved));
+                        let extra_resolved: Vec<Type> =
+                            _trait_type_args.iter().map(|t| self.sub.apply(t)).collect();
+                        scheme
+                            .constraints
+                            .push((trait_name.clone(), id, extra_resolved));
                     }
                     self.evidence.push(super::TraitEvidence {
                         node_id: *node_id,
@@ -987,7 +1066,8 @@ impl Checker {
                     return false;
                 }
                 true
-            });
+            },
+        );
 
         let operator_traits: std::collections::HashSet<&str> =
             ["Num", "Semigroup", "Eq"].into_iter().collect();
@@ -1009,14 +1089,14 @@ impl Checker {
                 .insert(name.to_string(), (dict_params, arity));
         }
 
-        self.env
-            .insert_with_def(name.to_string(), scheme, pat_id);
+        self.env.insert_with_def(name.to_string(), scheme, pat_id);
         if has_deferred_effects {
             self.effect_meta.known_let_bindings.insert(name.to_string());
         }
         self.lsp.node_spans.insert(pat_id, var_span);
         self.record_type_at_span(var_span, ty);
-        self.lsp.definitions
+        self.lsp
+            .definitions
             .push((pat_id, name.to_string(), var_span));
     }
 
@@ -1066,5 +1146,4 @@ impl Checker {
         }
         Ok(())
     }
-
 }

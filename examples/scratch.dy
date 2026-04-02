@@ -1,4 +1,4 @@
-# Test named effect instances (Layer 2)
+# Test named effect instances
 
 effect State s {
   fun get : Unit -> s
@@ -10,12 +10,7 @@ handler make_state for State Int {
   put _ = resume ()
 }
 
-# Function with named effect instances in needs
 fun transfer : Int -> Unit needs {from: State Int, to: State Int}
-transfer amount = {
-  let balance = from.get! ()
-  from.put! (balance - amount)
-  to.put! (to.get! () + amount)
-}
+transfer _ = from.put! 0
 
 main () = ()

@@ -128,11 +128,16 @@ fn format_needs_inner(effects: &[EffectRef], effect_row_var: &Option<(String, Sp
 }
 
 pub fn format_effect_ref(e: &EffectRef) -> Doc {
+    let prefix = if let Some(ref inst) = e.instance {
+        Doc::text(format!("{}: ", inst))
+    } else {
+        Doc::Nil
+    };
     if e.type_args.is_empty() {
-        Doc::text(&e.name)
+        docs![prefix, Doc::text(&e.name)]
     } else {
         let args: Vec<Doc> = e.type_args.iter().map(format_type_expr).collect();
-        docs![Doc::text(&e.name), Doc::text(" "), Doc::join(Doc::text(" "), args)]
+        docs![prefix, Doc::text(&e.name), Doc::text(" "), Doc::join(Doc::text(" "), args)]
     }
 }
 

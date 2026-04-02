@@ -68,19 +68,13 @@ pub fn build_constructor_atoms(
                 for variant in variants {
                     let ctor = &variant.node.name;
                     if !atoms.contains_key(ctor) {
-                        atoms.insert(
-                            ctor.clone(),
-                            format!("{}_{}", module_name, ctor),
-                        );
+                        atoms.insert(ctor.clone(), format!("{}_{}", module_name, ctor));
                     }
                 }
             }
             Decl::RecordDef { name, .. } => {
                 if !atoms.contains_key(name) {
-                    atoms.insert(
-                        name.clone(),
-                        format!("{}_{}", module_name, name),
-                    );
+                    atoms.insert(name.clone(), format!("{}_{}", module_name, name));
                 }
             }
             _ => {}
@@ -90,7 +84,12 @@ pub fn build_constructor_atoms(
     // Build a map of module name -> import alias from import declarations
     let mut import_aliases: HashMap<String, String> = HashMap::new();
     for decl in prelude_imports.iter().chain(program.iter()) {
-        if let Decl::Import { module_path, alias: Some(a), .. } = decl {
+        if let Decl::Import {
+            module_path,
+            alias: Some(a),
+            ..
+        } = decl
+        {
             import_aliases.insert(module_path.join("."), a.clone());
         }
     }
@@ -100,7 +99,10 @@ pub fn build_constructor_atoms(
         let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
         let erlang_name = module_name_to_erlang(&mod_path);
         let last_segment = mod_path.last().map(|s| s.as_str()).unwrap_or("");
-        let alias = import_aliases.get(mod_name).map(|s| s.as_str()).unwrap_or(last_segment);
+        let alias = import_aliases
+            .get(mod_name)
+            .map(|s| s.as_str())
+            .unwrap_or(last_segment);
 
         for (type_name, ctors) in &info.type_constructors {
             for ctor in ctors {
@@ -122,10 +124,7 @@ pub fn build_constructor_atoms(
                         atoms.insert(format!("{}.{}", alias, ctor), mangled.clone());
                     }
                     // Also register type-qualified: "FileError.NotFound"
-                    atoms.insert(
-                        format!("{}.{}", type_name, ctor),
-                        mangled,
-                    );
+                    atoms.insert(format!("{}.{}", type_name, ctor), mangled);
                 }
             }
         }
@@ -177,9 +176,22 @@ pub type ResolutionMap = HashMap<NodeId, ResolvedName>;
 #[derive(Debug, Clone)]
 #[allow(clippy::enum_variant_names)]
 enum ScopedName {
-    LocalFun { name: String, arity: usize, effects: Vec<String> },
-    ImportedFun { erlang_mod: String, name: String, arity: usize, effects: Vec<String> },
-    ExternalFun { erlang_mod: String, erlang_func: String, arity: usize },
+    LocalFun {
+        name: String,
+        arity: usize,
+        effects: Vec<String>,
+    },
+    ImportedFun {
+        erlang_mod: String,
+        name: String,
+        arity: usize,
+        effects: Vec<String>,
+    },
+    ExternalFun {
+        erlang_mod: String,
+        erlang_func: String,
+        arity: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +315,9 @@ fn collect_pat_vars_into(pat: &Pat, vars: &mut HashSet<String>) {
                 collect_pat_vars_into(elem, vars);
             }
         }
-        Pat::Record { fields, as_name, .. } => {
+        Pat::Record {
+            fields, as_name, ..
+        } => {
             for (field_name, alias_pat) in fields {
                 if let Some(alias) = alias_pat {
                     // `{ status: s }` — `s` is bound
@@ -478,9 +492,8 @@ pub fn resolve_names(
 
             // Register exported functions
             for (name, scheme) in &info.exports {
-                let (arity, _) = crate::codegen::lower::util::arity_and_effects_from_type(
-                    &scheme.ty,
-                );
+                let (arity, _) =
+                    crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
                 let dict_params =
                     crate::codegen::lower::util::dict_param_count(&scheme.constraints);
                 let effects = fun_effects_map
@@ -527,7 +540,10 @@ pub fn resolve_names(
                 }
 
                 // Register unqualified form only if exposed and not shadowed by local
-                if is_exposed(name) && !local_funs.contains_key(name) && !local_externals.contains_key(name) {
+                if is_exposed(name)
+                    && !local_funs.contains_key(name)
+                    && !local_externals.contains_key(name)
+                {
                     scope.entry(name.clone()).or_insert(scoped);
                 }
             }
@@ -546,12 +562,14 @@ pub fn resolve_names(
         let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
         let erlang_mod = module_name_to_erlang(&mod_path);
         for d in &info.trait_impl_dicts {
-            scope.entry(d.dict_name.clone()).or_insert(ScopedName::ImportedFun {
-                erlang_mod: erlang_mod.clone(),
-                name: d.dict_name.clone(),
-                arity: d.arity,
-                effects: Vec::new(),
-            });
+            scope
+                .entry(d.dict_name.clone())
+                .or_insert(ScopedName::ImportedFun {
+                    erlang_mod: erlang_mod.clone(),
+                    name: d.dict_name.clone(),
+                    arity: d.arity,
+                    effects: Vec::new(),
+                });
         }
     }
 
@@ -567,21 +585,13 @@ pub fn resolve_names(
 // Scope-aware AST walk
 // ---------------------------------------------------------------------------
 
-fn resolve_program(
-    program: &Program,
-    scope: &mut Scope<'_>,
-    map: &mut ResolutionMap,
-) {
+fn resolve_program(program: &Program, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
     for decl in program {
         resolve_decl(decl, scope, map);
     }
 }
 
-fn resolve_decl(
-    decl: &Decl,
-    scope: &mut Scope<'_>,
-    map: &mut ResolutionMap,
-) {
+fn resolve_decl(decl: &Decl, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
     match decl {
         Decl::FunBinding { params, body, .. } => {
             // Function parameters shadow module-level names within the body
@@ -594,7 +604,7 @@ fn resolve_decl(
             resolve_expr(value, scope, map);
         }
         Decl::HandlerDef { body, .. } => {
-            resolve_handler_body_names(&body, scope, map);
+            resolve_handler_body_names(body, scope, map);
         }
         Decl::ImplDef { methods, .. } => {
             for method in methods {
@@ -619,26 +629,25 @@ fn resolve_handler_body_names(
     map: &mut ResolutionMap,
 ) {
     for arm in &body.arms {
-        let param_names: HashSet<String> =
-            arm.node.params.iter().map(|(name, _)| name.clone()).collect();
+        let param_names: HashSet<String> = arm
+            .node
+            .params
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
         scope.push(param_names);
         resolve_expr(&arm.node.body, scope, map);
         scope.pop();
     }
     if let Some(rc) = &body.return_clause {
-        let param_names: HashSet<String> =
-            rc.params.iter().map(|(name, _)| name.clone()).collect();
+        let param_names: HashSet<String> = rc.params.iter().map(|(name, _)| name.clone()).collect();
         scope.push(param_names);
         resolve_expr(&rc.body, scope, map);
         scope.pop();
     }
 }
 
-fn resolve_expr(
-    expr: &Expr,
-    scope: &mut Scope<'_>,
-    map: &mut ResolutionMap,
-) {
+fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
     match &expr.kind {
         ExprKind::Var { name, .. } => {
             if let Some(scoped) = scope.resolve_unqualified(name) {
@@ -688,15 +697,20 @@ fn resolve_expr(
                         scope.pop();
                         scope.push(block_locals.clone());
                     }
-                    Stmt::LetFun { name, params, body, .. } => {
+                    Stmt::LetFun {
+                        name, params, body, ..
+                    } => {
                         // LetFun defines a local *function*, not a variable.
                         // It resolves as LocalFun (for FunRef codegen) and shadows imports.
                         let arity = params.len();
-                        block_funs.insert(name.clone(), ScopedName::LocalFun {
-                            name: name.clone(),
-                            arity,
-                            effects: Vec::new(),
-                        });
+                        block_funs.insert(
+                            name.clone(),
+                            ScopedName::LocalFun {
+                                name: name.clone(),
+                                arity,
+                                effects: Vec::new(),
+                            },
+                        );
                         // Update the local funs frame (visible to subsequent stmts + own body for recursion)
                         scope.pop_funs();
                         scope.push_funs(block_funs.clone());
@@ -730,7 +744,9 @@ fn resolve_expr(
             resolve_expr(then_branch, scope, map);
             resolve_expr(else_branch, scope, map);
         }
-        ExprKind::Case { scrutinee, arms, .. } => {
+        ExprKind::Case {
+            scrutinee, arms, ..
+        } => {
             resolve_expr(scrutinee, scope, map);
             for arm in arms {
                 // Pattern vars are in scope for the guard and body
@@ -743,7 +759,11 @@ fn resolve_expr(
                 scope.pop();
             }
         }
-        ExprKind::With { expr: inner, handler, .. } => {
+        ExprKind::With {
+            expr: inner,
+            handler,
+            ..
+        } => {
             resolve_expr(inner, scope, map);
             match handler.as_ref() {
                 ast::Handler::Named(_, _) => {}
@@ -753,8 +773,12 @@ fn resolve_expr(
                     ..
                 } => {
                     for arm in arms {
-                        let param_names: HashSet<String> =
-                            arm.node.params.iter().map(|(name, _)| name.clone()).collect();
+                        let param_names: HashSet<String> = arm
+                            .node
+                            .params
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect();
                         scope.push(param_names);
                         resolve_expr(&arm.node.body, scope, map);
                         scope.pop();
@@ -773,8 +797,7 @@ fn resolve_expr(
             resolve_expr(left, scope, map);
             resolve_expr(right, scope, map);
         }
-        ExprKind::UnaryMinus { expr: inner, .. }
-        | ExprKind::Ascription { expr: inner, .. } => {
+        ExprKind::UnaryMinus { expr: inner, .. } | ExprKind::Ascription { expr: inner, .. } => {
             resolve_expr(inner, scope, map);
         }
         ExprKind::Tuple { elements, .. } => {
@@ -832,7 +855,9 @@ fn resolve_expr(
                 scope.pop();
             }
         }
-        ExprKind::Receive { arms, after_clause, .. } => {
+        ExprKind::Receive {
+            arms, after_clause, ..
+        } => {
             for arm in arms {
                 let arm_vars = collect_pat_vars(&arm.node.pattern);
                 scope.push(arm_vars);
@@ -902,13 +927,10 @@ fn resolve_expr(
             scope.pop();
         }
         // Leaf nodes that don't contain sub-expressions
-        ExprKind::Lit { .. }
-        | ExprKind::Constructor { .. }
-        => {}
+        ExprKind::Lit { .. } | ExprKind::Constructor { .. } => {}
 
         // Sugar nodes should be desugared before this pass
-        ExprKind::Pipe { segments, .. }
-        | ExprKind::BinOpChain { segments, .. } => {
+        ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {
             for seg in segments {
                 resolve_expr(&seg.node, scope, map);
             }
@@ -934,7 +956,11 @@ fn resolve_expr(
 
 fn scoped_to_resolved(scoped: &ScopedName) -> ResolvedName {
     match scoped {
-        ScopedName::LocalFun { name, arity, effects } => ResolvedName::LocalFun {
+        ScopedName::LocalFun {
+            name,
+            arity,
+            effects,
+        } => ResolvedName::LocalFun {
             name: name.clone(),
             arity: *arity,
             effects: effects.clone(),

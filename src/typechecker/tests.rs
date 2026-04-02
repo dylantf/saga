@@ -4470,3 +4470,28 @@ fn phantom_trait_method_wrong_impl_type_args_fails() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn named_effect_instances_survive_function_lookup() {
+    check(
+        "effect State s {\n\
+         fun get : Unit -> s\n\
+         fun put : s -> Unit\n\
+         }\n\
+         handler make_state for State Int {\n\
+         get () = resume 0\n\
+         put _ = resume ()\n\
+         }\n\
+         fun transfer : Int -> Unit needs {from: State Int, to: State Int}\n\
+         transfer amount = {\n\
+         from.put! amount\n\
+         to.put! amount\n\
+         }\n\
+         main () = {\n\
+         handle src = make_state\n\
+         handle dst = make_state\n\
+         transfer 100 with { from: src, to: dst }\n\
+         }",
+    )
+    .unwrap();
+}

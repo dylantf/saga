@@ -145,9 +145,9 @@ impl Checker {
         let r1 = self.sub.apply_effect_row(row1);
         let r2 = self.sub.apply_effect_row(row2);
 
-        // Match effects by name and unify their type args pairwise
+        // Match effects by identity (instance + name) and unify their type args pairwise
         for entry1 in &r1.effects {
-            if let Some(entry2) = r2.effects.iter().find(|e| e.name == entry1.name) {
+            if let Some(entry2) = r2.effects.iter().find(|e| e.matches(entry1)) {
                 for (t1, t2) in entry1.args.iter().zip(entry2.args.iter()) {
                     self.unify(t1, t2)?;
                 }
@@ -156,11 +156,11 @@ impl Checker {
 
         // Collect unmatched effects from each side
         let extras1: Vec<_> = r1.effects.iter()
-            .filter(|e| !r2.effects.iter().any(|e2| e2.name == e.name))
+            .filter(|e| !r2.effects.iter().any(|e2| e2.matches(e)))
             .cloned()
             .collect();
         let extras2: Vec<_> = r2.effects.iter()
-            .filter(|e| !r1.effects.iter().any(|e1| e1.name == e.name))
+            .filter(|e| !r1.effects.iter().any(|e1| e1.matches(e)))
             .cloned()
             .collect();
 

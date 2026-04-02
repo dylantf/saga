@@ -138,7 +138,8 @@ impl Checker {
                                     let extra_types: Vec<Type> = extra_var_ids
                                         .iter()
                                         .map(|id| {
-                                            let mapped = mapping.get(id).cloned().unwrap_or(Type::Var(*id));
+                                            let mapped =
+                                                mapping.get(id).cloned().unwrap_or(Type::Var(*id));
                                             self.sub.apply(&mapped)
                                         })
                                         .collect();
@@ -155,13 +156,18 @@ impl Checker {
 
                         // Merge handler's needs effects into remaining, with fresh vars applied
                         let fresh_needs = EffectRow {
-                            effects: handler_info.needs_effects.effects.iter()
-                                .map(|entry| {
-                                    super::EffectEntry {
-                                        instance: entry.instance.clone(),
-                                        name: entry.name.clone(),
-                                        args: entry.args.iter().map(|t| self.replace_vars(t, &mapping)).collect(),
-                                    }
+                            effects: handler_info
+                                .needs_effects
+                                .effects
+                                .iter()
+                                .map(|entry| super::EffectEntry {
+                                    instance: entry.instance.clone(),
+                                    name: entry.name.clone(),
+                                    args: entry
+                                        .args
+                                        .iter()
+                                        .map(|t| self.replace_vars(t, &mapping))
+                                        .collect(),
                                 })
                                 .collect(),
                             tail: None,
@@ -181,6 +187,7 @@ impl Checker {
             }
             ast::Handler::Inline {
                 named,
+                instance_bindings,
                 arms,
                 return_clause,
                 ..
@@ -195,6 +202,51 @@ impl Checker {
                         ));
                     }
                 }
+
+                // Process instance bindings: `from: counter, to: savings`
+                // Each binding maps an instance name to a handler and subtracts
+                // the corresponding named effect from the inner computation.
+                let mut instance_handled: HashSet<String> = HashSet::new();
+                for ann in instance_bindings {
+                    let binding = &ann.node;
+                    let handler_ty = self.infer_expr(&binding.handler)?;
+                    // Verify the handler expression has a Handler type
+                    let resolved = self.sub.apply(&handler_ty);
+                    if let Type::Con(ref con, _) = resolved
+                        && con != "Handler"
+                    {
+                        self.collected_diagnostics.push(Diagnostic::error_at(
+                            binding.span,
+                            format!(
+                                "instance binding '{}' expects a handler, got type {}",
+                                binding.instance, resolved
+                            ),
+                        ));
+                    }
+                    // Build a key that matches the named effect entry:
+                    // inner computation emits `from: State`, we subtract by instance name
+                    instance_handled.insert(binding.instance.clone());
+                }
+
+                // Subtract named effects from inner computation
+                let remaining_effs = {
+                    let effects = remaining_effs
+                        .effects
+                        .iter()
+                        .filter(|e| {
+                            if let Some(ref inst) = e.instance {
+                                !instance_handled.contains(inst)
+                            } else {
+                                true
+                            }
+                        })
+                        .cloned()
+                        .collect();
+                    EffectRow {
+                        effects,
+                        tail: remaining_effs.tail.clone(),
+                    }
+                };
 
                 self.effect_meta.type_param_cache = inner_effect_cache;
 
@@ -227,7 +279,9 @@ impl Checker {
 
                 for arm in arms {
                     let arm = &arm.node;
-                    let op_sig = self.lookup_effect_op(&arm.op_name, arm.qualifier.as_deref(), arm.span).ok();
+                    let op_sig = self
+                        .lookup_effect_op(&arm.op_name, arm.qualifier.as_deref(), arm.span)
+                        .ok();
 
                     let saved_env = self.env.clone();
                     let saved_resume = self.resume_type.take();
@@ -286,7 +340,8 @@ impl Checker {
                     let arm_ty = self.infer_expr(&arm.body)?;
                     let arm_effs = self.restore_effects(saved_effs);
                     let own_effect = op_sig.as_ref().map(|sig| sig.effect_name.clone());
-                    let sibling_handled: HashSet<String> = handled.iter()
+                    let sibling_handled: HashSet<String> = handled
+                        .iter()
                         .filter(|e| own_effect.as_ref() != Some(e))
                         .cloned()
                         .collect();
