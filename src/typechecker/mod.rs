@@ -769,6 +769,9 @@ pub struct Checker {
     pub(crate) effects: HashMap<std::string::String, EffectDefInfo>,
     /// Named handler definitions: handler name -> info
     pub(crate) handlers: HashMap<std::string::String, HandlerInfo>,
+    /// Functions whose bodies produce handlers, so applications like
+    /// `make_state 0` can preserve handler metadata such as return clauses.
+    pub(crate) handler_funs: HashMap<std::string::String, HandlerInfo>,
     /// Context for resume typing: when inside a handler arm, the return type of the op being handled
     pub(crate) resume_type: Option<Type>,
     /// Context for resume return typing: when inside a handler arm, the answer type of the with-expression
@@ -1030,6 +1033,7 @@ impl Checker {
             records: HashMap::new(),
             effects: HashMap::new(),
             handlers: HashMap::new(),
+            handler_funs: HashMap::new(),
             resume_type: None,
             resume_return_type: None,
             effect_meta: EffectMeta::default(),

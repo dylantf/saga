@@ -1,48 +1,46 @@
-# Scratch: named handler instances with fully state-threaded handlers.
-#
-# This currently demonstrates the raw runtime shape of threading two named
-# State handlers through one computation: the handled call returns a nested
-# state function, applied one state at a time.
-
 effect State s {
   fun get : Unit -> s
   fun put : s -> Unit
 }
 
-handler thread_state for State Int {
-  get () = fun s -> (resume s) s
-  put next = fun _ -> (resume ()) next
-  return value = fun s -> (value, s)
+fun make_state : Int -> Handler (State Int)
+make_state initial =
+  handler for State Int {
+    get () = fun s -> (resume s) s
+    put next = fun _ -> (resume ()) next
+    return value = fun s -> (value, s)
+  }
+
+fun deposit : Int -> Int needs {account: State Int}
+deposit amount {account} = {
+  let balance = account.get! ()
+  let updated = balance + amount
+  account.put! updated
+  updated
 }
 
 fun transfer : Int -> (Int, Int) needs {from: State Int, to: State Int}
 transfer amount {from, to} = {
   let from_balance = from.get! ()
-  let to_balance = to.get! ()
-
+  let to_balance = deposit 0 with {
+    account: to,
+  }
   from.put! (from_balance - amount)
   to.put! (to_balance + amount)
-
   (from_balance - amount, to_balance + amount)
 }
 
 main () = {
-  handle checking = thread_state
-  handle savings = thread_state
-
-  # The current shape is nested:
-  #   transfer ... with { from, to }
-  # becomes a state function that takes one initial state, returns another
-  # state function plus one final state, and so on.
+  handle checking = make_state 100
+  handle savings = make_state 20
   let run_transfer = transfer 30 with {
     from: checking,
     to: savings,
   }
+  let (finish_transfer, from_final) = run_transfer 100
+  let (balances, to_final) = finish_transfer 20
 
-  let (finish_transfer, state_after_first) = run_transfer 100
-  let (balances, state_after_second) = finish_transfer 20
-
-  println (show balances)
-  println (show state_after_first)
-  println (show state_after_second)
+  let _ = dbg balances
+  let _ = dbg from_final
+  let _ = dbg to_final
 }

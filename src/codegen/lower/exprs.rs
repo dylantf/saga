@@ -4,6 +4,7 @@
 use crate::ast::{BinOp, CaseArm, Expr, ExprKind, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::token::Span;
+use crate::typechecker::Type;
 use std::collections::HashMap;
 
 use super::pats::{self, lower_pat};
@@ -589,7 +590,9 @@ impl<'a> Lowerer<'a> {
                     self.lower_handle_binding(name, value);
                     // If this became a dynamic handler, we need to actually
                     // lower the RHS and bind the result variable.
-                    if let Some((var, _effects)) = self.handle_dynamic_vars.get(name).cloned() {
+                    if let Some((var, _effects, _has_return)) =
+                        self.handle_dynamic_vars.get(name).cloned()
+                    {
                         let rhs_ce = self.lower_expr(value);
                         let rest_ce = self.lower_block(rest);
                         return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
@@ -1121,14 +1124,92 @@ impl<'a> Lowerer<'a> {
 
         // Dynamic handler: RHS is an arbitrary expression (e.g. function call).
         // Look up effect names from the typechecker's check result.
-        if let Some(cr) = &self.check_result
-            && let Some(info) = cr.handlers.get(name)
+        if let Some(cr) = &self.check_result {
+            let dynamic_info = cr.handlers.get(name)
+                .map(|info| {
+                    let effects = info.effects.iter()
+                        .map(|e| self.canonicalize_effect(e))
+                        .collect();
+                    let has_return = info.return_type.is_some();
+                    (effects, has_return)
+                })
+                .or_else(|| {
+                    cr.type_at_node
+                        .get(&value.id)
+                        .and_then(|ty| self.dynamic_handler_info_from_type(ty))
+                        .map(|effects| (effects, false))
+                });
+            let dynamic_info = dynamic_info.or_else(|| self.dynamic_handler_info_from_expr(value));
+            if let Some((effects, has_return)) = dynamic_info {
+                let var = self.fresh();
+                self.handle_dynamic_vars
+                    .insert(name.to_string(), (var, effects, has_return));
+            }
+        }
+    }
+
+    fn dynamic_handler_info_from_expr(&self, expr: &Expr) -> Option<(Vec<String>, bool)> {
+        let cr = self.check_result.as_ref()?;
+        if let Some(ty) = cr.type_at_node.get(&expr.id)
+            && let Some(effects) = self.dynamic_handler_info_from_type(ty)
         {
-            let effects = info.effects.iter()
-                .map(|e| self.canonicalize_effect(e))
+            return Some((effects, false));
+        }
+
+        if let ExprKind::Var { name } = &expr.kind
+            && let Some(scheme) = cr.env.get(name)
+            && let Some(effects) = self.dynamic_handler_info_from_type(&scheme.ty)
+        {
+            return Some((effects, false));
+        }
+
+        if let Some((func_name, _, args)) = collect_fun_call(expr)
+            && let Some(scheme) = cr.env.get(func_name)
+        {
+            let mut ty = scheme.ty.clone();
+            let arg_count = args
+                .iter()
+                .filter(|arg| {
+                    !matches!(
+                        arg.kind,
+                        ExprKind::Lit {
+                            value: crate::ast::Lit::Unit,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            for _ in 0..arg_count {
+                match ty {
+                    Type::Fun(_, ret, _) => ty = *ret,
+                    _ => break,
+                }
+            }
+            if let Some(effects) = self.dynamic_handler_info_from_type(&ty) {
+                return Some((effects, false));
+            }
+        }
+
+        None
+    }
+
+    fn dynamic_handler_info_from_type(&self, ty: &Type) -> Option<Vec<String>> {
+        if let Type::Con(name, args) = ty
+            && name == "Handler"
+        {
+            let effects: Vec<String> = args
+                .iter()
+                .filter_map(|arg| {
+                    if let Type::Con(effect_name, _) = arg {
+                        Some(self.canonicalize_effect(effect_name))
+                    } else {
+                        None
+                    }
+                })
                 .collect();
-            let var = self.fresh();
-            self.handle_dynamic_vars.insert(name.to_string(), (var, effects));
+            if effects.is_empty() { None } else { Some(effects) }
+        } else {
+            None
         }
     }
 

@@ -802,9 +802,18 @@ impl Checker {
 
     /// Extract HandlerInfo from a handle binding's RHS expression.
     /// Handles direct variable references, if/else conditionals, and handler expressions.
-    fn extract_handler_info(&self, expr: &Expr) -> Option<super::HandlerInfo> {
+    pub(crate) fn extract_handler_info(&self, expr: &Expr) -> Option<super::HandlerInfo> {
+        fn applied_fun_name(expr: &Expr) -> Option<&str> {
+            match &expr.kind {
+                ExprKind::Var { name, .. } => Some(name.as_str()),
+                ExprKind::App { func, .. } => applied_fun_name(func),
+                _ => None,
+            }
+        }
         match &expr.kind {
             ExprKind::Var { name } => self.handlers.get(name).cloned(),
+            ExprKind::App { .. } => applied_fun_name(expr)
+                .and_then(|name| self.handler_funs.get(name).cloned()),
             ExprKind::If {
                 then_branch,
                 else_branch,

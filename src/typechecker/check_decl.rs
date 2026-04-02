@@ -871,6 +871,7 @@ impl Checker {
 
         // Snapshot pending constraints so we can partition new ones after body checking
         let constraints_before = self.trait_state.pending_constraints.len();
+        let mut returned_handler_info: Option<super::HandlerInfo> = None;
 
         // Save and clear effect tracking and field candidate tracking for this function body
         let body_scope = self.enter_scope();
@@ -1003,6 +1004,9 @@ impl Checker {
             }
 
             let body_ty = self.infer_expr(body)?;
+            if returned_handler_info.is_none() {
+                returned_handler_info = self.extract_handler_info(body);
+            }
             self.unify_at(&result_ty, &body_ty, body.span)?;
 
             self.env = saved_env;
@@ -1115,6 +1119,12 @@ impl Checker {
                     ),
                 ));
             }
+        }
+
+        if let Some(info) = returned_handler_info {
+            self.handler_funs.insert(name.to_string(), info);
+        } else {
+            self.handler_funs.remove(name);
         }
 
         // Build curried function type. Effect row comes from:

@@ -12,9 +12,39 @@ use crate::ast::{Expr, ExprKind, Handler, HandlerArm};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::Lowerer;
-use super::util::{collect_fun_call, core_var};
+use super::util::{cerl_call, collect_fun_call, core_var};
 
 impl<'a> Lowerer<'a> {
+    fn dynamic_return_lambda(&mut self, tuple_var: &str, op_count: usize) -> CExpr {
+        let param = self.fresh();
+        let identity = CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)));
+        let tuple_size = cerl_call("erlang", "tuple_size", vec![CExpr::Var(tuple_var.to_string())]);
+        let return_index = op_count as i64 + 1;
+        let return_lambda = cerl_call(
+            "erlang",
+            "element",
+            vec![
+                CExpr::Lit(CLit::Int(return_index)),
+                CExpr::Var(tuple_var.to_string()),
+            ],
+        );
+        CExpr::Case(
+            Box::new(tuple_size),
+            vec![
+                CArm {
+                    pat: CPat::Lit(CLit::Int(return_index)),
+                    guard: None,
+                    body: return_lambda,
+                },
+                CArm {
+                    pat: CPat::Var("_".to_string()),
+                    guard: None,
+                    body: identity,
+                },
+            ],
+        )
+    }
+
     fn build_return_lambda(&mut self, ret: &HandlerArm) -> CExpr {
         let param = if ret.params.is_empty() {
             self.fresh()
@@ -283,6 +313,8 @@ impl<'a> Lowerer<'a> {
         // register instance-qualified handler params (e.g. "counter.put")
         // so that `counter.put!` routes to counter's specific handler.
         let mut instance_op_vars: Vec<(String, String, String)> = Vec::new(); // (instance_name, op, var_name)
+        let mut instance_value_bindings: Vec<(String, CExpr)> = Vec::new();
+        let mut dynamic_return_lambdas: Vec<CExpr> = Vec::new();
         if let Handler::Inline { named, .. } = handler {
             for ann in named {
                 let inst_name = &ann.node.name;
@@ -343,6 +375,46 @@ impl<'a> Lowerer<'a> {
                                 }
                             }
                         }
+                    } else if let Some((tuple_var, effects, _has_return)) =
+                        self.handle_dynamic_vars.get(handler_name).cloned()
+                    {
+                        let handler_ops = self.effect_handler_ops(&effects);
+                        for (idx, (_eff, op_name)) in handler_ops.iter().enumerate() {
+                            let inst_key = format!("{}.{}", inst_name, op_name);
+                            let var_name = format!("_HInst_{}_{}", inst_name, op_name);
+                            self.current_handler_params.insert(inst_key, var_name.clone());
+                            let element_call = cerl_call(
+                                "erlang",
+                                "element",
+                                vec![
+                                    CExpr::Lit(CLit::Int(idx as i64 + 1)),
+                                    CExpr::Var(tuple_var.clone()),
+                                ],
+                            );
+                            instance_value_bindings.push((var_name, element_call));
+                        }
+                        dynamic_return_lambdas
+                            .push(self.dynamic_return_lambda(&tuple_var, handler_ops.len()));
+                    } else {
+                        // Alias an existing named-instance binding in scope.
+                        // This is the common case for nested remaps like:
+                        //   deposit 0 with { account: to }
+                        // where `to` is already a handler instance parameter and we
+                        // just need the callee's `account.*` keys to point at the
+                        // caller's existing `to.*` handler vars.
+                        let prefix = format!("{}.", handler_name);
+                        let existing_bindings: Vec<(String, String)> = self
+                            .current_handler_params
+                            .iter()
+                            .filter_map(|(key, var_name)| {
+                                key.strip_prefix(&prefix).map(|op_name| {
+                                    (format!("{}.{}", inst_name, op_name), var_name.clone())
+                                })
+                            })
+                            .collect();
+                        for (inst_key, var_name) in existing_bindings {
+                            self.current_handler_params.insert(inst_key, var_name);
+                        }
                     }
                 }
             }
@@ -354,6 +426,7 @@ impl<'a> Lowerer<'a> {
         // (direct BEAM calls, no closures). CPS handlers may reference them
         // (e.g. async_handler's body calls spawn!/send!), so they must come after.
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
+        handler_bindings.extend(instance_value_bindings);
         for (eff, op, var_name) in &op_vars {
             if beam_native_effects.contains(eff) {
                 let handler_fun = self.build_beam_native_op_fun(op);
@@ -455,6 +528,7 @@ impl<'a> Lowerer<'a> {
         // Build return clause lambdas from instance-bound handlers first,
         // then the inline `return` clause if present.
         let mut return_lambdas: Vec<CExpr> = Vec::new();
+        return_lambdas.extend(dynamic_return_lambdas);
         if let Handler::Inline { instance_bindings, .. } = handler {
             for ann in instance_bindings {
                 let binding = &ann.node;
@@ -668,7 +742,7 @@ impl<'a> Lowerer<'a> {
 
     /// Check if a handler reference is a dynamic handler (tuple-of-lambdas).
     /// Returns Some((tuple_var, effects)) if so.
-    fn check_dynamic_handler(&self, handler: &Handler) -> Option<(String, Vec<String>)> {
+    fn check_dynamic_handler(&self, handler: &Handler) -> Option<(String, Vec<String>, bool)> {
         let name = match handler {
             Handler::Named(name, _) => name,
             Handler::Inline { named, .. } if named.len() == 1 && !named[0].node.name.is_empty() => {
@@ -684,9 +758,9 @@ impl<'a> Lowerer<'a> {
     fn lower_with_dynamic(
         &mut self,
         expr: &Expr,
-        dynamic_info: (String, Vec<String>),
+        dynamic_info: (String, Vec<String>, bool),
     ) -> CExpr {
-        let (tuple_var, handled_effects) = dynamic_info;
+        let (tuple_var, handled_effects, _has_return) = dynamic_info;
         let handler_ops = self.effect_handler_ops(&handled_effects);
 
         // Save handler params and set up per-op params from tuple elements
@@ -712,7 +786,33 @@ impl<'a> Lowerer<'a> {
 
         // Lower the inner expression
         let saved_return_k = self.current_return_k.take();
-        let result = self.lower_expr(expr);
+        let return_k_lambda = Some(self.dynamic_return_lambda(&tuple_var, handler_ops.len()));
+        let is_direct_effectful_call = collect_fun_call(expr)
+            .map(|(name, _, _)| {
+                self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
+            })
+            .unwrap_or(false);
+        let result = if is_direct_effectful_call {
+            if let Some(rk) = return_k_lambda {
+                let saved_outer = self.pending_callee_return_k.take();
+                self.pending_callee_return_k = Some(rk);
+                let ce = self.lower_expr(expr);
+                self.pending_callee_return_k = saved_outer;
+                ce
+            } else {
+                self.lower_expr(expr)
+            }
+        } else {
+            if let Some(rk) = return_k_lambda {
+                self.current_return_k = Some(rk);
+            }
+            let inner_ce = self.lower_expr(expr);
+            if matches!(expr.kind, ExprKind::Block { .. }) {
+                inner_ce
+            } else {
+                self.apply_return_k(inner_ce)
+            }
+        };
         self.current_return_k = saved_return_k;
 
         self.current_handler_params = saved_handler_params;

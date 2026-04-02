@@ -140,11 +140,11 @@ pub struct Lowerer<'a> {
     /// Conditional handle bindings: name -> (cond_var, cond_expr, then_canonical, else_canonical).
     /// Used during lower_with to generate conditional handler dispatch.
     handle_cond_vars: HashMap<String, (String, CExpr, String, String)>,
-    /// Dynamic handle bindings: name -> (lowered_var, canonical_effect_names).
+    /// Dynamic handle bindings: name -> (lowered_var, canonical_effect_names, has_return_clause).
     /// For `handle name = some_function_call()` where the handler isn't statically
     /// resolvable, the RHS is lowered to a tuple-of-lambdas and bound to a variable.
     /// At `with` sites, the tuple is destructured to extract per-op handler functions.
-    handle_dynamic_vars: HashMap<String, (String, Vec<String>)>,
+    handle_dynamic_vars: HashMap<String, (String, Vec<String>, bool)>,
 }
 
 impl<'a> Lowerer<'a> {
