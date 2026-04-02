@@ -1112,6 +1112,30 @@ impl Parser {
                                 span: stmt_span,
                             }
                         }
+                    } else if matches!(self.peek(), Token::Handle) {
+                        let handle_start = self.tokens[self.pos].span;
+                        self.advance(); // consume 'handle'
+                        let (name, name_span) = match self.peek() {
+                            Token::Ident(s) => {
+                                let s = s.clone();
+                                let sp = self.tokens[self.pos].span;
+                                self.advance();
+                                (s, sp)
+                            }
+                            _ => return Err(ParseError {
+                                message: "expected identifier after 'handle'".to_string(),
+                                span: self.tokens[self.pos].span,
+                            }),
+                        };
+                        self.expect(Token::Eq)?;
+                        let value = self.parse_expr(0)?;
+                        let stmt_span = handle_start.to(value.span);
+                        Stmt::Handle {
+                            name,
+                            name_span,
+                            value,
+                            span: stmt_span,
+                        }
                     } else {
                         Stmt::Expr(self.parse_expr(0)?)
                     };

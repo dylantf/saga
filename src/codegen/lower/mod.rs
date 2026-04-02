@@ -31,6 +31,7 @@ fn count_lambda_params(body: &Expr) -> usize {
 }
 
 /// Stored handler definition for CPS inlining at `with` sites.
+#[derive(Clone)]
 struct HandlerInfo {
     effects: Vec<String>,
     arms: Vec<HandlerArm>,
@@ -134,6 +135,9 @@ pub struct Lowerer<'a> {
     /// direct access to resolved types, while cross-module eta-reduction relies on
     /// imported function resolution/codegen info rather than another module's AST types.
     current_resolved_types: HashMap<crate::ast::NodeId, crate::typechecker::Type>,
+    /// Conditional handle bindings: name -> (cond_var, cond_expr, then_canonical, else_canonical).
+    /// Used during lower_with to generate conditional handler dispatch.
+    handle_cond_vars: HashMap<String, (String, CExpr, String, String)>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -170,6 +174,7 @@ impl<'a> Lowerer<'a> {
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
             current_resolved_types,
+            handle_cond_vars: HashMap::new(),
         }
     }
 

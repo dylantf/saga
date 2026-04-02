@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use crate::ast::{Expr, ExprKind, Handler, HandlerArm};
-use crate::codegen::cerl::{CExpr, CLit};
+use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::Lowerer;
 use super::util::{collect_fun_call, core_var};
@@ -180,6 +180,18 @@ impl<'a> Lowerer<'a> {
             _ => std::collections::HashSet::new(),
         };
 
+        // Check for conditional handle bindings and extract the handler name
+        let handle_name = match handler {
+            Handler::Named(name, _) => Some(name.clone()),
+            Handler::Inline { named, .. } if named.len() == 1 && !named[0].node.name.is_empty() => {
+                Some(named[0].node.name.clone())
+            }
+            _ => None,
+        };
+        let cond_info = handle_name
+            .as_ref()
+            .and_then(|name| self.handle_cond_vars.get(name).cloned());
+
         // Resolve all handler arms, return clause, and which effects are handled
         let (all_arms, return_clause, handled_effects) = self.resolve_handler(handler);
 
@@ -234,10 +246,65 @@ impl<'a> Lowerer<'a> {
                 handler_bindings.push((var_name.clone(), handler_fun));
             }
         }
+        // For conditional handle bindings, resolve the else-branch handler arms too
+        let else_arms_by_op: Option<std::collections::HashMap<String, HandlerArm>> =
+            cond_info.as_ref().and_then(|(_, _, _, else_canonical)| {
+                self.handler_defs.get(else_canonical).map(|info| {
+                    let mut map = std::collections::HashMap::new();
+                    for arm in &info.arms {
+                        if let Some(ref q) = arm.qualifier {
+                            let canonical = self.canonicalize_effect(q);
+                            map.insert(format!("{}.{}", canonical, arm.op_name), arm.clone());
+                        } else {
+                            map.insert(arm.op_name.clone(), arm.clone());
+                        }
+                    }
+                    map
+                })
+            });
+
         for (eff, op, var_name) in &op_vars {
             if !beam_native_effects.contains(eff) {
                 let qualified_key = format!("{}.{}", eff, op);
                 if let Some(arm) = arms_by_op.get(&qualified_key).or_else(|| arms_by_op.get(op.as_str())) {
+                    // Check if this is a conditional handle binding
+                    if let Some(ref else_map) = else_arms_by_op {
+                        let else_arm = else_map.get(&qualified_key).or_else(|| else_map.get(op.as_str())).cloned();
+                        if let Some(else_arm) = &else_arm {
+                            let cond_var = &cond_info.as_ref().unwrap().0;
+                            let then_fun = self.build_op_handler_fun(arm);
+                            let else_fun = self.build_op_handler_fun(else_arm);
+                            // Build a wrapper that dispatches based on condition:
+                            // fun(Args..., K) -> case CondVar of true -> then_fun(Args, K); _ -> else_fun(Args, K)
+                            let n_params = arm.params.len() + 1; // +1 for K
+                            let wrapper_params: Vec<String> =
+                                (0..n_params).map(|i| format!("_HW{}", i)).collect();
+                            let args_ce: Vec<CExpr> =
+                                wrapper_params.iter().map(|p| CExpr::Var(p.clone())).collect();
+                            let then_call = CExpr::Apply(Box::new(then_fun), args_ce.clone());
+                            let else_call = CExpr::Apply(Box::new(else_fun), args_ce);
+                            let case_expr = CExpr::Case(
+                                Box::new(CExpr::Var(cond_var.to_string())),
+                                vec![
+                                    CArm {
+                                        pat: CPat::Lit(CLit::Atom("true".to_string())),
+                                        guard: None,
+                                        body: then_call,
+                                    },
+                                    CArm {
+                                        pat: CPat::Var("_".to_string()),
+                                        guard: None,
+                                        body: else_call,
+                                    },
+                                ],
+                            );
+                            handler_bindings.push((
+                                var_name.clone(),
+                                CExpr::Fun(wrapper_params, Box::new(case_expr)),
+                            ));
+                            continue;
+                        }
+                    }
                     let handler_fun = self.build_op_handler_fun(arm);
                     handler_bindings.push((var_name.clone(), handler_fun));
                 } else {
@@ -338,12 +405,21 @@ impl<'a> Lowerer<'a> {
         // Only emit bindings that are actually referenced
         handler_bindings.retain(|(var, _)| needed.contains(var));
 
-        handler_bindings
+        // Wrap handler bindings around the result
+        let mut output = handler_bindings
             .into_iter()
             .rev()
             .fold(result, |body, (var, val)| {
                 CExpr::Let(var, Box::new(val), Box::new(body))
-            })
+            });
+
+        // For conditional handle bindings, wrap the condition variable binding
+        // around everything so handler arms can reference it.
+        if let Some((cond_var, cond_ce, _, _)) = cond_info {
+            output = CExpr::Let(cond_var, Box::new(cond_ce), Box::new(output));
+        }
+
+        output
     }
 
     /// Build a per-op handler function from a single handler arm.

@@ -1,0 +1,33 @@
+# Test handle bindings (Phase 1a)
+
+effect Log {
+  fun log : String -> Unit
+}
+
+handler console_log for Log {
+  log msg = {
+    println msg
+    resume ()
+  }
+}
+
+handler quiet_log for Log {
+  log msg = resume ()
+}
+
+main () = {
+  # Simple handle binding
+  handle logger = console_log
+  log! "hello from handle binding" with logger
+  log! "hello from inline block" with { logger }
+
+  # Conditional handle binding
+  # Conditional handle binding (True branch)
+  let dev = True
+  handle cond_logger = if dev then console_log else quiet_log
+  log! "conditional true (should print)" with cond_logger
+
+  # Conditional handle binding (False branch)
+  handle cond_logger2 = if False then console_log else quiet_log
+  log! "conditional false (should NOT print)" with cond_logger2
+}

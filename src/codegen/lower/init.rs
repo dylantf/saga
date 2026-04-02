@@ -536,7 +536,7 @@ impl<'a> Lowerer<'a> {
             ast::ExprKind::Block { stmts, .. } => {
                 for stmt in stmts {
                     match &stmt.node {
-                        ast::Stmt::Expr(e) | ast::Stmt::Let { value: e, .. } => {
+                        ast::Stmt::Expr(e) | ast::Stmt::Let { value: e, .. } | ast::Stmt::Handle { value: e, .. } => {
                             Self::collect_anon_records_from_expr(e, record_fields);
                         }
                         ast::Stmt::LetFun { body, .. } => {

@@ -680,6 +680,10 @@ pub fn format_stmt(stmt: &Stmt) -> Doc {
             }
             super::decl::format_binding(lhs, body)
         }
+        Stmt::Handle { name, value, .. } => {
+            let lhs = Doc::text(format!("handle {}", name));
+            super::decl::format_binding(lhs, value)
+        }
         Stmt::Expr(expr) => format_expr(expr),
     }
 }

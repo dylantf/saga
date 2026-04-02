@@ -166,12 +166,32 @@ just the compiler tracking "this lambda is shaped like a handler for `Log`."
 - `with` validates that the provided handlers cover the computation's `needs`
 - Factory functions declare `Handler Effect` as their return type
 
-### No Changes to CPS Transform
+### CPS Transform
 
-The lowerer doesn't change. `handle` bindings are desugared before lowering --
-a `handle` is just a let-binding for a handler lambda. `with` already passes
-handler lambdas; it just receives them from `handle` bindings instead of only
-from named `handler` declarations.
+Static handle bindings (`handle logger = console_log`) are pure compile-time
+aliases -- zero runtime cost. The handler arms are inlined at the `with` site
+exactly as if the original handler name were used.
+
+Conditional handle bindings (`handle logger = if dev then x else y`) generate
+a wrapper lambda per effect operation that dispatches via `case` at runtime:
+
+```erlang
+fun (Arg, K) ->
+  case CondVar of
+    'true' -> <then_handler_arm>(Arg, K)
+    _ -> <else_handler_arm>(Arg, K)
+  end
+```
+
+This adds one `case` per effect call -- negligible on the BEAM. The overhead
+is inherent to runtime dispatch: if handler selection is a runtime decision,
+there must be a runtime check. When the condition is a compile-time constant
+(e.g. a `val` binding), a future inlining pass could eliminate the dead branch
+entirely.
+
+Factory functions (Phase 1b) will have similar characteristics -- one extra
+indirection per op call when the handler is dynamically constructed, optimizable
+away when the handler is statically known.
 
 ---
 

@@ -1998,13 +1998,29 @@ impl Checker {
             },
         );
 
+        // Build Handler type from the effects this handler handles.
+        // E.g. `handler h for Log` -> Con("Handler", [Con("Log", [])])
+        // E.g. `handler h for State Int` -> Con("Handler", [Con("State", [Int])])
+        let handler_effect_types: Vec<Type> = effect_names
+            .iter()
+            .map(|e| {
+                let type_args: Vec<Type> = e
+                    .type_args
+                    .iter()
+                    .map(|ta| self.convert_type_expr(ta, &mut vec![]))
+                    .collect();
+                Type::Con(e.name.clone(), type_args)
+            })
+            .collect();
+        let handler_ty = Type::Con("Handler".into(), handler_effect_types);
+
         // Put the handler name in the env so it can be referenced
         self.env.insert_with_def(
             name.into(),
             Scheme {
                 forall: vec![],
                 constraints: vec![],
-                ty: Type::unit(), // handlers don't have a meaningful standalone type
+                ty: handler_ty,
             },
             *def_id,
         );

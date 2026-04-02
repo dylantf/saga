@@ -575,6 +575,15 @@ impl<'a> Lowerer<'a> {
                 CExpr::LetRec(vec![(fun_name, arity, fun_body)], Box::new(rest_ce))
             }
             [first, rest @ ..] => {
+                // Handle binding: register as a handler alias so `with name`
+                // resolves correctly. For static references, this is purely a
+                // compile-time alias. For conditionals, we lower the condition
+                // and register a synthetic handler that dispatches at runtime.
+                if let Stmt::Handle { name, value, .. } = first {
+                    self.lower_handle_binding(name, value);
+                    return self.lower_block(rest);
+                }
+
                 // If this let binding partially applies an effectful function,
                 // register the bound variable so call sites thread handlers.
                 if let Stmt::Let { pattern, .. } = first
@@ -627,7 +636,7 @@ impl<'a> Lowerer<'a> {
                     let value_expr = match first {
                         Stmt::Let { value, .. } => value,
                         Stmt::Expr(e) => e,
-                        Stmt::LetFun { .. } => unreachable!(),
+                        Stmt::LetFun { .. } | Stmt::Handle { .. } => unreachable!(),
                     };
                     let is_effectful_call = collect_fun_call(value_expr)
                         .map(|(name, _, _)| {
@@ -639,7 +648,7 @@ impl<'a> Lowerer<'a> {
                         let (pat_opt, value_expr) = match first {
                             Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                             Stmt::Expr(e) => (None, e),
-                            Stmt::LetFun { .. } => unreachable!(),
+                            Stmt::LetFun { .. } | Stmt::Handle { .. } => unreachable!(),
                         };
                         let rest_ce = self.lower_block(rest);
                         let (k_param, rest_ce) = match pat_opt {
@@ -665,7 +674,7 @@ impl<'a> Lowerer<'a> {
                     }
                     Stmt::Let { pattern, value, .. } => collect_effect_call(value)
                         .map(|(name, qual, args)| (Some(pattern), name, qual, args)),
-                    Stmt::LetFun { .. } => None,
+                    Stmt::LetFun { .. } | Stmt::Handle { .. } => None,
                 };
 
                 if let Some((pat, op_name, qualifier, args)) = effect_info {
@@ -685,14 +694,14 @@ impl<'a> Lowerer<'a> {
                     let value_has_nested = match first {
                         Stmt::Expr(e) => has_nested_effect_call(e),
                         Stmt::Let { value, .. } => has_nested_effect_call(value),
-                        Stmt::LetFun { .. } => false,
+                        Stmt::LetFun { .. } | Stmt::Handle { .. } => false,
                     };
 
                     if value_has_nested {
                         let (pat_opt, value_expr) = match first {
                             Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                             Stmt::Expr(e) => (None, e),
-                            Stmt::LetFun { .. } => unreachable!(),
+                            Stmt::LetFun { .. } | Stmt::Handle { .. } => unreachable!(),
                         };
                         let rest_ce = self.lower_block(rest);
                         let (k_param, rest_ce) = match pat_opt {
@@ -714,7 +723,7 @@ impl<'a> Lowerer<'a> {
                                 ..
                             } => (Some(pattern), *assert, *span, self.lower_expr(value)),
                             Stmt::Expr(e) => (None, false, e.span, self.lower_expr(e)),
-                            Stmt::LetFun { .. } => unreachable!(),
+                            Stmt::LetFun { .. } | Stmt::Handle { .. } => unreachable!(),
                         };
                         let rest_ce = self.lower_block(rest);
                         let (var, rest_ce) = match pat_opt {
@@ -879,7 +888,7 @@ impl<'a> Lowerer<'a> {
                     }
                     Stmt::Let { pattern, value, .. } => collect_effect_call(value)
                         .map(|(name, qual, args)| (Some(pattern), name, qual, args)),
-                    Stmt::LetFun { .. } => None,
+                    Stmt::LetFun { .. } | Stmt::Handle { .. } => None,
                 };
 
                 if let Some((pat, op_name, qualifier, args)) = effect_info {
@@ -896,7 +905,7 @@ impl<'a> Lowerer<'a> {
                     let (pat_opt, value_expr) = match first {
                         Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                         Stmt::Expr(e) => (None, e),
-                        Stmt::LetFun { .. } => unreachable!(),
+                        Stmt::LetFun { .. } | Stmt::Handle { .. } => unreachable!(),
                     };
 
                     // Check for call to an effectful function. Capture the
@@ -1038,5 +1047,60 @@ impl<'a> Lowerer<'a> {
         bindings.into_iter().rev().fold(tuple, |body, (var, val)| {
             CExpr::Let(var, Box::new(val), Box::new(body))
         })
+    }
+
+    /// Lower a handle binding statement. For direct handler references, registers
+    /// a compile-time alias. For conditionals, the condition is lowered and the
+    /// handle binding stores a flag variable; handler dispatch uses both handlers'
+    /// arms wrapped in a conditional at runtime.
+    fn lower_handle_binding(&mut self, name: &str, value: &Expr) {
+        // Direct handler reference: compile-time alias
+        if let ExprKind::Var { name: handler_name } = &value.kind {
+            let canonical = self.resolve_handler_name(handler_name);
+            self.handler_canonical.insert(name.to_string(), canonical);
+            return;
+        }
+        // Conditional: generate runtime dispatch
+        if let ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } = &value.kind
+        {
+            let then_canonical = self.resolve_handle_value(then_branch);
+            let else_canonical = self.resolve_handle_value(else_branch);
+
+            if let (Some(then_c), Some(else_c)) = (then_canonical, else_canonical) {
+                let cond_ce = self.lower_expr(cond);
+                let cond_var = self.fresh();
+                self.handle_cond_vars.insert(
+                    name.to_string(),
+                    (cond_var, cond_ce, then_c.clone(), else_c),
+                );
+                // Alias to then-branch for static resolution; conditional
+                // dispatch is handled in lower_with
+                self.handler_canonical.insert(name.to_string(), then_c);
+            }
+        }
+    }
+
+    /// Resolve a handle binding's RHS to a canonical handler name.
+    /// Walks through variable references and if/else branches.
+    fn resolve_handle_value(&self, expr: &Expr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Var { name } => {
+                Some(self.resolve_handler_name(name))
+            }
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.resolve_handle_value(then_branch)
+                    .or_else(|| self.resolve_handle_value(else_branch))
+            }
+            _ => None,
+        }
     }
 }

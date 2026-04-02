@@ -612,6 +612,25 @@ impl Checker {
         Ok(result_ty)
     }
 
+    /// Extract HandlerInfo from a handle binding's RHS expression.
+    /// Handles direct variable references and if/else conditionals.
+    fn extract_handler_info(&self, expr: &Expr) -> Option<super::HandlerInfo> {
+        match &expr.kind {
+            ExprKind::Var { name } => self.handlers.get(name).cloned(),
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                // For conditionals, try to extract from either branch
+                // (both should handle the same effects, verified by type unification)
+                self.extract_handler_info(then_branch)
+                    .or_else(|| self.extract_handler_info(else_branch))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn infer_block(&mut self, stmts: &[Annotated<Stmt>]) -> Result<Type, Diagnostic> {
         let mut last_ty = Type::unit();
         let mut errors: Vec<Diagnostic> = Vec::new();
@@ -766,6 +785,36 @@ impl Checker {
                     last_ty = Type::unit();
                     // Don't increment i -- the while loop already advanced it
                     continue;
+                }
+                Stmt::Handle {
+                    name,
+                    name_span,
+                    value,
+                    ..
+                } => {
+                    let ty = match self.infer_expr(value) {
+                        Ok(ty) => ty,
+                        Err(e) => {
+                            errors.push(e);
+                            Type::Error
+                        }
+                    };
+                    // If the RHS refers to a known handler (directly or via
+                    // conditional), copy its HandlerInfo under the new name so
+                    // `with name` works in handler resolution.
+                    if let Some(info) = self.extract_handler_info(value) {
+                        self.handlers.insert(name.clone(), info);
+                    }
+                    let def_id = crate::ast::NodeId::fresh();
+                    let scheme = self.generalize(&ty);
+                    self.env.insert_with_def(name.clone(), scheme, def_id);
+                    self.lsp.node_spans.insert(def_id, *name_span);
+                    self.lsp.type_at_span.insert(*name_span, ty);
+                    self.lsp
+                        .definitions
+                        .push((def_id, name.clone(), *name_span));
+                    last_ty = Type::unit();
+                    i += 1;
                 }
                 Stmt::Expr(expr) => {
                     match self.infer_expr(expr) {
