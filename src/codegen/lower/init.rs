@@ -26,6 +26,8 @@ pub fn extract_external(annotations: &[ast::Annotation]) -> Option<(String, Stri
 /// Keeps fun_info free of half-initialized entries.
 pub(super) struct PendingAnnotation {
     pub effects: Vec<String>,
+    /// Named effect instances: (instance_name, canonical_effect_name)
+    pub named_instances: Vec<(String, String)>,
     pub param_absorbed_effects: HashMap<usize, Vec<String>>,
 }
 
@@ -164,16 +166,22 @@ impl<'a> Lowerer<'a> {
                             FunInfo {
                                 arity: expanded_arity,
                                 effects: sorted_effects,
+                                named_instances: vec![],
                                 param_absorbed_effects: HashMap::new(),
                             },
                         );
                     } else {
                         // Regular function signature
-                        let mut sorted_effects = Vec::new();
-                        if !effects.is_empty() {
-                            sorted_effects = effects.iter().map(|e| canonicalize_effect(&e.name)).collect();
-                            sorted_effects.sort();
-                        }
+                        let named_instances: Vec<(String, String)> = effects.iter()
+                            .filter_map(|e| {
+                                e.instance.as_ref().map(|inst| (inst.clone(), canonicalize_effect(&e.name)))
+                            })
+                            .collect();
+                        let mut sorted_effects: Vec<String> = effects.iter()
+                            .filter(|e| e.instance.is_none())
+                            .map(|e| canonicalize_effect(&e.name))
+                            .collect();
+                        sorted_effects.sort();
                         let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
                         for (i, (_param_name, type_expr)) in params.iter().enumerate() {
                             let effs = collect_type_effects(type_expr);
@@ -190,6 +198,7 @@ impl<'a> Lowerer<'a> {
                             name.clone(),
                             PendingAnnotation {
                                 effects: sorted_effects,
+                                named_instances,
                                 param_absorbed_effects: param_effs,
                             },
                         );
@@ -225,6 +234,7 @@ impl<'a> Lowerer<'a> {
                 self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
                     arity: d.arity,
                     effects: Vec::new(),
+                    named_instances: vec![],
                     param_absorbed_effects: HashMap::new(),
                 });
             }
@@ -268,6 +278,7 @@ impl<'a> Lowerer<'a> {
                     let fi = FunInfo {
                         arity: expanded_arity,
                         effects,
+                        named_instances: vec![],
                         param_absorbed_effects: param_absorbed,
                     };
                     // Register under short alias (e.g. "List.map") and canonical (e.g. "Std.List.map")
@@ -390,6 +401,7 @@ impl<'a> Lowerer<'a> {
             let fi = FunInfo {
                 arity: expanded_arity,
                 effects: effects.clone(),
+                named_instances: vec![],
                 param_absorbed_effects: param_effs.clone(),
             };
             self.fun_info.insert(alias_qualified, fi.clone());
@@ -401,6 +413,7 @@ impl<'a> Lowerer<'a> {
                 self.fun_info.entry(name.clone()).or_insert(FunInfo {
                     arity: expanded_arity,
                     effects,
+                    named_instances: vec![],
                     param_absorbed_effects: param_effs,
                 });
             }
@@ -416,6 +429,7 @@ impl<'a> Lowerer<'a> {
             self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
                 arity: d.arity,
                 effects: Vec::new(),
+                named_instances: vec![],
                 param_absorbed_effects: HashMap::new(),
             });
         }

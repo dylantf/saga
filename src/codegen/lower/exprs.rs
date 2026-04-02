@@ -377,6 +377,7 @@ impl<'a> Lowerer<'a> {
                     FunInfo {
                         arity,
                         effects: effects.clone(),
+                        named_instances: vec![],
                         param_absorbed_effects: param_absorbed_effects.clone(),
                     },
                 );

@@ -299,6 +299,33 @@ impl<'a> Lowerer<'a> {
             }
         }
 
+        // Process instance bindings: `from: src` in `with { from: src, to: dst }`
+        // Each binding maps an instance name to a handler expression.
+        if let Handler::Inline { instance_bindings, .. } = handler {
+            for ann in instance_bindings {
+                let binding = &ann.node;
+                let inst_name = &binding.instance;
+                // The handler expr should be a handle binding name
+                if let ExprKind::Var { name: handler_name, .. } = &binding.handler.kind {
+                    let canonical = self.resolve_handler_name(handler_name);
+                    if let Some(info) = self.handler_defs.get(&canonical) {
+                        for eff in &info.effects {
+                            if let Some(eff_info) = self.effect_defs.get(eff) {
+                                let mut op_names: Vec<&String> = eff_info.ops.keys().collect();
+                                op_names.sort();
+                                for op_name in op_names {
+                                    let inst_key = format!("{}.{}", inst_name, op_name);
+                                    let var_name = format!("_HInst_{}_{}", inst_name, op_name);
+                                    self.current_handler_params.insert(inst_key, var_name.clone());
+                                    instance_op_vars.push((handler_name.clone(), op_name.clone(), var_name));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Pass 2: build ALL handler functions unconditionally.
         // We'll prune unreachable ones after lowering the body.
         // BEAM-native ops are emitted first since they're self-contained

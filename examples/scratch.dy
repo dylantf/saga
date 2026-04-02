@@ -1,16 +1,31 @@
-# Test named effect instances
+# Test named effect instances end-to-end
 
-effect State s {
-  fun get : Unit -> s
-  fun put : s -> Unit
+effect Log {
+  fun log : String -> Unit
 }
 
-handler make_state for State Int {
-  get () = resume 0
-  put _ = resume ()
+handler console_log for Log {
+  log msg = {
+    println msg
+    resume ()
+  }
 }
 
-fun transfer : Int -> Unit needs {from: State Int, to: State Int}
-transfer _ = from.put! 0
+handler prefix_log for Log {
+  log msg = {
+    println $"[PREFIX] {msg}"
+    resume ()
+  }
+}
 
-main () = ()
+fun greet : String -> Unit needs {out: Log}
+greet name = out.log! $"hello {name}"
+
+main () = {
+  handle c = console_log
+  handle p = prefix_log
+  greet "world" with {
+  }
+  greet "world" with {
+  }
+}

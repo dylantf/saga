@@ -1326,13 +1326,14 @@ impl Elaborator {
             Handler::Named(_, _) => handler.clone(),
             Handler::Inline {
                 named,
+                instance_bindings,
                 arms,
                 return_clause,
                 ..
             } => Handler::Inline {
                 dangling_trivia: vec![],
                 named: named.clone(),
-                instance_bindings: vec![],
+                instance_bindings: instance_bindings.clone(),
                 arms: arms
                     .iter()
                     .map(|ann| {
