@@ -1385,6 +1385,55 @@ fn tuple_type_as_app_arg_not_double_parened() {
     );
 }
 
+// --- Function types as parameters ---
+
+#[test]
+fn fun_sig_arrow_param_gets_parens() {
+    assert_eq!(
+        fmt80("fun apply : (a -> b) -> a -> b"),
+        "fun apply : (a -> b) -> a -> b\n"
+    );
+}
+
+#[test]
+fn fun_sig_multiple_arrow_params_get_parens() {
+    assert_eq!(
+        fmt80("fun compose : (b -> c) -> (a -> b) -> a -> c"),
+        "fun compose : (b -> c) -> (a -> b) -> a -> c\n"
+    );
+}
+
+#[test]
+fn fun_sig_arrow_return_type_no_parens() {
+    // Return type is right-associative, no parens needed
+    assert_eq!(
+        fmt80("fun curry : a -> b -> c"),
+        "fun curry : a -> b -> c\n"
+    );
+}
+
+#[test]
+fn effect_op_arrow_param_gets_parens() {
+    let src = "effect Scope {\n  fun acquire_scoped : (Unit -> a) -> (a -> Unit) -> a\n}";
+    let result = fmt80(src);
+    assert!(result.contains("(Unit -> a) -> (a -> Unit) -> a"), "arrow params should be parenthesized: {}", result);
+}
+
+#[test]
+fn trait_method_arrow_param_gets_parens() {
+    let src = "trait Functor a {\n  fun map : (b -> c) -> a b -> a c\n}";
+    let result = fmt80(src);
+    assert!(result.contains("(b -> c) -> a b -> a c"), "arrow param should be parenthesized: {}", result);
+}
+
+#[test]
+fn fun_sig_nested_arrow_param_gets_parens() {
+    assert_eq!(
+        fmt80("fun foo : ((a -> b) -> c) -> c"),
+        "fun foo : ((a -> b) -> c) -> c\n"
+    );
+}
+
 // --- Trailing lambda ---
 
 #[test]
