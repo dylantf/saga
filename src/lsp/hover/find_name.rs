@@ -158,6 +158,11 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                 if let Some(r) = find_in_expr(&arm.body, offset) {
                     return Some(r);
                 }
+                if let Some(ref fb) = arm.finally_block {
+                    if let Some(r) = find_in_expr(fb, offset) {
+                        return Some(r);
+                    }
+                }
             }
             if let Some(rc) = &body.return_clause {
                 for (param_name, param_span) in &rc.params {
@@ -386,6 +391,11 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
                         if contains(&arm.span, offset) {
                             if contains(&arm.body.span, offset) {
                                 return find_in_expr(&arm.body, offset);
+                            }
+                            if let Some(ref fb) = arm.finally_block {
+                                if contains(&fb.span, offset) {
+                                    return find_in_expr(fb, offset);
+                                }
                             }
                             // Check inline handler arm parameters
                             for (param_name, param_span) in &arm.params {
