@@ -69,7 +69,7 @@ first_active_grade () = do {
 }
 
 main () = {
-  let debug_print = debug >> println
+  let debug_print = debug >> dbg
 
   lookup_grade 1 |> debug_print
   lookup_grade 2 |> debug_print

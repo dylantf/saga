@@ -31,25 +31,25 @@ safe_str str = str
 
 main () = {
   let a = safe_div 10 2 with to_result
-  println $"a: {debug a}"
+  dbg $"a: {debug a}"
 
   let b = safe_div 10 0 with int_fallback
-  println $"b: {debug b}"
+  dbg $"b: {debug b}"
 
   let c = safe_div 10 0 with {
     fail _ = resume 0
   }
-  println $"c: {debug c}"
+  dbg $"c: {debug c}"
 
   let str_a = safe_str "Hello" with to_result
-  println $"String should be Hello: {debug str_a}"
+  dbg $"String should be Hello: {debug str_a}"
 
   let str_b = safe_str "" with to_result
-  println $"String should have been aborted: {debug str_b}"
+  dbg $"String should have been aborted: {debug str_b}"
 
-  println "About to panic..."
+  dbg "About to panic..."
   case catch_panic (fun () -> safe_div 2 0 with abort) {
-    Ok v -> println $"You shouldn't see this: {debug v}"
-    Err msg -> println msg
+    Ok v -> dbg $"You shouldn't see this: {debug v}"
+    Err msg -> dbg msg
   }
 }

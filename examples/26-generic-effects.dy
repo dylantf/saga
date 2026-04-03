@@ -28,7 +28,7 @@ fun test_default : (x: Int) -> (y: Int) -> Int
 test_default x y = safe_div x y with to_default
 
 main () = {
-  println (debug (test_result 10 2))
-  println (debug (test_result 10 0))
-  println (show (test_default 10 0))
+  dbg (debug (test_result 10 2))
+  dbg (debug (test_result 10 0))
+  dbg (show (test_default 10 0))
 }

@@ -20,36 +20,36 @@ type Scored a = Scored(score: Int, value: a) deriving (Show, Eq, Ord)
 
 main () = {
   let hans = Dog 5
-  println $"{hans} says {hans |> speak}"
+  dbg $"{hans} says {hans |> speak}"
 
   let dylan = Dog 5
-  println $"Hans and Dylan are: {comp hans dylan}"
+  dbg $"Hans and Dylan are: {comp hans dylan}"
 
   let hanna = Dog 7
-  println $"Hans and Hanna are {comp hans hanna}"
+  dbg $"Hans and Hanna are {comp hans hanna}"
 
   let oddbjorn = Cat
-  println "Oddbjørn"
-  println $"Hans and Oddbjørn are {comp hans oddbjorn}"
+  dbg "Oddbjørn"
+  dbg $"Hans and Oddbjørn are {comp hans oddbjorn}"
 
   # Ord: compare by constructor index
-  println $"Red vs Blue: {show (compare Red Blue)}"
-  println $"Green vs Green: {show (compare Green Green)}"
-  println $"Blue vs Red: {show (compare Blue Red)}"
+  dbg $"Red vs Blue: {show (compare Red Blue)}"
+  dbg $"Green vs Green: {show (compare Green Green)}"
+  dbg $"Blue vs Red: {show (compare Blue Red)}"
 
   # Comparison operators desugar to compare for ADTs
-  if High > Low then println "High > Low" else println "nope"
-  if Medium <= Medium then println "Medium <= Medium" else println "nope"
+  if High > Low then dbg "High > Low" else dbg "nope"
+  if Medium <= Medium then dbg "Medium <= Medium" else dbg "nope"
 
   # Ord on types with fields: left-to-right field comparison
   let a = Scored 10 "first"
   let b = Scored 10 "second"
   let c = Scored 20 "third"
-  println $"{a} vs {b}: {show (compare a b)}"
-  println $"{a} vs {c}: {show (compare a c)}"
+  dbg $"{a} vs {b}: {show (compare a b)}"
+  dbg $"{a} vs {c}: {show (compare a c)}"
 
   # Enum: convert between constructors and integers
-  println $"Red = {show (to_enum Red)}, Green = {show (to_enum Green)}, Blue = {show (to_enum Blue)}"
-  println $"from_enum 1 = {show (from_enum 1 : Color)}"
-  println $"from_enum 2 = {show (from_enum 2 : Priority)}"
+  dbg $"Red = {show (to_enum Red)}, Green = {show (to_enum Green)}, Blue = {show (to_enum Blue)}"
+  dbg $"from_enum 1 = {show (from_enum 1 : Color)}"
+  dbg $"from_enum 2 = {show (from_enum 2 : Priority)}"
 }

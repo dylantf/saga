@@ -28,8 +28,8 @@ main () = {
   let t = List.foldl insert Empty [5, 3, 7, 1, 4, 6, 8]
 
   # In-order traversal should give sorted output
-  debug (to_list t) |> println
+  to_list t |> dbg
 
-  show (contains t 4) |> println
-  show (contains t 9) |> println
+  contains t 4 |> dbg
+  contains t 9 |> dbg
 }

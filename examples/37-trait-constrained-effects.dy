@@ -4,7 +4,7 @@ effect Recorder a {
 
 handler console_logger for Recorder a where {a: Show} {
   log_state entity = {
-    println $"Current state: {entity}"
+    dbg $"Current state: {entity}"
     resume ()
   }
 }

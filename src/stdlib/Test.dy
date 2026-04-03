@@ -1,7 +1,7 @@
 module Std.Test
 
 import Std.Base
-import Std.IO (print, println)
+import Std.IO (Stdio, println, console)
 import Std.Process
 import Std.List
 import Std.String
@@ -105,7 +105,7 @@ handler collect_handler for TestRunner {
 }
 
 #@ Executing handler (pass 2). Renders results, skips non-only tests if has_only is set.
-pub handler exec_handler for TestRunner {
+pub handler exec_handler for TestRunner needs {Stdio} {
   report_test name failures mode elapsed_ms = {
     let k = resume ()
     fun state -> {
@@ -185,7 +185,7 @@ run_collected body = {
                 else summary
   println $"{summary} {format_timing total_ms}"
   if final.failed > 0 then Process.exit 1 else ()
-}
+} with console
 
 # Assertion helpers
 

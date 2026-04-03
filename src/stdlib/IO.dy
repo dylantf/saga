@@ -4,20 +4,55 @@ import Std.String
 
 #@ prints to stdout
 @builtin
-pub fun print : String -> Unit
+fun print_builtin : String -> Unit
 
 #@ prints to stdout with a trailing newline
 @builtin
-pub fun println : String -> Unit
+fun println_builtin : String -> Unit
 
 #@ prints to stderr
 @builtin
-pub fun eprint : String -> Unit
+pub fun eprint_builtin : String -> Unit
 
 #@ prints to stderr with a trailing newline
 @builtin
-pub fun eprintln : String -> Unit
+pub fun eprintln_builtin : String -> Unit
+
+#@ reads a line from stdin, stripping the trailing newline
+@external("erlang", "std_io_bridge", "read_line")
+fun readln_builtin : Unit -> String
+
+#@ reads a single character from stdin
+@external("erlang", "std_io_bridge", "read_char")
+fun read_char_builtin : Unit -> String
 
 #@ prints debug representation to stderr and returns the value
 @builtin
-pub fun dbg : a -> a where {a: Debug}
+pub fun dbg : a -> Unit where {a: Debug}
+
+pub effect Stdio {
+  fun print : String -> Unit
+  fun eprint : String -> Unit
+  fun read : String -> String
+}
+
+pub handler console for Stdio {
+  print message = {
+    print_builtin message
+    resume ()
+  }
+  eprint message = {
+    eprint_builtin message
+    resume ()
+  }
+  read message = {
+    print_builtin message
+    resume readln_builtin ()
+  }
+}
+
+pub fun println : String -> Unit needs {Stdio}
+println message = Stdio.print! (message <> "\n")
+
+pub fun eprintln : String -> Unit needs {Stdio}
+eprintln message = Stdio.eprint! (message <> "\n")

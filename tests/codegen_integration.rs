@@ -351,12 +351,12 @@ fn show_bool_uses_case() {
 
 #[test]
 fn print_uses_show_dict() {
-    let src = "main () = println (show 42)";
+    let src = "main () = dbg (show 42)";
     let out = emit_elaborated(src);
-    // println is lowered inline as io:format("~ts~n", [x])
+    // dbg is lowered inline as io:format(standard_error, "~ts~n", [x])
     assert!(
         out.contains("'io':'format'"),
-        "expected io:format call in print\n{out}"
+        "expected io:format call in dbg\n{out}"
     );
     // show 42 should reference the Show/Int dict
     assert!(
@@ -507,7 +507,7 @@ impl Show for Color {
   }
 }
 
-main () = println (show Red)
+main () = dbg (show Red)
 ";
     let out = emit_elaborated(src);
     // show should use the user's Show dict
@@ -515,10 +515,10 @@ main () = println (show Red)
         out.contains("'__dict_Show_Color'"),
         "expected Show/Color dict passed to show\n{out}"
     );
-    // println should call io:format
+    // dbg should call io:format
     assert!(
         out.contains("'io':'format'"),
-        "expected io:format in print\n{out}"
+        "expected io:format in dbg\n{out}"
     );
 }
 
@@ -938,7 +938,7 @@ main () = risky_work () with {
 
 #[test]
 fn handler_arm_body_gets_show_dict() {
-    // println inside a named handler body should work with String arg directly
+    // dbg inside a named handler body should work with String arg directly
     let src = r#"
 effect Log {
   fun log : (msg: String) -> Unit
@@ -946,7 +946,7 @@ effect Log {
 
 handler console_log for Log {
   log msg = {
-    println msg
+    dbg msg
     resume ()
   }
 }
@@ -960,7 +960,7 @@ do_work () = {
 main () = do_work () with console_log
 "#;
     let out = emit_elaborated(src);
-    // The handler arm body should call io:format (println is lowered inline)
+    // The handler arm body should call io:format (dbg is lowered inline)
     assert_contains(&out, "'io':'format'");
 }
 
@@ -1255,9 +1255,9 @@ try_it computation = computation () with {
 
 main () = {
   let a = try_it (fun () -> "hello")
-  println a
+  dbg a
   let b = try_it (fun () -> fail! "boom")
-  println b
+  dbg b
 }
 "#;
     assert_compiles(src);
@@ -1305,9 +1305,9 @@ try_it computation = computation () with {
 
 main () = {
   let a = try_it (fun () -> 42)
-  println "ok"
+  dbg "ok"
   let b = try_it (fun () -> fail! "boom")
-  println "ok"
+  dbg "ok"
 }
 "#;
     assert_compiles(src);
@@ -1633,19 +1633,19 @@ main () = try_it (fun () -> outer ())
 fn mixed_resume_and_abort_in_handler() {
     // Handler where some ops resume and others abort.
     let src = r#"
-effect IO {
-  fun read : Unit -> Int
+effect TestIO {
+  fun read_val : Unit -> Int
   fun crash : (msg: String) -> a
 }
 
-handler test_io for IO {
-  read = resume 42
+handler test_io for TestIO {
+  read_val = resume 42
   crash msg = 0
 }
 
-fun process : Unit -> Int needs {IO}
+fun process : Unit -> Int needs {TestIO}
 process () = {
-  let x = read! ()
+  let x = read_val! ()
   if x > 100 then crash! "too big" else x + 1
 }
 
@@ -1784,7 +1784,7 @@ add a b = a + b
 
 increment = add 1
 
-main () = println (show (increment 6))
+main () = dbg (show (increment 6))
 "#;
     assert_compiles(src);
 }
@@ -1823,7 +1823,7 @@ main () = {
   let debug_log = log_with_level "DEBUG"
   debug_log "hello" with {
     log msg = {
-      print msg
+      dbg msg
       resume ()
     }
   }
@@ -1846,7 +1846,7 @@ main () = {
   let debug_log = log_with_level "DEBUG"
   debug_log "hello" with {
     log msg = {
-      print msg
+      dbg msg
       resume ()
     }
   }
@@ -1876,7 +1876,7 @@ increment = add 1
 
 main () = {
   let result = increment 6
-  println (show result)
+  dbg (show result)
 }
 "#;
     assert_compiles(src);

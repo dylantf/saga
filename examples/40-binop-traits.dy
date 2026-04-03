@@ -10,9 +10,6 @@ impl Show for Currency c {
 fun add : Currency c -> Currency c -> Currency c
 add (Currency a) (Currency b) = Currency (a + b)
 
-fun sub : Currency c -> Currency c -> Currency c
-sub (Currency a) (Currency b) = Currency (a - b)
-
 fun usd : Float -> Currency USD
 usd amount = Currency amount
 
@@ -34,14 +31,14 @@ main () = {
   let amount1 = usd 23.50
   let amount2 = usd 50.00
   let sum = add amount1 amount2
-  println (show sum)
+  dbg (show sum)
 
-  println (show (amount1 == amount2))
-  println (show (amount1 == usd 23.50))
+  dbg (show (amount1 == amount2))
+  dbg (show (amount1 == usd 23.50))
 
   # let bad_sum = add amount1 (nok 500.00)
   # compile error: type mismatch: expected USD, got NOK
 
   let amount1_in_nok: Currency NOK = convert amount1
-  println (show (add amount1_in_nok (nok 500.00)))
+  dbg (show (add amount1_in_nok (nok 500.00)))
 }

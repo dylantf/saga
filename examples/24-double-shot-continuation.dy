@@ -18,9 +18,9 @@ effect Log {
 
 handler double_log for Log {
   log msg = {
-    println ("[1] " <> msg)
+    dbg ("[1] " <> msg)
     resume ()
-    println ("[2] " <> msg)
+    dbg ("[2] " <> msg)
     resume ()
   }
 }

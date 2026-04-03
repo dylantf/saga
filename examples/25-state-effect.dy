@@ -46,8 +46,8 @@ build_msg () = {
 
 main () = {
   let (value, _) = run_state 0 (fun () -> count_up 5)
-  println (show value)
+  dbg (show value)
 
   let (msg, _) = run_state "" build_msg
-  println msg
+  dbg msg
 }

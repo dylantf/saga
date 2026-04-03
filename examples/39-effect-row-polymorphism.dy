@@ -22,7 +22,7 @@ effect Fail {
 fun run_with_log : (f: Unit -> Unit needs {Log, ..e}) -> Unit needs {..e}
 run_with_log f = f () with {
   log msg = {
-    println msg
+    dbg msg
     resume ()
   }
 }
@@ -47,14 +47,14 @@ twice f x = f (f x)
 main () = {
   # twice requires a pure callback
   let result = twice (fun x -> x * 2) 5
-  println $"5 doubled twice: {result}"
+  dbg $"5 doubled twice: {result}"
 
   # run_with_log handles Log, inline handler catches Fail
   greet "world" with {
-    fail msg = println $"caught: {msg}"
+    fail msg = dbg $"caught: {msg}"
   }
 
   greet "" with {
-    fail msg = println $"caught: {msg}"
+    fail msg = dbg $"caught: {msg}"
   }
 }

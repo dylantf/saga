@@ -56,50 +56,50 @@ unwrap b = case b {
 
 main () = {
   let my_point = Point { x: 3, y: 4 }
-  println (show my_point)
+  dbg (show my_point)
 
   let p2 = translate 1 (-5) my_point # negative args need parens, like Elm/Haskell
-  println (show p2)
+  dbg (show p2)
 
-  println (quadrant my_point)
-  println (quadrant p2)
+  dbg (quadrant my_point)
+  dbg (quadrant p2)
 
   # polymorphic records
   let b1 = Box { value: 42 }
   let b2 = Box { value: "hello" }
 
-  println (show (unwrap b1))
-  println (unwrap b2)
+  dbg (show (unwrap b1))
+  dbg (unwrap b2)
 
   let b3 = { b1 | value: 99 }
-  println (show (unwrap b3))
+  dbg (show (unwrap b3))
 
-  fake_school () |> debug |> println
+  fake_school () |> debug |> dbg
 
   fake_school ()
   |> enroll_student (Student { name: "小明", grade: 6 })
   |> debug
-  |> println
+  |> dbg
 
   let house = House {
     year_built: 2005,
     address: { number: 123, street: "Fake Street" },
   }
 
-  house |> debug |> println
+  house |> debug |> dbg
 
   # Record update on nested anonymous record
   let house2 = { house | address: { house.address | street: "Real Street" } }
-  println house2.address.street
+  dbg house2.address.street
 
   # Pattern matching on anonymous record fields
   let House { address: { number, street }, .. } = house
-  println (show number)
-  println street
+  dbg (show number)
+  dbg street
   # let incomplete_house = House { year_built: 2005 }
   # let invalid_house = House {
   #   year_builded: 2005,
   #   year_built: "2005",
   # }
-  # println (debug invalid_house)
+  # dbg (debug invalid_house)
 }

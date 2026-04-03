@@ -84,32 +84,32 @@ main () = {
   let c = Circle 5.0
   let r = Rect 3.0 4.0
   let t = Triangle 6.0 8.0 10.0
-  describe_shape c |> println
-  describe_shape r |> println
-  describe_shape t |> println
+  describe_shape c |> dbg
+  describe_shape r |> dbg
+  describe_shape t |> dbg
 
   # Record patterns with guards
   let p1 = Point { x: 3, y: 4 }
   let p2 = Point { x: -2, y: 5 }
-  quadrant p1 |> println
-  quadrant p2 |> println
+  quadrant p1 |> dbg
+  quadrant p2 |> dbg
 
   # List patterns
-  describe [] |> println
-  describe [42] |> println
-  describe [1, 2] |> println
-  describe [1, 2, 3] |> println
+  describe [] |> dbg
+  describe [42] |> dbg
+  describe [1, 2] |> dbg
+  describe [1, 2, 3] |> dbg
 
   let foo = "Hello"
 
-  show (sum_two [3, 4]) |> println
+  show (sum_two [3, 4]) |> dbg
 
-  first_two [10, 20, 30] |> println
-  first_two [5] |> println
+  first_two [10, 20, 30] |> dbg
+  first_two [5] |> dbg
 
   # String patterns
-  classify_log "[INFO]: this is some helpful info :)" |> println
-  classify_log "[WARN]: test warning" |> println
-  classify_log "hello" |> println
-  classify_log "something else" |> println
+  classify_log "[INFO]: this is some helpful info :)" |> dbg
+  classify_log "[WARN]: test warning" |> dbg
+  classify_log "hello" |> dbg
+  classify_log "something else" |> dbg
 }

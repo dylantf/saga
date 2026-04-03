@@ -1,4 +1,7 @@
-use dylang::ast::{self, Annotated, CaseArm, Decl, EffectRef, Expr, ExprKind, NodeId, Pat, Stmt, TraitBound, TypeExpr};
+use dylang::ast::{
+    self, Annotated, CaseArm, Decl, EffectRef, Expr, ExprKind, NodeId, Pat, Stmt, TraitBound,
+    TypeExpr,
+};
 use dylang::token::Span;
 
 type Found = Option<(String, Span, Option<NodeId>)>;
@@ -158,10 +161,10 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                 if let Some(r) = find_in_expr(&arm.body, offset) {
                     return Some(r);
                 }
-                if let Some(ref fb) = arm.finally_block {
-                    if let Some(r) = find_in_expr(fb, offset) {
-                        return Some(r);
-                    }
+                if let Some(ref fb) = arm.finally_block
+                    && let Some(r) = find_in_expr(fb, offset)
+                {
+                    return Some(r);
                 }
             }
             if let Some(rc) = &body.return_clause {
@@ -179,8 +182,15 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             })
         }
         Decl::ImplDef {
-            trait_name, trait_name_span, target_type, target_type_span,
-            where_clause, needs, methods, span, ..
+            trait_name,
+            trait_name_span,
+            target_type,
+            target_type_span,
+            where_clause,
+            needs,
+            methods,
+            span,
+            ..
         } => {
             if !contains(span, offset) {
                 return None;
@@ -198,7 +208,12 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                 return Some(r);
             }
             for method in methods {
-                let ast::ImplMethod { name: method_name, name_span: method_span, params, body } = &method.node;
+                let ast::ImplMethod {
+                    name: method_name,
+                    name_span: method_span,
+                    params,
+                    body,
+                } = &method.node;
                 if let Some(r) = find_in_params_body(params, body, offset) {
                     return Some(r);
                 }
@@ -210,10 +225,20 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             None
         }
         Decl::Let {
-            id, name, name_span, value, span, ..
+            id,
+            name,
+            name_span,
+            value,
+            span,
+            ..
         }
         | Decl::Val {
-            id, name, name_span, value, span, ..
+            id,
+            name,
+            name_span,
+            value,
+            span,
+            ..
         } => {
             if !contains(span, offset) {
                 return None;
@@ -384,7 +409,9 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
                     return_clause,
                     ..
                 } => {
-                    let all_arms: Vec<&dylang::ast::HandlerArm> = arms.iter().map(|a| &a.node)
+                    let all_arms: Vec<&dylang::ast::HandlerArm> = arms
+                        .iter()
+                        .map(|a| &a.node)
                         .chain(return_clause.iter().map(|r| r.as_ref()))
                         .collect();
                     for arm in &all_arms {
@@ -392,10 +419,10 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
                             if contains(&arm.body.span, offset) {
                                 return find_in_expr(&arm.body, offset);
                             }
-                            if let Some(ref fb) = arm.finally_block {
-                                if contains(&fb.span, offset) {
-                                    return find_in_expr(fb, offset);
-                                }
+                            if let Some(ref fb) = arm.finally_block
+                                && contains(&fb.span, offset)
+                            {
+                                return find_in_expr(fb, offset);
                             }
                             // Check inline handler arm parameters
                             for (param_name, param_span) in &arm.params {
@@ -470,7 +497,6 @@ fn find_in_stmt(stmt: &Stmt, offset: usize) -> Found {
         } => find_in_params_body(params, body, offset).or_else(|| {
             contains_ident(name_span, offset).then(|| (name.clone(), *name_span, Some(*id)))
         }),
-
 
         Stmt::Expr(expr) => find_in_expr(expr, offset),
     }

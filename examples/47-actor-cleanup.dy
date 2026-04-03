@@ -26,8 +26,8 @@ server db = {
 
 fun run : Unit -> Unit needs {Process, Actor String, Scope}
 run () = {
-  let db = scoped! "my-connection" (fun c -> println $"  cleanup: {c}")
-  println $"  acquired: {db}"
+  let db = scoped! "my-connection" (fun c -> dbg $"  cleanup: {c}")
+  dbg $"  acquired: {db}"
 
   let pid = spawn! (fun () -> server db)
   send! pid (GetValue (self! ()))
@@ -35,10 +35,10 @@ run () = {
   let reply = receive {
     msg -> msg
   }
-  println $"  reply: {reply}"
+  dbg $"  reply: {reply}"
 }
 
 main () = {
-  println "Actor + Scope test:"
+  dbg "Actor + Scope test:"
   run () with {beam_actor, run_scoped}
 }

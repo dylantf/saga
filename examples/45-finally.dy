@@ -25,11 +25,11 @@ handler to_result for Fail {
 handler managed for Resource {
   acquire name = {
     let r = $"[{name}]"
-    println $"  acquired {r}"
+    dbg $"  acquired {r}"
     resume r
   } finally {
     # Effects in finally must be handled locally
-    println $"  released: {r}"
+    dbg $"  released: {r}"
   }
 }
 
@@ -38,14 +38,14 @@ handler managed for Resource {
 fun work : Unit -> String needs {Resource}
 work () = {
   let db = acquire! "db"
-  println $"  working with {db}"
+  dbg $"  working with {db}"
   "done"
 }
 
 fun work_and_fail : Unit -> String needs {Resource, Fail}
 work_and_fail () = {
   let db = acquire! "db"
-  println $"  working with {db}"
+  dbg $"  working with {db}"
   fail! "something went wrong"
 }
 
@@ -53,18 +53,18 @@ work_and_fail () = {
 
 main () = {
   # Normal completion: cleanup runs after the continuation finishes
-  println "1. Normal completion:"
+  dbg "1. Normal completion:"
   let result = work () with managed
-  println $"  result: {result}"
+  dbg $"  result: {result}"
 
   # Abort via Fail: cleanup still runs because WrappedK
   # catches the abort from to_result
-  println "2. Abort via Fail:"
+  dbg "2. Abort via Fail:"
   let result2 = {
     work_and_fail () with managed
   } with to_result
   case result2 {
-    Ok v -> println $"  result: Ok({v})"
-    Err e -> println $"  result: Err({e})"
+    Ok v -> dbg $"  result: Ok({v})"
+    Err e -> dbg $"  result: Err({e})"
   }
 }

@@ -1,7 +1,7 @@
 import Std.Actor (beam_actor)
 
 main () = {
-  println "Sleeping for 1 second..."
+  dbg "Sleeping for 1 second..."
   sleep! 1000
-  println "Done!"
+  dbg "Done!"
 } with beam_actor

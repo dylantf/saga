@@ -3,12 +3,12 @@
 main () = {
   # Regular strings
   let greeting = "hello, world"
-  println greeting
+  dbg greeting
 
   # String interpolation
   let name = "Dylan"
   let age = 30
-  println $"Name: {name}, Age: {show age}"
+  dbg $"Name: {name}, Age: {show age}"
 
   # Multiline strings (indentation stripped based on closing """)
   let poem = """
@@ -17,27 +17,27 @@ main () = {
     Multiline strings are neat,
     And so are you.
     """
-  println poem
+  dbg poem
 
   # Multiline with preserved relative indentation
   let code = """
     if x > 0 then
-      println "positive"
+      dbg "positive"
     else
-      println "non-positive"
+      dbg "non-positive"
     """
-  println code
+  dbg code
 
   # Escape sequences work in multiline strings
   let with_tabs = """
     col1\tcol2\tcol3
     a\tb\tc
     """
-  println with_tabs
+  dbg with_tabs
 
   # Raw strings (no escape processing)
   let path = @"C:\Users\dylan\documents"
-  println path
+  dbg path
 
   # Raw multiline strings
   let regex_notes = @"""
@@ -46,7 +46,7 @@ main () = {
     \s*     zero or more whitespace
     [a-z]+  one or more lowercase letters
     """
-  println regex_notes
+  dbg regex_notes
 
   # Multiline interpolated strings
   let x = 10
@@ -58,5 +58,5 @@ main () = {
     y = {show y}
     sum = {show (x + y)}
     """
-  println report
+  dbg report
 }
