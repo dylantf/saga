@@ -242,7 +242,6 @@ pub(super) fn has_nested_effect_call(expr: &Expr) -> bool {
             Stmt::Expr(e) => branch_has_effect(e),
             Stmt::Let { value, .. } => branch_has_effect(value),
             Stmt::LetFun { body, .. } => branch_has_effect(body),
-            Stmt::Handle { value, .. } => branch_has_effect(value),
         }),
         _ => false,
     }

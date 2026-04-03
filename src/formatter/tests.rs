@@ -599,13 +599,7 @@ fn normalize_stmt(s: &mut Stmt) {
             }
             normalize_expr(body);
         }
-        Stmt::Handle {
-            name_span, value, span, ..
-        } => {
-            *name_span = S;
-            *span = S;
-            normalize_expr(value);
-        }
+
         Stmt::Expr(e) => normalize_expr(e),
     }
 }

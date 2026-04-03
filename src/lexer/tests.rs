@@ -94,7 +94,6 @@ fn keywords() {
     assert_eq!(toks("record"), vec![Record, Eof]);
     assert_eq!(toks("effect"), vec![Effect, Eof]);
     assert_eq!(toks("handler"), vec![Handler, Eof]);
-    assert_eq!(toks("handle"), vec![Handle, Eof]);
     assert_eq!(toks("with"), vec![With, Eof]);
     assert_eq!(toks("where"), vec![Where, Eof]);
     assert_eq!(toks("import"), vec![Import, Eof]);

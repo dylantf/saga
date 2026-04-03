@@ -74,22 +74,6 @@ impl Normalizer {
                         span: *span,
                     }));
                 }
-                Stmt::Handle {
-                    name,
-                    name_span,
-                    value,
-                    span,
-                } => {
-                    let mut lifted = Vec::new();
-                    let new_value = self.normalize_top(value, &mut lifted);
-                    result.extend(lifted.into_iter().map(Annotated::bare));
-                    result.push(Annotated::bare(Stmt::Handle {
-                        name: name.clone(),
-                        name_span: *name_span,
-                        value: new_value,
-                        span: *span,
-                    }));
-                }
                 Stmt::Expr(e) => {
                     let mut lifted = Vec::new();
                     let new_expr = self.normalize_top(e, &mut lifted);

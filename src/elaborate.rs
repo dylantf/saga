@@ -1028,17 +1028,7 @@ impl Elaborator {
                                     body: self.elaborate_expr(body),
                                     span: *span,
                                 },
-                                Stmt::Handle {
-                                    name,
-                                    name_span,
-                                    value,
-                                    span,
-                                } => Stmt::Handle {
-                                    name: name.clone(),
-                                    name_span: *name_span,
-                                    value: self.elaborate_expr(value),
-                                    span: *span,
-                                },
+
                                 Stmt::Expr(e) => Stmt::Expr(self.elaborate_expr(e)),
                             })
                         })

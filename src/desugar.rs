@@ -417,7 +417,7 @@ fn desugar_stmt(stmt: &mut Stmt) {
                 desugar_expr(g);
             }
         }
-        Stmt::Handle { value, .. } => desugar_expr(value),
+
         Stmt::Expr(e) => desugar_expr(e),
     }
 }

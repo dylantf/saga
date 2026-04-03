@@ -460,14 +460,8 @@ fn find_in_stmt(stmt: &Stmt, offset: usize) -> Found {
         } => find_in_params_body(params, body, offset).or_else(|| {
             contains_ident(name_span, offset).then(|| (name.clone(), *name_span, Some(*id)))
         }),
-        Stmt::Handle {
-            name,
-            name_span,
-            value,
-            ..
-        } => find_in_expr(value, offset).or_else(|| {
-            contains_ident(name_span, offset).then(|| (name.clone(), *name_span, None))
-        }),
+
+
         Stmt::Expr(expr) => find_in_expr(expr, offset),
     }
 }

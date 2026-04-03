@@ -720,12 +720,6 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
                         resolve_expr(body, scope, map);
                         scope.pop();
                     }
-                    Stmt::Handle { name, value, .. } => {
-                        resolve_expr(value, scope, map);
-                        block_locals.insert(name.clone());
-                        scope.pop();
-                        scope.push(block_locals.clone());
-                    }
                     Stmt::Expr(e) => {
                         resolve_expr(e, scope, map);
                     }

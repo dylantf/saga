@@ -1,4 +1,4 @@
-# Handle bindings: conditional handler selection and handler expressions
+# Handler bindings: conditional handler selection and handler expressions
 
 effect Log {
   fun log : String -> Unit
@@ -16,37 +16,34 @@ handler quiet_log for Log {
 }
 
 fun make_logger : (is_dev: Bool) -> Handler Log
-make_logger is_dev =
-  handler for Log {
-    log msg = {
-      if is_dev then resume println $"[PREFIX] {msg}" else resume ()
-    }
+make_logger is_dev = handler for Log {
+  log msg = {
+    if is_dev then resume println $"[PREFIX] {msg}" else resume ()
   }
+}
 
 main () = {
-  # Simple handle binding
-  handle logger = console_log
-  log! "hello from handle binding" with logger
+  # Simple let binding with a handler
+  let logger = console_log
+  log! "hello from let binding" with logger
   log! "hello from inline block" with {logger}
 
-  # Conditional handle binding (True branch)
+  # Conditional handler binding (True branch)
   let dev = True
-  handle cond_logger = if dev then console_log else quiet_log
+  let cond_logger = if dev then console_log else quiet_log
   log! "conditional true (should print)" with cond_logger
 
-  # Conditional handle binding (False branch)
-  handle cond_logger2 = if False then console_log else quiet_log
+  # Conditional handler binding (False branch)
+  let cond_logger2 = if False then console_log else quiet_log
   log! "conditional false (should NOT print)" with cond_logger2
 
-  handle cond_logger3 = make_logger dev
+  # Handler factory function
+  let cond_logger3 = make_logger dev
   log! "conditional true (should print) from handler factory" with cond_logger3
 
-  # Handler expression
-  handle prefixed =
-    handler for Log {
-      log msg = {
-        resume println $"[PREFIX] {msg}"
-      }
-    }
-  log! "hello from handler expression" with prefixed
+  # Inline handler expression
+  let foo_really_long_variable_name_i_wonder_how_long_it_can_go = handler for Log {
+    log msg = resume println msg
+  }
+  log! "hello from handler expression" with foo
 }

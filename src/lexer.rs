@@ -318,7 +318,6 @@ impl Lexer {
             "record" => Token::Record,
             "effect" => Token::Effect,
             "handler" => Token::Handler,
-            "handle" => Token::Handle,
             "with" => Token::With,
             "where" => Token::Where,
             "import" => Token::Import,

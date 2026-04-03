@@ -384,9 +384,7 @@ fn resolve_stmt(stmt: &mut Stmt, scope: &ScopeMap, locals: &mut HashSet<String>)
                 resolve_expr(g, scope, &inner);
             }
         }
-        Stmt::Handle { name, value, .. } => {
-            resolve_expr(value, scope, locals);
-            locals.insert(name.clone());
-        }
+
+
     }
 }

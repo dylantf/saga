@@ -582,12 +582,15 @@ impl<'a> Lowerer<'a> {
                 // compile-time alias. For conditionals, we lower the condition
                 // and register a synthetic handler that dispatches at runtime.
                 // Dynamic handlers lower the RHS and bind it to a variable.
-                if let Stmt::Handle { name, value, .. } = first {
+                // Let bindings with handler values: detect and register the
+                // handler so `with name` resolves correctly.
+                if let Stmt::Let { pattern, value, .. } = first
+                    && let Pat::Var { name, .. } = pattern
+                    && self.is_handler_value(value)
+                {
                     self.lower_handle_binding(name, value);
-                    // If this became a dynamic handler, we need to actually
-                    // lower the RHS and bind the result variable.
                     if let Some((var, _effects, _has_return)) =
-                        self.handle_dynamic_vars.get(name).cloned()
+                        self.handle_dynamic_vars.get(name.as_str()).cloned()
                     {
                         let rhs_ce = self.lower_expr(value);
                         let rest_ce = self.lower_block(rest);
@@ -648,7 +651,7 @@ impl<'a> Lowerer<'a> {
                     let value_expr = match first {
                         Stmt::Let { value, .. } => value,
                         Stmt::Expr(e) => e,
-                        Stmt::LetFun { .. } | Stmt::Handle { .. } => unreachable!(),
+                        Stmt::LetFun { .. } => unreachable!(),
                     };
                     let is_effectful_call = collect_fun_call(value_expr)
                         .map(|(name, _, _)| {
@@ -660,7 +663,7 @@ impl<'a> Lowerer<'a> {
                         let (pat_opt, value_expr) = match first {
                             Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                             Stmt::Expr(e) => (None, e),
-                            Stmt::LetFun { .. } | Stmt::Handle { .. } => unreachable!(),
+                            Stmt::LetFun { .. } => unreachable!(),
                         };
                         let rest_ce = self.lower_block(rest);
                         let (k_param, rest_ce) = match pat_opt {
@@ -686,7 +689,7 @@ impl<'a> Lowerer<'a> {
                     }
                     Stmt::Let { pattern, value, .. } => collect_effect_call(value)
                         .map(|(name, qual, args)| (Some(pattern), name, qual, args)),
-                    Stmt::LetFun { .. } | Stmt::Handle { .. } => None,
+                    Stmt::LetFun { .. } => None,
                 };
 
                 if let Some((pat, op_name, qualifier, args)) = effect_info {
@@ -706,14 +709,14 @@ impl<'a> Lowerer<'a> {
                     let value_has_nested = match first {
                         Stmt::Expr(e) => has_nested_effect_call(e),
                         Stmt::Let { value, .. } => has_nested_effect_call(value),
-                        Stmt::LetFun { .. } | Stmt::Handle { .. } => false,
+                        Stmt::LetFun { .. } => false,
                     };
 
                     if value_has_nested {
                         let (pat_opt, value_expr) = match first {
                             Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                             Stmt::Expr(e) => (None, e),
-                            Stmt::LetFun { .. } | Stmt::Handle { .. } => unreachable!(),
+                            Stmt::LetFun { .. } => unreachable!(),
                         };
                         let rest_ce = self.lower_block(rest);
                         let (k_param, rest_ce) = match pat_opt {
@@ -735,7 +738,7 @@ impl<'a> Lowerer<'a> {
                                 ..
                             } => (Some(pattern), *assert, *span, self.lower_expr(value)),
                             Stmt::Expr(e) => (None, false, e.span, self.lower_expr(e)),
-                            Stmt::LetFun { .. } | Stmt::Handle { .. } => unreachable!(),
+                            Stmt::LetFun { .. } => unreachable!(),
                         };
                         let rest_ce = self.lower_block(rest);
                         let (var, rest_ce) = match pat_opt {
@@ -900,7 +903,7 @@ impl<'a> Lowerer<'a> {
                     }
                     Stmt::Let { pattern, value, .. } => collect_effect_call(value)
                         .map(|(name, qual, args)| (Some(pattern), name, qual, args)),
-                    Stmt::LetFun { .. } | Stmt::Handle { .. } => None,
+                    Stmt::LetFun { .. } => None,
                 };
 
                 if let Some((pat, op_name, qualifier, args)) = effect_info {
@@ -917,7 +920,7 @@ impl<'a> Lowerer<'a> {
                     let (pat_opt, value_expr) = match first {
                         Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                         Stmt::Expr(e) => (None, e),
-                        Stmt::LetFun { .. } | Stmt::Handle { .. } => unreachable!(),
+                        Stmt::LetFun { .. } => unreachable!(),
                     };
 
                     // Check for call to an effectful function. Capture the
@@ -1044,6 +1047,27 @@ impl<'a> Lowerer<'a> {
         }
 
         inner
+    }
+
+    /// Check if an expression produces a handler value.
+    fn is_handler_value(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::HandlerExpr { .. } => true,
+            ExprKind::Var { name } => {
+                self.resolve_handler_name_opt(name).is_some()
+                    || self.check_result.as_ref().is_some_and(|cr| {
+                        cr.handlers.contains_key(name)
+                            || self.dynamic_handler_info_from_expr(expr).is_some()
+                    })
+            }
+            ExprKind::If { then_branch, else_branch, .. } => {
+                self.is_handler_value(then_branch) || self.is_handler_value(else_branch)
+            }
+            ExprKind::App { .. } => {
+                self.dynamic_handler_info_from_expr(expr).is_some()
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn lower_tuple_elems(&mut self, elems: &[Expr]) -> CExpr {

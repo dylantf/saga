@@ -813,6 +813,12 @@ impl Checker {
                             &ty,
                             has_deferred_effects,
                         );
+                        // If the RHS is a handler, register it so `with name` works.
+                        if let Some(info) = self.extract_handler_info(value) {
+                            self.handlers.insert(name.clone(), info);
+                        } else if let Some(info) = self.handler_info_from_type(&ty) {
+                            self.handlers.insert(name.clone(), info);
+                        }
                     } else {
                         if let Err(e) = self.bind_pattern(pattern, &ty) {
                             errors.push(e);
@@ -927,41 +933,8 @@ impl Checker {
                     // Don't increment i -- the while loop already advanced it
                     continue;
                 }
-                Stmt::Handle {
-                    name,
-                    name_span,
-                    value,
-                    ..
-                } => {
-                    let ty = match self.infer_expr(value) {
-                        Ok(ty) => ty,
-                        Err(e) => {
-                            errors.push(e);
-                            Type::Error
-                        }
-                    };
-                    // If the RHS refers to a known handler (directly or via
-                    // conditional), copy its HandlerInfo under the new name so
-                    // `with name` works in handler resolution.
-                    if let Some(info) = self.extract_handler_info(value) {
-                        self.handlers.insert(name.clone(), info);
-                    } else if let Some(info) = self.handler_info_from_type(&ty) {
-                        // Dynamic handler (e.g. factory function result): build
-                        // a minimal HandlerInfo from the Handler type so the
-                        // lowerer knows which effects to destructure.
-                        self.handlers.insert(name.clone(), info);
-                    }
-                    let def_id = crate::ast::NodeId::fresh();
-                    let scheme = self.generalize(&ty);
-                    self.env.insert_with_def(name.clone(), scheme, def_id);
-                    self.lsp.node_spans.insert(def_id, *name_span);
-                    self.lsp.type_at_span.insert(*name_span, ty);
-                    self.lsp
-                        .definitions
-                        .push((def_id, name.clone(), *name_span));
-                    last_ty = Type::unit();
-                    i += 1;
-                }
+
+
                 Stmt::Expr(expr) => {
                     match self.infer_expr(expr) {
                         Ok(ty) => {

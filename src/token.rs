@@ -27,7 +27,6 @@ pub enum Token {
     Record,
     Effect,
     Handler,
-    Handle,
     With,
     Where,
     Import,

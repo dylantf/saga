@@ -120,7 +120,7 @@ fn find_call_in_stmt(stmt: &Stmt, offset: usize) -> Option<(String, usize)> {
     match stmt {
         Stmt::Let { value, .. } => find_call_in_expr(value, offset),
         Stmt::LetFun { body, .. } => find_call_in_expr(body, offset),
-        Stmt::Handle { value, .. } => find_call_in_expr(value, offset),
+
         Stmt::Expr(expr) => find_call_in_expr(expr, offset),
     }
 }

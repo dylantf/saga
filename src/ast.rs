@@ -677,14 +677,6 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `handle logger = expr` -- bind a handler to a name
-    Handle {
-        name: String,
-        name_span: Span,
-        value: Expr,
-        span: Span,
-    },
-
     /// Expression used as a statement (last one is the block's value)
     Expr(Expr),
 }
@@ -696,7 +688,6 @@ impl Stmt {
             Stmt::LetFun { body, guard, .. } => {
                 body.contains_resume() || guard.as_ref().is_some_and(|g| g.contains_resume())
             }
-            Stmt::Handle { value, .. } => value.contains_resume(),
             Stmt::Expr(e) => e.contains_resume(),
         }
     }
