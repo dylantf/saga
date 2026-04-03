@@ -715,4 +715,39 @@ impl<'a> Lowerer<'a> {
         }
         CExpr::Tuple(tuple_elements)
     }
+
+    /// Lower a named handler definition to a tuple-of-lambdas.
+    /// Used when a handler name appears as a value (e.g. returned from a function,
+    /// passed as an argument) rather than in a `with` block.
+    pub(super) fn lower_handler_def_to_tuple(&mut self, handler_name: &str) -> Option<CExpr> {
+        let canonical = self.resolve_handler_name(handler_name);
+        let info = self.handler_defs.get(&canonical)?.clone();
+        let handler_ops = self.effect_handler_ops(&info.effects);
+
+        let mut tuple_elements = Vec::new();
+        for (_eff, op) in &handler_ops {
+            if let Some(arm) = info.arms.iter().find(|a| a.op_name == *op) {
+                tuple_elements.push(self.build_op_handler_fun(arm));
+            } else {
+                let k_param = self.fresh();
+                tuple_elements.push(CExpr::Fun(
+                    vec![k_param.clone()],
+                    Box::new(CExpr::Apply(
+                        Box::new(CExpr::Var(k_param)),
+                        vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
+                    )),
+                ));
+            }
+        }
+        if let Some(rc) = &info.return_clause {
+            let param = if rc.params.is_empty() {
+                self.fresh()
+            } else {
+                super::util::core_var(&rc.params[0].0)
+            };
+            let ret_body = self.lower_expr(&rc.body);
+            tuple_elements.push(CExpr::Fun(vec![param], Box::new(ret_body)));
+        }
+        Some(CExpr::Tuple(tuple_elements))
+    }
 }

@@ -15,6 +15,14 @@ handler quiet_log for Log {
   log _ = resume ()
 }
 
+fun make_logger : (is_dev: Bool) -> Handler Log
+make_logger is_dev =
+  handler for Log {
+    log msg = {
+      if is_dev then resume println $"[PREFIX] {msg}" else resume ()
+    }
+  }
+
 main () = {
   # Simple handle binding
   handle logger = console_log
@@ -29,6 +37,9 @@ main () = {
   # Conditional handle binding (False branch)
   handle cond_logger2 = if False then console_log else quiet_log
   log! "conditional false (should NOT print)" with cond_logger2
+
+  handle cond_logger3 = make_logger dev
+  log! "conditional true (should print) from handler factory" with cond_logger3
 
   # Handler expression
   handle prefixed =

@@ -923,6 +923,10 @@ impl<'a> Lowerer<'a> {
                         // it's not a module-level or imported function.
                         if let Some(inlined) = self.inline_vals.get(name) {
                             inlined.clone()
+                        } else if let Some(tuple) = self.lower_handler_def_to_tuple(name) {
+                            // Handler used as a value (e.g. returned from a function,
+                            // passed as argument): convert to tuple-of-lambdas.
+                            tuple
                         } else {
                             CExpr::Var(core_var(name))
                         }
