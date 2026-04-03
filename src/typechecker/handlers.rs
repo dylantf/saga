@@ -201,9 +201,86 @@ impl Checker {
                     }
                 }
 
-                let answer_ty = expr_ty.clone();
+                let mut answer_ty = expr_ty.clone();
 
-                self.effect_meta.type_param_cache = inner_effect_cache;
+                self.effect_meta.type_param_cache = inner_effect_cache.clone();
+
+                // Apply named handlers' return type transformations and merge their needs_effects
+                let mut named_needs = EffectRow::empty();
+                for ann in named {
+                    let name = &ann.node.name;
+                    if let Some(handler_info) = self.handlers.get(name).cloned() {
+                        let mapping: std::collections::HashMap<u32, Type> = handler_info
+                            .forall
+                            .iter()
+                            .map(|&id| (id, self.fresh_var()))
+                            .collect();
+
+                        if let Some((param_ty, ret_ty)) = &handler_info.return_type {
+                            let fresh_param = self.replace_vars(param_ty, &mapping);
+                            let fresh_ret = self.replace_vars(ret_ty, &mapping);
+                            self.unify_at(&fresh_param, &answer_ty, with_span)?;
+                            answer_ty = self.sub.apply(&fresh_ret);
+                        }
+
+                        // Apply where_constraints from the named handler
+                        for ((effect_name, param_idx), trait_constraints) in
+                            &handler_info.where_constraints
+                        {
+                            if let Some(effect_info) = self.effects.get(effect_name).cloned()
+                                && let Some(&param_var_id) =
+                                    effect_info.type_params.get(*param_idx)
+                            {
+                                let ty =
+                                    if let Some(cache) = inner_effect_cache.get(effect_name)
+                                        && let Some(cached_ty) = cache.get(&param_var_id)
+                                    {
+                                        self.sub.apply(cached_ty)
+                                    } else {
+                                        self.sub.apply(&Type::Var(param_var_id))
+                                    };
+                                for (trait_name, extra_var_ids) in trait_constraints {
+                                    let extra_types: Vec<Type> = extra_var_ids
+                                        .iter()
+                                        .map(|id| {
+                                            let mapped = mapping
+                                                .get(id)
+                                                .cloned()
+                                                .unwrap_or(Type::Var(*id));
+                                            self.sub.apply(&mapped)
+                                        })
+                                        .collect();
+                                    self.trait_state.pending_constraints.push((
+                                        trait_name.clone(),
+                                        extra_types,
+                                        ty.clone(),
+                                        with_span,
+                                        with_node_id,
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Merge handler's needs_effects with fresh vars applied
+                        let fresh_needs = EffectRow {
+                            effects: handler_info
+                                .needs_effects
+                                .effects
+                                .iter()
+                                .map(|entry| super::EffectEntry {
+                                    name: entry.name.clone(),
+                                    args: entry
+                                        .args
+                                        .iter()
+                                        .map(|t| self.replace_vars(t, &mapping))
+                                        .collect(),
+                                })
+                                .collect(),
+                            tail: None,
+                        };
+                        named_needs = named_needs.merge(&fresh_needs);
+                    }
+                }
 
                 let answer_ty = if let Some(ret_arm) = return_clause {
                     let saved_env = self.env.clone();
@@ -325,8 +402,11 @@ impl Checker {
                     self.env = saved_env;
                 }
 
-                // Emit remaining effects from the inner expression
-                self.emit_effects(&remaining_effs);
+                // Emit remaining effects from the inner expression, plus named handlers' needs
+                // (minus effects handled by sibling handlers in this same block)
+                let unhandled_named_needs = named_needs.subtract(&handled);
+                let final_effs = remaining_effs.merge(&unhandled_named_needs);
+                self.emit_effects(&final_effs);
                 Ok(answer_ty)
             }
         }
