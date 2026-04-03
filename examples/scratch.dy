@@ -1,14 +1,3 @@
-effect Scope {
-  fun acquire_scoped : (Unit -> a) -> (a -> Unit) -> a
-}
-
-trait Foo a {
-  fun foo : (Unit -> a) -> a
-}
-
-fun foo : (Unit -> a) -> a
-foo _ = "bar"
-
 main () = {
   println "Hello world"
 }

@@ -1,0 +1,44 @@
+import Std.Actor (Process, Actor, beam_actor)
+
+effect Scope {
+  fun scoped : a -> (a -> Unit) -> a
+}
+
+handler run_scoped for Scope {
+  scoped resource release = {
+    resume resource
+  } finally {
+    release resource
+  }
+}
+
+type Msg = GetValue(Pid String)
+
+fun server : String -> Unit needs {Process, Actor Msg}
+server db = {
+  receive {
+    GetValue caller -> {
+      send! caller $"result from {db}"
+      server db
+    }
+  }
+}
+
+fun run : Unit -> Unit needs {Process, Actor String, Scope}
+run () = {
+  let db = scoped! "my-connection" (fun c -> println $"  cleanup: {c}")
+  println $"  acquired: {db}"
+
+  let pid = spawn! (fun () -> server db)
+  send! pid (GetValue (self! ()))
+
+  let reply = receive {
+    msg -> msg
+  }
+  println $"  reply: {reply}"
+}
+
+main () = {
+  println "Actor + Scope test:"
+  run () with {beam_actor, run_scoped}
+}
