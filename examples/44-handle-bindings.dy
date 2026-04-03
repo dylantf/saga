@@ -4,6 +4,7 @@ effect Log {
   fun log : String -> Unit
 }
 
+# Handler declaration
 handler console_log for Log {
   log msg = {
     println msg
@@ -23,7 +24,7 @@ make_logger is_dev = handler for Log {
 }
 
 main () = {
-  # Simple let binding with a handler
+  # Bound handler
   let logger = console_log
   log! "hello from let binding" with logger
   log! "hello from inline block" with {logger}
@@ -41,9 +42,14 @@ main () = {
   let cond_logger3 = make_logger dev
   log! "conditional true (should print) from handler factory" with cond_logger3
 
-  # Inline handler expression
-  let foo_really_long_variable_name_i_wonder_how_long_it_can_go = handler for Log {
+  # Handler expression
+  let bound_logger = handler for Log {
     log msg = resume println msg
   }
-  log! "hello from handler expression" with foo
+  log! "hello from handler expression" with bound_logger
+
+  # Inline handler
+  log! "hello from inline handler" with {
+    log msg = resume println msg
+  }
 }

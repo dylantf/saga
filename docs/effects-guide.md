@@ -83,12 +83,13 @@ let sum = ask! () + ask! ()
 
 ## Handling Effects
 
-A handler provides implementations for effect operations. There are two forms:
-**named** and **inline**.
+A handler provides implementations for effect operations. There are several
+forms: **declarations**, **bindings**, **expressions**, and **inline**.
 
-### Named Handlers
+### Handler Declarations
 
-Define a reusable handler with the `handler` keyword:
+Define a reusable handler at the top level with the `handler` keyword. Handler
+declarations have type `Handler Effect`:
 
 ```
 handler console_log for Log needs {Console} {
@@ -112,6 +113,39 @@ Attach them by name with `with`:
 main () = {
   run_server ()
 } with console_log
+```
+
+### Handler Bindings
+
+Bind a handler to a local variable with `let`. This enables conditional
+handler selection without duplicating the computation:
+
+```
+main () = {
+  let logger = if env == "dev" then console_log else sentry_log
+  let db = if env == "dev" then sqlite_db else postgres_db
+  run_server () with { logger, db }
+}
+```
+
+### Handler Expressions and Factories
+
+`handler for Effect { ... }` is an expression that produces a `Handler Effect`
+value. This enables handler factory functions:
+
+```
+fun make_logger : String -> Handler Log
+make_logger prefix = handler for Log {
+  log level msg = {
+    println (prefix <> " [" <> level <> "] " <> msg)
+    resume ()
+  }
+}
+
+main () = {
+  let logger = make_logger "[app]"
+  run_server () with logger
+}
 ```
 
 ### Inline Handlers
@@ -618,9 +652,7 @@ handler with_retry for Http needs {Http} {
 
 **Note:** Inside the handler arm, the re-performed effect operation (e.g.
 `increment!`, `get!`) is unqualified. It routes to the outer handler because
-the handler's `needs` clause puts it in scope. If this is unclear at the call
-site, the planned named effect instances feature will allow explicit
-qualification (e.g. `inner.increment!()`).
+the handler's `needs` clause puts it in scope.
 
 ---
 
@@ -630,10 +662,13 @@ qualification (e.g. `inner.increment!()`).
 | --------------------- | ------------------------------------------------------------ |
 | Define an effect      | `effect Log { fun log : String -> Unit }`                    |
 | Perform an effect     | `log! "hello"`                                               |
-| Named handler         | `handler h for Log { log msg = ... }`                        |
+| Handler declaration   | `handler h for Log { log msg = ... }`                        |
 | Handler with effects  | `handler h for Log needs {X} { ... }`                        |
+| Handler binding       | `let h = console_log` or `let h = if dev then x else y`      |
+| Handler expression    | `handler for Log { log msg = ... }` (anonymous, as a value)  |
+| Handler factory       | `fun make : Config -> Handler Log`                           |
 | Inline handler        | `expr with { log msg = ... }`                                |
-| Attach named handler  | `expr with console_log`                                      |
+| Attach handler        | `expr with console_log` or `expr with my_binding`            |
 | Stack handlers        | `expr with { h1, h2, op args = ... }`                        |
 | Continue computation  | `resume value`                                               |
 | Abort computation     | (just don't call `resume`)                                   |

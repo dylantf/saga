@@ -90,7 +90,7 @@ After inferring all clauses of a function body, the accumulated `EffectRow` (mer
 ### Key Files
 
 - `typechecker/mod.rs` -- `Type::Fun`, `EffectRow` (with `empty`, `merge`, `subtract`), `EffectMeta`, `effects_from_type`
-- `typechecker/infer.rs` -- `infer_expr` returns `(Type, EffectRow)`, App absorption logic, lambda effect propagation
+- `typechecker/infer.rs` -- `infer_expr` returns `(Type, EffectRow)`, App absorption logic, lambda effect propagation, handler binding detection in `infer_block` (`extract_handler_info`, `handler_info_from_type`)
 - `typechecker/effects.rs` -- `check_effects_via_row`, effect op lookup/instantiation
 - `typechecker/handlers.rs` -- `infer_with`/`infer_with_inner`, handler subtraction
 - `typechecker/check_decl.rs` -- `collect_annotations` (builds EffectRow on innermost arrow), `check_fun_clauses` (body effect check), `innermost_effect_row` helper
@@ -147,18 +147,29 @@ Transforms to Core Erlang where each `op!` call passes a continuation:
 
 ### Handler Representation
 
-A handler is a function that receives `(op_name, args..., K)`:
+Handler declarations are compiled to per-op handler functions at `with` sites. Each op gets its own function `(args..., K)`:
 
 ```erlang
 % handler console_log for Log { log msg -> { print msg; resume () } }
-'console_log'/3 = fun (_Op, Msg, K) ->
+% At the `with` site, the log arm becomes:
+fun (Msg, K) ->
   call 'io':'format'("~s~n", [Msg]),
   apply K('unit')
 
 % handler to_result for Fail { fail reason -> Err(reason) }
-'to_result_fail'/3 = fun (_Op, Reason, _K) ->
+fun (Reason, _K) ->
   {'Err', Reason}       % don't call K = abort
 ```
+
+### Handler Bindings (Dynamic Handlers)
+
+When a handler is bound to a variable via `let` (e.g. from a conditional or factory function), it becomes a **tuple of per-op lambdas** at runtime. The tuple layout is ops sorted alphabetically by `Effect.op` key, with an optional return clause lambda as the last element.
+
+At `with` sites, the lowerer destructures the tuple to extract per-op handler functions. Three compilation paths:
+
+1. **Static alias** (`let foo = console_log`): resolved at compile time to the original handler declaration. Arms are inlined. Zero cost.
+2. **Conditional** (`let foo = if dev then x else y`): generates wrapper lambdas that dispatch via `case` on the condition variable.
+3. **Dynamic** (`let foo = make_handler()` or `let foo = handler for Log { ... }`): the handler is a tuple of lambdas, destructured at `with` sites via `erlang:element/2`.
 
 ### `with` Attaches the Handler
 
@@ -204,7 +215,8 @@ Some effects (Actor, Process, Monitor, Link, Timer) bypass CPS and are lowered t
 ### Key Files
 
 - `codegen/lower/mod.rs` -- `Lowerer`, `FunInfo`, `fun_effects()`, `expanded_arity()`
-- `codegen/lower/effects.rs` -- `lower_effect_call`, `lower_with`, `build_op_handler_fun`, `build_beam_native_op_fun`
+- `codegen/lower/effects.rs` -- `lower_effect_call`, `lower_with`, `build_op_handler_fun`, `build_beam_native_op_fun`, `lower_handler_expr_to_tuple`, `lower_handler_def_to_tuple`
+- `codegen/lower/exprs.rs` -- `lower_handle_binding` (static alias, conditional, and dynamic handler binding detection), `is_handler_value`
 - `codegen/lower/init.rs` -- populates `FunInfo` from type schemes via `arity_and_effects_from_type`
 - `codegen/lower/util.rs` -- `arity_and_effects_from_type`, `param_absorbed_effects_from_type`
 
