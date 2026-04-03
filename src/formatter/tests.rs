@@ -438,8 +438,7 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
             }
         }
         ExprKind::PipeBack { segments }
-        | ExprKind::ComposeForward { segments }
-        | ExprKind::ComposeBack { segments } => {
+        | ExprKind::ComposeForward { segments } => {
             for seg in segments.iter_mut() {
                 normalize_annotated(seg, normalize_expr);
             }
@@ -484,6 +483,15 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
         ExprKind::ForeignCall { args, .. } => {
             for a in args.iter_mut() {
                 normalize_expr(a);
+            }
+        }
+        ExprKind::BitString { segments } => {
+            for seg in segments.iter_mut() {
+                normalize_expr(&mut seg.value);
+                seg.span = S;
+                if let Some(size) = &mut seg.size {
+                    normalize_expr(size);
+                }
             }
         }
     }
@@ -559,6 +567,17 @@ fn normalize_pat(p: &mut Pat) {
             *id = NID;
             *span = S;
             for p in patterns { normalize_pat(p); }
+        }
+        Pat::BitStringPat { id, segments, span } => {
+            *id = NID;
+            *span = S;
+            for seg in segments.iter_mut() {
+                normalize_pat(&mut seg.value);
+                seg.span = S;
+                if let Some(size) = &mut seg.size {
+                    normalize_expr(size);
+                }
+            }
         }
     }
 }

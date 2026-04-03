@@ -362,6 +362,38 @@ impl Parser {
                     span: span.to(end),
                 })
             }
+            // <<seg, seg, ...>> -- bitstring pattern
+            Token::ComposeBack => {
+                // <<>> -- empty bitstring pattern
+                if matches!(self.peek(), Token::ComposeForward) {
+                    let end = self.tokens[self.pos].span;
+                    self.advance(); // consume >>
+                    return Ok(Pat::BitStringPat {
+                        id: NodeId::fresh(),
+                        segments: vec![],
+                        span: span.to(end),
+                    });
+                }
+
+                let mut segments = Vec::new();
+                loop {
+                    let seg = self.parse_bit_segment_pat()?;
+                    segments.push(seg);
+                    if matches!(self.peek(), Token::Comma) {
+                        self.advance(); // consume ,
+                    } else {
+                        break;
+                    }
+                }
+                let end = self.tokens[self.pos].span;
+                self.expect(Token::ComposeForward)?; // consume >>
+                Ok(Pat::BitStringPat {
+                    id: NodeId::fresh(),
+                    segments,
+                    span: span.to(end),
+                })
+            }
+
             tok => {
                 self.pos -= 1;
                 Err(ParseError {
@@ -370,5 +402,52 @@ impl Parser {
                 })
             }
         }
+    }
+
+    /// Parse a single bitstring segment in pattern position.
+    fn parse_bit_segment_pat(&mut self) -> Result<BitSegment<Pat>, ParseError> {
+        let start = self.tokens[self.pos].span;
+        let value = self.parse_pattern_atom()?;
+
+        let size = if matches!(self.peek(), Token::Colon) {
+            self.advance(); // consume :
+            // Size is an int literal or variable name
+            let size_expr = match self.peek().clone() {
+                Token::Int(s, n) => {
+                    let sp = self.tokens[self.pos].span;
+                    self.advance();
+                    Expr { id: NodeId::fresh(), span: sp, kind: ExprKind::Lit { value: Lit::Int(s, n) } }
+                }
+                Token::Ident(name) => {
+                    let sp = self.tokens[self.pos].span;
+                    self.advance();
+                    Expr { id: NodeId::fresh(), span: sp, kind: ExprKind::Var { name } }
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "expected integer or variable for segment size".to_string(),
+                        span: self.tokens[self.pos].span,
+                    });
+                }
+            };
+            Some(Box::new(size_expr))
+        } else {
+            None
+        };
+
+        let specs = if matches!(self.peek(), Token::Slash) {
+            self.advance(); // consume /
+            self.parse_bit_specs()?
+        } else {
+            vec![]
+        };
+
+        let end = self.tokens[self.pos - 1].span;
+        Ok(BitSegment {
+            value,
+            size,
+            specs,
+            span: start.to(end),
+        })
     }
 }

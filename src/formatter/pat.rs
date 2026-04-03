@@ -61,6 +61,14 @@ pub fn format_pat(pat: &Pat) -> Doc {
         Pat::StringPrefix { prefix, rest, .. } => {
             docs![Doc::text(format!("\"{}\" <> ", prefix)), format_pat(rest)]
         }
+        Pat::BitStringPat { segments, .. } => {
+            if segments.is_empty() {
+                Doc::text("<<>>")
+            } else {
+                let seg_docs: Vec<Doc> = segments.iter().map(format_bit_segment_pat).collect();
+                docs![Doc::text("<<"), Doc::join(Doc::text(", "), seg_docs), Doc::text(">>")]
+            }
+        }
         Pat::ListPat { elements, .. } => {
             if elements.is_empty() {
                 Doc::text("[]")
@@ -99,6 +107,33 @@ pub fn format_pat_atom(pat: &Pat) -> Doc {
         Pat::Constructor { args, .. } if args.is_empty() => format_pat(pat),
         // Record with no as_name is just `Name {}` or `Name { .. }` - no parens needed
         Pat::Record { as_name: None, .. } => format_pat(pat),
+        // BitString is self-delimited by << >>
+        Pat::BitStringPat { .. } => format_pat(pat),
         _ => docs![Doc::text("("), format_pat(pat), Doc::text(")")],
     }
+}
+
+fn format_bit_segment_pat(seg: &BitSegment<Pat>) -> Doc {
+    let mut d = format_pat(&seg.value);
+    if let Some(size) = &seg.size {
+        d = d.append(Doc::text(":")).append(super::expr::format_expr(size));
+    }
+    if !seg.specs.is_empty() {
+        d = d.append(Doc::text("/")).append(Doc::text(format_bit_specs(&seg.specs)));
+    }
+    d
+}
+
+pub fn format_bit_specs(specs: &[BitSegSpec]) -> String {
+    specs.iter().map(|s| match s {
+        BitSegSpec::Integer => "integer",
+        BitSegSpec::Float => "float",
+        BitSegSpec::Binary => "binary",
+        BitSegSpec::Utf8 => "utf8",
+        BitSegSpec::Big => "big",
+        BitSegSpec::Little => "little",
+        BitSegSpec::Native => "native",
+        BitSegSpec::Signed => "signed",
+        BitSegSpec::Unsigned => "unsigned",
+    }).collect::<Vec<_>>().join("-")
 }

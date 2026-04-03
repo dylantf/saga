@@ -538,6 +538,35 @@ impl Checker {
                 Ok(ty)
             }
 
+            ExprKind::BitString { segments } => {
+                for seg in segments {
+                    let val_ty = self.infer_expr(&seg.value)?;
+                    // Determine expected type based on specifiers
+                    let has_spec = |s: &crate::ast::BitSegSpec| seg.specs.contains(s);
+                    let expected = if has_spec(&crate::ast::BitSegSpec::Float) {
+                        Type::float()
+                    } else if has_spec(&crate::ast::BitSegSpec::Binary) {
+                        Type::con("BitString")
+                    } else if has_spec(&crate::ast::BitSegSpec::Utf8) {
+                        Type::int()
+                    } else {
+                        // Default or explicit /integer: check for string literal sugar
+                        match &seg.value.kind {
+                            ExprKind::Lit { value: Lit::String(..), .. } => Type::string(),
+                            _ => Type::int(),
+                        }
+                    };
+                    self.unify_at(&val_ty, &expected, seg.span)?;
+                    if let Some(size) = &seg.size {
+                        let size_ty = self.infer_expr(size)?;
+                        self.unify_at(&size_ty, &Type::int(), size.span)?;
+                    }
+                }
+                let ty = Type::con("BitString");
+                self.record_type(node_id, &ty);
+                Ok(ty)
+            }
+
             ExprKind::DictMethodAccess { .. }
             | ExprKind::DictRef { .. }
             | ExprKind::ForeignCall { .. } => {
@@ -548,7 +577,6 @@ impl Checker {
             | ExprKind::BinOpChain { .. }
             | ExprKind::PipeBack { .. }
             | ExprKind::ComposeForward { .. }
-            | ExprKind::ComposeBack { .. }
             | ExprKind::Cons { .. }
             | ExprKind::ListLit { .. }
             | ExprKind::StringInterp { .. }

@@ -2,12 +2,7 @@ module Std.BitString
 
 import Std.Maybe (Maybe)
 import Std.Result (Result)
-import Std.Int
 import Std.List
-
-impl Show for BitString {
-  show bs = "<<" <> show_bytes (to_list bs) <> ">>"
-}
 
 impl Debug for BitString {
   debug bs = "<<" <> show_bytes (to_list bs) <> ">>"
@@ -16,8 +11,8 @@ impl Debug for BitString {
 fun show_bytes : List Int -> String
 show_bytes xs = case xs {
   [] -> ""
-  [x] -> Int.to_string x
-  x :: rest -> Int.to_string x <> ", " <> show_bytes rest
+  [x] -> show x
+  x :: rest -> show x <> ", " <> show_bytes rest
 }
 
 #@ Returns the size of the bitstring in bytes.

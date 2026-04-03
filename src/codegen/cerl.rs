@@ -100,6 +100,46 @@ pub enum CBinSeg<T> {
     Byte(u8),
     /// A variable-length binary splice: `#<T>('all',8,'binary',['unsigned'|['big']])`
     BinaryAll(T),
+    /// A general segment with explicit size, type, and flags.
+    Segment {
+        value: T,
+        size: BinSegSize,
+        unit: u8,
+        type_name: BinSegType,
+        flags: BinSegFlags,
+    },
+}
+
+/// Size of a binary segment.
+#[derive(Debug, Clone)]
+pub enum BinSegSize {
+    /// An explicit size expression (integer literal or variable).
+    Expr(CExpr),
+    /// UTF-8: BEAM determines size automatically.
+    Utf8,
+}
+
+/// Type of a binary segment.
+#[derive(Debug, Clone)]
+pub enum BinSegType {
+    Integer,
+    Float,
+    Binary,
+    Utf8,
+}
+
+/// Flags for a binary segment.
+#[derive(Debug, Clone)]
+pub struct BinSegFlags {
+    pub signed: bool,
+    pub endianness: Endianness,
+}
+
+#[derive(Debug, Clone)]
+pub enum Endianness {
+    Big,
+    Little,
+    Native,
 }
 
 impl CExpr {
@@ -167,8 +207,15 @@ impl CExpr {
             }
             CExpr::Binary(segs) => {
                 for seg in segs {
-                    if let CBinSeg::BinaryAll(e) = seg {
-                        e.collect_handle_refs(out);
+                    match seg {
+                        CBinSeg::BinaryAll(e) => e.collect_handle_refs(out),
+                        CBinSeg::Segment { value, size, .. } => {
+                            value.collect_handle_refs(out);
+                            if let BinSegSize::Expr(s) = size {
+                                s.collect_handle_refs(out);
+                            }
+                        }
+                        CBinSeg::Byte(_) => {}
                     }
                 }
             }
@@ -476,6 +523,30 @@ impl Printer {
         ));
     }
 
+    fn print_segment_suffix(&mut self, size: &BinSegSize, unit: u8, type_name: &BinSegType, flags: &BinSegFlags) {
+        self.push(">(");
+        match size {
+            BinSegSize::Expr(e) => self.print_expr(e),
+            BinSegSize::Utf8 => self.push("'all'"),
+        }
+        self.push(&format!(",{},'", unit));
+        match type_name {
+            BinSegType::Integer => self.push("integer"),
+            BinSegType::Float => self.push("float"),
+            BinSegType::Binary => self.push("binary"),
+            BinSegType::Utf8 => self.push("utf8"),
+        }
+        self.push("',['");
+        if flags.signed { self.push("signed") } else { self.push("unsigned") }
+        self.push("'|['");
+        match flags.endianness {
+            Endianness::Big => self.push("big"),
+            Endianness::Little => self.push("little"),
+            Endianness::Native => self.push("native"),
+        }
+        self.push("']])");
+    }
+
     fn print_binary_segs_expr(&mut self, segs: &[CBinSeg<CExpr>]) {
         self.push("#{");
         for (i, seg) in segs.iter().enumerate() {
@@ -488,6 +559,11 @@ impl Printer {
                     self.push("#<");
                     self.print_expr(expr);
                     self.push(">('all',8,'binary',['unsigned'|['big']])");
+                }
+                CBinSeg::Segment { value, size, unit, type_name, flags } => {
+                    self.push("#<");
+                    self.print_expr(value);
+                    self.print_segment_suffix(size, *unit, type_name, flags);
                 }
             }
         }
@@ -506,6 +582,11 @@ impl Printer {
                     self.push("#<");
                     self.print_pat(pat);
                     self.push(">('all',8,'binary',['unsigned'|['big']])");
+                }
+                CBinSeg::Segment { value, size, unit, type_name, flags } => {
+                    self.push("#<");
+                    self.print_pat(value);
+                    self.print_segment_suffix(size, *unit, type_name, flags);
                 }
             }
         }

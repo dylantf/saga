@@ -417,6 +417,19 @@ impl Normalizer {
             // Handler expressions: clone as-is (arm bodies are normalized when lowered).
             ExprKind::HandlerExpr { .. } => expr.clone(),
 
+            // BitString: normalize segment values and sizes.
+            ExprKind::BitString { segments } => {
+                let new_segs = segments.iter().map(|seg| {
+                    BitSegment {
+                        value: self.normalize_and_lift(&seg.value, lifted),
+                        size: seg.size.as_ref().map(|s| Box::new(self.normalize_and_lift(s, lifted))),
+                        specs: seg.specs.clone(),
+                        span: seg.span,
+                    }
+                }).collect();
+                Expr::synth(span, ExprKind::BitString { segments: new_segs })
+            }
+
             // Leaves: no sub-expressions to normalize.
             ExprKind::Lit { .. }
             | ExprKind::Var { .. }
@@ -429,7 +442,6 @@ impl Normalizer {
             | ExprKind::BinOpChain { .. }
             | ExprKind::PipeBack { .. }
             | ExprKind::ComposeForward { .. }
-            | ExprKind::ComposeBack { .. }
             | ExprKind::Cons { .. }
             | ExprKind::ListLit { .. }
             | ExprKind::StringInterp { .. }

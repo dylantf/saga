@@ -1296,6 +1296,18 @@ impl Elaborator {
 
             ExprKind::Ascription { expr, .. } => self.elaborate_expr(expr),
 
+            ExprKind::BitString { segments } => Expr::synth(
+                span,
+                ExprKind::BitString {
+                    segments: segments.iter().map(|seg| BitSegment {
+                        value: self.elaborate_expr(&seg.value),
+                        size: seg.size.as_ref().map(|s| Box::new(self.elaborate_expr(s))),
+                        specs: seg.specs.clone(),
+                        span: seg.span,
+                    }).collect(),
+                },
+            ),
+
             // Elaboration-only variants (shouldn't appear in input)
             ExprKind::DictMethodAccess { .. } | ExprKind::DictRef { .. } => expr.clone(),
 
@@ -1303,7 +1315,6 @@ impl Elaborator {
             | ExprKind::BinOpChain { .. }
             | ExprKind::PipeBack { .. }
             | ExprKind::ComposeForward { .. }
-            | ExprKind::ComposeBack { .. }
             | ExprKind::Cons { .. }
             | ExprKind::ListLit { .. }
             | ExprKind::StringInterp { .. }

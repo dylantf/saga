@@ -1,0 +1,37 @@
+module Main
+
+import Std.BitString as BitString
+
+pub fun main : Unit -> Unit
+main () = {
+  # Construction from stdlib functions
+  let bs = BitString.from_list [72, 101, 108, 108, 111]
+  print (debug bs)
+  print (show (BitString.size bs))
+
+  # Construction with << >> syntax
+  let bs2 = <<72, 101, 108, 108, 111>>
+  print (debug bs2)
+
+  # Concat with <>
+  let combined = bs <> BitString.from_byte 32 <> bs2
+  print (debug combined)
+
+  # Integer encoding with size and endianness specifiers
+  let packet = <<1:8, 256:16/big, "hello">>
+  print (debug packet)
+
+  # Pattern matching with variable-sized segments
+  case packet {
+    <<tag:8, len:16/big, rest/binary>> -> {
+      print ("tag: " <> show tag)
+      print ("len: " <> show len)
+      print ("rest: " <> debug rest)
+    }
+    _ -> print "no match"
+  }
+
+  # Empty bitstring
+  let empty = <<>>
+  print (show (BitString.is_empty empty))
+}

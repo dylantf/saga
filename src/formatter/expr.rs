@@ -472,7 +472,6 @@ pub fn format_expr(expr: &Expr) -> Doc {
         }
         ExprKind::PipeBack { segments } => format_binary_chain(segments, " <| "),
         ExprKind::ComposeForward { segments } => format_binary_chain(segments, " >> "),
-        ExprKind::ComposeBack { segments } => format_binary_chain(segments, " << "),
         ExprKind::Cons { head, tail } => {
             docs![format_expr(head), Doc::text(" :: "), format_expr(tail)]
         }
@@ -515,6 +514,24 @@ pub fn format_expr(expr: &Expr) -> Doc {
             docs![header, Doc::nest(2, arms), Doc::hardline(), Doc::text("}")]
         }
 
+        ExprKind::BitString { segments } => {
+            if segments.is_empty() {
+                Doc::text("<<>>")
+            } else {
+                let seg_docs: Vec<Doc> = segments.iter().map(|seg| {
+                    let mut d = format_expr(&seg.value);
+                    if let Some(size) = &seg.size {
+                        d = d.append(Doc::text(":")).append(format_expr(size));
+                    }
+                    if !seg.specs.is_empty() {
+                        d = d.append(Doc::text("/")).append(Doc::text(super::pat::format_bit_specs(&seg.specs)));
+                    }
+                    d
+                }).collect();
+                docs![Doc::text("<<"), Doc::join(Doc::text(", "), seg_docs), Doc::text(">>")]
+            }
+        }
+
         // Elaboration-only
         ExprKind::DictMethodAccess { .. }
         | ExprKind::DictRef { .. }
@@ -553,7 +570,8 @@ pub fn format_expr_atom(expr: &Expr) -> Doc {
         | ExprKind::Block { .. }
         | ExprKind::StringInterp { .. }
         | ExprKind::ListLit { .. }
-        | ExprKind::Ascription { .. } => format_expr(expr),
+        | ExprKind::Ascription { .. }
+        | ExprKind::BitString { .. } => format_expr(expr),
         _ => docs![Doc::text("("), format_expr(expr), Doc::text(")")],
     }
 }

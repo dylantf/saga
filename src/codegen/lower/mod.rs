@@ -21,6 +21,17 @@ use util::{
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
 
+/// Lower a simple expression used as a bitstring segment size.
+/// Handles integer literals and variable references — the common cases
+/// for pattern-position sizes like `<<len:8, data:len/binary>>`.
+pub(crate) fn lower_size_expr(expr: &Expr) -> CExpr {
+    match &expr.kind {
+        ExprKind::Lit { value: Lit::Int(_, n), .. } => CExpr::Lit(CLit::Int(*n)),
+        ExprKind::Var { name, .. } => CExpr::Var(core_var(name)),
+        _ => unreachable!("bitstring segment size must be an integer literal or variable"),
+    }
+}
+
 /// Count how many lambda params can be absorbed from the body of a top-level
 /// function definition. Peels nested lambdas so `fun x -> fun y -> body` counts 2.
 fn count_lambda_params(body: &Expr) -> usize {
@@ -2092,6 +2103,10 @@ impl<'a> Lowerer<'a> {
             // Produce a tuple of per-op handler lambdas for runtime use.
             ExprKind::HandlerExpr { body } => {
                 self.lower_handler_expr_to_tuple(body)
+            }
+
+            ExprKind::BitString { segments } => {
+                self.lower_bitstring_expr(segments)
             }
 
             // StringInterpolation should be desugared before reaching the lowerer,

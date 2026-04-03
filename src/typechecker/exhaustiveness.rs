@@ -100,8 +100,8 @@ pub(crate) fn simplify_pat(pat: &Pat, ty: Option<&Type>, ctx: &SimplifyCtx) -> S
         Pat::AnonRecord { fields, .. } => {
             simplify_anon_record_pat(fields, ty, ctx)
         }
-        Pat::StringPrefix { .. } => {
-            // String prefix patterns are non-covering (infinite string domain)
+        Pat::StringPrefix { .. } | Pat::BitStringPat { .. } => {
+            // String prefix and bitstring patterns are non-covering (infinite domain)
             // Treat as wildcard so exhaustiveness requires a catch-all arm
             SPat::Wildcard
         }

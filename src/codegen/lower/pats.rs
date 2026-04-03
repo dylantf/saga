@@ -119,8 +119,37 @@ pub(super) fn lower_pat(
             segs.push(CBinSeg::BinaryAll(tail));
             CPat::Binary(segs)
         }
+        Pat::BitStringPat { segments, .. } => {
+            let segs = segments.iter().map(|seg| {
+                lower_bit_segment_pat(seg, record_fields, constructor_atoms)
+            }).collect();
+            CPat::Binary(segs)
+        }
         Pat::ListPat { .. } | Pat::ConsPat { .. } | Pat::Or { .. } => {
             unreachable!("surface syntax should be desugared before codegen")
         }
     }
+}
+
+fn lower_bit_segment_pat(
+    seg: &crate::ast::BitSegment<Pat>,
+    record_fields: &std::collections::HashMap<String, Vec<String>>,
+    constructor_atoms: &std::collections::HashMap<String, String>,
+) -> CBinSeg<CPat> {
+    use super::util::{resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size};
+    use crate::ast::BitSegSpec;
+
+    let is_binary = seg.specs.contains(&BitSegSpec::Binary);
+    let pat = lower_pat(&seg.value, record_fields, constructor_atoms);
+
+    if is_binary && seg.size.is_none() {
+        return CBinSeg::BinaryAll(pat);
+    }
+
+    let (type_name, default_size, unit) = resolve_bit_segment_meta(&seg.specs);
+    let flags = resolve_bit_segment_flags(&seg.specs);
+    let size = seg.size.as_ref().map(|s| super::lower_size_expr(s));
+    let size_expr = resolve_bit_segment_size(size, &type_name, default_size);
+
+    CBinSeg::Segment { value: pat, size: size_expr, unit, type_name, flags }
 }

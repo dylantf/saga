@@ -1,8 +1,8 @@
 /// Expression-lowering helper methods on Lowerer.
 /// General expression forms: case arms, constructors, binops, blocks, do-else, etc.
 /// Effect system lowering is in effects.rs.
-use crate::ast::{BinOp, CaseArm, Expr, ExprKind, Pat, Stmt};
-use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
+use crate::ast::{self, BinOp, BitSegment, CaseArm, Expr, ExprKind, Lit, Pat, Stmt};
+use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CLit, CPat};
 use crate::token::Span;
 use crate::typechecker::Type;
 use std::collections::HashMap;
@@ -1247,5 +1247,42 @@ impl<'a> Lowerer<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Lower a `<<seg1, seg2, ...>>` bitstring expression to `CExpr::Binary`.
+    pub(super) fn lower_bitstring_expr(&mut self, segments: &[BitSegment<Expr>]) -> CExpr {
+        use super::util::{resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size};
+
+        let mut segs = Vec::new();
+        for seg in segments {
+            // String literal sugar: expand to byte segments
+            if let ExprKind::Lit { value: Lit::String(s, kind), .. } = &seg.value.kind {
+                let resolved = if kind.is_multiline() {
+                    super::util::process_string_escapes(s)
+                } else {
+                    s.clone()
+                };
+                for b in resolved.as_bytes() {
+                    segs.push(CBinSeg::Byte(*b));
+                }
+                continue;
+            }
+
+            let is_binary = seg.specs.contains(&ast::BitSegSpec::Binary);
+            let value = self.lower_expr(&seg.value);
+
+            if is_binary && seg.size.is_none() {
+                segs.push(CBinSeg::BinaryAll(value));
+                continue;
+            }
+
+            let (type_name, default_size, unit) = resolve_bit_segment_meta(&seg.specs);
+            let flags = resolve_bit_segment_flags(&seg.specs);
+            let size = seg.size.as_ref().map(|s| self.lower_expr(s));
+            let size_expr = resolve_bit_segment_size(size, &type_name, default_size);
+
+            segs.push(CBinSeg::Segment { value, size: size_expr, unit, type_name, flags });
+        }
+        CExpr::Binary(segs)
     }
 }

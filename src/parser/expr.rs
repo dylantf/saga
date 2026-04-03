@@ -97,7 +97,6 @@ impl Parser {
                 Token::Pipe => (None, 1),
                 Token::PipeBack => (None, 1),
                 Token::ComposeForward => (None, 1),
-                Token::ComposeBack => (None, 1),
                 Token::DoubleColon => (None, 1),
                 Token::Or => (Some(BinOp::Or), 2),
                 Token::And => (Some(BinOp::And), 3),
@@ -175,10 +174,10 @@ impl Parser {
                 continue;
             }
 
-            // For <|, >>, << collect flat chain like |>
+            // For <|, >> collect flat chain like |>
             if matches!(
                 self.peek(),
-                Token::PipeBack | Token::ComposeForward | Token::ComposeBack
+                Token::PipeBack | Token::ComposeForward
             ) {
                 let chain_token = self.peek().clone();
                 let mut segments = vec![Annotated::bare(left)];
@@ -193,7 +192,6 @@ impl Parser {
                 let kind = match chain_token {
                     Token::PipeBack => ExprKind::PipeBack { segments },
                     Token::ComposeForward => ExprKind::ComposeForward { segments },
-                    Token::ComposeBack => ExprKind::ComposeBack { segments },
                     _ => unreachable!(),
                 };
                 left = Expr {
@@ -1417,6 +1415,38 @@ impl Parser {
                 })
             }
 
+            // <<seg, seg, ...>> -- bitstring construction
+            Token::ComposeBack => {
+                // <<>> -- empty bitstring
+                if matches!(self.peek(), Token::ComposeForward) {
+                    let end = self.tokens[self.pos].span;
+                    self.advance(); // consume >>
+                    return Ok(Expr {
+                        id: self.next_id(),
+                        span: span.to(end),
+                        kind: ExprKind::BitString { segments: vec![] },
+                    });
+                }
+
+                let mut segments = Vec::new();
+                loop {
+                    let seg = self.parse_bit_segment_expr()?;
+                    segments.push(seg);
+                    if matches!(self.peek(), Token::Comma) {
+                        self.advance(); // consume ,
+                    } else {
+                        break;
+                    }
+                }
+                let end = self.tokens[self.pos].span;
+                self.expect(Token::ComposeForward)?; // consume >>
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: span.to(end),
+                    kind: ExprKind::BitString { segments },
+                })
+            }
+
             tok => {
                 self.pos -= 1; // put back
                 Err(ParseError {
@@ -1472,6 +1502,78 @@ impl Parser {
             }
         }
         Ok(qualifiers)
+    }
+
+    /// Parse a single bitstring segment in expression position.
+    /// `value` or `value:size` or `value/specs` or `value:size/specs`
+    fn parse_bit_segment_expr(&mut self) -> Result<BitSegment<Expr>, ParseError> {
+        let start = self.tokens[self.pos].span;
+        // Use parse_postfix for the value so we don't consume `:` or `/` as binary ops
+        let value = self.parse_postfix()?;
+
+        let size = if matches!(self.peek(), Token::Colon) {
+            self.advance(); // consume :
+            // Size is a simple expression (int literal or variable)
+            let size_expr = self.parse_postfix()?;
+            Some(Box::new(size_expr))
+        } else {
+            None
+        };
+
+        let specs = if matches!(self.peek(), Token::Slash) {
+            self.advance(); // consume /
+            self.parse_bit_specs()?
+        } else {
+            vec![]
+        };
+
+        let end = self.tokens[self.pos - 1].span;
+        Ok(BitSegment {
+            value,
+            size,
+            specs,
+            span: start.to(end),
+        })
+    }
+
+    /// Parse bitstring type specifiers: `integer-unsigned-big`
+    pub(super) fn parse_bit_specs(&mut self) -> Result<Vec<BitSegSpec>, ParseError> {
+        let mut specs = Vec::new();
+        loop {
+            let spec = match self.peek() {
+                Token::Ident(s) => match s.as_str() {
+                    "integer" => BitSegSpec::Integer,
+                    "float" => BitSegSpec::Float,
+                    "binary" => BitSegSpec::Binary,
+                    "utf8" => BitSegSpec::Utf8,
+                    "big" => BitSegSpec::Big,
+                    "little" => BitSegSpec::Little,
+                    "native" => BitSegSpec::Native,
+                    "signed" => BitSegSpec::Signed,
+                    "unsigned" => BitSegSpec::Unsigned,
+                    other => {
+                        return Err(ParseError {
+                            message: format!("unknown bitstring specifier: {}", other),
+                            span: self.tokens[self.pos].span,
+                        });
+                    }
+                },
+                _ => {
+                    return Err(ParseError {
+                        message: "expected bitstring type specifier after '/'".to_string(),
+                        span: self.tokens[self.pos].span,
+                    });
+                }
+            };
+            self.advance(); // consume the specifier ident
+            specs.push(spec);
+            if matches!(self.peek(), Token::Minus) {
+                self.advance(); // consume -
+            } else {
+                break;
+            }
+        }
+        Ok(specs)
     }
 }
 
