@@ -14,12 +14,26 @@ use errors::{ErrorInfo, ErrorKind, SourceInfo};
 use init::{PendingAnnotation, extract_external};
 use pats::{lower_params, lower_pat};
 use util::{
-    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call,
-    collect_qualified_call, core_var, field_access_record_name, has_nested_effect_call, lower_lit,
-    lower_string_to_binary,  process_string_escapes,
+    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_qualified_call,
+    core_var, field_access_record_name, has_nested_effect_call, lower_lit, lower_string_to_binary,
+    process_string_escapes,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
+
+/// Lower a simple expression used as a bitstring segment size.
+/// Handles integer literals and variable references — the common cases
+/// for pattern-position sizes like `<<len:8, data:len/binary>>`.
+pub(crate) fn lower_size_expr(expr: &Expr) -> CExpr {
+    match &expr.kind {
+        ExprKind::Lit {
+            value: Lit::Int(_, n),
+            ..
+        } => CExpr::Lit(CLit::Int(*n)),
+        ExprKind::Var { name, .. } => CExpr::Var(core_var(name)),
+        _ => unreachable!("bitstring segment size must be an integer literal or variable"),
+    }
+}
 
 /// Count how many lambda params can be absorbed from the body of a top-level
 /// function definition. Peels nested lambdas so `fun x -> fun y -> body` counts 2.
@@ -286,7 +300,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     /// Check if a handler is BEAM-native (should be lowered to direct BEAM calls).
     pub(super) fn is_beam_native_handler(&self, name: &str) -> bool {
         let canonical = self.resolve_handler_name(name);
@@ -490,11 +503,14 @@ impl<'a> Lowerer<'a> {
                         && let Some(scheme) = cr.env.get(name)
                     {
                         let resolved_ty = cr.sub.apply(&scheme.ty);
-                        effects = self.canonicalize_effects(util::arity_and_effects_from_type(&resolved_ty).1);
-                        param_absorbed_effects = util::param_absorbed_effects_from_type(&resolved_ty)
-                            .into_iter()
-                            .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
-                            .collect();
+                        effects = self.canonicalize_effects(
+                            util::arity_and_effects_from_type(&resolved_ty).1,
+                        );
+                        param_absorbed_effects =
+                            util::param_absorbed_effects_from_type(&resolved_ty)
+                                .into_iter()
+                                .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
+                                .collect();
                     }
                     let base_arity = lower_params(params).len() + count_lambda_params(body);
                     let arity = self.expanded_arity(base_arity, &effects);
@@ -511,7 +527,12 @@ impl<'a> Lowerer<'a> {
                                 param_absorbed_effects,
                             },
                         );
-                        clause_groups.push((name.clone(), arity, vec![(params, guard, body)], *span));
+                        clause_groups.push((
+                            name.clone(),
+                            arity,
+                            vec![(params, guard, body)],
+                            *span,
+                        ));
                     }
                 }
                 Decl::DictConstructor {
@@ -604,9 +625,11 @@ impl<'a> Lowerer<'a> {
 
             let saved_handler_params = std::mem::take(&mut self.current_handler_params);
             for (key, param) in &handler_entries {
-                self.current_handler_params.insert(key.clone(), param.clone());
+                self.current_handler_params
+                    .insert(key.clone(), param.clone());
             }
-            let handler_param_names: Vec<String> = handler_entries.iter().map(|(_, p)| p.clone()).collect();
+            let handler_param_names: Vec<String> =
+                handler_entries.iter().map(|(_, p)| p.clone()).collect();
             // Set up effectful variable tracking for HOF absorption.
             // Map param indices to param names from the first clause's patterns.
             let saved_effectful_vars = std::mem::take(&mut self.current_effectful_vars);
@@ -911,10 +934,7 @@ impl<'a> Lowerer<'a> {
                             if let Some(inlined) = self.inline_vals.get(name) {
                                 inlined.clone()
                             } else {
-                                CExpr::Apply(
-                                    Box::new(CExpr::FunRef(name.clone(), 0)),
-                                    vec![],
-                                )
+                                CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])
                             }
                         } else {
                             let lowered_arity = self.fun_arity(name).unwrap_or(*arity);
@@ -958,7 +978,8 @@ impl<'a> Lowerer<'a> {
                 // e.g. `Math.abs x` -> call 'math':'abs'(X)
                 // Intercept Process.catch_panic as a builtin before general qualified call handling.
                 if let Some((_module, func_name, _head, args)) = collect_qualified_call(expr)
-                    && func_name == "catch_panic" && args.len() == 1
+                    && func_name == "catch_panic"
+                    && args.len() == 1
                 {
                     return self.lower_catch_panic(args[0]);
                 }
@@ -970,17 +991,29 @@ impl<'a> Lowerer<'a> {
                     {
                         return self.lower_ctor(func_name, args);
                     }
-                    return self.lower_qualified_call(module, func_name, head, &args, Some(&expr.span));
+                    return self.lower_qualified_call(
+                        module,
+                        func_name,
+                        head,
+                        &args,
+                        Some(&expr.span),
+                    );
                 }
 
                 // Lower print/println/eprint/eprintln to io:format, dbg to stderr+passthrough.
                 // Match both bare names (builtins) and canonical names (after resolve pass).
                 if let Some((func_name, _head, args)) = collect_fun_call(expr) {
                     let lowered = match func_name {
-                        "print" | "Std.IO.print" => self.lower_builtin_print(&args, false, false),
-                        "println" | "Std.IO.println" => self.lower_builtin_print(&args, false, true),
-                        "eprint" | "Std.IO.eprint" => self.lower_builtin_print(&args, true, false),
-                        "eprintln" | "Std.IO.eprintln" => {
+                        "print_builtin" | "Std.IO.print_builtin" => {
+                            self.lower_builtin_print(&args, false, false)
+                        }
+                        "println_builtin" | "Std.IO.println_builtin" => {
+                            self.lower_builtin_print(&args, false, true)
+                        }
+                        "eprint_builtin" | "Std.IO.eprint_builtin" => {
+                            self.lower_builtin_print(&args, true, false)
+                        }
+                        "eprintln_builtin" | "Std.IO.eprintln_builtin" => {
                             self.lower_builtin_print(&args, true, true)
                         }
                         "dbg" | "Std.IO.dbg" => self.lower_builtin_dbg(&args),
@@ -1036,7 +1069,8 @@ impl<'a> Lowerer<'a> {
                     // Build (key, param_name) list for callee handler params
                     let mut callee_handler_entries: Vec<(String, String)> = Vec::new();
                     for (eff, op) in &callee_ops {
-                        callee_handler_entries.push((format!("{}.{}", eff, op), Self::handler_param_name(eff, op)));
+                        callee_handler_entries
+                            .push((format!("{}.{}", eff, op), Self::handler_param_name(eff, op)));
                     }
                     let effect_count = callee_handler_entries.len();
                     let total_arity = self.fun_arity(func_name);
@@ -1085,12 +1119,14 @@ impl<'a> Lowerer<'a> {
                         // have ensured all effects are handled).
                         if !callee_handler_entries.is_empty() {
                             for (key, _) in &callee_handler_entries {
-                                let param = self.current_handler_params.get(key)
-                                    .unwrap_or_else(|| panic!(
-                                        "ICE: saturated call to '{}' needs handler for '{}' \
+                                let param =
+                                    self.current_handler_params.get(key).unwrap_or_else(|| {
+                                        panic!(
+                                            "ICE: saturated call to '{}' needs handler for '{}' \
                                          but no handler param in scope. params: {:?}",
-                                        func_name, key, self.current_handler_params,
-                                    ));
+                                            func_name, key, self.current_handler_params,
+                                        )
+                                    });
                                 arg_vars.push(param.clone());
                             }
                             // Pass _ReturnK: take from pending (set by `with`), or identity
@@ -1106,7 +1142,13 @@ impl<'a> Lowerer<'a> {
                         {
                             let call_args: Vec<CExpr> =
                                 arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-                            let call = self.emit_call(func_name, head_expr.id, arity, call_args, Some(&expr.span));
+                            let call = self.emit_call(
+                                func_name,
+                                head_expr.id,
+                                arity,
+                                call_args,
+                                Some(&expr.span),
+                            );
                             return bindings.into_iter().rev().fold(call, |body, (var, val)| {
                                 CExpr::Let(var, Box::new(val), Box::new(body))
                             });
@@ -1150,7 +1192,13 @@ impl<'a> Lowerer<'a> {
                                 params.push(rk.clone());
                                 call_args.push(CExpr::Var(rk));
                             }
-                            let call = self.emit_call(func_name, head_expr.id, arity, call_args, Some(&expr.span));
+                            let call = self.emit_call(
+                                func_name,
+                                head_expr.id,
+                                arity,
+                                call_args,
+                                Some(&expr.span),
+                            );
                             let lambda = CExpr::Fun(params, Box::new(call));
                             return bindings.into_iter().rev().fold(lambda, |body, (var, val)| {
                                 CExpr::Let(var, Box::new(val), Box::new(body))
@@ -1245,9 +1293,7 @@ impl<'a> Lowerer<'a> {
                 // If so, split into a saturated call + apply of remaining args.
                 // Only consult fun_info if the resolver confirmed this is a function.
                 let callee_arity = match &callee.kind {
-                    ExprKind::Var { name, .. }
-                        if self.resolved.contains_key(&callee.id) =>
-                    {
+                    ExprKind::Var { name, .. } if self.resolved.contains_key(&callee.id) => {
                         self.fun_arity(name)
                     }
                     _ => None,
@@ -1646,12 +1692,12 @@ impl<'a> Lowerer<'a> {
                                         pat: CPat::Tuple(vec![
                                             CPat::Tuple(vec![
                                                 CPat::Lit(CLit::Atom("dylang_error".into())),
-                                                CPat::Wildcard,          // kind
+                                                CPat::Wildcard, // kind
                                                 CPat::Var(error_msg_var.clone()),
-                                                CPat::Wildcard,          // module
-                                                CPat::Wildcard,          // function
-                                                CPat::Wildcard,          // file
-                                                CPat::Wildcard,          // line
+                                                CPat::Wildcard, // module
+                                                CPat::Wildcard, // function
+                                                CPat::Wildcard, // file
+                                                CPat::Wildcard, // line
                                             ]),
                                             CPat::Wildcard, // stacktrace
                                         ]),
@@ -1727,7 +1773,12 @@ impl<'a> Lowerer<'a> {
                 use super::resolve::ResolvedName;
                 if let Some(resolved) = self.resolved.get(&expr.id) {
                     match resolved {
-                        ResolvedName::ImportedFun { erlang_mod, name: erl_name, arity, .. } => {
+                        ResolvedName::ImportedFun {
+                            erlang_mod,
+                            name: erl_name,
+                            arity,
+                            ..
+                        } => {
                             if *arity == 0 {
                                 CExpr::Call(erlang_mod.clone(), erl_name.clone(), vec![])
                             } else {
@@ -1742,26 +1793,25 @@ impl<'a> Lowerer<'a> {
                                 )
                             }
                         }
-                        ResolvedName::ExternalFun { erlang_mod, erlang_func, arity } => {
-                            CExpr::Call(
-                                "erlang".to_string(),
-                                "make_fun".to_string(),
-                                vec![
-                                    CExpr::Lit(CLit::Atom(erlang_mod.clone())),
-                                    CExpr::Lit(CLit::Atom(erlang_func.clone())),
-                                    CExpr::Lit(CLit::Int(*arity as i64)),
-                                ],
-                            )
-                        }
+                        ResolvedName::ExternalFun {
+                            erlang_mod,
+                            erlang_func,
+                            arity,
+                        } => CExpr::Call(
+                            "erlang".to_string(),
+                            "make_fun".to_string(),
+                            vec![
+                                CExpr::Lit(CLit::Atom(erlang_mod.clone())),
+                                CExpr::Lit(CLit::Atom(erlang_func.clone())),
+                                CExpr::Lit(CLit::Int(*arity as i64)),
+                            ],
+                        ),
                         ResolvedName::LocalFun { name, arity, .. } => {
                             if *arity == 0 {
                                 if let Some(inlined) = self.inline_vals.get(name) {
                                     inlined.clone()
                                 } else {
-                                    CExpr::Apply(
-                                        Box::new(CExpr::FunRef(name.clone(), 0)),
-                                        vec![],
-                                    )
+                                    CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])
                                 }
                             } else {
                                 let lowered_arity = self.fun_arity(name).unwrap_or(*arity);
@@ -2031,11 +2081,11 @@ impl<'a> Lowerer<'a> {
                     .expect("resume used outside handler");
                 let v = self.fresh();
                 let ce = self.lower_expr(value);
-                let k_call = CExpr::Apply(
-                    Box::new(CExpr::Var(k_name)),
-                    vec![CExpr::Var(v.clone())],
-                );
-                let k_or_wrapped = if let Some(ref finally_expr) = self.current_handler_finally.clone() {
+                let k_call =
+                    CExpr::Apply(Box::new(CExpr::Var(k_name)), vec![CExpr::Var(v.clone())]);
+                let k_or_wrapped = if let Some(ref finally_expr) =
+                    self.current_handler_finally.clone()
+                {
                     // let Cleanup = fun() -> finally_body in
                     // try apply K(V)
                     // of OkVar -> let _ = apply Cleanup() in OkVar
@@ -2043,14 +2093,10 @@ impl<'a> Lowerer<'a> {
                     let cleanup_var = self.fresh();
                     let cleanup_body = self.lower_expr(finally_expr);
                     let cleanup_lambda = CExpr::Fun(vec![], Box::new(cleanup_body));
-                    let cleanup_call_ok = CExpr::Apply(
-                        Box::new(CExpr::Var(cleanup_var.clone())),
-                        vec![],
-                    );
-                    let cleanup_call_catch = CExpr::Apply(
-                        Box::new(CExpr::Var(cleanup_var.clone())),
-                        vec![],
-                    );
+                    let cleanup_call_ok =
+                        CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
+                    let cleanup_call_catch =
+                        CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
                     let ok_var = self.fresh();
                     let class_var = self.fresh();
                     let reason_var = self.fresh();
@@ -2090,9 +2136,9 @@ impl<'a> Lowerer<'a> {
 
             // Handler expression as a value (e.g. returned from a function).
             // Produce a tuple of per-op handler lambdas for runtime use.
-            ExprKind::HandlerExpr { body } => {
-                self.lower_handler_expr_to_tuple(body)
-            }
+            ExprKind::HandlerExpr { body } => self.lower_handler_expr_to_tuple(body),
+
+            ExprKind::BitString { segments } => self.lower_bitstring_expr(segments),
 
             // StringInterpolation should be desugared before reaching the lowerer,
             // but keep a fallback just in case.

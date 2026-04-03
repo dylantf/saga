@@ -503,7 +503,7 @@ import Logger
 pub fun main : Unit -> String
 main () = Logger.greet \"world\" with {
   log msg = {
-    print msg
+    dbg msg
     resume ()
   }
 }
@@ -528,7 +528,7 @@ import Logger (greet)
 pub fun main : Unit -> String
 main () = greet \"world\" with {
   log msg = {
-    print msg
+    dbg msg
     resume ()
   }
 }
@@ -563,7 +563,7 @@ import Logger
 pub fun main : Unit -> String
 main () = Logger.greet \"world\" with {
   log msg = {
-    print msg
+    dbg msg
     resume ()
   }
 }
@@ -981,7 +981,7 @@ import Logger (greet)
 
 pub fun main : Unit -> String
 main () = greet \"world\" with {
-  log msg = { print msg; resume () }
+  log msg = { dbg msg; resume () }
 }
 ";
     let mut checker = make_project_checker();
@@ -998,7 +998,7 @@ import Logger
 
 pub fun main : Unit -> String
 main () = Logger.greet \"world\" with {
-  log msg = { print msg; resume () }
+  log msg = { dbg msg; resume () }
 }
 ";
     let mut checker = make_project_checker();
@@ -1016,7 +1016,7 @@ import Logger (greet)
 
 pub fun main : Unit -> String
 main () = greet \"world\" with {
-  log msg = { print msg; resume () }
+  log msg = { dbg msg; resume () }
 }
 ";
     let mut checker = make_project_checker();

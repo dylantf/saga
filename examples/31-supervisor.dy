@@ -8,5 +8,5 @@ unreliable () = fail! "something went wrong"
 
 main () = {
   let r1 = supervised 3 (fun () -> unreliable ())
-  println $"unreliable: {debug r1}"
+  dbg $"unreliable: {debug r1}"
 }

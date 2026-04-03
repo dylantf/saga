@@ -178,6 +178,29 @@ impl Checker {
                 self.bind_pattern(rest, &Type::string())
             }
 
+            Pat::BitStringPat { segments, span, .. } => {
+                self.unify_at(ty, &Type::con("BitString"), *span)?;
+                // Process segments left-to-right so earlier bindings are in
+                // scope for later size expressions (e.g. <<len:8, data:len/binary>>)
+                for seg in segments {
+                    let has_spec = |s: &ast::BitSegSpec| seg.specs.contains(s);
+                    let seg_ty = if has_spec(&ast::BitSegSpec::Float) {
+                        Type::float()
+                    } else if has_spec(&ast::BitSegSpec::Binary) {
+                        Type::con("BitString")
+                    } else {
+                        // integer (default), utf8 — both bind as Int
+                        Type::int()
+                    };
+                    self.bind_pattern(&seg.value, &seg_ty)?;
+                    if let Some(size) = &seg.size {
+                        let size_ty = self.infer_expr(size)?;
+                        self.unify_at(&size_ty, &Type::int(), size.span)?;
+                    }
+                }
+                Ok(())
+            }
+
             Pat::AnonRecord {
                 fields,
                 rest,

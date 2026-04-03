@@ -41,19 +41,19 @@ safe_div x y = x / y
 
 main () = {
   # Polymorphism: id works on any type
-  println (show (id 42))
-  println (id "hello")
+  dbg (show (id 42))
+  dbg (id "hello")
 
   # Type-safe arithmetic
-  println (show (add 10 20))
+  dbg (show (add 10 20))
 
   # Records
   let p = Point { x: 1.0, y: 2.0 }
-  println (show (distance p))
+  dbg (show (distance p))
 
   # Pattern matching
-  println (describe (Just 99))
-  println (describe Nothing)
+  dbg (describe (Just 99))
+  dbg (describe Nothing)
 
   # Effects with handler
   let result = {
@@ -61,13 +61,13 @@ main () = {
   } with {
     fail _ = 0 - 1
   }
-  println ("safe_div result: " <> show result)
+  dbg ("safe_div result: " <> show result)
 
   # Let bindings with type annotations: guides inference and catches mismatches
   let n: Int = 42
   let greeting: String = "hello"
-  println (show n)
-  println greeting
+  dbg (show n)
+  dbg greeting
   # --- Uncomment any line below to see a type error: ---
   # let bad = 1 + "hello"               # type mismatch: expected Int, got String
   # let bad = if True then 1 else "no"   # branch type mismatch

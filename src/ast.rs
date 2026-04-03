@@ -485,6 +485,11 @@ pub enum ExprKind {
         dangling_trivia: Vec<Trivia>,
     },
 
+    /// `<<seg1, seg2, ...>>` -- bitstring construction
+    BitString {
+        segments: Vec<BitSegment<Expr>>,
+    },
+
     /// `(expr : Type)` -- inline type annotation / ascription
     Ascription {
         expr: Box<Expr>,
@@ -523,9 +528,6 @@ pub enum ExprKind {
 
     /// `f >> g` -- forward compose chain (desugars to fun x -> g (f x))
     ComposeForward { segments: Vec<Annotated<Expr>> },
-
-    /// `f << g` -- backward compose chain (desugars to fun x -> f (g x))
-    ComposeBack { segments: Vec<Annotated<Expr>> },
 
     /// `x :: xs` -- cons (desugars to App(App(Constructor("Cons"), x), xs))
     Cons { head: Box<Expr>, tail: Box<Expr> },
@@ -618,6 +620,13 @@ impl Expr {
                         .is_some_and(|(t, b)| t.contains_resume() || b.contains_resume())
             }
             ExprKind::Ascription { expr, .. } => expr.contains_resume(),
+            ExprKind::BitString { segments } => segments.iter().any(|seg| {
+                seg.value.contains_resume()
+                    || seg
+                        .size
+                        .as_ref()
+                        .is_some_and(|s| s.contains_resume())
+            }),
             // Handler expression arm bodies have their own resume context,
             // similar to With -- don't look through them.
             ExprKind::HandlerExpr { .. } => false,
@@ -625,8 +634,7 @@ impl Expr {
                 segments.iter().any(|s| s.node.contains_resume())
             }
             ExprKind::PipeBack { segments }
-            | ExprKind::ComposeForward { segments }
-            | ExprKind::ComposeBack { segments } => {
+            | ExprKind::ComposeForward { segments } => {
                 segments.iter().any(|s| s.node.contains_resume())
             }
             ExprKind::Cons { head, tail } => head.contains_resume() || tail.contains_resume(),
@@ -754,6 +762,13 @@ pub enum Pat {
         span: Span,
     },
 
+    /// `<<tag:8, rest/binary>>` -- bitstring pattern
+    BitStringPat {
+        id: NodeId,
+        segments: Vec<BitSegment<Pat>>,
+        span: Span,
+    },
+
     // --- Surface syntax (desugared before typechecking) ---
     /// `[a, b, c]` -- list pattern (desugars to nested Cons/Nil constructors)
     ListPat {
@@ -789,6 +804,7 @@ impl Pat {
             | Pat::AnonRecord { id, .. }
             | Pat::Tuple { id, .. }
             | Pat::StringPrefix { id, .. }
+            | Pat::BitStringPat { id, .. }
             | Pat::ListPat { id, .. }
             | Pat::ConsPat { id, .. }
             | Pat::Or { id, .. } => *id,
@@ -805,6 +821,7 @@ impl Pat {
             | Pat::AnonRecord { span, .. }
             | Pat::Tuple { span, .. }
             | Pat::StringPrefix { span, .. }
+            | Pat::BitStringPat { span, .. }
             | Pat::ListPat { span, .. }
             | Pat::ConsPat { span, .. }
             | Pat::Or { span, .. } => *span,
@@ -935,6 +952,36 @@ pub enum BinOp {
     And,      // &&
     Or,       // ||
     Concat,   // <>
+}
+
+/// A type specifier for a segment in a bitstring expression or pattern.
+/// Used in the `/spec-spec-spec` suffix, e.g. `<<x:16/integer-unsigned-big>>`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BitSegSpec {
+    // Type specifiers
+    Integer,
+    Float,
+    Binary,
+    Utf8,
+    // Endianness
+    Big,
+    Little,
+    Native,
+    // Signedness
+    Signed,
+    Unsigned,
+}
+
+/// A single segment in a `<< >>` bitstring expression or pattern.
+/// `T` is `Expr` for construction and `Pat` for pattern matching.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BitSegment<T> {
+    pub value: T,
+    /// Optional size: `<<x:16>>` or `<<payload:len/binary>>`
+    pub size: Option<Box<Expr>>,
+    /// Type specifiers: `<<x:16/integer-unsigned-big>>`
+    pub specs: Vec<BitSegSpec>,
+    pub span: Span,
 }
 
 /// A part of an interpolated string (`$"hello {name}"`).

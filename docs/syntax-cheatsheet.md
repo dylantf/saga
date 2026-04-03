@@ -88,7 +88,6 @@ val max_retries = 5
 # Pipe: |>
 # Backward-pipe: <| (desugars to opposite of pipe)
 # Compose: >>  (f >> g = fun x -> g (f x))
-# Backward-compose: <<  (f << g = fun x -> f (g x))
 # Cons: ::
 
 5 |> add 3 |> show |> print
@@ -560,6 +559,41 @@ Dict.to_list ages            # [("alice", 30), ("bob", 25)]
 Dict.new ()
   |> Dict.put "x" 1
   |> Dict.put "y" 2
+```
+
+---
+
+## BitStrings
+
+```
+# Construction
+<<>>                                    # empty
+<<1, 2, 3>>                             # byte values (default: 8-bit unsigned int)
+<<port:16/big, flags:8>>                # explicit size and endianness
+<<value:32/float-little>>               # 64-bit float, little-endian
+<<header:4/binary, payload/binary>>     # binary segments
+<<char/utf8>>                           # UTF-8 codepoint
+<<"hello", 0>>                          # string sugar (expands to bytes)
+<<value:16/integer-unsigned-big>>       # full Erlang-style specifiers
+
+# Pattern matching
+case data {
+  <<>> -> "empty"
+  <<tag:8, rest/binary>> -> process tag rest
+  <<len:16/big, payload:len/binary>> -> payload   # variable-sized
+  _ -> "unknown"
+}
+
+# Segment specifiers (dash-separated):
+# Types:    integer (default), float, binary, utf8
+# Endian:   big (default), little, native
+# Sign:     unsigned (default), signed
+
+# Stdlib operations (import Std.BitString)
+BitString.size bs                # byte count
+BitString.from_list [1, 2, 3]    # from byte list
+BitString.to_list bs             # to byte list
+bs1 <> bs2                       # concatenation
 ```
 
 ---

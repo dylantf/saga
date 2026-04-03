@@ -53,7 +53,7 @@ validate_user input = {
 }
 
 main () = {
-  let print_result = validate_user >> debug >> println
+  let print_result = validate_user >> debug >> dbg
 
   print_result (UserInput { name: "Alice", age: 25 })
   print_result (UserInput { name: "", age: 25 })

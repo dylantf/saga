@@ -5,28 +5,28 @@ process () = {
   let result = File.write! "test_output.txt" "hello from dylang!"
   case result {
     Ok () -> ()
-    Err _ -> println "write failed"
+    Err _ -> dbg "write failed"
   }
 
   let result = File.read! "test_output.txt"
   case result {
-    Ok content -> println content
+    Ok content -> dbg content
     Err e -> case e {
-      Std.File.NotFound -> println "file not found"
-      Std.File.PermissionDenied -> println "permission denied"
-      _ -> println "other error"
+      Std.File.NotFound -> dbg "file not found"
+      Std.File.PermissionDenied -> dbg "permission denied"
+      _ -> dbg "other error"
     }
   }
 
   let _ = File.delete! "test_output.txt"
-  println $"file exists after delete?: {File.exists! "test_output.txt"}"
+  dbg $"file exists after delete?: {File.exists! "test_output.txt"}"
 
   # Reading a file that doesn't exist
   let missing = File.read! "nonexistent.txt"
   case missing {
-    Ok _ -> println "unexpected"
-    Err(File.NotFound) -> println "correctly got NotFound"
-    Err e -> println $"wrong error {debug e}"
+    Ok _ -> dbg "unexpected"
+    Err(File.NotFound) -> dbg "correctly got NotFound"
+    Err e -> dbg $"wrong error {debug e}"
   }
 }
 

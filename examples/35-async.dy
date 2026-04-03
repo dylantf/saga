@@ -11,5 +11,5 @@ run () = {
 
 main () = {
   let results = run () with {async_handler, beam_actor}
-  println (debug results)
+  dbg (debug results)
 }

@@ -34,3 +34,10 @@ impl Ord for String {
   compare x y = if x < y then Lt else if x > y then Gt else Eq
 }
 
+#@ Applies a function to a value, discards the result, and returns the value unchanged.
+#@ Useful for debugging without disrupting an expression: `x |> tap dbg |> process`
+pub fun tap : (a -> b) -> a -> a
+tap f x = {
+  let _ = f x
+  x
+}

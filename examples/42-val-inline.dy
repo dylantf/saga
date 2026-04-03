@@ -12,8 +12,8 @@ val numbers = [1, 2, 3]
 val computed = List.map (fun x -> x * 2) [1, 2, 3]
 
 main () = {
-  println (show pi)
-  println app_name
-  println (debug numbers)
-  println (debug computed)
+  dbg (show pi)
+  dbg app_name
+  dbg (debug numbers)
+  dbg (debug computed)
 }

@@ -2671,26 +2671,6 @@ fn compose_forward() {
 }
 
 #[test]
-fn compose_backward() {
-    let expr = parse_expr("f << g");
-    match expr {
-        Expr {
-            kind: ExprKind::ComposeBack { segments },
-            ..
-        } => {
-            assert_eq!(segments.len(), 2);
-            assert!(
-                matches!(&segments[0].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "f")
-            );
-            assert!(
-                matches!(&segments[1].node, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "g")
-            );
-        }
-        other => panic!("expected ComposeBack, got {:?}", other),
-    }
-}
-
-#[test]
 fn compose_chain() {
     // f >> g >> h parses without error (left-associative)
     parse_expr("f >> g >> h");

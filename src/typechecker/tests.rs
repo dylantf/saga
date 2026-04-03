@@ -650,7 +650,7 @@ fn multiple_effects_all_declared() {
 fn with_subtracts_only_handled_effect() {
     // Handler handles Log but not Fail, so Fail still needs declaration
     let result = check(
-        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nhandler console for Log {\n  log msg = println msg\n}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n} with console",
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nhandler console for Log {\n  log msg = { dbg msg; resume () }\n}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n} with console",
     );
     assert!(result.is_err());
     let err = result.err().expect("expected error");
@@ -1178,19 +1178,19 @@ main () = special (Bar { num: 1 })",
 
 #[test]
 fn show_works_for_primitives() {
-    check("main () = println (show 42)").unwrap();
-    check("main () = println (show 1.5)").unwrap();
-    check("main () = println \"hello\"").unwrap();
-    check("main () = println (show True)").unwrap();
-    check("main () = println (debug ())").unwrap();
-    check("let x = show 42\nmain () = println x").unwrap();
+    check("main () = dbg (show 42)").unwrap();
+    check("main () = dbg (show 1.5)").unwrap();
+    check("main () = dbg \"hello\"").unwrap();
+    check("main () = dbg (show True)").unwrap();
+    check("main () = dbg (debug ())").unwrap();
+    check("let x = show 42\nmain () = dbg x").unwrap();
 }
 
 #[test]
 fn show_fails_for_custom_type_without_impl() {
     let result = check(
         "record Foo { x: Int }
-main () = println (show (Foo { x: 1 }))",
+main () = dbg (show (Foo { x: 1 }))",
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
@@ -1208,7 +1208,7 @@ fn show_works_for_custom_type_with_impl() {
 impl Show for Foo {
   show f = \"Foo\"
 }
-main () = println (show (Foo { x: 1 }))",
+main () = dbg (show (Foo { x: 1 }))",
     )
     .unwrap();
 }
@@ -3737,7 +3737,7 @@ fn references_map_populated() {
 
 #[test]
 fn partial_application_pure_function_typechecks() {
-    check("fun myAdd : Int -> Int -> Int\nmyAdd a b = a + b\nincrement = myAdd 1\nmain () = println (show (increment 6))").unwrap();
+    check("fun myAdd : Int -> Int -> Int\nmyAdd a b = a + b\nincrement = myAdd 1\nmain () = dbg (show (increment 6))").unwrap();
 }
 
 #[test]

@@ -4,43 +4,43 @@
 main () = {
   # Create from list of tuples
   let ages = Dict.from_list [("alice", 30), ("bob", 25), ("charlie", 35)]
-  println $"ages: {debug ages}"
-  println $"size: {Dict.size ages}"
+  dbg $"ages: {debug ages}"
+  dbg $"size: {Dict.size ages}"
 
   # Lookup
   let alice_age = Dict.get "alice" ages
-  println $"alice: {debug alice_age}"
+  dbg $"alice: {debug alice_age}"
 
   let unknown = Dict.get "dave" ages
-  println $"dave: {debug unknown}"
+  dbg $"dave: {debug unknown}"
 
   # Insert and update
   let ages2 = Dict.put "dave" 28 ages
-  println $"added dave: {debug ages2}"
+  dbg $"added dave: {debug ages2}"
 
   let ages3 = Dict.put "alice" 31 ages2
-  println $"updated alice: {debug ages3}"
+  dbg $"updated alice: {debug ages3}"
 
   # Remove
   let ages4 = Dict.remove "bob" ages3
-  println $"removed bob: {debug ages4}"
+  dbg $"removed bob: {debug ages4}"
 
   # Membership
-  println $"has alice: {Dict.member "alice" ages}"
-  println $"has dave: {Dict.member "dave" ages}"
+  dbg $"has alice: {Dict.member "alice" ages}"
+  dbg $"has dave: {Dict.member "dave" ages}"
 
   # Keys and values
-  println $"keys: {debug (Dict.keys ages)}"
-  println $"values: {debug (Dict.values ages)}"
+  dbg $"keys: {debug (Dict.keys ages)}"
+  dbg $"values: {debug (Dict.values ages)}"
 
   # Round-trip through list
   let pairs = Dict.to_list ages
-  println $"to_list: {debug pairs}"
+  dbg $"to_list: {debug pairs}"
 
   # Start from empty
   let d =
     Dict.new ()
     |> Dict.put "y" 2
     |> Dict.put "x" 1
-  println $"from empty: {debug d}"
+  dbg $"from empty: {debug d}"
 }

@@ -7,7 +7,7 @@ fizzbuzz n = show n
 loop i max =
   if i > max then ()
   else {
-    fizzbuzz i |> println
+    fizzbuzz i |> dbg
     loop (i + 1) max
   }
 

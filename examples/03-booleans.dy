@@ -1,12 +1,10 @@
-print_bool b = show b |> println
-
 main () = {
-  print_bool <| True && False
-  print_bool <| True || False
-  print_bool <| 1 == 1
-  print_bool <| 1 != 2
-  print_bool <| 3 < 5
-  print_bool <| 5 > 3
-  print_bool <| 3 <= 3
-  print_bool <| 5 >= 6
+  dbg (True && False)
+  dbg (True || False)
+  dbg (1 == 1)
+  dbg (1 != 2)
+  dbg (3 < 5)
+  dbg (5 > 3)
+  dbg (3 <= 3)
+  dbg (5 >= 6)
 }

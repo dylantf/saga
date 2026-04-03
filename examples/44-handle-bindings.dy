@@ -7,7 +7,7 @@ effect Log {
 # Handler declaration
 handler console_log for Log {
   log msg = {
-    println msg
+    dbg msg
     resume ()
   }
 }
@@ -19,7 +19,7 @@ handler quiet_log for Log {
 fun make_logger : (is_dev: Bool) -> Handler Log
 make_logger is_dev = handler for Log {
   log msg = {
-    if is_dev then resume println $"[PREFIX] {msg}" else resume ()
+    if is_dev then resume dbg $"[PREFIX] {msg}" else resume ()
   }
 }
 
@@ -44,12 +44,12 @@ main () = {
 
   # Handler expression
   let bound_logger = handler for Log {
-    log msg = resume println msg
+    log msg = resume dbg msg
   }
   log! "hello from handler expression" with bound_logger
 
   # Inline handler
   log! "hello from inline handler" with {
-    log msg = resume println msg
+    log msg = resume dbg msg
   }
 }

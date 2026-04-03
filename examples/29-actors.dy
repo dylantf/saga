@@ -26,7 +26,7 @@ run_counter () = {
   let result = receive {
     n -> n
   }
-  println (show result)
+  dbg (show result)
 }
 
 main () = {

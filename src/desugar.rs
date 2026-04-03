@@ -6,7 +6,6 @@
 //! - `Pipe { segments: [a, b, c] }` → `App(c, App(b, a))`
 //! - `PipeBack { segments: [a, b, c] }` → `App(App(a, b), c)`
 //! - `ComposeForward { segments: [f, g] }` → `fun _x -> g (f _x)`
-//! - `ComposeBack { segments: [f, g] }` → `fun _x -> f (g _x)`
 //! - `Cons { head, tail }` → `App(App(Constructor("Cons"), head), tail)`
 //! - `ListLit { elements }` → nested `Cons`/`Nil` chain
 //! - `StringInterp { parts }` → `show(expr) <> literal <> ...`
@@ -219,6 +218,14 @@ fn desugar_expr(expr: &mut Expr) {
             }
         }
         ExprKind::Ascription { expr: inner, .. } => desugar_expr(inner),
+        ExprKind::BitString { segments } => {
+            for seg in segments {
+                desugar_expr(&mut seg.value);
+                if let Some(size) = &mut seg.size {
+                    desugar_expr(size);
+                }
+            }
+        }
 
         // Sugar nodes: recurse into children before transforming
         ExprKind::Pipe { segments, .. }
@@ -228,8 +235,7 @@ fn desugar_expr(expr: &mut Expr) {
             }
         }
         ExprKind::PipeBack { segments }
-        | ExprKind::ComposeForward { segments }
-        | ExprKind::ComposeBack { segments } => {
+        | ExprKind::ComposeForward { segments } => {
             for seg in segments {
                 desugar_expr(&mut seg.node);
             }
@@ -335,17 +341,6 @@ fn desugar_expr(expr: &mut Expr) {
             for seg in iter {
                 let next = seg.node;
                 acc = Expr::synth(span, desugar_compose(acc, next, span));
-            }
-            *expr = acc;
-        }
-        ExprKind::ComposeBack { .. } => {
-            // [f, g, h] from f << g << h → fold left: acc << next = fun _x -> acc(next(_x))
-            let ExprKind::ComposeBack { segments } = std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit }) else { unreachable!() };
-            let mut iter = segments.into_iter();
-            let mut acc = iter.next().unwrap().node;
-            for seg in iter {
-                let next = seg.node;
-                acc = Expr::synth(span, desugar_compose(next, acc, span));
             }
             *expr = acc;
         }
@@ -470,6 +465,9 @@ fn desugar_pat(pat: &mut Pat) {
             for e in elements { desugar_pat(e); }
         }
         Pat::StringPrefix { rest, .. } => desugar_pat(rest),
+        Pat::BitStringPat { segments, .. } => {
+            for seg in segments { desugar_pat(&mut seg.value); }
+        }
         Pat::ListPat { elements, .. } => {
             for e in elements { desugar_pat(e); }
         }

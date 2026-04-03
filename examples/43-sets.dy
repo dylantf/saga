@@ -11,40 +11,40 @@ main () = {
     |> Set.insert 3
     |> Set.insert 2
 
-  println (show (Set.size s))
+  dbg (show (Set.size s))
 
   let s2 = Set.from_list [3, 4, 5]
 
   let u = Set.union s s2
-  println (show (Set.size u))
+  dbg (show (Set.size u))
 
   let i = Set.intersection s s2
-  println (show (Set.size i))
+  dbg (show (Set.size i))
 
   let d = Set.difference s s2
-  println (show (Set.size d))
+  dbg (show (Set.size d))
 
-  println (show (Set.member 2 s))
-  println (show (Set.member 99 s))
+  dbg (show (Set.member 2 s))
+  dbg (show (Set.member 99 s))
 
-  println (show (Set.is_empty s))
-  println (show (Set.is_empty (Set.new ())))
+  dbg (show (Set.is_empty s))
+  dbg (show (Set.is_empty (Set.new ())))
 
   let doubled = Set.map (fun x -> x * 2) s
-  println (show (Set.size doubled))
+  dbg (show (Set.size doubled))
 
   let evens = Set.filter (fun x -> x % 2 == 0) s
-  println (show (Set.size evens))
+  dbg (show (Set.size evens))
 
   let total = Set.fold (fun acc x -> acc + x) 0 s
-  println (show total)
+  dbg (show total)
 
-  println (show (Set.is_subset (Set.from_list [1, 2]) s))
-  println (show (Set.is_subset (Set.from_list [1, 99]) s))
+  dbg (show (Set.is_subset (Set.from_list [1, 2]) s))
+  dbg (show (Set.is_subset (Set.from_list [1, 99]) s))
 
   let sym = Set.symmetric_difference s s2
-  println (show (Set.size sym))
+  dbg (show (Set.size sym))
 
   let removed = Set.remove 2 s
-  println (show (Set.size removed))
+  dbg (show (Set.size removed))
 }

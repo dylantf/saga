@@ -37,7 +37,7 @@ impl Lowerer<'_> {
         Some(CExpr::Let(v, Box::new(val), Box::new(format_call)))
     }
 
-    /// Lower `dbg(dict, x)` to: let s = debug(x) in io:format(stderr, "~ts~n", [s]), x
+    /// Lower `dbg(dict, x)` to: let s = debug(x) in io:format(stderr, "~ts~n", [s])
     /// After elaboration, `dbg x` becomes `dbg(__dict_Debug_a, x)`.
     pub(super) fn lower_builtin_dbg(
         &mut self,
@@ -52,7 +52,6 @@ impl Lowerer<'_> {
         let v = self.fresh();
         let debug_fn = self.fresh();
         let s = self.fresh();
-        let dummy = self.fresh();
 
         // Extract debug function from dict: element(1, Dict)
         let extract_debug = cerl_call(
@@ -77,25 +76,17 @@ impl Lowerer<'_> {
         );
 
         // let d = dict in let v = val in let debug_fn = element(1, d) in
-        // let s = debug_fn(v) in let _ = io:format(stderr, ..., [s]) in v
+        // let s = debug_fn(v) in io:format(stderr, ..., [s])
         Some(CExpr::Let(
             d.clone(),
             Box::new(dict),
             Box::new(CExpr::Let(
-                v.clone(),
+                v,
                 Box::new(val),
                 Box::new(CExpr::Let(
                     debug_fn,
                     Box::new(extract_debug),
-                    Box::new(CExpr::Let(
-                        s,
-                        Box::new(apply_debug),
-                        Box::new(CExpr::Let(
-                            dummy,
-                            Box::new(print_stderr),
-                            Box::new(CExpr::Var(v)),
-                        )),
-                    )),
+                    Box::new(CExpr::Let(s, Box::new(apply_debug), Box::new(print_stderr))),
                 )),
             )),
         ))

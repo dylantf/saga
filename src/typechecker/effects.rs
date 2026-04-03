@@ -90,13 +90,27 @@ impl Checker {
             return Ok(());
         }
         undeclared.sort();
-        if declared.effects.is_empty() {
+        // Pretty-print effect names: strip module prefix for readability
+        let pretty_effects: Vec<String> = undeclared
+            .iter()
+            .map(|e| e.rsplit('.').next().unwrap_or(e).to_string())
+            .collect();
+        let effects_str = pretty_effects.join(", ");
+        if label == "function 'main'" {
+            Err(Diagnostic::error_at(
+                span,
+                format!(
+                    "`main` uses effects {{{}}} but no handler is provided. Use `with` to handle them, e.g.:\n\n  main () = {{\n    ...\n  }} with handler_name\n",
+                    effects_str,
+                ),
+            ))
+        } else if declared.effects.is_empty() {
             Err(Diagnostic::error_at(
                 span,
                 format!(
                     "{} uses effects {{{}}} but has no 'needs' declaration",
                     label,
-                    undeclared.join(", ")
+                    effects_str,
                 ),
             ))
         } else {
@@ -105,7 +119,7 @@ impl Checker {
                 format!(
                     "{} uses effects {{{}}} not declared in its 'needs' clause",
                     label,
-                    undeclared.join(", ")
+                    effects_str,
                 ),
             ))
         }
@@ -315,6 +329,11 @@ impl Checker {
             let info = self
                 .effects
                 .get(&canonical)
+                .or_else(|| {
+                    // Local module fallback: try Module.Name
+                    self.current_module.as_ref()
+                        .and_then(|m| self.effects.get(&format!("{}.{}", m, effect_name)))
+                })
                 .ok_or_else(|| {
                     Diagnostic::error_at(span, format!("undefined effect: {}", effect_name))
                 })?

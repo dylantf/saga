@@ -352,6 +352,11 @@ fn collect_pat_vars_into(pat: &Pat, vars: &mut HashSet<String>) {
                 collect_pat_vars_into(elem, vars);
             }
         }
+        Pat::BitStringPat { segments, .. } => {
+            for seg in segments {
+                collect_pat_vars_into(&seg.value, vars);
+            }
+        }
         Pat::Wildcard { .. } | Pat::Lit { .. } => {}
         Pat::Or { .. } => unreachable!("or-patterns should be desugared before resolve"),
     }
@@ -926,6 +931,14 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
             resolve_expr(body, scope, map);
             scope.pop();
         }
+        ExprKind::BitString { segments } => {
+            for seg in segments {
+                resolve_expr(&seg.value, scope, map);
+                if let Some(size) = &seg.size {
+                    resolve_expr(size, scope, map);
+                }
+            }
+        }
         // Leaf nodes that don't contain sub-expressions
         ExprKind::Lit { .. } | ExprKind::Constructor { .. } => {}
 
@@ -936,8 +949,7 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
             }
         }
         ExprKind::PipeBack { segments }
-        | ExprKind::ComposeForward { segments }
-        | ExprKind::ComposeBack { segments } => {
+        | ExprKind::ComposeForward { segments } => {
             for seg in segments {
                 resolve_expr(&seg.node, scope, map);
             }

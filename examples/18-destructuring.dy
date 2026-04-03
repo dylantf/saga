@@ -26,19 +26,19 @@ area (Rect(w, h)) = w * h
 main () = {
   # Let with tuples
   let (name, age) = ("Alice", 30)
-  println $"{name} is {age}"
+  dbg $"{name} is {age}"
 
   # Let with records
   let origin = Point { x: 0, y: 0 }
   let Point { x, y } = origin
-  println $"origin: ({x}, {y})"
+  dbg $"origin: ({x}, {y})"
 
   let Point { x: just_x, .. } = origin
-  println $"Just x: ({just_x}, [not destructured])"
+  dbg $"Just x: ({just_x}, [not destructured])"
 
   # Let with single-constructor types (irrefutable)
   let Wrapped inner = Wrapped 42
-  println $"inner: {inner}"
+  dbg $"inner: {inner}"
 
   # Case for multi-constructor types
   let shape = Circle 10.0
@@ -46,25 +46,25 @@ main () = {
     Circle r -> r
     Rect(w, h) -> w * h
   }
-  println $"r2: {r2}"
+  dbg $"r2: {r2}"
 
   # Let with list cons (case needed since list could be empty)
   let items = [1, 2, 3, 4, 5]
   case items {
     h :: t -> {
-      println $"head: {h}"
-      println $"tail: {debug t}"
+      dbg $"head: {h}"
+      dbg $"tail: {debug t}"
     }
-    [] -> println "empty"
+    [] -> dbg "empty"
   }
 
   # Nested destructuring
   let ((a, b), (c, d)) = ((1, 2), (3, 4))
-  println $"sum: {a + b + c + d}"
+  dbg $"sum: {a + b + c + d}"
 
   # Shape Show impl
   let c = Circle 10.0
   let rect = Rect 3.0 4.0
-  println $"{c} has area {area c}"
-  println $"{rect} has area {area rect}"
+  dbg $"{c} has area {area c}"
+  dbg $"{rect} has area {area rect}"
 }

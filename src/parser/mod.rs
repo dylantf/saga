@@ -187,6 +187,7 @@ impl Parser {
                 | Token::EffectCall(_)
                 | Token::Resume
                 | Token::Do
+                | Token::ComposeBack
         ) || (!self.no_brace_app && matches!(self.peek(), Token::LBrace))
     }
 

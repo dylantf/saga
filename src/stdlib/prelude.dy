@@ -8,4 +8,4 @@ import Std.Int
 import Std.Float
 import Std.String
 import Std.Tuple (fst, snd)
-import Std.IO (print, println, eprint, eprintln, dbg)
+import Std.IO (dbg, Stdio, console, println, eprintln)
