@@ -658,6 +658,9 @@ fn normalize_handler_arm(arm: &mut HandlerArm) {
         *s = S;
     }
     normalize_expr(&mut arm.body);
+    if let Some(ref mut fb) = arm.finally_block {
+        normalize_expr(fb);
+    }
 }
 
 fn normalize_effect_op(op: &mut EffectOp) {

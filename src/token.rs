@@ -43,6 +43,7 @@ pub enum Token {
     Receive,
     After,
     When,
+    Finally,
     EffectCall(String),
 
     // Operators

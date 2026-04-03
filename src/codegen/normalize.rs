@@ -508,6 +508,7 @@ pub fn normalize_effects(program: &Program) -> Program {
                         qualifier: ann.node.qualifier.clone(),
                         params: ann.node.params.clone(),
                         body: Box::new(normalizer.normalize_expr(&ann.node.body)),
+                        finally_block: ann.node.finally_block.as_ref().map(|fb| Box::new(normalizer.normalize_expr(fb))),
                         span: ann.node.span,
                     }))
                     .collect();
@@ -517,6 +518,7 @@ pub fn normalize_effects(program: &Program) -> Program {
                         qualifier: rc.qualifier.clone(),
                         params: rc.params.clone(),
                         body: Box::new(normalizer.normalize_expr(&rc.body)),
+                        finally_block: None,
                         span: rc.span,
                     })
                 });

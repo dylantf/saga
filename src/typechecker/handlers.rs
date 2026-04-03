@@ -305,6 +305,21 @@ impl Checker {
 
                     self.unify_at(&arm_ty, &answer_ty, arm.span)?;
 
+                    // Typecheck optional `finally` block: effects must be self-contained
+                    if let Some(ref finally_expr) = arm.finally_block {
+                        let saved_effs2 = self.save_effects();
+                        let _finally_ty = self.infer_expr(finally_expr)?;
+                        let finally_effs = self.restore_effects(saved_effs2);
+                        if let Err(e) = self.check_effects_via_row(
+                            &finally_effs,
+                            &EffectRow::empty(),
+                            &format!("finally block for '{}'", arm.op_name),
+                            finally_expr.span,
+                        ) {
+                            self.collected_diagnostics.push(e);
+                        }
+                    }
+
                     self.resume_type = saved_resume;
                     self.resume_return_type = saved_resume_ret;
                     self.env = saved_env;

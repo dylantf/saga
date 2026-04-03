@@ -180,6 +180,11 @@ pub fn format_handler_arm(arm: &crate::ast::HandlerArm) -> Doc {
         }
     }
     d = d.append(Doc::text(" = ")).append(super::expr::format_expr(&arm.body));
+    if let Some(ref finally_expr) = arm.finally_block {
+        d = d
+            .append(Doc::text(" finally "))
+            .append(super::expr::format_expr(finally_expr));
+    }
     d
 }
 

@@ -637,6 +637,9 @@ fn resolve_handler_body_names(
             .collect();
         scope.push(param_names);
         resolve_expr(&arm.node.body, scope, map);
+        if let Some(ref fb) = arm.node.finally_block {
+            resolve_expr(fb, scope, map);
+        }
         scope.pop();
     }
     if let Some(rc) = &body.return_clause {
@@ -775,6 +778,9 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
                             .collect();
                         scope.push(param_names);
                         resolve_expr(&arm.node.body, scope, map);
+                        if let Some(ref fb) = arm.node.finally_block {
+                            resolve_expr(fb, scope, map);
+                        }
                         scope.pop();
                     }
                     if let Some(rc) = return_clause {

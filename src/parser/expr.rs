@@ -625,6 +625,7 @@ impl Parser {
                         qualifier: None,
                         params: vec![(param, param_span)],
                         body: Box::new(body),
+                        finally_block: None,
                         span: arm_start.to(arm_end),
                     }));
                 } else {
@@ -666,7 +667,18 @@ impl Parser {
                     }
                     self.expect(Token::Eq)?;
                     let body = self.parse_expr(0)?;
-                    let arm_end = body.span;
+                    let mut arm_end = body.span;
+
+                    // Parse optional `finally { cleanup }` block
+                    let finally_block = if matches!(self.peek(), Token::Finally) {
+                        self.advance(); // consume 'finally'
+                        let fb = self.parse_expr(0)?;
+                        arm_end = fb.span;
+                        Some(Box::new(fb))
+                    } else {
+                        None
+                    };
+
                     let trailing_comment = self.take_trailing_comment(self.pos - 1);
                     arms.push(Annotated {
                         node: HandlerArm {
@@ -674,6 +686,7 @@ impl Parser {
                             qualifier,
                             params,
                             body: Box::new(body),
+                            finally_block,
                             span: arm_start.to(arm_end),
                         },
                         leading_trivia: self.take_leading_trivia(start),

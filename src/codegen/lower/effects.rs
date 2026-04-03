@@ -18,7 +18,11 @@ impl<'a> Lowerer<'a> {
     fn dynamic_return_lambda(&mut self, tuple_var: &str, op_count: usize) -> CExpr {
         let param = self.fresh();
         let identity = CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)));
-        let tuple_size = cerl_call("erlang", "tuple_size", vec![CExpr::Var(tuple_var.to_string())]);
+        let tuple_size = cerl_call(
+            "erlang",
+            "tuple_size",
+            vec![CExpr::Var(tuple_var.to_string())],
+        );
         let return_index = op_count as i64 + 1;
         let return_lambda = cerl_call(
             "erlang",
@@ -60,8 +64,7 @@ impl<'a> Lowerer<'a> {
         let first = iter.next()?;
         Some(iter.fold(first, |inner, outer| {
             let param = self.fresh();
-            let applied_inner =
-                CExpr::Apply(Box::new(inner), vec![CExpr::Var(param.clone())]);
+            let applied_inner = CExpr::Apply(Box::new(inner), vec![CExpr::Var(param.clone())]);
             let applied_outer = CExpr::Apply(Box::new(outer), vec![applied_inner]);
             CExpr::Fun(vec![param], Box::new(applied_outer))
         }))
@@ -92,7 +95,8 @@ impl<'a> Lowerer<'a> {
         let effect_key = format!("{}.{}", effect_name, op_name);
 
         // Find the per-op handler param variable.
-        let handler_var = self.current_handler_params
+        let handler_var = self
+            .current_handler_params
             .get(&effect_key)
             .unwrap_or_else(|| {
                 panic!(
@@ -224,7 +228,11 @@ impl<'a> Lowerer<'a> {
         let beam_native_effects: std::collections::HashSet<String> = match handler {
             Handler::Named(name, _) if self.is_beam_native_handler(name) => {
                 let canonical = self.resolve_handler_name(name);
-                self.handler_defs[&canonical].effects.iter().cloned().collect()
+                self.handler_defs[&canonical]
+                    .effects
+                    .iter()
+                    .cloned()
+                    .collect()
             }
             Handler::Inline { named, .. } => named
                 .iter()
@@ -280,10 +288,13 @@ impl<'a> Lowerer<'a> {
         for (eff, op) in &handler_ops {
             let var_name = Self::handler_param_name(eff, op);
             let key = format!("{}.{}", eff, op);
-            self.current_handler_params.insert(key.clone(), var_name.clone());
+            self.current_handler_params
+                .insert(key.clone(), var_name.clone());
             // Track arms that never call resume so call sites can skip building a real continuation.
             let qualified_key = format!("{}.{}", eff, op);
-            if let Some(arm) = arms_by_op.get(&qualified_key).or_else(|| arms_by_op.get(op.as_str()))
+            if let Some(arm) = arms_by_op
+                .get(&qualified_key)
+                .or_else(|| arms_by_op.get(op.as_str()))
                 && !arm.body.contains_resume()
             {
                 self.no_resume_ops.insert(key);
@@ -323,10 +334,16 @@ impl<'a> Lowerer<'a> {
         for (eff, op, var_name) in &op_vars {
             if !beam_native_effects.contains(eff) {
                 let qualified_key = format!("{}.{}", eff, op);
-                if let Some(arm) = arms_by_op.get(&qualified_key).or_else(|| arms_by_op.get(op.as_str())) {
+                if let Some(arm) = arms_by_op
+                    .get(&qualified_key)
+                    .or_else(|| arms_by_op.get(op.as_str()))
+                {
                     // Check if this is a conditional handle binding
                     if let Some(ref else_map) = else_arms_by_op {
-                        let else_arm = else_map.get(&qualified_key).or_else(|| else_map.get(op.as_str())).cloned();
+                        let else_arm = else_map
+                            .get(&qualified_key)
+                            .or_else(|| else_map.get(op.as_str()))
+                            .cloned();
                         if let Some(else_arm) = &else_arm {
                             let cond_var = &cond_info.as_ref().unwrap().0;
                             let then_fun = self.build_op_handler_fun(arm);
@@ -336,8 +353,10 @@ impl<'a> Lowerer<'a> {
                             let n_params = arm.params.len() + 1; // +1 for K
                             let wrapper_params: Vec<String> =
                                 (0..n_params).map(|i| format!("_HW{}", i)).collect();
-                            let args_ce: Vec<CExpr> =
-                                wrapper_params.iter().map(|p| CExpr::Var(p.clone())).collect();
+                            let args_ce: Vec<CExpr> = wrapper_params
+                                .iter()
+                                .map(|p| CExpr::Var(p.clone()))
+                                .collect();
                             let then_call = CExpr::Apply(Box::new(then_fun), args_ce.clone());
                             let else_call = CExpr::Apply(Box::new(else_fun), args_ce);
                             let case_expr = CExpr::Case(
@@ -479,12 +498,24 @@ impl<'a> Lowerer<'a> {
     ///
     /// Produces: `fun (Arg0, ..., ArgN, K) -> body`
     /// Each op gets its own function with natural arity.
+    ///
+    /// When the arm has a `finally` block, `current_handler_finally` is set so
+    /// that each `resume` site inlines try/catch around the K call. This ensures
+    /// the cleanup code is lowered in the correct lexical scope (where arm body
+    /// variables like `conn` are bound). For abort handlers (no resume), cleanup
+    /// is appended after the arm body.
     fn build_op_handler_fun(&mut self, arm: &HandlerArm) -> CExpr {
+        let has_resume = arm.body.contains_resume();
+
         // If resume is never called, use `_` (Core Erlang wildcard) so the compiler
         // doesn't warn about the unused continuation parameter. Safe because
         // `contains_resume()` being false guarantees no Resume node exists in the arm
         // body, so `current_handler_k` ("<_>") is never read during lowering.
-        let k_var = if arm.body.contains_resume() { self.fresh() } else { "_".to_string() };
+        let k_var = if has_resume {
+            self.fresh()
+        } else {
+            "_".to_string()
+        };
         let param_vars: Vec<String> = (0..arm.params.len())
             .map(|i| format!("_HArg{}", i))
             .collect();
@@ -500,7 +531,16 @@ impl<'a> Lowerer<'a> {
         let prev_handler_k = self.current_handler_k.replace(k_var);
         let saved_return_k = self.current_return_k.take();
         let saved_pending_k = self.pending_callee_return_k.take();
+
+        // Set current_handler_finally so Resume lowering wraps K calls in try/catch.
+        let saved_finally = self.current_handler_finally.take();
+        if let Some(ref fb) = arm.finally_block {
+            self.current_handler_finally = Some(fb.as_ref().clone());
+        }
+
         let mut body_ce = self.lower_expr(&arm.body);
+
+        self.current_handler_finally = saved_finally;
         self.current_return_k = saved_return_k;
         self.pending_callee_return_k = saved_pending_k;
 
@@ -510,6 +550,26 @@ impl<'a> Lowerer<'a> {
                 core_var(param_name),
                 Box::new(CExpr::Var(param_vars[i].clone())),
                 Box::new(body_ce),
+            );
+        }
+
+        // For abort handlers (no resume) with finally: append cleanup after body.
+        // The cleanup is lowered here because the arm body's let-bindings are not
+        // in scope — but for abort handlers, the typical pattern is that the resource
+        // was never acquired (the handler failed early), so cleanup referencing
+        // body-local variables is unlikely. If it does reference arm params, those
+        // are in scope via the param bindings above.
+        if let (Some(fb), false) = (&arm.finally_block, has_resume) {
+            let cleanup_ce = self.lower_expr(fb);
+            let result_var = self.fresh();
+            body_ce = CExpr::Let(
+                result_var.clone(),
+                Box::new(body_ce),
+                Box::new(CExpr::Let(
+                    "_".to_string(),
+                    Box::new(cleanup_ce),
+                    Box::new(CExpr::Var(result_var)),
+                )),
             );
         }
 
@@ -526,10 +586,9 @@ impl<'a> Lowerer<'a> {
         match handler {
             Handler::Named(name, _) => {
                 let canonical = self.resolve_handler_name(name);
-                let info = self
-                    .handler_defs
-                    .get(&canonical)
-                    .unwrap_or_else(|| panic!("unknown handler: {} (canonical: {})", name, canonical));
+                let info = self.handler_defs.get(&canonical).unwrap_or_else(|| {
+                    panic!("unknown handler: {} (canonical: {})", name, canonical)
+                });
                 (
                     info.arms.clone(),
                     info.return_clause.clone(),
@@ -549,10 +608,9 @@ impl<'a> Lowerer<'a> {
                 for ann in named {
                     let name = &ann.node.name;
                     let canonical = self.resolve_handler_name(name);
-                    let info = self
-                        .handler_defs
-                        .get(&canonical)
-                        .unwrap_or_else(|| panic!("unknown handler: {} (canonical: {})", name, canonical));
+                    let info = self.handler_defs.get(&canonical).unwrap_or_else(|| {
+                        panic!("unknown handler: {} (canonical: {})", name, canonical)
+                    });
                     all_arms.extend(info.arms.iter().cloned());
                     handled_effects.extend(info.effects.iter().cloned());
                     if resolved_return.is_none() {
@@ -674,17 +732,18 @@ impl<'a> Lowerer<'a> {
     ///
     /// The tuple layout is: ops sorted alphabetically by "Effect.op" key,
     /// with an optional return clause lambda as the last element.
-    pub(super) fn lower_handler_expr_to_tuple(
-        &mut self,
-        body: &crate::ast::HandlerBody,
-    ) -> CExpr {
-        let canonical_effects: Vec<String> = body.effects.iter()
+    pub(super) fn lower_handler_expr_to_tuple(&mut self, body: &crate::ast::HandlerBody) -> CExpr {
+        let canonical_effects: Vec<String> = body
+            .effects
+            .iter()
             .map(|e| self.canonicalize_effect(&e.name))
             .collect();
         let handler_ops = self.effect_handler_ops(&canonical_effects);
 
         // Index arms by op name for quick lookup
-        let arms_by_op: std::collections::HashMap<&str, &crate::ast::HandlerArm> = body.arms.iter()
+        let arms_by_op: std::collections::HashMap<&str, &crate::ast::HandlerArm> = body
+            .arms
+            .iter()
             .map(|a| (a.node.op_name.as_str(), &a.node))
             .collect();
 

@@ -990,6 +990,9 @@ pub struct HandlerArm {
     pub qualifier: Option<String>,
     pub params: Vec<(String, Span)>,
     pub body: Box<Expr>,
+    /// Optional `finally { cleanup }` block — runs after resume completes or on abort.
+    /// Effects inside must be self-contained (fully handled within the block).
+    pub finally_block: Option<Box<Expr>>,
     pub span: Span,
 }
 

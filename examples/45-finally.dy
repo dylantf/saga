@@ -1,0 +1,70 @@
+# Resource cleanup with `finally`
+#
+# Handler arms can have a `finally` block that runs after the
+# continuation completes, regardless of success or failure.
+# This guarantees resource cleanup even when another handler
+# aborts the computation or a panic occurs.
+
+effect Fail {
+  fun fail : String -> a
+}
+
+effect Resource {
+  fun acquire : String -> String
+}
+
+# Handler that wraps failure in Result
+handler to_result for Fail {
+  fail reason = Err reason
+  return value = Ok value
+}
+
+# Resource handler with cleanup via `finally`.
+# The finally block runs after resume's continuation returns.
+# Effects inside `finally` must be self-contained (fully handled).
+handler managed for Resource {
+  acquire name = {
+    let r = $"[{name}]"
+    println $"  acquired {r}"
+    resume r
+  } finally {
+    # Effects in finally must be handled locally
+    println $"  released: {r}"
+  }
+}
+
+# --- Use the resource ---
+
+fun work : Unit -> String needs {Resource}
+work () = {
+  let db = acquire! "db"
+  println $"  working with {db}"
+  "done"
+}
+
+fun work_and_fail : Unit -> String needs {Resource, Fail}
+work_and_fail () = {
+  let db = acquire! "db"
+  println $"  working with {db}"
+  fail! "something went wrong"
+}
+
+# --- Run ---
+
+main () = {
+  # Normal completion: cleanup runs after the continuation finishes
+  println "1. Normal completion:"
+  let result = work () with managed
+  println $"  result: {result}"
+
+  # Abort via Fail: cleanup still runs because WrappedK
+  # catches the abort from to_result
+  println "2. Abort via Fail:"
+  let result2 = {
+    work_and_fail () with managed
+  } with to_result
+  case result2 {
+    Ok v -> println $"  result: Ok({v})"
+    Err e -> println $"  result: Err({e})"
+  }
+}
