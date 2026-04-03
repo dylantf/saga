@@ -1,0 +1,83 @@
+module Std.BitString
+
+import Std.Maybe (Maybe)
+import Std.Result (Result)
+import Std.Int
+import Std.List
+
+impl Show for BitString {
+  show bs = "<<" <> show_bytes (to_list bs) <> ">>"
+}
+
+impl Debug for BitString {
+  debug bs = "<<" <> show_bytes (to_list bs) <> ">>"
+}
+
+fun show_bytes : List Int -> String
+show_bytes xs = case xs {
+  [] -> ""
+  [x] -> Int.to_string x
+  x :: rest -> Int.to_string x <> ", " <> show_bytes rest
+}
+
+#@ Returns the size of the bitstring in bytes.
+@external("erlang", "erlang", "byte_size")
+pub fun size : (bs: BitString) -> Int
+
+#@ Creates a bitstring from a list of byte values (0-255).
+@external("erlang", "std_bitstring_bridge", "from_list")
+pub fun from_list : (bytes: List Int) -> BitString
+
+#@ Converts a bitstring to a list of byte values.
+@external("erlang", "erlang", "binary_to_list")
+pub fun to_list : (bs: BitString) -> List Int
+
+#@ Creates a bitstring from a UTF-8 encoded string.
+#@ This is a zero-cost operation since Dylan strings are already UTF-8 binaries.
+@external("erlang", "std_bitstring_bridge", "from_string")
+pub fun from_string : (s: String) -> BitString
+
+#@ Attempts to decode a bitstring as a UTF-8 string.
+#@ Returns Err if the bitstring is not valid UTF-8.
+@external("erlang", "std_bitstring_bridge", "to_string")
+pub fun to_string : (bs: BitString) -> Result String String
+
+#@ Returns the byte at the given zero-based index, or Nothing if out of bounds.
+@external("erlang", "std_bitstring_bridge", "at")
+pub fun at : (index: Int) -> (bs: BitString) -> Maybe Int
+
+#@ Extracts a sub-bitstring starting at position for length bytes.
+@external("erlang", "std_bitstring_bridge", "slice")
+pub fun slice : (start: Int) -> (len: Int) -> (bs: BitString) -> BitString
+
+#@ Appends two bitstrings. Also available via the <> operator.
+@external("erlang", "std_bitstring_bridge", "append")
+pub fun append : (a: BitString) -> (b: BitString) -> BitString
+
+#@ Creates a bitstring of the given size filled with zero bytes.
+@external("erlang", "std_bitstring_bridge", "zeroes")
+pub fun zeroes : (n: Int) -> BitString
+
+#@ Creates a single-byte bitstring from an integer (0-255).
+@external("erlang", "std_bitstring_bridge", "from_byte")
+pub fun from_byte : (byte: Int) -> BitString
+
+#@ Encodes an integer as a big-endian bitstring of the given byte width.
+@external("erlang", "std_bitstring_bridge", "encode_int")
+pub fun encode_int : (width: Int) -> (value: Int) -> BitString
+
+#@ Decodes a big-endian integer from a bitstring.
+@external("erlang", "std_bitstring_bridge", "decode_int")
+pub fun decode_int : (bs: BitString) -> Int
+
+#@ Encodes an integer as a little-endian bitstring of the given byte width.
+@external("erlang", "std_bitstring_bridge", "encode_int_little")
+pub fun encode_int_little : (width: Int) -> (value: Int) -> BitString
+
+#@ Decodes a little-endian integer from a bitstring.
+@external("erlang", "std_bitstring_bridge", "decode_int_little")
+pub fun decode_int_little : (bs: BitString) -> Int
+
+#@ Returns True if the bitstring is empty (zero bytes).
+pub fun is_empty : BitString -> Bool
+is_empty bs = size bs == 0

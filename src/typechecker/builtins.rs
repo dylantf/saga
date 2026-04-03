@@ -36,7 +36,7 @@ impl Checker {
                 methods: vec![],
             },
         );
-        for prim in &["String", "List"] {
+        for prim in &["String", "List", "BitString"] {
             self.trait_state.impls.insert(
                 ("Semigroup".into(), vec![], prim.to_string()),
                 ImplInfo {
@@ -56,7 +56,7 @@ impl Checker {
                 methods: vec![],
             },
         );
-        for prim in &["Int", "Float", "String", "Bool", "Unit"] {
+        for prim in &["Int", "Float", "String", "Bool", "Unit", "BitString"] {
             self.trait_state.impls.insert(
                 ("Eq".into(), vec![], prim.to_string()),
                 ImplInfo {
@@ -157,7 +157,7 @@ impl Checker {
             .insert("Bool".into(), vec![("True".into(), 0), ("False".into(), 0)]);
 
         // Built-in type arities
-        for name in &["Int", "Float", "String", "Bool", "Unit"] {
+        for name in &["Int", "Float", "String", "Bool", "Unit", "BitString"] {
             self.type_arity.insert(name.to_string(), 0);
         }
         self.type_arity.insert("List".into(), 1);
