@@ -785,12 +785,6 @@ fn fun_binding_case_body_stays_on_eq_line() {
     );
 }
 
-#[test]
-fn fun_binding_preserves_named_instance_params() {
-    let src = "greet name {out} = out.log! name";
-    assert_eq!(fmt80(src), "greet name {out} = out.log! name\n");
-}
-
 // --- Let bindings (declarations) ---
 
 #[test]

@@ -161,7 +161,6 @@ impl Checker {
                                 .effects
                                 .iter()
                                 .map(|entry| super::EffectEntry {
-                                    instance: entry.instance.clone(),
                                     name: entry.name.clone(),
                                     args: entry
                                         .args
@@ -187,7 +186,6 @@ impl Checker {
             }
             ast::Handler::Inline {
                 named,
-                instance_bindings,
                 arms,
                 return_clause,
                 ..
@@ -203,68 +201,7 @@ impl Checker {
                     }
                 }
 
-                // Process instance bindings: `from: counter, to: savings`
-                // Each binding maps an instance name to a handler and subtracts
-                // the corresponding named effect from the inner computation.
-                let mut instance_handled: HashSet<String> = HashSet::new();
-                let mut answer_ty = expr_ty.clone();
-                for ann in instance_bindings {
-                    let binding = &ann.node;
-                    let handler_ty = self.infer_expr(&binding.handler)?;
-                    // Verify the handler expression has a Handler type
-                    let resolved = self.sub.apply(&handler_ty);
-                    if let Type::Con(ref con, _) = resolved
-                        && con != "Handler"
-                    {
-                        self.collected_diagnostics.push(Diagnostic::error_at(
-                            binding.span,
-                            format!(
-                                "instance binding '{}' expects a handler, got type {}",
-                                binding.instance, resolved
-                            ),
-                        ));
-                    }
-                    // Build a key that matches the named effect entry:
-                    // inner computation emits `from: State`, we subtract by instance name
-                    instance_handled.insert(binding.instance.clone());
-
-                    // Named instance bindings can also transform the result type via
-                    // the bound handler's return clause (e.g. State threading).
-                    if let ast::ExprKind::Var { name } = &binding.handler.kind
-                        && let Some(handler_info) = self.handlers.get(name).cloned()
-                        && let Some((param_ty, ret_ty)) = handler_info.return_type
-                    {
-                        let mapping: std::collections::HashMap<u32, Type> = handler_info
-                            .forall
-                            .iter()
-                            .map(|&id| (id, self.fresh_var()))
-                            .collect();
-                        let fresh_param = self.replace_vars(&param_ty, &mapping);
-                        let fresh_ret = self.replace_vars(&ret_ty, &mapping);
-                        self.unify_at(&answer_ty, &fresh_param, binding.span)?;
-                        answer_ty = fresh_ret;
-                    }
-                }
-
-                // Subtract named effects from inner computation
-                let remaining_effs = {
-                    let effects = remaining_effs
-                        .effects
-                        .iter()
-                        .filter(|e| {
-                            if let Some(ref inst) = e.instance {
-                                !instance_handled.contains(inst)
-                            } else {
-                                true
-                            }
-                        })
-                        .cloned()
-                        .collect();
-                    EffectRow {
-                        effects,
-                        tail: remaining_effs.tail.clone(),
-                    }
-                };
+                let answer_ty = expr_ty.clone();
 
                 self.effect_meta.type_param_cache = inner_effect_cache;
 

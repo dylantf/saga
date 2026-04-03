@@ -77,13 +77,10 @@ impl<'a> Lowerer<'a> {
         &mut self,
         op_name: &str,
         qualifier: Option<&str>,
-        instance: Option<&str>,
         args: &[Expr],
         continuation: Option<CExpr>,
     ) -> CExpr {
-        // Resolve the effect name (canonical form). For instance-qualified calls
-        // this is only needed for the no_resume_ops check; the handler param is
-        // looked up by instance key directly.
+        // Resolve the effect name (canonical form).
         let effect_name = if let Some(q) = qualifier {
             self.canonicalize_effect(q)
         } else {
@@ -95,30 +92,15 @@ impl<'a> Lowerer<'a> {
         let effect_key = format!("{}.{}", effect_name, op_name);
 
         // Find the per-op handler param variable.
-        // Instance-qualified calls (e.g. `counter.put!`) look up by instance name
-        // directly — no effect canonicalization needed since the key is scope-based.
-        let handler_var = if let Some(inst) = instance {
-            let inst_key = format!("{}.{}", inst, op_name);
-            self.current_handler_params
-                .get(&inst_key)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "no handler param for instance-qualified op '{}.{}', handler_params: {:?}",
-                        inst, op_name, self.current_handler_params
-                    )
-                })
-                .clone()
-        } else {
-            self.current_handler_params
-                .get(&effect_key)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "no handler param for op '{}.{}', handler_params: {:?}",
-                        effect_name, op_name, self.current_handler_params
-                    )
-                })
-                .clone()
-        };
+        let handler_var = self.current_handler_params
+            .get(&effect_key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no handler param for op '{}.{}', handler_params: {:?}",
+                    effect_name, op_name, self.current_handler_params
+                )
+            })
+            .clone();
 
         // Build: apply Handler(arg1, ..., argN, K)
         // Per-op handlers have natural arity -- no atom dispatch, no padding.
@@ -309,124 +291,12 @@ impl<'a> Lowerer<'a> {
             op_vars.push((eff.clone(), op.clone(), var_name));
         }
 
-        // Instance pass: for each named handler ref in the with block,
-        // register instance-qualified handler params (e.g. "counter.put")
-        // so that `counter.put!` routes to counter's specific handler.
-        let mut instance_op_vars: Vec<(String, String, String)> = Vec::new(); // (instance_name, op, var_name)
-        let mut instance_value_bindings: Vec<(String, CExpr)> = Vec::new();
-        let mut dynamic_return_lambdas: Vec<CExpr> = Vec::new();
-        if let Handler::Inline { named, .. } = handler {
-            for ann in named {
-                let inst_name = &ann.node.name;
-                let canonical = self.resolve_handler_name(inst_name);
-                if let Some(info) = self.handler_defs.get(&canonical) {
-                    for eff in &info.effects {
-                        if let Some(eff_info) = self.effect_defs.get(eff) {
-                            let mut op_names: Vec<&String> = eff_info.ops.keys().collect();
-                            op_names.sort();
-                            for op_name in op_names {
-                                let inst_key = format!("{}.{}", inst_name, op_name);
-                                let var_name = format!("_HInst_{}_{}", inst_name, op_name);
-                                self.current_handler_params.insert(inst_key, var_name.clone());
-                                instance_op_vars.push((inst_name.clone(), op_name.clone(), var_name));
-                            }
-                        }
-                    }
-                }
-            }
-        } else if let Handler::Named(name, _) = handler {
-            // Single named handler: also register instance-qualified keys
-            let canonical = self.resolve_handler_name(name);
-            if let Some(info) = self.handler_defs.get(&canonical) {
-                for eff in &info.effects {
-                    if let Some(eff_info) = self.effect_defs.get(eff) {
-                        let mut op_names: Vec<&String> = eff_info.ops.keys().collect();
-                        op_names.sort();
-                        for op_name in op_names {
-                            let inst_key = format!("{}.{}", name, op_name);
-                            let var_name = format!("_HInst_{}_{}", name, op_name);
-                            self.current_handler_params.insert(inst_key, var_name.clone());
-                            instance_op_vars.push((name.clone(), op_name.clone(), var_name));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Process instance bindings: `from: src` in `with { from: src, to: dst }`
-        // Each binding maps an instance name to a handler expression.
-        if let Handler::Inline { instance_bindings, .. } = handler {
-            for ann in instance_bindings {
-                let binding = &ann.node;
-                let inst_name = &binding.instance;
-                // The handler expr should be a handle binding name
-                if let ExprKind::Var { name: handler_name, .. } = &binding.handler.kind {
-                    let canonical = self.resolve_handler_name(handler_name);
-                    if let Some(info) = self.handler_defs.get(&canonical) {
-                        for eff in &info.effects {
-                            if let Some(eff_info) = self.effect_defs.get(eff) {
-                                let mut op_names: Vec<&String> = eff_info.ops.keys().collect();
-                                op_names.sort();
-                                for op_name in op_names {
-                                    let inst_key = format!("{}.{}", inst_name, op_name);
-                                    let var_name = format!("_HInst_{}_{}", inst_name, op_name);
-                                    self.current_handler_params.insert(inst_key, var_name.clone());
-                                    instance_op_vars.push((handler_name.clone(), op_name.clone(), var_name));
-                                }
-                            }
-                        }
-                    } else if let Some((tuple_var, effects, _has_return)) =
-                        self.handle_dynamic_vars.get(handler_name).cloned()
-                    {
-                        let handler_ops = self.effect_handler_ops(&effects);
-                        for (idx, (_eff, op_name)) in handler_ops.iter().enumerate() {
-                            let inst_key = format!("{}.{}", inst_name, op_name);
-                            let var_name = format!("_HInst_{}_{}", inst_name, op_name);
-                            self.current_handler_params.insert(inst_key, var_name.clone());
-                            let element_call = cerl_call(
-                                "erlang",
-                                "element",
-                                vec![
-                                    CExpr::Lit(CLit::Int(idx as i64 + 1)),
-                                    CExpr::Var(tuple_var.clone()),
-                                ],
-                            );
-                            instance_value_bindings.push((var_name, element_call));
-                        }
-                        dynamic_return_lambdas
-                            .push(self.dynamic_return_lambda(&tuple_var, handler_ops.len()));
-                    } else {
-                        // Alias an existing named-instance binding in scope.
-                        // This is the common case for nested remaps like:
-                        //   deposit 0 with { account: to }
-                        // where `to` is already a handler instance parameter and we
-                        // just need the callee's `account.*` keys to point at the
-                        // caller's existing `to.*` handler vars.
-                        let prefix = format!("{}.", handler_name);
-                        let existing_bindings: Vec<(String, String)> = self
-                            .current_handler_params
-                            .iter()
-                            .filter_map(|(key, var_name)| {
-                                key.strip_prefix(&prefix).map(|op_name| {
-                                    (format!("{}.{}", inst_name, op_name), var_name.clone())
-                                })
-                            })
-                            .collect();
-                        for (inst_key, var_name) in existing_bindings {
-                            self.current_handler_params.insert(inst_key, var_name);
-                        }
-                    }
-                }
-            }
-        }
-
         // Pass 2: build ALL handler functions unconditionally.
         // We'll prune unreachable ones after lowering the body.
         // BEAM-native ops are emitted first since they're self-contained
         // (direct BEAM calls, no closures). CPS handlers may reference them
         // (e.g. async_handler's body calls spawn!/send!), so they must come after.
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
-        handler_bindings.extend(instance_value_bindings);
         for (eff, op, var_name) in &op_vars {
             if beam_native_effects.contains(eff) {
                 let handler_fun = self.build_beam_native_op_fun(op);
@@ -511,37 +381,8 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        // Build handler functions for instance-qualified ops.
-        // Each named handler ref gets its own set of handler functions so that
-        // `counter.put!` and `buffer.put!` route to different handlers.
-        for (inst_name, op, var_name) in &instance_op_vars {
-            let canonical = self.resolve_handler_name(inst_name);
-            if let Some(info) = self.handler_defs.get(&canonical).cloned() {
-                // Find the arm for this op in this handler's arms
-                if let Some(arm) = info.arms.iter().find(|a| a.op_name == *op) {
-                    let handler_fun = self.build_op_handler_fun(arm);
-                    handler_bindings.push((var_name.clone(), handler_fun));
-                }
-            }
-        }
-
-        // Build return clause lambdas from instance-bound handlers first,
-        // then the inline `return` clause if present.
+        // Build return clause lambdas.
         let mut return_lambdas: Vec<CExpr> = Vec::new();
-        return_lambdas.extend(dynamic_return_lambdas);
-        if let Handler::Inline { instance_bindings, .. } = handler {
-            for ann in instance_bindings {
-                let binding = &ann.node;
-                if let ExprKind::Var { name, .. } = &binding.handler.kind {
-                    let canonical = self.resolve_handler_name(name);
-                    if let Some(info) = self.handler_defs.get(&canonical).cloned()
-                        && let Some(ret) = info.return_clause.as_deref()
-                    {
-                        return_lambdas.push(self.build_return_lambda(ret));
-                    }
-                }
-            }
-        }
 
         // Build the return clause lambda (if present).
         let saved_return_k = self.current_return_k.take();

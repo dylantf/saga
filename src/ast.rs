@@ -109,12 +109,10 @@ impl NodeId {
     }
 }
 
-/// A reference to an effect, optionally with type arguments and instance name.
-/// e.g. `Log` (no args), `State Int`, `from: State Int` (named instance)
+/// A reference to an effect, optionally with type arguments.
+/// e.g. `Log` (no args), `State Int`, `State (MVector a)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectRef {
-    /// Optional instance name: `from` in `from: State Int`
-    pub instance: Option<String>,
     pub name: String,
     pub type_args: Vec<TypeExpr>,
     pub span: Span,
@@ -165,14 +163,12 @@ pub enum Decl {
         span: Span,
     },
 
-    /// `add x y = x + y` or `transfer amount {from, to} = { ... }`
+    /// `add x y = x + y` or `main () = { ... }`
     FunBinding {
         id: NodeId,
         name: String,
         name_span: Span,
         params: Vec<Pat>,
-        /// Named effect instance receivers: `{from, to}` in `transfer amount {from, to} = ...`
-        instance_params: Vec<(String, Span)>,
         guard: Option<Box<Expr>>,
         body: Expr,
         span: Span,
@@ -441,13 +437,11 @@ pub enum ExprKind {
         fields: Vec<(String, Span, Expr)>,
     },
 
-    /// `log! "hello"`, `Cache.get! key`, `counter.put! 5`
+    /// `log! "hello"`, `Cache.get! key`
     EffectCall {
         name: String,
         /// Optional namespace qualifier: `Cache` in `Cache.get!`
         qualifier: Option<String>,
-        /// Optional handle-binding instance: `counter` in `counter.put!`
-        instance: Option<String>,
         args: Vec<Expr>,
     },
 
@@ -1037,28 +1031,15 @@ pub struct NamedHandlerRef {
     pub span: Span,
 }
 
-/// An instance binding in a `with` block: `from: counter` maps the instance
-/// name `from` to the handler expression `counter`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct InstanceBinding {
-    /// Instance name (e.g. `from` in `from: counter`)
-    pub instance: String,
-    /// Handler expression (e.g. `counter`)
-    pub handler: Expr,
-    pub span: Span,
-}
-
 /// The handler in a `with` expression
 #[derive(Debug, Clone, PartialEq)]
 pub enum Handler {
     /// `expr with handler_name`
     Named(String, Span),
-    /// `expr with { h1, h2, from: counter, op args = body }`
+    /// `expr with { h1, h2, op args = body }`
     Inline {
         /// Named handler references (e.g. `h1, h2`)
         named: Vec<Annotated<NamedHandlerRef>>,
-        /// Instance bindings (e.g. `from: counter, to: savings`)
-        instance_bindings: Vec<Annotated<InstanceBinding>>,
         /// Inline handler arms (e.g. `op args = body`)
         arms: Vec<Annotated<HandlerArm>>,
         /// `return value = Ok(value)` clause

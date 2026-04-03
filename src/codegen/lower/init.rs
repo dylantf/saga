@@ -26,8 +26,6 @@ pub fn extract_external(annotations: &[ast::Annotation]) -> Option<(String, Stri
 /// Keeps fun_info free of half-initialized entries.
 pub(super) struct PendingAnnotation {
     pub effects: Vec<String>,
-    /// Named effect instances: (instance_name, canonical_effect_name)
-    pub named_instances: Vec<(String, String)>,
     pub param_absorbed_effects: HashMap<usize, Vec<String>>,
 }
 
@@ -175,19 +173,12 @@ impl<'a> Lowerer<'a> {
                             FunInfo {
                                 arity: expanded_arity,
                                 effects: sorted_effects,
-                                named_instances: vec![],
                                 param_absorbed_effects: HashMap::new(),
                             },
                         );
                     } else {
                         // Regular function signature
-                        let named_instances: Vec<(String, String)> = effects.iter()
-                            .filter_map(|e| {
-                                e.instance.as_ref().map(|inst| (inst.clone(), canonicalize_effect(&e.name)))
-                            })
-                            .collect();
                         let mut sorted_effects: Vec<String> = effects.iter()
-                            .filter(|e| e.instance.is_none())
                             .map(|e| canonicalize_effect(&e.name))
                             .collect();
                         sorted_effects.sort();
@@ -207,7 +198,6 @@ impl<'a> Lowerer<'a> {
                             name.clone(),
                             PendingAnnotation {
                                 effects: sorted_effects,
-                                named_instances,
                                 param_absorbed_effects: param_effs,
                             },
                         );
@@ -219,13 +209,7 @@ impl<'a> Lowerer<'a> {
                     if *public {
                         self.pub_names.insert(name.clone());
                     }
-                    self.fun_info.insert(
-                        name.clone(),
-                        FunInfo {
-                            arity: 0,
-                            ..Default::default()
-                        },
-                    );
+                    self.fun_info.insert(name.clone(), FunInfo::default());
                 }
                 _ => {}
             }
@@ -242,9 +226,7 @@ impl<'a> Lowerer<'a> {
             for d in &info.trait_impl_dicts {
                 self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
                     arity: d.arity,
-                    effects: Vec::new(),
-                    named_instances: vec![],
-                    param_absorbed_effects: HashMap::new(),
+                    ..Default::default()
                 });
             }
             if mod_name.starts_with("Std.") {
@@ -274,14 +256,10 @@ impl<'a> Lowerer<'a> {
                 // exposing lists, handled by the user import processing below.
                 for (name, scheme) in &info.exports {
                     let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
-                    let named_instances: Vec<(String, String)> = util::named_instances_from_type(&scheme.ty)
-                        .into_iter()
-                        .map(|(inst, eff)| (inst, canonicalize_effect(&eff)))
-                        .collect();
                     let effects = self.canonicalize_effects(effects);
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
                     let expanded_arity =
-                        self.expanded_arity_with_instances(base_arity, &effects, &named_instances)
+                        self.expanded_arity(base_arity, &effects)
                             + dict_param_count;
                     let param_absorbed =
                         util::param_absorbed_effects_from_type(&scheme.ty);
@@ -292,7 +270,6 @@ impl<'a> Lowerer<'a> {
                     let fi = FunInfo {
                         arity: expanded_arity,
                         effects,
-                        named_instances,
                         param_absorbed_effects: param_absorbed,
                     };
                     // Register under short alias (e.g. "List.map") and canonical (e.g. "Std.List.map")
@@ -400,14 +377,10 @@ impl<'a> Lowerer<'a> {
         // Register imported functions
         for (name, scheme) in &info.exports {
             let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
-            let named_instances: Vec<(String, String)> = util::named_instances_from_type(&scheme.ty)
-                .into_iter()
-                .map(|(inst, eff)| (inst, self.canonicalize_effect(&eff)))
-                .collect();
             let effects = self.canonicalize_effects(effects);
             let dict_param_count = util::dict_param_count(&scheme.constraints);
             let expanded_arity =
-                self.expanded_arity_with_instances(base_arity, &effects, &named_instances)
+                self.expanded_arity(base_arity, &effects)
                     + dict_param_count;
             let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
             // Canonicalize absorbed effect names too
@@ -421,7 +394,6 @@ impl<'a> Lowerer<'a> {
             let fi = FunInfo {
                 arity: expanded_arity,
                 effects: effects.clone(),
-                named_instances: named_instances.clone(),
                 param_absorbed_effects: param_effs.clone(),
             };
             self.fun_info.insert(alias_qualified, fi.clone());
@@ -433,7 +405,6 @@ impl<'a> Lowerer<'a> {
                 self.fun_info.entry(name.clone()).or_insert(FunInfo {
                     arity: expanded_arity,
                     effects,
-                    named_instances,
                     param_absorbed_effects: param_effs,
                 });
             }
@@ -448,9 +419,7 @@ impl<'a> Lowerer<'a> {
         for d in &info.trait_impl_dicts {
             self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
                 arity: d.arity,
-                effects: Vec::new(),
-                named_instances: vec![],
-                param_absorbed_effects: HashMap::new(),
+                ..Default::default()
             });
         }
 

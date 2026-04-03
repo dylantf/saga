@@ -727,7 +727,6 @@ fn synthesize_test_main(program: &mut ast::Program) {
         id: ast::NodeId::fresh(),
         name: "main".to_string(),
         name_span: s,
-        instance_params: vec![],
         params: vec![ast::Pat::Lit {
             id: ast::NodeId::fresh(),
             value: ast::Lit::Unit,

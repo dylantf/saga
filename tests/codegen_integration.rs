@@ -651,43 +651,6 @@ main () = do_work () with silent
 }
 
 #[test]
-fn inferred_named_instance_bonus_param_runs_end_to_end() {
-    let src = r#"
-effect Log {
-  fun log : String -> Unit
-}
-
-handler console_log for Log {
-  log msg = {
-    print msg
-    resume ()
-  }
-}
-
-handler prefix_log for Log {
-  log msg = {
-    print ("[PREFIX] " <> msg)
-    resume ()
-  }
-}
-
-greet name {out} = out.log! ("hello " <> name)
-
-main () = {
-  handle c = console_log
-  handle p = prefix_log
-  greet "world" with {
-    out: c,
-  }
-  greet "world" with {
-    out: p,
-  }
-}
-"#;
-    assert_runs_and_stdout_contains(src, &["hello world", "[PREFIX] hello world"]);
-}
-
-#[test]
 fn with_inline_handler() {
     let src = r#"
 effect Fail {

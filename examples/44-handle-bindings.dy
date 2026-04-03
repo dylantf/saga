@@ -1,60 +1,41 @@
-# Handle bindings with named State handler instances
+# Handle bindings: conditional handler selection and handler expressions
 
-effect State s {
-  fun get : Unit -> s
-  fun put : s -> Unit
+effect Log {
+  fun log : String -> Unit
 }
 
-# Two separate handlers for the same effect type.
-# They start with different balances and print the updated balance on put!,
-# which makes the transfer visible without introducing extra machinery.
-handler checking_state for State Int {
-  get () = resume 100
-  put next = {
-    print ("checking -> " <> show next)
+handler console_log for Log {
+  log msg = {
+    println msg
     resume ()
   }
 }
 
-handler savings_state for State Int {
-  get () = resume 20
-  put next = {
-    print ("savings -> " <> show next)
-    resume ()
-  }
-}
-
-fun deposit : Int -> Int needs {account: State Int}
-deposit amount {account} = {
-  let balance = account.get! ()
-  let updated = balance + amount
-  account.put! updated
-  updated
-}
-
-fun transfer : Int -> (Int, Int) needs {from: State Int, to: State Int}
-transfer amount {from, to} = {
-  let from_balance = from.get! ()
-  let to_balance = deposit 0 with { account: to }
-
-  from.put! (from_balance - amount)
-  to.put! (to_balance + amount)
-
-  (from_balance - amount, to_balance + amount)
+handler quiet_log for Log {
+  log _ = resume ()
 }
 
 main () = {
-  # Handle bindings choose the concrete handlers first.
-  handle checking = checking_state
-  handle savings = savings_state
+  # Simple handle binding
+  handle logger = console_log
+  log! "hello from handle binding" with logger
+  log! "hello from inline block" with {logger}
 
-  # Named handler instances pass two State Int handlers to the same function.
-  let (checking_after, savings_after) =
-    transfer 30 with {
-      from: checking,
-      to: savings,
+  # Conditional handle binding (True branch)
+  let dev = True
+  handle cond_logger = if dev then console_log else quiet_log
+  log! "conditional true (should print)" with cond_logger
+
+  # Conditional handle binding (False branch)
+  handle cond_logger2 = if False then console_log else quiet_log
+  log! "conditional false (should NOT print)" with cond_logger2
+
+  # Handler expression
+  handle prefixed =
+    handler for Log {
+      log msg = {
+        resume println $"[PREFIX] {msg}"
+      }
     }
-
-  println (show checking_after)
-  println (show savings_after)
+  log! "hello from handler expression" with prefixed
 }

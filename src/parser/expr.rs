@@ -380,7 +380,6 @@ impl Parser {
             self.advance(); // consume '.'
 
             // Qualified effect call: `Cache.get! key` or `Std.Cache.get! key`
-            // Instance-qualified effect call: `counter.put! 5`
             if let Token::EffectCall(name) = self.peek().clone() {
                 // Check for effect qualifier (uppercase: Cache.get!)
                 let qualifier = match &expr.kind {
@@ -392,12 +391,7 @@ impl Parser {
                     }
                     _ => None,
                 };
-                // Check for instance qualifier (lowercase: counter.put!)
-                let instance = match &expr.kind {
-                    ExprKind::Var { name: var_name, .. } => Some(var_name.clone()),
-                    _ => None,
-                };
-                if qualifier.is_some() || instance.is_some() {
+                if qualifier.is_some() {
                     let start_span = expr.span;
                     let effect_span = self.tokens[self.pos].span;
                     self.advance(); // consume effect call token
@@ -408,7 +402,6 @@ impl Parser {
                         kind: ExprKind::EffectCall {
                             name,
                             qualifier,
-                            instance,
                             args: Vec::new(),
                         },
                     };
@@ -614,40 +607,6 @@ impl Parser {
                 }
             }
 
-            // Phase 1b: Parse instance bindings: `from: counter, to: savings`
-            // An instance binding is `ident: expr` — the colon distinguishes it
-            // from inline arms (which use `=`).
-            let mut instance_bindings = Vec::new();
-            while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                let is_instance_binding = matches!(self.peek(), Token::Ident(_))
-                    && matches!(self.peek_at(1), Token::Colon);
-                if is_instance_binding {
-                    let start = self.pos;
-                    let bind_start = self.tokens[self.pos].span;
-                    let instance_name = self.expect_ident()?;
-                    self.advance(); // consume ':'
-                    let handler_expr = self.parse_expr(0)?;
-                    let bind_end = handler_expr.span;
-                    let mut trailing_comment = None;
-                    if matches!(self.peek(), Token::Comma) {
-                        self.advance();
-                        trailing_comment = self.take_trailing_comment(self.pos - 1);
-                    }
-                    instance_bindings.push(Annotated {
-                        node: InstanceBinding {
-                            instance: instance_name,
-                            handler: handler_expr,
-                            span: bind_start.to(bind_end),
-                        },
-                        leading_trivia: self.take_leading_trivia(start),
-                        trailing_comment,
-                        trailing_trivia: vec![],
-                    });
-                } else {
-                    break;
-                }
-            }
-
             // Phase 2: Parse inline handler arms (newline-separated, commas optional).
             while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                 let start = self.pos;
@@ -740,7 +699,6 @@ impl Parser {
 
             Ok(Handler::Inline {
                 named,
-                instance_bindings,
                 arms,
                 return_clause,
                 dangling_trivia,
@@ -1367,7 +1325,6 @@ impl Parser {
                 kind: ExprKind::EffectCall {
                     name,
                     qualifier: None,
-                    instance: None,
                     args: Vec::new(),
                 },
             }),

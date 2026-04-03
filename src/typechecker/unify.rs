@@ -21,7 +21,6 @@ pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
                 effects: row.effects.iter()
                     .map(|entry| {
                         super::EffectEntry {
-                            instance: entry.instance.clone(),
                             name: entry.name.clone(),
                             args: entry.args.iter().map(|t| rename_vars(t, names)).collect(),
                         }
@@ -270,7 +269,6 @@ impl Checker {
                         effects: row.effects.iter()
                             .map(|entry| {
                                 super::EffectEntry {
-                                    instance: entry.instance.clone(),
                                     name: entry.name.clone(),
                                     args: entry.args.iter().map(|t| self.replace_vars(t, mapping)).collect(),
                                 }

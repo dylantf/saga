@@ -106,7 +106,7 @@ impl CExpr {
     /// Collect all `Var` references whose name starts with `_Handle_` into `out`.
     pub fn collect_handle_refs(&self, out: &mut std::collections::HashSet<String>) {
         match self {
-            CExpr::Var(v) if v.starts_with("_Handle_") || v.starts_with("_HInst_") => {
+            CExpr::Var(v) if v.starts_with("_Handle_") => {
                 out.insert(v.clone());
             }
             CExpr::Var(_) | CExpr::Lit(_) | CExpr::Nil | CExpr::FunRef(_, _) => {}

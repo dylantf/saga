@@ -449,7 +449,6 @@ impl Elaborator {
                 Decl::FunBinding {
                     name,
                     params,
-                    instance_params,
                     guard,
                     body,
                     span,
@@ -496,7 +495,6 @@ impl Elaborator {
                         name: name.clone(),
                         name_span: *span, // elaborated binding, reuse span
                         params: full_params,
-                        instance_params: instance_params.clone(),
                         guard: elab_guard,
                         body: elab_body,
                         span: *span,
@@ -1161,14 +1159,12 @@ impl Elaborator {
             ExprKind::EffectCall {
                 name,
                 qualifier,
-                instance,
                 args,
             } => Expr::synth(
                 span,
                 ExprKind::EffectCall {
                     name: name.clone(),
                     qualifier: qualifier.clone(),
-                    instance: instance.clone(),
                     args: args.iter().map(|a| self.elaborate_expr(a)).collect(),
                 },
             ),
@@ -1328,14 +1324,12 @@ impl Elaborator {
             Handler::Named(_, _) => handler.clone(),
             Handler::Inline {
                 named,
-                instance_bindings,
                 arms,
                 return_clause,
                 ..
             } => Handler::Inline {
                 dangling_trivia: vec![],
                 named: named.clone(),
-                instance_bindings: instance_bindings.clone(),
                 arms: arms
                     .iter()
                     .map(|ann| {

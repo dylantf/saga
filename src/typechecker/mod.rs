@@ -46,12 +46,9 @@ pub(crate) fn find_effect_call(expr: &Expr) -> Option<Span> {
 
 // --- Type representation ---
 
-/// A single entry in an effect row. Named instances (e.g. `from: State Int`)
-/// carry an instance name for disambiguation; unnamed effects have `instance: None`.
+/// A single entry in an effect row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectEntry {
-    /// Optional instance name: `from` in `from: State Int`
-    pub instance: Option<String>,
     /// Canonical effect name: `State`, `Std.Log.Log`, etc.
     pub name: String,
     /// Type arguments: `[Int]` in `State Int`
@@ -60,16 +57,12 @@ pub struct EffectEntry {
 
 impl EffectEntry {
     pub fn unnamed(name: String, args: Vec<Type>) -> Self {
-        EffectEntry { instance: None, name, args }
+        EffectEntry { name, args }
     }
 
-    pub fn named(instance: String, name: String, args: Vec<Type>) -> Self {
-        EffectEntry { instance: Some(instance), name, args }
-    }
-
-    /// Two entries match if they have the same instance name and effect name.
+    /// Two entries match if they have the same effect name.
     pub fn matches(&self, other: &EffectEntry) -> bool {
-        self.instance == other.instance && self.name == other.name
+        self.name == other.name
     }
 }
 
@@ -85,14 +78,6 @@ pub struct EffectRow {
 impl EffectRow {
     pub fn closed(effects: Vec<EffectEntry>) -> Self {
         EffectRow { effects, tail: None }
-    }
-
-    /// Create a closed row from unnamed effects (convenience for the common case).
-    pub fn closed_unnamed(effects: Vec<(String, Vec<Type>)>) -> Self {
-        EffectRow {
-            effects: effects.into_iter().map(|(n, a)| EffectEntry::unnamed(n, a)).collect(),
-            tail: None,
-        }
     }
 
     /// Empty closed row (pure -- no effects).
@@ -128,11 +113,10 @@ impl EffectRow {
     }
 
     /// Remove handled effects by name. Only removes unnamed entries.
-    /// Named instances are not removed by this method — they require
-    /// explicit name matching via `subtract_named`.
+    /// Remove handled effects by name.
     pub fn subtract(&self, handled: &std::collections::HashSet<String>) -> EffectRow {
         let effects = self.effects.iter()
-            .filter(|e| e.instance.is_some() || !handled.contains(&e.name))
+            .filter(|e| !handled.contains(&e.name))
             .cloned()
             .collect();
         EffectRow { effects, tail: self.tail.clone() }
@@ -291,7 +275,6 @@ impl Substitution {
         let mut effects: Vec<EffectEntry> = row.effects.iter()
             .map(|entry| {
                 EffectEntry {
-                    instance: entry.instance.clone(),
                     name: entry.name.clone(),
                     args: entry.args.iter().map(|t| self.apply(t)).collect(),
                 }
@@ -305,7 +288,6 @@ impl Substitution {
             {
                 for entry in &bound.effects {
                     effects.push(EffectEntry {
-                        instance: entry.instance.clone(),
                         name: entry.name.clone(),
                         args: entry.args.iter().map(|t| self.apply(t)).collect(),
                     });
@@ -1369,9 +1351,7 @@ pub fn effects_from_type(ty: &Type) -> HashSet<String> {
     fn walk(ty: &Type, out: &mut HashSet<String>) {
         if let Type::Fun(_, ret, row) = ty {
             for entry in &row.effects {
-                if entry.instance.is_none() {
-                    out.insert(entry.name.clone());
-                }
+                out.insert(entry.name.clone());
             }
             walk(ret, out);
         }

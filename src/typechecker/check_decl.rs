@@ -569,11 +569,7 @@ impl Checker {
                                 ));
                                 e.name.clone()
                             };
-                            if let Some(ref inst) = e.instance {
-                                EffectEntry::named(inst.clone(), name, args)
-                            } else {
-                                EffectEntry::unnamed(name, args)
-                            }
+                            EffectEntry::unnamed(name, args)
                         })
                         .collect();
                     let tail = effect_row_var.as_ref().map(|(rv_name, _)| {
@@ -898,7 +894,6 @@ impl Checker {
         for clause in clauses {
             let Decl::FunBinding {
                 params,
-                instance_params,
                 guard,
                 body,
                 span,
@@ -925,69 +920,6 @@ impl Checker {
 
             for (pat, ty) in params.iter().zip(param_types.iter()) {
                 self.bind_pattern(pat, ty)?;
-            }
-
-            // Register named effect instance params from the definition's `{from, to}`.
-            // Each instance name becomes a handler binding in scope. The effect it
-            // handles is inferred from usage (e.g. `from.get!()`) or from the annotation.
-            for (inst_name, inst_span) in instance_params {
-                // If there's an annotation with this instance name, use its effect info
-                let effect_info = annotation.and_then(|ann| {
-                    let mut ty = ann;
-                    while let Type::Fun(_, ret, row) = ty {
-                        for entry in &row.effects {
-                            if entry.instance.as_deref() == Some(inst_name.as_str()) {
-                                return Some((entry.name.clone(), entry.args.clone()));
-                            }
-                        }
-                        ty = ret;
-                    }
-                    None
-                });
-
-                if let Some((eff_name, eff_args)) = effect_info {
-                    let handler_ty = Type::Con(
-                        "Handler".into(),
-                        vec![Type::Con(eff_name.clone(), eff_args)],
-                    );
-                    let scheme = Scheme {
-                        forall: vec![],
-                        constraints: vec![],
-                        ty: handler_ty,
-                    };
-                    let def_id = crate::ast::NodeId::fresh();
-                    self.env.insert_with_def(inst_name.clone(), scheme, def_id);
-                    self.handlers.insert(
-                        inst_name.clone(),
-                        super::HandlerInfo {
-                            effects: vec![eff_name],
-                            return_type: None,
-                            needs_effects: EffectRow::empty(),
-                            forall: vec![],
-                            arm_spans: std::collections::HashMap::new(),
-                            where_constraints: super::HandlerWhereConstraints::default(),
-                            source_module: None,
-                        },
-                    );
-                } else {
-                    // No annotation — infer from usage. Register a fresh handler binding
-                    // with unknown effect type; usage will constrain it.
-                    let fresh = self.fresh_var();
-                    let handler_ty = Type::Con("Handler".into(), vec![fresh]);
-                    let scheme = Scheme {
-                        forall: vec![],
-                        constraints: vec![],
-                        ty: handler_ty,
-                    };
-                    let def_id = crate::ast::NodeId::fresh();
-                    self.env.insert_with_def(inst_name.clone(), scheme, def_id);
-                    // Don't register in self.handlers yet — will be resolved from env
-                }
-                // Record for LSP
-                if let Some(def_id) = self.env.def_id(inst_name) {
-                    self.lsp.node_spans.insert(def_id, *inst_span);
-                    self.lsp.definitions.push((def_id, inst_name.clone(), *inst_span));
-                }
             }
 
             if let Some(guard) = guard {
@@ -1064,19 +996,7 @@ impl Checker {
 
         let declared_row = annotation
             .and_then(|ann| innermost_effect_row(&self.sub.apply(ann)))
-            .unwrap_or_else(|| {
-                // Unannotated functions with instance params (e.g. `transfer () {from, to} = ...`)
-                // infer their effects from the body. All other unannotated functions get an empty
-                // closed row, so undeclared effects are caught as errors.
-                let has_instance_params = clauses.iter().any(|c| {
-                    matches!(c, Decl::FunBinding { instance_params, .. } if !instance_params.is_empty())
-                });
-                if has_instance_params {
-                    all_body_effs.clone()
-                } else {
-                    EffectRow::empty()
-                }
-            });
+            .unwrap_or_else(EffectRow::empty);
 
         if !all_body_effs.is_empty() || !declared_row.is_empty() {
             let err_span = match clauses[0] {

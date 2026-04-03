@@ -1,6 +1,6 @@
 use crate::ast::{Annotated, BinOp, CaseArm, Decl, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
 
-use super::{Checker, Diagnostic, EffectEntry, EffectRow, Scheme, Type};
+use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
 use crate::token::Span;
 
 impl Checker {
@@ -326,109 +326,9 @@ impl Checker {
             ExprKind::EffectCall {
                 name,
                 qualifier,
-                instance,
                 ..
             } => {
-                if let Some(inst_name) = instance
-                    && let Some(def_id) = self.env.def_id(inst_name)
-                {
-                    self.record_reference(node_id, span, def_id);
-                }
-                let mut inferred_op_sig: Option<super::EffectOpSig> = None;
-                // For instance-qualified calls (e.g. `counter.put!`), resolve the
-                // effect qualifier from the handle binding's handler info.
-                let resolved_qualifier = if let Some(inst_name) = instance {
-                    if let Some(handler_info) = self.handlers.get(inst_name) {
-                        // Find which of the handler's effects contains this op
-                        let mut found = None;
-                        for eff_name in &handler_info.effects {
-                            if let Some(info) = self.effects.get(eff_name)
-                                && info.ops.iter().any(|o| o.name == *name)
-                            {
-                                found = Some(eff_name.clone());
-                                break;
-                            }
-                        }
-                        if found.is_none() {
-                            return Err(Diagnostic::error_at(
-                                span,
-                                format!(
-                                    "handler '{}' does not handle an effect with operation '{}'",
-                                    inst_name, name
-                                ),
-                            ));
-                        }
-                        found
-                    } else if let Some(effects) = self.handler_effects_from_env(inst_name) {
-                        let found: Option<String> = effects.into_iter().find(|eff_name| {
-                            self.effects
-                                .get(eff_name)
-                                .is_some_and(|info| info.ops.iter().any(|o| o.name == *name))
-                        });
-                        if found.is_none() {
-                            return Err(Diagnostic::error_at(
-                                span,
-                                format!(
-                                    "handler '{}' does not handle an effect with operation '{}'",
-                                    inst_name, name
-                                ),
-                            ));
-                        }
-                        found
-                    } else if let Some(handler_ty) = self.env.get(inst_name).map(|s| s.ty.clone()) {
-                        // Unannotated named instance params start as `Handler ?a`.
-                        // Infer the concrete handled effect from the unique op use here.
-                        let op_sig = self.lookup_effect_op(name, None, span)?;
-                        let effect_name = op_sig.effect_name.clone();
-
-                        let type_param_ids = self
-                            .effects
-                            .get(&effect_name)
-                            .map(|info| info.type_params.clone())
-                            .unwrap_or_default();
-                        let mut effect_args = Vec::new();
-                        for param_id in type_param_ids {
-                            if let Some(ty) = self
-                                .effect_meta
-                                .type_param_cache
-                                .get(&effect_name)
-                                .and_then(|m| m.get(&param_id))
-                                .cloned()
-                            {
-                                effect_args.push(ty);
-                            } else {
-                                let fresh = self.fresh_var();
-                                self.effect_meta
-                                    .type_param_cache
-                                    .entry(effect_name.clone())
-                                    .or_default()
-                                    .insert(param_id, fresh.clone());
-                                effect_args.push(fresh);
-                            }
-                        }
-
-                        let expected_handler_ty = Type::Con(
-                            "Handler".into(),
-                            vec![Type::Con(effect_name.clone(), effect_args)],
-                        );
-                        self.unify_at(&handler_ty, &expected_handler_ty, span)?;
-                        inferred_op_sig = Some(op_sig);
-                        Some(effect_name)
-                    } else {
-                        return Err(Diagnostic::error_at(
-                            span,
-                            format!("'{}' is not a handler binding", inst_name),
-                        ));
-                    }
-                } else {
-                    qualifier.clone()
-                };
-
-                let op_sig = if let Some(op_sig) = inferred_op_sig {
-                    op_sig
-                } else {
-                    self.lookup_effect_op(name, resolved_qualifier.as_deref(), span)?
-                };
+                let op_sig = self.lookup_effect_op(name, qualifier.as_deref(), span)?;
 
                 // Record call site -> handler arm for LSP go-to-def
                 if let Some((arm_span, arm_module)) = self
@@ -453,18 +353,8 @@ impl Checker {
                     }
                 }
                 // Emit the effect onto the accumulator.
-                // Instance-qualified calls emit named effects (e.g. `from: State`)
-                // so they propagate distinctly from unnamed effects.
-                if let Some(effect_name) = self.effect_for_op(name, resolved_qualifier.as_deref()) {
-                    if let Some(inst_name) = instance {
-                        let entry =
-                            EffectEntry::named(inst_name.clone(), effect_name.clone(), vec![]);
-                        if !self.effect_row.effects.iter().any(|e| e.matches(&entry)) {
-                            self.effect_row.effects.push(entry);
-                        }
-                    } else {
-                        self.emit_effect(effect_name.clone(), vec![]);
-                    }
+                if let Some(effect_name) = self.effect_for_op(name, qualifier.as_deref()) {
+                    self.emit_effect(effect_name.clone(), vec![]);
                 }
                 Ok(ty)
             }

@@ -137,12 +137,10 @@ impl Normalizer {
             ExprKind::EffectCall {
                 name,
                 qualifier,
-                instance,
                 args,
             } => Expr::synth(span, ExprKind::EffectCall {
                 name: name.clone(),
                 qualifier: qualifier.clone(),
-                instance: instance.clone(),
                 args: args
                     .iter()
                     .map(|a| self.normalize_and_lift(a, lifted))
@@ -497,7 +495,6 @@ pub fn normalize_effects(program: &Program) -> Program {
                 name,
                 name_span,
                 params,
-                instance_params,
                 guard,
                 body,
                 span,
@@ -506,7 +503,6 @@ pub fn normalize_effects(program: &Program) -> Program {
                 name: name.clone(),
                 name_span: *name_span,
                 params: params.clone(),
-                instance_params: instance_params.clone(),
                 guard: guard.clone(),
                 body: normalizer.normalize_expr(body),
                 span: *span,

@@ -188,8 +188,8 @@ pub(super) fn collect_ctor_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
 }
 
 /// Peel a chain of App nodes to find an EffectCall head and its arguments.
-/// Returns `Some((op_name, qualifier, instance, args))` if found.
-pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Option<&str>, Vec<&Expr>)> {
+/// Returns `Some((op_name, qualifier, args))` if found.
+pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
@@ -201,7 +201,6 @@ pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Op
             ExprKind::EffectCall {
                 name,
                 qualifier,
-                instance,
                 args: direct_args,
                 ..
             } => {
@@ -210,7 +209,7 @@ pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Op
                     "EffectCall.args should be empty (args are wrapped via App nodes)"
                 );
                 args.reverse();
-                return Some((name.as_str(), qualifier.as_deref(), instance.as_deref(), args));
+                return Some((name.as_str(), qualifier.as_deref(), args));
             }
             _ => return None,
         }
@@ -316,29 +315,11 @@ pub fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
             arity += 1;
         }
         for entry in &row.effects {
-            if entry.instance.is_none() {
-                effects.insert(entry.name.clone());
-            }
+            effects.insert(entry.name.clone());
         }
         current = ret;
     }
     (arity, effects.into_iter().collect())
-}
-
-/// Extract named effect instances from a typechecker `Type`.
-/// Returns sorted `(instance_name, effect_name)` pairs from all function rows.
-pub fn named_instances_from_type(ty: &Type) -> Vec<(String, String)> {
-    let mut named = BTreeSet::new();
-    let mut current = ty;
-    while let Type::Fun(_, ret, row) = current {
-        for entry in &row.effects {
-            if let Some(instance) = &entry.instance {
-                named.insert((instance.clone(), entry.name.clone()));
-            }
-        }
-        current = ret;
-    }
-    named.into_iter().collect()
 }
 
 /// Extract per-parameter absorbed effects from a function type.

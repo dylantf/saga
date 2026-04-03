@@ -266,12 +266,9 @@ pub fn format_expr(expr: &Expr) -> Doc {
         ExprKind::EffectCall {
             name,
             qualifier,
-            instance,
             args,
         } => {
-            let mut d = if let Some(inst) = instance {
-                Doc::text(format!("{}.{}!", inst, name))
-            } else if let Some(q) = qualifier {
+            let mut d = if let Some(q) = qualifier {
                 Doc::text(format!("{}.{}!", q, name))
             } else {
                 Doc::text(format!("{}!", name))
@@ -639,12 +636,11 @@ fn format_handler(handler: &Handler) -> Doc {
         Handler::Named(name, _) => Doc::text(name),
         Handler::Inline {
             named,
-            instance_bindings,
             arms,
             return_clause,
             dangling_trivia,
         } => {
-            let has_inline = !arms.is_empty() || return_clause.is_some() || !instance_bindings.is_empty();
+            let has_inline = !arms.is_empty() || return_clause.is_some();
             let has_trivia = named.iter().any(|a| {
                 a.trailing_comment.is_some() || !a.leading_trivia.is_empty()
             });
@@ -664,14 +660,6 @@ fn format_handler(handler: &Handler) -> Doc {
                 body_items.push(Doc::hardline());
                 body_items.push(format_trivia(&ann.leading_trivia));
                 body_items.push(Doc::text(format!("{},", ann.node.name)));
-                body_items.push(format_trailing(&ann.trailing_comment));
-            }
-            for ann in instance_bindings {
-                body_items.push(Doc::hardline());
-                body_items.push(format_trivia(&ann.leading_trivia));
-                body_items.push(Doc::text(format!("{}: ", ann.node.instance)));
-                body_items.push(super::expr::format_expr(&ann.node.handler));
-                body_items.push(Doc::text(","));
                 body_items.push(format_trailing(&ann.trailing_comment));
             }
             for ann in arms {

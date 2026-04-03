@@ -83,10 +83,7 @@ impl Checker {
         let mut undeclared = Vec::new();
         for entry in &body_effs.effects {
             if !declared.effects.iter().any(|e| e.matches(entry)) {
-                undeclared.push(match &entry.instance {
-                    Some(inst) => format!("{}: {}", inst, entry.name),
-                    None => entry.name.clone(),
-                });
+                undeclared.push(entry.name.clone());
             }
         }
         if undeclared.is_empty() {

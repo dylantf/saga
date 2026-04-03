@@ -40,7 +40,6 @@ impl Checker {
                         .iter()
                         .map(|entry| {
                             super::EffectEntry {
-                                instance: entry.instance.clone(),
                                 name: entry.name.clone(),
                                 args: entry.args.iter()
                                     .map(|t| {
