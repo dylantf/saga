@@ -49,13 +49,14 @@ fn collect_missing_handler_arms(
     for decl in program {
         if let Decl::HandlerDef {
             name,
-            effects,
-            arms,
+            body,
             recovered_arms,
             span,
             ..
         } = decl
         {
+            let effects = &body.effects;
+            let arms = &body.arms;
             let handler_start = line_index.offset_to_line_col(span.start, source);
             let handler_end = line_index.offset_to_line_col(span.end, source);
             let handler_range = Range {

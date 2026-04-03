@@ -53,7 +53,7 @@ fn emit_from_program(
         module_name,
         &elaborated,
         &ctx,
-        result.resolved_type_at_node_map(),
+        Some(&result),
         None,
     )
 }

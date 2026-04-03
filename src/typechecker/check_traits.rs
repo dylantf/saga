@@ -38,15 +38,15 @@ impl Checker {
                     effects: row
                         .effects
                         .iter()
-                        .map(|(name, args)| {
-                            (
-                                name.clone(),
-                                args.iter()
+                        .map(|entry| {
+                            super::EffectEntry {
+                                name: entry.name.clone(),
+                                args: entry.args.iter()
                                     .map(|t| {
                                         self.substitute_trait_param(trait_param_id, replacement, t)
                                     })
                                     .collect(),
-                            )
+                            }
                         })
                         .collect(),
                     tail: row.tail.as_ref().map(|t| {
@@ -447,7 +447,7 @@ impl Checker {
             let scope_result = self.exit_scope(body_scope);
             let body_field_candidates = scope_result.field_candidates;
             let body_effects: std::collections::HashSet<String> =
-                body_effs.effects.iter().map(|(n, _)| n.clone()).collect();
+                body_effs.effects.iter().map(|e| e.name.clone()).collect();
             if !body_effects.is_empty() || !declared_effects.is_empty() {
                 let undeclared: Vec<String> = body_effects
                     .difference(&declared_effects)

@@ -83,7 +83,7 @@ impl Checker {
         let inner_result = self.exit_scope(inner_scope);
 
         // Unnecessary handler check
-        if !handled.is_empty() && !inner_effs.effects.iter().any(|(n, _)| handled.contains(n)) {
+        if !handled.is_empty() && !inner_effs.effects.iter().any(|e| handled.contains(&e.name)) {
             let mut effects: Vec<_> = handled.iter().cloned().collect();
             effects.sort();
             self.collected_diagnostics.push(Diagnostic::warning_at(
@@ -138,7 +138,8 @@ impl Checker {
                                     let extra_types: Vec<Type> = extra_var_ids
                                         .iter()
                                         .map(|id| {
-                                            let mapped = mapping.get(id).cloned().unwrap_or(Type::Var(*id));
+                                            let mapped =
+                                                mapping.get(id).cloned().unwrap_or(Type::Var(*id));
                                             self.sub.apply(&mapped)
                                         })
                                         .collect();
@@ -155,12 +156,17 @@ impl Checker {
 
                         // Merge handler's needs effects into remaining, with fresh vars applied
                         let fresh_needs = EffectRow {
-                            effects: handler_info.needs_effects.effects.iter()
-                                .map(|(name, args)| {
-                                    (
-                                        name.clone(),
-                                        args.iter().map(|t| self.replace_vars(t, &mapping)).collect(),
-                                    )
+                            effects: handler_info
+                                .needs_effects
+                                .effects
+                                .iter()
+                                .map(|entry| super::EffectEntry {
+                                    name: entry.name.clone(),
+                                    args: entry
+                                        .args
+                                        .iter()
+                                        .map(|t| self.replace_vars(t, &mapping))
+                                        .collect(),
                                 })
                                 .collect(),
                             tail: None,
@@ -195,6 +201,8 @@ impl Checker {
                     }
                 }
 
+                let answer_ty = expr_ty.clone();
+
                 self.effect_meta.type_param_cache = inner_effect_cache;
 
                 let answer_ty = if let Some(ret_arm) = return_clause {
@@ -206,12 +214,12 @@ impl Checker {
                             Scheme {
                                 forall: vec![],
                                 constraints: vec![],
-                                ty: expr_ty.clone(),
+                                ty: answer_ty.clone(),
                             },
                             param_id,
                         );
                         self.lsp.node_spans.insert(param_id, *param_span);
-                        self.lsp.type_at_span.insert(*param_span, expr_ty.clone());
+                        self.lsp.type_at_span.insert(*param_span, answer_ty.clone());
                         self.lsp
                             .definitions
                             .push((param_id, param_name.clone(), *param_span));
@@ -221,12 +229,14 @@ impl Checker {
                     self.env = saved_env;
                     ret_ty
                 } else {
-                    expr_ty.clone()
+                    answer_ty
                 };
 
                 for arm in arms {
                     let arm = &arm.node;
-                    let op_sig = self.lookup_effect_op(&arm.op_name, arm.qualifier.as_deref(), arm.span).ok();
+                    let op_sig = self
+                        .lookup_effect_op(&arm.op_name, arm.qualifier.as_deref(), arm.span)
+                        .ok();
 
                     let saved_env = self.env.clone();
                     let saved_resume = self.resume_type.take();
@@ -285,7 +295,8 @@ impl Checker {
                     let arm_ty = self.infer_expr(&arm.body)?;
                     let arm_effs = self.restore_effects(saved_effs);
                     let own_effect = op_sig.as_ref().map(|sig| sig.effect_name.clone());
-                    let sibling_handled: HashSet<String> = handled.iter()
+                    let sibling_handled: HashSet<String> = handled
+                        .iter()
                         .filter(|e| own_effect.as_ref() != Some(e))
                         .cloned()
                         .collect();

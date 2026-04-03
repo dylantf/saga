@@ -1,25 +1,3 @@
-# Test: handler that re-performs the same effect (middleware pattern)
-# Does `handler X for Effect needs {Effect}` work?
-
-effect Counter {
-  fun increment : Unit -> Int
-}
-
-handler simple_counter for Counter {
-  increment () = resume 1
-}
-
-# Middleware: wraps Counter, doubles the result
-handler double_counter for Counter needs {Counter} {
-  increment () = {
-    let n = increment! ()
-    resume n * 2
-  }
-}
-
 main () = {
-  let result = {
-    increment! () with double_counter
-  } with simple_counter
-  println (show result)
+  println "Hello world"
 }

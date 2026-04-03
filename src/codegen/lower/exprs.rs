@@ -4,6 +4,7 @@
 use crate::ast::{BinOp, CaseArm, Expr, ExprKind, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::token::Span;
+use crate::typechecker::Type;
 use std::collections::HashMap;
 
 use super::pats::{self, lower_pat};
@@ -351,15 +352,16 @@ impl<'a> Lowerer<'a> {
                 // Build the function body (same logic as top-level multi-clause funs)
                 let source_arity = pats::lower_params(clauses[0].0).len();
                 let (arity, effects, param_absorbed_effects) = self
-                    .current_resolved_types
-                    .get(&fun_id)
+                    .check_result
+                    .as_ref()
+                    .and_then(|cr| cr.resolved_type_for_node(fun_id))
                     .map(|ty| {
-                        let (base_arity, effects) = arity_and_effects_from_type(ty);
+                        let (base_arity, effects) = arity_and_effects_from_type(&ty);
                         let effects = self.canonicalize_effects(effects);
                         let handler_count = self.effect_handler_ops(&effects).len();
                         let expanded_arity =
                             base_arity + handler_count + if handler_count > 0 { 1 } else { 0 };
-                        let param_absorbed_effects = param_absorbed_effects_from_type(ty)
+                        let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
                             .into_iter()
                             .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
                             .collect::<HashMap<usize, Vec<String>>>();
@@ -419,9 +421,9 @@ impl<'a> Lowerer<'a> {
                         if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
                             let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                             self.lower_effect_call(
-                                op_name,
-                                qualifier,
-                                &args_owned,
+                            op_name,
+                            qualifier,
+                            &args_owned,
                                 self.current_return_k.clone(),
                             )
                         } else if has_nested_effect_call(body) {
@@ -510,9 +512,9 @@ impl<'a> Lowerer<'a> {
                                 {
                                     let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                                     self.lower_effect_call(
-                                        op_name,
-                                        qualifier,
-                                        &args_owned,
+                            op_name,
+                            qualifier,
+                            &args_owned,
                                         self.current_return_k.clone(),
                                     )
                                 } else if has_nested_effect_call(body) {
@@ -575,6 +577,28 @@ impl<'a> Lowerer<'a> {
                 CExpr::LetRec(vec![(fun_name, arity, fun_body)], Box::new(rest_ce))
             }
             [first, rest @ ..] => {
+                // Handle binding: register as a handler alias so `with name`
+                // resolves correctly. For static references, this is purely a
+                // compile-time alias. For conditionals, we lower the condition
+                // and register a synthetic handler that dispatches at runtime.
+                // Dynamic handlers lower the RHS and bind it to a variable.
+                // Let bindings with handler values: detect and register the
+                // handler so `with name` resolves correctly.
+                if let Stmt::Let { pattern, value, .. } = first
+                    && let Pat::Var { name, .. } = pattern
+                    && self.is_handler_value(value)
+                {
+                    self.lower_handle_binding(name, value);
+                    if let Some((var, _effects, _has_return)) =
+                        self.handle_dynamic_vars.get(name.as_str()).cloned()
+                    {
+                        let rhs_ce = self.lower_expr(value);
+                        let rest_ce = self.lower_block(rest);
+                        return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
+                    }
+                    return self.lower_block(rest);
+                }
+
                 // If this let binding partially applies an effectful function,
                 // register the bound variable so call sites thread handlers.
                 if let Stmt::Let { pattern, .. } = first
@@ -826,9 +850,9 @@ impl<'a> Lowerer<'a> {
             // Direct effect call: pass K as the continuation
             let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
             self.lower_effect_call(
-                op_name,
-                qualifier,
-                &args_owned,
+                            op_name,
+                            qualifier,
+                            &args_owned,
                 Some(CExpr::Var(k_var.to_string())),
             )
         } else if collect_fun_call(expr)
@@ -1025,6 +1049,27 @@ impl<'a> Lowerer<'a> {
         inner
     }
 
+    /// Check if an expression produces a handler value.
+    fn is_handler_value(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::HandlerExpr { .. } => true,
+            ExprKind::Var { name } => {
+                self.resolve_handler_name_opt(name).is_some()
+                    || self.check_result.as_ref().is_some_and(|cr| {
+                        cr.handlers.contains_key(name)
+                            || self.dynamic_handler_info_from_expr(expr).is_some()
+                    })
+            }
+            ExprKind::If { then_branch, else_branch, .. } => {
+                self.is_handler_value(then_branch) || self.is_handler_value(else_branch)
+            }
+            ExprKind::App { .. } => {
+                self.dynamic_handler_info_from_expr(expr).is_some()
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn lower_tuple_elems(&mut self, elems: &[Expr]) -> CExpr {
         let mut vars: Vec<String> = Vec::new();
         let mut bindings: Vec<(String, CExpr)> = Vec::new();
@@ -1038,5 +1083,169 @@ impl<'a> Lowerer<'a> {
         bindings.into_iter().rev().fold(tuple, |body, (var, val)| {
             CExpr::Let(var, Box::new(val), Box::new(body))
         })
+    }
+
+    /// Lower a handle binding statement. For direct handler references, registers
+    /// a compile-time alias. For conditionals, the condition is lowered and the
+    /// handle binding stores a flag variable; handler dispatch uses both handlers'
+    /// arms wrapped in a conditional at runtime.
+    fn lower_handle_binding(&mut self, name: &str, value: &Expr) {
+        // Direct handler reference: compile-time alias
+        if let ExprKind::Var { name: handler_name } = &value.kind
+            && self.resolve_handler_name_opt(handler_name).is_some()
+        {
+            let canonical = self.resolve_handler_name(handler_name);
+            self.handler_canonical.insert(name.to_string(), canonical);
+            return;
+        }
+        // Handler expression: register arms directly under synthetic name
+        if let ExprKind::HandlerExpr { body } = &value.kind {
+            let synthetic = format!("__handler_expr_{}", value.id.0);
+            let canonical_effects = body.effects.iter()
+                .map(|e| self.canonicalize_effect(&e.name))
+                .collect();
+            self.handler_defs.insert(
+                synthetic.clone(),
+                super::HandlerInfo {
+                    effects: canonical_effects,
+                    arms: body.arms.iter().map(|a| a.node.clone()).collect(),
+                    return_clause: body.return_clause.clone(),
+                    source_module: None,
+                },
+            );
+            self.handler_canonical.insert(name.to_string(), synthetic);
+            return;
+        }
+        // Conditional: generate runtime dispatch
+        if let ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } = &value.kind
+        {
+            let then_canonical = self.resolve_handle_value(then_branch);
+            let else_canonical = self.resolve_handle_value(else_branch);
+
+            if let (Some(then_c), Some(else_c)) = (then_canonical, else_canonical) {
+                let cond_ce = self.lower_expr(cond);
+                let cond_var = self.fresh();
+                self.handle_cond_vars.insert(
+                    name.to_string(),
+                    (cond_var, cond_ce, then_c.clone(), else_c),
+                );
+                // Alias to then-branch for static resolution; conditional
+                // dispatch is handled in lower_with
+                self.handler_canonical.insert(name.to_string(), then_c);
+                return;
+            }
+        }
+
+        // Dynamic handler: RHS is an arbitrary expression (e.g. function call).
+        // Look up effect names from the typechecker's check result.
+        if let Some(cr) = &self.check_result {
+            let dynamic_info = cr.handlers.get(name)
+                .map(|info| {
+                    let effects = info.effects.iter()
+                        .map(|e| self.canonicalize_effect(e))
+                        .collect();
+                    let has_return = info.return_type.is_some();
+                    (effects, has_return)
+                })
+                .or_else(|| {
+                    cr.type_at_node
+                        .get(&value.id)
+                        .and_then(|ty| self.dynamic_handler_info_from_type(ty))
+                        .map(|effects| (effects, false))
+                });
+            let dynamic_info = dynamic_info.or_else(|| self.dynamic_handler_info_from_expr(value));
+            if let Some((effects, has_return)) = dynamic_info {
+                let var = self.fresh();
+                self.handle_dynamic_vars
+                    .insert(name.to_string(), (var, effects, has_return));
+            }
+        }
+    }
+
+    fn dynamic_handler_info_from_expr(&self, expr: &Expr) -> Option<(Vec<String>, bool)> {
+        let cr = self.check_result.as_ref()?;
+        if let Some(ty) = cr.type_at_node.get(&expr.id)
+            && let Some(effects) = self.dynamic_handler_info_from_type(ty)
+        {
+            return Some((effects, false));
+        }
+
+        if let ExprKind::Var { name } = &expr.kind
+            && let Some(scheme) = cr.env.get(name)
+            && let Some(effects) = self.dynamic_handler_info_from_type(&scheme.ty)
+        {
+            return Some((effects, false));
+        }
+
+        if let Some((func_name, _, args)) = collect_fun_call(expr)
+            && let Some(scheme) = cr.env.get(func_name)
+        {
+            let mut ty = scheme.ty.clone();
+            let arg_count = args.len();
+            for _ in 0..arg_count {
+                match ty {
+                    Type::Fun(_, ret, _) => ty = *ret,
+                    _ => break,
+                }
+            }
+            if let Some(effects) = self.dynamic_handler_info_from_type(&ty) {
+                return Some((effects, false));
+            }
+        }
+
+        None
+    }
+
+    fn dynamic_handler_info_from_type(&self, ty: &Type) -> Option<Vec<String>> {
+        if let Type::Con(name, args) = ty
+            && name == "Handler"
+        {
+            let effects: Vec<String> = args
+                .iter()
+                .filter_map(|arg| {
+                    if let Type::Con(effect_name, _) = arg {
+                        Some(self.canonicalize_effect(effect_name))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if effects.is_empty() { None } else { Some(effects) }
+        } else {
+            None
+        }
+    }
+
+    /// Resolve a handle binding's RHS to a canonical handler name.
+    /// Walks through variable references, if/else branches, and handler expressions.
+    fn resolve_handle_value(&self, expr: &Expr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Var { name } => {
+                Some(self.resolve_handler_name(name))
+            }
+            ExprKind::HandlerExpr { .. } => {
+                // Handler expressions registered under synthetic name
+                let synthetic = format!("__handler_expr_{}", expr.id.0);
+                if self.handler_defs.contains_key(&synthetic) {
+                    Some(synthetic)
+                } else {
+                    None
+                }
+            }
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.resolve_handle_value(then_branch)
+                    .or_else(|| self.resolve_handle_value(else_branch))
+            }
+            _ => None,
+        }
     }
 }

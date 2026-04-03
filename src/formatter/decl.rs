@@ -87,7 +87,8 @@ pub(super) fn is_block_like(expr: &Expr) -> bool {
         ExprKind::Block { .. }
         | ExprKind::Case { .. }
         | ExprKind::Do { .. }
-        | ExprKind::Receive { .. } => true,
+        | ExprKind::Receive { .. }
+        | ExprKind::HandlerExpr { .. } => true,
         // Multiline strings handle their own layout with hardlines
         ExprKind::Lit {
             value: Lit::String(_, kind),

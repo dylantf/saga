@@ -169,7 +169,7 @@ pub fn cmd_emit(file: &str) {
         "_script",
         &elaborated,
         &ctx,
-        result.resolved_type_at_node_map(),
+        Some(&result),
         Some(&source_file),
     );
     print!("{}", core_src);
@@ -299,16 +299,14 @@ pub fn cmd_test(filter: Option<&str>) {
         for (name, compiled) in &test_std_modules {
             if !all_modules.contains_key(name) {
                 let erlang_name = name.to_lowercase().replace('.', "_");
-                let current_type_at_node = result
+                let check_result = result
                     .module_check_results()
-                    .get(name)
-                    .map(|check| check.resolved_type_at_node_map())
-                    .unwrap_or_default();
+                    .get(name);
                 emit_module(
                     &erlang_name,
                     &compiled.elaborated,
                     &std_ctx,
-                    current_type_at_node,
+                    check_result,
                     &build_dir,
                     None,
                 );
@@ -342,7 +340,7 @@ pub fn cmd_test(filter: Option<&str>) {
             "_test",
             &elaborated,
             &test_ctx,
-            result.resolved_type_at_node_map(),
+            Some(&result),
             Some(&test_source_file),
         );
         let core_path = build_dir.join("_test.core");

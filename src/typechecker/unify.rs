@@ -19,11 +19,11 @@ pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
             Box::new(rename_vars(b, names)),
             EffectRow {
                 effects: row.effects.iter()
-                    .map(|(name, args)| {
-                        (
-                            name.clone(),
-                            args.iter().map(|t| rename_vars(t, names)).collect(),
-                        )
+                    .map(|entry| {
+                        super::EffectEntry {
+                            name: entry.name.clone(),
+                            args: entry.args.iter().map(|t| rename_vars(t, names)).collect(),
+                        }
                     })
                     .collect(),
                 tail: row.tail.as_ref().map(|t| Box::new(rename_vars(t, names))),
@@ -55,8 +55,8 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
         Type::Fun(a, b, row) => {
             collect_free_vars(a, out);
             collect_free_vars(b, out);
-            for (_, args) in &row.effects {
-                for t in args {
+            for entry in &row.effects {
+                for t in &entry.args {
                     collect_free_vars(t, out);
                 }
             }
@@ -144,10 +144,10 @@ impl Checker {
         let r1 = self.sub.apply_effect_row(row1);
         let r2 = self.sub.apply_effect_row(row2);
 
-        // Match effects by name and unify their type args pairwise
-        for (name, args1) in &r1.effects {
-            if let Some((_, args2)) = r2.effects.iter().find(|(n, _)| n == name) {
-                for (t1, t2) in args1.iter().zip(args2.iter()) {
+        // Match effects by identity (instance + name) and unify their type args pairwise
+        for entry1 in &r1.effects {
+            if let Some(entry2) = r2.effects.iter().find(|e| e.matches(entry1)) {
+                for (t1, t2) in entry1.args.iter().zip(entry2.args.iter()) {
                     self.unify(t1, t2)?;
                 }
             }
@@ -155,11 +155,11 @@ impl Checker {
 
         // Collect unmatched effects from each side
         let extras1: Vec<_> = r1.effects.iter()
-            .filter(|(n, _)| !r2.effects.iter().any(|(n2, _)| n2 == n))
+            .filter(|e| !r2.effects.iter().any(|e2| e2.matches(e)))
             .cloned()
             .collect();
         let extras2: Vec<_> = r2.effects.iter()
-            .filter(|(n, _)| !r1.effects.iter().any(|(n1, _)| n1 == n))
+            .filter(|e| !r1.effects.iter().any(|e1| e1.matches(e)))
             .cloned()
             .collect();
 
@@ -176,7 +176,7 @@ impl Checker {
                 } else {
                     // Both have unmatched effects -- genuinely incompatible
                     let mut extras: Vec<_> = extras1.iter().chain(extras2.iter())
-                        .map(|(n, _)| n.as_str())
+                        .map(|e| e.name.as_str())
                         .collect();
                     extras.sort();
                     extras.dedup();
@@ -267,11 +267,11 @@ impl Checker {
                     Box::new(self.replace_vars(b, mapping)),
                     EffectRow {
                         effects: row.effects.iter()
-                            .map(|(name, args)| {
-                                (
-                                    name.clone(),
-                                    args.iter().map(|t| self.replace_vars(t, mapping)).collect(),
-                                )
+                            .map(|entry| {
+                                super::EffectEntry {
+                                    name: entry.name.clone(),
+                                    args: entry.args.iter().map(|t| self.replace_vars(t, mapping)).collect(),
+                                }
                             })
                             .collect(),
                         tail: row.tail.as_ref().map(|t| Box::new(self.replace_vars(t, mapping))),
@@ -402,7 +402,7 @@ impl Checker {
                 let a_ty = self.convert_type_expr(from, params);
                 let b_ty = self.convert_type_expr(to, params);
                 {
-                    let effect_refs: Vec<(String, Vec<Type>)> = effects
+                    let effect_refs: Vec<super::EffectEntry> = effects
                         .iter()
                         .map(|e| {
                             // Record effect name reference
@@ -435,7 +435,7 @@ impl Checker {
                                 ));
                                 e.name.clone()
                             };
-                            (name, args)
+                            super::EffectEntry::unnamed(name, args)
                         })
                         .collect();
                     let tail = effect_row_var.as_ref().map(|(name, _)| {

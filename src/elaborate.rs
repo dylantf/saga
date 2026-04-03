@@ -328,9 +328,9 @@ impl Elaborator {
                     );
                 }
                 Decl::HandlerDef {
-                    name, where_clause, ..
+                    name, body, ..
                 } => {
-                    let dict_params = self.dict_params_from_where(where_clause);
+                    let dict_params = self.dict_params_from_where(&body.where_clause);
                     if !dict_params.is_empty() {
                         self.handler_dict_params.insert(name.clone(), dict_params);
                     }
@@ -507,19 +507,15 @@ impl Elaborator {
                     public,
                     name,
                     name_span,
-                    effects,
-                    needs,
-                    where_clause,
-                    arms,
-                    return_clause,
+                    body,
                     span,
                     ..
                 } => {
                     // Set up dict params from where clause so arm bodies can
                     // reference trait dicts (e.g. `show entity` -> `__dict_Show_a`)
-                    let saved = self.setup_dict_params(where_clause);
+                    let saved = self.setup_dict_params(&body.where_clause);
 
-                    let elab_arms: Vec<Annotated<HandlerArm>> = arms
+                    let elab_arms: Vec<Annotated<HandlerArm>> = body.arms
                         .iter()
                         .map(|ann| {
                             let arm = &ann.node;
@@ -532,7 +528,7 @@ impl Elaborator {
                             })
                         })
                         .collect();
-                    let elab_return = return_clause.as_ref().map(|rc| {
+                    let elab_return = body.return_clause.as_ref().map(|rc| {
                         Box::new(HandlerArm {
                             op_name: rc.op_name.clone(),
                             qualifier: rc.qualifier.clone(),
@@ -550,12 +546,14 @@ impl Elaborator {
                         public: *public,
                         name: name.clone(),
                         name_span: *name_span,
-                        effects: effects.clone(),
-                        needs: needs.clone(),
-                        where_clause: where_clause.clone(),
-                        arms: elab_arms,
+                        body: HandlerBody {
+                            effects: body.effects.clone(),
+                            needs: body.needs.clone(),
+                            where_clause: body.where_clause.clone(),
+                            arms: elab_arms,
+                            return_clause: elab_return,
+                        },
                         recovered_arms: vec![],
-                        return_clause: elab_return,
                         span: *span,
                         dangling_trivia: vec![],
                     });
@@ -1030,6 +1028,7 @@ impl Elaborator {
                                     body: self.elaborate_expr(body),
                                     span: *span,
                                 },
+
                                 Stmt::Expr(e) => Stmt::Expr(self.elaborate_expr(e)),
                             })
                         })
@@ -1218,6 +1217,35 @@ impl Elaborator {
                     with_expr
                 }
             }
+
+            ExprKind::HandlerExpr { body } => Expr::synth(
+                span,
+                ExprKind::HandlerExpr {
+                    body: HandlerBody {
+                        effects: body.effects.clone(),
+                        needs: body.needs.clone(),
+                        where_clause: body.where_clause.clone(),
+                        arms: body.arms.iter().map(|ann| {
+                            Annotated::bare(HandlerArm {
+                                op_name: ann.node.op_name.clone(),
+                                qualifier: ann.node.qualifier.clone(),
+                                params: ann.node.params.clone(),
+                                body: Box::new(self.elaborate_expr(&ann.node.body)),
+                                span: ann.node.span,
+                            })
+                        }).collect(),
+                        return_clause: body.return_clause.as_ref().map(|rc| {
+                            Box::new(HandlerArm {
+                                op_name: rc.op_name.clone(),
+                                qualifier: rc.qualifier.clone(),
+                                params: rc.params.clone(),
+                                body: Box::new(self.elaborate_expr(&rc.body)),
+                                span: rc.span,
+                            })
+                        }),
+                    },
+                },
+            ),
 
             ExprKind::Resume { value } => Expr::synth(
                 span,

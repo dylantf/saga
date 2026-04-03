@@ -107,7 +107,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         "_script",
         &elaborated,
         &ctx,
-        result.resolved_type_at_node_map(),
+        Some(&result),
         None,
     )
 }
@@ -137,6 +137,52 @@ fn assert_compiles(src: &str) {
         out,
         String::from_utf8_lossy(&status.stderr)
     );
+}
+
+fn assert_runs_and_stdout_contains(src: &str, needles: &[&str]) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    let out = emit_elaborated_with_std(src);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("dylang_run_test_{}_{id}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let core_path = dir.join("_script.core");
+    std::fs::write(&core_path, &out).unwrap();
+    let status = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        status.status.success(),
+        "erlc failed to compile:\n{}\nstderr: {}",
+        out,
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let run_output = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("'_script':main(), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run_output.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run_output.stdout);
+    for needle in needles {
+        assert!(
+            stdout.contains(needle),
+            "expected '{needle}' in output, got: {stdout}"
+        );
+    }
 }
 
 fn assert_contains(out: &str, needle: &str) {

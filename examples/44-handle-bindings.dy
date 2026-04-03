@@ -1,0 +1,55 @@
+# Handler bindings: conditional handler selection and handler expressions
+
+effect Log {
+  fun log : String -> Unit
+}
+
+# Handler declaration
+handler console_log for Log {
+  log msg = {
+    println msg
+    resume ()
+  }
+}
+
+handler quiet_log for Log {
+  log _ = resume ()
+}
+
+fun make_logger : (is_dev: Bool) -> Handler Log
+make_logger is_dev = handler for Log {
+  log msg = {
+    if is_dev then resume println $"[PREFIX] {msg}" else resume ()
+  }
+}
+
+main () = {
+  # Bound handler
+  let logger = console_log
+  log! "hello from let binding" with logger
+  log! "hello from inline block" with {logger}
+
+  # Conditional handler binding (True branch)
+  let dev = True
+  let cond_logger = if dev then console_log else quiet_log
+  log! "conditional true (should print)" with cond_logger
+
+  # Conditional handler binding (False branch)
+  let cond_logger2 = if False then console_log else quiet_log
+  log! "conditional false (should NOT print)" with cond_logger2
+
+  # Handler factory function
+  let cond_logger3 = make_logger dev
+  log! "conditional true (should print) from handler factory" with cond_logger3
+
+  # Handler expression
+  let bound_logger = handler for Log {
+    log msg = resume println msg
+  }
+  log! "hello from handler expression" with bound_logger
+
+  # Inline handler
+  log! "hello from inline handler" with {
+    log msg = resume println msg
+  }
+}

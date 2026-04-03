@@ -4,8 +4,8 @@ use crate::ast::{self, Decl, ExprKind, Lit};
 
 use super::result::CheckResult;
 use super::{
-    Checker, Diagnostic, EffectDefInfo, EffectOpSig, EffectRow, HandlerInfo, RecordInfo, Scheme,
-    Span, Type, find_effect_call,
+    Checker, Diagnostic, EffectDefInfo, EffectEntry, EffectOpSig, EffectRow, HandlerInfo,
+    RecordInfo, Scheme, Span, Type, find_effect_call,
 };
 
 /// Check if an expression is a compile-time inlineable value:
@@ -145,7 +145,7 @@ impl Checker {
             .env
             .get("main")
             .and_then(|s| innermost_effect_row(&self.sub.apply(&s.ty)))
-            .map(|r| r.effects.iter().map(|(n, _)| n.clone()).collect())
+            .map(|r| r.effects.iter().map(|e| e.name.clone()).collect())
             .unwrap_or_default();
         if !main_effects.is_empty() {
             let span = program.iter().find_map(|d| {
@@ -540,7 +540,7 @@ impl Checker {
 
                 // Build effect row from the function's `needs` clause.
                 let fun_effect_row = if !effects.is_empty() || effect_row_var.is_some() {
-                    let effect_refs: Vec<(String, Vec<Type>)> = effects
+                    let effect_refs: Vec<EffectEntry> = effects
                         .iter()
                         .map(|e| {
                             let args = e
@@ -569,7 +569,7 @@ impl Checker {
                                 ));
                                 e.name.clone()
                             };
-                            (name, args)
+                            EffectEntry::unnamed(name, args)
                         })
                         .collect();
                     let tail = effect_row_var.as_ref().map(|(rv_name, _)| {
@@ -867,6 +867,7 @@ impl Checker {
 
         // Snapshot pending constraints so we can partition new ones after body checking
         let constraints_before = self.trait_state.pending_constraints.len();
+        let mut returned_handler_info: Option<super::HandlerInfo> = None;
 
         // Save and clear effect tracking and field candidate tracking for this function body
         let body_scope = self.enter_scope();
@@ -915,6 +916,7 @@ impl Checker {
             }
 
             let saved_env = self.env.clone();
+            let saved_handlers = self.handlers.clone();
 
             for (pat, ty) in params.iter().zip(param_types.iter()) {
                 self.bind_pattern(pat, ty)?;
@@ -934,9 +936,13 @@ impl Checker {
             }
 
             let body_ty = self.infer_expr(body)?;
+            if returned_handler_info.is_none() {
+                returned_handler_info = self.extract_handler_info(body);
+            }
             self.unify_at(&result_ty, &body_ty, body.span)?;
 
             self.env = saved_env;
+            self.handlers = saved_handlers;
         }
         // Collect accumulated effects and restore outer scope
         let all_body_effs = self.restore_effects(saved_effs);
@@ -990,7 +996,7 @@ impl Checker {
 
         let declared_row = annotation
             .and_then(|ann| innermost_effect_row(&self.sub.apply(ann)))
-            .unwrap_or_else(|| EffectRow::closed(vec![]));
+            .unwrap_or_else(EffectRow::empty);
 
         if !all_body_effs.is_empty() || !declared_row.is_empty() {
             let err_span = match clauses[0] {
@@ -1008,12 +1014,12 @@ impl Checker {
             let body_effect_names: std::collections::HashSet<String> = all_body_effs
                 .effects
                 .iter()
-                .map(|(n, _)| n.clone())
+                .map(|e| e.name.clone())
                 .collect();
             let declared_effects: std::collections::HashSet<String> = declared_row
                 .effects
                 .iter()
-                .map(|(n, _)| n.clone())
+                .map(|e| e.name.clone())
                 .collect();
             let unused: Vec<_> = declared_effects.difference(&body_effect_names).collect();
             if !unused.is_empty() {
@@ -1045,6 +1051,12 @@ impl Checker {
                     ),
                 ));
             }
+        }
+
+        if let Some(info) = returned_handler_info {
+            self.handler_funs.insert(name.to_string(), info);
+        } else {
+            self.handler_funs.remove(name);
         }
 
         // Build curried function type. Effect row comes from:
@@ -1605,17 +1617,14 @@ impl Checker {
             id: def_id,
             name,
             name_span,
-            effects: effect_names,
-            needs,
-            where_clause,
-            arms,
-            return_clause,
+            body,
             span,
             ..
         } = decl
         else {
             unreachable!("register_handler called with non-HandlerDef");
         };
+        let ast::HandlerBody { effects: effect_names, needs, where_clause, arms, return_clause } = body;
         let return_clause = return_clause.as_deref();
         // Save and clear effect/field tracking for this handler body
         let body_scope = self.enter_scope();
@@ -1857,7 +1866,7 @@ impl Checker {
         let body_effects: std::collections::HashSet<String> = all_handler_effs
             .effects
             .iter()
-            .map(|(n, _)| n.clone())
+            .map(|e| e.name.clone())
             .collect();
         if !body_effects.is_empty() || !declared_effects.is_empty() {
             let err_span = arms.first().map(|a| a.node.span).unwrap_or(*span);
@@ -1927,8 +1936,8 @@ impl Checker {
         } else {
             vec![]
         };
-        for (_, args) in &all_handler_effs.effects {
-            for t in args {
+        for entry in &all_handler_effs.effects {
+            for t in &entry.args {
                 super::collect_free_vars(t, &mut forall);
             }
         }
@@ -1998,13 +2007,29 @@ impl Checker {
             },
         );
 
+        // Build Handler type from the effects this handler handles.
+        // E.g. `handler h for Log` -> Con("Handler", [Con("Log", [])])
+        // E.g. `handler h for State Int` -> Con("Handler", [Con("State", [Int])])
+        let handler_effect_types: Vec<Type> = effect_names
+            .iter()
+            .map(|e| {
+                let type_args: Vec<Type> = e
+                    .type_args
+                    .iter()
+                    .map(|ta| self.convert_type_expr(ta, &mut vec![]))
+                    .collect();
+                Type::Con(e.name.clone(), type_args)
+            })
+            .collect();
+        let handler_ty = Type::Con("Handler".into(), handler_effect_types);
+
         // Put the handler name in the env so it can be referenced
         self.env.insert_with_def(
             name.into(),
             Scheme {
                 forall: vec![],
                 constraints: vec![],
-                ty: Type::unit(), // handlers don't have a meaningful standalone type
+                ty: handler_ty,
             },
             *def_id,
         );

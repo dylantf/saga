@@ -1,4 +1,4 @@
-use crate::ast::{Annotated, BinOp, CaseArm, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
+use crate::ast::{Annotated, BinOp, CaseArm, Decl, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
 
 use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
 use crate::token::Span;
@@ -22,15 +22,27 @@ impl Checker {
             }),
 
             ExprKind::Var { name, .. } => {
-                let resolved_name = self.scope_map.resolve_value(name)
-                    .map(|s| s.to_string()).unwrap_or_else(|| name.clone());
+                let resolved_name = self
+                    .scope_map
+                    .resolve_value(name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| name.clone());
                 // Try bare name first (locals), then resolved name (imports)
                 let env_lookup = self.env.get(name).or_else(|| self.env.get(&resolved_name));
                 if let Some(scheme) = env_lookup {
                     let scheme = scheme.clone();
                     // Propagate effect type params from callee's annotations.
-                    let effect_key = if self.effect_meta.fun_type_constraints.contains_key(name) { name.clone() } else { resolved_name.clone() };
-                    if let Some(constraints) = self.effect_meta.fun_type_constraints.get(&effect_key).cloned() {
+                    let effect_key = if self.effect_meta.fun_type_constraints.contains_key(name) {
+                        name.clone()
+                    } else {
+                        resolved_name.clone()
+                    };
+                    if let Some(constraints) = self
+                        .effect_meta
+                        .fun_type_constraints
+                        .get(&effect_key)
+                        .cloned()
+                    {
                         for (effect_name, concrete_types) in &constraints {
                             if let Some(info) = self.effects.get(effect_name).cloned() {
                                 let mapping: std::collections::HashMap<u32, Type> = info
@@ -39,26 +51,27 @@ impl Checker {
                                     .zip(concrete_types.iter())
                                     .map(|(&param_id, ty)| (param_id, ty.clone()))
                                     .collect();
-                                self.effect_meta.type_param_cache
+                                self.effect_meta
+                                    .type_param_cache
                                     .insert(effect_name.clone(), mapping);
                             }
                         }
                     }
-                    let (mut ty, constraints) = self.instantiate(&scheme);
+                    let (ty, constraints) = self.instantiate(&scheme);
                     for (trait_name, trait_ty, extra_types) in constraints {
-                        self.trait_state.pending_constraints
-                            .push((trait_name, extra_types, trait_ty, span, node_id));
-                    }
-                    if let Some(eff_constraints) =
-                        self.effect_meta.fun_type_constraints.get(&effect_key).cloned()
-                        && let Type::Fun(a, b, _) = ty
-                    {
-                        let eff_refs: Vec<(String, Vec<Type>)> =
-                            eff_constraints.into_iter().collect();
-                        ty = Type::Fun(a, b, super::EffectRow::closed(eff_refs));
+                        self.trait_state.pending_constraints.push((
+                            trait_name,
+                            extra_types,
+                            trait_ty,
+                            span,
+                            node_id,
+                        ));
                     }
                     self.record_type(node_id, &ty);
-                    let def_id = self.env.def_id(name).or_else(|| self.env.def_id(&resolved_name));
+                    let def_id = self
+                        .env
+                        .def_id(name)
+                        .or_else(|| self.env.def_id(&resolved_name));
                     if let Some(def_id) = def_id {
                         self.record_reference(node_id, span, def_id);
                     }
@@ -72,14 +85,23 @@ impl Checker {
             }
 
             ExprKind::Constructor { name, .. } => {
-                let resolved_ctor = self.scope_map.resolve_constructor(name)
-                    .map(|s| s.to_string()).unwrap_or_else(|| name.clone());
-                let ctor_lookup = self.constructors.get(name).or_else(|| self.constructors.get(&resolved_ctor));
+                let resolved_ctor = self
+                    .scope_map
+                    .resolve_constructor(name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| name.clone());
+                let ctor_lookup = self
+                    .constructors
+                    .get(name)
+                    .or_else(|| self.constructors.get(&resolved_ctor));
                 if let Some(scheme) = ctor_lookup {
                     let scheme = scheme.clone();
                     let (ty, _) = self.instantiate(&scheme);
                     self.record_type(node_id, &ty);
-                    let def_id = self.lsp.constructor_def_ids.get(name)
+                    let def_id = self
+                        .lsp
+                        .constructor_def_ids
+                        .get(name)
                         .or_else(|| self.lsp.constructor_def_ids.get(&resolved_ctor))
                         .copied();
                     if let Some(def_id) = def_id {
@@ -106,7 +128,10 @@ impl Checker {
                         &Type::Fun(
                             Box::new(arg_ty),
                             Box::new(ret_ty.clone()),
-                            EffectRow { effects: vec![], tail: Some(Box::new(eff_row_var)) },
+                            EffectRow {
+                                effects: vec![],
+                                tail: Some(Box::new(eff_row_var)),
+                            },
                         ),
                         span,
                     )
@@ -145,8 +170,8 @@ impl Checker {
                 if let Type::Fun(p, _, _) = func_shallow {
                     let param_shallow = self.sub.resolve_var(p);
                     if let Type::Fun(_, _, row) = param_shallow {
-                        let absorbed: std::collections::HashSet<String> = row
-                            .effects.iter().map(|(n, _)| n.clone()).collect();
+                        let absorbed: std::collections::HashSet<String> =
+                            row.effects.iter().map(|e| e.name.clone()).collect();
                         self.effect_row = self.effect_row.subtract(&absorbed);
                     }
                 }
@@ -169,7 +194,13 @@ impl Checker {
                 let left_ty = self.infer_expr(left)?;
                 let right_ty = self.infer_expr(right)?;
                 match op {
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloatDiv | BinOp::IntDiv | BinOp::Mod | BinOp::FloatMod => {
+                    BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::FloatDiv
+                    | BinOp::IntDiv
+                    | BinOp::Mod
+                    | BinOp::FloatMod => {
                         self.unify_at(&left_ty, &right_ty, span)?;
                         self.trait_state.pending_constraints.push((
                             "Num".into(),
@@ -193,7 +224,8 @@ impl Checker {
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         self.unify_at(&left_ty, &right_ty, span)?;
-                        let ord_name = self.resolve_trait_name("Ord")
+                        let ord_name = self
+                            .resolve_trait_name("Ord")
                             .unwrap_or_else(|| "Ord".into());
                         self.trait_state.pending_constraints.push((
                             ord_name,
@@ -225,8 +257,13 @@ impl Checker {
 
             ExprKind::UnaryMinus { expr: inner, .. } => {
                 let ty = self.infer_expr(inner)?;
-                self.trait_state.pending_constraints
-                    .push(("Num".into(), vec![], ty.clone(), span, node_id));
+                self.trait_state.pending_constraints.push((
+                    "Num".into(),
+                    vec![],
+                    ty.clone(),
+                    span,
+                    node_id,
+                ));
                 Ok(ty)
             }
 
@@ -276,22 +313,20 @@ impl Checker {
                 self.infer_record_create(name, fields, span)
             }
 
-            ExprKind::AnonRecordCreate { fields, .. } => {
-                self.infer_anon_record_create(fields)
-            }
+            ExprKind::AnonRecordCreate { fields, .. } => self.infer_anon_record_create(fields),
 
             ExprKind::FieldAccess {
                 expr: inner, field, ..
-            } => {
-                self.infer_field_access(inner, field, span)
-            }
+            } => self.infer_field_access(inner, field, span),
 
             ExprKind::RecordUpdate { record, fields, .. } => {
                 self.infer_record_update(record, fields, span)
             }
 
             ExprKind::EffectCall {
-                name, qualifier, ..
+                name,
+                qualifier,
+                ..
             } => {
                 let op_sig = self.lookup_effect_op(name, qualifier.as_deref(), span)?;
 
@@ -303,7 +338,8 @@ impl Checker {
                     .rev()
                     .find_map(|map| map.get(name.as_str()))
                 {
-                    self.lsp.effect_call_targets
+                    self.lsp
+                        .effect_call_targets
                         .insert(span, (*arm_span, arm_module.clone()));
                 }
 
@@ -316,7 +352,7 @@ impl Checker {
                         ty = Type::arrow(param_ty.clone(), ty);
                     }
                 }
-                // Emit the effect onto the accumulator
+                // Emit the effect onto the accumulator.
                 if let Some(effect_name) = self.effect_for_op(name, qualifier.as_deref()) {
                     self.emit_effect(effect_name.clone(), vec![]);
                 }
@@ -327,9 +363,7 @@ impl Checker {
                 expr: inner,
                 handler,
                 ..
-            } => {
-                self.infer_with(inner, handler, span, node_id)
-            }
+            } => self.infer_with(inner, handler, span, node_id),
 
             ExprKind::Resume { value, .. } => {
                 let val_ty = self.infer_expr(value)?;
@@ -352,7 +386,11 @@ impl Checker {
                 Ok(Type::Con("Tuple".into(), tys))
             }
 
-            ExprKind::QualifiedName { module, name, canonical_module } => {
+            ExprKind::QualifiedName {
+                module,
+                name,
+                canonical_module,
+            } => {
                 if name.is_empty() {
                     return Ok(self.fresh_var());
                 }
@@ -368,7 +406,10 @@ impl Checker {
                         && !self.modules.exports.contains_key(module.as_str())
                     {
                         // Alias = full module name so only Std.X.y is registered
-                        if self.typecheck_import(&parts, Some(module), None, span).is_ok() {
+                        if self
+                            .typecheck_import(&parts, Some(module), None, span)
+                            .is_ok()
+                        {
                             // Register synthetic import so resolver/codegen can see it
                             self.prelude_imports.push(crate::ast::Decl::Import {
                                 id: crate::ast::NodeId::fresh(),
@@ -380,16 +421,33 @@ impl Checker {
                         }
                     }
                 }
-                let resolved_key = self.scope_map.resolve_value(&key).map(|s| s.to_string()).unwrap_or_else(|| key.clone());
-                match self.env.get(&key).or_else(|| self.env.get(&resolved_key)).cloned() {
+                let resolved_key = self
+                    .scope_map
+                    .resolve_value(&key)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| key.clone());
+                match self
+                    .env
+                    .get(&key)
+                    .or_else(|| self.env.get(&resolved_key))
+                    .cloned()
+                {
                     Some(scheme) => {
                         let (ty, constraints) = self.instantiate(&scheme);
                         for (trait_name, trait_ty, extra_types) in constraints {
-                            self.trait_state.pending_constraints
-                                .push((trait_name, extra_types, trait_ty, span, node_id));
+                            self.trait_state.pending_constraints.push((
+                                trait_name,
+                                extra_types,
+                                trait_ty,
+                                span,
+                                node_id,
+                            ));
                         }
                         self.record_type(node_id, &ty);
-                        let def_id = self.env.def_id(&key).or_else(|| self.env.def_id(&resolved_key));
+                        let def_id = self
+                            .env
+                            .def_id(&key)
+                            .or_else(|| self.env.def_id(&resolved_key));
                         if let Some(def_id) = def_id {
                             self.record_reference(node_id, span, def_id);
                         }
@@ -440,13 +498,11 @@ impl Checker {
 
             ExprKind::Receive {
                 arms, after_clause, ..
-            } => {
-                self.infer_receive(
-                    arms,
-                    after_clause.as_ref().map(|(t, b)| (t.as_ref(), b.as_ref())),
-                    span,
-                )
-            }
+            } => self.infer_receive(
+                arms,
+                after_clause.as_ref().map(|(t, b)| (t.as_ref(), b.as_ref())),
+                span,
+            ),
 
             ExprKind::Ascription {
                 expr: inner,
@@ -458,6 +514,28 @@ impl Checker {
                 self.unify_at(&inferred, &ann_ty, span)?;
                 self.record_type(node_id, &ann_ty);
                 Ok(ann_ty)
+            }
+
+            ExprKind::HandlerExpr { body } => {
+                // Create a synthetic HandlerDef and reuse register_handler
+                let synthetic_name = format!("__handler_expr_{}", node_id.0);
+                let synthetic_decl = Decl::HandlerDef {
+                    id: node_id,
+                    doc: vec![],
+                    public: false,
+                    name: synthetic_name.clone(),
+                    name_span: span,
+                    body: body.clone(),
+                    recovered_arms: vec![],
+                    dangling_trivia: vec![],
+                    span,
+                };
+                self.register_handler(&synthetic_decl)?;
+                // register_handler inserted the Handler type into self.env
+                let scheme = self.env.get(&synthetic_name).unwrap();
+                let ty = scheme.ty.clone();
+                self.record_type(node_id, &ty);
+                Ok(ty)
             }
 
             ExprKind::DictMethodAccess { .. }
@@ -612,6 +690,81 @@ impl Checker {
         Ok(result_ty)
     }
 
+    /// Extract HandlerInfo from a handle binding's RHS expression.
+    /// Handles direct variable references, if/else conditionals, and handler expressions.
+    pub(crate) fn extract_handler_info(&self, expr: &Expr) -> Option<super::HandlerInfo> {
+        fn applied_fun_name(expr: &Expr) -> Option<&str> {
+            match &expr.kind {
+                ExprKind::Var { name, .. } => Some(name.as_str()),
+                ExprKind::App { func, .. } => applied_fun_name(func),
+                _ => None,
+            }
+        }
+        match &expr.kind {
+            ExprKind::Var { name } => self.handlers.get(name).cloned(),
+            ExprKind::App { .. } => applied_fun_name(expr)
+                .and_then(|name| self.handler_funs.get(name).cloned()),
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                // For conditionals, try to extract from either branch
+                // (both should handle the same effects, verified by type unification)
+                self.extract_handler_info(then_branch)
+                    .or_else(|| self.extract_handler_info(else_branch))
+            }
+            ExprKind::HandlerExpr { .. } => {
+                // Handler expressions are registered under a synthetic name by infer_expr
+                let synthetic = format!("__handler_expr_{}", expr.id.0);
+                self.handlers.get(&synthetic).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    /// Build a minimal HandlerInfo from a Handler type.
+    /// Used for dynamic handle bindings where the handler arms aren't statically known.
+    fn handler_info_from_type(&self, ty: &Type) -> Option<super::HandlerInfo> {
+        let resolved = self.sub.apply(ty);
+        if let Type::Con(ref name, ref args) = resolved
+            && name == "Handler"
+        {
+            let effects: Vec<String> = args
+                .iter()
+                .filter_map(|arg| {
+                    if let Type::Con(eff_name, _) = self.sub.apply(arg) {
+                        // Try to find canonical name
+                        self.effects
+                            .keys()
+                            .find(|k| k.ends_with(&format!(".{}", eff_name)) || *k == &eff_name)
+                            .cloned()
+                            .or(Some(eff_name))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if effects.is_empty() {
+                return None;
+            }
+            Some(super::HandlerInfo {
+                effects,
+                return_type: None,
+                needs_effects: super::EffectRow {
+                    effects: vec![],
+                    tail: None,
+                },
+                forall: vec![],
+                arm_spans: std::collections::HashMap::new(),
+                where_constraints: std::collections::HashMap::new(),
+                source_module: self.current_module.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn infer_block(&mut self, stmts: &[Annotated<Stmt>]) -> Result<Type, Diagnostic> {
         let mut last_ty = Type::unit();
         let mut errors: Vec<Diagnostic> = Vec::new();
@@ -654,14 +807,23 @@ impl Checker {
                     } = pattern
                     {
                         self.generalize_let_binding(
-                            name, *pat_id, *var_span, &ty, has_deferred_effects,
+                            name,
+                            *pat_id,
+                            *var_span,
+                            &ty,
+                            has_deferred_effects,
                         );
+                        // If the RHS is a handler, register it so `with name` works.
+                        if let Some(info) = self.extract_handler_info(value) {
+                            self.handlers.insert(name.clone(), info);
+                        } else if let Some(info) = self.handler_info_from_type(&ty) {
+                            self.handlers.insert(name.clone(), info);
+                        }
                     } else {
                         if let Err(e) = self.bind_pattern(pattern, &ty) {
                             errors.push(e);
                         }
-                        if let Err(e) = self.check_let_pattern_irrefutable(pattern, &ty)
-                        {
+                        if let Err(e) = self.check_let_pattern_irrefutable(pattern, &ty) {
                             errors.push(e);
                         }
                     }
@@ -751,7 +913,11 @@ impl Checker {
                         let mut clause_ty = body_ty;
                         for (j, param_ty) in param_types.into_iter().rev().enumerate() {
                             if j == 0 && !body_effs.effects.is_empty() {
-                                clause_ty = Type::Fun(Box::new(param_ty), Box::new(clause_ty), body_effs.clone());
+                                clause_ty = Type::Fun(
+                                    Box::new(param_ty),
+                                    Box::new(clause_ty),
+                                    body_effs.clone(),
+                                );
                             } else {
                                 clause_ty = Type::arrow(param_ty, clause_ty);
                             }
@@ -767,14 +933,17 @@ impl Checker {
                     // Don't increment i -- the while loop already advanced it
                     continue;
                 }
+
+
                 Stmt::Expr(expr) => {
                     match self.infer_expr(expr) {
                         Ok(ty) => {
                             if i + 1 < stmts.len() {
-                                self.pending_warnings.push(super::PendingWarning::DiscardedValue {
-                                    span: expr.span,
-                                    ty: ty.clone(),
-                                });
+                                self.pending_warnings
+                                    .push(super::PendingWarning::DiscardedValue {
+                                        span: expr.span,
+                                        ty: ty.clone(),
+                                    });
                             }
                             last_ty = ty;
                         }
@@ -806,8 +975,8 @@ impl Checker {
     ) {
         let mut scheme = self.generalize(ty);
 
-        self.trait_state.pending_constraints
-            .retain(|(trait_name, _trait_type_args, cty, _span, node_id)| {
+        self.trait_state.pending_constraints.retain(
+            |(trait_name, _trait_type_args, cty, _span, node_id)| {
                 let resolved = self.sub.apply(cty);
                 if let Type::Var(id) = resolved
                     && scheme.forall.contains(&id)
@@ -818,11 +987,11 @@ impl Checker {
                         .any(|(t, v, _)| t == trait_name && *v == id)
                     {
                         // Resolve extra type arg var IDs through substitution
-                        let extra_resolved: Vec<Type> = _trait_type_args
-                            .iter()
-                            .map(|t| self.sub.apply(t))
-                            .collect();
-                        scheme.constraints.push((trait_name.clone(), id, extra_resolved));
+                        let extra_resolved: Vec<Type> =
+                            _trait_type_args.iter().map(|t| self.sub.apply(t)).collect();
+                        scheme
+                            .constraints
+                            .push((trait_name.clone(), id, extra_resolved));
                     }
                     self.evidence.push(super::TraitEvidence {
                         node_id: *node_id,
@@ -834,7 +1003,8 @@ impl Checker {
                     return false;
                 }
                 true
-            });
+            },
+        );
 
         let operator_traits: std::collections::HashSet<&str> =
             ["Num", "Semigroup", "Eq"].into_iter().collect();
@@ -856,14 +1026,14 @@ impl Checker {
                 .insert(name.to_string(), (dict_params, arity));
         }
 
-        self.env
-            .insert_with_def(name.to_string(), scheme, pat_id);
+        self.env.insert_with_def(name.to_string(), scheme, pat_id);
         if has_deferred_effects {
             self.effect_meta.known_let_bindings.insert(name.to_string());
         }
         self.lsp.node_spans.insert(pat_id, var_span);
         self.record_type_at_span(var_span, ty);
-        self.lsp.definitions
+        self.lsp
+            .definitions
             .push((pat_id, name.to_string(), var_span));
     }
 
@@ -884,8 +1054,8 @@ impl Checker {
                 let mut extra_effects: Vec<&str> = actual_row
                     .effects
                     .iter()
-                    .filter(|(n, _)| !expected_row.effects.iter().any(|(en, _)| en == n))
-                    .map(|(n, _)| n.as_str())
+                    .filter(|e| !expected_row.effects.iter().any(|en| en.name == e.name))
+                    .map(|e| e.name.as_str())
                     .collect();
                 if !extra_effects.is_empty() {
                     extra_effects.sort();
@@ -898,7 +1068,7 @@ impl Checker {
                         let mut expected_names: Vec<&str> = expected_row
                             .effects
                             .iter()
-                            .map(|(n, _)| n.as_str())
+                            .map(|e| e.name.as_str())
                             .collect();
                         expected_names.sort();
                         format!(
@@ -913,5 +1083,4 @@ impl Checker {
         }
         Ok(())
     }
-
 }

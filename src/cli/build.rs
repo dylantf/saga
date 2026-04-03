@@ -79,7 +79,7 @@ pub fn emit_module(
     module_name: &str,
     elaborated: &ast::Program,
     ctx: &codegen::CodegenContext,
-    current_resolved_types: std::collections::HashMap<ast::NodeId, typechecker::Type>,
+    check_result: Option<&typechecker::CheckResult>,
     build_dir: &Path,
     source_file: Option<&codegen::SourceFile>,
 ) {
@@ -88,7 +88,7 @@ pub fn emit_module(
         &erlang_name,
         elaborated,
         ctx,
-        current_resolved_types,
+        check_result,
         source_file,
     );
     let core_path = build_dir.join(format!("{}.core", erlang_name));
@@ -501,20 +501,16 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
             module_name.to_lowercase().replace('.', "_")
         };
         let sf = source_files.get(module_name);
-        let current_resolved_types = if module_name == "Main" {
-            result.resolved_type_at_node_map()
+        let check_result = if module_name == "Main" {
+            Some(&result)
         } else {
-            result
-                .module_check_results()
-                .get(module_name)
-                .map(|check| check.resolved_type_at_node_map())
-                .unwrap_or_default()
+            result.module_check_results().get(module_name)
         };
         emit_module(
             &erlang_name,
             &compiled.elaborated,
             &ctx,
-            current_resolved_types,
+            check_result,
             &build_dir,
             sf,
         );
@@ -591,20 +587,16 @@ pub fn build_script(file: &str, profile: &str) -> PathBuf {
         } else {
             None
         };
-        let current_resolved_types = if module_name == "_script" {
-            result.resolved_type_at_node_map()
+        let check_result = if module_name == "_script" {
+            Some(&result)
         } else {
-            result
-                .module_check_results()
-                .get(module_name)
-                .map(|check| check.resolved_type_at_node_map())
-                .unwrap_or_default()
+            result.module_check_results().get(module_name)
         };
         emit_module(
             module_name,
             &compiled.elaborated,
             &ctx,
-            current_resolved_types,
+            check_result,
             &build_dir,
             sf,
         );

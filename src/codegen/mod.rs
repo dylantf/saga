@@ -7,7 +7,6 @@ mod tests;
 
 use crate::ast;
 use crate::typechecker::ModuleCodegenInfo;
-use crate::typechecker::Type;
 use std::collections::HashMap;
 
 /// Result of compiling a single module: codegen metadata, elaborated AST,
@@ -49,7 +48,7 @@ impl CodegenContext {
 
 pub fn emit_module(module_name: &str, program: &ast::Program) -> String {
     let ctx = CodegenContext::default();
-    emit_module_with_context(module_name, program, &ctx, HashMap::new(), None)
+    emit_module_with_context(module_name, program, &ctx, None, None)
 }
 
 /// Source file path and source text for error location tracking.
@@ -64,7 +63,7 @@ pub fn emit_module_with_context(
     module_name: &str,
     program: &ast::Program,
     ctx: &CodegenContext,
-    current_resolved_types: HashMap<ast::NodeId, Type>,
+    check_result: Option<&crate::typechecker::CheckResult>,
     source_file: Option<&SourceFile>,
 ) -> String {
     let codegen_info = ctx.codegen_info();
@@ -87,7 +86,7 @@ pub fn emit_module_with_context(
         ctx,
         constructor_atoms,
         resolution_map,
-        current_resolved_types,
+        check_result,
         source_info,
     )
         .lower_module(module_name, &program);

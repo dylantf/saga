@@ -268,9 +268,10 @@ pub fn format_expr(expr: &Expr) -> Doc {
             qualifier,
             args,
         } => {
-            let mut d = match qualifier {
-                Some(q) => Doc::text(format!("{}.{}!", q, name)),
-                None => Doc::text(format!("{}!", name)),
+            let mut d = if let Some(q) = qualifier {
+                Doc::text(format!("{}.{}!", q, name))
+            } else {
+                Doc::text(format!("{}!", name))
             };
             for arg in args {
                 d = d.append(Doc::text(" ")).append(format_expr_atom(arg));
@@ -508,6 +509,12 @@ pub fn format_expr(expr: &Expr) -> Doc {
             docs_from_vec(parts)
         }
 
+        ExprKind::HandlerExpr { body } => {
+            let header = format_handler_expr_header(body);
+            let arms = format_handler_expr_body(body);
+            docs![header, Doc::nest(2, arms), Doc::hardline(), Doc::text("}")]
+        }
+
         // Elaboration-only
         ExprKind::DictMethodAccess { .. }
         | ExprKind::DictRef { .. }
@@ -680,6 +687,7 @@ pub fn format_stmt(stmt: &Stmt) -> Doc {
             }
             super::decl::format_binding(lhs, body)
         }
+
         Stmt::Expr(expr) => format_expr(expr),
     }
 }
@@ -752,4 +760,43 @@ fn format_interp_multiline(parts: &[StringPart]) -> Doc {
     inner.push(Doc::text("\"\"\""));
 
     Doc::text("$\"\"\"").append(Doc::nest(2, docs_from_vec(inner)))
+}
+
+/// Format the header of a handler expression: `handler for Log {`
+/// (no hardlines — safe to wrap in Doc::group for width-based breaking).
+pub fn format_handler_expr_header(body: &crate::ast::HandlerBody) -> Doc {
+    let mut parts = Vec::new();
+    parts.push(Doc::text("handler for "));
+    let eff_docs: Vec<Doc> = body
+        .effects
+        .iter()
+        .map(super::type_expr::format_effect_ref)
+        .collect();
+    parts.push(Doc::join(Doc::text(", "), eff_docs));
+    if !body.needs.is_empty() {
+        parts.push(Doc::text(" "));
+        parts.push(super::type_expr::format_needs(&body.needs, &None));
+    }
+    if !body.where_clause.is_empty() {
+        parts.push(Doc::text(" "));
+        parts.push(super::type_expr::format_where_clause(&body.where_clause));
+    }
+    parts.push(Doc::text(" {"));
+    docs_from_vec(parts)
+}
+
+/// Format the arms of a handler expression (with hardlines between arms).
+pub fn format_handler_expr_body(body: &crate::ast::HandlerBody) -> Doc {
+    let mut body_items = Vec::new();
+    for ann in &body.arms {
+        body_items.push(Doc::hardline());
+        body_items.push(format_trivia(&ann.leading_trivia));
+        body_items.push(format_handler_arm(&ann.node));
+        body_items.push(format_trailing(&ann.trailing_comment));
+    }
+    if let Some(rc) = &body.return_clause {
+        body_items.push(Doc::hardline());
+        body_items.push(format_handler_arm(rc));
+    }
+    format_braced_body(&body_items, &[])
 }

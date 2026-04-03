@@ -16,7 +16,7 @@ use pats::{lower_params, lower_pat};
 use util::{
     cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call,
     collect_qualified_call, core_var, field_access_record_name, has_nested_effect_call, lower_lit,
-    lower_string_to_binary, process_string_escapes,
+    lower_string_to_binary,  process_string_escapes,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -31,6 +31,7 @@ fn count_lambda_params(body: &Expr) -> usize {
 }
 
 /// Stored handler definition for CPS inlining at `with` sites.
+#[derive(Clone)]
 struct HandlerInfo {
     effects: Vec<String>,
     arms: Vec<HandlerArm>,
@@ -129,11 +130,18 @@ pub struct Lowerer<'a> {
     /// Bare effect name -> canonical effect name (e.g. "Assert" -> "Std.Test.Assert").
     /// Built during init_module for canonicalizing effect names from the type system.
     effect_canonical: HashMap<String, String>,
-    /// Resolved node types for the module currently being lowered.
-    /// This is intentionally current-module-only: local `let fun` lowering needs
-    /// direct access to resolved types, while cross-module eta-reduction relies on
-    /// imported function resolution/codegen info rather than another module's AST types.
-    current_resolved_types: HashMap<crate::ast::NodeId, crate::typechecker::Type>,
+    /// Typechecker result for the module currently being lowered.
+    /// Provides resolved types, handler info, effect info, etc.
+    /// None for modules compiled without full typechecking (e.g. codegen tests).
+    check_result: Option<crate::typechecker::CheckResult>,
+    /// Conditional handle bindings: name -> (cond_var, cond_expr, then_canonical, else_canonical).
+    /// Used during lower_with to generate conditional handler dispatch.
+    handle_cond_vars: HashMap<String, (String, CExpr, String, String)>,
+    /// Dynamic handle bindings: name -> (lowered_var, canonical_effect_names, has_return_clause).
+    /// For `handle name = some_function_call()` where the handler isn't statically
+    /// resolvable, the RHS is lowered to a tuple-of-lambdas and bound to a variable.
+    /// At `with` sites, the tuple is destructured to extract per-op handler functions.
+    handle_dynamic_vars: HashMap<String, (String, Vec<String>, bool)>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -141,7 +149,7 @@ impl<'a> Lowerer<'a> {
         ctx: &'a super::CodegenContext,
         constructor_atoms: super::resolve::ConstructorAtoms,
         resolved: super::resolve::ResolutionMap,
-        current_resolved_types: HashMap<crate::ast::NodeId, crate::typechecker::Type>,
+        check_result: Option<&crate::typechecker::CheckResult>,
         source_info: Option<SourceInfo>,
     ) -> Self {
         Lowerer {
@@ -169,7 +177,9 @@ impl<'a> Lowerer<'a> {
             inline_vals: HashMap::new(),
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
-            current_resolved_types,
+            check_result: check_result.cloned(),
+            handle_cond_vars: HashMap::new(),
+            handle_dynamic_vars: HashMap::new(),
         }
     }
 
@@ -259,6 +269,18 @@ impl<'a> Lowerer<'a> {
             .cloned()
             .unwrap_or_else(|| name.to_string())
     }
+
+    /// Try to resolve a handler name to a known handler definition.
+    /// Returns Some(canonical) if the handler exists in handler_defs, None otherwise.
+    fn resolve_handler_name_opt(&self, name: &str) -> Option<String> {
+        let canonical = self.resolve_handler_name(name);
+        if self.handler_defs.contains_key(&canonical) {
+            Some(canonical)
+        } else {
+            None
+        }
+    }
+
 
     /// Check if a handler is BEAM-native (should be lowered to direct BEAM calls).
     pub(super) fn is_beam_native_handler(&self, name: &str) -> bool {
@@ -450,14 +472,25 @@ impl<'a> Lowerer<'a> {
                     ..
                 } => {
                     let PendingAnnotation {
-                        effects,
-                        param_absorbed_effects,
+                        mut effects,
+                        mut param_absorbed_effects,
                     } = pending_annotations
                         .remove(name.as_str())
                         .unwrap_or(PendingAnnotation {
                             effects: Vec::new(),
                             param_absorbed_effects: HashMap::new(),
                         });
+                    if effects.is_empty()
+                        && let Some(cr) = &self.check_result
+                        && let Some(scheme) = cr.env.get(name)
+                    {
+                        let resolved_ty = cr.sub.apply(&scheme.ty);
+                        effects = self.canonicalize_effects(util::arity_and_effects_from_type(&resolved_ty).1);
+                        param_absorbed_effects = util::param_absorbed_effects_from_type(&resolved_ty)
+                            .into_iter()
+                            .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
+                            .collect();
+                    }
                     let base_arity = lower_params(params).len() + count_lambda_params(body);
                     let arity = self.expanded_arity(base_arity, &effects);
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _, _)| n == name) {
@@ -556,19 +589,19 @@ impl<'a> Lowerer<'a> {
             }
 
             // Set up handler param context for effectful functions.
-            // One handler param per op (e.g. _Handle_Process_spawn, _Handle_Process_send).
             let effects = self.fun_effects(&name).cloned().unwrap_or_default();
-            let handler_ops = self.effect_handler_ops(&effects);
-            let handler_params: Vec<String> = handler_ops
-                .iter()
-                .map(|(eff, op)| Self::handler_param_name(eff, op))
-                .collect();
-            let saved_handler_params = std::mem::take(&mut self.current_handler_params);
-            for ((eff, op), param) in handler_ops.iter().zip(handler_params.iter()) {
-                // Key by "Effect.op" for unambiguous lookup from lower_effect_call
+            let mut handler_entries: Vec<(String, String)> = Vec::new();
+            for (eff, op) in &self.effect_handler_ops(&effects) {
                 let key = format!("{}.{}", eff, op);
-                self.current_handler_params.insert(key, param.clone());
+                let param = Self::handler_param_name(eff, op);
+                handler_entries.push((key, param));
             }
+
+            let saved_handler_params = std::mem::take(&mut self.current_handler_params);
+            for (key, param) in &handler_entries {
+                self.current_handler_params.insert(key.clone(), param.clone());
+            }
+            let handler_param_names: Vec<String> = handler_entries.iter().map(|(_, p)| p.clone()).collect();
             // Set up effectful variable tracking for HOF absorption.
             // Map param indices to param names from the first clause's patterns.
             let saved_effectful_vars = std::mem::take(&mut self.current_effectful_vars);
@@ -584,8 +617,8 @@ impl<'a> Lowerer<'a> {
                 }
             }
 
-            let has_effects = !handler_params.is_empty();
-            let base_arity = arity - handler_params.len() - if has_effects { 1 } else { 0 };
+            let has_effects = !handler_param_names.is_empty();
+            let base_arity = arity - handler_param_names.len() - if has_effects { 1 } else { 0 };
 
             // For effectful functions, set _ReturnK as current_return_k so
             // lower_block applies it at terminal positions. Handler aborts
@@ -623,7 +656,7 @@ impl<'a> Lowerer<'a> {
                     params_ce.extend(lower_params(lam_params));
                     body = lam_body;
                 }
-                params_ce.extend(handler_params.iter().cloned());
+                params_ce.extend(handler_param_names.iter().cloned());
                 if has_effects {
                     params_ce.push("_ReturnK".to_string());
                 }
@@ -674,7 +707,7 @@ impl<'a> Lowerer<'a> {
                 // and case-match on them using proper Core Erlang values syntax.
                 let mut arg_vars: Vec<String> =
                     (0..base_arity).map(|i| format!("_Arg{}", i)).collect();
-                arg_vars.extend(handler_params.iter().cloned());
+                arg_vars.extend(handler_param_names.iter().cloned());
                 if has_effects {
                     arg_vars.push("_ReturnK".to_string());
                 }
@@ -890,6 +923,10 @@ impl<'a> Lowerer<'a> {
                         // it's not a module-level or imported function.
                         if let Some(inlined) = self.inline_vals.get(name) {
                             inlined.clone()
+                        } else if let Some(tuple) = self.lower_handler_def_to_tuple(name) {
+                            // Handler used as a value (e.g. returned from a function,
+                            // passed as argument): convert to tuple-of-lambdas.
+                            tuple
                         } else {
                             CExpr::Var(core_var(name))
                         }
@@ -991,7 +1028,12 @@ impl<'a> Lowerer<'a> {
                         .as_ref()
                         .map(|effs| self.effect_handler_ops(effs))
                         .unwrap_or_default();
-                    let effect_count = callee_ops.len();
+                    // Build (key, param_name) list for callee handler params
+                    let mut callee_handler_entries: Vec<(String, String)> = Vec::new();
+                    for (eff, op) in &callee_ops {
+                        callee_handler_entries.push((format!("{}.{}", eff, op), Self::handler_param_name(eff, op)));
+                    }
+                    let effect_count = callee_handler_entries.len();
                     let total_arity = self.fun_arity(func_name);
 
                     // Filter out unit literal args (they don't count toward arity)
@@ -1036,14 +1078,13 @@ impl<'a> Lowerer<'a> {
                         // from the enclosing function's `needs` clause or from a `with` block.
                         // If one is missing, it's a compiler bug (the type system should
                         // have ensured all effects are handled).
-                        if !callee_ops.is_empty() {
-                            for (eff, op) in &callee_ops {
-                                let key = format!("{}.{}", eff, op);
-                                let param = self.current_handler_params.get(&key)
+                        if !callee_handler_entries.is_empty() {
+                            for (key, _) in &callee_handler_entries {
+                                let param = self.current_handler_params.get(key)
                                     .unwrap_or_else(|| panic!(
-                                        "ICE: saturated call to '{}' needs handler for '{}.{}' \
-                                         but no handler param in scope",
-                                        func_name, eff, op,
+                                        "ICE: saturated call to '{}' needs handler for '{}' \
+                                         but no handler param in scope. params: {:?}",
+                                        func_name, key, self.current_handler_params,
                                     ));
                                 arg_vars.push(param.clone());
                             }
@@ -1095,11 +1136,10 @@ impl<'a> Lowerer<'a> {
                             // For effectful functions, include handler params and
                             // _ReturnK in the lambda. Handlers will be provided at
                             // the eventual call site via `with`.
-                            if !callee_ops.is_empty() {
-                                for (eff, op) in &callee_ops {
-                                    let p = Self::handler_param_name(eff, op);
+                            if !callee_handler_entries.is_empty() {
+                                for (_, p) in &callee_handler_entries {
                                     params.push(p.clone());
-                                    call_args.push(CExpr::Var(p));
+                                    call_args.push(CExpr::Var(p.clone()));
                                 }
                                 let rk = "_ReturnK".to_string();
                                 params.push(rk.clone());
@@ -1990,6 +2030,12 @@ impl<'a> Lowerer<'a> {
                         vec![CExpr::Var(v)],
                     )),
                 )
+            }
+
+            // Handler expression as a value (e.g. returned from a function).
+            // Produce a tuple of per-op handler lambdas for runtime use.
+            ExprKind::HandlerExpr { body } => {
+                self.lower_handler_expr_to_tuple(body)
             }
 
             // StringInterpolation should be desugared before reaching the lowerer,

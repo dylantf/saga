@@ -313,8 +313,8 @@ pub fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
         if !matches!(param.as_ref(), Type::Con(name, args) if name == "Unit" && args.is_empty()) {
             arity += 1;
         }
-        for (eff, _) in &row.effects {
-            effects.insert(eff.clone());
+        for entry in &row.effects {
+            effects.insert(entry.name.clone());
         }
         current = ret;
     }
@@ -349,8 +349,8 @@ fn collect_effarrow_effects(ty: &Type) -> Vec<String> {
     let mut effects = BTreeSet::new();
     let mut current = ty;
     while let Type::Fun(_, ret, row) = current {
-        for (eff, _) in &row.effects {
-            effects.insert(eff.clone());
+        for entry in &row.effects {
+            effects.insert(entry.name.clone());
         }
         current = ret;
     }

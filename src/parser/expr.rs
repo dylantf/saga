@@ -381,6 +381,7 @@ impl Parser {
 
             // Qualified effect call: `Cache.get! key` or `Std.Cache.get! key`
             if let Token::EffectCall(name) = self.peek().clone() {
+                // Check for effect qualifier (uppercase: Cache.get!)
                 let qualifier = match &expr.kind {
                     ExprKind::Constructor { name: q, .. } => Some(q.clone()),
                     ExprKind::QualifiedName { module, name: prev_name, .. }
@@ -390,7 +391,7 @@ impl Parser {
                     }
                     _ => None,
                 };
-                if let Some(qualifier) = qualifier {
+                if qualifier.is_some() {
                     let start_span = expr.span;
                     let effect_span = self.tokens[self.pos].span;
                     self.advance(); // consume effect call token
@@ -400,7 +401,7 @@ impl Parser {
                         span,
                         kind: ExprKind::EffectCall {
                             name,
-                            qualifier: Some(qualifier),
+                            qualifier,
                             args: Vec::new(),
                         },
                     };
@@ -1389,6 +1390,17 @@ impl Parser {
                         else_arms,
                         dangling_trivia,
                     },
+                })
+            }
+
+            Token::Handler => {
+                // handler for Effect { arms... } -- anonymous handler expression
+                let parsed = self.parse_handler_body()?;
+                let end = self.tokens[self.pos.saturating_sub(1)].span;
+                Ok(Expr {
+                    id: self.next_id(),
+                    span: span.to(end),
+                    kind: ExprKind::HandlerExpr { body: parsed.body },
                 })
             }
 

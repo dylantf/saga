@@ -46,17 +46,37 @@ pub(crate) fn find_effect_call(expr: &Expr) -> Option<Span> {
 
 // --- Type representation ---
 
+/// A single entry in an effect row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectEntry {
+    /// Canonical effect name: `State`, `Std.Log.Log`, etc.
+    pub name: String,
+    /// Type arguments: `[Int]` in `State Int`
+    pub args: Vec<Type>,
+}
+
+impl EffectEntry {
+    pub fn unnamed(name: String, args: Vec<Type>) -> Self {
+        EffectEntry { name, args }
+    }
+
+    /// Two entries match if they have the same effect name.
+    pub fn matches(&self, other: &EffectEntry) -> bool {
+        self.name == other.name
+    }
+}
+
 /// An effect row: a list of known effects plus an optional row variable (tail).
 /// When `tail` is `None`, the row is closed (no additional effects allowed).
 /// When `tail` is `Some(id)`, the row is open (additional effects unify with the variable).
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectRow {
-    pub effects: Vec<(String, Vec<Type>)>,
+    pub effects: Vec<EffectEntry>,
     pub tail: Option<Box<Type>>,
 }
 
 impl EffectRow {
-    pub fn closed(effects: Vec<(String, Vec<Type>)>) -> Self {
+    pub fn closed(effects: Vec<EffectEntry>) -> Self {
         EffectRow { effects, tail: None }
     }
 
@@ -80,22 +100,23 @@ impl EffectRow {
         }
     }
 
-    /// Merge two closed effect rows (union of effects by name).
-    /// Used to combine effects from subexpressions in blocks, branches, etc.
+    /// Merge two closed effect rows (union of effects by identity).
+    /// Identity = (instance, name) pair — unnamed and named entries are distinct.
     pub fn merge(&self, other: &EffectRow) -> EffectRow {
         let mut effects = self.effects.clone();
-        for (name, args) in &other.effects {
-            if !effects.iter().any(|(n, _)| n == name) {
-                effects.push((name.clone(), args.clone()));
+        for entry in &other.effects {
+            if !effects.iter().any(|e| e.matches(entry)) {
+                effects.push(entry.clone());
             }
         }
         EffectRow { effects, tail: None }
     }
 
+    /// Remove handled effects by name. Only removes unnamed entries.
     /// Remove handled effects by name.
     pub fn subtract(&self, handled: &std::collections::HashSet<String>) -> EffectRow {
         let effects = self.effects.iter()
-            .filter(|(name, _)| !handled.contains(name))
+            .filter(|e| !handled.contains(&e.name))
             .cloned()
             .collect();
         EffectRow { effects, tail: self.tail.clone() }
@@ -159,12 +180,12 @@ impl std::fmt::Display for Type {
                 }
                 if !row.effects.is_empty() || row.tail.is_some() {
                     write!(f, " needs {{")?;
-                    for (i, (name, args)) in row.effects.iter().enumerate() {
+                    for (i, entry) in row.effects.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(f, "{}", name)?;
-                        for arg in args {
+                        write!(f, "{}", entry.name)?;
+                        for arg in &entry.args {
                             write!(f, " {}", arg)?;
                         }
                     }
@@ -251,9 +272,12 @@ impl Substitution {
     /// Apply the substitution to an effect row, resolving type args and chasing
     /// row variable bindings.
     pub fn apply_effect_row(&self, row: &EffectRow) -> EffectRow {
-        let mut effects: Vec<(String, Vec<Type>)> = row.effects.iter()
-            .map(|(name, args)| {
-                (name.clone(), args.iter().map(|t| self.apply(t)).collect())
+        let mut effects: Vec<EffectEntry> = row.effects.iter()
+            .map(|entry| {
+                EffectEntry {
+                    name: entry.name.clone(),
+                    args: entry.args.iter().map(|t| self.apply(t)).collect(),
+                }
             })
             .collect();
         let mut tail = row.tail.as_ref().map(|t| Box::new(self.apply(t)));
@@ -262,8 +286,11 @@ impl Substitution {
             if let Type::Var(tail_id) = tail_ty.as_ref()
                 && let Some(bound) = self.row_map.get(tail_id)
             {
-                for (name, args) in &bound.effects {
-                    effects.push((name.clone(), args.iter().map(|t| self.apply(t)).collect()));
+                for entry in &bound.effects {
+                    effects.push(EffectEntry {
+                        name: entry.name.clone(),
+                        args: entry.args.iter().map(|t| self.apply(t)).collect(),
+                    });
                 }
                 tail = bound.tail.clone();
                 continue;
@@ -341,7 +368,7 @@ impl Substitution {
                     || self.occurs(id, b)
                     || row.effects
                         .iter()
-                        .any(|(_, args)| args.iter().any(|t| self.occurs(id, t)))
+                        .any(|entry| entry.args.iter().any(|t| self.occurs(id, t)))
             }
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
             Type::Record(fields) => fields.iter().any(|(_, ty)| self.occurs(id, ty)),
@@ -505,8 +532,8 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
         Type::Fun(a, b, row) => {
             free_vars_in_type(a, bound, out);
             free_vars_in_type(b, bound, out);
-            for (_, args) in &row.effects {
-                for t in args {
+            for entry in &row.effects {
+                for t in &entry.args {
                     free_vars_in_type(t, bound, out);
                 }
             }
@@ -724,6 +751,9 @@ pub struct Checker {
     pub(crate) effects: HashMap<std::string::String, EffectDefInfo>,
     /// Named handler definitions: handler name -> info
     pub(crate) handlers: HashMap<std::string::String, HandlerInfo>,
+    /// Functions whose bodies produce handlers, so applications like
+    /// `make_state 0` can preserve handler metadata such as return clauses.
+    pub(crate) handler_funs: HashMap<std::string::String, HandlerInfo>,
     /// Context for resume typing: when inside a handler arm, the return type of the op being handled
     pub(crate) resume_type: Option<Type>,
     /// Context for resume return typing: when inside a handler arm, the answer type of the with-expression
@@ -985,6 +1015,7 @@ impl Checker {
             records: HashMap::new(),
             effects: HashMap::new(),
             handlers: HashMap::new(),
+            handler_funs: HashMap::new(),
             resume_type: None,
             resume_return_type: None,
             effect_meta: EffectMeta::default(),
@@ -1255,17 +1286,17 @@ impl Checker {
 
     /// Push effects onto the accumulator, deduplicating by name.
     pub(crate) fn emit_effects(&mut self, effs: &EffectRow) {
-        for (name, args) in &effs.effects {
-            if !self.effect_row.effects.iter().any(|(n, _)| n == name) {
-                self.effect_row.effects.push((name.clone(), args.clone()));
+        for entry in &effs.effects {
+            if !self.effect_row.effects.iter().any(|e| e.name == entry.name) {
+                self.effect_row.effects.push(entry.clone());
             }
         }
     }
 
     /// Push a single named effect onto the accumulator, deduplicating by name.
     pub(crate) fn emit_effect(&mut self, name: String, args: Vec<Type>) {
-        if !self.effect_row.effects.iter().any(|(n, _)| n == &name) {
-            self.effect_row.effects.push((name, args));
+        if !self.effect_row.effects.iter().any(|e| e.name == name) {
+            self.effect_row.effects.push(EffectEntry::unnamed(name, args));
         }
     }
 
@@ -1319,8 +1350,8 @@ pub fn effects_from_type(ty: &Type) -> HashSet<String> {
     let mut effects = HashSet::new();
     fn walk(ty: &Type, out: &mut HashSet<String>) {
         if let Type::Fun(_, ret, row) = ty {
-            for (name, _) in &row.effects {
-                out.insert(name.clone());
+            for entry in &row.effects {
+                out.insert(entry.name.clone());
             }
             walk(ret, out);
         }
@@ -1334,8 +1365,8 @@ pub fn effects_from_type(ty: &Type) -> HashSet<String> {
 /// Only collects from closed-row effects (not row variables).
 pub fn collect_callback_effects(ty: &Type, out: &mut HashSet<String>) {
     if let Type::Fun(_, ret, row) = ty {
-        for (name, _) in &row.effects {
-            out.insert(name.clone());
+        for entry in &row.effects {
+            out.insert(entry.name.clone());
         }
         collect_callback_effects(ret, out);
     }

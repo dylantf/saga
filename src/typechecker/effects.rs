@@ -81,9 +81,9 @@ impl Checker {
         }
         // Closed row: every body effect must appear in declared
         let mut undeclared = Vec::new();
-        for (eff_name, _) in &body_effs.effects {
-            if !declared.effects.iter().any(|(n, _)| n == eff_name) {
-                undeclared.push(eff_name.clone());
+        for entry in &body_effs.effects {
+            if !declared.effects.iter().any(|e| e.matches(entry)) {
+                undeclared.push(entry.name.clone());
             }
         }
         if undeclared.is_empty() {
@@ -134,12 +134,16 @@ impl Checker {
             ast::Handler::Named(name, _) => {
                 if let Some(info) = self.handlers.get(name) {
                     handled.extend(info.effects.iter().cloned());
+                } else if let Some(effects) = self.handler_effects_from_env(name) {
+                    handled.extend(effects);
                 }
             }
             ast::Handler::Inline { named, arms, .. } => {
                 for ann in named {
                     if let Some(info) = self.handlers.get(&ann.node.name) {
                         handled.extend(info.effects.iter().cloned());
+                    } else if let Some(effects) = self.handler_effects_from_env(&ann.node.name) {
+                        handled.extend(effects);
                     }
                 }
                 for arm in arms {
@@ -150,6 +154,46 @@ impl Checker {
             }
         }
         handled
+    }
+
+    /// Extract handled effect names from a `Handler(...)` type in the env.
+    /// Used as a fallback when a name is not in `self.handlers` (e.g. handle bindings).
+    pub(crate) fn handler_effects_from_env(&self, name: &str) -> Option<Vec<String>> {
+        let scheme = self.env.get(name)?;
+        let ty = self.sub.apply(&scheme.ty);
+        if let Type::Con(ref con_name, ref args) = ty
+            && con_name == "Handler"
+        {
+                let effects: Vec<String> = args
+                    .iter()
+                    .filter_map(|arg| {
+                        let resolved = self.sub.apply(arg);
+                        if let Type::Con(eff_name, _) = resolved {
+                            // Try to find canonical name from known effects
+                            let canonical = self.effects.keys()
+                                .find(|k| {
+                                    k.ends_with(&format!(".{}", eff_name)) || *k == &eff_name
+                                })
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    if let Some(m) = &self.current_module {
+                                        format!("{}.{}", m, eff_name)
+                                    } else {
+                                        eff_name
+                                    }
+                                });
+                            Some(canonical)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if effects.is_empty() {
+                    return None;
+                }
+                return Some(effects);
+        }
+        None
     }
 
     /// Instantiate an effect op signature, reusing cached type param vars for the same effect
