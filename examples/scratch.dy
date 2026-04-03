@@ -3,9 +3,9 @@ effect State s {
   fun put : s -> Unit
 }
 
-fun make_state : Int -> Handler (State Int)
-make_state initial =
-  handler for State Int {
+fun make_state : Unit -> Handler (State s)
+make_state () =
+  handler for State s {
     get () = fun s -> (resume s) s
     put next = fun _ -> (resume ()) next
     return value = fun s -> (value, s)
@@ -31,14 +31,14 @@ transfer amount {from, to} = {
 }
 
 main () = {
-  handle checking = make_state 100
-  handle savings = make_state 20
-  let run_transfer = transfer 30 with {
+  handle checking = make_state ()
+  handle savings = make_state ()
+  let result = transfer 30 with {
     from: checking,
     to: savings,
   }
-  let (finish_transfer, from_final) = run_transfer 100
-  let (balances, to_final) = finish_transfer 20
+  let (inner, from_final) = result 100
+  let (balances, to_final) = inner 20
 
   let _ = dbg balances
   let _ = dbg from_final

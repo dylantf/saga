@@ -1167,18 +1167,7 @@ impl<'a> Lowerer<'a> {
             && let Some(scheme) = cr.env.get(func_name)
         {
             let mut ty = scheme.ty.clone();
-            let arg_count = args
-                .iter()
-                .filter(|arg| {
-                    !matches!(
-                        arg.kind,
-                        ExprKind::Lit {
-                            value: crate::ast::Lit::Unit,
-                            ..
-                        }
-                    )
-                })
-                .count();
+            let arg_count = args.len();
             for _ in 0..arg_count {
                 match ty {
                     Type::Fun(_, ret, _) => ty = *ret,

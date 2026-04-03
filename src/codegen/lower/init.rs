@@ -45,10 +45,19 @@ impl<'a> Lowerer<'a> {
         // Build bare→canonical effect name resolver from all sources.
         // Local effects: "Log" → "MyModule.Log"
         // Imported effects: "Assert" → "Std.Test.Assert" (from codegen_info)
+        // Use source module name (e.g. "Std.Test") for canonical effect names so they
+        // match the typechecker's naming (which also uses source module names).
+        let source_module_name = program.iter().find_map(|d| {
+            if let Decl::ModuleDecl { path, .. } = d {
+                Some(path.join("."))
+            } else {
+                None
+            }
+        }).unwrap_or_else(|| module_name.to_string());
         let mut effect_canonical: HashMap<String, String> = HashMap::new();
         for decl in program {
             if let Decl::EffectDef { name, .. } = decl {
-                effect_canonical.insert(name.clone(), format!("{}.{}", module_name, name));
+                effect_canonical.insert(name.clone(), format!("{}.{}", source_module_name, name));
             }
         }
         for info in self.ctx.modules.values() {
@@ -66,7 +75,7 @@ impl<'a> Lowerer<'a> {
         let mut handler_canonical: HashMap<String, String> = HashMap::new();
         for decl in program {
             if let Decl::HandlerDef { name, .. } = decl {
-                handler_canonical.insert(name.clone(), format!("{}.{}", module_name, name));
+                handler_canonical.insert(name.clone(), format!("{}.{}", source_module_name, name));
             }
         }
         for info in self.ctx.modules.values() {
@@ -112,7 +121,7 @@ impl<'a> Lowerer<'a> {
                 Decl::EffectDef {
                     name, operations, ..
                 } => {
-                    let canonical_effect = format!("{}.{}", module_name, name);
+                    let canonical_effect = format!("{}.{}", source_module_name, name);
                     let mut ops = HashMap::new();
                     for op in operations {
                         ops.insert(op.node.name.clone(), op.node.params.len());
@@ -127,7 +136,7 @@ impl<'a> Lowerer<'a> {
                     body,
                     ..
                 } => {
-                    let canonical_handler = format!("{}.{}", module_name, name);
+                    let canonical_handler = format!("{}.{}", source_module_name, name);
                     self.handler_defs.insert(
                         canonical_handler,
                         HandlerInfo {

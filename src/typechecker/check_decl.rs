@@ -1064,7 +1064,19 @@ impl Checker {
 
         let declared_row = annotation
             .and_then(|ann| innermost_effect_row(&self.sub.apply(ann)))
-            .unwrap_or_else(|| all_body_effs.clone());
+            .unwrap_or_else(|| {
+                // Unannotated functions with instance params (e.g. `transfer () {from, to} = ...`)
+                // infer their effects from the body. All other unannotated functions get an empty
+                // closed row, so undeclared effects are caught as errors.
+                let has_instance_params = clauses.iter().any(|c| {
+                    matches!(c, Decl::FunBinding { instance_params, .. } if !instance_params.is_empty())
+                });
+                if has_instance_params {
+                    all_body_effs.clone()
+                } else {
+                    EffectRow::empty()
+                }
+            });
 
         if !all_body_effs.is_empty() || !declared_row.is_empty() {
             let err_span = match clauses[0] {
