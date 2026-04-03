@@ -115,6 +115,10 @@ pub struct Lowerer<'a> {
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
+    /// When lowering a handler arm with `finally`, this holds the finally block AST.
+    /// At each `resume` site, the cleanup code is lowered inline (wrapped in try/catch
+    /// around the K call) so it can capture variables from the arm body's lexical scope.
+    current_handler_finally: Option<crate::ast::Expr>,
     /// Pre-resolved constructor name -> mangled Erlang atom.
     /// e.g. "NotFound" -> "std_file_NotFound", "Ok" -> "ok".
     /// Built by resolve::build_constructor_atoms before lowering.
@@ -174,6 +178,7 @@ impl<'a> Lowerer<'a> {
             constructor_atoms,
             resolved,
             current_handler_k: None,
+            current_handler_finally: None,
             inline_vals: HashMap::new(),
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
@@ -2014,7 +2019,11 @@ impl<'a> Lowerer<'a> {
             // `expr with handler` -- attaches handler(s) to a computation
             ExprKind::With { expr, handler, .. } => self.lower_with(expr, handler),
 
-            // `resume value` -- inside a handler arm, calls the continuation K
+            // `resume value` -- inside a handler arm, calls the continuation K.
+            // When a `finally` block is active, the K call is wrapped in try/catch
+            // so cleanup runs after K completes or panics. The cleanup is lowered
+            // once into a lambda (at the resume site, where arm body variables are
+            // in scope) and called in both the ok and catch branches.
             ExprKind::Resume { value, .. } => {
                 let k_name = self
                     .current_handler_k
@@ -2022,14 +2031,61 @@ impl<'a> Lowerer<'a> {
                     .expect("resume used outside handler");
                 let v = self.fresh();
                 let ce = self.lower_expr(value);
-                CExpr::Let(
-                    v.clone(),
-                    Box::new(ce),
-                    Box::new(CExpr::Apply(
-                        Box::new(CExpr::Var(k_name)),
-                        vec![CExpr::Var(v)],
-                    )),
-                )
+                let k_call = CExpr::Apply(
+                    Box::new(CExpr::Var(k_name)),
+                    vec![CExpr::Var(v.clone())],
+                );
+                let k_or_wrapped = if let Some(ref finally_expr) = self.current_handler_finally.clone() {
+                    // let Cleanup = fun() -> finally_body in
+                    // try apply K(V)
+                    // of OkVar -> let _ = apply Cleanup() in OkVar
+                    // catch <C, R, T> -> let _ = apply Cleanup() in raise(C, R, T)
+                    let cleanup_var = self.fresh();
+                    let cleanup_body = self.lower_expr(finally_expr);
+                    let cleanup_lambda = CExpr::Fun(vec![], Box::new(cleanup_body));
+                    let cleanup_call_ok = CExpr::Apply(
+                        Box::new(CExpr::Var(cleanup_var.clone())),
+                        vec![],
+                    );
+                    let cleanup_call_catch = CExpr::Apply(
+                        Box::new(CExpr::Var(cleanup_var.clone())),
+                        vec![],
+                    );
+                    let ok_var = self.fresh();
+                    let class_var = self.fresh();
+                    let reason_var = self.fresh();
+                    let trace_var = self.fresh();
+                    CExpr::Let(
+                        cleanup_var,
+                        Box::new(cleanup_lambda),
+                        Box::new(CExpr::Try {
+                            expr: Box::new(k_call),
+                            ok_var: ok_var.clone(),
+                            ok_body: Box::new(CExpr::Let(
+                                "_".to_string(),
+                                Box::new(cleanup_call_ok),
+                                Box::new(CExpr::Var(ok_var)),
+                            )),
+                            catch_vars: (class_var.clone(), reason_var.clone(), trace_var.clone()),
+                            catch_body: Box::new(CExpr::Let(
+                                "_".to_string(),
+                                Box::new(cleanup_call_catch),
+                                Box::new(CExpr::Call(
+                                    "erlang".to_string(),
+                                    "raise".to_string(),
+                                    vec![
+                                        CExpr::Var(class_var),
+                                        CExpr::Var(reason_var),
+                                        CExpr::Var(trace_var),
+                                    ],
+                                )),
+                            )),
+                        }),
+                    )
+                } else {
+                    k_call
+                };
+                CExpr::Let(v, Box::new(ce), Box::new(k_or_wrapped))
             }
 
             // Handler expression as a value (e.g. returned from a function).

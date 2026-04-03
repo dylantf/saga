@@ -334,6 +334,7 @@ impl Lexer {
             "receive" => Token::Receive,
             "after" => Token::After,
             "when" => Token::When,
+            "finally" => Token::Finally,
             "mut" => Token::Ident("mut".into()),
             // Lex True/False as keywords even though they are treated as types
             "True" => Token::True,

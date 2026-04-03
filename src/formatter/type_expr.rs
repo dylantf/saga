@@ -101,7 +101,10 @@ pub fn format_fun_type(
 pub fn format_arrow_chain(params: &[(String, TypeExpr)], return_type: &TypeExpr) -> Doc {
     let mut parts: Vec<Doc> = params.iter().map(|(label, ty)| {
         if label.starts_with('_') {
-            format_type_expr(ty)
+            match ty {
+                TypeExpr::Arrow { .. } => docs![Doc::text("("), format_type_expr(ty), Doc::text(")")],
+                _ => format_type_expr(ty),
+            }
         } else {
             docs![Doc::text(format!("({}: ", label)), format_type_expr(ty), Doc::text(")")]
         }

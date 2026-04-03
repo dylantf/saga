@@ -71,6 +71,9 @@ fn desugar_decl(decl: &mut Decl) {
         Decl::HandlerDef { body, recovered_arms, .. } => {
             for ann_arm in body.arms.iter_mut().chain(recovered_arms.iter_mut()) {
                 desugar_expr(&mut ann_arm.node.body);
+                if let Some(fb) = &mut ann_arm.node.finally_block {
+                    desugar_expr(fb);
+                }
             }
             if let Some(rc) = &mut body.return_clause {
                 desugar_expr(&mut rc.body);
@@ -173,6 +176,9 @@ fn desugar_expr(expr: &mut Expr) {
         ExprKind::HandlerExpr { body } => {
             for arm in &mut body.arms {
                 desugar_expr(&mut arm.node.body);
+                if let Some(fb) = &mut arm.node.finally_block {
+                    desugar_expr(fb);
+                }
             }
             if let Some(rc) = &mut body.return_clause {
                 desugar_expr(&mut rc.body);
@@ -516,6 +522,9 @@ fn desugar_handler(handler: &mut Handler) {
         Handler::Inline { arms, return_clause, .. } => {
             for ann_arm in arms {
                 desugar_expr(&mut ann_arm.node.body);
+                if let Some(fb) = &mut ann_arm.node.finally_block {
+                    desugar_expr(fb);
+                }
             }
             if let Some(rc) = return_clause {
                 desugar_expr(&mut rc.body);

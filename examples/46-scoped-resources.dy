@@ -1,0 +1,66 @@
+# Scoped resource management via `finally`
+#
+# The Scope effect + run_scoped handler give flat, multi-resource
+# cleanup without nesting. Each `acquire_scoped!` registers a
+# resource with its release function. Cleanup runs in reverse
+# acquisition order when the `with run_scoped` block exits,
+# whether normally, via abort, or on panic.
+#
+# This is built entirely on the `finally` keyword, no special
+# compiler support beyond what handler arms already provide.
+
+effect Scope {
+  fun acquire_scoped : (acquire: Unit -> a) -> (release: a -> Unit) -> a
+}
+
+handler run_scoped for Scope {
+  acquire_scoped acquire release = {
+    let resource = acquire ()
+    resume resource
+  } finally {
+    release resource
+  }
+}
+
+effect Fail {
+  fun fail : String -> a
+}
+
+handler to_result for Fail {
+  fail reason = Err reason
+  return value = Ok value
+}
+
+fun connect : String -> String
+connect name = {
+  println $"  connecting: {name}"
+  name
+}
+
+fun disconnect : String -> Unit
+disconnect name = println $"  disconnect: {name}"
+
+main () = {
+  # 1. Normal completion — both resources cleaned up in reverse order
+  {
+    let db = acquire_scoped! (fun () -> connect "postgres") disconnect
+    let cache = acquire_scoped! (fun () -> connect "redis") disconnect
+    println $"  query {db}"
+    println $"  get {cache}"
+  } with run_scoped
+
+  println "---"
+
+  # 2. Abort via Fail — cleanup still runs
+  let result = {
+    let db = acquire_scoped! (fun () -> connect "postgres") disconnect
+    let _cache = acquire_scoped! (fun () -> connect "redis") disconnect
+    println $"  query {db}"
+    fail! "something broke"
+  } with {run_scoped, to_result}
+
+  case result {
+    Ok _ -> println "  ok"
+    Err e -> println $"  caught: {e}"
+  }
+}

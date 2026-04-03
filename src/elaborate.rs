@@ -524,6 +524,7 @@ impl Elaborator {
                                 qualifier: arm.qualifier.clone(),
                                 params: arm.params.clone(),
                                 body: Box::new(self.elaborate_expr(&arm.body)),
+                                finally_block: arm.finally_block.as_ref().map(|fb| Box::new(self.elaborate_expr(fb))),
                                 span: arm.span,
                             })
                         })
@@ -534,6 +535,7 @@ impl Elaborator {
                             qualifier: rc.qualifier.clone(),
                             params: rc.params.clone(),
                             body: Box::new(self.elaborate_expr(&rc.body)),
+                            finally_block: None,
                             span: rc.span,
                         })
                     });
@@ -1231,6 +1233,7 @@ impl Elaborator {
                                 qualifier: ann.node.qualifier.clone(),
                                 params: ann.node.params.clone(),
                                 body: Box::new(self.elaborate_expr(&ann.node.body)),
+                                finally_block: ann.node.finally_block.as_ref().map(|fb| Box::new(self.elaborate_expr(fb))),
                                 span: ann.node.span,
                             })
                         }).collect(),
@@ -1240,6 +1243,7 @@ impl Elaborator {
                                 qualifier: rc.qualifier.clone(),
                                 params: rc.params.clone(),
                                 body: Box::new(self.elaborate_expr(&rc.body)),
+                                finally_block: None,
                                 span: rc.span,
                             })
                         }),
@@ -1329,6 +1333,7 @@ impl Elaborator {
                             qualifier: arm.qualifier.clone(),
                             params: arm.params.clone(),
                             body: Box::new(self.elaborate_expr(&arm.body)),
+                            finally_block: arm.finally_block.as_ref().map(|fb| Box::new(self.elaborate_expr(fb))),
                             span: arm.span,
                         })
                     })
@@ -1339,6 +1344,7 @@ impl Elaborator {
                         qualifier: arm.qualifier.clone(),
                         params: arm.params.clone(),
                         body: Box::new(self.elaborate_expr(&arm.body)),
+                        finally_block: None,
                         span: arm.span,
                     })
                 }),
