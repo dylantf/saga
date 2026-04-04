@@ -6,3 +6,4 @@ main = "Main.dy"
 
 [deps]
 mathlib = { path = "../library" }
+base64url = { version = "1.0.1" }

@@ -535,24 +535,28 @@ pub fn run_erlc(build_dir: &Path, build_start: Instant) {
 }
 
 /// Run a compiled module on the BEAM.
-pub fn exec_erl(build_dir: &Path, stdlib_dir: &Path, entry_module: &str) {
+pub fn exec_erl(build_dir: &Path, stdlib_dir: &Path, extra_pa: &[PathBuf], entry_module: &str) {
     let eval = format!(
         "try '{}':main() of _ -> init:stop() catch C:R:S -> dylang_runtime:format_crash(C, R, S), init:stop(1) end",
         entry_module
     );
-    let status = std::process::Command::new("erl")
-        .arg("-noshell")
+    let mut cmd = std::process::Command::new("erl");
+    cmd.arg("-noshell")
         .arg("-pa")
         .arg(stdlib_dir)
         .arg("-pa")
-        .arg(build_dir)
-        .arg("-eval")
-        .arg(&eval)
-        .status()
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to run erl: {}", e);
-            std::process::exit(1);
-        });
+        .arg(build_dir);
+
+    for dir in extra_pa {
+        cmd.arg("-pa").arg(dir);
+    }
+
+    cmd.arg("-eval").arg(&eval);
+
+    let status = cmd.status().unwrap_or_else(|e| {
+        eprintln!("Failed to run erl: {}", e);
+        std::process::exit(1);
+    });
 
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
@@ -563,6 +567,7 @@ pub struct ProjectBuild {
     pub build_dir: PathBuf,
     pub stdlib_dir: PathBuf,
     pub compiled_modules: HashMap<String, codegen::CompiledModule>,
+    pub hex_ebin_dirs: Vec<PathBuf>,
 }
 
 /// Build a project (with project.toml) into the given build directory.
@@ -805,10 +810,13 @@ pub fn build_project(profile: &str) -> ProjectBuild {
         .write(&build_dir);
     }
 
+    let hex_ebin_dirs = project_config::hex_ebin_dirs(&project_root);
+
     ProjectBuild {
         build_dir,
         stdlib_dir,
         compiled_modules,
+        hex_ebin_dirs,
     }
 }
 

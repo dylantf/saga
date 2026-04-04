@@ -78,15 +78,63 @@ pub struct DepEntry {
     /// Module name alias for the dependency.
     #[serde(rename = "as")]
     pub alias: Option<String>,
+    /// Version requirement for Hex dependencies.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
-/// Resolved lockfile entry for a git dependency.
+impl DepEntry {
+    /// Whether this is a Hex dependency (no path or git specified).
+    pub fn is_hex(&self) -> bool {
+        self.path.is_none() && self.git.is_none()
+    }
+}
+
+/// Resolved lockfile entry for a dependency.
 #[derive(Debug, Deserialize, serde::Serialize, Clone)]
 pub struct LockEntry {
-    pub git: String,
+    // Git fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#ref: Option<String>,
-    pub commit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    // Hex fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
+}
+
+impl LockEntry {
+    pub fn new_git(git: String, r#ref: Option<String>, commit: String) -> Self {
+        LockEntry {
+            git: Some(git),
+            r#ref,
+            commit: Some(commit),
+            hex: None,
+            version: None,
+            checksum: None,
+        }
+    }
+
+    pub fn new_hex(name: String, version: String, checksum: String) -> Self {
+        LockEntry {
+            git: None,
+            r#ref: None,
+            commit: None,
+            hex: Some(name),
+            version: Some(version),
+            checksum: Some(checksum),
+        }
+    }
+
+    pub fn is_hex(&self) -> bool {
+        self.hex.is_some()
+    }
 }
 
 /// Parsed dylang.lock file.
@@ -167,17 +215,24 @@ impl ProjectConfig {
 
         if let Some(deps) = &self.deps {
             for (name, dep) in deps {
-                if dep.path.is_none() && dep.git.is_none() {
-                    return Err(format!(
-                        "dependency '{}' must have either 'path' or 'git'",
-                        name
-                    ));
-                }
-                if dep.path.is_some() && dep.git.is_some() {
+                let source_count = [dep.path.is_some(), dep.git.is_some()]
+                    .iter()
+                    .filter(|&&b| b)
+                    .count();
+                if source_count > 1 {
                     return Err(format!(
                         "dependency '{}' cannot have both 'path' and 'git'",
                         name
                     ));
+                }
+                if dep.is_hex() {
+                    // Hex dep: version is required
+                    if dep.version.is_none() {
+                        return Err(format!(
+                            "dependency '{}' must have 'version' (Hex dep), or specify 'path' or 'git'",
+                            name
+                        ));
+                    }
                 }
                 if let Some(path) = &dep.path {
                     let dep_path = Path::new(path);
@@ -388,7 +443,7 @@ fn resolve_dep_to_path(
     } else if dep_entry.git.is_some() {
         let locked_commit = lockfile
             .and_then(|lf| lf.deps.get(dep_name))
-            .map(|entry| entry.commit.as_str());
+            .and_then(|entry| entry.commit.as_deref());
 
         if locked_commit.is_none() {
             return Err(format!(
@@ -406,7 +461,7 @@ fn resolve_dep_to_path(
 
 // --- Install (fetch + lockfile) ---
 
-/// Recursively fetch all git deps and collect lock entries.
+/// Recursively fetch all deps (git and Hex) and collect lock entries.
 fn install_deps_recursive(
     project_root: &Path,
     lockfile: &mut Lockfile,
@@ -423,7 +478,12 @@ fn install_deps_recursive(
     let indent = "  ".repeat(depth + 1);
 
     for (dep_name, dep_entry) in &deps {
-        // Cycle detection
+        if dep_entry.is_hex() {
+            install_hex_dep_recursive(dep_name, dep_entry, lockfile, installing, &indent, depth)?;
+            continue;
+        }
+
+        // Cycle detection for git/path deps
         let dep_key = if let Some(url) = &dep_entry.git {
             url.clone()
         } else if let Some(path) = &dep_entry.path {
@@ -471,11 +531,11 @@ fn install_deps_recursive(
 
             lockfile.deps.insert(
                 dep_name.clone(),
-                LockEntry {
-                    git: url.clone(),
-                    r#ref: dep_entry.tag.clone().or(dep_entry.branch.clone()),
+                LockEntry::new_git(
+                    url.clone(),
+                    dep_entry.tag.clone().or(dep_entry.branch.clone()),
                     commit,
-                },
+                ),
             );
 
             checkout_path
@@ -494,6 +554,185 @@ fn install_deps_recursive(
     }
 
     Ok(())
+}
+
+/// Install a Hex dependency and recursively install its transitive deps.
+fn install_hex_dep_recursive(
+    dep_name: &str,
+    dep_entry: &DepEntry,
+    lockfile: &mut Lockfile,
+    installing: &mut HashSet<String>,
+    indent: &str,
+    depth: usize,
+) -> Result<(), String> {
+    let version = dep_entry
+        .version
+        .as_deref()
+        .ok_or_else(|| format!("Hex dependency '{}' has no version", dep_name))?;
+
+    let dep_key = format!("hex:{}-{}", dep_name, version);
+    if !installing.insert(dep_key.clone()) {
+        return Err(format!(
+            "circular dependency detected: Hex package '{}'",
+            dep_name
+        ));
+    }
+
+    // Skip if already locked at this version
+    if let Some(lock_entry) = lockfile.deps.get(dep_name)
+        && lock_entry.version.as_deref() == Some(version)
+    {
+        installing.remove(&dep_key);
+        return Ok(());
+    }
+
+    eprintln!("{}Fetching {} (hex @ {})...", indent, dep_name, version);
+
+    let (_ebin_dir, release) = crate::hex::install_package(dep_name, version)?;
+
+    eprintln!("{}Resolved {} -> {}", indent, dep_name, version);
+
+    lockfile.deps.insert(
+        dep_name.to_string(),
+        LockEntry::new_hex(
+            dep_name.to_string(),
+            version.to_string(),
+            release.checksum.clone(),
+        ),
+    );
+
+    // Recursively install non-optional transitive Hex deps
+    let child_indent = "  ".repeat(depth + 2);
+    for (req_name, req) in &release.requirements {
+        if req.optional {
+            continue;
+        }
+
+        // For now, resolve the requirement to an exact version.
+        // v1: if requirement looks like an exact version, use it directly.
+        // Otherwise, fetch package info and pick the latest matching version.
+        let resolved_version = resolve_hex_requirement(req_name, &req.requirement)?;
+
+        let transitive_entry = DepEntry {
+            path: None,
+            git: None,
+            tag: None,
+            branch: None,
+            rev: None,
+            alias: None,
+            version: Some(resolved_version),
+        };
+
+        install_hex_dep_recursive(
+            req_name,
+            &transitive_entry,
+            lockfile,
+            installing,
+            &child_indent,
+            depth + 1,
+        )?;
+    }
+
+    installing.remove(&dep_key);
+    Ok(())
+}
+
+/// Resolve a Hex version requirement to an exact version.
+/// For v1: supports exact versions and basic `~>` requirements.
+fn resolve_hex_requirement(name: &str, requirement: &str) -> Result<String, String> {
+    let req = requirement.trim();
+
+    // Exact version (e.g., "1.0.1" or "== 1.0.1")
+    let exact = req.strip_prefix("== ").unwrap_or(req);
+    if !exact.starts_with("~>")
+        && !exact.starts_with(">=")
+        && !exact.starts_with(">")
+        && !exact.starts_with("<=")
+        && !exact.starts_with("<")
+    {
+        return Ok(exact.to_string());
+    }
+
+    // ~> requirement: fetch available versions and pick the latest matching one
+    if let Some(version_part) = req.strip_prefix("~>") {
+        let base = version_part.trim();
+        let info = crate::hex::fetch_package_info(name)?;
+
+        let matching = find_latest_compatible(&info.releases, base);
+        return matching.ok_or_else(|| {
+            format!(
+                "no version of '{}' matches requirement '{}'",
+                name, requirement
+            )
+        });
+    }
+
+    // For other complex requirements, try to fetch and pick latest
+    // This is a simplification for v1
+    let info = crate::hex::fetch_package_info(name)?;
+    info.releases
+        .first()
+        .map(|r| r.version.clone())
+        .ok_or_else(|| format!("no versions found for '{}'", name))
+}
+
+/// Find the latest version compatible with a ~> requirement.
+/// `~> 1.0` means >= 1.0.0, < 2.0.0
+/// `~> 1.4.2` means >= 1.4.2, < 1.5.0
+fn find_latest_compatible(releases: &[crate::hex::HexPackageRelease], base: &str) -> Option<String> {
+    let base_parts: Vec<u64> = base.split('.').filter_map(|s| s.parse().ok()).collect();
+    if base_parts.is_empty() {
+        return None;
+    }
+
+    // Build the upper bound: bump the second-to-last segment
+    let upper_parts = if base_parts.len() <= 2 {
+        // ~> 1.0 -> < 2.0.0
+        vec![base_parts[0] + 1, 0, 0]
+    } else {
+        // ~> 1.4.2 -> < 1.5.0
+        let mut upper = base_parts[..base_parts.len() - 1].to_vec();
+        if let Some(last) = upper.last_mut() {
+            *last += 1;
+        }
+        upper.push(0);
+        upper
+    };
+
+    // Releases are returned newest first from the API
+    for release in releases {
+        let parts: Vec<u64> = release
+            .version
+            .split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if parts.len() < 2 {
+            continue;
+        }
+
+        // Pad to 3 parts
+        let v = [
+            parts.first().copied().unwrap_or(0),
+            parts.get(1).copied().unwrap_or(0),
+            parts.get(2).copied().unwrap_or(0),
+        ];
+        let b = [
+            base_parts.first().copied().unwrap_or(0),
+            base_parts.get(1).copied().unwrap_or(0),
+            base_parts.get(2).copied().unwrap_or(0),
+        ];
+        let u = [
+            upper_parts.first().copied().unwrap_or(0),
+            upper_parts.get(1).copied().unwrap_or(0),
+            upper_parts.get(2).copied().unwrap_or(0),
+        ];
+
+        if v >= b && v < u {
+            return Some(release.version.clone());
+        }
+    }
+
+    None
 }
 
 /// Run `dylang install`: fetch all git deps (recursively), resolve refs, write lockfile.
@@ -515,15 +754,29 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
     // Report updates compared to previous lockfile
     if let Some(existing) = &existing_lock {
         for (name, new_entry) in &lockfile.deps {
-            if let Some(old_entry) = existing.deps.get(name)
-                && old_entry.commit != new_entry.commit
-            {
-                eprintln!(
-                    "  Updated {} ({} -> {})",
-                    name,
-                    &old_entry.commit[..old_entry.commit.len().min(12)],
-                    &new_entry.commit[..new_entry.commit.len().min(12)]
-                );
+            if let Some(old_entry) = existing.deps.get(name) {
+                // Compare git commits
+                if let (Some(old_commit), Some(new_commit)) =
+                    (&old_entry.commit, &new_entry.commit)
+                    && old_commit != new_commit
+                {
+                    eprintln!(
+                        "  Updated {} ({} -> {})",
+                        name,
+                        &old_commit[..old_commit.len().min(12)],
+                        &new_commit[..new_commit.len().min(12)]
+                    );
+                }
+                // Compare hex versions
+                if let (Some(old_ver), Some(new_ver)) =
+                    (&old_entry.version, &new_entry.version)
+                    && old_ver != new_ver
+                {
+                    eprintln!(
+                        "  Updated {} ({} -> {})",
+                        name, old_ver, new_ver
+                    );
+                }
             }
         }
     }
@@ -550,6 +803,11 @@ fn resolve_deps_recursive(
     let indent = "  ".repeat(depth + 1);
 
     for (dep_name, dep_entry) in deps {
+        // Skip Hex deps — they're opaque (no typechecking, just beam files)
+        if dep_entry.is_hex() {
+            continue;
+        }
+
         let dep_path = resolve_dep_to_path(dep_name, dep_entry, parent_dir, lockfile)?;
 
         // Cycle detection
@@ -678,7 +936,7 @@ pub fn resolve_deps(
     Ok(())
 }
 
-/// Collect the root paths of all direct dependencies.
+/// Collect the root paths of all direct dependencies (non-Hex only).
 pub fn dep_root_paths(
     project_root: &Path,
     deps: &HashMap<String, DepEntry>,
@@ -686,10 +944,40 @@ pub fn dep_root_paths(
     let lockfile = Lockfile::load(project_root);
     let mut roots = Vec::new();
     for (dep_name, dep_entry) in deps {
+        if dep_entry.is_hex() {
+            continue;
+        }
         if let Ok(path) = resolve_dep_to_path(dep_name, dep_entry, project_root, lockfile.as_ref())
         {
             roots.push(path);
         }
     }
     roots
+}
+
+/// Collect ebin directories for all Hex dependencies (including transitive).
+/// Reads from the lockfile — deps must be installed first.
+pub fn hex_ebin_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let lockfile = match Lockfile::load(project_root) {
+        Some(lf) => lf,
+        None => return Vec::new(),
+    };
+
+    let mut dirs = Vec::new();
+    for (name, entry) in &lockfile.deps {
+        if entry.is_hex()
+            && let (Some(hex_name), Some(version)) = (&entry.hex, &entry.version)
+        {
+            let ebin = crate::hex::package_ebin_dir(hex_name, version);
+            if ebin.exists() {
+                dirs.push(ebin);
+            } else {
+                eprintln!(
+                    "Warning: Hex dependency '{}' ({}) is not compiled. Run `dylang install`.",
+                    name, version
+                );
+            }
+        }
+    }
+    dirs
 }

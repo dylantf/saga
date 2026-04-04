@@ -1,9 +1,17 @@
 module Main
 
-import MathLib (add, double, square)
+import MathLib (add, double, square, Rand, real_rand)
 
 fun roll_dice : Unit -> Int needs {Rand}
 roll_dice () = random_int! 1 6
+
+# Direct FFI to hex dep
+@external("erlang", "base64url", "encode")
+fun b64_encode : String -> String
+
+# Bridge that calls into hex dep
+@external("erlang", "base64_bridge", "round_trip")
+fun b64_round_trip : String -> (String, String)
 
 pub fun main : Unit -> Unit
 main () = {
@@ -18,4 +26,13 @@ main () = {
 
   let die = roll_dice () with real_rand
   println $"rolled a {show die}"
-}
+
+  # Direct call to hex dep
+  let encoded = b64_encode "hello from hex!"
+  println $"encoded: {encoded}"
+
+  # Bridge call that uses hex dep internally
+  let (enc, dec) = b64_round_trip "round trip test"
+  println $"bridge encoded: {enc}"
+  println $"bridge decoded: {dec}"
+} with {console}
