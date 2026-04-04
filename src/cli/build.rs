@@ -567,7 +567,7 @@ pub struct ProjectBuild {
     pub build_dir: PathBuf,
     pub stdlib_dir: PathBuf,
     pub compiled_modules: HashMap<String, codegen::CompiledModule>,
-    pub hex_ebin_dirs: Vec<PathBuf>,
+    pub extra_ebin_dirs: Vec<PathBuf>,
 }
 
 /// Build a project (with project.toml) into the given build directory.
@@ -787,14 +787,19 @@ pub fn build_project(profile: &str) -> ProjectBuild {
         );
     }
 
-    // Copy project-specific bridge (.erl) files into build dir
+    // Copy project-specific bridge (.erl) files into build dir.
+    // Skip deps that have their own ebin/ — they're already on the code path.
     let mut bridge_roots: Vec<&Path> = vec![&project_root];
     let dep_roots = config
         .deps
         .as_ref()
         .map(|deps| project_config::dep_root_paths(&project_root, deps))
         .unwrap_or_default();
-    bridge_roots.extend(dep_roots.iter().map(|p| p.as_path()));
+    for dep_root in &dep_roots {
+        if !dep_root.join("ebin").exists() {
+            bridge_roots.push(dep_root);
+        }
+    }
     copy_project_bridges(&bridge_roots, &build_dir);
 
     run_erlc(&build_dir, build_start);
@@ -810,13 +815,13 @@ pub fn build_project(profile: &str) -> ProjectBuild {
         .write(&build_dir);
     }
 
-    let hex_ebin_dirs = project_config::hex_ebin_dirs(&project_root);
+    let extra_ebin_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
 
     ProjectBuild {
         build_dir,
         stdlib_dir,
         compiled_modules,
-        hex_ebin_dirs,
+        extra_ebin_dirs,
     }
 }
 

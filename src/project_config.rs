@@ -548,6 +548,27 @@ fn install_deps_recursive(
             continue;
         };
 
+        // Build native code if needed (rebar3 for NIFs, erlc for plain .erl)
+        if crate::hex::needs_rebar3(&dep_path) {
+            eprintln!("{}{} {} (native)...", indent, dim("Compiling"), dep_name);
+            crate::hex::compile_with_rebar3(&dep_path, dep_name)?;
+        } else if dep_path.join("src").exists()
+            && std::fs::read_dir(dep_path.join("src"))
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .any(|e| e.path().extension().is_some_and(|ext| ext == "erl"))
+                })
+                .unwrap_or(false)
+        {
+            // Has .erl files in src/ — compile them with erlc
+            let ebin_dir = dep_path.join("ebin");
+            if !ebin_dir.exists() {
+                eprintln!("{}{} {} (erlang)...", indent, dim("Compiling"), dep_name);
+                crate::hex::compile_erlang(&dep_path, dep_name)?;
+            }
+        }
+
         // Recurse into the dep's own dependencies
         install_deps_recursive(&dep_path, lockfile, installing, depth + 1)?;
 
@@ -961,16 +982,16 @@ pub fn dep_root_paths(
     roots
 }
 
-/// Collect ebin directories for all Hex dependencies (including transitive).
-/// Reads from the project's deps/ directory.
-pub fn hex_ebin_dirs(project_root: &Path) -> Vec<PathBuf> {
-    let deps_dir = project_root.join("deps");
-    if !deps_dir.exists() {
-        return Vec::new();
-    }
-
+/// Collect ebin directories for all non-dylang dependencies (Hex + git deps with native code).
+/// Scans the project's deps/ directory and git dep checkouts.
+pub fn extra_ebin_dirs(project_root: &Path, deps: Option<&HashMap<String, DepEntry>>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&deps_dir) {
+
+    // Hex deps: scan deps/ directory
+    let deps_dir = project_root.join("deps");
+    if deps_dir.exists()
+        && let Ok(entries) = std::fs::read_dir(&deps_dir)
+    {
         for entry in entries.flatten() {
             let ebin = entry.path().join("ebin");
             if ebin.exists() {
@@ -978,5 +999,24 @@ pub fn hex_ebin_dirs(project_root: &Path) -> Vec<PathBuf> {
             }
         }
     }
+
+    // Git/path deps: check for ebin/ in their checkout/source directories
+    if let Some(deps) = deps {
+        let lockfile = Lockfile::load(project_root);
+        for (dep_name, dep_entry) in deps {
+            if dep_entry.is_hex() {
+                continue;
+            }
+            if let Ok(dep_path) =
+                resolve_dep_to_path(dep_name, dep_entry, project_root, lockfile.as_ref())
+            {
+                let ebin = dep_path.join("ebin");
+                if ebin.exists() {
+                    dirs.push(ebin);
+                }
+            }
+        }
+    }
+
     dirs
 }

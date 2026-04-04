@@ -181,8 +181,8 @@ pub fn download_and_extract(
 
 // --- Compilation ---
 
-/// Whether a package needs rebar3 to compile (has NIFs, hooks, etc.).
-fn needs_rebar3(pkg_dir: &Path) -> bool {
+/// Whether a package directory needs rebar3 to compile (has NIFs, hooks, etc.).
+pub fn needs_rebar3(pkg_dir: &Path) -> bool {
     // Has c_src/ or native/ directory (NIF source)
     if pkg_dir.join("c_src").exists() || pkg_dir.join("native").exists() {
         return true;
@@ -202,18 +202,19 @@ fn needs_rebar3(pkg_dir: &Path) -> bool {
     false
 }
 
-/// Compile a Hex package using rebar3 bare compile.
+/// Compile a package using rebar3 bare compile.
+/// `pkg_dir` is the directory containing the source and rebar.config.
+/// `name` is used for error messages and to find rebar3's output dir.
 /// Returns the ebin directory path.
-fn compile_with_rebar3(project_root: &Path, name: &str) -> Result<PathBuf, String> {
-    let pkg_dir = package_dir(project_root, name);
+pub fn compile_with_rebar3(pkg_dir: &Path, name: &str) -> Result<PathBuf, String> {
     let ebin_dir = pkg_dir.join("ebin");
 
     // rebar3 bare compile outputs to <output_dir>/ebin/.
     // Point it at the package dir so ebin/ lands where we expect.
     let output = std::process::Command::new("rebar3")
         .args(["bare", "compile", "--paths", ebin_dir.to_str().unwrap_or(".")])
-        .current_dir(&pkg_dir)
-        .env("REBAR_BARE_COMPILER_OUTPUT_DIR", &pkg_dir)
+        .current_dir(pkg_dir)
+        .env("REBAR_BARE_COMPILER_OUTPUT_DIR", pkg_dir)
         .env("REBAR_PROFILE", "prod")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -221,7 +222,7 @@ fn compile_with_rebar3(project_root: &Path, name: &str) -> Result<PathBuf, Strin
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 format!(
-                    "Hex package '{}' requires rebar3 for compilation (has native code), \
+                    "dependency '{}' requires rebar3 for compilation (has native code), \
                      but rebar3 is not on PATH. Install rebar3: https://rebar3.org",
                     name
                 )
@@ -235,7 +236,7 @@ fn compile_with_rebar3(project_root: &Path, name: &str) -> Result<PathBuf, Strin
         let stdout = String::from_utf8_lossy(&output.stdout);
         let _ = std::fs::remove_dir_all(&ebin_dir);
         return Err(format!(
-            "rebar3 bare compile failed for {}:\n{}\n{}",
+            "rebar3 bare compile failed for '{}':\n{}\n{}",
             name,
             stdout.trim(),
             stderr.trim()
@@ -301,34 +302,22 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Compile Erlang source files in a Hex package to .beam files.
-/// Uses raw erlc for simple packages, rebar3 for packages with NIFs/hooks.
+/// Compile .erl files in a package's src/ directory with erlc.
 /// Returns the ebin directory path.
-pub fn compile_package(project_root: &Path, name: &str) -> Result<PathBuf, String> {
-    let pkg_dir = package_dir(project_root, name);
+pub fn compile_erlang(pkg_dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let src_dir = pkg_dir.join("src");
     let ebin_dir = pkg_dir.join("ebin");
 
     if ebin_dir.exists() {
         return Ok(ebin_dir);
     }
 
-    // Use rebar3 for packages that need it (NIFs, hooks, etc.)
-    if needs_rebar3(&pkg_dir) {
-        return compile_with_rebar3(project_root, name);
-    }
-
-    // Fast path: raw erlc for pure Erlang packages
-    let src_dir = pkg_dir.join("src");
     if !src_dir.exists() {
-        return Err(format!(
-            "Hex package '{}' has no src/ directory",
-            name
-        ));
+        return Err(format!("dependency '{}' has no src/ directory", name));
     }
 
     std::fs::create_dir_all(&ebin_dir).map_err(|e| format!("failed to create ebin dir: {}", e))?;
 
-    // Find all .erl files in src/
     let erl_files: Vec<PathBuf> = std::fs::read_dir(&src_dir)
         .map_err(|e| format!("failed to read src dir: {}", e))?
         .filter_map(|e| e.ok())
@@ -337,13 +326,9 @@ pub fn compile_package(project_root: &Path, name: &str) -> Result<PathBuf, Strin
         .collect();
 
     if erl_files.is_empty() {
-        return Err(format!(
-            "Hex package '{}' has no .erl files in src/",
-            name
-        ));
+        return Err(format!("dependency '{}' has no .erl files in src/", name));
     }
 
-    // Compile each .erl file with erlc
     for erl_file in &erl_files {
         let output = std::process::Command::new("erlc")
             .arg("-o")
@@ -372,6 +357,23 @@ pub fn compile_package(project_root: &Path, name: &str) -> Result<PathBuf, Strin
     }
 
     Ok(ebin_dir)
+}
+
+/// Compile Erlang source files in a Hex package to .beam files.
+/// Uses raw erlc for simple packages, rebar3 for packages with NIFs/hooks.
+/// Returns the ebin directory path.
+pub fn compile_package(project_root: &Path, name: &str) -> Result<PathBuf, String> {
+    let pkg_dir = package_dir(project_root, name);
+
+    if pkg_dir.join("ebin").exists() {
+        return Ok(pkg_dir.join("ebin"));
+    }
+
+    if needs_rebar3(&pkg_dir) {
+        compile_with_rebar3(&pkg_dir, name)
+    } else {
+        compile_erlang(&pkg_dir, name)
+    }
 }
 
 /// Full install pipeline for a single Hex package: fetch metadata, download, extract, compile.

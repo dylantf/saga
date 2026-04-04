@@ -195,6 +195,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Polymorphic type class dicts used as bare function refs without applying dict arguments (e.g. `'__dict_Show_Result'/2` not called with sub-dicts)
 - [x] Builtin modules don't have access to `print` (undefined variable: `print`)
 - [x] Effect op name collisions: multi-effect handlers (`handler x for A, B {}`) and unqualified `op!` calls silently resolve to the first match when multiple effects define the same op name. Should emit a compile error on ambiguity. (`register_handler` takes first match and breaks; `effect_for_op` iterates HashMap nondeterministically.)
+- [ ] Eta-reduce on lambdas doesn't seem to work (wrong arity error), e.g. `List.iter println`
 
 ### Effects (CPS transform)
 

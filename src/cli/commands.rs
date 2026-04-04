@@ -25,13 +25,13 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 );
                 std::process::exit(1);
             }
-            let hex_dirs = project_config::hex_ebin_dirs(&project_root);
+            let extra_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
             let (build_dir, stdlib_dir) = check_project_cache(&project_root, "release")
                 .unwrap_or_else(|| {
                     let pb = build_project("release");
                     (pb.build_dir, pb.stdlib_dir)
                 });
-            exec_erl(&build_dir, &stdlib_dir, &hex_dirs, "main");
+            exec_erl(&build_dir, &stdlib_dir, &extra_dirs, "main");
         }
     } else {
         // dev: always clean rebuild
@@ -51,7 +51,7 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 std::process::exit(1);
             }
             let pb = build_project("dev");
-            exec_erl(&pb.build_dir, &pb.stdlib_dir, &pb.hex_ebin_dirs, "main");
+            exec_erl(&pb.build_dir, &pb.stdlib_dir, &pb.extra_ebin_dirs, "main");
         }
     }
 }
@@ -428,7 +428,7 @@ pub fn cmd_test(filter: Option<&str>) {
         });
 
         run_erlc_file(&core_path, &pb.build_dir);
-        exec_erl(&pb.build_dir, &pb.stdlib_dir, &pb.hex_ebin_dirs, "_test");
+        exec_erl(&pb.build_dir, &pb.stdlib_dir, &pb.extra_ebin_dirs, "_test");
     }
 }
 
