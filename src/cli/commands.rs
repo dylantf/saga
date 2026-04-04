@@ -1,6 +1,5 @@
 use dylang::{codegen, elaborate, project_config::ProjectConfig};
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -11,9 +10,9 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
     if release {
         // --release: use cached build if still valid, otherwise rebuild
         if let Some(f) = file {
-            let (build_dir, erlang_name) =
+            let sb =
                 check_script_cache(f, "release").unwrap_or_else(|| build_script(f, "release"));
-            exec_erl(&build_dir, &erlang_name);
+            exec_erl(&sb.build_dir, &sb.stdlib_dir, &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
                 eprintln!("No project.toml found.");
@@ -26,15 +25,18 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 );
                 std::process::exit(1);
             }
-            let build_dir = check_project_cache(&project_root, "release")
-                .unwrap_or_else(|| build_project("release").0);
-            exec_erl(&build_dir, "main");
+            let (build_dir, stdlib_dir) = check_project_cache(&project_root, "release")
+                .unwrap_or_else(|| {
+                    let pb = build_project("release");
+                    (pb.build_dir, pb.stdlib_dir)
+                });
+            exec_erl(&build_dir, &stdlib_dir, "main");
         }
     } else {
         // dev: always clean rebuild
         if let Some(f) = file {
-            let (build_dir, erlang_name) = build_script(f, "dev");
-            exec_erl(&build_dir, &erlang_name);
+            let sb = build_script(f, "dev");
+            exec_erl(&sb.build_dir, &sb.stdlib_dir, &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
                 eprintln!("No project.toml found.");
@@ -47,8 +49,8 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 );
                 std::process::exit(1);
             }
-            let (build_dir, _) = build_project("dev");
-            exec_erl(&build_dir, "main");
+            let pb = build_project("dev");
+            exec_erl(&pb.build_dir, &pb.stdlib_dir, "main");
         }
     }
 }
@@ -57,9 +59,9 @@ pub fn cmd_build(file: Option<&str>, release: bool) {
     let profile = if release { "release" } else { "dev" };
 
     if let Some(f) = file {
-        let _ = build_script(f, profile);
+        let _sb = build_script(f, profile);
     } else {
-        build_project(profile);
+        let _pb = build_project(profile);
     }
 }
 
@@ -271,7 +273,7 @@ pub fn cmd_test(filter: Option<&str>) {
     };
 
     // Build the main project first (compiles all non-test modules)
-    let (build_dir, project_modules) = build_project("test");
+    let pb = build_project("test");
 
     // Build and run each test file, reusing the project's compiled modules.
     for test_file in &test_files {
@@ -286,33 +288,10 @@ pub fn cmd_test(filter: Option<&str>) {
         let (program, _) = parse_and_typecheck_inner(&source, &source_path, &mut checker, true);
         let result = checker.to_result();
 
-        // Compile any std modules the test file needs that weren't in the project build
+        // Std modules needed for CodegenContext but beams come from global cache
         let test_std_modules = compile_std_modules(&result);
-        let mut all_modules = project_modules.clone();
-        // Merge test std modules
-        let std_ctx = codegen::CodegenContext {
-            modules: test_std_modules.clone(),
-            let_effect_bindings: HashMap::new(),
-            prelude_imports: result.prelude_imports.clone(),
-        };
-        for (name, compiled) in &test_std_modules {
-            if !all_modules.contains_key(name) {
-                let erlang_name = name.to_lowercase().replace('.', "_");
-                let check_result = result
-                    .module_check_results()
-                    .get(name);
-                emit_module(
-                    &erlang_name,
-                    &compiled.elaborated,
-                    &std_ctx,
-                    check_result,
-                    &build_dir,
-                    None,
-                );
-                run_erlc_file(&build_dir.join(format!("{}.core", erlang_name)), &build_dir);
-                all_modules.insert(name.clone(), compiled.clone());
-            }
-        }
+        let mut all_modules = pb.compiled_modules.clone();
+        all_modules.extend(test_std_modules);
 
         // Elaborate only the test file
         let elaborated = elaborate::elaborate(&program, &result);
@@ -342,14 +321,14 @@ pub fn cmd_test(filter: Option<&str>) {
             Some(&result),
             Some(&test_source_file),
         );
-        let core_path = build_dir.join("_test.core");
+        let core_path = pb.build_dir.join("_test.core");
         fs::write(&core_path, &core_src).unwrap_or_else(|e| {
             eprintln!("Error writing {}: {}", core_path.display(), e);
             std::process::exit(1);
         });
 
-        run_erlc_file(&core_path, &build_dir);
-        exec_erl(&build_dir, "_test");
+        run_erlc_file(&core_path, &pb.build_dir);
+        exec_erl(&pb.build_dir, &pb.stdlib_dir, "_test");
     }
 }
 

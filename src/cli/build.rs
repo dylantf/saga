@@ -11,7 +11,8 @@ use std::time::Instant;
 use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
 
-const BUILD_HASH: &str = env!("SAGA_BUILD_HASH");
+const BUILD_HASH: &str = env!("DYLANG_BUILD_HASH");
+const STDLIB_HASH: &str = env!("DYLANG_STDLIB_HASH");
 
 /// Build manifest written to `_build/<profile>/.manifest` for cache invalidation.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -52,8 +53,8 @@ fn file_mtime(path: &Path) -> u64 {
 }
 
 /// Check if a cached build is still valid for the given script file.
-/// Returns `Some((build_dir, entry_module))` if the cache is fresh.
-pub fn check_script_cache(file: &str, profile: &str) -> Option<(PathBuf, String)> {
+/// Returns a `ScriptBuild` if the cache is fresh.
+pub fn check_script_cache(file: &str, profile: &str) -> Option<ScriptBuild> {
     let build_dir = Path::new(file)
         .parent()
         .unwrap_or(Path::new("."))
@@ -82,12 +83,21 @@ pub fn check_script_cache(file: &str, profile: &str) -> Option<(PathBuf, String)
         return None;
     }
 
-    Some((build_dir, manifest.entry_module))
+    let stdlib_dir = stdlib_cache_dir();
+    if !stdlib_dir.join(".complete").exists() {
+        return None;
+    }
+
+    Some(ScriptBuild {
+        build_dir,
+        stdlib_dir,
+        erlang_name: manifest.entry_module,
+    })
 }
 
 /// Check if a cached build is still valid for a project.
-/// Returns `Some(build_dir)` if the cache is fresh.
-pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<PathBuf> {
+/// Returns `Some((build_dir, stdlib_dir))` if the cache is fresh.
+pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<(PathBuf, PathBuf)> {
     let build_dir = project_root.join("_build").join(profile);
 
     let manifest = BuildManifest::read(&build_dir)?;
@@ -108,7 +118,12 @@ pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<PathBuf
         return None;
     }
 
-    Some(build_dir)
+    let stdlib_dir = stdlib_cache_dir();
+    if !stdlib_dir.join(".complete").exists() {
+        return None;
+    }
+
+    Some((build_dir, stdlib_dir))
 }
 
 /// Find the maximum mtime across all .dy files and project.toml in a project.
@@ -226,13 +241,8 @@ pub fn emit_module(
     source_file: Option<&codegen::SourceFile>,
 ) {
     let erlang_name = module_name.to_lowercase().replace('.', "_");
-    let core_src = codegen::emit_module_with_context(
-        &erlang_name,
-        elaborated,
-        ctx,
-        check_result,
-        source_file,
-    );
+    let core_src =
+        codegen::emit_module_with_context(&erlang_name, elaborated, ctx, check_result, source_file);
     let core_path = build_dir.join(format!("{}.core", erlang_name));
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
@@ -313,10 +323,7 @@ fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
             "std_set_bridge.erl",
             include_str!("../stdlib/Set.bridge.erl"),
         ),
-        (
-            "dylang_runtime.erl",
-            include_str!("../stdlib/runtime.erl"),
-        ),
+        ("dylang_runtime.erl", include_str!("../stdlib/runtime.erl")),
         (
             "std_time_bridge.erl",
             include_str!("../stdlib/Time.bridge.erl"),
@@ -325,10 +332,7 @@ fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
             "std_bitstring_bridge.erl",
             include_str!("../stdlib/BitString.bridge.erl"),
         ),
-        (
-            "std_io_bridge.erl",
-            include_str!("../stdlib/IO.bridge.erl"),
-        ),
+        ("std_io_bridge.erl", include_str!("../stdlib/IO.bridge.erl")),
     ]
 }
 
@@ -341,6 +345,96 @@ fn write_stdlib_bridges(build_dir: &Path) {
             std::process::exit(1);
         });
     }
+}
+
+/// Ensure precompiled stdlib beams exist in the global cache.
+/// Returns the cache directory path. On a cold cache, creates a fresh checker,
+/// imports ALL builtin modules, elaborates, and compiles them.
+pub fn ensure_stdlib_cache() -> PathBuf {
+    let cache_dir = stdlib_cache_dir();
+
+    // If marker exists, cache is warm
+    if cache_dir.join(".complete").exists() {
+        return cache_dir;
+    }
+
+    eprintln!("  {} stdlib...", color::dim("Compiling"));
+
+    let _ = fs::remove_dir_all(&cache_dir);
+    fs::create_dir_all(&cache_dir).unwrap_or_else(|e| {
+        eprintln!("Error creating stdlib cache dir: {}", e);
+        std::process::exit(1);
+    });
+
+    // Create a dedicated checker and force-import all builtin modules
+    let mut checker = make_checker(None);
+    for (module_name, _) in typechecker::BUILTIN_MODULES {
+        checker.typecheck_import_by_name(module_name);
+    }
+    let result = checker.to_result();
+
+    // Elaborate all Std modules
+    let compiled_modules = compile_std_modules(&result);
+
+    // Build CodegenContext and emit .core files
+    let ctx = codegen::CodegenContext {
+        modules: compiled_modules.clone(),
+        let_effect_bindings: HashMap::new(),
+        prelude_imports: result.prelude_imports.clone(),
+    };
+    for (module_name, compiled) in &compiled_modules {
+        let check_result = result.module_check_results().get(module_name);
+        emit_module(
+            module_name,
+            &compiled.elaborated,
+            &ctx,
+            check_result,
+            &cache_dir,
+            None,
+        );
+    }
+
+    // Write bridge .erl files
+    write_stdlib_bridges(&cache_dir);
+
+    // Compile everything with erlc
+    let compilable_files: Vec<_> = fs::read_dir(&cache_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext == "core" || ext == "erl")
+        })
+        .map(|e| e.path())
+        .collect();
+
+    for file in &compilable_files {
+        run_erlc_file(file, &cache_dir);
+    }
+
+    // Clean up source files — only keep .beam
+    for file in &compilable_files {
+        let _ = fs::remove_file(file);
+    }
+
+    // Write marker so we know the cache is complete
+    fs::write(cache_dir.join(".complete"), BUILD_HASH).unwrap_or_else(|e| {
+        eprintln!("Error writing stdlib cache marker: {}", e);
+        std::process::exit(1);
+    });
+
+    cache_dir
+}
+
+fn stdlib_cache_dir() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".dylang")
+        .join("lib")
+        .join(STDLIB_HASH)
 }
 
 /// Scan project and dependency directories for .erl bridge files and copy them to the build directory.
@@ -433,17 +527,23 @@ pub fn run_erlc(build_dir: &Path, build_start: Instant) {
     }
 
     let elapsed = build_start.elapsed();
-    eprintln!("  {} in {:.2}s", color::green("Built"), elapsed.as_secs_f64());
+    eprintln!(
+        "  {} in {:.2}s",
+        color::green("Built"),
+        elapsed.as_secs_f64()
+    );
 }
 
 /// Run a compiled module on the BEAM.
-pub fn exec_erl(build_dir: &Path, entry_module: &str) {
+pub fn exec_erl(build_dir: &Path, stdlib_dir: &Path, entry_module: &str) {
     let eval = format!(
         "try '{}':main() of _ -> init:stop() catch C:R:S -> dylang_runtime:format_crash(C, R, S), init:stop(1) end",
         entry_module
     );
     let status = std::process::Command::new("erl")
         .arg("-noshell")
+        .arg("-pa")
+        .arg(stdlib_dir)
         .arg("-pa")
         .arg(build_dir)
         .arg("-eval")
@@ -459,9 +559,14 @@ pub fn exec_erl(build_dir: &Path, entry_module: &str) {
     }
 }
 
+pub struct ProjectBuild {
+    pub build_dir: PathBuf,
+    pub stdlib_dir: PathBuf,
+    pub compiled_modules: HashMap<String, codegen::CompiledModule>,
+}
+
 /// Build a project (with project.toml) into the given build directory.
-/// Returns the build directory path, elaborated modules, and codegen info.
-pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::CompiledModule>) {
+pub fn build_project(profile: &str) -> ProjectBuild {
     let build_start = Instant::now();
     let project_root = super::find_project_root().unwrap_or_else(|| {
         eprintln!("No project.toml found. Use `dylang build <file.dy>` for single files.");
@@ -523,8 +628,10 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
     });
 
     // Phase 2: Elaborate all modules
-    eprintln!("  {} stdlib...", color::dim("Compiling"));
     let mut compiled_modules = compile_std_modules(&result);
+
+    // Ensure stdlib beams are cached globally
+    let stdlib_dir = ensure_stdlib_cache();
 
     // Elaborate user modules
     let codegen_info_map = result.codegen_info();
@@ -638,23 +745,32 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
         );
     }
 
-    // Phase 3: Lower and emit all modules
+    // Phase 3: Lower and emit user modules only (stdlib beams are cached globally)
+    // user_modules + Main are the modules we need to emit; std modules are in the
+    // CodegenContext for cross-module resolution but their beams come from the cache.
     let ctx = codegen::CodegenContext {
         modules: compiled_modules.clone(),
         let_effect_bindings: HashMap::new(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    for (module_name, compiled) in &compiled_modules {
-        let erlang_name = if module_name == "Main" {
+
+    let mut modules_to_emit: Vec<&str> = user_modules.iter().map(|s| s.as_str()).collect();
+    if has_bin {
+        modules_to_emit.push("Main");
+    }
+
+    for module_name in &modules_to_emit {
+        let compiled = &compiled_modules[*module_name];
+        let erlang_name = if *module_name == "Main" {
             "main".to_string()
         } else {
             module_name.to_lowercase().replace('.', "_")
         };
-        let sf = source_files.get(module_name);
-        let check_result = if module_name == "Main" {
+        let sf = source_files.get(*module_name);
+        let check_result = if *module_name == "Main" {
             Some(&result)
         } else {
-            result.module_check_results().get(module_name)
+            result.module_check_results().get(*module_name)
         };
         emit_module(
             &erlang_name,
@@ -666,8 +782,7 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
         );
     }
 
-    // Copy bridge (.erl) files into build dir
-    write_stdlib_bridges(&build_dir);
+    // Copy project-specific bridge (.erl) files into build dir
     let mut bridge_roots: Vec<&Path> = vec![&project_root];
     let dep_roots = config
         .deps
@@ -690,7 +805,11 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
         .write(&build_dir);
     }
 
-    (build_dir, compiled_modules)
+    ProjectBuild {
+        build_dir,
+        stdlib_dir,
+        compiled_modules,
+    }
 }
 
 /// Extract the module name from a parsed program, if it has a `module` declaration.
@@ -702,8 +821,8 @@ pub fn declared_module_name(program: &ast::Program) -> Option<String> {
 }
 
 /// Build a single script file into the given build directory.
-/// Returns the build directory path and the entry module's erlang name.
-pub fn build_script(file: &str, profile: &str) -> (PathBuf, String) {
+/// Returns (build_dir, stdlib_cache_dir, erlang_name).
+pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
     let build_start = Instant::now();
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Error reading {}: {}", file, e);
@@ -711,9 +830,18 @@ pub fn build_script(file: &str, profile: &str) -> (PathBuf, String) {
     });
     let display_path = std::env::current_dir()
         .ok()
-        .and_then(|cwd| Path::new(file).strip_prefix(&cwd).ok().map(|p| p.to_path_buf()))
+        .and_then(|cwd| {
+            Path::new(file)
+                .strip_prefix(&cwd)
+                .ok()
+                .map(|p| p.to_path_buf())
+        })
         .unwrap_or_else(|| PathBuf::from(file));
-    eprintln!("  {} {}...", color::dim("Compiling"), display_path.display());
+    eprintln!(
+        "  {} {}...",
+        color::dim("Compiling"),
+        display_path.display()
+    );
     let mut checker = make_checker(None);
     let (program, _) = parse_and_typecheck(&source, file, &mut checker);
     let result = checker.to_result();
@@ -733,8 +861,12 @@ pub fn build_script(file: &str, profile: &str) -> (PathBuf, String) {
     let module_name = declared_module_name(&program).unwrap_or_else(|| "_script".to_string());
     let erlang_name = module_name.to_lowercase().replace('.', "_");
 
-    // Phase 2: Elaborate all modules
+    // Phase 2: Elaborate all modules (std modules needed for CodegenContext)
     let mut compiled_modules = compile_std_modules(&result);
+
+    // Ensure stdlib beams are cached globally
+    let stdlib_dir = ensure_stdlib_cache();
+
     let elaborated = elaborate::elaborate(&program, &result);
     compiled_modules.insert(
         module_name.clone(),
@@ -745,7 +877,7 @@ pub fn build_script(file: &str, profile: &str) -> (PathBuf, String) {
         },
     );
 
-    // Phase 3: Emit all modules
+    // Phase 3: Emit only the user module
     let ctx = codegen::CodegenContext {
         modules: compiled_modules.clone(),
         let_effect_bindings: result.let_effect_bindings.clone(),
@@ -755,29 +887,14 @@ pub fn build_script(file: &str, profile: &str) -> (PathBuf, String) {
         path: file.to_string(),
         source: source.clone(),
     };
-    for (mod_name, compiled) in &compiled_modules {
-        let sf = if mod_name == &module_name {
-            Some(&script_source)
-        } else {
-            None
-        };
-        let check_result = if mod_name == &module_name {
-            Some(&result)
-        } else {
-            result.module_check_results().get(mod_name)
-        };
-        emit_module(
-            mod_name,
-            &compiled.elaborated,
-            &ctx,
-            check_result,
-            &build_dir,
-            sf,
-        );
-    }
-
-    // Copy stdlib bridge (.erl) files into build dir
-    write_stdlib_bridges(&build_dir);
+    emit_module(
+        &module_name,
+        &compiled_modules[&module_name].elaborated,
+        &ctx,
+        Some(&result),
+        &build_dir,
+        Some(&script_source),
+    );
 
     run_erlc(&build_dir, build_start);
 
@@ -790,13 +907,24 @@ pub fn build_script(file: &str, profile: &str) -> (PathBuf, String) {
     }
     .write(&build_dir);
 
-    (build_dir, erlang_name)
+    ScriptBuild {
+        build_dir,
+        stdlib_dir,
+        erlang_name,
+    }
 }
 
+pub struct ScriptBuild {
+    pub build_dir: PathBuf,
+    pub stdlib_dir: PathBuf,
+    pub erlang_name: String,
+}
 
 /// Check if a desugared Let { name: "_" } is a test/describe call.
 fn is_test_decl(decl: &ast::Decl) -> bool {
-    let ast::Decl::Let { name, value, .. } = decl else { return false };
+    let ast::Decl::Let { name, value, .. } = decl else {
+        return false;
+    };
     if name != "_" {
         return false;
     }
@@ -806,8 +934,7 @@ fn is_test_decl(decl: &ast::Decl) -> bool {
         match &e.kind {
             ast::ExprKind::App { func, .. } => e = func,
             ast::ExprKind::Var { name } => {
-                return name == "test" || name == "describe"
-                    || name == "skip" || name == "only";
+                return name == "test" || name == "describe" || name == "skip" || name == "only";
             }
             _ => return false,
         }
@@ -849,7 +976,11 @@ fn synthesize_test_main(program: &mut ast::Program) {
 
     // Auto-import run_collected if not already imported
     let has_run_collected = top_level.iter().any(|d| {
-        if let ast::Decl::Import { exposing: Some(items), .. } = d {
+        if let ast::Decl::Import {
+            exposing: Some(items),
+            ..
+        } = d
+        {
             items.iter().any(|item| item == "run_collected")
         } else {
             false
@@ -876,28 +1007,40 @@ fn synthesize_test_main(program: &mut ast::Program) {
         })
         .collect();
 
-    let block = ast::Expr::synth(s, ast::ExprKind::Block {
-        stmts,
-        dangling_trivia: vec![],
-    });
+    let block = ast::Expr::synth(
+        s,
+        ast::ExprKind::Block {
+            stmts,
+            dangling_trivia: vec![],
+        },
+    );
 
-    let lambda = ast::Expr::synth(s, ast::ExprKind::Lambda {
-        params: vec![ast::Pat::Lit {
-            id: ast::NodeId::fresh(),
-            value: ast::Lit::Unit,
-            span: s,
-        }],
-        body: Box::new(block),
-    });
+    let lambda = ast::Expr::synth(
+        s,
+        ast::ExprKind::Lambda {
+            params: vec![ast::Pat::Lit {
+                id: ast::NodeId::fresh(),
+                value: ast::Lit::Unit,
+                span: s,
+            }],
+            body: Box::new(block),
+        },
+    );
 
-    let run_collected = ast::Expr::synth(s, ast::ExprKind::Var {
-        name: "run_collected".to_string(),
-    });
+    let run_collected = ast::Expr::synth(
+        s,
+        ast::ExprKind::Var {
+            name: "run_collected".to_string(),
+        },
+    );
 
-    let body = ast::Expr::synth(s, ast::ExprKind::App {
-        func: Box::new(run_collected),
-        arg: Box::new(lambda),
-    });
+    let body = ast::Expr::synth(
+        s,
+        ast::ExprKind::App {
+            func: Box::new(run_collected),
+            arg: Box::new(lambda),
+        },
+    );
 
     top_level.push(ast::Decl::FunBinding {
         id: ast::NodeId::fresh(),

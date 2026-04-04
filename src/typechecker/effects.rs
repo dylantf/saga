@@ -128,10 +128,21 @@ impl Checker {
     /// Find which effect an operation belongs to. Returns the canonical
     /// (module-qualified) effect name, e.g. "Std.Fail.Fail".
     pub(crate) fn effect_for_op(&self, op_name: &str, qualifier: Option<&str>) -> Option<String> {
-        if let Some(effect_name) = qualifier
-            && self.effects.contains_key(effect_name)
-        {
-            return Some(effect_name.to_string());
+        if let Some(effect_name) = qualifier {
+            // Resolve qualifier through scope_map, matching lookup_effect_op's logic
+            let canonical = self.scope_map.resolve_effect(effect_name)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| effect_name.to_string());
+            if self.effects.contains_key(&canonical) {
+                return Some(canonical);
+            }
+            // Local module fallback
+            if let Some(m) = &self.current_module {
+                let qualified = format!("{}.{}", m, effect_name);
+                if self.effects.contains_key(&qualified) {
+                    return Some(qualified);
+                }
+            }
         }
         for (effect_name, info) in &self.effects {
             if info.ops.iter().any(|o| o.name == op_name) {

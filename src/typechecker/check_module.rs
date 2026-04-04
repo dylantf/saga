@@ -168,12 +168,24 @@ impl ModuleExports {
             }
         }
 
-        // Collect effectful function names for public functions
-        let effectful_funs: HashSet<String> = pub_names
-            .iter()
-            .filter(|name| checker.effect_meta.known_funs.contains(name.as_str()))
-            .cloned()
-            .collect();
+        // Collect effectful function names — only functions with declared effects,
+        // not all known_funs (which includes pure functions too).
+        let effectful_funs: HashSet<String> = {
+            let mut set = HashSet::new();
+            for decl in program {
+                if let Decl::FunSignature {
+                    public: true,
+                    name,
+                    effects,
+                    ..
+                } = decl
+                    && !effects.is_empty()
+                {
+                    set.insert(name.clone());
+                }
+            }
+            set
+        };
 
         // Collect doc comments from all public declarations
         let mut doc_comments: HashMap<String, Vec<String>> = HashMap::new();
