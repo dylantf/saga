@@ -42,6 +42,14 @@ enum Command {
         /// Filter pattern (file path or substring match)
         filter: Option<String>,
     },
+    /// Create a new project
+    New {
+        /// Project name (also the directory name)
+        name: String,
+        /// Create a library project instead of a binary
+        #[arg(long)]
+        lib: bool,
+    },
     /// Fetch and cache git dependencies
     Install,
     /// Format a source file
@@ -78,6 +86,9 @@ fn main() {
         }
         Command::Test { filter } => {
             cli::commands::cmd_test(filter.as_deref());
+        }
+        Command::New { name, lib } => {
+            cli::commands::cmd_new(&name, lib);
         }
         Command::Install => {
             cli::commands::cmd_install();

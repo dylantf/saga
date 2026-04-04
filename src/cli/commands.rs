@@ -94,12 +94,6 @@ pub fn cmd_check(file: Option<&str>) {
                 eprintln!("Error in project.toml: {}", e);
                 std::process::exit(1);
             }
-            let main_file = config.main_file();
-            let main_path = project_root.join(main_file);
-            let source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
-                eprintln!("Error reading {}: {}", main_file, e);
-                std::process::exit(1);
-            });
             let mut checker = make_checker(Some(project_root.clone()));
             if let Some(deps) = &config.deps
                 && let Err(e) =
@@ -108,7 +102,26 @@ pub fn cmd_check(file: Option<&str>) {
                 eprintln!("Error resolving dependencies: {}", e);
                 std::process::exit(1);
             }
-            let (_, result) = parse_and_typecheck(&source, main_file, &mut checker);
+            if config.is_bin() {
+                let main_file = config.main_file();
+                let main_path = project_root.join(main_file);
+                let source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
+                    eprintln!("Error reading {}: {}", main_file, e);
+                    std::process::exit(1);
+                });
+                parse_and_typecheck(&source, main_file, &mut checker);
+            } else if let Some(lib) = &config.library {
+                let module_map = checker.module_map().cloned().unwrap_or_default();
+                for exposed in &lib.expose {
+                    if module_map.contains_key(exposed) {
+                        checker.typecheck_import_by_name(exposed);
+                    } else {
+                        eprintln!("Error: exposed module '{}' not found in project", exposed);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            let result = checker.to_result();
             let warning_count = result.warnings().len();
             if warning_count > 0 {
                 eprintln!(
@@ -120,6 +133,92 @@ pub fn cmd_check(file: Option<&str>) {
             }
         }
     }
+}
+
+pub fn cmd_new(name: &str, lib: bool) {
+    let dir = std::path::PathBuf::from(name);
+    if dir.exists() {
+        eprintln!("Error: directory '{}' already exists", name);
+        std::process::exit(1);
+    }
+
+    fs::create_dir_all(&dir).unwrap_or_else(|e| {
+        eprintln!("Error creating directory: {}", e);
+        std::process::exit(1);
+    });
+
+    // Convert project name to PascalCase module name (e.g. "my-project" -> "MyProject")
+    let module_name: String = name
+        .split(['-', '_'])
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect();
+
+    if lib {
+        let project_toml = format!(
+            r#"[project]
+name = "{name}"
+
+[library]
+module = "{module_name}"
+expose = []
+
+# [bin]
+# main = "Main.dy"
+
+# [deps]
+# some-lib = {{ path = "../some-lib" }}
+"#
+        );
+        fs::write(dir.join("project.toml"), project_toml).unwrap();
+        fs::write(
+            dir.join(format!("{module_name}.dy")),
+            format!("module {module_name}\n"),
+        )
+        .unwrap();
+    } else {
+        let project_toml = format!(
+            r#"[project]
+name = "{name}"
+
+[bin]
+main = "Main.dy"
+
+# [library]
+# module = "{module_name}"
+# expose = []
+
+# [deps]
+# some-lib = {{ path = "../some-lib" }}
+"#
+        );
+        fs::write(dir.join("project.toml"), project_toml).unwrap();
+        fs::write(
+            dir.join("Main.dy"),
+            "module Main\n\nimport Std.IO (console)\n\npub fun main : Unit -> Unit\nmain () = {\n  println \"hello!\"\n} with console\n",
+        )
+        .unwrap();
+    }
+
+    // Initialize git repo
+    let _ = std::process::Command::new("git")
+        .arg("init")
+        .arg(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    eprintln!(
+        "  {} {} project '{}'",
+        super::color::green("Created"),
+        if lib { "library" } else { "binary" },
+        name
+    );
 }
 
 pub fn cmd_install() {
