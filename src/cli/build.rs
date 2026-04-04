@@ -12,7 +12,22 @@ use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
 
 const BUILD_HASH: &str = env!("DYLANG_BUILD_HASH");
-const STDLIB_HASH: &str = env!("DYLANG_STDLIB_HASH");
+/// Compute stdlib hash at runtime from the embedded sources.
+/// This is more reliable than the build-time hash because it always
+/// reflects the actual content compiled into the binary.
+fn stdlib_hash() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (name, source) in typechecker::BUILTIN_MODULES {
+        name.hash(&mut hasher);
+        source.hash(&mut hasher);
+    }
+    for (name, source) in stdlib_bridge_files() {
+        name.hash(&mut hasher);
+        source.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
 
 /// Build manifest written to `_build/<profile>/.manifest` for cache invalidation.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -419,7 +434,7 @@ pub fn ensure_stdlib_cache() -> PathBuf {
     }
 
     // Write marker so we know the cache is complete
-    fs::write(cache_dir.join(".complete"), STDLIB_HASH).unwrap_or_else(|e| {
+    fs::write(cache_dir.join(".complete"), "").unwrap_or_else(|e| {
         eprintln!("Error writing stdlib cache marker: {}", e);
         std::process::exit(1);
     });
@@ -434,7 +449,7 @@ fn stdlib_cache_dir() -> PathBuf {
     PathBuf::from(home)
         .join(".dylang")
         .join("lib")
-        .join(STDLIB_HASH)
+        .join(stdlib_hash())
 }
 
 /// Scan project and dependency directories for .erl bridge files and copy them to the build directory.
