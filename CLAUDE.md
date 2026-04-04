@@ -23,9 +23,10 @@ cargo run --bin dylang -- build file.dy     # Compile without running
 cargo run --bin dylang -- check file.dy     # Type check only
 cargo run --bin dylang -- emit file.dy      # Print Core Erlang to stdout
 cargo run --bin dylang -- test              # Run project test suite (tests/*.dy)
+cargo run --bin dylang -- install           # Fetch and compile Hex/git dependencies
 ```
 
-Requires `erlc` and `erl` on PATH (Erlang/OTP) for `run`/`build`/`test` commands.
+Requires `erlc` and `erl` on PATH (Erlang/OTP) for `run`/`build`/`test` commands. Hex packages with NIFs require `rebar3` on PATH.
 
 ## Architecture
 

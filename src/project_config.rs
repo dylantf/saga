@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::color::{cyan, dim, green};
 use crate::typechecker;
 
 /// Parsed project.toml configuration.
@@ -512,8 +513,8 @@ fn install_deps_recursive(
                 .unwrap_or("HEAD");
 
             eprintln!(
-                "{}Fetching {} ({} @ {})...",
-                indent, dep_name, url, ref_label
+                "{}{} {} ({} @ {})...",
+                indent, dim("Fetching"), dep_name, url, ref_label
             );
 
             let (checkout_path, commit) = resolve_git_dep(dep_name, dep_entry, None)?;
@@ -527,7 +528,7 @@ fn install_deps_recursive(
             }
 
             let short_commit = &commit[..commit.len().min(12)];
-            eprintln!("{}Resolved {} -> {}", indent, dep_name, short_commit);
+            eprintln!("{}{} {} -> {}", indent, cyan("Resolved"), dep_name, short_commit);
 
             lockfile.deps.insert(
                 dep_name.clone(),
@@ -587,11 +588,11 @@ fn install_hex_dep_recursive(
         return Ok(());
     }
 
-    eprintln!("{}Fetching {} (hex @ {})...", indent, dep_name, version);
+    eprintln!("{}{} {} (hex @ {})...", indent, dim("Fetching"), dep_name, version);
 
     let (_ebin_dir, release) = crate::hex::install_package(project_root, dep_name, version)?;
 
-    eprintln!("{}Resolved {} -> {}", indent, dep_name, version);
+    eprintln!("{}{} {} -> {}", indent, cyan("Resolved"), dep_name, version);
 
     lockfile.deps.insert(
         dep_name.to_string(),
@@ -763,7 +764,8 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
                     && old_commit != new_commit
                 {
                     eprintln!(
-                        "  Updated {} ({} -> {})",
+                        "  {} {} ({} -> {})",
+                        cyan("Updated"),
                         name,
                         &old_commit[..old_commit.len().min(12)],
                         &new_commit[..new_commit.len().min(12)]
@@ -775,7 +777,8 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
                     && old_ver != new_ver
                 {
                     eprintln!(
-                        "  Updated {} ({} -> {})",
+                        "  {} {} ({} -> {})",
+                        cyan("Updated"),
                         name, old_ver, new_ver
                     );
                 }
@@ -785,7 +788,7 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
 
     if !lockfile.deps.is_empty() {
         lockfile.save(project_root)?;
-        eprintln!("  Wrote dylang.lock");
+        eprintln!("  {} dylang.lock", green("Wrote"));
     }
 
     Ok(())
@@ -822,7 +825,7 @@ fn resolve_deps_recursive(
             ));
         }
 
-        eprintln!("{}Resolving dependency '{}'...", indent, dep_name);
+        eprintln!("{}{} dependency '{}'...", indent, dim("Resolving"), dep_name);
 
         let dep_config = ProjectConfig::load(&dep_path);
         let lib = dep_config.library.ok_or_else(|| {
@@ -916,7 +919,8 @@ pub fn resolve_deps(
     if !dep_modules.is_empty() {
         let module_names: Vec<&str> = dep_modules.keys().map(|s| s.as_str()).collect();
         eprintln!(
-            "  Resolved {} dependency module(s): {}",
+            "  {} {} dependency module(s): {}",
+            cyan("Resolved"),
             module_names.len(),
             module_names.join(", ")
         );

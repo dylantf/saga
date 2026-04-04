@@ -64,17 +64,24 @@ Git deps are cached globally in `~/.dylang/cache/git/`. The cache uses bare clon
 
 ### Hex Dependencies (Erlang packages)
 
-Dependencies from the [Hex package registry](https://hex.pm). These are Erlang (BEAM) packages — they're compiled with `erlc` and made available on the code path, but not typechecked by dylang.
+Dependencies from the [Hex package registry](https://hex.pm). These are Erlang (BEAM) packages — they're compiled and made available on the code path, but not typechecked by dylang.
 
 ```toml
 [deps]
 base64url = { version = "1.0.1" }
-jsx = { version = "3.1.0" }
+argon2 = { version = "1.2.0" }
 ```
 
 Hex is the default source: if a dep has no `path` or `git`, it's treated as a Hex package. The dep key is the Hex package name.
 
-`dylang install` fetches the tarball from `repo.hex.pm`, extracts it, compiles `.erl` files with `erlc`, and caches the result in `~/.dylang/cache/hex/{name}-{version}/`. Transitive Hex dependencies are resolved and installed automatically.
+`dylang install` fetches the tarball from `repo.hex.pm`, extracts it, compiles it, and installs into the project's `deps/` directory. Transitive Hex dependencies are resolved and installed automatically.
+
+#### Compilation
+
+Hex packages are compiled with one of two strategies:
+
+- **Pure Erlang packages** (no native code): compiled directly with `erlc`. Fast, no extra tools needed.
+- **Packages with NIFs or build hooks**: detected by the presence of `c_src/`, `native/`, or `pre_hooks`/`port_specs` in `rebar.config`. These are compiled with `rebar3 bare compile`, which handles native code compilation (C, Rust, etc.) via the package's build hooks. Requires `rebar3` on PATH.
 
 #### Wrapping Hex packages
 
@@ -89,24 +96,27 @@ pub fun encode : String -> String
 For more complex cases where types need conversion, write a bridge `.erl` file. Bridge files can call into Hex deps because Erlang module calls are late-bound (resolved at runtime, not compile time):
 
 ```erlang
-%% my_bridge.erl
--module(my_bridge).
--export([round_trip/1]).
+%% argon2_bridge.erl
+-module(argon2_bridge).
+-export([hash/1]).
 
-round_trip(Bin) ->
-    Encoded = base64url:encode(Bin),
-    Decoded = base64url:decode(Encoded),
-    {Encoded, Decoded}.
+hash(Password) ->
+    {ok, Hash} = argon2:hash(Password),
+    Hash.
 ```
 
 ```
-@external("erlang", "my_bridge", "round_trip")
-fun round_trip : String -> (String, String)
+@external("erlang", "argon2_bridge", "hash")
+fun argon2_hash : String -> String
 ```
 
 #### Version requirements
 
 For now, Hex deps use exact versions. Transitive dependencies from Hex packages may specify `~>` requirements (e.g., `~> 1.0`), which are resolved to the latest compatible version.
+
+#### Install location
+
+Hex packages are installed into the project's `deps/` directory (e.g., `deps/base64url/ebin/`). This keeps builds isolated per project and avoids OTP version mismatches across projects. To reinstall all Hex deps, delete `deps/` and run `dylang install` again.
 
 ---
 
