@@ -94,12 +94,6 @@ pub fn cmd_check(file: Option<&str>) {
                 eprintln!("Error in project.toml: {}", e);
                 std::process::exit(1);
             }
-            let main_file = config.main_file();
-            let main_path = project_root.join(main_file);
-            let source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
-                eprintln!("Error reading {}: {}", main_file, e);
-                std::process::exit(1);
-            });
             let mut checker = make_checker(Some(project_root.clone()));
             if let Some(deps) = &config.deps
                 && let Err(e) =
@@ -108,7 +102,26 @@ pub fn cmd_check(file: Option<&str>) {
                 eprintln!("Error resolving dependencies: {}", e);
                 std::process::exit(1);
             }
-            let (_, result) = parse_and_typecheck(&source, main_file, &mut checker);
+            if config.is_bin() {
+                let main_file = config.main_file();
+                let main_path = project_root.join(main_file);
+                let source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
+                    eprintln!("Error reading {}: {}", main_file, e);
+                    std::process::exit(1);
+                });
+                parse_and_typecheck(&source, main_file, &mut checker);
+            } else if let Some(lib) = &config.library {
+                let module_map = checker.module_map().cloned().unwrap_or_default();
+                for exposed in &lib.expose {
+                    if module_map.contains_key(exposed) {
+                        checker.typecheck_import_by_name(exposed);
+                    } else {
+                        eprintln!("Error: exposed module '{}' not found in project", exposed);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            let result = checker.to_result();
             let warning_count = result.warnings().len();
             if warning_count > 0 {
                 eprintln!(
