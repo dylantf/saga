@@ -437,8 +437,9 @@ impl<'a> Lowerer<'a> {
                             .iter()
                             .map(|e| self.canonicalize_effect(&e.name))
                             .collect();
+                        let canonical_handler = format!("{}.{}", module_name, name);
                         self.handler_defs
-                            .entry(name.clone())
+                            .entry(canonical_handler)
                             .or_insert(HandlerInfo {
                                 effects: canonical_effects,
                                 arms: body.arms.iter().map(|a| a.node.clone()).collect(),
