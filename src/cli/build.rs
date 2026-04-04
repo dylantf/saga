@@ -419,7 +419,7 @@ pub fn ensure_stdlib_cache() -> PathBuf {
     }
 
     // Write marker so we know the cache is complete
-    fs::write(cache_dir.join(".complete"), BUILD_HASH).unwrap_or_else(|e| {
+    fs::write(cache_dir.join(".complete"), STDLIB_HASH).unwrap_or_else(|e| {
         eprintln!("Error writing stdlib cache marker: {}", e);
         std::process::exit(1);
     });
