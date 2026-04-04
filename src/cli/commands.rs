@@ -122,6 +122,92 @@ pub fn cmd_check(file: Option<&str>) {
     }
 }
 
+pub fn cmd_new(name: &str, lib: bool) {
+    let dir = std::path::PathBuf::from(name);
+    if dir.exists() {
+        eprintln!("Error: directory '{}' already exists", name);
+        std::process::exit(1);
+    }
+
+    fs::create_dir_all(&dir).unwrap_or_else(|e| {
+        eprintln!("Error creating directory: {}", e);
+        std::process::exit(1);
+    });
+
+    // Convert project name to PascalCase module name (e.g. "my-project" -> "MyProject")
+    let module_name: String = name
+        .split(['-', '_'])
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect();
+
+    if lib {
+        let project_toml = format!(
+            r#"[project]
+name = "{name}"
+
+[library]
+module = "{module_name}"
+expose = []
+
+# [bin]
+# main = "Main.dy"
+
+# [deps]
+# some-lib = {{ path = "../some-lib" }}
+"#
+        );
+        fs::write(dir.join("project.toml"), project_toml).unwrap();
+        fs::write(
+            dir.join(format!("{module_name}.dy")),
+            format!("module {module_name}\n"),
+        )
+        .unwrap();
+    } else {
+        let project_toml = format!(
+            r#"[project]
+name = "{name}"
+
+[bin]
+main = "Main.dy"
+
+# [library]
+# module = "{module_name}"
+# expose = []
+
+# [deps]
+# some-lib = {{ path = "../some-lib" }}
+"#
+        );
+        fs::write(dir.join("project.toml"), project_toml).unwrap();
+        fs::write(
+            dir.join("Main.dy"),
+            "module Main\n\nimport Std.IO (console)\n\npub fun main : Unit -> Unit\nmain () = {\n  println \"hello!\"\n} with console\n",
+        )
+        .unwrap();
+    }
+
+    // Initialize git repo
+    let _ = std::process::Command::new("git")
+        .arg("init")
+        .arg(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    eprintln!(
+        "  {} {} project '{}'",
+        super::color::green("Created"),
+        if lib { "library" } else { "binary" },
+        name
+    );
+}
+
 pub fn cmd_install() {
     let project_root = super::find_project_root().unwrap_or_else(|| {
         eprintln!("No project.toml found.");
