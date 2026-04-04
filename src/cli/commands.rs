@@ -9,13 +9,11 @@ use super::color;
 
 pub fn cmd_run(file: Option<&str>, release: bool) {
     if release {
-        // --release: use existing build if present, build only if missing
+        // --release: use cached build if still valid, otherwise rebuild
         if let Some(f) = file {
-            let build_dir = script_build_dir(f, "release");
-            if !build_dir.join("_script.beam").exists() {
-                build_script(f, "release");
-            }
-            exec_erl(&build_dir, "_script");
+            let (build_dir, erlang_name) =
+                check_script_cache(f, "release").unwrap_or_else(|| build_script(f, "release"));
+            exec_erl(&build_dir, &erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
                 eprintln!("No project.toml found.");
@@ -28,17 +26,15 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 );
                 std::process::exit(1);
             }
-            let build_dir = project_root.join("_build").join("release");
-            if !build_dir.join("main.beam").exists() {
-                build_project("release");
-            }
+            let build_dir = check_project_cache(&project_root, "release")
+                .unwrap_or_else(|| build_project("release").0);
             exec_erl(&build_dir, "main");
         }
     } else {
         // dev: always clean rebuild
         if let Some(f) = file {
-            let build_dir = build_script(f, "dev");
-            exec_erl(&build_dir, "_script");
+            let (build_dir, erlang_name) = build_script(f, "dev");
+            exec_erl(&build_dir, &erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
                 eprintln!("No project.toml found.");
@@ -61,7 +57,7 @@ pub fn cmd_build(file: Option<&str>, release: bool) {
     let profile = if release { "release" } else { "dev" };
 
     if let Some(f) = file {
-        build_script(f, profile);
+        let _ = build_script(f, profile);
     } else {
         build_project(profile);
     }
@@ -145,11 +141,14 @@ pub fn cmd_emit(file: &str) {
     let (program, _) = parse_and_typecheck(&source, file, &mut checker);
     let result = checker.to_result();
 
+    let module_name = declared_module_name(&program).unwrap_or_else(|| "_script".to_string());
+    let erlang_name = module_name.to_lowercase().replace('.', "_");
+
     // Full pipeline: compile Std modules + elaborate user code
     let mut compiled_modules = compile_std_modules(&result);
     let elaborated = elaborate::elaborate(&program, &result);
     compiled_modules.insert(
-        "_script".to_string(),
+        module_name,
         codegen::CompiledModule {
             codegen_info: Default::default(),
             elaborated: elaborated.clone(),
@@ -166,7 +165,7 @@ pub fn cmd_emit(file: &str) {
         source: source.clone(),
     };
     let core_src = codegen::emit_module_with_context(
-        "_script",
+        &erlang_name,
         &elaborated,
         &ctx,
         Some(&result),

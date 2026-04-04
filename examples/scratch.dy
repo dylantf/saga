@@ -1,5 +1,19 @@
 import Std.IO (Stdio, console)
+import Std.IO.Unsafe (print_stderr)
+
+# Custom handler that redirects stdout to stderr
+handler stderr_only for Stdio {
+  print message = {
+    print_stderr message
+    resume ()
+  }
+  eprint message = {
+    print_stderr message
+    resume ()
+  }
+  read _ = resume ""
+}
 
 main () = {
-  print! "Hello world"
-}
+  Stdio.print! "hello from a custom handler"
+} with stderr_only

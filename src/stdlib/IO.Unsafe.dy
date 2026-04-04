@@ -1,0 +1,16 @@
+module Std.IO.Unsafe
+
+#@ Writes a string directly to stdout, bypassing the Stdio effect.
+#@ Use this in custom Stdio handler implementations.
+@builtin
+pub fun print_stdout : String -> Unit
+
+#@ Writes a string directly to stderr, bypassing the Stdio effect.
+#@ Use this in custom Stdio handler implementations.
+@builtin
+pub fun print_stderr : String -> Unit
+
+#@ Reads a line from stdin, stripping the trailing newline.
+#@ Use this in custom Stdio handler implementations.
+@external("erlang", "std_io_bridge", "read_line")
+pub fun read_stdin : Unit -> String

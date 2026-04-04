@@ -11,6 +11,148 @@ use std::time::Instant;
 use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
 
+const BUILD_HASH: &str = env!("SAGA_BUILD_HASH");
+
+/// Build manifest written to `_build/<profile>/.manifest` for cache invalidation.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BuildManifest {
+    entry_module: String,
+    source_file: String,
+    source_mtime: u64,
+    compiler_version: String,
+}
+
+impl BuildManifest {
+    fn path(build_dir: &Path) -> PathBuf {
+        build_dir.join(".manifest")
+    }
+
+    fn write(&self, build_dir: &Path) {
+        let path = Self::path(build_dir);
+        let content = toml::to_string(self).expect("failed to serialize manifest");
+        fs::write(&path, content).unwrap_or_else(|e| {
+            eprintln!("Error writing manifest: {}", e);
+        });
+    }
+
+    fn read(build_dir: &Path) -> Option<Self> {
+        let path = Self::path(build_dir);
+        let content = fs::read_to_string(&path).ok()?;
+        toml::from_str(&content).ok()
+    }
+}
+
+fn file_mtime(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Check if a cached build is still valid for the given script file.
+/// Returns `Some((build_dir, entry_module))` if the cache is fresh.
+pub fn check_script_cache(file: &str, profile: &str) -> Option<(PathBuf, String)> {
+    let build_dir = Path::new(file)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("_build")
+        .join(profile);
+
+    let manifest = BuildManifest::read(&build_dir)?;
+    if manifest.compiler_version != BUILD_HASH {
+        return None;
+    }
+
+    let rel_source = relative_source_path(file);
+    if manifest.source_file != rel_source {
+        return None;
+    }
+
+    let current_mtime = file_mtime(Path::new(file));
+    if manifest.source_mtime != current_mtime {
+        return None;
+    }
+
+    if !build_dir
+        .join(format!("{}.beam", manifest.entry_module))
+        .exists()
+    {
+        return None;
+    }
+
+    Some((build_dir, manifest.entry_module))
+}
+
+/// Check if a cached build is still valid for a project.
+/// Returns `Some(build_dir)` if the cache is fresh.
+pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<PathBuf> {
+    let build_dir = project_root.join("_build").join(profile);
+
+    let manifest = BuildManifest::read(&build_dir)?;
+    if manifest.compiler_version != BUILD_HASH {
+        return None;
+    }
+
+    // Check if any .dy file or project.toml has been modified
+    let current_mtime = max_project_mtime(project_root);
+    if manifest.source_mtime != current_mtime {
+        return None;
+    }
+
+    if !build_dir
+        .join(format!("{}.beam", manifest.entry_module))
+        .exists()
+    {
+        return None;
+    }
+
+    Some(build_dir)
+}
+
+/// Find the maximum mtime across all .dy files and project.toml in a project.
+fn max_project_mtime(root: &Path) -> u64 {
+    let mut max = file_mtime(&root.join("project.toml"));
+    collect_dy_mtimes(root, &mut max);
+    max
+}
+
+fn collect_dy_mtimes(dir: &Path, max: &mut u64) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path
+                .file_name()
+                .is_some_and(|n| n == "_build" || n == "tests")
+            {
+                continue;
+            }
+            collect_dy_mtimes(&path, max);
+        } else if path.extension().is_some_and(|ext| ext == "dy") {
+            let mtime = file_mtime(&path);
+            if mtime > *max {
+                *max = mtime;
+            }
+        }
+    }
+}
+
+fn relative_source_path(file: &str) -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            Path::new(file)
+                .strip_prefix(&cwd)
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| file.to_string())
+}
+
 pub fn parse_and_typecheck(
     source: &str,
     source_path: &str,
@@ -536,12 +678,32 @@ pub fn build_project(profile: &str) -> (PathBuf, HashMap<String, codegen::Compil
     copy_project_bridges(&bridge_roots, &build_dir);
 
     run_erlc(&build_dir, build_start);
+
+    // Write manifest for cache invalidation
+    if has_bin {
+        BuildManifest {
+            entry_module: "main".to_string(),
+            source_file: "project.toml".to_string(),
+            source_mtime: max_project_mtime(&project_root),
+            compiler_version: BUILD_HASH.to_string(),
+        }
+        .write(&build_dir);
+    }
+
     (build_dir, compiled_modules)
 }
 
+/// Extract the module name from a parsed program, if it has a `module` declaration.
+pub fn declared_module_name(program: &ast::Program) -> Option<String> {
+    program.iter().find_map(|decl| match decl {
+        ast::Decl::ModuleDecl { path, .. } => Some(path.join(".")),
+        _ => None,
+    })
+}
+
 /// Build a single script file into the given build directory.
-/// Returns the build directory path.
-pub fn build_script(file: &str, profile: &str) -> PathBuf {
+/// Returns the build directory path and the entry module's erlang name.
+pub fn build_script(file: &str, profile: &str) -> (PathBuf, String) {
     let build_start = Instant::now();
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Error reading {}: {}", file, e);
@@ -567,11 +729,15 @@ pub fn build_script(file: &str, profile: &str) -> PathBuf {
         std::process::exit(1);
     });
 
+    // Resolve module name: use declared name if present, otherwise "_script"
+    let module_name = declared_module_name(&program).unwrap_or_else(|| "_script".to_string());
+    let erlang_name = module_name.to_lowercase().replace('.', "_");
+
     // Phase 2: Elaborate all modules
     let mut compiled_modules = compile_std_modules(&result);
     let elaborated = elaborate::elaborate(&program, &result);
     compiled_modules.insert(
-        "_script".to_string(),
+        module_name.clone(),
         codegen::CompiledModule {
             codegen_info: Default::default(),
             elaborated,
@@ -589,19 +755,19 @@ pub fn build_script(file: &str, profile: &str) -> PathBuf {
         path: file.to_string(),
         source: source.clone(),
     };
-    for (module_name, compiled) in &compiled_modules {
-        let sf = if module_name == "_script" {
+    for (mod_name, compiled) in &compiled_modules {
+        let sf = if mod_name == &module_name {
             Some(&script_source)
         } else {
             None
         };
-        let check_result = if module_name == "_script" {
+        let check_result = if mod_name == &module_name {
             Some(&result)
         } else {
-            result.module_check_results().get(module_name)
+            result.module_check_results().get(mod_name)
         };
         emit_module(
-            module_name,
+            mod_name,
             &compiled.elaborated,
             &ctx,
             check_result,
@@ -614,17 +780,19 @@ pub fn build_script(file: &str, profile: &str) -> PathBuf {
     write_stdlib_bridges(&build_dir);
 
     run_erlc(&build_dir, build_start);
-    build_dir
+
+    // Write manifest for cache invalidation
+    BuildManifest {
+        entry_module: erlang_name.clone(),
+        source_file: relative_source_path(file),
+        source_mtime: file_mtime(Path::new(file)),
+        compiler_version: BUILD_HASH.to_string(),
+    }
+    .write(&build_dir);
+
+    (build_dir, erlang_name)
 }
 
-/// Get the build directory for a script without building.
-pub fn script_build_dir(file: &str, profile: &str) -> PathBuf {
-    Path::new(file)
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("_build")
-        .join(profile)
-}
 
 /// Check if a desugared Let { name: "_" } is a test/describe call.
 fn is_test_decl(decl: &ast::Decl) -> bool {

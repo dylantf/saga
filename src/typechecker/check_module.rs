@@ -432,6 +432,7 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("Std.Fail", include_str!("../stdlib/Fail.dy")),
     ("Std.Supervisor", include_str!("../stdlib/Supervisor.dy")),
     ("Std.Async", include_str!("../stdlib/Async.dy")),
+    ("Std.IO.Unsafe", include_str!("../stdlib/IO.Unsafe.dy")),
     ("Std.IO", include_str!("../stdlib/IO.dy")),
     ("Std.Math", include_str!("../stdlib/Math.dy")),
     ("Std.Test", include_str!("../stdlib/Test.dy")),

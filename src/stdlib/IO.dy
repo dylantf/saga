@@ -1,30 +1,7 @@
 module Std.IO
 
 import Std.String
-
-#@ prints to stdout
-@builtin
-fun print_builtin : String -> Unit
-
-#@ prints to stdout with a trailing newline
-@builtin
-fun println_builtin : String -> Unit
-
-#@ prints to stderr
-@builtin
-pub fun eprint_builtin : String -> Unit
-
-#@ prints to stderr with a trailing newline
-@builtin
-pub fun eprintln_builtin : String -> Unit
-
-#@ reads a line from stdin, stripping the trailing newline
-@external("erlang", "std_io_bridge", "read_line")
-fun readln_builtin : Unit -> String
-
-#@ reads a single character from stdin
-@external("erlang", "std_io_bridge", "read_char")
-fun read_char_builtin : Unit -> String
+import Std.IO.Unsafe (print_stdout, print_stderr, read_stdin)
 
 #@ prints debug representation to stderr and returns the value
 @builtin
@@ -38,16 +15,16 @@ pub effect Stdio {
 
 pub handler console for Stdio {
   print message = {
-    print_builtin message
+    print_stdout message
     resume ()
   }
   eprint message = {
-    eprint_builtin message
+    print_stderr message
     resume ()
   }
   read message = {
-    print_builtin message
-    resume readln_builtin ()
+    print_stdout message
+    resume (read_stdin ())
   }
 }
 

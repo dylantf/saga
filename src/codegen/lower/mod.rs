@@ -1004,17 +1004,12 @@ impl<'a> Lowerer<'a> {
                 // Match both bare names (builtins) and canonical names (after resolve pass).
                 if let Some((func_name, _head, args)) = collect_fun_call(expr) {
                     let lowered = match func_name {
-                        "print_builtin" | "Std.IO.print_builtin" => {
+                        // todo maybe? these could be moved to the bridge files directly
+                        "print_stdout" | "Std.IO.Unsafe.print_stdout" => {
                             self.lower_builtin_print(&args, false, false)
                         }
-                        "println_builtin" | "Std.IO.println_builtin" => {
-                            self.lower_builtin_print(&args, false, true)
-                        }
-                        "eprint_builtin" | "Std.IO.eprint_builtin" => {
+                        "print_stderr" | "Std.IO.Unsafe.print_stderr" => {
                             self.lower_builtin_print(&args, true, false)
-                        }
-                        "eprintln_builtin" | "Std.IO.eprintln_builtin" => {
-                            self.lower_builtin_print(&args, true, true)
                         }
                         "dbg" | "Std.IO.dbg" => self.lower_builtin_dbg(&args),
                         _ => None,
