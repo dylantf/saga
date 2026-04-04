@@ -7,3 +7,4 @@ main = "Main.dy"
 [deps]
 mathlib = { path = "../library" }
 base64url = { version = "1.0.1" }
+argon2 = { version = "1.2.0" }

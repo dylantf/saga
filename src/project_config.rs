@@ -479,7 +479,7 @@ fn install_deps_recursive(
 
     for (dep_name, dep_entry) in &deps {
         if dep_entry.is_hex() {
-            install_hex_dep_recursive(dep_name, dep_entry, lockfile, installing, &indent, depth)?;
+            install_hex_dep_recursive(project_root, dep_name, dep_entry, lockfile, installing, &indent, depth)?;
             continue;
         }
 
@@ -558,6 +558,7 @@ fn install_deps_recursive(
 
 /// Install a Hex dependency and recursively install its transitive deps.
 fn install_hex_dep_recursive(
+    project_root: &Path,
     dep_name: &str,
     dep_entry: &DepEntry,
     lockfile: &mut Lockfile,
@@ -588,7 +589,7 @@ fn install_hex_dep_recursive(
 
     eprintln!("{}Fetching {} (hex @ {})...", indent, dep_name, version);
 
-    let (_ebin_dir, release) = crate::hex::install_package(dep_name, version)?;
+    let (_ebin_dir, release) = crate::hex::install_package(project_root, dep_name, version)?;
 
     eprintln!("{}Resolved {} -> {}", indent, dep_name, version);
 
@@ -624,6 +625,7 @@ fn install_hex_dep_recursive(
         };
 
         install_hex_dep_recursive(
+            project_root,
             req_name,
             &transitive_entry,
             lockfile,
@@ -956,26 +958,19 @@ pub fn dep_root_paths(
 }
 
 /// Collect ebin directories for all Hex dependencies (including transitive).
-/// Reads from the lockfile — deps must be installed first.
+/// Reads from the project's deps/ directory.
 pub fn hex_ebin_dirs(project_root: &Path) -> Vec<PathBuf> {
-    let lockfile = match Lockfile::load(project_root) {
-        Some(lf) => lf,
-        None => return Vec::new(),
-    };
+    let deps_dir = project_root.join("deps");
+    if !deps_dir.exists() {
+        return Vec::new();
+    }
 
     let mut dirs = Vec::new();
-    for (name, entry) in &lockfile.deps {
-        if entry.is_hex()
-            && let (Some(hex_name), Some(version)) = (&entry.hex, &entry.version)
-        {
-            let ebin = crate::hex::package_ebin_dir(hex_name, version);
+    if let Ok(entries) = std::fs::read_dir(&deps_dir) {
+        for entry in entries.flatten() {
+            let ebin = entry.path().join("ebin");
             if ebin.exists() {
                 dirs.push(ebin);
-            } else {
-                eprintln!(
-                    "Warning: Hex dependency '{}' ({}) is not compiled. Run `dylang install`.",
-                    name, version
-                );
             }
         }
     }

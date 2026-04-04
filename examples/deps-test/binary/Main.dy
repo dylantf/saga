@@ -13,6 +13,10 @@ fun b64_encode : String -> String
 @external("erlang", "base64_bridge", "round_trip")
 fun b64_round_trip : String -> (String, String)
 
+# NIF — rebar3-compiled hex dep (via bridge for type mapping)
+@external("erlang", "argon2_bridge", "hash")
+fun argon2_hash : String -> String
+
 pub fun main : Unit -> Unit
 main () = {
   let result = add 3 4
@@ -35,4 +39,8 @@ main () = {
   let (enc, dec) = b64_round_trip "round trip test"
   println $"bridge encoded: {enc}"
   println $"bridge decoded: {dec}"
+
+  # NIF call via rebar3-compiled hex dep
+  let hashed = argon2_hash "my_password"
+  println $"argon2 hash: {hashed}"
 } with {console}

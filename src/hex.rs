@@ -1,29 +1,20 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Global cache directory for Hex packages.
-fn hex_cache_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".dylang")
-        .join("cache")
-        .join("hex")
+/// Directory for a specific Hex package within a project's deps/ folder.
+pub fn package_dir(project_root: &Path, name: &str) -> PathBuf {
+    project_root.join("deps").join(name)
 }
 
-/// Cache directory for a specific package version.
-pub fn package_cache_dir(name: &str, version: &str) -> PathBuf {
-    hex_cache_dir().join(format!("{}-{}", name, version))
+/// Path to the ebin directory for a Hex package.
+pub fn package_ebin_dir(project_root: &Path, name: &str) -> PathBuf {
+    package_dir(project_root, name).join("ebin")
 }
 
-/// Path to the ebin directory for a cached Hex package.
-pub fn package_ebin_dir(name: &str, version: &str) -> PathBuf {
-    package_cache_dir(name, version).join("ebin")
-}
-
-/// Whether a Hex package is already cached and compiled.
-pub fn is_cached(name: &str, version: &str) -> bool {
-    package_ebin_dir(name, version).exists()
+/// Whether a Hex package is already compiled in this project.
+pub fn is_compiled(project_root: &Path, name: &str) -> bool {
+    package_ebin_dir(project_root, name).exists()
 }
 
 // --- Hex API types ---
@@ -71,7 +62,10 @@ fn hex_client() -> reqwest::blocking::Client {
 
 /// Fetch release metadata from the Hex API.
 pub fn fetch_release(name: &str, version: &str) -> Result<HexRelease, String> {
-    let url = format!("https://hex.pm/api/packages/{}/releases/{}", name, version);
+    let url = format!(
+        "https://hex.pm/api/packages/{}/releases/{}",
+        name, version
+    );
     let resp = hex_client()
         .get(&url)
         .header("Accept", "application/json")
@@ -87,12 +81,8 @@ pub fn fetch_release(name: &str, version: &str) -> Result<HexRelease, String> {
         ));
     }
 
-    resp.json::<HexRelease>().map_err(|e| {
-        format!(
-            "failed to parse release metadata for {}-{}: {}",
-            name, version, e
-        )
-    })
+    resp.json::<HexRelease>()
+        .map_err(|e| format!("failed to parse release metadata for {}-{}: {}", name, version, e))
 }
 
 /// Fetch package info (all versions) from the Hex API.
@@ -118,14 +108,18 @@ pub fn fetch_package_info(name: &str) -> Result<HexPackageInfo, String> {
 
 // --- Tarball download & extraction ---
 
-/// Download a Hex tarball and extract its contents to the cache.
-/// Returns the cache directory path.
-pub fn download_and_extract(name: &str, version: &str) -> Result<PathBuf, String> {
-    let cache_dir = package_cache_dir(name, version);
+/// Download a Hex tarball and extract its contents into deps/{name}/.
+/// Returns the package directory path.
+pub fn download_and_extract(
+    project_root: &Path,
+    name: &str,
+    version: &str,
+) -> Result<PathBuf, String> {
+    let pkg_dir = package_dir(project_root, name);
 
     // Already extracted?
-    if cache_dir.join("src").exists() {
-        return Ok(cache_dir);
+    if pkg_dir.join("src").exists() {
+        return Ok(pkg_dir);
     }
 
     let url = format!("https://repo.hex.pm/tarballs/{}-{}.tar", name, version);
@@ -147,8 +141,8 @@ pub fn download_and_extract(name: &str, version: &str) -> Result<PathBuf, String
         .bytes()
         .map_err(|e| format!("failed to read tarball bytes: {}", e))?;
 
-    std::fs::create_dir_all(&cache_dir)
-        .map_err(|e| format!("failed to create cache dir: {}", e))?;
+    std::fs::create_dir_all(&pkg_dir)
+        .map_err(|e| format!("failed to create deps dir: {}", e))?;
 
     // The outer tarball is uncompressed and contains: VERSION, CHECKSUM, metadata.config, contents.tar.gz
     let mut outer_tar = tar::Archive::new(tarball_bytes.as_ref());
@@ -179,29 +173,156 @@ pub fn download_and_extract(name: &str, version: &str) -> Result<PathBuf, String
     let gz = flate2::read::GzDecoder::new(contents_bytes.as_slice());
     let mut inner_tar = tar::Archive::new(gz);
     inner_tar
-        .unpack(&cache_dir)
+        .unpack(&pkg_dir)
         .map_err(|e| format!("failed to extract contents: {}", e))?;
 
-    Ok(cache_dir)
+    Ok(pkg_dir)
 }
 
 // --- Compilation ---
 
-/// Compile Erlang source files in a Hex package to .beam files.
+/// Whether a package needs rebar3 to compile (has NIFs, hooks, etc.).
+fn needs_rebar3(pkg_dir: &Path) -> bool {
+    // Has c_src/ or native/ directory (NIF source)
+    if pkg_dir.join("c_src").exists() || pkg_dir.join("native").exists() {
+        return true;
+    }
+
+    // Has rebar.config with pre_hooks or port_specs
+    let rebar_config = pkg_dir.join("rebar.config");
+    if rebar_config.exists()
+        && let Ok(contents) = std::fs::read_to_string(&rebar_config)
+        && (contents.contains("pre_hooks")
+            || contents.contains("port_specs")
+            || contents.contains("provider_hooks"))
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Compile a Hex package using rebar3 bare compile.
 /// Returns the ebin directory path.
-pub fn compile_package(name: &str, version: &str) -> Result<PathBuf, String> {
-    let cache_dir = package_cache_dir(name, version);
-    let src_dir = cache_dir.join("src");
-    let ebin_dir = cache_dir.join("ebin");
+fn compile_with_rebar3(project_root: &Path, name: &str) -> Result<PathBuf, String> {
+    let pkg_dir = package_dir(project_root, name);
+    let ebin_dir = pkg_dir.join("ebin");
+
+    // rebar3 bare compile outputs to <output_dir>/ebin/.
+    // Point it at the package dir so ebin/ lands where we expect.
+    let output = std::process::Command::new("rebar3")
+        .args(["bare", "compile", "--paths", ebin_dir.to_str().unwrap_or(".")])
+        .current_dir(&pkg_dir)
+        .env("REBAR_BARE_COMPILER_OUTPUT_DIR", &pkg_dir)
+        .env("REBAR_PROFILE", "prod")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "Hex package '{}' requires rebar3 for compilation (has native code), \
+                     but rebar3 is not on PATH. Install rebar3: https://rebar3.org",
+                    name
+                )
+            } else {
+                format!("failed to run rebar3: {}", e)
+            }
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _ = std::fs::remove_dir_all(&ebin_dir);
+        return Err(format!(
+            "rebar3 bare compile failed for {}:\n{}\n{}",
+            name,
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
+
+    // rebar3 may put ebin inside _build — copy beams to our ebin dir if needed
+    let rebar_ebin = pkg_dir
+        .join("_build")
+        .join("default")
+        .join("lib")
+        .join(name)
+        .join("ebin");
+    if rebar_ebin.exists() && rebar_ebin != ebin_dir {
+        std::fs::create_dir_all(&ebin_dir)
+            .map_err(|e| format!("failed to create ebin dir: {}", e))?;
+        for entry in std::fs::read_dir(&rebar_ebin)
+            .map_err(|e| format!("failed to read rebar ebin: {}", e))?
+        {
+            let entry = entry.map_err(|e| format!("failed to read entry: {}", e))?;
+            let dest = ebin_dir.join(entry.file_name());
+            if !dest.exists() {
+                std::fs::copy(entry.path(), &dest)
+                    .map_err(|e| format!("failed to copy {}: {}", entry.path().display(), e))?;
+            }
+        }
+    }
+
+    // Also copy priv/ directory if it exists (NIF .so files live here)
+    let priv_dir = pkg_dir.join("priv");
+    if priv_dir.exists() {
+        let dest_priv = ebin_dir.parent().unwrap().join("priv");
+        if !dest_priv.exists() {
+            copy_dir_recursive(&priv_dir, &dest_priv)?;
+        }
+    }
+
+    if !ebin_dir.exists() {
+        return Err(format!(
+            "rebar3 compiled '{}' but no ebin directory was produced",
+            name
+        ));
+    }
+
+    Ok(ebin_dir)
+}
+
+/// Recursively copy a directory.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("failed to create dir: {}", e))?;
+    for entry in
+        std::fs::read_dir(src).map_err(|e| format!("failed to read dir {}: {}", src.display(), e))?
+    {
+        let entry = entry.map_err(|e| format!("failed to read entry: {}", e))?;
+        let dest = dst.join(entry.file_name());
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), &dest)
+                .map_err(|e| format!("failed to copy {}: {}", entry.path().display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Compile Erlang source files in a Hex package to .beam files.
+/// Uses raw erlc for simple packages, rebar3 for packages with NIFs/hooks.
+/// Returns the ebin directory path.
+pub fn compile_package(project_root: &Path, name: &str) -> Result<PathBuf, String> {
+    let pkg_dir = package_dir(project_root, name);
+    let ebin_dir = pkg_dir.join("ebin");
 
     if ebin_dir.exists() {
         return Ok(ebin_dir);
     }
 
+    // Use rebar3 for packages that need it (NIFs, hooks, etc.)
+    if needs_rebar3(&pkg_dir) {
+        return compile_with_rebar3(project_root, name);
+    }
+
+    // Fast path: raw erlc for pure Erlang packages
+    let src_dir = pkg_dir.join("src");
     if !src_dir.exists() {
         return Err(format!(
-            "Hex package {}-{} has no src/ directory",
-            name, version
+            "Hex package '{}' has no src/ directory",
+            name
         ));
     }
 
@@ -217,8 +338,8 @@ pub fn compile_package(name: &str, version: &str) -> Result<PathBuf, String> {
 
     if erl_files.is_empty() {
         return Err(format!(
-            "Hex package {}-{} has no .erl files in src/",
-            name, version
+            "Hex package '{}' has no .erl files in src/",
+            name
         ));
     }
 
@@ -234,7 +355,6 @@ pub fn compile_package(name: &str, version: &str) -> Result<PathBuf, String> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // Clean up partial ebin on failure
             let _ = std::fs::remove_dir_all(&ebin_dir);
             return Err(format!(
                 "erlc failed for {}: {}",
@@ -256,12 +376,17 @@ pub fn compile_package(name: &str, version: &str) -> Result<PathBuf, String> {
 
 /// Full install pipeline for a single Hex package: fetch metadata, download, extract, compile.
 /// Returns (ebin_dir, release_info).
-pub fn install_package(name: &str, version: &str) -> Result<(PathBuf, HexRelease), String> {
-    // Check if already fully cached
-    if is_cached(name, version) {
+pub fn install_package(
+    project_root: &Path,
+    name: &str,
+    version: &str,
+) -> Result<(PathBuf, HexRelease), String> {
+    let pkg_dir = package_dir(project_root, name);
+
+    // Check if already compiled
+    if is_compiled(project_root, name) {
         // Load cached release.json for dep info
-        let cache_dir = package_cache_dir(name, version);
-        let release_json_path = cache_dir.join("release.json");
+        let release_json_path = pkg_dir.join("release.json");
         let release = if release_json_path.exists() {
             let contents = std::fs::read_to_string(&release_json_path)
                 .map_err(|e| format!("failed to read cached release.json: {}", e))?;
@@ -270,26 +395,25 @@ pub fn install_package(name: &str, version: &str) -> Result<(PathBuf, HexRelease
         } else {
             fetch_release(name, version)?
         };
-        return Ok((package_ebin_dir(name, version), release));
+        return Ok((package_ebin_dir(project_root, name), release));
     }
 
     // Fetch release metadata
     let release = fetch_release(name, version)?;
 
     // Cache release.json
-    let cache_dir = package_cache_dir(name, version);
-    std::fs::create_dir_all(&cache_dir)
-        .map_err(|e| format!("failed to create cache dir: {}", e))?;
+    std::fs::create_dir_all(&pkg_dir)
+        .map_err(|e| format!("failed to create deps dir: {}", e))?;
     let release_json = serde_json::to_string_pretty(&release)
         .map_err(|e| format!("failed to serialize release metadata: {}", e))?;
-    std::fs::write(cache_dir.join("release.json"), release_json)
+    std::fs::write(pkg_dir.join("release.json"), release_json)
         .map_err(|e| format!("failed to write release.json: {}", e))?;
 
     // Download and extract tarball
-    download_and_extract(name, version)?;
+    download_and_extract(project_root, name, version)?;
 
     // Compile
-    let ebin_dir = compile_package(name, version)?;
+    let ebin_dir = compile_package(project_root, name)?;
 
     Ok((ebin_dir, release))
 }
