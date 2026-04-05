@@ -1,8 +1,5 @@
-main () = {
-  let person = Ok ("Alice", 32)
+foo () = "foo"
 
-  case person {
-    Ok (name, age) -> dbg $"{name}: {age}"
-    Err s -> panic s
-  }
-}
+main () = {
+  println (foo ())
+} with console

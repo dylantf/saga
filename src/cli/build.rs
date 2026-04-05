@@ -377,10 +377,10 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
     let hash = stdlib_hash();
 
     // If marker exists and hash matches, cache is warm
-    if let Ok(cached_hash) = fs::read_to_string(cache_dir.join(".hash")) {
-        if cached_hash.trim() == hash {
-            return cache_dir;
-        }
+    if let Ok(cached_hash) = fs::read_to_string(cache_dir.join(".hash"))
+        && cached_hash.trim() == hash
+    {
+        return cache_dir;
     }
 
     eprintln!("  {} stdlib...", color::dim("Compiling"));
