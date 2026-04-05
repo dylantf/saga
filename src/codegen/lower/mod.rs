@@ -347,6 +347,57 @@ impl<'a> Lowerer<'a> {
         base_arity + op_count + if op_count > 0 { 1 } else { 0 }
     }
 
+    /// Try to generate a wrapper lambda for an effectful function used as a
+    /// value (eta reduction). The wrapper takes only user-visible args and
+    /// captures handler params from scope, threading them + a return
+    /// continuation to the CPS-expanded callee.
+    ///
+    /// Returns `None` if the required handler params aren't in scope (e.g.
+    /// the function is being passed to a HOF that handles the effects).
+    /// The caller should fall back to `make_fun`/`FunRef` in that case.
+    fn lower_effectful_fun_ref(
+        &mut self,
+        effects: &[String],
+        total_arity: usize,
+        make_call: impl FnOnce(Vec<CExpr>) -> CExpr,
+    ) -> Option<CExpr> {
+        let handler_ops = self.effect_handler_ops(effects);
+        let return_k_count = if handler_ops.is_empty() { 0 } else { 1 };
+        let user_arity = total_arity - handler_ops.len() - return_k_count;
+
+        // Check that all required handler params are in scope
+        for (eff, op) in &handler_ops {
+            let key = format!("{}.{}", eff, op);
+            if !self.current_handler_params.contains_key(&key) {
+                return None;
+            }
+        }
+
+        let mut params = Vec::new();
+        let mut call_args = Vec::new();
+        for _ in 0..user_arity {
+            let p = self.fresh();
+            call_args.push(CExpr::Var(p.clone()));
+            params.push(p);
+        }
+
+        for (eff, op) in &handler_ops {
+            let key = format!("{}.{}", eff, op);
+            let param = self.current_handler_params.get(&key).unwrap();
+            call_args.push(CExpr::Var(param.clone()));
+        }
+
+        if !handler_ops.is_empty() {
+            let rk = self.fresh();
+            call_args.push(CExpr::Fun(
+                vec![rk.clone()],
+                Box::new(CExpr::Var(rk)),
+            ));
+        }
+
+        Some(CExpr::Fun(params, Box::new(make_call(call_args))))
+    }
+
     /// Check if a function is effectful.
     fn is_effectful(&self, name: &str) -> bool {
         self.fun_info
@@ -898,11 +949,36 @@ impl<'a> Lowerer<'a> {
                         erlang_mod,
                         name: erl_name,
                         arity,
-                        ..
+                        effects,
                     }) => {
                         if *arity == 0 {
-                            // Val reference: call the zero-arity function
                             CExpr::Call(erlang_mod.clone(), erl_name.clone(), vec![])
+                        } else if !effects.is_empty() {
+                            // Effectful function used as a value (eta reduction).
+                            // Try to generate a wrapper that captures handlers
+                            // from scope. Falls back to make_fun if handlers
+                            // aren't available (e.g. passed to a HOF that
+                            // handles effects internally).
+                            let effects = effects.clone();
+                            let arity = *arity;
+                            let erl_mod = erlang_mod.clone();
+                            let erl_fn = erl_name.clone();
+                            self.lower_effectful_fun_ref(
+                                &effects,
+                                arity,
+                                |args| CExpr::Call(erl_mod.clone(), erl_fn.clone(), args),
+                            )
+                            .unwrap_or_else(|| {
+                                CExpr::Call(
+                                    "erlang".to_string(),
+                                    "make_fun".to_string(),
+                                    vec![
+                                        CExpr::Lit(CLit::Atom(erl_mod)),
+                                        CExpr::Lit(CLit::Atom(erl_fn)),
+                                        CExpr::Lit(CLit::Int(arity as i64)),
+                                    ],
+                                )
+                            })
                         } else {
                             CExpr::Call(
                                 "erlang".to_string(),
@@ -928,7 +1004,7 @@ impl<'a> Lowerer<'a> {
                             CExpr::Lit(CLit::Int(*arity as i64)),
                         ],
                     ),
-                    Some(ResolvedName::LocalFun { name, arity, .. }) => {
+                    Some(ResolvedName::LocalFun { name, arity, effects }) => {
                         if *arity == 0 {
                             // Val reference: check inline_vals first, then call
                             if let Some(inlined) = self.inline_vals.get(name) {
@@ -937,8 +1013,36 @@ impl<'a> Lowerer<'a> {
                                 CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])
                             }
                         } else {
-                            let lowered_arity = self.fun_arity(name).unwrap_or(*arity);
-                            CExpr::FunRef(name.clone(), lowered_arity)
+                            // Check effects from resolution map first, then fall
+                            // back to fun_info (needed for LetFun which the
+                            // resolver registers with empty effects).
+                            let eff = if !effects.is_empty() {
+                                Some(effects.clone())
+                            } else {
+                                self.fun_effects(name).cloned().filter(|e| !e.is_empty())
+                            };
+                            if let Some(effects) = eff {
+                                let fun_name = name.clone();
+                                let lowered_arity =
+                                    self.fun_arity(&fun_name).unwrap_or(*arity);
+                                self.lower_effectful_fun_ref(
+                                    &effects,
+                                    lowered_arity,
+                                    |args| {
+                                        CExpr::Apply(
+                                            Box::new(CExpr::FunRef(
+                                                fun_name.clone(),
+                                                lowered_arity,
+                                            )),
+                                            args,
+                                        )
+                                    },
+                                )
+                                .unwrap_or(CExpr::FunRef(fun_name, lowered_arity))
+                            } else {
+                                let lowered_arity = self.fun_arity(name).unwrap_or(*arity);
+                                CExpr::FunRef(name.clone(), lowered_arity)
+                            }
                         }
                     }
                     _ => {

@@ -1,19 +1,21 @@
-import Std.IO (Stdio, console)
-import Std.IO.Unsafe (print_stderr)
+fun run : (f: a -> b needs {..e}) -> (x: a) -> b needs {..e}
+run f x = f x
 
-# Custom handler that redirects stdout to stderr
-handler stderr_only for Stdio {
-  print message = {
-    print_stderr message
-    resume ()
-  }
-  eprint message = {
-    print_stderr message
-    resume ()
-  }
-  read _ = resume ""
-}
+fn1 a = dbg a
+
+fn2 = dbg
 
 main () = {
-  Stdio.print! "hello from a custom handler"
-} with stderr_only
+  let fn3 a = println a
+  let fn4 = println
+
+  run fn1 "fn1 Hello"
+  run fn2 "fn2 Hello"
+  run fn3 "fn3 Hello"
+  run fn4 "fn4 Hello"
+
+  List.iter fn1 ["iter fn1 1", "iter fn1 2"]
+  List.iter fn2 ["iter fn2 1", "iter fn2 2"]
+  List.iter fn3 ["iter fn3 1", "iter fn3 2"]
+  List.iter fn4 ["iter fn4 1", "iter fn4 2"]
+} with {console}

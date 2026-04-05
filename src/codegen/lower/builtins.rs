@@ -39,33 +39,50 @@ impl Lowerer<'_> {
 
     /// Lower `dbg(dict, x)` to: let s = debug(x) in io:format(stderr, "~ts~n", [s])
     /// After elaboration, `dbg x` becomes `dbg(__dict_Debug_a, x)`.
+    ///
+    /// Also handles the 1-arg case (partial application / eta reduction):
+    /// `dbg(dict)` returns a lambda `fun(value) -> ...dbg logic...`.
     pub(super) fn lower_builtin_dbg(
         &mut self,
         args: &[&crate::ast::Expr],
     ) -> Option<CExpr> {
-        if args.len() != 2 {
-            return None;
+        match args.len() {
+            1 => {
+                // Partial application: fn2 = dbg → fn2(dict) = fun(v) -> dbg_inline(dict, v)
+                let dict = self.lower_expr(args[0]);
+                let d = self.fresh();
+                let v_param = self.fresh();
+                let body = self.dbg_body(CExpr::Var(d.clone()), CExpr::Var(v_param.clone()));
+                let lambda = CExpr::Fun(vec![v_param], Box::new(body));
+                Some(CExpr::Let(d, Box::new(dict), Box::new(lambda)))
+            }
+            2 => {
+                let dict = self.lower_expr(args[0]);
+                let val = self.lower_expr(args[1]);
+                let d = self.fresh();
+                let v = self.fresh();
+                let body = self.dbg_body(CExpr::Var(d.clone()), CExpr::Var(v.clone()));
+                Some(CExpr::Let(
+                    d,
+                    Box::new(dict),
+                    Box::new(CExpr::Let(v, Box::new(val), Box::new(body))),
+                ))
+            }
+            _ => None,
         }
-        let dict = self.lower_expr(args[0]);
-        let val = self.lower_expr(args[1]);
-        let d = self.fresh();
-        let v = self.fresh();
+    }
+
+    /// Shared dbg logic: extract debug fn from dict, apply to value, print to stderr.
+    fn dbg_body(&mut self, dict: CExpr, val: CExpr) -> CExpr {
         let debug_fn = self.fresh();
         let s = self.fresh();
-
-        // Extract debug function from dict: element(1, Dict)
-        let extract_debug = cerl_call(
+        let extract = cerl_call(
             "erlang",
             "element",
-            vec![CExpr::Lit(CLit::Int(1)), CExpr::Var(d.clone())],
+            vec![CExpr::Lit(CLit::Int(1)), dict],
         );
-        // Apply debug to value
-        let apply_debug = CExpr::Apply(
-            Box::new(CExpr::Var(debug_fn.clone())),
-            vec![CExpr::Var(v.clone())],
-        );
-        // Print to stderr
-        let print_stderr = cerl_call(
+        let apply = CExpr::Apply(Box::new(CExpr::Var(debug_fn.clone())), vec![val]);
+        let print = cerl_call(
             "io",
             "format",
             vec![
@@ -74,22 +91,11 @@ impl Lowerer<'_> {
                 CExpr::Cons(Box::new(CExpr::Var(s.clone())), Box::new(CExpr::Nil)),
             ],
         );
-
-        // let d = dict in let v = val in let debug_fn = element(1, d) in
-        // let s = debug_fn(v) in io:format(stderr, ..., [s])
-        Some(CExpr::Let(
-            d.clone(),
-            Box::new(dict),
-            Box::new(CExpr::Let(
-                v,
-                Box::new(val),
-                Box::new(CExpr::Let(
-                    debug_fn,
-                    Box::new(extract_debug),
-                    Box::new(CExpr::Let(s, Box::new(apply_debug), Box::new(print_stderr))),
-                )),
-            )),
-        ))
+        CExpr::Let(
+            debug_fn,
+            Box::new(extract),
+            Box::new(CExpr::Let(s, Box::new(apply), Box::new(print))),
+        )
     }
 
     /// Lower `catch_panic thunk` to a Core Erlang try/catch.

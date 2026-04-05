@@ -965,6 +965,21 @@ impl Checker {
             let resolved = self.sub.apply(pt);
             super::collect_callback_effects(&resolved, &mut absorbed);
         }
+        // Check if any callback parameter has an open effect row variable
+        // (..e). Concrete effects on callbacks (e.g. `needs {Fail}`) can be
+        // handled with `with` in the body, but open row variables represent
+        // unknown effects that MUST be propagated via `needs {..e}`.
+        let callback_has_open_effect_row = param_types.iter().any(|pt| {
+            let resolved = self.sub.apply(pt);
+            fn has_open_row(ty: &Type) -> bool {
+                if let Type::Fun(_, ret, row) = ty {
+                    row.tail.is_some() || has_open_row(ret)
+                } else {
+                    false
+                }
+            }
+            has_open_row(&resolved)
+        });
         let all_body_effs = if absorbed.is_empty() {
             all_body_effs
         } else {
@@ -997,6 +1012,27 @@ impl Checker {
         let declared_row = annotation
             .and_then(|ann| innermost_effect_row(&self.sub.apply(ann)))
             .unwrap_or_else(EffectRow::empty);
+
+        // A callback parameter with an open effect row (..e) represents
+        // unknown effects that can't be handled with `with` — they must be
+        // propagated via `needs {..e}` on the function's own annotation.
+        if annotation.is_some() && callback_has_open_effect_row {
+            let has_open_declared_row = declared_row.tail.is_some();
+            if !has_open_declared_row {
+                let err_span = annotation_span.unwrap_or_else(|| match clauses[0] {
+                    Decl::FunBinding { span, .. } => *span,
+                    _ => unreachable!(),
+                });
+                return Err(Diagnostic::error_at(
+                    err_span,
+                    format!(
+                        "`{}` accepts callback with open effect row but does not propagate effects; \
+                         add `needs {{..e}}` to the annotation",
+                        name,
+                    ),
+                ));
+            }
+        }
 
         if !all_body_effs.is_empty() || !declared_row.is_empty() {
             let err_span = match clauses[0] {

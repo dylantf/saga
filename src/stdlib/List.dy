@@ -204,7 +204,7 @@ unique_go seen remaining = case remaining {
 pub fun concat : (xss: List (List a)) -> List a
 
 #@ Applies a side-effecting function to each element.
-pub fun iter : (f: a -> Unit needs {..e}) -> (xs: List a) -> Unit
+pub fun iter : (f: a -> Unit needs {..e}) -> (xs: List a) -> Unit needs {..e}
 iter f xs = case xs {
   Nil -> ()
   h :: t -> {

@@ -16,5 +16,5 @@ main () = {
   "data.csv"
   |> read_csv
   |> parse 44
-  |> List.iter (fun row -> dbg row)
-} with {console, fs}
+  |> List.iter dbg
+} with {fs}
