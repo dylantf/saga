@@ -19,7 +19,7 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Expr, ExprKind};
+use crate::ast::{Expr, ExprKind, NodeId};
 use crate::token::Span;
 
 /// Returns the span of the first effect call found in `expr`, if any.
@@ -799,8 +799,10 @@ pub struct Checker {
     pub(crate) scope_map: ScopeMap,
     /// Evidence collected during constraint solving for the elaboration pass.
     pub(crate) evidence: Vec<TraitEvidence>,
-    /// Dict params for let bindings with trait constraints: name -> (params, value_arity).
-    pub(crate) let_dict_params: HashMap<String, (Vec<(String, String)>, usize)>,
+    /// Dict params for let bindings with trait constraints.
+    /// Keyed by (name, pat_node_id) to avoid collisions between same-named
+    /// bindings in different scopes (e.g. multiple test bodies).
+    pub(crate) let_dict_params: HashMap<(String, NodeId), (Vec<(String, String)>, usize)>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Warnings deferred until after inference, when substitutions are complete.

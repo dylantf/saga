@@ -7,7 +7,7 @@
 //! - Add dictionary parameters to functions with where clauses
 //! - Insert dictionary arguments at call sites
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::token::{Span, StringKind};
@@ -61,6 +61,9 @@ struct Elaborator {
     erlang_module: String,
     /// Arity of let-bound values with trait constraints (for eta-expansion)
     let_binding_arities: HashMap<String, usize>,
+    /// Pat node IDs of let bindings that actually need dict wrapping.
+    /// Used to avoid wrapping same-named bindings in different scopes.
+    let_dict_pat_ids: HashMap<String, HashSet<crate::ast::NodeId>>,
     /// Scope map values for canonical name bridging (user name -> canonical)
     scope_map_values: HashMap<String, String>,
     /// Scope map traits for resolving bare trait names to canonical
@@ -103,13 +106,21 @@ impl Elaborator {
             }
         }
 
-        // Merge let-binding dict params (from local let bindings with trait constraints)
+        // Merge let-binding dict params (from local let bindings with trait constraints).
+        // Keyed by (name, pat_id) to avoid collisions between same-named bindings
+        // in different scopes. We store the pat_id set so the elaborator can check
+        // whether a specific binding needs dict wrapping.
         let mut let_binding_arities: HashMap<String, usize> = HashMap::new();
-        for (name, (params, arity)) in &result.let_dict_params {
+        let mut let_dict_pat_ids: HashMap<String, HashSet<crate::ast::NodeId>> = HashMap::new();
+        for ((name, pat_id), (params, arity)) in &result.let_dict_params {
             inferred_dict_params
                 .entry(name.clone())
                 .or_insert_with(|| params.clone());
             let_binding_arities.insert(name.clone(), *arity);
+            let_dict_pat_ids
+                .entry(name.clone())
+                .or_default()
+                .insert(*pat_id);
         }
 
         // Build evidence lookup by node ID
@@ -172,6 +183,7 @@ impl Elaborator {
             current_dict_params_by_var: HashMap::new(),
             erlang_module,
             let_binding_arities,
+            let_dict_pat_ids,
             scope_map_values: result.scope_map.values.clone(),
             scope_map_traits: result.scope_map.traits.clone(),
         }
@@ -915,12 +927,23 @@ impl Elaborator {
                                     assert,
                                     span,
                                 } => {
-                                    // Check if this let binding has trait constraints
-                                    let dict_info = if let Pat::Var { name, .. } = pattern {
-                                        self.fun_dict_params.get(name).cloned()
-                                    } else {
-                                        None
-                                    };
+                                    // Check if this specific let binding has trait constraints.
+                                    // Use pat_id to distinguish same-named bindings in
+                                    // different scopes (e.g. `result` in multiple test bodies).
+                                    let dict_info =
+                                        if let Pat::Var { name, id, .. } = pattern {
+                                            let is_this_binding = self
+                                                .let_dict_pat_ids
+                                                .get(name.as_str())
+                                                .is_some_and(|ids| ids.contains(id));
+                                            if is_this_binding {
+                                                self.fun_dict_params.get(name).cloned()
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        };
 
                                     if let Some(dict_param_info) = dict_info {
                                         // Set up dict params for elaborating the value.
