@@ -965,21 +965,23 @@ impl Checker {
             let resolved = self.sub.apply(pt);
             super::collect_callback_effects(&resolved, &mut absorbed);
         }
-        // Check if any callback parameter has an open effect row variable
-        // (..e). Concrete effects on callbacks (e.g. `needs {Fail}`) can be
-        // handled with `with` in the body, but open row variables represent
-        // unknown effects that MUST be propagated via `needs {..e}`.
-        let callback_has_open_effect_row = param_types.iter().any(|pt| {
+        // Collect row variable IDs from callback parameters' open effect rows.
+        // These represent unknown effects that must be propagated via `needs`.
+        let mut callback_row_vars = std::collections::HashSet::new();
+        for pt in &param_types {
             let resolved = self.sub.apply(pt);
-            fn has_open_row(ty: &Type) -> bool {
+            fn collect_row_vars(ty: &Type, out: &mut std::collections::HashSet<u32>) {
                 if let Type::Fun(_, ret, row) = ty {
-                    row.tail.is_some() || has_open_row(ret)
-                } else {
-                    false
+                    if let Some(tail) = &row.tail {
+                        if let Type::Var(id) = tail.as_ref() {
+                            out.insert(*id);
+                        }
+                    }
+                    collect_row_vars(ret, out);
                 }
             }
-            has_open_row(&resolved)
-        });
+            collect_row_vars(&resolved, &mut callback_row_vars);
+        }
         let all_body_effs = if absorbed.is_empty() {
             all_body_effs
         } else {
@@ -1015,10 +1017,19 @@ impl Checker {
 
         // A callback parameter with an open effect row (..e) represents
         // unknown effects that can't be handled with `with` — they must be
-        // propagated via `needs {..e}` on the function's own annotation.
-        if annotation.is_some() && callback_has_open_effect_row {
-            let has_open_declared_row = declared_row.tail.is_some();
-            if !has_open_declared_row {
+        // propagated via `needs {..e}` on the function's own annotation,
+        // and the row variable must be the SAME one (connected).
+        if annotation.is_some() && !callback_row_vars.is_empty() {
+            // Check: the declared row must have an open tail whose variable
+            // resolves to the same root as one of the callback row variables.
+            let propagates = declared_row.tail.as_ref().is_some_and(|t| {
+                let decl_resolved = self.sub.apply(t);
+                callback_row_vars.iter().any(|&cb_id| {
+                    let cb_resolved = self.sub.apply(&Type::Var(cb_id));
+                    decl_resolved == cb_resolved
+                })
+            });
+            if !propagates {
                 let err_span = annotation_span.unwrap_or_else(|| match clauses[0] {
                     Decl::FunBinding { span, .. } => *span,
                     _ => unreachable!(),
