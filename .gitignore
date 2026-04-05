@@ -1,5 +1,6 @@
 /target
 erl_crash.dump
+rebar3.crashdump
 editors/vscode/node_modules
 
 _build/
