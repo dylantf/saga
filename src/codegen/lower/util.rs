@@ -55,7 +55,9 @@ pub(super) fn process_string_escapes(s: &str) -> String {
         if ch == '\\' {
             match chars.next() {
                 Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
                 Some('t') => out.push('\t'),
+                Some('0') => out.push('\0'),
                 Some('\\') => out.push('\\'),
                 Some('"') => out.push('"'),
                 Some('x') => {

@@ -224,10 +224,13 @@ pub fn parse_and_typecheck_inner(
             std::process::exit(1);
         }
     };
-    derive::expand_derives(&mut program);
+    let derive_errors = derive::expand_derives(&mut program);
     desugar::desugar_program(&mut program);
     if test_mode {
         synthesize_test_main(&mut program);
+    }
+    for d in &derive_errors {
+        print_tc_diagnostic(source, source_path, d);
     }
     let result = checker.check_program(&mut program);
     for w in result.warnings() {
@@ -710,9 +713,12 @@ pub fn build_project(profile: &str) -> ProjectBuild {
                 source: source_text,
             },
         );
-        derive::expand_derives(&mut program);
+        let derive_errors = derive::expand_derives(&mut program);
         desugar::desugar_program(&mut program);
 
+        for d in &derive_errors {
+            eprintln!("Error in module {}: {}", module_name, d.message);
+        }
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
         let mod_result = mod_checker.check_program(&mut program);
         for w in mod_result.warnings() {

@@ -47,8 +47,8 @@ pub struct CheckResult {
     pub handler_arm_targets: HashMap<crate::token::Span, (crate::token::Span, Option<String>)>,
     /// Maps effect call span -> (handler arm span, source module) (LSP go-to-def, level 1).
     pub effect_call_targets: HashMap<crate::token::Span, (crate::token::Span, Option<String>)>,
-    /// Dict params for let bindings with trait constraints: name -> (params, value_arity).
-    pub let_dict_params: HashMap<String, (Vec<(String, String)>, usize)>,
+    /// Dict params for let bindings with trait constraints: (name, pat_id) -> (params, value_arity).
+    pub let_dict_params: HashMap<(String, crate::ast::NodeId), (Vec<(String, String)>, usize)>,
     /// Deferred effects for let bindings that partially apply effectful functions.
     /// name -> effect names. Used by the lowerer to register effectful local vars.
     pub let_effect_bindings: HashMap<String, Vec<String>>,

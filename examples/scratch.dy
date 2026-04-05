@@ -1,5 +1,12 @@
-foo () = "foo"
+record Person {
+  name: String,
+  age: Int,
+} deriving (Debug, Eq)
 
 main () = {
-  println (foo ())
-} with console
+  let x : Maybe (List Person) = Just [
+    Person { name: "Alice", age: 30 },
+    Person { name: "Bob", age: 25 },
+  ]
+  dbg (debug x)
+}
