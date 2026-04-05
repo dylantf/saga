@@ -774,7 +774,7 @@ fn pattern_constructor_with_args() {
 
 #[test]
 fn pattern_constructor_multiple_args() {
-    let pat = parse_pattern("Cons(a, b)");
+    let pat = parse_pattern("Cons a b");
     match pat {
         Pat::Constructor { name, args, .. } => {
             assert_eq!(name, "Cons");
@@ -786,7 +786,7 @@ fn pattern_constructor_multiple_args() {
 
 #[test]
 fn pattern_nested_constructor() {
-    let pat = parse_pattern("Just(Cons(a, b))");
+    let pat = parse_pattern("Just (Cons a b)");
     match pat {
         Pat::Constructor { name, args, .. } => {
             assert_eq!(name, "Just");
@@ -840,13 +840,14 @@ fn pattern_constructor_space_separated_nested() {
 }
 
 #[test]
-fn pattern_constructor_with_paren_args() {
-    // Foo(1, 2) and Foo (1, 2) both parse as Foo with two args (paren syntax)
+fn pattern_constructor_with_tuple_arg() {
+    // Foo (1, 2) parses as Foo with one arg: the tuple (1, 2)
     let pat = parse_pattern("Foo (1, 2)");
     match pat {
         Pat::Constructor { name, args, .. } => {
             assert_eq!(name, "Foo");
-            assert_eq!(args.len(), 2);
+            assert_eq!(args.len(), 1);
+            assert!(matches!(&args[0], Pat::Tuple { elements, .. } if elements.len() == 2));
         }
         _ => panic!("expected Constructor, got {:?}", pat),
     }

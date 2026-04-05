@@ -728,8 +728,16 @@ impl Checker {
                 name_span,
                 ..
             } = decl
-                && !fun_vars.contains_key(name)
             {
+                // Link every FunBinding name to the FunSignature def_id so
+                // LSP rename/references can find the implementation site(s).
+                if let Some(sig_def_id) = self.env.def_id(name) {
+                    self.record_reference(*id, *name_span, sig_def_id);
+                }
+
+                if fun_vars.contains_key(name) {
+                    continue;
+                }
                 // Register all functions in known_funs (annotated ones are
                 // already registered; un-annotated ones are added here).
                 // This lets `with` validation distinguish local functions from imports.

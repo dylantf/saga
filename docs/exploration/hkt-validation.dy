@@ -10,26 +10,26 @@ trait Applicative (f: * -> *) where {f: Functor} {
 }
 
 type Validation e a
-  = Valid(a)
-  | Invalid(e)
+  = Valid a
+  | Invalid e
 
 impl Functor for Validation e {
   map f v = case v {
-    Valid(x)      -> Valid(f x)
-    Invalid(errs) -> Invalid(errs)
+    Valid (x)      -> Valid (f x)
+    Invalid (errs) -> Invalid (errs)
   }
 }
 
 impl Applicative for Validation e {
-  pure x = Valid(x)
+  pure x = Valid (x)
   ap ff fa = case ff {
-    Valid(f) -> case fa {
-      Valid(v)      -> Valid(f v)
-      Invalid(errs) -> Invalid(errs)
+    Valid (f) -> case fa {
+      Valid (v)      -> Valid (f v)
+      Invalid (errs) -> Invalid (errs)
     }
-    Invalid(e1) -> case fa {
-      Valid(_)      -> Invalid(e1)
-      Invalid(e2)   -> Invalid(append e1 e2)
+    Invalid (e1) -> case fa {
+      Valid (_)      -> Invalid (e1)
+      Invalid (e2)   -> Invalid (append e1 e2)
     }
   }
 }
@@ -37,12 +37,12 @@ impl Applicative for Validation e {
 # --- Validators ---
 
 require_non_empty label s =
-  if s == "" then Invalid([$"{label} is required"])
-  else Valid(s)
+  if s == "" then Invalid ([$"{label} is required"])
+  else Valid (s)
 
 require_min_age min age =
-  if age < min then Invalid([$"age must be at least {min}"])
-  else Valid(age)
+  if age < min then Invalid ([$"age must be at least {min}"])
+  else Valid (age)
 
 # --- Domain types ---
 
@@ -68,8 +68,8 @@ show_errors errs = foldl (fun acc e -> acc <> $"\n  - {e}") "" errs
 
 fun show_result : (r: Validation (List String) ValidUser) -> String
 show_result r = case r {
-  Valid(user)   -> $"Valid: {user.name}, age {user.age}"
-  Invalid(errs) -> $"Invalid: {show_errors errs}"
+  Valid (user)   -> $"Valid: {user.name}, age {user.age}"
+  Invalid (errs) -> $"Invalid: {show_errors errs}"
 }
 
 # --- Main ---

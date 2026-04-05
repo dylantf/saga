@@ -7,7 +7,7 @@ pub type FileError =
   | NotDirectory
   | NoSpace
   | AlreadyExists
-  | Other(String)
+  | Other String
   deriving (Debug)
 
 pub effect File {

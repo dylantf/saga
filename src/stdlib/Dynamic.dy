@@ -1,0 +1,167 @@
+module Std.Dynamic
+
+# --- Core types ---
+
+#@ An opaque type wrapping a raw Erlang/BEAM term.
+#@ Used at FFI boundaries where the type of a value is unknown at compile time.
+opaque type Dynamic = Dynamic
+
+#@ An error produced when decoding a Dynamic value fails.
+pub type DecodeError =
+  | DecodeError String String (List String)
+  deriving (Eq)
+
+impl Debug for DecodeError {
+  debug e = case e {
+    DecodeError expected found path ->
+      $"DecodeError(expected: {debug expected}, found: {debug found}, path: {debug path})"
+  }
+}
+
+impl Show for DecodeError {
+  show e = case e {
+    DecodeError expected found path -> case path {
+      [] -> $"Expected {expected}, got {found}"
+      _ -> $"At {debug path}: expected {expected}, got {found}"
+    }
+  }
+}
+
+#@ A decoder pairs a decoding function with a default/placeholder value.
+#@ The placeholder is used during error accumulation — it allows subsequent
+#@ decoders to continue running even when an earlier one fails.
+pub type Decoder a =
+  | Decoder (Dynamic -> Result a DecodeError) a
+
+# --- Primitive decoders ---
+
+@external("erlang", "std_dynamic_bridge", "decode_string")
+fun decode_string_raw : Dynamic -> Result String DecodeError
+
+#@ Decoder for String values.
+pub val string = Decoder decode_string_raw ""
+
+@external("erlang", "std_dynamic_bridge", "decode_int")
+fun decode_int_raw : Dynamic -> Result Int DecodeError
+
+#@ Decoder for Int values.
+pub val int = Decoder decode_int_raw 0
+
+@external("erlang", "std_dynamic_bridge", "decode_float")
+fun decode_float_raw : Dynamic -> Result Float DecodeError
+
+#@ Decoder for Float values.
+pub val float = Decoder decode_float_raw 0.0
+
+@external("erlang", "std_dynamic_bridge", "decode_bool")
+fun decode_bool_raw : Dynamic -> Result Bool DecodeError
+
+#@ Decoder for Bool values.
+pub val bool = Decoder decode_bool_raw False
+
+# --- Utilities ---
+
+#@ Classify a Dynamic value, returning a human-readable type name.
+#@ Useful for error messages.
+@external("erlang", "std_dynamic_bridge", "classify")
+pub fun classify : Dynamic -> String
+
+#@ Wrap any value as Dynamic. This is an identity function at runtime —
+#@ it just erases the type information.
+@external("erlang", "std_dynamic_bridge", "from_erlang")
+pub fun from_erlang : a -> Dynamic
+
+# --- FFI helpers (private) ---
+
+@external("erlang", "std_dynamic_bridge", "field_lookup")
+fun raw_field_lookup : String -> Dynamic -> Result Dynamic DecodeError
+
+@external("erlang", "std_dynamic_bridge", "element_lookup")
+fun raw_element_lookup : Int -> Dynamic -> Result Dynamic DecodeError
+
+fun run_decoder : Decoder a -> Dynamic -> Result a DecodeError
+run_decoder dec dyn = case dec {
+  Decoder f _ -> f dyn
+}
+
+fun decoder_default : Decoder a -> a
+decoder_default dec = case dec {
+  Decoder _ d -> d
+}
+
+# --- Decode effect ---
+
+#@ The Decode effect provides field and element decoding operations.
+#@ Use with `Dynamic.run` to execute a decoding block.
+pub effect Decode {
+  fun decode_field : String -> Decoder a -> a
+  fun decode_element : Int -> Decoder a -> a
+}
+
+#@ Run a decoding block against a Dynamic value.
+#@ All decode operations run to completion — errors are accumulated,
+#@ not short-circuited. Returns Ok with the decoded value if all operations
+#@ succeed, or Err with all collected errors.
+pub fun run : Dynamic -> (Unit -> a needs {Decode}) -> Result a (List DecodeError)
+run data f = {
+  let (value, errors) = f () with {
+    decode_field name dec = {
+      let result = case raw_field_lookup name data {
+        Ok dyn -> run_decoder dec dyn
+        Err e -> Err e
+      }
+      case result {
+        Ok decoded -> {
+          let (v, errs) = resume decoded
+          (v, errs)
+        }
+        Err e -> {
+          let (v, errs) = resume decoder_default dec
+          (v, e :: errs)
+        }
+      }
+    }
+    decode_element idx dec = {
+      let result = case raw_element_lookup idx data {
+        Ok dyn -> run_decoder dec dyn
+        Err e -> Err e
+      }
+      case result {
+        Ok decoded -> {
+          let (v, errs) = resume decoded
+          (v, errs)
+        }
+        Err e -> {
+          let (v, errs) = resume decoder_default dec
+          (v, e :: errs)
+        }
+      }
+    }
+    return v = (v, [])
+  }
+  case errors {
+    [] -> Ok value
+    _ -> Err errors
+  }
+}
+
+# --- Combinators ---
+
+@external("erlang", "std_dynamic_bridge", "decode_list")
+fun decode_list_raw : (Dynamic -> Result a DecodeError) -> Dynamic -> Result (List a) DecodeError
+
+#@ Decoder for a list where every element is decoded with the given decoder.
+pub fun list_of : Decoder a -> Decoder (List a)
+list_of dec = case dec {
+  Decoder f _ -> Decoder (decode_list_raw f) []
+}
+
+@external("erlang", "std_dynamic_bridge", "decode_optional")
+fun decode_optional_raw : (Dynamic -> Result a DecodeError) -> Dynamic -> Result (Maybe a) DecodeError
+
+#@ Decoder for optional/nullable values. Decodes nil/undefined/null as Nothing,
+#@ otherwise tries the inner decoder and wraps in Just.
+pub fun optional : Decoder a -> Decoder (Maybe a)
+optional dec = case dec {
+  Decoder f _ -> Decoder (decode_optional_raw f) Nothing
+}

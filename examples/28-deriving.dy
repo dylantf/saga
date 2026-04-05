@@ -1,5 +1,5 @@
 type Animal =
-  | Dog(age: Int)
+  | Dog (age: Int)
   | Cat
   deriving (Show, Eq)
 
@@ -16,7 +16,7 @@ comp _ _ = "🚫 Not equal!"
 # fields are compared left-to-right.
 type Color = Red | Green | Blue deriving (Show, Eq, Ord, Enum)
 type Priority = Low | Medium | High deriving (Show, Eq, Ord, Enum)
-type Scored a = Scored(score: Int, value: a) deriving (Show, Eq, Ord)
+type Scored a = Scored (score: Int) (value: a) deriving (Show, Eq, Ord)
 
 main () = {
   let hans = Dog 5

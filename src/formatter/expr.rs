@@ -83,12 +83,19 @@ pub fn format_expr(expr: &Expr) -> Doc {
             // If so, treat it as a "trailing lambda": keep `(fun params -> {`
             // on the same line as the call, with the block body indented from
             // the call site, not nested inside the arg list.
-            if let Some((last, rest)) = args.split_last()
-                && let ExprKind::Lambda { params, body } = &last.kind
-                && is_block_like(body)
-            {
+            // Check if any arg is a lambda with a block body ("trailing lambda").
+            // Keep `(fun params -> {` on the same line as the call.
+            if let Some(lambda_idx) = args.iter().position(|a| {
+                matches!(&a.kind, ExprKind::Lambda { body, .. } if is_block_like(body))
+            }) {
+                let ExprKind::Lambda { params, body } = &args[lambda_idx].kind else {
+                    unreachable!()
+                };
+                let before = &args[..lambda_idx];
+                let after = &args[lambda_idx + 1..];
+
                 let mut prefix = func_doc;
-                for a in rest {
+                for a in before {
                     prefix = prefix.append(Doc::text(" ")).append(format_expr_atom(a));
                 }
                 let mut lhs = Doc::text("(fun ");
@@ -99,8 +106,31 @@ pub fn format_expr(expr: &Expr) -> Doc {
                     lhs = lhs.append(format_pat(p));
                 }
                 lhs = lhs.append(Doc::text(" -> "));
+
+                let mut suffix = Doc::text(")");
+                for a in after {
+                    suffix = suffix.append(Doc::text(" ")).append(format_expr_atom(a));
+                }
+
+                // For block bodies, inline the `{` onto the `-> ` line so we get
+                // `(fun x -> {` instead of C#-style brace on its own line.
+                if let ExprKind::Block { stmts, dangling_trivia } = &body.kind {
+                    let mut body_items = Vec::new();
+                    for ann in stmts {
+                        body_items.push(Doc::hardline());
+                        body_items.push(super::helpers::format_trivia(&ann.leading_trivia));
+                        body_items.push(format_stmt(&ann.node));
+                        body_items.push(super::helpers::format_trailing(&ann.trailing_comment));
+                    }
+                    let inner = super::helpers::format_braced_body(&body_items, dangling_trivia);
+                    return docs![
+                        prefix, Doc::text(" "), lhs, Doc::text("{"),
+                        Doc::nest(2, inner),
+                        Doc::hardline(), Doc::text("}"), suffix
+                    ];
+                }
                 let body_doc = format_expr(body);
-                return docs![prefix, Doc::text(" "), lhs, body_doc, Doc::text(")")];
+                return docs![prefix, Doc::text(" "), lhs, body_doc, suffix];
             }
 
             // Applications never break across lines - newlines terminate

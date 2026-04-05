@@ -167,18 +167,16 @@ pub fn format_type_def(decl: &Decl) -> Doc {
             vdoc = vdoc.append(format_trivia(&ann.leading_trivia));
         }
         vdoc = vdoc.append(Doc::text(&variant.name));
-        if !variant.fields.is_empty() {
-            let fields: Vec<Doc> = variant
-                .fields
-                .iter()
-                .map(|(label, ty)| match label {
-                    Some(l) => docs![Doc::text(format!("{}: ", l)), format_type_expr(ty)],
-                    None => format_type_expr(ty),
-                })
-                .collect();
-            vdoc = vdoc.append(Doc::text("("));
-            vdoc = vdoc.append(Doc::join(Doc::text(", "), fields));
-            vdoc = vdoc.append(Doc::text(")"));
+        for (label, ty) in &variant.fields {
+            vdoc = vdoc.append(Doc::text(" "));
+            match label {
+                Some(l) => {
+                    vdoc = vdoc.append(docs![Doc::text(format!("({}: ", l)), format_type_expr(ty), Doc::text(")")]);
+                }
+                None => {
+                    vdoc = vdoc.append(format_type_expr_atom(ty));
+                }
+            }
         }
         vdoc.append(format_trailing(&ann.trailing_comment))
     };

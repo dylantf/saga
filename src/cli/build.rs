@@ -98,8 +98,9 @@ pub fn check_script_cache(file: &str, profile: &str) -> Option<ScriptBuild> {
         return None;
     }
 
-    let stdlib_dir = build_root.join(".stdlib").join(stdlib_hash());
-    if !stdlib_dir.join(".complete").exists() {
+    let stdlib_dir = build_root.join(".stdlib");
+    let cached_hash = fs::read_to_string(stdlib_dir.join(".hash")).ok();
+    if cached_hash.as_deref().map(str::trim) != Some(&*stdlib_hash()) {
         return None;
     }
 
@@ -134,8 +135,9 @@ pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<(PathBu
     }
 
     let build_root = project_root.join("_build");
-    let stdlib_dir = build_root.join(".stdlib").join(stdlib_hash());
-    if !stdlib_dir.join(".complete").exists() {
+    let stdlib_dir = build_root.join(".stdlib");
+    let cached_hash = fs::read_to_string(stdlib_dir.join(".hash")).ok();
+    if cached_hash.as_deref().map(str::trim) != Some(&*stdlib_hash()) {
         return None;
     }
 
@@ -349,6 +351,10 @@ fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
             include_str!("../stdlib/BitString.bridge.erl"),
         ),
         ("std_io_bridge.erl", include_str!("../stdlib/IO.bridge.erl")),
+        (
+            "std_dynamic_bridge.erl",
+            include_str!("../stdlib/Dynamic.bridge.erl"),
+        ),
     ]
 }
 
@@ -367,10 +373,13 @@ fn write_stdlib_bridges(build_dir: &Path) {
 /// Returns the stdlib directory path. On a cold cache, creates a fresh checker,
 /// imports ALL builtin modules, elaborates, and compiles them.
 pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
-    let cache_dir = build_root.join(".stdlib").join(stdlib_hash());
+    let cache_dir = build_root.join(".stdlib");
+    let hash = stdlib_hash();
 
-    // If marker exists, cache is warm
-    if cache_dir.join(".complete").exists() {
+    // If marker exists and hash matches, cache is warm
+    if let Ok(cached_hash) = fs::read_to_string(cache_dir.join(".hash"))
+        && cached_hash.trim() == hash
+    {
         return cache_dir;
     }
 
@@ -434,9 +443,9 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
         let _ = fs::remove_file(file);
     }
 
-    // Write marker so we know the cache is complete
-    fs::write(cache_dir.join(".complete"), "").unwrap_or_else(|e| {
-        eprintln!("Error writing stdlib cache marker: {}", e);
+    // Write hash so we know the cache is complete and which version
+    fs::write(cache_dir.join(".hash"), &hash).unwrap_or_else(|e| {
+        eprintln!("Error writing stdlib cache hash: {}", e);
         std::process::exit(1);
     });
 

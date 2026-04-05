@@ -322,20 +322,19 @@ impl Parser {
         })
     }
 
-    // Parses a single constructor inside a type def, e.g. `Some(a)` or `None`
+    // Parses a single constructor inside a type def, e.g. `Just a` or `Rect Float Float` or `None`
+    // Constructor args are space-separated type atoms, optionally labeled: `(label: Type)`
     fn parse_type_constructor_def(&mut self) -> Result<TypeConstructor, ParseError> {
         let start = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let mut fields = Vec::new();
 
-        if matches!(self.peek(), Token::LParen) {
-            self.advance();
+        // Parse space-separated constructor fields (stop at `|`, newline, `deriving`, etc.)
+        while self.can_start_type_atom()
+            && !self.next_on_new_line()
+            && !matches!(self.peek(), Token::Bar)
+        {
             fields.push(self.parse_labeled_type_field()?);
-            while matches!(self.peek(), Token::Comma) {
-                self.advance();
-                fields.push(self.parse_labeled_type_field()?);
-            }
-            self.expect(Token::RParen)?;
         }
 
         let end = self.tokens[self.pos - 1].span;
@@ -347,22 +346,22 @@ impl Parser {
         })
     }
 
-    /// Parse an optional label followed by a type expression: `radius: Float` or just `Float`.
+    /// Parse a constructor field: either a labeled `(label: Type)` or a bare type atom.
+    /// In labeled form, the outer parens are consumed here and the inner type can be
+    /// a full type expression (arrows, application, etc.). In bare form, only a type
+    /// atom is parsed so that `Rect Float Float` stays as two separate fields.
     fn parse_labeled_type_field(&mut self) -> Result<(Option<String>, TypeExpr), ParseError> {
-        // Try label: if we see `ident :`, it's a labeled field
-        if let Token::Ident(name) = self.peek() {
-            let name = name.clone();
-            let save = self.pos;
-            self.advance();
-            if matches!(self.peek(), Token::Colon) {
-                self.advance(); // consume ':'
-                let ty = self.parse_type_expr()?;
-                return Ok((Some(name), ty));
-            }
-            // Not a label, backtrack
-            self.pos = save;
+        // Labeled field: `(label: Type)` — detected by `(ident :` lookahead.
+        // The parens are part of the label syntax and consumed here.
+        if matches!(self.peek(), Token::LParen) && self.is_labeled_param_at(self.pos) {
+            self.advance(); // consume '('
+            let label = self.expect_ident()?;
+            self.expect(Token::Colon)?;
+            let ty = self.parse_type_expr()?;
+            self.expect(Token::RParen)?;
+            return Ok((Some(label), ty));
         }
-        let ty = self.parse_type_expr()?;
+        let ty = self.parse_type_atom()?;
         Ok((None, ty))
     }
 

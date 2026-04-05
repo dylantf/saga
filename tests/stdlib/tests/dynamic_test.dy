@@ -1,0 +1,122 @@
+import Std.Dynamic as Dynamic
+import Std.Dynamic (
+  Dynamic,
+  Decode,
+  Decoder,
+  DecodeError,
+  from_erlang,
+  classify,
+  string,
+  int,
+  float,
+  bool,
+  list_of,
+  optional
+)
+import Std.List as List
+import Std.Test (describe, test, assert_eq)
+
+describe "Dynamic" {
+
+  describe "classify" {
+    test "classifies Int" {
+      assert_eq (classify (from_erlang 42)) "Int"
+    }
+
+    test "classifies String" {
+      assert_eq (classify (from_erlang "hello")) "String"
+    }
+
+    test "classifies Bool" {
+      assert_eq (classify (from_erlang True)) "Bool"
+    }
+
+    test "classifies Float" {
+      assert_eq (classify (from_erlang 1.5)) "Float"
+    }
+
+    test "classifies List" {
+      assert_eq (classify (from_erlang [1, 2, 3])) "List"
+    }
+
+    test "classifies Map" {
+      assert_eq (classify (from_erlang (Dict.from_list [("a", 1)]))) "Map"
+    }
+  }
+
+  describe "decode_field" {
+    test "decodes string and int fields" {
+      let data =
+        from_erlang (Dict.from_list [
+          ("name", from_erlang "Alice"),
+          ("age", from_erlang 30),
+        ])
+
+      let result = Dynamic.run data (fun () -> {
+        let name = Decode.decode_field! "name" string
+        let age = Decode.decode_field! "age" int
+        (name, age)
+      })
+
+      assert_eq result (Ok ("Alice", 30))
+    }
+
+    test "accumulates errors for wrong types" {
+      let data =
+        from_erlang (Dict.from_list [
+          ("name", from_erlang 42),
+          ("age", from_erlang "not a number"),
+        ])
+
+      let result = Dynamic.run data (fun () -> {
+        let name = Decode.decode_field! "name" string
+        let age = Decode.decode_field! "age" int
+        (name, age)
+      })
+
+      assert_eq (Result.is_err result) True
+    }
+
+    test "reports missing field" {
+      let data = from_erlang (Dict.from_list [("name", from_erlang "Alice")])
+
+      let result = Dynamic.run data (fun () -> {
+        let name = Decode.decode_field! "name" string
+        let age = Decode.decode_field! "age" int
+        (name, age)
+      })
+
+      assert_eq (Result.is_err result) True
+    }
+
+    test "decodes float and bool fields" {
+      let data =
+        from_erlang (Dict.from_list [
+          ("score", from_erlang 9.5),
+          ("active", from_erlang True),
+        ])
+
+      let result = Dynamic.run data (fun () -> {
+        let score = Decode.decode_field! "score" float
+        let active = Decode.decode_field! "active" bool
+        (score, active)
+      })
+
+      assert_eq result (Ok (9.5, True))
+    }
+  }
+
+  describe "decode_element" {
+    test "decodes tuple elements" {
+      let data = from_erlang ("Bob", 25)
+
+      let result = Dynamic.run data (fun () -> {
+        let name = Decode.decode_element! 0 string
+        let age = Decode.decode_element! 1 int
+        (name, age)
+      })
+
+      assert_eq result (Ok ("Bob", 25))
+    }
+  }
+}

@@ -1,8 +1,8 @@
 import Std.Actor (Process, Actor, beam_actor)
 
 type CounterMsg =
-  | Increment(Int)
-  | GetCount(Pid Int)
+  | Increment Int
+  | GetCount (Pid Int)
   | Stop
 
 fun counter : (count: Int) -> Unit needs {Process, Actor CounterMsg}

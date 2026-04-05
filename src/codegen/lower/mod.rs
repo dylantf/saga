@@ -6,7 +6,7 @@ pub(crate) mod init;
 mod pats;
 pub mod util;
 
-use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Lit, Pat};
+use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Lit, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use std::collections::HashMap;
 
@@ -15,7 +15,7 @@ use init::{PendingAnnotation, extract_external};
 use pats::{lower_params, lower_pat};
 use util::{
     cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_qualified_call,
-    core_var, field_access_record_name, has_nested_effect_call, lower_lit, lower_string_to_binary,
+    core_var, field_access_record_name, lower_lit, lower_string_to_binary,
     process_string_escapes,
 };
 
@@ -398,6 +398,46 @@ impl<'a> Lowerer<'a> {
         Some(CExpr::Fun(params, Box::new(make_call(call_args))))
     }
 
+    /// Check if an expression contains effectful calls nested inside if/case/block
+    /// branches. Like `has_nested_effect_call` but also detects effectful function
+    /// calls (e.g. `assert_eq 1 1`) that the static utility misses because it has
+    /// no access to the resolution/fun_info tables.
+    fn has_nested_effectful_expr(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.branch_is_effectful(then_branch)
+                    || self.branch_is_effectful(else_branch)
+            }
+            ExprKind::Case { arms, .. } => arms
+                .iter()
+                .any(|arm| self.branch_is_effectful(&arm.node.body)),
+            ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match &s.node {
+                Stmt::Expr(e) => self.branch_is_effectful(e),
+                Stmt::Let { value, .. } => self.branch_is_effectful(value),
+                Stmt::LetFun { body, .. } => self.branch_is_effectful(body),
+            }),
+            _ => false,
+        }
+    }
+
+    /// Check if an expression is or contains an effectful call — either a direct
+    /// effect op (`!` call), an effectful function call, or nested branches
+    /// containing either.
+    fn branch_is_effectful(&self, expr: &Expr) -> bool {
+        collect_effect_call(expr).is_some()
+            || collect_fun_call(expr)
+                .map(|(name, _, _)| {
+                    self.is_effectful(name)
+                        || self.current_effectful_vars.contains_key(name)
+                })
+                .unwrap_or(false)
+            || self.has_nested_effectful_expr(expr)
+    }
+
     /// Check if a function is effectful.
     fn is_effectful(&self, name: &str) -> bool {
         self.fun_info
@@ -751,7 +791,7 @@ impl<'a> Lowerer<'a> {
                             &args_owned,
                             self.current_return_k.clone(),
                         )
-                    } else if has_nested_effect_call(body) {
+                    } else if self.has_nested_effectful_expr(body) {
                         // Nested effect calls in branches (e.g. if/case with fail!):
                         // thread _ReturnK through branches so abort skips the wrap.
                         let k_var = self.fresh();
@@ -838,7 +878,7 @@ impl<'a> Lowerer<'a> {
                                     &args_owned,
                                     self.current_return_k.clone(),
                                 )
-                            } else if has_nested_effect_call(body) {
+                            } else if self.has_nested_effectful_expr(body) {
                                 let k_var = self.fresh();
                                 let k_ce = self.current_return_k.clone().unwrap();
                                 let body_ce = self.lower_expr_with_k(body, &k_var);
@@ -1574,7 +1614,7 @@ impl<'a> Lowerer<'a> {
                             &args_owned,
                             self.current_return_k.clone(),
                         )
-                    } else if has_nested_effect_call(body) {
+                    } else if self.has_nested_effectful_expr(body) {
                         let k_var = self.fresh();
                         let k_ce = self.current_return_k.clone().unwrap();
                         let body_ce = self.lower_expr_with_k(body, &k_var);
@@ -2289,9 +2329,19 @@ impl<'a> Lowerer<'a> {
         let mut arg_vars: Vec<String> = Vec::new();
         let mut bindings: Vec<(String, CExpr)> = Vec::new();
 
-        for arg in &non_unit_args {
+        let callee_param_effs = self.param_absorbed_effects(&qualified).cloned();
+        for (i, arg) in non_unit_args.iter().enumerate() {
             let v = self.fresh();
+            // If this arg position has absorbed effects, set context
+            // so lambdas at this position get handler params added.
+            let saved_ctx = self.lambda_effect_context.take();
+            if let Some(ref pe) = callee_param_effs
+                && let Some(effs) = pe.get(&i)
+            {
+                self.lambda_effect_context = Some(effs.clone());
+            }
             let ce = self.lower_expr(arg);
+            self.lambda_effect_context = saved_ctx;
             arg_vars.push(v.clone());
             bindings.push((v, ce));
         }

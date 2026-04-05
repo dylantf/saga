@@ -1,7 +1,7 @@
 import Std.Actor (Actor, Process, Monitor, beam_actor)
 
 type WorkerMsg =
-  | Work(Int)
+  | Work Int
   | Die
 
 fun worker : Unit -> Unit needs {Actor WorkerMsg}
@@ -22,7 +22,7 @@ watcher () = {
   send! pid Die
 
   receive {
-    Down(_dead_pid, reason) -> dbg $"Worker died: {reason}"
+    Down _dead_pid reason -> dbg $"Worker died: {reason}"
     after 5000 -> dbg "Timed out waiting for Down"
   }
 }
