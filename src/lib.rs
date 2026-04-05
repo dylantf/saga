@@ -1,9 +1,11 @@
 pub mod ast;
 pub mod codegen;
+pub mod color;
 pub mod derive;
 pub mod desugar;
 pub mod elaborate;
 pub mod formatter;
+pub mod hex;
 pub mod lexer;
 pub mod parser;
 pub mod project_config;

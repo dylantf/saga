@@ -82,17 +82,73 @@ impl Checker {
         let inner_effs = self.restore_effects(saved_effs);
         let inner_result = self.exit_scope(inner_scope);
 
-        // Unnecessary handler check
-        if !handled.is_empty() && !inner_effs.effects.iter().any(|e| handled.contains(&e.name)) {
-            let mut effects: Vec<_> = handled.iter().cloned().collect();
-            effects.sort();
-            self.collected_diagnostics.push(Diagnostic::warning_at(
-                expr.span,
-                format!(
-                    "expression does not use effects {{{}}}; handler is unnecessary",
-                    effects.join(", ")
-                ),
-            ));
+        // Unnecessary handler check.
+        // Named handlers (bundles) only warn when ALL their effects are unused.
+        // Inline arms warn per-unused-effect.
+        if !handled.is_empty() {
+            let used: std::collections::HashSet<&String> =
+                inner_effs.effects.iter().map(|e| &e.name).collect();
+            let mut unused = Vec::new();
+
+            match handler {
+                ast::Handler::Named(name, _) => {
+                    // Single named handler: warn only if none of its effects are used
+                    let handler_effects: Vec<String> = self
+                        .handlers
+                        .get(name)
+                        .map(|h| h.effects.to_vec())
+                        .or_else(|| {
+                            self.handler_effects_from_env(name)
+                                .map(|e| e.into_iter().collect())
+                        })
+                        .unwrap_or_default();
+                    if !handler_effects.is_empty()
+                        && !handler_effects.iter().any(|e| used.contains(e))
+                    {
+                        unused.extend(handler_effects);
+                    }
+                }
+                ast::Handler::Inline { named, arms, .. } => {
+                    // Named refs within inline block: warn per-handler when all unused
+                    for ann in named {
+                        let handler_effects: Vec<String> = self
+                            .handlers
+                            .get(&ann.node.name)
+                            .map(|h| h.effects.to_vec())
+                            .or_else(|| {
+                                self.handler_effects_from_env(&ann.node.name)
+                                    .map(|e| e.into_iter().collect())
+                            })
+                            .unwrap_or_default();
+                        if !handler_effects.is_empty()
+                            && !handler_effects.iter().any(|e| used.contains(e))
+                        {
+                            unused.extend(handler_effects);
+                        }
+                    }
+                    // Inline arms: warn per-unused-effect
+                    for arm in arms {
+                        if let Some(eff) =
+                            self.effect_for_op(&arm.node.op_name, arm.node.qualifier.as_deref())
+                            && !used.contains(&eff)
+                        {
+                            unused.push(eff);
+                        }
+                    }
+                }
+            }
+
+            if !unused.is_empty() {
+                unused.sort();
+                unused.dedup();
+                self.collected_diagnostics.push(Diagnostic::warning_at(
+                    expr.span,
+                    format!(
+                        "expression does not use effects {{{}}}; handler is unnecessary",
+                        unused.join(", ")
+                    ),
+                ));
+            }
         }
 
         let inner_effect_cache = inner_result.effect_cache;
@@ -228,25 +284,21 @@ impl Checker {
                             &handler_info.where_constraints
                         {
                             if let Some(effect_info) = self.effects.get(effect_name).cloned()
-                                && let Some(&param_var_id) =
-                                    effect_info.type_params.get(*param_idx)
+                                && let Some(&param_var_id) = effect_info.type_params.get(*param_idx)
                             {
-                                let ty =
-                                    if let Some(cache) = inner_effect_cache.get(effect_name)
-                                        && let Some(cached_ty) = cache.get(&param_var_id)
-                                    {
-                                        self.sub.apply(cached_ty)
-                                    } else {
-                                        self.sub.apply(&Type::Var(param_var_id))
-                                    };
+                                let ty = if let Some(cache) = inner_effect_cache.get(effect_name)
+                                    && let Some(cached_ty) = cache.get(&param_var_id)
+                                {
+                                    self.sub.apply(cached_ty)
+                                } else {
+                                    self.sub.apply(&Type::Var(param_var_id))
+                                };
                                 for (trait_name, extra_var_ids) in trait_constraints {
                                     let extra_types: Vec<Type> = extra_var_ids
                                         .iter()
                                         .map(|id| {
-                                            let mapped = mapping
-                                                .get(id)
-                                                .cloned()
-                                                .unwrap_or(Type::Var(*id));
+                                            let mapped =
+                                                mapping.get(id).cloned().unwrap_or(Type::Var(*id));
                                             self.sub.apply(&mapped)
                                         })
                                         .collect();

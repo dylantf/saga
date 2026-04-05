@@ -12,7 +12,22 @@ use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
 
 const BUILD_HASH: &str = env!("DYLANG_BUILD_HASH");
-const STDLIB_HASH: &str = env!("DYLANG_STDLIB_HASH");
+/// Compute stdlib hash at runtime from the embedded sources.
+/// This is more reliable than the build-time hash because it always
+/// reflects the actual content compiled into the binary.
+fn stdlib_hash() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (name, source) in typechecker::BUILTIN_MODULES {
+        name.hash(&mut hasher);
+        source.hash(&mut hasher);
+    }
+    for (name, source) in stdlib_bridge_files() {
+        name.hash(&mut hasher);
+        source.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
 
 /// Build manifest written to `_build/<profile>/.manifest` for cache invalidation.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -55,11 +70,11 @@ fn file_mtime(path: &Path) -> u64 {
 /// Check if a cached build is still valid for the given script file.
 /// Returns a `ScriptBuild` if the cache is fresh.
 pub fn check_script_cache(file: &str, profile: &str) -> Option<ScriptBuild> {
-    let build_dir = Path::new(file)
+    let build_root = Path::new(file)
         .parent()
         .unwrap_or(Path::new("."))
-        .join("_build")
-        .join(profile);
+        .join("_build");
+    let build_dir = build_root.join(profile);
 
     let manifest = BuildManifest::read(&build_dir)?;
     if manifest.compiler_version != BUILD_HASH {
@@ -83,7 +98,7 @@ pub fn check_script_cache(file: &str, profile: &str) -> Option<ScriptBuild> {
         return None;
     }
 
-    let stdlib_dir = stdlib_cache_dir();
+    let stdlib_dir = build_root.join(".stdlib").join(stdlib_hash());
     if !stdlib_dir.join(".complete").exists() {
         return None;
     }
@@ -118,7 +133,8 @@ pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<(PathBu
         return None;
     }
 
-    let stdlib_dir = stdlib_cache_dir();
+    let build_root = project_root.join("_build");
+    let stdlib_dir = build_root.join(".stdlib").join(stdlib_hash());
     if !stdlib_dir.join(".complete").exists() {
         return None;
     }
@@ -347,11 +363,11 @@ fn write_stdlib_bridges(build_dir: &Path) {
     }
 }
 
-/// Ensure precompiled stdlib beams exist in the global cache.
-/// Returns the cache directory path. On a cold cache, creates a fresh checker,
+/// Ensure precompiled stdlib beams exist in the project's _build/.stdlib/ directory.
+/// Returns the stdlib directory path. On a cold cache, creates a fresh checker,
 /// imports ALL builtin modules, elaborates, and compiles them.
-pub fn ensure_stdlib_cache() -> PathBuf {
-    let cache_dir = stdlib_cache_dir();
+pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
+    let cache_dir = build_root.join(".stdlib").join(stdlib_hash());
 
     // If marker exists, cache is warm
     if cache_dir.join(".complete").exists() {
@@ -419,22 +435,12 @@ pub fn ensure_stdlib_cache() -> PathBuf {
     }
 
     // Write marker so we know the cache is complete
-    fs::write(cache_dir.join(".complete"), STDLIB_HASH).unwrap_or_else(|e| {
+    fs::write(cache_dir.join(".complete"), "").unwrap_or_else(|e| {
         eprintln!("Error writing stdlib cache marker: {}", e);
         std::process::exit(1);
     });
 
     cache_dir
-}
-
-fn stdlib_cache_dir() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".dylang")
-        .join("lib")
-        .join(STDLIB_HASH)
 }
 
 /// Scan project and dependency directories for .erl bridge files and copy them to the build directory.
@@ -535,24 +541,28 @@ pub fn run_erlc(build_dir: &Path, build_start: Instant) {
 }
 
 /// Run a compiled module on the BEAM.
-pub fn exec_erl(build_dir: &Path, stdlib_dir: &Path, entry_module: &str) {
+pub fn exec_erl(build_dir: &Path, stdlib_dir: &Path, extra_pa: &[PathBuf], entry_module: &str) {
     let eval = format!(
         "try '{}':main() of _ -> init:stop() catch C:R:S -> dylang_runtime:format_crash(C, R, S), init:stop(1) end",
         entry_module
     );
-    let status = std::process::Command::new("erl")
-        .arg("-noshell")
+    let mut cmd = std::process::Command::new("erl");
+    cmd.arg("-noshell")
         .arg("-pa")
         .arg(stdlib_dir)
         .arg("-pa")
-        .arg(build_dir)
-        .arg("-eval")
-        .arg(&eval)
-        .status()
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to run erl: {}", e);
-            std::process::exit(1);
-        });
+        .arg(build_dir);
+
+    for dir in extra_pa {
+        cmd.arg("-pa").arg(dir);
+    }
+
+    cmd.arg("-eval").arg(&eval);
+
+    let status = cmd.status().unwrap_or_else(|e| {
+        eprintln!("Failed to run erl: {}", e);
+        std::process::exit(1);
+    });
 
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
@@ -563,6 +573,7 @@ pub struct ProjectBuild {
     pub build_dir: PathBuf,
     pub stdlib_dir: PathBuf,
     pub compiled_modules: HashMap<String, codegen::CompiledModule>,
+    pub extra_ebin_dirs: Vec<PathBuf>,
 }
 
 /// Build a project (with project.toml) into the given build directory.
@@ -630,8 +641,9 @@ pub fn build_project(profile: &str) -> ProjectBuild {
     // Phase 2: Elaborate all modules
     let mut compiled_modules = compile_std_modules(&result);
 
-    // Ensure stdlib beams are cached globally
-    let stdlib_dir = ensure_stdlib_cache();
+    // Ensure stdlib beams are cached in _build/
+    let build_root = project_root.join("_build");
+    let stdlib_dir = ensure_stdlib_cache(&build_root);
 
     // Elaborate user modules
     let codegen_info_map = result.codegen_info();
@@ -782,14 +794,20 @@ pub fn build_project(profile: &str) -> ProjectBuild {
         );
     }
 
-    // Copy project-specific bridge (.erl) files into build dir
+    // Copy project-specific bridge (.erl) files into build dir.
+    // Skip deps that have their own ebin/ — they're already on the code path.
+    // Copy bridge (.erl) files from project root and deps without their own ebin/
     let mut bridge_roots: Vec<&Path> = vec![&project_root];
     let dep_roots = config
         .deps
         .as_ref()
         .map(|deps| project_config::dep_root_paths(&project_root, deps))
         .unwrap_or_default();
-    bridge_roots.extend(dep_roots.iter().map(|p| p.as_path()));
+    for dep_root in &dep_roots {
+        if !dep_root.join("ebin").exists() {
+            bridge_roots.push(dep_root);
+        }
+    }
     copy_project_bridges(&bridge_roots, &build_dir);
 
     run_erlc(&build_dir, build_start);
@@ -805,10 +823,13 @@ pub fn build_project(profile: &str) -> ProjectBuild {
         .write(&build_dir);
     }
 
+    let extra_ebin_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
+
     ProjectBuild {
         build_dir,
         stdlib_dir,
         compiled_modules,
+        extra_ebin_dirs,
     }
 }
 
@@ -846,11 +867,11 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
     let (program, _) = parse_and_typecheck(&source, file, &mut checker);
     let result = checker.to_result();
 
-    let build_dir = Path::new(file)
+    let build_root = Path::new(file)
         .parent()
         .unwrap_or(Path::new("."))
-        .join("_build")
-        .join(profile);
+        .join("_build");
+    let build_dir = build_root.join(profile);
     let _ = fs::remove_dir_all(&build_dir);
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| {
         eprintln!("Error creating build dir: {}", e);
@@ -864,8 +885,8 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
     // Phase 2: Elaborate all modules (std modules needed for CodegenContext)
     let mut compiled_modules = compile_std_modules(&result);
 
-    // Ensure stdlib beams are cached globally
-    let stdlib_dir = ensure_stdlib_cache();
+    // Ensure stdlib beams are cached in _build/
+    let stdlib_dir = ensure_stdlib_cache(&build_root);
 
     let elaborated = elaborate::elaborate(&program, &result);
     compiled_modules.insert(

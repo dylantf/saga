@@ -86,23 +86,24 @@ The `-module(name)` in your `.erl` file must match the module string in `@extern
 
 Bridge functions must return values matching these BEAM representations:
 
-| Type                     | BEAM representation    | Example                  |
-| ------------------------ | ---------------------- | ------------------------ |
-| `Int`                    | Integer                | `42`                     |
-| `Float`                  | Float                  | `1.5`                    |
-| `String`                 | Binary                 | `<<"hello">>`            |
-| `Bool`                   | Atoms `true` / `false` | `true`                   |
-| `Unit`                   | Atom `unit`            | `unit`                   |
-| `List a`                 | Erlang list            | `[1, 2, 3]`              |
-| `(a, b)`                 | Tuple                  | `{1, <<"hi">>}`          |
-| `Ok v`                   | `{ok, V}`              | `{ok, <<"contents">>}`   |
-| `Err e`                  | `{error, E}`           | `{error, <<"not found">>}` |
-| `Just v`                 | `{just, V}`            | `{just, <<"hello">>}`    |
-| `Nothing`                | `{nothing}`            | `{nothing}`              |
-| Custom `Foo x y`         | `{module_Foo, X, Y}`   | `{shapes_Circle, 5}`     |
-| Custom nullary `Foo`     | `{module_Foo}`         | `{std_file_NotFound}`    |
+| Type                 | BEAM representation    | Example                    |
+| -------------------- | ---------------------- | -------------------------- |
+| `Int`                | Integer                | `42`                       |
+| `Float`              | Float                  | `1.5`                      |
+| `String`             | Binary                 | `<<"hello">>`              |
+| `Bool`               | Atoms `true` / `false` | `true`                     |
+| `Unit`               | Atom `unit`            | `unit`                     |
+| `List a`             | Erlang list            | `[1, 2, 3]`                |
+| `(a, b)`             | Tuple                  | `{1, <<"hi">>}`            |
+| `Ok v`               | `{ok, V}`              | `{ok, <<"contents">>}`     |
+| `Err e`              | `{error, E}`           | `{error, <<"not found">>}` |
+| `Just v`             | `{just, V}`            | `{just, <<"hello">>}`      |
+| `Nothing`            | `{nothing}`            | `{nothing}`                |
+| Custom `Foo x y`     | `{module_Foo, X, Y}`   | `{shapes_Circle, 5}`       |
+| Custom nullary `Foo` | `{module_Foo}`         | `{std_file_NotFound}`      |
 
 Notes:
+
 - `Err` maps to the atom `error`, not `err`
 - `Unit` is the atom `unit`, not an empty tuple `{}`
 - Custom ADT constructors are prefixed with the module name: `Circle` in module `Shapes` becomes `shapes_Circle`

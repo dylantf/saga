@@ -23,9 +23,10 @@ cargo run --bin dylang -- build file.dy     # Compile without running
 cargo run --bin dylang -- check file.dy     # Type check only
 cargo run --bin dylang -- emit file.dy      # Print Core Erlang to stdout
 cargo run --bin dylang -- test              # Run project test suite (tests/*.dy)
+cargo run --bin dylang -- install           # Fetch and compile Hex/git dependencies
 ```
 
-Requires `erlc` and `erl` on PATH (Erlang/OTP) for `run`/`build`/`test` commands.
+Requires `erlc` and `erl` on PATH (Erlang/OTP) for `run`/`build`/`test` commands. Hex packages with NIFs require `rebar3` on PATH.
 
 ## Architecture
 
@@ -88,8 +89,10 @@ Typechecker tests use `check(src)` which loads the prelude then checks the sourc
 
 ### Build Output
 
-- Single files: `<parent>/_build/{dev,release}/`
-- Projects: `<project_root>/_build/{dev,release}/`
+- `_build/{dev,release}/` — compiled project beams
+- `_build/.stdlib/{hash}/` — precompiled stdlib beams (per-project, keyed by content hash)
+- `deps/{name}/` — installed dependencies (Hex and git), with `ebin/` and `priv/`
+- `~/.dylang/cache/` — global download cache (Hex tarballs, git bare clones)
 
 ## Language Design Notes
 

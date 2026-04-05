@@ -1,0 +1,20 @@
+module CsvParser
+
+import Std.File (File, fs)
+
+import Std.IO (console)
+import SagaCsv (parse)
+
+fun read_csv : String -> String needs {File}
+read_csv filename = case File.read! filename {
+  Ok content -> content
+  Err _ -> panic $"Failed to read {filename}"
+}
+
+pub fun main : Unit -> Unit
+main () = {
+  "data.csv"
+  |> read_csv
+  |> parse 44
+  |> List.iter dbg
+} with {fs}

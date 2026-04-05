@@ -1,0 +1,6 @@
+[project]
+name = "e2e-tests"
+
+[library]
+module = "E2eTests"
+expose = []

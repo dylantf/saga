@@ -1,4 +1,4 @@
-use dylang::{codegen, elaborate, project_config::ProjectConfig};
+use dylang::{codegen, elaborate, project_config, project_config::ProjectConfig};
 
 use std::fs;
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
         if let Some(f) = file {
             let sb =
                 check_script_cache(f, "release").unwrap_or_else(|| build_script(f, "release"));
-            exec_erl(&sb.build_dir, &sb.stdlib_dir, &sb.erlang_name);
+            exec_erl(&sb.build_dir, &sb.stdlib_dir, &[], &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
                 eprintln!("No project.toml found.");
@@ -25,18 +25,19 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 );
                 std::process::exit(1);
             }
+            let extra_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
             let (build_dir, stdlib_dir) = check_project_cache(&project_root, "release")
                 .unwrap_or_else(|| {
                     let pb = build_project("release");
                     (pb.build_dir, pb.stdlib_dir)
                 });
-            exec_erl(&build_dir, &stdlib_dir, "main");
+            exec_erl(&build_dir, &stdlib_dir, &extra_dirs, "main");
         }
     } else {
         // dev: always clean rebuild
         if let Some(f) = file {
             let sb = build_script(f, "dev");
-            exec_erl(&sb.build_dir, &sb.stdlib_dir, &sb.erlang_name);
+            exec_erl(&sb.build_dir, &sb.stdlib_dir, &[], &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
                 eprintln!("No project.toml found.");
@@ -50,7 +51,7 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 std::process::exit(1);
             }
             let pb = build_project("dev");
-            exec_erl(&pb.build_dir, &pb.stdlib_dir, "main");
+            exec_erl(&pb.build_dir, &pb.stdlib_dir, &pb.extra_ebin_dirs, "main");
         }
     }
 }
@@ -427,7 +428,7 @@ pub fn cmd_test(filter: Option<&str>) {
         });
 
         run_erlc_file(&core_path, &pb.build_dir);
-        exec_erl(&pb.build_dir, &pb.stdlib_dir, "_test");
+        exec_erl(&pb.build_dir, &pb.stdlib_dir, &pb.extra_ebin_dirs, "_test");
     }
 }
 

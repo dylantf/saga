@@ -195,6 +195,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Polymorphic type class dicts used as bare function refs without applying dict arguments (e.g. `'__dict_Show_Result'/2` not called with sub-dicts)
 - [x] Builtin modules don't have access to `print` (undefined variable: `print`)
 - [x] Effect op name collisions: multi-effect handlers (`handler x for A, B {}`) and unqualified `op!` calls silently resolve to the first match when multiple effects define the same op name. Should emit a compile error on ambiguity. (`register_handler` takes first match and breaks; `effect_for_op` iterates HashMap nondeterministically.)
+- [ ] Eta-reduce on lambdas doesn't seem to work (wrong arity error), e.g. `List.iter println`
 
 ### Effects (CPS transform)
 
@@ -272,9 +273,9 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Library compilation mode (`dylang build --lib`): compile modules to `.beam` without
       an entry point, serialize type info (types, effects, handlers, trait impls) alongside
       `.beam` files so downstream projects can typecheck against the library
-- [x] Dependency management (`project.toml` dependencies, git deps first, Hex registry later)
-- [ ] Hex package integration: package format (`.beam` files + type info sidecar), publish/install
-      commands. Prerequisite: library compilation mode
+- [x] Dependency management (`project.toml` dependencies, path, git, Hex)
+- [x] Hex package integration: fetch from hex.pm, compile with erlc, cache in `~/.dylang/cache/hex/`
+- [ ] Hex publishing: publish dylang packages to Hex with type info sidecar
 - [x] LSP (go-to-definition, hover types, error squiggles, autocomplete for constructors/effects). See separate LSP roadmap
 - [x] Testing framework (assert_eq, test runner, test discovery, skip, nested describe)
   - [x] Exit code 1 on test failure (for CI)

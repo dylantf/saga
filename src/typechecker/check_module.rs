@@ -336,10 +336,10 @@ fn scan_dir(dir: &Path, root: &Path, map: &mut ModuleMap) -> Result<(), String> 
         let entry = entry.map_err(|e| format!("read_dir error: {}", e))?;
         let path = entry.path();
         if path.is_dir() {
-            // Skip _build and tests directories
+            // Skip _build, deps, and tests directories
             if path
                 .file_name()
-                .is_some_and(|n| n == "_build" || n == "tests")
+                .is_some_and(|n| n == "_build" || n == "deps" || n == "tests")
             {
                 continue;
             }

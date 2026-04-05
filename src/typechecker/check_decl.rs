@@ -463,17 +463,17 @@ impl Checker {
                 if !where_clause.is_empty() {
                     for bound in where_clause {
                         for (trait_name, _, trait_span) in &bound.traits {
-                            let resolved = self.resolve_trait_name(trait_name)
+                            let resolved = self
+                                .resolve_trait_name(trait_name)
                                 .unwrap_or_else(|| trait_name.clone());
-                            self.lsp
-                                .type_references
-                                .push((*trait_span, resolved));
+                            self.lsp.type_references.push((*trait_span, resolved));
                         }
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
                         {
                             for (trait_name, trait_type_args, _) in &bound.traits {
-                                let resolved_trait = self.resolve_trait_name(trait_name)
+                                let resolved_trait = self
+                                    .resolve_trait_name(trait_name)
                                     .unwrap_or_else(|| trait_name.clone());
                                 let extra_types: Vec<Type> = trait_type_args
                                     .iter()
@@ -553,7 +553,13 @@ impl Checker {
                             let name = if let Some(info) = self.resolve_effect(&e.name) {
                                 info.source_module
                                     .as_ref()
-                                    .map(|m| format!("{}.{}", m, e.name.rsplit('.').next().unwrap_or(&e.name)))
+                                    .map(|m| {
+                                        format!(
+                                            "{}.{}",
+                                            m,
+                                            e.name.rsplit('.').next().unwrap_or(&e.name)
+                                        )
+                                    })
                                     .unwrap_or_else(|| {
                                         // Local effect: qualify with current module
                                         if let Some(m) = &self.current_module {
@@ -622,10 +628,13 @@ impl Checker {
                                 .collect();
                             // Use canonical effect name so lookups against
                             // canonical-only self.effects succeed later.
-                            let canonical = self.resolve_effect(&eff.name)
+                            let canonical = self
+                                .resolve_effect(&eff.name)
                                 .and_then(|info| {
                                     let short = eff.name.rsplit('.').next().unwrap_or(&eff.name);
-                                    info.source_module.as_ref().map(|m| format!("{}.{}", m, short))
+                                    info.source_module
+                                        .as_ref()
+                                        .map(|m| format!("{}.{}", m, short))
                                 })
                                 .unwrap_or_else(|| {
                                     if let Some(m) = &self.current_module {
@@ -648,11 +657,10 @@ impl Checker {
                     let mut constraints = Vec::new();
                     for bound in where_clause {
                         for (trait_name, _, trait_span) in &bound.traits {
-                            let resolved = self.resolve_trait_name(trait_name)
+                            let resolved = self
+                                .resolve_trait_name(trait_name)
                                 .unwrap_or_else(|| trait_name.clone());
-                            self.lsp
-                                .type_references
-                                .push((*trait_span, resolved));
+                            self.lsp.type_references.push((*trait_span, resolved));
                         }
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
@@ -661,7 +669,8 @@ impl Checker {
                                 .where_bound_var_names
                                 .insert(*var_id, bound.type_var.clone());
                             for (trait_name, trait_type_args, _) in &bound.traits {
-                                let resolved_trait = self.resolve_trait_name(trait_name)
+                                let resolved_trait = self
+                                    .resolve_trait_name(trait_name)
                                     .unwrap_or_else(|| trait_name.clone());
                                 let extra_types: Vec<Type> = trait_type_args
                                     .iter()
@@ -965,6 +974,23 @@ impl Checker {
             let resolved = self.sub.apply(pt);
             super::collect_callback_effects(&resolved, &mut absorbed);
         }
+        // Collect row variable IDs from callback parameters' open effect rows.
+        // These represent unknown effects that must be propagated via `needs`.
+        let mut callback_row_vars = std::collections::HashSet::new();
+        for pt in &param_types {
+            let resolved = self.sub.apply(pt);
+            fn collect_row_vars(ty: &Type, out: &mut std::collections::HashSet<u32>) {
+                if let Type::Fun(_, ret, row) = ty {
+                    if let Some(tail) = &row.tail
+                        && let Type::Var(id) = tail.as_ref()
+                    {
+                        out.insert(*id);
+                    }
+                    collect_row_vars(ret, out);
+                }
+            }
+            collect_row_vars(&resolved, &mut callback_row_vars);
+        }
         let all_body_effs = if absorbed.is_empty() {
             all_body_effs
         } else {
@@ -997,6 +1023,36 @@ impl Checker {
         let declared_row = annotation
             .and_then(|ann| innermost_effect_row(&self.sub.apply(ann)))
             .unwrap_or_else(EffectRow::empty);
+
+        // A callback parameter with an open effect row (..e) represents
+        // unknown effects that can't be handled with `with` — they must be
+        // propagated via `needs {..e}` on the function's own annotation,
+        // and the row variable must be the SAME one (connected).
+        if annotation.is_some() && !callback_row_vars.is_empty() {
+            // Check: the declared row must have an open tail whose variable
+            // resolves to the same root as one of the callback row variables.
+            let propagates = declared_row.tail.as_ref().is_some_and(|t| {
+                let decl_resolved = self.sub.apply(t);
+                callback_row_vars.iter().any(|&cb_id| {
+                    let cb_resolved = self.sub.apply(&Type::Var(cb_id));
+                    decl_resolved == cb_resolved
+                })
+            });
+            if !propagates {
+                let err_span = annotation_span.unwrap_or_else(|| match clauses[0] {
+                    Decl::FunBinding { span, .. } => *span,
+                    _ => unreachable!(),
+                });
+                return Err(Diagnostic::error_at(
+                    err_span,
+                    format!(
+                        "`{}` accepts callback with open effect row but does not propagate effects; \
+                         add `needs {{..e}}` to the annotation",
+                        name,
+                    ),
+                ));
+            }
+        }
 
         if !all_body_effs.is_empty() || !declared_row.is_empty() {
             let err_span = match clauses[0] {
@@ -1125,9 +1181,11 @@ impl Checker {
             .find_map(|(bound_id, traits)| {
                 if traits.contains(trait_name) {
                     match self.sub.apply(&Type::Var(*bound_id)) {
-                        Type::Var(r) if r == resolved_id => {
-                            self.trait_state.where_bound_var_names.get(bound_id).cloned()
-                        }
+                        Type::Var(r) if r == resolved_id => self
+                            .trait_state
+                            .where_bound_var_names
+                            .get(bound_id)
+                            .cloned(),
                         _ => None,
                     }
                 } else {
@@ -1527,11 +1585,7 @@ impl Checker {
     /// Phase 1: Register effect name and type params (stub with empty ops).
     /// Called first for ALL effects so that forward references between effects
     /// (e.g. Process referencing Actor) resolve during op signature processing.
-    pub(crate) fn register_effect_stub(
-        &mut self,
-        name: &str,
-        effect_type_params: &[String],
-    ) {
+    pub(crate) fn register_effect_stub(&mut self, name: &str, effect_type_params: &[String]) {
         let mut type_param_ids = Vec::new();
         for _tp in effect_type_params {
             let var = self.fresh_var();
@@ -1572,7 +1626,9 @@ impl Checker {
             name.to_string()
         };
         // Retrieve the type param IDs created during stub registration.
-        let type_param_ids = self.effects.get(&key)
+        let type_param_ids = self
+            .effects
+            .get(&key)
             .map(|info| info.type_params.clone())
             .unwrap_or_default();
 
@@ -1624,7 +1680,13 @@ impl Checker {
         else {
             unreachable!("register_handler called with non-HandlerDef");
         };
-        let ast::HandlerBody { effects: effect_names, needs, where_clause, arms, return_clause } = body;
+        let ast::HandlerBody {
+            effects: effect_names,
+            needs,
+            where_clause,
+            arms,
+            return_clause,
+        } = body;
         let return_clause = return_clause.as_deref();
         // Save and clear effect/field tracking for this handler body
         let body_scope = self.enter_scope();
@@ -1663,7 +1725,8 @@ impl Checker {
                     .where_bound_var_names
                     .insert(*var_id, bound.type_var.clone());
                 for (trait_req, _, trait_span) in &bound.traits {
-                    let resolved_req = self.resolve_trait_name(trait_req)
+                    let resolved_req = self
+                        .resolve_trait_name(trait_req)
                         .unwrap_or_else(|| trait_req.clone());
                     self.lsp
                         .type_references
@@ -1863,12 +1926,15 @@ impl Checker {
         // Collect accumulated handler effects and restore outer scope
         let all_handler_effs = self.restore_effects(handler_saved_effs);
         let _scope_result = self.exit_scope(body_scope);
-        let declared_effects: std::collections::HashSet<String> =
-            needs.iter().map(|e| {
+        let declared_effects: std::collections::HashSet<String> = needs
+            .iter()
+            .map(|e| {
                 self.resolve_effect(&e.name)
                     .and_then(|info| {
                         let short = e.name.rsplit('.').next().unwrap_or(&e.name);
-                        info.source_module.as_ref().map(|m| format!("{}.{}", m, short))
+                        info.source_module
+                            .as_ref()
+                            .map(|m| format!("{}.{}", m, short))
                     })
                     .unwrap_or_else(|| {
                         if let Some(m) = &self.current_module {
@@ -1877,7 +1943,8 @@ impl Checker {
                             e.name.clone()
                         }
                     })
-            }).collect();
+            })
+            .collect();
 
         let body_effects: std::collections::HashSet<String> = all_handler_effs
             .effects
@@ -1975,7 +2042,8 @@ impl Checker {
                                     .entry((effect_ref.name.clone(), i))
                                     .or_default();
                                 for (trait_name, trait_type_args, _) in &bound.traits {
-                                    let resolved_trait = self.resolve_trait_name(trait_name)
+                                    let resolved_trait = self
+                                        .resolve_trait_name(trait_name)
                                         .unwrap_or_else(|| trait_name.clone());
                                     let extra_var_ids: Vec<u32> = trait_type_args
                                         .iter()
@@ -1996,20 +2064,25 @@ impl Checker {
         }
 
         // Canonicalize effect names so they match canonical names in effect rows.
-        let canonical_effects: Vec<String> = effect_names.iter().map(|e| {
-            self.resolve_effect(&e.name)
-                .and_then(|info| {
-                    let short = e.name.rsplit('.').next().unwrap_or(&e.name);
-                    info.source_module.as_ref().map(|m| format!("{}.{}", m, short))
-                })
-                .unwrap_or_else(|| {
-                    if let Some(m) = &self.current_module {
-                        format!("{}.{}", m, e.name)
-                    } else {
-                        e.name.clone()
-                    }
-                })
-        }).collect();
+        let canonical_effects: Vec<String> = effect_names
+            .iter()
+            .map(|e| {
+                self.resolve_effect(&e.name)
+                    .and_then(|info| {
+                        let short = e.name.rsplit('.').next().unwrap_or(&e.name);
+                        info.source_module
+                            .as_ref()
+                            .map(|m| format!("{}.{}", m, short))
+                    })
+                    .unwrap_or_else(|| {
+                        if let Some(m) = &self.current_module {
+                            format!("{}.{}", m, e.name)
+                        } else {
+                            e.name.clone()
+                        }
+                    })
+            })
+            .collect();
         self.handlers.insert(
             name.into(),
             HandlerInfo {
@@ -2101,25 +2174,31 @@ impl Checker {
                     // Concrete type (includes primitives): check that an impl exists.
                     // Try canonical form first, then resolve through scope_map.
                     Type::Con(type_name, args) => {
-                        let resolved_trait = self.resolve_trait_name(&trait_name)
+                        let resolved_trait = self
+                            .resolve_trait_name(&trait_name)
                             .unwrap_or_else(|| trait_name.clone());
-                        let impl_info = self.trait_state.impls.get(&(
-                            resolved_trait.clone(),
-                            resolved_trait_type_args.clone(),
-                            type_name.clone(),
-                        )).or_else(|| {
-                            // Fallback: try bare trait name for builtin impls (Num, Eq, Show for Tuple, etc.)
-                            let bare = resolved_trait.rsplit('.').next().unwrap_or(&resolved_trait);
-                            if bare != resolved_trait {
-                                self.trait_state.impls.get(&(
-                                    bare.to_string(),
-                                    resolved_trait_type_args.clone(),
-                                    type_name.clone(),
-                                ))
-                            } else {
-                                None
-                            }
-                        });
+                        let impl_info = self
+                            .trait_state
+                            .impls
+                            .get(&(
+                                resolved_trait.clone(),
+                                resolved_trait_type_args.clone(),
+                                type_name.clone(),
+                            ))
+                            .or_else(|| {
+                                // Fallback: try bare trait name for builtin impls (Num, Eq, Show for Tuple, etc.)
+                                let bare =
+                                    resolved_trait.rsplit('.').next().unwrap_or(&resolved_trait);
+                                if bare != resolved_trait {
+                                    self.trait_state.impls.get(&(
+                                        bare.to_string(),
+                                        resolved_trait_type_args.clone(),
+                                        type_name.clone(),
+                                    ))
+                                } else {
+                                    None
+                                }
+                            });
                         match impl_info {
                             None => {
                                 // Check if this might be caused by a user function
@@ -2152,11 +2231,14 @@ impl Checker {
                                         }
                                     }
                                 }
-                                let display_trait = resolved_trait.rsplit('.').next()
-                                    .unwrap_or(&resolved_trait);
+                                let display_trait =
+                                    resolved_trait.rsplit('.').next().unwrap_or(&resolved_trait);
                                 return Err(Diagnostic::error_at(
                                     span,
-                                    format!("no impl of {} for {}{}", display_trait, type_name, hint),
+                                    format!(
+                                        "no impl of {} for {}{}",
+                                        display_trait, type_name, hint
+                                    ),
                                 ));
                             }
                             Some(info) => {
