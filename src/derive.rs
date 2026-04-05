@@ -79,8 +79,10 @@ fn generate_record_derive(
     fields: &[Annotated<(String, TypeExpr)>],
     span: Span,
 ) -> Option<Decl> {
-    match trait_name {
-        "Show" | "Debug" => Some(derive_record_stringify(trait_name, if trait_name == "Show" { "show" } else { "debug" }, record_name, type_params, fields, span)),
+    let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+    match bare {
+        "Show" | "Debug" => Some(derive_record_stringify(bare, if bare == "Show" { "show" } else { "debug" }, record_name, type_params, fields, span)),
+        "Eq" => Some(derive_marker_trait("Eq", record_name, type_params, span)),
         _ => None,
     }
 }

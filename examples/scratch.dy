@@ -1,7 +1,12 @@
-import Std.Test (describe, test, assert_eq)
-
-# record Person { name: String, age: Int } deriving (Eq, Debug)
+record Person {
+  name: String,
+  age: Int,
+} deriving (Debug, Eq)
 
 main () = {
-  println "Ok"
-} with console
+  let x : Maybe (List Person) = Just [
+    Person { name: "Alice", age: 30 },
+    Person { name: "Bob", age: 25 },
+  ]
+  dbg (debug x)
+}

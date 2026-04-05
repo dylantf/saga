@@ -1,0 +1,19 @@
+import Std.Test (describe, test, assert_eq)
+
+record Person {
+  name: String,
+  age: Int,
+} deriving (Debug, Eq)
+
+describe "repro" {
+  test "assert_eq with Maybe (List Record)" {
+    let result : Maybe (List Person) = Just [
+      Person { name: "Alice", age: 30 },
+      Person { name: "Bob", age: 25 },
+    ]
+    assert_eq result (Just [
+      Person { name: "Alice", age: 30 },
+      Person { name: "Bob", age: 25 },
+    ])
+  }
+}
