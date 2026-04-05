@@ -8,7 +8,7 @@ impl Debug for Dict k v where {k: Debug, v: Debug} {
 
 fun debug_entries : List (k, v) -> String where {k: Debug, v: Debug}
 debug_entries xs = case xs {
-  Nil -> ""
+  [] -> ""
   [(k, v)] -> debug k <> ": " <> debug v
   (k, v) :: t -> debug k <> ": " <> debug v <> ", " <> debug_entries t
 }
