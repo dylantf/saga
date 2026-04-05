@@ -1,0 +1,54 @@
+import Std.Dynamic (
+  Dynamic,
+  Decode,
+  from_erlang,
+  classify,
+  string,
+  int,
+  float,
+  bool
+)
+
+main () = {
+  # Test classify
+  dbg (classify (from_erlang 42))
+  dbg (classify (from_erlang "hello"))
+  dbg (classify (from_erlang True))
+
+  # Test successful decoding with qualified Dynamic.run
+  let data =
+    from_erlang (Dict.from_list [
+      ("name", from_erlang "Alice"),
+      ("age", from_erlang 30),
+    ])
+
+  let result = Dynamic.run data (fun () -> {
+    let name = Decode.decode_field! "name" string
+    let age = Decode.decode_field! "age" int
+    (name, age)
+  })
+  dbg result
+
+  # Test error accumulation — both fields have wrong types
+  let bad_data =
+    from_erlang (Dict.from_list [
+      ("name", from_erlang 42),
+      ("age", from_erlang "not a number"),
+    ])
+
+  let result2 = Dynamic.run bad_data (fun () -> {
+    let name = Decode.decode_field! "name" string
+    let age = Decode.decode_field! "age" int
+    (name, age)
+  })
+  dbg result2
+
+  # Test element decoding (tuples)
+  let tuple_data = from_erlang ("Bob", 25)
+  let result3 = Dynamic.run tuple_data (fun () -> {
+    let name = Decode.decode_element! 0 string
+    let age = Decode.decode_element! 1 int
+    (name, age)
+  })
+  dbg result3
+}

@@ -453,6 +453,7 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("Std.Set", include_str!("../stdlib/Set.dy")),
     ("Std.Time", include_str!("../stdlib/Time.dy")),
     ("Std.BitString", include_str!("../stdlib/BitString.dy")),
+    ("Std.Dynamic", include_str!("../stdlib/Dynamic.dy")),
 ];
 
 pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {

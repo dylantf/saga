@@ -2289,9 +2289,19 @@ impl<'a> Lowerer<'a> {
         let mut arg_vars: Vec<String> = Vec::new();
         let mut bindings: Vec<(String, CExpr)> = Vec::new();
 
-        for arg in &non_unit_args {
+        let callee_param_effs = self.param_absorbed_effects(&qualified).cloned();
+        for (i, arg) in non_unit_args.iter().enumerate() {
             let v = self.fresh();
+            // If this arg position has absorbed effects, set context
+            // so lambdas at this position get handler params added.
+            let saved_ctx = self.lambda_effect_context.take();
+            if let Some(ref pe) = callee_param_effs
+                && let Some(effs) = pe.get(&i)
+            {
+                self.lambda_effect_context = Some(effs.clone());
+            }
             let ce = self.lower_expr(arg);
+            self.lambda_effect_context = saved_ctx;
             arg_vars.push(v.clone());
             bindings.push((v, ce));
         }
