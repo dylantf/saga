@@ -2,19 +2,25 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Directory for a specific Hex package within a project's deps/ folder.
+/// Directory for a dependency within the project's deps/ folder.
 pub fn package_dir(project_root: &Path, name: &str) -> PathBuf {
     project_root.join("deps").join(name)
 }
 
-/// Path to the ebin directory for a Hex package.
+/// Path to the ebin directory for a dependency.
 pub fn package_ebin_dir(project_root: &Path, name: &str) -> PathBuf {
     package_dir(project_root, name).join("ebin")
 }
 
-/// Whether a Hex package is already compiled in this project.
+/// Whether a dependency is already compiled in this project.
 pub fn is_compiled(project_root: &Path, name: &str) -> bool {
     package_ebin_dir(project_root, name).exists()
+}
+
+/// Global cache directory for Hex tarball downloads.
+fn hex_tarball_cache_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".dylang").join("cache").join("hex")
 }
 
 // --- Hex API types ---
@@ -122,24 +128,39 @@ pub fn download_and_extract(
         return Ok(pkg_dir);
     }
 
-    let url = format!("https://repo.hex.pm/tarballs/{}-{}.tar", name, version);
-    let resp = hex_client()
-        .get(&url)
-        .send()
-        .map_err(|e| format!("failed to download {}: {}", url, e))?;
+    // Check global tarball cache first
+    let cache_dir = hex_tarball_cache_dir();
+    let tarball_cache = cache_dir.join(format!("{}-{}.tar", name, version));
+    let tarball_bytes = if tarball_cache.exists() {
+        std::fs::read(&tarball_cache)
+            .map_err(|e| format!("failed to read cached tarball: {}", e))?
+            .into()
+    } else {
+        let url = format!("https://repo.hex.pm/tarballs/{}-{}.tar", name, version);
+        let resp = hex_client()
+            .get(&url)
+            .send()
+            .map_err(|e| format!("failed to download {}: {}", url, e))?;
 
-    if !resp.status().is_success() {
-        return Err(format!(
-            "failed to download Hex tarball for {}-{} (HTTP {})",
-            name,
-            version,
-            resp.status()
-        ));
-    }
+        if !resp.status().is_success() {
+            return Err(format!(
+                "failed to download Hex tarball for {}-{} (HTTP {})",
+                name, version, resp.status()
+            ));
+        }
 
-    let tarball_bytes = resp
-        .bytes()
-        .map_err(|e| format!("failed to read tarball bytes: {}", e))?;
+        let bytes = resp
+            .bytes()
+            .map_err(|e| format!("failed to read tarball bytes: {}", e))?;
+
+        // Cache the tarball globally
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| format!("failed to create tarball cache dir: {}", e))?;
+        std::fs::write(&tarball_cache, &bytes)
+            .map_err(|e| format!("failed to cache tarball: {}", e))?;
+
+        bytes
+    };
 
     std::fs::create_dir_all(&pkg_dir)
         .map_err(|e| format!("failed to create deps dir: {}", e))?;

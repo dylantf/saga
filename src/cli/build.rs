@@ -70,11 +70,11 @@ fn file_mtime(path: &Path) -> u64 {
 /// Check if a cached build is still valid for the given script file.
 /// Returns a `ScriptBuild` if the cache is fresh.
 pub fn check_script_cache(file: &str, profile: &str) -> Option<ScriptBuild> {
-    let build_dir = Path::new(file)
+    let build_root = Path::new(file)
         .parent()
         .unwrap_or(Path::new("."))
-        .join("_build")
-        .join(profile);
+        .join("_build");
+    let build_dir = build_root.join(profile);
 
     let manifest = BuildManifest::read(&build_dir)?;
     if manifest.compiler_version != BUILD_HASH {
@@ -98,7 +98,7 @@ pub fn check_script_cache(file: &str, profile: &str) -> Option<ScriptBuild> {
         return None;
     }
 
-    let stdlib_dir = stdlib_cache_dir();
+    let stdlib_dir = build_root.join(".stdlib").join(stdlib_hash());
     if !stdlib_dir.join(".complete").exists() {
         return None;
     }
@@ -133,7 +133,8 @@ pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<(PathBu
         return None;
     }
 
-    let stdlib_dir = stdlib_cache_dir();
+    let build_root = project_root.join("_build");
+    let stdlib_dir = build_root.join(".stdlib").join(stdlib_hash());
     if !stdlib_dir.join(".complete").exists() {
         return None;
     }
@@ -362,11 +363,11 @@ fn write_stdlib_bridges(build_dir: &Path) {
     }
 }
 
-/// Ensure precompiled stdlib beams exist in the global cache.
-/// Returns the cache directory path. On a cold cache, creates a fresh checker,
+/// Ensure precompiled stdlib beams exist in the project's _build/.stdlib/ directory.
+/// Returns the stdlib directory path. On a cold cache, creates a fresh checker,
 /// imports ALL builtin modules, elaborates, and compiles them.
-pub fn ensure_stdlib_cache() -> PathBuf {
-    let cache_dir = stdlib_cache_dir();
+pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
+    let cache_dir = build_root.join(".stdlib").join(stdlib_hash());
 
     // If marker exists, cache is warm
     if cache_dir.join(".complete").exists() {
@@ -440,16 +441,6 @@ pub fn ensure_stdlib_cache() -> PathBuf {
     });
 
     cache_dir
-}
-
-fn stdlib_cache_dir() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".dylang")
-        .join("lib")
-        .join(stdlib_hash())
 }
 
 /// Scan project and dependency directories for .erl bridge files and copy them to the build directory.
@@ -650,8 +641,9 @@ pub fn build_project(profile: &str) -> ProjectBuild {
     // Phase 2: Elaborate all modules
     let mut compiled_modules = compile_std_modules(&result);
 
-    // Ensure stdlib beams are cached globally
-    let stdlib_dir = ensure_stdlib_cache();
+    // Ensure stdlib beams are cached in _build/
+    let build_root = project_root.join("_build");
+    let stdlib_dir = ensure_stdlib_cache(&build_root);
 
     // Elaborate user modules
     let codegen_info_map = result.codegen_info();
@@ -804,6 +796,7 @@ pub fn build_project(profile: &str) -> ProjectBuild {
 
     // Copy project-specific bridge (.erl) files into build dir.
     // Skip deps that have their own ebin/ — they're already on the code path.
+    // Copy bridge (.erl) files from project root and deps without their own ebin/
     let mut bridge_roots: Vec<&Path> = vec![&project_root];
     let dep_roots = config
         .deps
@@ -874,11 +867,11 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
     let (program, _) = parse_and_typecheck(&source, file, &mut checker);
     let result = checker.to_result();
 
-    let build_dir = Path::new(file)
+    let build_root = Path::new(file)
         .parent()
         .unwrap_or(Path::new("."))
-        .join("_build")
-        .join(profile);
+        .join("_build");
+    let build_dir = build_root.join(profile);
     let _ = fs::remove_dir_all(&build_dir);
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| {
         eprintln!("Error creating build dir: {}", e);
@@ -892,8 +885,8 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
     // Phase 2: Elaborate all modules (std modules needed for CodegenContext)
     let mut compiled_modules = compile_std_modules(&result);
 
-    // Ensure stdlib beams are cached globally
-    let stdlib_dir = ensure_stdlib_cache();
+    // Ensure stdlib beams are cached in _build/
+    let stdlib_dir = ensure_stdlib_cache(&build_root);
 
     let elaborated = elaborate::elaborate(&program, &result);
     compiled_modules.insert(

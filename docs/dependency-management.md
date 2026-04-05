@@ -60,7 +60,7 @@ http = { git = "https://github.com/someone/http", rev = "abc123f" }
 
 Specify exactly one of `tag`, `branch`, or `rev`. If none is given, defaults to `HEAD`.
 
-Git deps are cached globally in `~/.dylang/cache/git/`. The cache uses bare clones with per-commit working copies, so fetches are incremental and multiple versions coexist.
+Git repo source is cached globally in `~/.dylang/cache/git/` (bare clones, shared across projects). Compiled output goes to the project's `_build/deps/{name}/`.
 
 ### Hex Dependencies (Erlang packages)
 
@@ -74,7 +74,7 @@ argon2 = { version = "1.2.0" }
 
 Hex is the default source: if a dep has no `path` or `git`, it's treated as a Hex package. The dep key is the Hex package name.
 
-`dylang install` fetches the tarball from `repo.hex.pm`, extracts it, compiles it, and installs into the project's `deps/` directory. Transitive Hex dependencies are resolved and installed automatically.
+`dylang install` fetches the tarball from `repo.hex.pm`, extracts it, compiles it, and installs into the project's `deps/` directory. Tarballs are cached globally in `~/.dylang/cache/hex/` to avoid re-downloading. Transitive Hex dependencies are resolved and installed automatically.
 
 #### Compilation
 
@@ -116,7 +116,11 @@ For now, Hex deps use exact versions. Transitive dependencies from Hex packages 
 
 #### Install location
 
-Hex packages are installed into the project's `deps/` directory (e.g., `deps/base64url/ebin/`). This keeps builds isolated per project and avoids OTP version mismatches across projects. To reinstall all Hex deps, delete `deps/` and run `dylang install` again.
+Hex and git dependencies are installed into the project's `deps/` directory (e.g., `deps/base64url/ebin/`). This keeps builds isolated per project. To reinstall all deps, delete `deps/` and run `dylang install` again.
+
+Source downloads are cached globally to avoid re-downloading:
+- Hex tarballs: `~/.dylang/cache/hex/`
+- Git repos: `~/.dylang/cache/git/` (bare clones)
 
 ---
 

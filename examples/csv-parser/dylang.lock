@@ -2,4 +2,4 @@
 
 [deps.saga_csv]
 git = "https://github.com/dylantf/saga_csv"
-commit = "ebeddac311e1b7a978d799c8364e8602f8e75098"
+commit = "5a36c0ba762e463ef39a967e0b01da9e35a8b348"

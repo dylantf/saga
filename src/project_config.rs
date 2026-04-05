@@ -368,46 +368,46 @@ fn resolve_ref(bare_repo: &Path, dep: &DepEntry) -> Result<String, String> {
 }
 
 /// Ensure a working copy at a specific commit exists. Returns the path to the checkout.
-fn ensure_checkout(bare_repo: &Path, commit: &str) -> Result<PathBuf, String> {
-    let checkout_dir = bare_repo.parent().unwrap().join(commit);
-
-    if checkout_dir.exists() {
-        return Ok(checkout_dir);
+/// Clone from the bare cache into the target directory at a specific commit.
+fn ensure_checkout(bare_repo: &Path, commit: &str, target_dir: &Path) -> Result<PathBuf, String> {
+    if target_dir.exists() {
+        return Ok(target_dir.to_path_buf());
     }
 
-    std::fs::create_dir_all(&checkout_dir)
+    std::fs::create_dir_all(target_dir)
         .map_err(|e| format!("failed to create checkout dir: {}", e))?;
 
     let status = std::process::Command::new("git")
         .args(["clone", "--quiet"])
         .arg(bare_repo)
-        .arg(&checkout_dir)
+        .arg(target_dir)
         .status()
         .map_err(|e| format!("failed to clone from cache: {}", e))?;
     if !status.success() {
-        let _ = std::fs::remove_dir_all(&checkout_dir);
+        let _ = std::fs::remove_dir_all(target_dir);
         return Err("git clone from cache failed".to_string());
     }
 
     let status = std::process::Command::new("git")
         .args(["checkout", "--quiet", commit])
-        .current_dir(&checkout_dir)
+        .current_dir(target_dir)
         .status()
         .map_err(|e| format!("failed to checkout {}: {}", commit, e))?;
     if !status.success() {
-        let _ = std::fs::remove_dir_all(&checkout_dir);
+        let _ = std::fs::remove_dir_all(target_dir);
         return Err(format!("git checkout failed for commit {}", commit));
     }
 
-    Ok(checkout_dir)
+    Ok(target_dir.to_path_buf())
 }
 
-/// Resolve a git dependency to a local path, fetching/caching as needed.
+/// Resolve a git dependency: fetch into global bare cache, checkout into project-local _build/deps/.
 /// Returns (checkout_path, resolved_commit).
 pub fn resolve_git_dep(
     dep_name: &str,
     dep: &DepEntry,
     locked_commit: Option<&str>,
+    target_dir: &Path,
 ) -> Result<(PathBuf, String), String> {
     let url = dep
         .git
@@ -422,7 +422,7 @@ pub fn resolve_git_dep(
         resolve_ref(&bare_repo, dep)?
     };
 
-    let checkout = ensure_checkout(&bare_repo, &commit)?;
+    let checkout = ensure_checkout(&bare_repo, &commit, target_dir)?;
 
     Ok((checkout, commit))
 }
@@ -430,7 +430,8 @@ pub fn resolve_git_dep(
 // --- Resolve a dep entry to a local directory path ---
 
 /// Resolve a single dependency to a local filesystem path.
-/// For path deps, joins with the parent directory. For git deps, uses the cache.
+/// For path deps, joins with the parent directory.
+/// For git deps, returns _build/deps/{name} (must be installed first).
 fn resolve_dep_to_path(
     dep_name: &str,
     dep_entry: &DepEntry,
@@ -453,8 +454,15 @@ fn resolve_dep_to_path(
             ));
         }
 
-        let (checkout_path, _) = resolve_git_dep(dep_name, dep_entry, locked_commit)?;
-        Ok(checkout_path)
+        // Git deps are checked out into deps/{name}
+        let target = crate::hex::package_dir(parent_dir, dep_name);
+        if !target.exists() {
+            return Err(format!(
+                "git dependency '{}' is not installed. Run `dylang install` first.",
+                dep_name
+            ));
+        }
+        Ok(target)
     } else {
         Err(format!("dependency '{}' has no 'path' or 'git'", dep_name))
     }
@@ -517,7 +525,8 @@ fn install_deps_recursive(
                 indent, dim("Fetching"), dep_name, url, ref_label
             );
 
-            let (checkout_path, commit) = resolve_git_dep(dep_name, dep_entry, None)?;
+            let target_dir = crate::hex::package_dir(project_root, dep_name);
+            let (checkout_path, commit) = resolve_git_dep(dep_name, dep_entry, None, &target_dir)?;
 
             let dep_config = ProjectConfig::load(&checkout_path);
             if dep_config.library.is_none() {
@@ -982,12 +991,12 @@ pub fn dep_root_paths(
     roots
 }
 
-/// Collect ebin directories for all non-dylang dependencies (Hex + git deps with native code).
-/// Scans the project's deps/ directory and git dep checkouts.
+/// Collect ebin directories for all dependencies.
+/// Scans deps/ for Hex packages, and resolves git/path deps from lockfile.
 pub fn extra_ebin_dirs(project_root: &Path, deps: Option<&HashMap<String, DepEntry>>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    // Hex deps: scan deps/ directory
+    // Scan deps/ directory (Hex + git deps)
     let deps_dir = project_root.join("deps");
     if deps_dir.exists()
         && let Ok(entries) = std::fs::read_dir(&deps_dir)
@@ -1000,12 +1009,12 @@ pub fn extra_ebin_dirs(project_root: &Path, deps: Option<&HashMap<String, DepEnt
         }
     }
 
-    // Git/path deps: check for ebin/ in their checkout/source directories
+    // Path deps: check for ebin/ in their source directories
     if let Some(deps) = deps {
         let lockfile = Lockfile::load(project_root);
         for (dep_name, dep_entry) in deps {
-            if dep_entry.is_hex() {
-                continue;
+            if dep_entry.is_hex() || dep_entry.git.is_some() {
+                continue; // already in deps/
             }
             if let Ok(dep_path) =
                 resolve_dep_to_path(dep_name, dep_entry, project_root, lockfile.as_ref())
