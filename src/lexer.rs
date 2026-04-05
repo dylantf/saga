@@ -371,7 +371,9 @@ impl Lexer {
                     self.advance(); // consume backslash
                     match self.advance() {
                         Some('n') => s.push('\n'),
+                        Some('r') => s.push('\r'),
                         Some('t') => s.push('\t'),
+                        Some('0') => s.push('\0'),
                         Some('\\') => s.push('\\'),
                         Some('"') => s.push('"'),
                         Some('x') => {
@@ -430,7 +432,9 @@ impl Lexer {
                     self.advance();
                     match self.advance() {
                         Some('n') => literal.push('\n'),
+                        Some('r') => literal.push('\r'),
                         Some('t') => literal.push('\t'),
+                        Some('0') => literal.push('\0'),
                         Some('\\') => literal.push('\\'),
                         Some('"') => literal.push('"'),
                         Some('x') => {
@@ -643,7 +647,9 @@ impl Lexer {
                     self.advance();
                     match self.advance() {
                         Some('n') => literal.push('\n'),
+                        Some('r') => literal.push('\r'),
                         Some('t') => literal.push('\t'),
+                        Some('0') => literal.push('\0'),
                         Some('\\') => literal.push('\\'),
                         Some('"') => literal.push('"'),
                         Some('x') => {

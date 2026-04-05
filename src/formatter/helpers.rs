@@ -32,7 +32,9 @@ pub fn escape_string(s: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
             ch => out.push(ch),
         }
     }
