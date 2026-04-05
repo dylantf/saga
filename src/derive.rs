@@ -5,11 +5,14 @@
 use crate::ast::*;
 use crate::token::StringKind;
 use crate::token::Span;
+use crate::typechecker::{Diagnostic, Severity};
 
 /// Expand all `deriving` clauses in a program, appending synthetic `ImplDef`
-/// nodes after each `TypeDef` that has them.
-pub fn expand_derives(program: &mut Vec<Decl>) {
+/// nodes after each `TypeDef` that has them. Returns diagnostics for
+/// unsupported derive requests.
+pub fn expand_derives(program: &mut Vec<Decl>) -> Vec<Diagnostic> {
     let mut extra = Vec::new();
+    let mut errors = Vec::new();
     for decl in program.iter() {
         match decl {
             Decl::TypeDef {
@@ -33,10 +36,13 @@ pub fn expand_derives(program: &mut Vec<Decl>) {
                 }
 
                 for trait_name in deriving {
-                    if let Some(impl_def) =
-                        generate_derive(trait_name, name, type_params, variants, *span)
-                    {
-                        extra.push(impl_def);
+                    match generate_derive(trait_name, name, type_params, variants, *span) {
+                        Some(impl_def) => extra.push(impl_def),
+                        None => errors.push(Diagnostic {
+                            severity: Severity::Error,
+                            message: format!("cannot derive `{trait_name}` for type `{name}`"),
+                            span: Some(*span),
+                        }),
                     }
                 }
             }
@@ -49,13 +55,21 @@ pub fn expand_derives(program: &mut Vec<Decl>) {
                 ..
             } => {
                 for trait_name in deriving {
-                    extra.push(generate_record_derive(trait_name, name, type_params, fields, *span));
+                    match generate_record_derive(trait_name, name, type_params, fields, *span) {
+                        Some(impl_def) => extra.push(impl_def),
+                        None => errors.push(Diagnostic {
+                            severity: Severity::Error,
+                            message: format!("cannot derive `{trait_name}` for record `{name}`"),
+                            span: Some(*span),
+                        }),
+                    }
                 }
             }
             _ => {}
         }
     }
     program.extend(extra);
+    errors
 }
 
 fn generate_record_derive(
@@ -64,10 +78,10 @@ fn generate_record_derive(
     type_params: &[String],
     fields: &[Annotated<(String, TypeExpr)>],
     span: Span,
-) -> Decl {
+) -> Option<Decl> {
     match trait_name {
-        "Show" | "Debug" => derive_record_stringify(trait_name, if trait_name == "Show" { "show" } else { "debug" }, record_name, type_params, fields, span),
-        other => panic!("cannot derive `{other}` for record `{record_name}` (only Show and Debug are supported for records)"),
+        "Show" | "Debug" => Some(derive_record_stringify(trait_name, if trait_name == "Show" { "show" } else { "debug" }, record_name, type_params, fields, span)),
+        _ => None,
     }
 }
 
@@ -190,7 +204,7 @@ fn generate_derive(
         "Eq" => Some(derive_marker_trait("Eq", type_name, type_params, span)),
         "Ord" => Some(derive_ord(type_name, type_params, variants, span)),
         "Enum" => Some(derive_enum(type_name, variants, span)),
-        other => panic!("cannot derive `{other}` (only Show, Debug, Eq, Ord, and Enum are supported)"),
+        _ => None,
     }
 }
 

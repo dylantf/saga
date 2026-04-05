@@ -1,5 +1,7 @@
-foo () = "foo"
+import Std.Test (describe, test, assert_eq)
+
+# record Person { name: String, age: Int } deriving (Eq, Debug)
 
 main () = {
-  println (foo ())
+  println "Ok"
 } with console

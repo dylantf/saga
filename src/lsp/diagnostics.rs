@@ -78,7 +78,7 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckSnapshot {
         }
     };
 
-    derive::expand_derives(&mut program);
+    let derive_errors = derive::expand_derives(&mut program);
     desugar::desugar_program(&mut program);
 
     // If this file declares a builtin stdlib module, evict its cached state
@@ -98,9 +98,11 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckSnapshot {
     }
 
     let tc_result = checker.check_program(&mut program);
-    let diagnostics = tc_result.diagnostics.iter()
+    let mut diagnostics: Vec<Diagnostic> = derive_errors.iter()
         .map(|d| tc_to_lsp_diagnostic(&line_index, &source, d))
         .collect();
+    diagnostics.extend(tc_result.diagnostics.iter()
+        .map(|d| tc_to_lsp_diagnostic(&line_index, &source, d)));
 
     CheckSnapshot {
         diagnostics,
