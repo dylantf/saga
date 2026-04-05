@@ -49,13 +49,7 @@ fn emit_from_program(
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    codegen::emit_module_with_context(
-        module_name,
-        &elaborated,
-        &ctx,
-        Some(&result),
-        None,
-    )
+    codegen::emit_module_with_context(module_name, &elaborated, &ctx, Some(&result), None)
 }
 
 /// Parse and typecheck a source file with the given checker (project mode).

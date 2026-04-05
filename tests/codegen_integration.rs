@@ -103,13 +103,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    codegen::emit_module_with_context(
-        "_script",
-        &elaborated,
-        &ctx,
-        Some(&result),
-        None,
-    )
+    codegen::emit_module_with_context("_script", &elaborated, &ctx, Some(&result), None)
 }
 
 /// Emit Core Erlang and compile it with erlc, asserting no compilation errors.
@@ -417,7 +411,9 @@ fn show_tuple_inlines_per_element() {
     );
     // ", " = #{#<44>...,#<32>...}#
     assert!(
-        out.contains("#<44>(8,1,'integer',['unsigned'|['big']]),#<32>(8,1,'integer',['unsigned'|['big']])"),
+        out.contains(
+            "#<44>(8,1,'integer',['unsigned'|['big']]),#<32>(8,1,'integer',['unsigned'|['big']])"
+        ),
         "expected comma separator binary\n{out}"
     );
     // ")" = #{#<41>...}#
@@ -2157,10 +2153,7 @@ main () = {
         "LetFun 'length' should shadow imported length\n{out}"
     );
     // Should be a letrec with a local function call
-    assert!(
-        out.contains("letrec"),
-        "LetFun should emit a letrec\n{out}"
-    );
+    assert!(out.contains("letrec"), "LetFun should emit a letrec\n{out}");
 }
 
 /// Multiple binding forms all shadowing the same import in nested scopes.

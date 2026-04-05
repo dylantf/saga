@@ -96,7 +96,7 @@ impl Checker {
                     let handler_effects: Vec<String> = self
                         .handlers
                         .get(name)
-                        .map(|h| h.effects.iter().cloned().collect())
+                        .map(|h| h.effects.to_vec())
                         .or_else(|| {
                             self.handler_effects_from_env(name)
                                 .map(|e| e.into_iter().collect())
@@ -114,7 +114,7 @@ impl Checker {
                         let handler_effects: Vec<String> = self
                             .handlers
                             .get(&ann.node.name)
-                            .map(|h| h.effects.iter().cloned().collect())
+                            .map(|h| h.effects.to_vec())
                             .or_else(|| {
                                 self.handler_effects_from_env(&ann.node.name)
                                     .map(|e| e.into_iter().collect())
@@ -128,13 +128,11 @@ impl Checker {
                     }
                     // Inline arms: warn per-unused-effect
                     for arm in arms {
-                        if let Some(eff) = self.effect_for_op(
-                            &arm.node.op_name,
-                            arm.node.qualifier.as_deref(),
-                        ) {
-                            if !used.contains(&eff) {
-                                unused.push(eff);
-                            }
+                        if let Some(eff) =
+                            self.effect_for_op(&arm.node.op_name, arm.node.qualifier.as_deref())
+                            && !used.contains(&eff)
+                        {
+                            unused.push(eff);
                         }
                     }
                 }
@@ -286,25 +284,21 @@ impl Checker {
                             &handler_info.where_constraints
                         {
                             if let Some(effect_info) = self.effects.get(effect_name).cloned()
-                                && let Some(&param_var_id) =
-                                    effect_info.type_params.get(*param_idx)
+                                && let Some(&param_var_id) = effect_info.type_params.get(*param_idx)
                             {
-                                let ty =
-                                    if let Some(cache) = inner_effect_cache.get(effect_name)
-                                        && let Some(cached_ty) = cache.get(&param_var_id)
-                                    {
-                                        self.sub.apply(cached_ty)
-                                    } else {
-                                        self.sub.apply(&Type::Var(param_var_id))
-                                    };
+                                let ty = if let Some(cache) = inner_effect_cache.get(effect_name)
+                                    && let Some(cached_ty) = cache.get(&param_var_id)
+                                {
+                                    self.sub.apply(cached_ty)
+                                } else {
+                                    self.sub.apply(&Type::Var(param_var_id))
+                                };
                                 for (trait_name, extra_var_ids) in trait_constraints {
                                     let extra_types: Vec<Type> = extra_var_ids
                                         .iter()
                                         .map(|id| {
-                                            let mapped = mapping
-                                                .get(id)
-                                                .cloned()
-                                                .unwrap_or(Type::Var(*id));
+                                            let mapped =
+                                                mapping.get(id).cloned().unwrap_or(Type::Var(*id));
                                             self.sub.apply(&mapped)
                                         })
                                         .collect();
