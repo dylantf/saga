@@ -81,6 +81,22 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckSnapshot {
     derive::expand_derives(&mut program);
     desugar::desugar_program(&mut program);
 
+    // If this file declares a builtin stdlib module, evict its cached state
+    // from the checker to avoid false "duplicate impl" errors. The prelude
+    // already loaded this module, but we need to re-check it cleanly.
+    for decl in program.iter() {
+        if let ast::Decl::ModuleDecl { path, .. } = decl {
+            let module_name = path.join(".");
+            if typechecker::BUILTIN_MODULES
+                .iter()
+                .any(|(name, _)| *name == module_name)
+            {
+                checker.evict_module(&module_name);
+            }
+            break;
+        }
+    }
+
     let tc_result = checker.check_program(&mut program);
     let diagnostics = tc_result.diagnostics.iter()
         .map(|d| tc_to_lsp_diagnostic(&line_index, &source, d))

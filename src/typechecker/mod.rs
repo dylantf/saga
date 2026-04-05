@@ -1095,6 +1095,17 @@ impl Checker {
         Ok(checker)
     }
 
+    /// Remove a module's cached exports and trait impls from this checker.
+    /// Used by the LSP to avoid false "duplicate impl" errors when re-checking
+    /// a stdlib file that was already loaded via the prelude.
+    pub fn evict_module(&mut self, module_name: &str) {
+        if let Some(exports) = self.modules.exports.remove(module_name) {
+            for key in exports.trait_impls.keys() {
+                self.trait_state.impls.remove(key);
+            }
+        }
+    }
+
     /// Drain errors from collected_diagnostics, leaving warnings in place.
     pub(crate) fn drain_errors(&mut self) -> Vec<Diagnostic> {
         let (errors, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.collected_diagnostics)
