@@ -1,21 +1,35 @@
-fun run : (f: a -> b needs {..e}) -> (x: a) -> b needs {..e}
-run f x = f x
+# Repro: case arms with effectful function calls (not direct effect ops)
 
-fn1 a = dbg a
+effect Assert {
+  fun check : Bool -> Unit
+}
 
-fn2 = dbg
+# Effectful *function* — same pattern as Std.Test.assert_eq
+fun assert_eq : Int -> Int -> Unit needs {Assert}
+assert_eq a b = check! (a == b)
+
+# Mimics Std.Test.run_body: handler with return clause
+fun run_body : (Unit -> Unit needs {Assert}) -> List String
+run_body body = {
+  let (_, failures) = { body () } with {
+    check _ok = {
+      let (v, errs) = resume ()
+      (v, errs)
+    }
+    return v = (v, [])
+  }
+  failures
+}
 
 main () = {
-  let fn3 a = println a
-  let fn4 = println
-
-  run fn1 "fn1 Hello"
-  run fn2 "fn2 Hello"
-  run fn3 "fn3 Hello"
-  run fn4 "fn4 Hello"
-
-  List.iter fn1 ["iter fn1 1", "iter fn1 2"]
-  List.iter fn2 ["iter fn2 1", "iter fn2 2"]
-  List.iter fn3 ["iter fn3 1", "iter fn3 2"]
-  List.iter fn4 ["iter fn4 1", "iter fn4 2"]
-} with {console}
+  let failures = run_body (fun () -> {
+    case Ok 123 {
+      Ok _ -> assert_eq 1 1
+      Err _ -> assert_eq 1 1
+    }
+  })
+  case failures {
+    [] -> println "PASS" with console
+    _ -> println "FAIL" with console
+  }
+}

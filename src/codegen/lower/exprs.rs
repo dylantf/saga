@@ -304,8 +304,9 @@ impl<'a> Lowerer<'a> {
                     }
                     // Terminal expression with nested effect calls (e.g. case with
                     // effect calls in arms): thread _ReturnK through branches so each
-                    // arm's effect call gets the right continuation.
-                    if has_nested_effect_call(e) {
+                    // arm's effect call gets the right continuation. Uses the
+                    // resolution-aware check to also detect effectful function calls.
+                    if self.has_nested_effectful_expr(e) {
                         let k_var = self.fresh();
                         let k_ce = self.current_return_k.clone().unwrap();
                         let body_ce = self.lower_expr_with_k(e, &k_var);
