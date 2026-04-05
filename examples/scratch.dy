@@ -1,35 +1,8 @@
-# Repro: case arms with effectful function calls (not direct effect ops)
-
-effect Assert {
-  fun check : Bool -> Unit
-}
-
-# Effectful *function* — same pattern as Std.Test.assert_eq
-fun assert_eq : Int -> Int -> Unit needs {Assert}
-assert_eq a b = check! (a == b)
-
-# Mimics Std.Test.run_body: handler with return clause
-fun run_body : (Unit -> Unit needs {Assert}) -> List String
-run_body body = {
-  let (_, failures) = { body () } with {
-    check _ok = {
-      let (v, errs) = resume ()
-      (v, errs)
-    }
-    return v = (v, [])
-  }
-  failures
-}
-
 main () = {
-  let failures = run_body (fun () -> {
-    case Ok 123 {
-      Ok _ -> assert_eq 1 1
-      Err _ -> assert_eq 1 1
-    }
-  })
-  case failures {
-    [] -> println "PASS" with console
-    _ -> println "FAIL" with console
+  let person = Ok ("Alice", 32)
+
+  case person {
+    Ok (name, age) -> dbg $"{name}: {age}"
+    Err s -> panic s
   }
 }

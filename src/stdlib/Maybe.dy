@@ -9,7 +9,7 @@ impl Debug for Maybe a where {a: Debug} {
 
 pub type Maybe a =
   | Nothing
-  | Just(a)
+  | Just a
 
 #@ Returns True if the value is Just.
 pub fun is_just : Maybe a -> Bool

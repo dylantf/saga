@@ -11,13 +11,13 @@ pub fn format_pat(pat: &Pat) -> Doc {
         Pat::Constructor { name, args, .. } => {
             if args.is_empty() {
                 Doc::text(name)
-            } else if args.len() == 1 && is_simple_pat(&args[0]) {
-                // Single simple arg: `Ok foo`, `Some x`, `Currency a`
-                docs![Doc::text(name), Doc::text(" "), format_pat_atom(&args[0])]
             } else {
-                // Multi-arg or complex single arg: `Cons(h, t)`, `Ok(())`
-                let arg_docs: Vec<Doc> = args.iter().map(format_pat).collect();
-                docs![Doc::text(format!("{}(", name)), Doc::join(Doc::text(", "), arg_docs), Doc::text(")")]
+                // All constructor args are space-separated: `Ok x`, `Pair a b`, `Ok ()`
+                let mut d = Doc::text(name);
+                for a in args {
+                    d = d.append(Doc::text(" ")).append(format_pat_atom(a));
+                }
+                d
             }
         }
         Pat::Record { name, fields, rest, as_name, .. } => {
@@ -85,12 +85,6 @@ pub fn format_pat(pat: &Pat) -> Doc {
             Doc::join(Doc::text(" | "), pat_docs)
         }
     }
-}
-
-/// Is this pattern simple enough for space-separated constructor syntax?
-/// `Ok foo`, `Some x`, `Ok ()` — but not `Just(Some x)`.
-fn is_simple_pat(pat: &Pat) -> bool {
-    matches!(pat, Pat::Var { .. } | Pat::Wildcard { .. } | Pat::Lit { .. })
 }
 
 /// Format a pattern in "atom" position (function params, constructor args).

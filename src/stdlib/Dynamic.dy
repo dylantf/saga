@@ -8,19 +8,19 @@ opaque type Dynamic = Dynamic
 
 #@ An error produced when decoding a Dynamic value fails.
 pub type DecodeError =
-  | DecodeError(String, String, List String)
+  | DecodeError String String (List String)
   deriving (Eq)
 
 impl Debug for DecodeError {
   debug e = case e {
-    DecodeError(expected, found, path) ->
+    DecodeError expected found path ->
       $"DecodeError(expected: {debug expected}, found: {debug found}, path: {debug path})"
   }
 }
 
 impl Show for DecodeError {
   show e = case e {
-    DecodeError(expected, found, path) -> case path {
+    DecodeError expected found path -> case path {
       [] -> $"Expected {expected}, got {found}"
       _ -> $"At {debug path}: expected {expected}, got {found}"
     }
@@ -31,7 +31,7 @@ impl Show for DecodeError {
 #@ The placeholder is used during error accumulation — it allows subsequent
 #@ decoders to continue running even when an earlier one fails.
 pub type Decoder a =
-  | Decoder(Dynamic -> Result a DecodeError, a)
+  | Decoder (Dynamic -> Result a DecodeError) a
 
 # --- Primitive decoders ---
 
@@ -81,12 +81,12 @@ fun raw_element_lookup : Int -> Dynamic -> Result Dynamic DecodeError
 
 fun run_decoder : Decoder a -> Dynamic -> Result a DecodeError
 run_decoder dec dyn = case dec {
-  Decoder(f, _) -> f dyn
+  Decoder f _ -> f dyn
 }
 
 fun decoder_default : Decoder a -> a
 decoder_default dec = case dec {
-  Decoder(_, d) -> d
+  Decoder _ d -> d
 }
 
 # --- Decode effect ---
@@ -153,7 +153,7 @@ fun decode_list_raw : (Dynamic -> Result a DecodeError) -> Dynamic -> Result (Li
 #@ Decoder for a list where every element is decoded with the given decoder.
 pub fun list_of : Decoder a -> Decoder (List a)
 list_of dec = case dec {
-  Decoder(f, _) -> Decoder (decode_list_raw f) []
+  Decoder f _ -> Decoder (decode_list_raw f) []
 }
 
 @external("erlang", "std_dynamic_bridge", "decode_optional")
@@ -163,5 +163,5 @@ fun decode_optional_raw : (Dynamic -> Result a DecodeError) -> Dynamic -> Result
 #@ otherwise tries the inner decoder and wraps in Just.
 pub fun optional : Decoder a -> Decoder (Maybe a)
 optional dec = case dec {
-  Decoder(f, _) -> Decoder (decode_optional_raw f) Nothing
+  Decoder f _ -> Decoder (decode_optional_raw f) Nothing
 }

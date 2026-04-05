@@ -1,10 +1,10 @@
 type Tree =
   | Empty
-  | Node(Tree, Int, Tree)
+  | Node Tree Int Tree
 
 insert t x = case t {
   Empty -> Node Empty x Empty
-  Node(l, v, r) ->
+  Node l v r ->
     if x < v then Node (insert l x) v r
     else if x > v then Node l v (insert r x)
     else t
@@ -12,7 +12,7 @@ insert t x = case t {
 
 contains t x = case t {
   Empty -> False
-  Node(l, v, r) ->
+  Node l v r ->
     if x == v then True
     else if x < v then contains l x
     else contains r x
@@ -21,7 +21,7 @@ contains t x = case t {
 # In-order traversal produces a sorted list
 to_list t = case t {
   Empty -> []
-  Node(l, v, r) -> List.append (to_list l) (v :: to_list r)
+  Node l v r -> List.append (to_list l) (v :: to_list r)
 }
 
 main () = {

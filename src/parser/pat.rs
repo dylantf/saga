@@ -144,38 +144,7 @@ impl Parser {
                     name_end = self.tokens[self.pos - 1].span;
                     name = format!("{}.{}", name, segment);
                 }
-                if matches!(self.peek(), Token::LParen) {
-                    // Constructor with args: Some(x), Shapes.Circle(r), Ok(())
-                    self.advance(); // consume '('
-                    // Handle Ok(()) — unit arg
-                    if matches!(self.peek(), Token::RParen) {
-                        let end = self.tokens[self.pos].span;
-                        self.advance(); // consume ')'
-                        return Ok(Pat::Constructor {
-                            id: NodeId::fresh(),
-                            name,
-                            args: vec![Pat::Lit {
-                                id: NodeId::fresh(),
-                                value: Lit::Unit,
-                                span: span.to(end),
-                            }],
-                            span: span.to(end),
-                        });
-                    }
-                    let mut args = vec![self.parse_pattern()?];
-                    while matches!(self.peek(), Token::Comma) {
-                        self.advance();
-                        args.push(self.parse_pattern()?);
-                    }
-                    let end = self.tokens[self.pos].span;
-                    self.expect(Token::RParen)?;
-                    Ok(Pat::Constructor {
-                        id: NodeId::fresh(),
-                        name,
-                        args,
-                        span: span.to(end),
-                    })
-                } else if matches!(self.peek(), Token::LBrace) {
+                if matches!(self.peek(), Token::LBrace) {
                     // Record pattern: User { name, age: a } or User { name, .. }
                     self.advance(); // consume '{'
                     let mut fields = Vec::new();

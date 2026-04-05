@@ -83,6 +83,23 @@ pub fn format_type_expr(ty: &TypeExpr) -> Doc {
     }
 }
 
+/// Format a type in "atom" position — wraps App and Arrow in parens since they
+/// contain spaces and would be ambiguous in space-separated contexts.
+/// Named, Var, Labeled, Record, and Tuple types are already self-delimiting.
+pub fn format_type_expr_atom(ty: &TypeExpr) -> Doc {
+    if collect_tuple_args(ty).is_some() {
+        // Tuples are (A, B) — already parenthesized
+        return format_type_expr(ty);
+    }
+    match ty {
+        TypeExpr::Named { .. } | TypeExpr::Var { .. } | TypeExpr::Labeled { .. } | TypeExpr::Record { .. } => {
+            format_type_expr(ty)
+        }
+        // App and Arrow need wrapping
+        _ => docs![Doc::text("("), format_type_expr(ty), Doc::text(")")],
+    }
+}
+
 /// Format a function type signature: params -> return_type [needs {...}]
 /// Used for effect ops and trait methods where needs/where always inline.
 pub fn format_fun_type(

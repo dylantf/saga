@@ -46,10 +46,11 @@ describe "Dynamic" {
 
   describe "decode_field" {
     test "decodes string and int fields" {
-      let data = from_erlang (Dict.from_list [
-        ("name", from_erlang "Alice"),
-        ("age", from_erlang 30)
-      ])
+      let data =
+        from_erlang (Dict.from_list [
+          ("name", from_erlang "Alice"),
+          ("age", from_erlang 30),
+        ])
 
       let result = Dynamic.run data (fun () -> {
         let name = Decode.decode_field! "name" string
@@ -57,14 +58,15 @@ describe "Dynamic" {
         (name, age)
       })
 
-      assert_eq result (Ok(("Alice", 30)))
+      assert_eq result (Ok ("Alice", 30))
     }
 
     test "accumulates errors for wrong types" {
-      let data = from_erlang (Dict.from_list [
-        ("name", from_erlang 42),
-        ("age", from_erlang "not a number")
-      ])
+      let data =
+        from_erlang (Dict.from_list [
+          ("name", from_erlang 42),
+          ("age", from_erlang "not a number"),
+        ])
 
       let result = Dynamic.run data (fun () -> {
         let name = Decode.decode_field! "name" string
@@ -76,9 +78,7 @@ describe "Dynamic" {
     }
 
     test "reports missing field" {
-      let data = from_erlang (Dict.from_list [
-        ("name", from_erlang "Alice")
-      ])
+      let data = from_erlang (Dict.from_list [("name", from_erlang "Alice")])
 
       let result = Dynamic.run data (fun () -> {
         let name = Decode.decode_field! "name" string
@@ -90,10 +90,11 @@ describe "Dynamic" {
     }
 
     test "decodes float and bool fields" {
-      let data = from_erlang (Dict.from_list [
-        ("score", from_erlang 9.5),
-        ("active", from_erlang True)
-      ])
+      let data =
+        from_erlang (Dict.from_list [
+          ("score", from_erlang 9.5),
+          ("active", from_erlang True),
+        ])
 
       let result = Dynamic.run data (fun () -> {
         let score = Decode.decode_field! "score" float
@@ -101,7 +102,7 @@ describe "Dynamic" {
         (score, active)
       })
 
-      assert_eq result (Ok((9.5, True)))
+      assert_eq result (Ok (9.5, True))
     }
   }
 
@@ -115,7 +116,7 @@ describe "Dynamic" {
         (name, age)
       })
 
-      assert_eq result (Ok(("Bob", 25)))
+      assert_eq result (Ok ("Bob", 25))
     }
   }
 }

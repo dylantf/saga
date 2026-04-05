@@ -1,10 +1,10 @@
 record Point { x: Int, y: Int }
 
 type Shape =
-  | Circle(Float)
-  | Rect(Float, Float)
+  | Circle Float
+  | Rect Float Float
 
-type Wrapped a = Wrapped(a)
+type Wrapped a = Wrapped a
 
 impl Show for Point {
   show p = $"({p.x}, {p.y})"
@@ -13,7 +13,7 @@ impl Show for Point {
 impl Show for Shape {
   show s = case s {
     Circle r -> $"Circle({r})"
-    Rect(w, h) -> $"Rect({w}, {h})"
+    Rect w h -> $"Rect({w}, {h})"
   }
 }
 
@@ -21,7 +21,7 @@ impl Show for Shape {
 add_points (x1, y1) (x2, y2) = (x1 + x2, y1 + y2)
 
 area (Circle r) = r * r * 3.14
-area (Rect(w, h)) = w * h
+area (Rect w h) = w * h
 
 main () = {
   # Let with tuples
@@ -44,7 +44,7 @@ main () = {
   let shape = Circle 10.0
   let r2 = case shape {
     Circle r -> r
-    Rect(w, h) -> w * h
+    Rect w h -> w * h
   }
   dbg $"r2: {r2}"
 

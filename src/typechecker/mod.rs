@@ -202,10 +202,29 @@ impl std::fmt::Display for Type {
             Type::Con(name, args) => {
                 if args.is_empty() {
                     write!(f, "{}", name)
+                } else if name == "Tuple" && args.len() >= 2 {
+                    // Display as (A, B, ...) instead of Tuple A B
+                    write!(f, "(")?;
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", arg)?;
+                    }
+                    write!(f, ")")
                 } else {
                     write!(f, "{}", name)?;
                     for arg in args {
-                        write!(f, " {}", arg)?;
+                        // Wrap multi-arg type applications in parens for readability,
+                        // but not tuples (they already render as (A, B))
+                        match arg {
+                            Type::Con(n, inner_args)
+                                if !inner_args.is_empty() && n != "Tuple" =>
+                            {
+                                write!(f, " ({})", arg)?;
+                            }
+                            _ => write!(f, " {}", arg)?,
+                        }
                     }
                     Ok(())
                 }

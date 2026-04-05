@@ -2269,7 +2269,7 @@ fn list_non_exhaustive_missing_nil() {
     let result = check(
         "fun f : (xs: List Int) -> Int
 f xs = case xs {
-  Cons(_, _) -> 1
+  Cons _ _ -> 1
 }",
     );
     let err = result.err().expect("expected type error");

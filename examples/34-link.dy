@@ -20,7 +20,7 @@ supervisor () = {
   send! pid Crash
 
   receive {
-    Down(_dead_pid, reason) -> dbg $"Child exited: {reason}"
+    Down _dead_pid reason -> dbg $"Child exited: {reason}"
     after 3000 -> dbg "No exit received"
   }
 }
