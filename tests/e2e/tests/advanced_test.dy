@@ -1,0 +1,298 @@
+import Std.Test (describe, test, assert_eq, assert_true, assert_false)
+import Std.BitString as BitString
+
+# --- Types for deriving tests ---
+
+type Animal =
+  | Dog Int
+  | Cat
+  deriving (Show, Eq)
+
+type Color = Red | Green | Blue deriving (Show, Debug, Eq, Ord, Enum)
+
+type Scored a = Scored Int a deriving (Show, Eq, Ord)
+
+# --- Traits ---
+
+trait Describe a {
+  fun describe_it : a -> String
+}
+
+record User {
+  name: String,
+  age: Int,
+}
+
+impl Describe for User {
+  describe_it user = $"{user.name} (age: {user.age})"
+}
+
+record Point { x: Int, y: Int }
+
+impl Describe for Point {
+  describe_it p = $"({p.x}, {p.y})"
+}
+
+# Supertrait
+trait Verbose a where {a: Describe} {
+  fun verbose : a -> String
+}
+
+impl Verbose for User {
+  verbose user = $"User: {describe_it user}"
+}
+
+# --- Phantom type / binop traits ---
+
+type USD = USD deriving (Debug, Eq)
+type NOK = NOK deriving (Debug, Eq)
+type Currency c = Currency Float deriving (Debug, Eq)
+
+impl Show for Currency c {
+  show (Currency a) = show a
+}
+
+fun add_currency : Currency c -> Currency c -> Currency c
+add_currency (Currency a) (Currency b) = Currency (a + b)
+
+fun usd : Float -> Currency USD
+usd amount = Currency amount
+
+fun nok : Float -> Currency NOK
+nok amount = Currency amount
+
+# --- Val bindings ---
+
+val greeting = "hello world"
+val max_retries = 5
+val origins = ["localhost", "example.com"]
+
+# --- FFI ---
+
+@external("erlang", "lists", "reverse")
+fun erl_reverse : List a -> List a
+
+@external("erlang", "erlang", "length")
+fun erl_length : List a -> Int
+
+# --- Sorting algorithms ---
+
+fun insert_sorted : Int -> List Int -> List Int
+insert_sorted x xs = case xs {
+  [] -> [x]
+  h :: t -> if x <= h then x :: xs else h :: insert_sorted x t
+}
+
+fun insertion_sort : List Int -> List Int
+insertion_sort xs = List.foldl (fun sorted x -> insert_sorted x sorted) [] xs
+
+fun quicksort : List Int -> List Int
+quicksort xs = case xs {
+  [] -> []
+  h :: t -> {
+    let smaller = List.filter (fun x -> x <= h) t
+    let larger = List.filter (fun x -> x > h) t
+    List.append (quicksort smaller) (h :: quicksort larger)
+  }
+}
+
+# --- Tests ---
+
+describe "deriving" {
+
+  describe "Show" {
+    test "ADT with field" {
+      assert_eq (show (Dog 5)) "Dog(5)"
+    }
+
+    test "ADT nullary constructor" {
+      assert_eq (show Cat) "Cat"
+    }
+
+    test "enum constructors" {
+      assert_eq (show Red) "Red"
+      assert_eq (show Green) "Green"
+      assert_eq (show Blue) "Blue"
+    }
+  }
+
+  describe "Eq" {
+    test "equal ADT values" {
+      assert_true (Dog 5 == Dog 5)
+    }
+
+    test "different ADT values" {
+      assert_false (Dog 5 == Dog 7)
+    }
+
+    test "different constructors" {
+      assert_false (Dog 5 == Cat)
+    }
+
+    test "enum equality" {
+      assert_true (Red == Red)
+      assert_false (Red == Blue)
+    }
+  }
+
+  describe "Ord" {
+    test "constructor ordering" {
+      assert_eq (compare Red Blue) Lt
+      assert_eq (compare Green Green) Eq
+      assert_eq (compare Blue Red) Gt
+    }
+
+    test "comparison operators" {
+      assert_true (Red < Blue)
+      assert_true (Blue > Green)
+      assert_true (Green <= Green)
+      assert_true (Green >= Green)
+    }
+
+    test "Ord with fields - same constructor" {
+      let a = Scored 10 "first"
+      let b = Scored 20 "second"
+      assert_eq (compare a b) Lt
+    }
+
+    test "Ord with fields - same score" {
+      let a = Scored 10 "aaa"
+      let b = Scored 10 "zzz"
+      assert_eq (compare a b) Lt
+    }
+  }
+
+  describe "Enum" {
+    test "to_enum" {
+      assert_eq (to_enum Red) 0
+      assert_eq (to_enum Green) 1
+      assert_eq (to_enum Blue) 2
+    }
+
+    test "from_enum" {
+      assert_eq (from_enum 0 : Color) Red
+      assert_eq (from_enum 1 : Color) Green
+      assert_eq (from_enum 2 : Color) Blue
+    }
+  }
+}
+
+describe "traits" {
+
+  describe "basic trait dispatch" {
+    test "User describe" {
+      let alice = User { name: "Alice", age: 30 }
+      assert_eq (describe_it alice) "Alice (age: 30)"
+    }
+
+    test "Point describe" {
+      let p = Point { x: 3, y: 4 }
+      assert_eq (describe_it p) "(3, 4)"
+    }
+  }
+
+  describe "supertraits" {
+    test "verbose uses describe" {
+      let alice = User { name: "Alice", age: 30 }
+      assert_eq (verbose alice) "User: Alice (age: 30)"
+    }
+  }
+
+  describe "phantom type constraints" {
+    test "add same currency" {
+      let total = add_currency (usd 23.5) (usd 50.0)
+      assert_eq total (usd 73.5)
+    }
+
+    test "currency equality" {
+      assert_false (usd 23.5 == usd 50.0)
+      assert_true (usd 23.5 == usd 23.5)
+    }
+  }
+}
+
+describe "val bindings" {
+
+  test "string val" {
+    assert_eq greeting "hello world"
+  }
+
+  test "int val" {
+    assert_eq max_retries 5
+  }
+
+  test "list val" {
+    assert_eq origins ["localhost", "example.com"]
+  }
+}
+
+describe "sorting algorithms" {
+
+  let nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
+  let sorted = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+  test "insertion sort" {
+    assert_eq (insertion_sort nums) sorted
+  }
+
+  test "quicksort" {
+    assert_eq (quicksort nums) sorted
+  }
+
+  test "sort empty list" {
+    assert_eq (insertion_sort []) ([] : List Int)
+    assert_eq (quicksort []) ([] : List Int)
+  }
+
+  test "sort single element" {
+    assert_eq (insertion_sort [1]) [1]
+    assert_eq (quicksort [1]) [1]
+  }
+}
+
+describe "FFI" {
+
+  test "erlang lists:reverse" {
+    assert_eq (erl_reverse [1, 2, 3]) [3, 2, 1]
+  }
+
+  test "erlang length" {
+    assert_eq (erl_length [1, 2, 3, 4, 5]) 5
+  }
+}
+
+describe "bitstrings" {
+
+  test "construction and size" {
+    let bs = <<72, 101, 108, 108, 111>>
+    assert_eq (BitString.size bs) 5
+  }
+
+  test "from_list roundtrip" {
+    let bs = BitString.from_list [1, 2, 3]
+    assert_eq (BitString.to_list bs) [1, 2, 3]
+  }
+
+  test "concatenation" {
+    let a = <<1, 2>>
+    let b = <<3, 4>>
+    let combined = a <> b
+    assert_eq (BitString.to_list combined) [1, 2, 3, 4]
+  }
+
+  test "empty bitstring" {
+    let empty = <<>>
+    assert_true (BitString.is_empty empty)
+  }
+
+  test "pattern matching on bitstring" {
+    let packet = <<1:8, 256:16/big, "hello">>
+    case packet {
+      <<tag:8, len:16/big, rest/binary>> -> {
+        assert_eq tag 1
+        assert_eq len 256
+      }
+      _ -> assert_true False
+    }
+  }
+}

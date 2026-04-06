@@ -1,0 +1,421 @@
+import Std.Test (describe, test, assert_eq, assert_true, assert_false)
+
+# --- Types for testing ---
+
+type Shape =
+  | Circle Float
+  | Rect Float Float
+  | Triangle Float Float Float
+
+record Point { x: Int, y: Int }
+
+type Tree =
+  | Empty
+  | Node Tree Int Tree
+
+type Wrapped a = Wrapped a
+
+record Box a { value: a }
+
+# --- Helper functions ---
+
+fun area : Shape -> Float
+area shape = case shape {
+  Circle r -> r * r
+  Rect w h -> w * h
+  Triangle b h _ -> b * h / 2.0
+}
+
+fun describe_shape : Shape -> String
+describe_shape shape = case shape {
+  Circle _ -> "circle"
+  Rect _ _ -> "rectangle"
+  Triangle _ _ _ -> "triangle"
+}
+
+fun quadrant : Point -> String
+quadrant p = case p {
+  Point { x, y } when x > 0 && y > 0 -> "Q1"
+  Point { x, y } when x < 0 && y > 0 -> "Q2"
+  Point { x, y } when x < 0 && y < 0 -> "Q3"
+  Point { x, y } when x > 0 && y < 0 -> "Q4"
+  _ -> "origin or axis"
+}
+
+fun describe_list : (xs: List a) -> String
+describe_list items = case items {
+  [] -> "empty"
+  [_] -> "one"
+  [_, _] -> "two"
+  _ :: _ -> "many"
+}
+
+fun classify_log : String -> String
+classify_log msg = case msg {
+  "[ERROR]: " <> detail -> "Error: " <> detail
+  "[WARN]: " <> detail -> "Warning: " <> detail
+  "hello" -> "greeting"
+  _ -> "unknown"
+}
+
+fun is_shape_fun : Shape -> Bool
+is_shape_fun shape = case shape {
+  Circle _ | Rect _ _ -> True
+  Triangle _ _ _ -> False
+}
+
+fun fizzbuzz : Int -> String
+fizzbuzz n when n % 15 == 0 = "FizzBuzz"
+fizzbuzz n when n % 3 == 0 = "Fizz"
+fizzbuzz n when n % 5 == 0 = "Buzz"
+fizzbuzz n = show n
+
+fun fib : Int -> Int
+fib 0 = 0
+fib 1 = 1
+fib n = fib (n - 1) + fib (n - 2)
+
+fun bst_insert : Tree -> Int -> Tree
+bst_insert t x = case t {
+  Empty -> Node Empty x Empty
+  Node l v r ->
+    if x < v then Node (bst_insert l x) v r
+    else if x > v then Node l v (bst_insert r x)
+    else t
+}
+
+fun bst_contains : Tree -> Int -> Bool
+bst_contains t x = case t {
+  Empty -> False
+  Node l v r ->
+    if x == v then True
+    else if x < v then bst_contains l x
+    else bst_contains r x
+}
+
+fun bst_to_list : Tree -> List Int
+bst_to_list t = case t {
+  Empty -> []
+  Node l v r -> List.append (bst_to_list l) (v :: bst_to_list r)
+}
+
+fun unwrap_box : Box a -> a
+unwrap_box b = case b {
+  Box { value: v } -> v
+}
+
+fun add_pairs : (Int, Int) -> (Int, Int) -> (Int, Int)
+add_pairs (a, b) (c, d) = (a + c, b + d)
+
+fun swap : (a, b) -> (b, a)
+swap (x, y) = (y, x)
+
+# --- do...else helpers ---
+
+fun find_user : Int -> Result String String
+find_user id =
+  if id == 1 then Ok "alice"
+  else Err $"no user {id}"
+
+fun find_score : String -> Result Int String
+find_score name =
+  if name == "alice" then Ok 95
+  else Err $"no score for {name}"
+
+fun grade : Int -> Result String String
+grade score =
+  if score >= 90 then Ok "A"
+  else Err $"failing: {score}"
+
+fun lookup_grade : Int -> Result String String
+lookup_grade id = do {
+  Ok name <- find_user id
+  Ok score <- find_score name
+  Ok g <- grade score
+  Ok g
+} else {
+  Err e -> Err e
+}
+
+fun score_or_zero : Int -> Int
+score_or_zero id = do {
+  Ok name <- find_user id
+  Ok score <- find_score name
+  score
+} else {
+  Err _ -> 0
+}
+
+# --- Tests ---
+
+describe "pattern matching" {
+
+  describe "ADT patterns" {
+    test "match Circle" {
+      assert_eq (describe_shape (Circle 5.0)) "circle"
+    }
+
+    test "match Rect" {
+      assert_eq (describe_shape (Rect 3.0 4.0)) "rectangle"
+    }
+
+    test "match Triangle" {
+      assert_eq (describe_shape (Triangle 3.0 4.0 5.0)) "triangle"
+    }
+
+    test "extract fields from constructors" {
+      assert_eq (area (Circle 5.0)) 25.0
+      assert_eq (area (Rect 3.0 4.0)) 12.0
+      assert_eq (area (Triangle 6.0 8.0 10.0)) 24.0
+    }
+  }
+
+  describe "record patterns with guards" {
+    test "quadrant I" {
+      assert_eq (quadrant (Point { x: 3, y: 4 })) "Q1"
+    }
+
+    test "quadrant II" {
+      assert_eq (quadrant (Point { x: -2, y: 5 })) "Q2"
+    }
+
+    test "quadrant III" {
+      assert_eq (quadrant (Point { x: -1, y: -1 })) "Q3"
+    }
+
+    test "quadrant IV" {
+      assert_eq (quadrant (Point { x: 3, y: -4 })) "Q4"
+    }
+
+    test "origin" {
+      assert_eq (quadrant (Point { x: 0, y: 0 })) "origin or axis"
+    }
+  }
+
+  describe "list patterns" {
+    test "empty list" {
+      assert_eq (describe_list ([] : List Int)) "empty"
+    }
+
+    test "single element" {
+      assert_eq (describe_list [42]) "one"
+    }
+
+    test "two elements" {
+      assert_eq (describe_list [1, 2]) "two"
+    }
+
+    test "many elements" {
+      assert_eq (describe_list [1, 2, 3]) "many"
+    }
+  }
+
+  describe "string patterns" {
+    test "prefix split" {
+      assert_eq (classify_log "[ERROR]: disk full") "Error: disk full"
+    }
+
+    test "prefix split warn" {
+      assert_eq (classify_log "[WARN]: low memory") "Warning: low memory"
+    }
+
+    test "exact match" {
+      assert_eq (classify_log "hello") "greeting"
+    }
+
+    test "wildcard fallback" {
+      assert_eq (classify_log "something else") "unknown"
+    }
+  }
+
+  describe "disjunctive patterns" {
+    test "circle matches fun shapes" {
+      assert_true (is_shape_fun (Circle 1.0))
+    }
+
+    test "rect matches fun shapes" {
+      assert_true (is_shape_fun (Rect 1.0 2.0))
+    }
+
+    test "triangle is not fun" {
+      assert_false (is_shape_fun (Triangle 1.0 2.0 3.0))
+    }
+  }
+
+  describe "function head guards" {
+    test "fizzbuzz 15 is FizzBuzz" {
+      assert_eq (fizzbuzz 15) "FizzBuzz"
+    }
+
+    test "fizzbuzz 3 is Fizz" {
+      assert_eq (fizzbuzz 3) "Fizz"
+    }
+
+    test "fizzbuzz 5 is Buzz" {
+      assert_eq (fizzbuzz 5) "Buzz"
+    }
+
+    test "fizzbuzz 7 is 7" {
+      assert_eq (fizzbuzz 7) "7"
+    }
+  }
+
+  describe "recursion" {
+    test "fibonacci" {
+      assert_eq (fib 0) 0
+      assert_eq (fib 1) 1
+      assert_eq (fib 10) 55
+    }
+  }
+
+  describe "recursive data structures (BST)" {
+    let tree = List.foldl bst_insert Empty [5, 3, 7, 1, 4, 6, 8]
+
+    test "in-order traversal is sorted" {
+      assert_eq (bst_to_list tree) [1, 3, 4, 5, 6, 7, 8]
+    }
+
+    test "contains inserted element" {
+      assert_true (bst_contains tree 4)
+    }
+
+    test "does not contain missing element" {
+      assert_false (bst_contains tree 9)
+    }
+  }
+}
+
+describe "destructuring" {
+
+  describe "let destructuring" {
+    test "tuple destructuring" {
+      let (a, b) = (10, 20)
+      assert_eq a 10
+      assert_eq b 20
+    }
+
+    test "nested tuple destructuring" {
+      let ((a, b), (c, d)) = ((1, 2), (3, 4))
+      assert_eq (a + b + c + d) 10
+    }
+
+    test "record destructuring" {
+      let origin = Point { x: 5, y: 10 }
+      let Point { x, y } = origin
+      assert_eq x 5
+      assert_eq y 10
+    }
+
+    test "record destructuring with field alias" {
+      let p = Point { x: 7, y: 8 }
+      let Point { x: px, .. } = p
+      assert_eq px 7
+    }
+
+    test "single-constructor type destructuring" {
+      let Wrapped inner = Wrapped 42
+      assert_eq inner 42
+    }
+  }
+
+  describe "function argument destructuring" {
+    test "tuple args" {
+      assert_eq (add_pairs (1, 2) (3, 4)) (4, 6)
+    }
+  }
+
+  describe "tuples" {
+    test "swap" {
+      assert_eq (swap (1, 2)) (2, 1)
+    }
+
+    test "fst and snd" {
+      let p = ("hello", 42)
+      assert_eq (fst p) "hello"
+      assert_eq (snd p) 42
+    }
+
+    test "nested tuple pattern" {
+      let result = case ((1, 2), (3, 4)) {
+        ((a, b), (c, d)) -> a + b + c + d
+      }
+      assert_eq result 10
+    }
+  }
+}
+
+describe "records" {
+
+  describe "creation and access" {
+    test "create and access fields" {
+      let p = Point { x: 3, y: 4 }
+      assert_eq p.x 3
+      assert_eq p.y 4
+    }
+
+    test "record update" {
+      let p = Point { x: 3, y: 4 }
+      let p2 = { p | x: 10 }
+      assert_eq p2.x 10
+      assert_eq p2.y 4
+    }
+  }
+
+  describe "polymorphic records" {
+    test "int box" {
+      assert_eq (unwrap_box (Box { value: 42 })) 42
+    }
+
+    test "string box" {
+      assert_eq (unwrap_box (Box { value: "hello" })) "hello"
+    }
+
+    test "update same type" {
+      let b = Box { value: 42 }
+      let b2 = { b | value: 99 }
+      assert_eq (unwrap_box b2) 99
+    }
+  }
+}
+
+describe "do...else" {
+
+  test "successful chain" {
+    assert_eq (lookup_grade 1) (Ok "A")
+  }
+
+  test "early bail on first step" {
+    assert_eq (lookup_grade 99) (Err "no user 99")
+  }
+
+  test "success returns unwrapped value" {
+    assert_eq (score_or_zero 1) 95
+  }
+
+  test "failure returns default" {
+    assert_eq (score_or_zero 99) 0
+  }
+}
+
+describe "list comprehensions" {
+
+  test "simple map" {
+    assert_eq ([x * 2 | x <- [1, 2, 3]]) [2, 4, 6]
+  }
+
+  test "filter" {
+    assert_eq ([x | x <- [1, 2, 3, 4, 5], x % 2 == 0]) [2, 4]
+  }
+
+  test "nested generators (cartesian product)" {
+    assert_eq ([x * 10 + y | x <- [1, 2], y <- [3, 4]]) [13, 14, 23, 24]
+  }
+
+  test "guard with transform" {
+    assert_eq ([x * 2 | x <- [1, 2, 3, 4, 5], x > 3]) [8, 10]
+  }
+
+  test "let binding in comprehension" {
+    assert_eq ([y | x <- [1, 2, 3, 4, 5], let y = x + 10, y > 13]) [14, 15]
+  }
+}

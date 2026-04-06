@@ -1228,7 +1228,7 @@ impl<'a> Lowerer<'a> {
                             // (e.g. `expr with handler` in argument position) don't
                             // steal the continuation meant for THIS call.
                             let saved_pending_k = self.pending_callee_return_k.take();
-                            let ce = self.lower_expr(arg);
+                            let ce = self.lower_expr_value(arg);
                             self.pending_callee_return_k = saved_pending_k;
                             self.lambda_effect_context = saved_ctx;
                             arg_vars.push(v.clone());
@@ -1289,7 +1289,7 @@ impl<'a> Lowerer<'a> {
                             let mut bindings: Vec<(String, CExpr)> = Vec::new();
                             for arg in &non_unit_args {
                                 let v = self.fresh();
-                                let ce = self.lower_expr(arg);
+                                let ce = self.lower_expr_value(arg);
                                 arg_vars.push(v.clone());
                                 bindings.push((v, ce));
                             }
@@ -1351,7 +1351,7 @@ impl<'a> Lowerer<'a> {
                         .collect();
                     for arg in non_unit_args {
                         let v = self.fresh();
-                        let ce = self.lower_expr(arg);
+                        let ce = self.lower_expr_value(arg);
                         arg_vars.push(v.clone());
                         bindings.push((v, ce));
                     }
@@ -1430,7 +1430,7 @@ impl<'a> Lowerer<'a> {
                     let mut arg_vars = Vec::new();
                     for arg in &args {
                         let v = self.fresh();
-                        let ce = self.lower_expr(arg);
+                        let ce = self.lower_expr_value(arg);
                         bindings.push((v.clone(), ce));
                         arg_vars.push(v);
                     }
@@ -1465,7 +1465,7 @@ impl<'a> Lowerer<'a> {
                     let mut arg_vars = Vec::new();
                     for arg in &args {
                         let v = self.fresh();
-                        let ce = self.lower_expr(arg);
+                        let ce = self.lower_expr_value(arg);
                         bindings.push((v.clone(), ce));
                         arg_vars.push(v);
                     }
@@ -1963,7 +1963,7 @@ impl<'a> Lowerer<'a> {
                 let mut bindings = Vec::new();
                 for arg in args {
                     let v = self.fresh();
-                    let ce = self.lower_expr(arg);
+                    let ce = self.lower_expr_value(arg);
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
@@ -2186,7 +2186,7 @@ impl<'a> Lowerer<'a> {
             {
                 self.lambda_effect_context = Some(effs.clone());
             }
-            let ce = self.lower_expr(arg);
+            let ce = self.lower_expr_value(arg);
             self.lambda_effect_context = saved_ctx;
             arg_vars.push(v.clone());
             bindings.push((v, ce));

@@ -14,7 +14,8 @@ handler recording for Recorder a where {a: Show} {
 run f = f ()
 
 main () = {
-  let result = run (fun () -> {
+  # Bug: _ does not match (). Only works when called with ().
+  let result = run (fun _ -> {
     let result = {
       log_state! 42
       log_state! 99

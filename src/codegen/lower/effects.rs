@@ -399,6 +399,12 @@ impl<'a> Lowerer<'a> {
                 let ce = self.lower_expr(expr);
                 self.pending_callee_return_k = saved_outer;
                 ce
+            } else if let Some(inherited_rk) = saved_return_k.clone() {
+                let saved_outer = self.pending_callee_return_k.take();
+                self.pending_callee_return_k = Some(inherited_rk);
+                let ce = self.lower_expr(expr);
+                self.pending_callee_return_k = saved_outer;
+                ce
             } else {
                 self.lower_expr(expr)
             }
@@ -663,6 +669,12 @@ impl<'a> Lowerer<'a> {
             if let Some(rk) = return_k_lambda {
                 let saved_outer = self.pending_callee_return_k.take();
                 self.pending_callee_return_k = Some(rk);
+                let ce = self.lower_expr(expr);
+                self.pending_callee_return_k = saved_outer;
+                ce
+            } else if let Some(inherited_rk) = saved_return_k.clone() {
+                let saved_outer = self.pending_callee_return_k.take();
+                self.pending_callee_return_k = Some(inherited_rk);
                 let ce = self.lower_expr(expr);
                 self.pending_callee_return_k = saved_outer;
                 ce

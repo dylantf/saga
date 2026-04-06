@@ -35,7 +35,7 @@ impl<'a> Lowerer<'a> {
     /// blocks used in expression position don't tail-call the enclosing
     /// `_ReturnK` before the surrounding `let`/statement has a chance to
     /// continue.
-    fn lower_expr_value(&mut self, expr: &Expr) -> CExpr {
+    pub(super) fn lower_expr_value(&mut self, expr: &Expr) -> CExpr {
         let saved_return_k = self.current_return_k.take();
         let saved_pending_k = self.pending_callee_return_k.take();
         let ce = self.lower_expr(expr);
@@ -310,6 +310,12 @@ impl<'a> Lowerer<'a> {
             [] => self.apply_return_k(CExpr::Tuple(vec![])), // unit
             [Stmt::Expr(e)] => {
                 if self.current_return_k.is_some() {
+                    // Terminal nested `with`: let lower_with thread the ambient
+                    // return continuation inward as needed. Applying return_k
+                    // again outside would double-wrap abort-sensitive results.
+                    if matches!(e.kind, ExprKind::With { .. }) {
+                        return self.lower_expr(e);
+                    }
                     // Terminal effect call: pass _ReturnK as K directly for abort semantics
                     if let Some((op_name, qualifier, args)) = collect_effect_call(e) {
                         let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
