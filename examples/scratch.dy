@@ -1,12 +1,28 @@
-record Person {
-  name: String,
-  age: Int,
-} deriving (Debug, Eq)
+import Std.Actor (Process, Actor, Link, beam_actor, Shutdown)
+
+type EchoMsg = Echo String (Pid String)
+
+fun echo_server : Unit -> Unit needs {Process, Actor EchoMsg}
+echo_server () = {
+  receive {
+    Echo msg caller -> {
+      send! caller msg
+      echo_server ()
+    }
+  }
+}
+
+# Actor String is needed because the spawned lambda captures Actor handlers.
+# Previously this gave a false "unused effect" warning.
+fun run : Unit -> Unit needs {Process, Actor String, Link}
+run () = {
+  let pid = spawn! (fun () -> echo_server ())
+  link! pid
+  unlink! pid
+  exit! pid Shutdown
+  dbg "ok"
+}
 
 main () = {
-  let x : Maybe (List Person) = Just [
-    Person { name: "Alice", age: 30 },
-    Person { name: "Bob", age: 25 },
-  ]
-  dbg (debug x)
-}
+  run ()
+} with beam_actor

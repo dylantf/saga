@@ -19,6 +19,7 @@ add a b = ...
 ```
 
 Doc content is Markdown, top to bottom. Conventions:
+
 - First line is a short summary (used in index pages, hover, etc.)
 - Longer description follows if needed
 - `## Examples` section with code blocks
@@ -59,6 +60,7 @@ The `Docs` chunk payload is an Erlang term:
 ```
 
 Where:
+
 - `ModuleDoc` — `#{<<"en">> => <<"markdown content">>}` or `none`
 - `FunctionDocs` — list of `{{function, Name, Arity}, Anno, [Signature], Doc, Meta}` tuples
 
@@ -67,7 +69,7 @@ Where:
 Post-process `.beam` files after `erlc`. Add an `erl -noshell` step that reads the `.beam`, appends the `Docs` chunk via `beam_lib`, and writes it back. The compiler already shells out to `erlc`/`erl`, so this fits the existing build flow.
 
 ```
-.core → erlc → .beam → erl (inject Docs chunk) → .beam with docs
+.core -> erlc -> .beam -> erl (inject Docs chunk) -> .beam with docs
 ```
 
 This is independent of HTML doc generation — do it even if `dylang docs` isn't being run, so all published `.beam` files have docs embedded.
@@ -77,6 +79,7 @@ This is independent of HTML doc generation — do it even if `dylang docs` isn't
 ### Package Publishing
 
 `dylang publish` command that:
+
 1. Builds the project
 2. Runs `dylang docs` to generate HTML into `doc/`
 3. Packages a Hex tarball (metadata + source + docs)

@@ -48,11 +48,13 @@ pub(super) fn lower_pat(
             // Booleans are bare atoms to match Erlang's native true/false
             "True" if args.is_empty() => CPat::Lit(CLit::Atom("true".to_string())),
             "False" if args.is_empty() => CPat::Lit(CLit::Atom("false".to_string())),
-            // ExitReason constructors are bare atoms to match Erlang exit reasons
-            "Normal" if args.is_empty() => CPat::Lit(CLit::Atom("normal".to_string())),
-            "Shutdown" if args.is_empty() => CPat::Lit(CLit::Atom("shutdown".to_string())),
-            "Killed" if args.is_empty() => CPat::Lit(CLit::Atom("killed".to_string())),
-            "Noproc" if args.is_empty() => CPat::Lit(CLit::Atom("noproc".to_string())),
+            _ if args.is_empty() && super::beam_interop::exit_reason_bare_atom(name).is_some() => {
+                CPat::Lit(CLit::Atom(
+                    super::beam_interop::exit_reason_bare_atom(name)
+                        .unwrap()
+                        .to_string(),
+                ))
+            }
             _ => {
                 let atom = mangle_ctor_atom(name, constructor_atoms);
                 let mut elems = vec![CPat::Lit(CLit::Atom(atom))];

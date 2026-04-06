@@ -48,7 +48,7 @@ impl Lowerer<'_> {
     ) -> Option<CExpr> {
         match args.len() {
             1 => {
-                // Partial application: fn2 = dbg → fn2(dict) = fun(v) -> dbg_inline(dict, v)
+                // Partial application: fn2 = dbg -> fn2(dict) = fun(v) -> dbg_inline(dict, v)
                 let dict = self.lower_expr(args[0]);
                 let d = self.fresh();
                 let v_param = self.fresh();

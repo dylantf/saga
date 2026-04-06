@@ -1027,6 +1027,8 @@ pub struct EffectOp {
     pub name: String,
     pub params: Vec<(String, TypeExpr)>,
     pub return_type: TypeExpr,
+    pub effects: Vec<EffectRef>,
+    pub effect_row_var: Option<(String, Span)>,
     pub span: Span,
 }
 

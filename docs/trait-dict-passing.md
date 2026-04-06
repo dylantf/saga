@@ -27,8 +27,8 @@ Source: `src/typechecker/check_decl.rs`
 When the typechecker processes a function signature with `where` clauses, it populates two maps on `TraitState`:
 
 ```rust
-where_bound_var_names: HashMap<u32, String>        // var_id → source name ("a")
-where_bounds: HashMap<u32, HashSet<String>>         // var_id → {"Show", "Debug"}
+where_bound_var_names: HashMap<u32, String>        // var_id -> source name ("a")
+where_bounds: HashMap<u32, HashSet<String>>         // var_id -> {"Show", "Debug"}
 ```
 
 For `fun f : a -> b -> String where {a: Show, b: Debug}`, this stores two entries mapping the fresh type variable IDs for `a` and `b` to their source names and required traits.
@@ -71,18 +71,18 @@ Source: `src/elaborate.rs`
 
 The elaborator scans declarations to build lookup tables:
 
-| Map | Key | Value | Source |
-|-----|-----|-------|--------|
-| `trait_methods` | method name | (trait, index) | `TraitDef` |
-| `fun_dict_params` | function name | [(trait, type_var)] | `FunSignature` where clause |
-| `dict_names` | (trait, type_args, type) | constructor name | `ImplDef` |
-| `impl_dict_params` | (trait, type_args, type) | [(constraint_trait, param_idx)] | `ImplDef` where clause |
+| Map                | Key                      | Value                           | Source                      |
+| ------------------ | ------------------------ | ------------------------------- | --------------------------- |
+| `trait_methods`    | method name              | (trait, index)                  | `TraitDef`                  |
+| `fun_dict_params`  | function name            | [(trait, type_var)]             | `FunSignature` where clause |
+| `dict_names`       | (trait, type_args, type) | constructor name                | `ImplDef`                   |
+| `impl_dict_params` | (trait, type_args, type) | [(constraint_trait, param_idx)] | `ImplDef` where clause      |
 
 Dict constructor names follow the pattern `__dict_{Trait}_{module}_{Type}`, e.g., `__dict_Show_std_int_Int`.
 
 ### Pass 2: AST Transformation
 
-**ImplDef → DictConstructor.** Each impl becomes a function that returns a tuple of method closures. If the impl has where-clause constraints (e.g., `impl Show for List a where {a: Show}`), the constructor takes dictionary parameters:
+**ImplDef -> DictConstructor.** Each impl becomes a function that returns a tuple of method closures. If the impl has where-clause constraints (e.g., `impl Show for List a where {a: Show}`), the constructor takes dictionary parameters:
 
 ```
 # Source
@@ -109,7 +109,7 @@ __dict_Debug_Dict(__dict_Debug_k, __dict_Debug_v) =
 # Emitted:  debug_entries __dict_Debug_k __dict_Debug_v (to_list d)
 ```
 
-**Trait method calls → DictMethodAccess.** A call like `show x` is recognized as a trait method call via `trait_methods`. The elaborator resolves the dictionary and emits:
+**Trait method calls -> DictMethodAccess.** A call like `show x` is recognized as a trait method call via `trait_methods`. The elaborator resolves the dictionary and emits:
 
 ```
 DictMethodAccess { dict: <resolved_dict>, method_index: 0 }
@@ -120,8 +120,8 @@ DictMethodAccess { dict: <resolved_dict>, method_index: 0 }
 `resolve_dict_nth(trait, node_id, occurrence)` is the core lookup:
 
 1. **Evidence-first**: Look up `evidence_by_node[node_id]` for the nth evidence entry matching the trait.
-   - If `resolved_type` is concrete → call `dict_for_type()` to build the dict expression.
-   - If `resolved_type` is None → use `type_var_name` to build `Var("__dict_Debug_k")`.
+   - If `resolved_type` is concrete -> call `dict_for_type()` to build the dict expression.
+   - If `resolved_type` is None -> use `type_var_name` to build `Var("__dict_Debug_k")`.
 2. **Fallback**: If no evidence exists, fall back to `current_dict_params` (keyed by trait name). This handles inferred constraints where the typechecker absorbed the constraint into the function's scheme without per-node evidence.
 
 The `occurrence` parameter handles multiple where-clause bounds for the same trait (e.g., `where {k: Debug, v: Debug}` — occurrence 0 gets `k`'s dict, occurrence 1 gets `v`'s).
@@ -187,6 +187,7 @@ Method indices are 0-based in the AST, 1-based in Core Erlang's `element/2`.
 ### DictRef
 
 Resolved by the lowerer based on the resolution map:
+
 - **Imported dict**: `call 'std_int':'__dict_Show_std_int_Int'()`
 - **Local dict**: `apply '__dict_Show_Foo'/0()`
 - **Dict parameter variable**: plain `Var` reference (e.g., `___dict_Show_a`)
@@ -195,11 +196,11 @@ Resolved by the lowerer based on the resolution map:
 
 ## Naming Conventions
 
-| Context | Pattern | Example |
-|---------|---------|---------|
-| Dict constructor | `__dict_{Trait}_{module}_{Type}` | `__dict_Show_std_int_Int` |
-| Dict parameter | `__dict_{Trait}_{typevar}` | `__dict_Debug_k` |
-| Core Erlang var | `___dict_{Trait}_{typevar}` | `___dict_Debug_k` (triple underscore) |
+| Context          | Pattern                          | Example                               |
+| ---------------- | -------------------------------- | ------------------------------------- |
+| Dict constructor | `__dict_{Trait}_{module}_{Type}` | `__dict_Show_std_int_Int`             |
+| Dict parameter   | `__dict_{Trait}_{typevar}`       | `__dict_Debug_k`                      |
+| Core Erlang var  | `___dict_{Trait}_{typevar}`      | `___dict_Debug_k` (triple underscore) |
 
 The triple underscore in Core Erlang comes from `core_var()` prefixing names that start with lowercase.
 

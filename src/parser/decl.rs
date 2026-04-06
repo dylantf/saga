@@ -503,7 +503,7 @@ impl Parser {
             let op_name = self.expect_ident()?;
 
             self.expect(Token::Colon)?;
-            let (params, return_type, _effects, _effect_row_var) = self.parse_annotated_signature()?;
+            let (params, return_type, effects, effect_row_var) = self.parse_annotated_signature()?;
             let op_end = self.tokens[self.pos - 1].span;
 
             let trailing_comment = self.take_trailing_comment(self.pos - 1);
@@ -513,6 +513,8 @@ impl Parser {
                     name: op_name,
                     params,
                     return_type,
+                    effects,
+                    effect_row_var,
                     span: op_start.to(op_end),
                 },
                 leading_trivia: self.take_leading_trivia(start),

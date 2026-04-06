@@ -274,6 +274,7 @@ impl Checker {
                     .map(|(label, t)| (label.clone(), self.replace_vars(t, &mapping)))
                     .collect(),
                 return_type: self.replace_vars(&op.return_type, &mapping),
+                needs: self.replace_vars_in_effect_row(&op.needs, &mapping),
             };
         }
         // Reuse cached mapping or create fresh vars for effect-level type params
@@ -321,6 +322,7 @@ impl Checker {
                 .map(|(label, t)| (label.clone(), self.replace_vars(t, &mapping)))
                 .collect(),
             return_type: self.replace_vars(&op.return_type, &mapping),
+            needs: self.replace_vars_in_effect_row(&op.needs, &mapping),
         }
     }
 
@@ -333,7 +335,7 @@ impl Checker {
         span: Span,
     ) -> Result<EffectOpSig, Diagnostic> {
         if let Some(effect_name) = qualifier {
-            // Resolve qualifier through scope_map (bare/aliased → canonical)
+            // Resolve qualifier through scope_map (bare/aliased -> canonical)
             let canonical = self.scope_map.resolve_effect(effect_name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| effect_name.to_string());

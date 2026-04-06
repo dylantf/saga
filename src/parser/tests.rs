@@ -2443,7 +2443,7 @@ fn private_fun_annotation() {
 
 #[test]
 fn interp_empty() {
-    // $"" → StringInterp with no parts
+    // $"" -> StringInterp with no parts
     let expr = parse_expr(r#"$"""#);
     assert!(
         matches!(expr, Expr { kind: ExprKind::StringInterp { ref parts, .. }, .. } if parts.is_empty())
@@ -2452,7 +2452,7 @@ fn interp_empty() {
 
 #[test]
 fn interp_no_holes() {
-    // $"hello" → StringInterp with one literal part
+    // $"hello" -> StringInterp with one literal part
     let expr = parse_expr(r#"$"hello""#);
     match expr {
         Expr {
@@ -2468,7 +2468,7 @@ fn interp_no_holes() {
 
 #[test]
 fn interp_single_hole() {
-    // $"{x}" → StringInterp with one Expr part
+    // $"{x}" -> StringInterp with one Expr part
     let expr = parse_expr(r#"$"{x}""#);
     match expr {
         Expr {
@@ -2486,7 +2486,7 @@ fn interp_single_hole() {
 
 #[test]
 fn interp_literal_and_hole() {
-    // $"hello {name}" → StringInterp with literal + expr
+    // $"hello {name}" -> StringInterp with literal + expr
     let expr = parse_expr(r#"$"hello {name}""#);
     match expr {
         Expr {
@@ -2505,7 +2505,7 @@ fn interp_literal_and_hole() {
 
 #[test]
 fn interp_escaped_braces() {
-    // $"\{" → StringInterp with literal "{"
+    // $"\{" -> StringInterp with literal "{"
     let expr = parse_expr("$\"\\{\"");
     match expr {
         Expr {

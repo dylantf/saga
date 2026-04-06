@@ -2,10 +2,10 @@
 //!
 //! Runs after imports are processed (scope_map is complete), before the main
 //! typechecking passes. Transforms:
-//! - `Var { name: "map" }` → `Var { name: "Std.List.map" }` (if not locally bound)
-//! - `QualifiedName { module: "List", name: "map" }` → fills `canonical_module`
-//! - `Constructor { name: "Just" }` → `Constructor { name: "Std.Maybe.Just" }` (if in scope_map)
-//! - `Pat::Constructor { name: "Just" }` → `Pat::Constructor { name: "Std.Maybe.Just" }`
+//! - `Var { name: "map" }` -> `Var { name: "Std.List.map" }` (if not locally bound)
+//! - `QualifiedName { module: "List", name: "map" }` -> fills `canonical_module`
+//! - `Constructor { name: "Just" }` -> `Constructor { name: "Std.Maybe.Just" }` (if in scope_map)
+//! - `Pat::Constructor { name: "Just" }` -> `Pat::Constructor { name: "Std.Maybe.Just" }`
 //!
 //! The pass is scope-aware: local bindings (function params, let bindings,
 //! lambda params, case pattern bindings) shadow imported names.

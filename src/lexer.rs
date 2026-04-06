@@ -225,9 +225,7 @@ impl Lexer {
         let mut digits_only = String::new();
 
         // Check for hex literal: 0x or 0X
-        if self.peek() == Some('0')
-            && self.peek_next().is_some_and(|c| c == 'x' || c == 'X')
-        {
+        if self.peek() == Some('0') && self.peek_next().is_some_and(|c| c == 'x' || c == 'X') {
             self.advance(); // consume '0'
             self.advance(); // consume 'x'
             while let Some(ch) = self.peek() {
@@ -785,10 +783,10 @@ impl Lexer {
                     let (text, is_doc) = self.read_comment_text();
 
                     if !seen_newline && !tokens.is_empty() {
-                        // Same line as previous token → trailing comment
+                        // Same line as previous token -> trailing comment
                         tokens.last_mut().unwrap().trailing_comment = Some(text);
                     } else {
-                        // Own line → leading trivia on next token
+                        // Own line -> leading trivia on next token
                         if is_doc {
                             pending_trivia.push(Trivia::DocComment(text));
                         } else {
@@ -875,7 +873,7 @@ impl Lexer {
                 }
                 Some(ch) if ch.is_alphabetic() || ch == '_' => {
                     let mut tok = self.read_identifier();
-                    // ident! (no space) → EffectCall, but not ident!=
+                    // ident! (no space) -> EffectCall, but not ident!=
                     if let Token::Ident(ref name) = tok
                         && self.peek() == Some('!')
                         && self.peek_next() != Some('=')

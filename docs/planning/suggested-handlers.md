@@ -51,6 +51,6 @@ The annotation attaches to the effect's AST node, so the LSP can:
 
 ## Scope
 
-- Works for stdlib effects (`Stdio` → `console`, `File` → `fs`, etc.)
+- Works for stdlib effects (`Stdio` -> `console`, `File` -> `fs`, etc.)
 - Works for user-defined effects — anyone can annotate their own effects
 - No hardcoded knowledge in the compiler; entirely driven by annotations

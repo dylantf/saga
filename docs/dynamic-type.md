@@ -132,7 +132,7 @@ run data f = {
 
 On success: resume with the decoded value, thread through accumulated errors.
 On failure: resume with the placeholder, prepend the error. Every field runs
-regardless of earlier failures. At the end, empty errors → `Ok`, otherwise
+regardless of earlier failures. At the end, empty errors -> `Ok`, otherwise
 `Err` with all collected errors.
 
 ### Combinators
@@ -226,8 +226,8 @@ The Gleam approach bakes error accumulation into the `Decoder` type itself
 - `field_lookup/2` — `maps:find/2`, error if not a map
 - `element_lookup/2` — `erlang:element/2` for tuples, list nth for lists (0-indexed)
 - `decode_list/2` — iterate list with decoder, prepend index to error path
-- `decode_optional/2` — nil/undefined/null → `{nothing}`, otherwise inner decoder
-- `classify/1` — guard chain → type name string
+- `decode_optional/2` — nil/undefined/null -> `{nothing}`, otherwise inner decoder
+- `classify/1` — guard chain -> type name string
 - `from_erlang/1` — identity
 
 ### Compiler registration

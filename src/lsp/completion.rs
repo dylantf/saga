@@ -167,9 +167,9 @@ pub struct RecordConstructionContext {
 /// (anonymous nested record inside a named record).
 ///
 /// Examples:
-/// - `House { a|` → fields of House
-/// - `House { year_built: 2005, a|` → fields of House
-/// - `House { address: { n|` → fields of House.address (anonymous record)
+/// - `House { a|` -> fields of House
+/// - `House { year_built: 2005, a|` -> fields of House
+/// - `House { address: { n|` -> fields of House.address (anonymous record)
 pub fn extract_record_construction_context(
     result: &CheckResult,
     source: &str,
@@ -358,9 +358,9 @@ pub fn collect_record_construction_completions(
 /// `chain` is the dot-chain before the cursor (e.g. `["List"]` or `["Std"]`).
 ///
 /// Completes the *next* path segment only:
-/// - `List.` → `map`, `reverse`, ... (leaf names)
-/// - `Std.` → `List`, `Dict`, `Time`, ... (sub-modules)
-/// - `Std.List.` → `map`, `reverse`, ... (leaf names via canonical path)
+/// - `List.` -> `map`, `reverse`, ... (leaf names)
+/// - `Std.` -> `List`, `Dict`, `Time`, ... (sub-modules)
+/// - `Std.List.` -> `map`, `reverse`, ... (leaf names via canonical path)
 pub fn collect_module_completions(
     result: &CheckResult,
     chain: &[String],

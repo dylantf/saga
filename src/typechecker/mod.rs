@@ -660,6 +660,8 @@ pub struct EffectOpSig {
     pub effect_name: std::string::String,
     pub params: Vec<(String, Type)>,
     pub return_type: Type,
+    /// Effect requirements declared on this op (e.g. `spawn` needs `{Actor msg, ..e}`).
+    pub needs: EffectRow,
 }
 
 /// Record definition info: type parameter var IDs + field types (with those vars).

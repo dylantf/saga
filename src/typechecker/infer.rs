@@ -343,13 +343,26 @@ impl Checker {
                         .insert(span, (*arm_span, arm_module.clone()));
                 }
 
-                // Build curried function type
+                // Build curried function type. If the op has its own `needs`,
+                // place them on the outermost arrow so that App's saturated-call
+                // emission will re-emit them after absorption.
                 let mut ty = op_sig.return_type.clone();
-                if op_sig.params.is_empty() {
-                    ty = Type::arrow(Type::unit(), ty);
+                let needs_row = if op_sig.needs.is_empty() {
+                    EffectRow::empty()
                 } else {
-                    for (_, param_ty) in op_sig.params.iter().rev() {
-                        ty = Type::arrow(param_ty.clone(), ty);
+                    op_sig.needs.clone()
+                };
+                if op_sig.params.is_empty() {
+                    ty = Type::Fun(Box::new(Type::unit()), Box::new(ty), needs_row);
+                } else {
+                    for (i, (_, param_ty)) in op_sig.params.iter().rev().enumerate() {
+                        let row = if i == op_sig.params.len() - 1 {
+                            // Outermost arrow carries the needs
+                            needs_row.clone()
+                        } else {
+                            EffectRow::empty()
+                        };
+                        ty = Type::Fun(Box::new(param_ty.clone()), Box::new(ty), row);
                     }
                 }
                 // Emit the effect onto the accumulator.
