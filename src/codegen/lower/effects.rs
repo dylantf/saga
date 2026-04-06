@@ -15,6 +15,48 @@ use super::Lowerer;
 use super::util::{cerl_call, collect_fun_call, core_var};
 
 impl<'a> Lowerer<'a> {
+    fn lower_handled_expr_with_return_k(
+        &mut self,
+        expr: &Expr,
+        return_k: Option<CExpr>,
+    ) -> CExpr {
+        self.with_current_return_k(return_k.clone(), |this| {
+            let inner_ce = this.lower_expr(expr);
+            // Block expressions apply the installed return_k at their
+            // terminal statement, so don't wrap them again here.
+            if matches!(expr.kind, ExprKind::Block { .. }) {
+                inner_ce
+            } else {
+                this.apply_return_k_with(return_k, inner_ce)
+            }
+        })
+    }
+
+    fn lower_handled_inner_expr(
+        &mut self,
+        expr: &Expr,
+        handled_return_k: Option<CExpr>,
+        inherited_return_k: Option<CExpr>,
+    ) -> CExpr {
+        let is_direct_effectful_call = collect_fun_call(expr)
+            .map(|(name, _, _)| {
+                self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
+            })
+            .unwrap_or(false);
+
+        if is_direct_effectful_call {
+            if let Some(rk) = handled_return_k {
+                self.lower_expr_with_pending_return_k(expr, Some(rk))
+            } else if let Some(inherited_rk) = inherited_return_k {
+                self.lower_expr_with_pending_return_k(expr, Some(inherited_rk))
+            } else {
+                self.lower_expr(expr)
+            }
+        } else {
+            self.lower_handled_expr_with_return_k(expr, handled_return_k)
+        }
+    }
+
     fn dynamic_return_lambda(&mut self, tuple_var: &str, op_count: usize) -> CExpr {
         let param = self.fresh();
         let identity = CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)));
@@ -368,57 +410,24 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        // Build return clause lambdas.
-        let mut return_lambdas: Vec<CExpr> = Vec::new();
-
         // Build the return clause lambda (if present).
-        let saved_return_k = self.current_return_k.take();
-        if let Some(ret) = &return_clause {
-            return_lambdas.push(self.build_return_lambda(ret));
-        }
+        let saved_return_k = self.current_return_k.clone();
+        let return_lambdas = self.with_current_return_k(None, |this| {
+            let mut return_lambdas: Vec<CExpr> = Vec::new();
+            if let Some(ret) = &return_clause {
+                return_lambdas.push(this.build_return_lambda(ret));
+            }
+            return_lambdas
+        });
         let return_k_lambda = self.compose_return_lambdas(return_lambdas);
 
-        // Check if the inner expression is a direct effectful function call.
-        // If so, pass the return clause as _ReturnK parameter instead of
-        // wrapping externally. This prevents abort values from being wrapped.
-        let is_direct_effectful_call = collect_fun_call(expr)
-            .map(|(name, _, _)| {
-                self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
-            })
-            .unwrap_or(false);
-
-        let result = if is_direct_effectful_call {
-            // Pass return clause as _ReturnK to the callee via pending_callee_return_k.
-            // When there IS a return clause: save the outer pending (e.g. rest-of-block
-            // continuation) so the block can apply it to the CPS result afterwards.
-            // When there is NO return clause: let the outer pending flow through as
-            // _ReturnK so abort-style handlers skip subsequent statements.
-            if let Some(rk) = return_k_lambda {
-                self.lower_expr_with_pending_return_k(expr, Some(rk))
-            } else if let Some(inherited_rk) = saved_return_k.clone() {
-                self.lower_expr_with_pending_return_k(expr, Some(inherited_rk))
-            } else {
-                self.lower_expr(expr)
-            }
-        } else {
-            // Block form or non-call: use current_return_k for terminal application
-            if let Some(rk) = return_k_lambda {
-                self.current_return_k = Some(rk);
-            }
-            let inner_ce = self.lower_expr(expr);
-            // Block expressions apply current_return_k internally (at the terminal
-            // statement), so don't apply it again here to avoid double-wrapping.
-            if matches!(expr.kind, ExprKind::Block { .. }) {
-                inner_ce
-            } else {
-                self.apply_return_k(inner_ce)
-            }
-        };
+        // Direct effectful calls receive the handled return-k as `_ReturnK`.
+        // When there is no return clause, the inherited outer return-k still
+        // needs to flow through so abort-style handlers skip subsequent code.
+        let result = self.lower_handled_inner_expr(expr, return_k_lambda, saved_return_k);
 
         self.current_handler_params = saved_handler_params;
         self.no_resume_ops = saved_no_resume_ops;
-        self.current_return_k = saved_return_k;
-
         // Post-hoc reachability: scan the lowered body for _Handle_* references,
         // then transitively close through handler binding values.
         let mut needed: HashSet<String> = HashSet::new();
@@ -495,7 +504,6 @@ impl<'a> Lowerer<'a> {
         // value, which flows to the rest of the block via rest_k, not through
         // the function's own return continuation.
         let prev_handler_k = self.current_handler_k.replace(k_var);
-        let saved_return_k = self.current_return_k.take();
         let saved_pending_k = self.pending_callee_return_k.take();
 
         // Set current_handler_finally so Resume lowering wraps K calls in try/catch.
@@ -504,10 +512,9 @@ impl<'a> Lowerer<'a> {
             self.current_handler_finally = Some(fb.as_ref().clone());
         }
 
-        let mut body_ce = self.lower_expr(&arm.body);
+        let mut body_ce = self.with_current_return_k(None, |this| this.lower_expr(&arm.body));
 
         self.current_handler_finally = saved_finally;
-        self.current_return_k = saved_return_k;
         self.pending_callee_return_k = saved_pending_k;
 
         // Bind arm's named params to the positional handler args
@@ -650,33 +657,9 @@ impl<'a> Lowerer<'a> {
         }
 
         // Lower the inner expression
-        let saved_return_k = self.current_return_k.take();
         let return_k_lambda = Some(self.dynamic_return_lambda(&tuple_var, handler_ops.len()));
-        let is_direct_effectful_call = collect_fun_call(expr)
-            .map(|(name, _, _)| {
-                self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
-            })
-            .unwrap_or(false);
-        let result = if is_direct_effectful_call {
-            if let Some(rk) = return_k_lambda {
-                self.lower_expr_with_pending_return_k(expr, Some(rk))
-            } else if let Some(inherited_rk) = saved_return_k.clone() {
-                self.lower_expr_with_pending_return_k(expr, Some(inherited_rk))
-            } else {
-                self.lower_expr(expr)
-            }
-        } else {
-            if let Some(rk) = return_k_lambda {
-                self.current_return_k = Some(rk);
-            }
-            let inner_ce = self.lower_expr(expr);
-            if matches!(expr.kind, ExprKind::Block { .. }) {
-                inner_ce
-            } else {
-                self.apply_return_k(inner_ce)
-            }
-        };
-        self.current_return_k = saved_return_k;
+        let inherited_return_k = self.current_return_k.clone();
+        let result = self.lower_handled_inner_expr(expr, return_k_lambda, inherited_return_k);
 
         self.current_handler_params = saved_handler_params;
         self.no_resume_ops = saved_no_resume_ops;

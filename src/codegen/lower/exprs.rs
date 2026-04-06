@@ -37,11 +37,9 @@ impl<'a> Lowerer<'a> {
     pub(super) fn lower_expr_in(&mut self, expr: &Expr, mode: LowerMode) -> CExpr {
         match mode {
             LowerMode::Value => {
-                let saved_return_k = self.current_return_k.take();
                 let saved_pending_k = self.pending_callee_return_k.take();
-                let ce = self.lower_expr(expr);
+                let ce = self.with_current_return_k(None, |this| this.lower_expr(expr));
                 self.pending_callee_return_k = saved_pending_k;
-                self.current_return_k = saved_return_k;
                 ce
             }
             LowerMode::Tail(k) => self.lower_expr_tail_compat(expr, k),
@@ -106,6 +104,19 @@ impl<'a> Lowerer<'a> {
         ce
     }
 
+    /// Run lowering with `current_return_k` temporarily replaced.
+    pub(super) fn with_current_return_k<T>(
+        &mut self,
+        return_k: Option<CExpr>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let saved_return_k = self.current_return_k.take();
+        self.current_return_k = return_k;
+        let out = f(self);
+        self.current_return_k = saved_return_k;
+        out
+    }
+
     /// Consume the currently pending callee return continuation, or build an
     /// identity continuation when none has been provided by the surrounding
     /// lowering context.
@@ -128,22 +139,26 @@ impl<'a> Lowerer<'a> {
         CExpr::Let(k_var, Box::new(k), Box::new(body))
     }
 
-    /// Lower a non-block expression in a context where `current_return_k`
+    /// Lower a non-block expression in a context where `return_k`
     /// should govern terminal effect semantics.
     ///
     /// This centralizes the common decision tree used for effectful function
     /// bodies and lambdas:
-    /// - direct effect ops receive `current_return_k` as their continuation
-    /// - nested effectful control flow threads `current_return_k` through branches
+    /// - direct effect ops receive `return_k` as their continuation
+    /// - nested effectful control flow threads `return_k` through branches
     /// - direct effectful function calls receive it via `pending_callee_return_k`
-    /// - pure expressions are lowered normally and wrapped with `apply_return_k`
-    pub(super) fn lower_terminal_effectful_expr(&mut self, expr: &Expr) -> CExpr {
+    /// - pure expressions are lowered normally and wrapped with `return_k`
+    pub(super) fn lower_terminal_effectful_expr_with_return_k(
+        &mut self,
+        expr: &Expr,
+        return_k: Option<CExpr>,
+    ) -> CExpr {
         if let Some((op_name, qualifier, args)) = collect_effect_call(expr) {
             let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
-            self.lower_effect_call(op_name, qualifier, &args_owned, self.current_return_k.clone())
+            self.lower_effect_call(op_name, qualifier, &args_owned, return_k)
         } else if self.has_nested_effectful_expr(expr) {
             let k_var = self.fresh();
-            let k_ce = self.current_return_k.clone().unwrap();
+            let k_ce = return_k.expect("nested terminal effectful expr requires return_k");
             let body_ce = self.lower_expr_with_k(expr, &k_var);
             CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
         } else {
@@ -153,10 +168,10 @@ impl<'a> Lowerer<'a> {
                 })
                 .unwrap_or(false);
             if is_eff_call {
-                self.lower_expr_with_pending_return_k(expr, self.current_return_k.clone())
+                self.lower_expr_with_pending_return_k(expr, return_k)
             } else {
                 let body_ce = self.lower_expr(expr);
-                self.apply_return_k(body_ce)
+                self.apply_return_k_with(return_k, body_ce)
             }
         }
     }
@@ -166,22 +181,31 @@ impl<'a> Lowerer<'a> {
     ///
     /// `with` remains a delimiter here: it manages inherited return handling
     /// internally and must not be wrapped again outside.
-    fn lower_block_terminal_expr(&mut self, expr: &Expr) -> CExpr {
-        if self.current_return_k.is_some() {
+    fn lower_block_terminal_expr_with_return_k(
+        &mut self,
+        expr: &Expr,
+        return_k: Option<CExpr>,
+    ) -> CExpr {
+        if return_k.is_some() {
             if matches!(expr.kind, ExprKind::With { .. }) {
                 return self.lower_expr(expr);
             }
-            return self.lower_terminal_effectful_expr(expr);
+            return self.lower_terminal_effectful_expr_with_return_k(expr, return_k);
         }
 
         let val = self.lower_expr(expr);
-        self.apply_return_k(val)
+        self.apply_return_k_with(return_k, val)
     }
 
     /// Build the continuation representing the rest of a block after the
     /// current statement, optionally destructuring the result through `pat`.
-    fn lower_rest_block_k(&mut self, pat: Option<&Pat>, rest: &[Stmt]) -> CExpr {
-        let rest_ce = self.lower_block(rest);
+    fn lower_rest_block_k_with_return_k(
+        &mut self,
+        pat: Option<&Pat>,
+        rest: &[Stmt],
+        return_k: Option<CExpr>,
+    ) -> CExpr {
+        let rest_ce = self.lower_block_with_return_k(rest, return_k);
         let (k_param, rest_ce) = match pat {
             Some(p) => self.destructure_pat(p, rest_ce),
             None => (self.fresh(), rest_ce),
@@ -443,11 +467,9 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-    /// Apply the current return continuation (if set) to a final value.
-    /// Clones the return_k so it can be applied in multiple branches
-    /// (e.g. both arms of an if/case inside a with block).
-    pub(super) fn apply_return_k(&mut self, val: CExpr) -> CExpr {
-        if let Some(k) = self.current_return_k.clone() {
+    /// Apply an optional return continuation to a final value.
+    pub(super) fn apply_return_k_with(&mut self, return_k: Option<CExpr>, val: CExpr) -> CExpr {
+        if let Some(k) = return_k {
             let v = self.fresh();
             CExpr::Let(
                 v.clone(),
@@ -500,14 +522,14 @@ impl<'a> Lowerer<'a> {
         (tmp, wrapped)
     }
 
-    pub(super) fn lower_block(&mut self, stmts: &[Stmt]) -> CExpr {
+    fn lower_block_with_return_k(&mut self, stmts: &[Stmt], return_k: Option<CExpr>) -> CExpr {
         match stmts {
-            [] => self.apply_return_k(CExpr::Tuple(vec![])), // unit
-            [Stmt::Expr(e)] => self.lower_block_terminal_expr(e),
+            [] => self.apply_return_k_with(return_k, CExpr::Tuple(vec![])), // unit
+            [Stmt::Expr(e)] => self.lower_block_terminal_expr_with_return_k(e, return_k),
             [Stmt::Let { pattern, value, .. }] => {
                 let var = pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
                 let val_ce = self.lower_expr_value(value);
-                let body = self.apply_return_k(CExpr::Var(var.clone()));
+                let body = self.apply_return_k_with(return_k, CExpr::Var(var.clone()));
                 CExpr::Let(var, Box::new(val_ce), Box::new(body))
             }
             [Stmt::LetFun { .. }, ..] => {
@@ -593,12 +615,10 @@ impl<'a> Lowerer<'a> {
 
                 let has_effects = !handler_params.is_empty();
                 let base_arity = arity - handler_params.len() - if has_effects { 1 } else { 0 };
-                let saved_return_k = self.current_return_k.take();
-                if has_effects {
-                    self.current_return_k = Some(CExpr::Var("_ReturnK".to_string()));
-                }
-
-                let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
+                let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
+                let fun_body = self.with_current_return_k(
+                    effect_return_k.clone(),
+                    |this| if clauses.len() == 1 && clauses[0].1.is_none() {
                     // Single clause, no guard
                     let mut params_ce = pats::lower_params(clauses[0].0);
                     params_ce.extend(handler_params.iter().cloned());
@@ -607,9 +627,12 @@ impl<'a> Lowerer<'a> {
                     }
                     let body = clauses[0].2;
                     let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
-                        self.lower_terminal_effectful_expr(body)
+                        this.lower_terminal_effectful_expr_with_return_k(
+                            body,
+                            effect_return_k.clone(),
+                        )
                     } else {
-                        self.lower_expr(body)
+                        this.lower_expr(body)
                     };
                     CExpr::Fun(params_ce, Box::new(body_ce))
                 } else {
@@ -632,8 +655,8 @@ impl<'a> Lowerer<'a> {
                             let pat = if base_arity == 1 {
                                 pats::lower_pat(
                                     &params[0],
-                                    &self.record_fields,
-                                    &self.constructor_atoms,
+                                    &this.record_fields,
+                                    &this.constructor_atoms,
                                 )
                             } else if base_arity == 0 {
                                 CPat::Wildcard
@@ -644,20 +667,23 @@ impl<'a> Lowerer<'a> {
                                         .map(|p| {
                                             pats::lower_pat(
                                                 p,
-                                                &self.record_fields,
-                                                &self.constructor_atoms,
+                                                &this.record_fields,
+                                                &this.constructor_atoms,
                                             )
                                         })
                                         .collect(),
                                 )
                             };
-                            let guard_ce = guard.as_ref().map(|g| self.lower_expr(g));
+                            let guard_ce = guard.as_ref().map(|g| this.lower_expr(g));
                             let body_ce = if has_effects
                                 && !matches!(body.kind, ExprKind::Block { .. })
                             {
-                                self.lower_terminal_effectful_expr(body)
+                                this.lower_terminal_effectful_expr_with_return_k(
+                                    body,
+                                    effect_return_k.clone(),
+                                )
                             } else {
-                                self.lower_expr(body)
+                                this.lower_expr(body)
                             };
                             CArm {
                                 pat,
@@ -677,16 +703,14 @@ impl<'a> Lowerer<'a> {
                         },
                         Box::new(CExpr::Case(Box::new(scrutinee), arms)),
                     )
-                };
-
-                self.current_return_k = saved_return_k;
+                });
                 self.current_handler_params = saved_handler_params;
                 self.current_effectful_vars = saved_effectful_vars;
 
                 let rest_ce = if rest.is_empty() {
-                    self.apply_return_k(CExpr::Tuple(vec![]))
+                    self.apply_return_k_with(return_k, CExpr::Tuple(vec![]))
                 } else {
-                    self.lower_block(rest)
+                    self.lower_block_with_return_k(rest, return_k)
                 };
 
                 CExpr::LetRec(vec![(fun_name, arity, fun_body)], Box::new(rest_ce))
@@ -708,10 +732,10 @@ impl<'a> Lowerer<'a> {
                         self.handle_dynamic_vars.get(name.as_str()).cloned()
                     {
                         let rhs_ce = self.lower_expr(value);
-                        let rest_ce = self.lower_block(rest);
+                        let rest_ce = self.lower_block_with_return_k(rest, return_k);
                         return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
                     }
-                    return self.lower_block(rest);
+                    return self.lower_block_with_return_k(rest, return_k);
                 }
 
                 // If this let binding partially applies an effectful function,
@@ -727,7 +751,7 @@ impl<'a> Lowerer<'a> {
                 // Check if the value is a call to an effectful function. If so,
                 // capture the rest of the block as _ReturnK so abort-style handlers
                 // skip subsequent statements (same CPS treatment as `with`).
-                if self.current_return_k.is_some() {
+                if return_k.is_some() {
                     let value_expr = match first {
                         Stmt::Let { value, .. } => value,
                         Stmt::Expr(e) => e,
@@ -745,7 +769,8 @@ impl<'a> Lowerer<'a> {
                             Stmt::Expr(e) => (None, e),
                             Stmt::LetFun { .. } => unreachable!(),
                         };
-                        let rest_k = self.lower_rest_block_k(pat_opt, rest);
+                        let rest_k =
+                            self.lower_rest_block_k_with_return_k(pat_opt, rest, return_k);
                         return self.lower_expr_with_pending_return_k(value_expr, Some(rest_k));
                     }
                 }
@@ -764,7 +789,7 @@ impl<'a> Lowerer<'a> {
                 };
 
                 if let Some((pat, op_name, qualifier, args)) = effect_info {
-                    let k = self.lower_rest_block_k(pat, rest);
+                    let k = self.lower_rest_block_k_with_return_k(pat, rest, return_k);
                     // We need to own the args for lower_effect_call
                     let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                     self.lower_effect_call(op_name, qualifier, &args_owned, Some(k))
@@ -784,7 +809,7 @@ impl<'a> Lowerer<'a> {
                             Stmt::Expr(e) => (None, e),
                             Stmt::LetFun { .. } => unreachable!(),
                         };
-                        let k = self.lower_rest_block_k(pat_opt, rest);
+                        let k = self.lower_rest_block_k_with_return_k(pat_opt, rest, return_k);
                         let k_var = self.fresh();
                         let body = self.lower_expr_with_k(value_expr, &k_var);
                         CExpr::Let(k_var, Box::new(k), Box::new(body))
@@ -801,7 +826,7 @@ impl<'a> Lowerer<'a> {
                             Stmt::Expr(e) => (None, false, e.span, self.lower_expr_value(e)),
                             Stmt::LetFun { .. } => unreachable!(),
                         };
-                        let rest_ce = self.lower_block(rest);
+                        let rest_ce = self.lower_block_with_return_k(rest, return_k);
                         let (var, rest_ce) = match pat_opt {
                             Some(p) if is_assert => {
                                 self.destructure_pat_assert(p, rest_ce, let_span)
@@ -814,6 +839,10 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
+    }
+
+    pub(super) fn lower_block(&mut self, stmts: &[Stmt]) -> CExpr {
+        self.lower_block_with_return_k(stmts, self.current_return_k.clone())
     }
 
     // --- Outer-K threading for nested effect calls in branches ---

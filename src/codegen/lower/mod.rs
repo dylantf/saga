@@ -726,15 +726,11 @@ impl<'a> Lowerer<'a> {
 
             let has_effects = !handler_param_names.is_empty();
             let base_arity = arity - handler_param_names.len() - if has_effects { 1 } else { 0 };
+            let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
 
             // For effectful functions, set _ReturnK as current_return_k so
             // lower_block applies it at terminal positions. Handler aborts
             // bypass the function's normal return, so they skip _ReturnK.
-            let saved_return_k = self.current_return_k.take();
-            if has_effects {
-                self.current_return_k = Some(CExpr::Var("_ReturnK".to_string()));
-            }
-
             let all_simple_params = clauses.len() == 1
                 && clauses[0].0.iter().all(|p| {
                     matches!(
@@ -747,7 +743,9 @@ impl<'a> Lowerer<'a> {
                             }
                     )
                 });
-            let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() && all_simple_params {
+            let fun_body = self.with_current_return_k(
+                effect_return_k.clone(),
+                |this| if clauses.len() == 1 && clauses[0].1.is_none() && all_simple_params {
                 // Single clause, no guard: emit directly without a case wrapper.
                 let (params, _, body) = clauses[0];
                 let mut params_ce = lower_params(params);
@@ -771,9 +769,9 @@ impl<'a> Lowerer<'a> {
                 // Special case: if the body is a terminal effect call, pass _ReturnK
                 // directly as K so abort-style handlers skip the rest (proper CPS).
                 let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
-                    self.lower_terminal_effectful_expr(body)
+                    this.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())
                 } else {
-                    self.lower_expr(body)
+                    this.lower_expr(body)
                 };
                 CExpr::Fun(params_ce, Box::new(body_ce))
             } else {
@@ -793,8 +791,8 @@ impl<'a> Lowerer<'a> {
                         let pat = if base_arity == 1 {
                             lower_pat(
                                 &params[0],
-                                &self.record_fields,
-                                &self.constructor_atoms,
+                                &this.record_fields,
+                                &this.constructor_atoms,
                             )
                         } else if base_arity == 0 {
                             // No user params to match on -- use wildcard
@@ -804,33 +802,20 @@ impl<'a> Lowerer<'a> {
                                 params
                                     .iter()
                                     .map(|p| {
-                                        lower_pat(p, &self.record_fields, &self.constructor_atoms)
+                                        lower_pat(p, &this.record_fields, &this.constructor_atoms)
                                     })
                                     .collect(),
                             )
                         };
-                        let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
+                        let guard_ce = guard.as_deref().map(|g| this.lower_expr(g));
                         let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. })
                         {
-                            if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
-                                let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
-                                self.lower_effect_call(
-                                    op_name,
-                                    qualifier,
-                                    &args_owned,
-                                    self.current_return_k.clone(),
-                                )
-                            } else if self.has_nested_effectful_expr(body) {
-                                let k_var = self.fresh();
-                                let k_ce = self.current_return_k.clone().unwrap();
-                                let body_ce = self.lower_expr_with_k(body, &k_var);
-                                CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
-                            } else {
-                                let body_ce = self.lower_expr(body);
-                                self.apply_return_k(body_ce)
-                            }
+                            this.lower_terminal_effectful_expr_with_return_k(
+                                body,
+                                effect_return_k.clone(),
+                            )
                         } else {
-                            self.lower_expr(body)
+                            this.lower_expr(body)
                         };
                         CArm {
                             pat,
@@ -856,9 +841,7 @@ impl<'a> Lowerer<'a> {
                 };
                 let case_ce = CExpr::Case(Box::new(scrut_ce), arms);
                 CExpr::Fun(arg_vars, Box::new(case_ce))
-            };
-
-            self.current_return_k = saved_return_k;
+            });
 
             self.current_handler_params = saved_handler_params;
             self.current_effectful_vars = saved_effectful_vars;
@@ -1449,7 +1432,6 @@ impl<'a> Lowerer<'a> {
                 });
                 let mut param_vars = lower_params(params);
                 let saved_handler_params = self.current_handler_params.clone();
-                let saved_return_k = self.current_return_k.take();
                 // If a lambda_effect_context is set (from being passed to an
                 // effectful HOF parameter), add handler params for those effects.
                 // This ensures both pure and effectful lambdas have the right arity.
@@ -1464,21 +1446,28 @@ impl<'a> Lowerer<'a> {
                     }
                     // Add _ReturnK parameter for effectful lambdas
                     param_vars.push("_ReturnK".to_string());
-                    self.current_return_k = Some(CExpr::Var("_ReturnK".to_string()));
                     is_effectful_lambda = true;
                 } else {
                     // Not in a HOF context, but check if the body uses effects
                     // directly (e.g. lambda defined in a block that already has
                     // handler params in scope -- those are captured, not parameterized).
                 }
-                let body_ce = if is_effectful_lambda && !matches!(body.kind, ExprKind::Block { .. })
-                {
-                    self.lower_terminal_effectful_expr(body)
-                } else {
-                    self.lower_expr(body)
-                };
+                let effect_return_k =
+                    is_effectful_lambda.then(|| CExpr::Var("_ReturnK".to_string()));
+                let body_ce = self.with_current_return_k(
+                    effect_return_k.clone(),
+                    |this| {
+                        if is_effectful_lambda && !matches!(body.kind, ExprKind::Block { .. }) {
+                            this.lower_terminal_effectful_expr_with_return_k(
+                                body,
+                                effect_return_k.clone(),
+                            )
+                        } else {
+                            this.lower_expr(body)
+                        }
+                    },
+                );
                 self.current_handler_params = saved_handler_params;
-                self.current_return_k = saved_return_k;
                 // If lambda has complex params (tuples, constructors), wrap
                 // the body in a case expression for destructuring.
                 let body_ce = if !all_simple {
