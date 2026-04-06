@@ -1051,7 +1051,7 @@ impl Checker {
                 t = ret;
             }
             self.let_dict_params
-                .insert((name.to_string(), pat_id), (dict_params, arity));
+                .insert((name.to_string(), pat_id), crate::typechecker::result::LetDictInfo { params: dict_params, value_arity: arity });
         }
 
         self.env.insert_with_def(name.to_string(), scheme, pat_id);

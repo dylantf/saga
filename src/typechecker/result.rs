@@ -14,6 +14,15 @@ use super::{
 /// Prettified effect op: (op_name, [(label, type)], return_type).
 pub type PrettifiedOp = (String, Vec<(String, Type)>, Type);
 
+/// Dictionary-passing info for a let binding with trait constraints.
+#[derive(Debug, Clone)]
+pub struct LetDictInfo {
+    /// Dictionary parameter pairs: (trait_name, dict_param_name).
+    pub params: Vec<(String, String)>,
+    /// Arity of the value (number of non-dict arguments).
+    pub value_arity: usize,
+}
+
 /// The public output of typechecking. Downstream consumers (elaborator, lowerer,
 /// LSP) read from this instead of reaching into Checker internals.
 #[derive(Clone)]
@@ -48,7 +57,7 @@ pub struct CheckResult {
     /// Maps effect call span -> (handler arm span, source module) (LSP go-to-def, level 1).
     pub effect_call_targets: HashMap<crate::token::Span, (crate::token::Span, Option<String>)>,
     /// Dict params for let bindings with trait constraints: (name, pat_id) -> (params, value_arity).
-    pub let_dict_params: HashMap<(String, crate::ast::NodeId), (Vec<(String, String)>, usize)>,
+    pub let_dict_params: HashMap<(String, crate::ast::NodeId), LetDictInfo>,
     /// Deferred effects for let bindings that partially apply effectful functions.
     /// name -> effect names. Used by the lowerer to register effectful local vars.
     pub let_effect_bindings: HashMap<String, Vec<String>>,
@@ -74,23 +83,32 @@ pub struct CheckResult {
 impl CheckResult {
     /// Whether typechecking found any errors.
     pub fn has_errors(&self) -> bool {
-        self.diagnostics.iter().any(|d| matches!(d.severity, Severity::Error))
+        self.diagnostics
+            .iter()
+            .any(|d| matches!(d.severity, Severity::Error))
     }
 
     /// All errors.
     pub fn errors(&self) -> Vec<&Diagnostic> {
-        self.diagnostics.iter().filter(|d| matches!(d.severity, Severity::Error)).collect()
+        self.diagnostics
+            .iter()
+            .filter(|d| matches!(d.severity, Severity::Error))
+            .collect()
     }
 
     /// All warnings.
     pub fn warnings(&self) -> Vec<&Diagnostic> {
-        self.diagnostics.iter().filter(|d| matches!(d.severity, Severity::Warning)).collect()
+        self.diagnostics
+            .iter()
+            .filter(|d| matches!(d.severity, Severity::Warning))
+            .collect()
     }
 
     /// Look up an effect by name, resolving bare/aliased names through the scope_map.
     pub fn resolve_effect(&self, name: &str) -> Option<&EffectDefInfo> {
         self.effects.get(name).or_else(|| {
-            self.scope_map.resolve_effect(name)
+            self.scope_map
+                .resolve_effect(name)
                 .and_then(|canonical| self.effects.get(canonical))
         })
     }
@@ -147,9 +165,7 @@ impl CheckResult {
 
     /// Look up a resolved type by node id for downstream compiler passes.
     pub fn resolved_type_for_node(&self, node_id: crate::ast::NodeId) -> Option<super::Type> {
-        self.type_at_node
-            .get(&node_id)
-            .map(|ty| self.sub.apply(ty))
+        self.type_at_node.get(&node_id).map(|ty| self.sub.apply(ty))
     }
 
     /// Look up the resolved type at a span (for Pat bindings), applying the substitution.
@@ -177,10 +193,7 @@ impl CheckResult {
 
     /// Prettify record field types with consistent variable naming.
     /// Returns field `(name, type)` pairs with free vars renamed to a, b, c, ...
-    pub fn prettify_record(
-        &self,
-        info: &super::RecordInfo,
-    ) -> Vec<(String, super::Type)> {
+    pub fn prettify_record(&self, info: &super::RecordInfo) -> Vec<(String, super::Type)> {
         let resolved: Vec<(String, super::Type)> = info
             .fields
             .iter()
@@ -209,10 +222,7 @@ impl CheckResult {
 
     /// Prettify all types in an effect definition with consistent variable naming.
     /// Returns `(params, return_type)` pairs for each op, with free vars renamed to a, b, c, ...
-    pub fn prettify_effect(
-        &self,
-        info: &super::EffectDefInfo,
-    ) -> Vec<PrettifiedOp> {
+    pub fn prettify_effect(&self, info: &super::EffectDefInfo) -> Vec<PrettifiedOp> {
         // Resolve all types through substitution first
         let resolved_ops: Vec<PrettifiedOp> = info
             .ops

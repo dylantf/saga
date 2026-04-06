@@ -921,15 +921,15 @@ main () = reveal (make_token \"hello\")
 // ---- Effect and handler exposing rules ----
 
 /// Typecheck a source and return the error messages (empty if no errors).
-fn typecheck_errors(source: &str, checker: &mut typechecker::Checker) -> Vec<String> {
-    let tokens = lexer::Lexer::new(source).lex().expect("lex error");
-    let mut program = parser::Parser::new(tokens)
-        .parse_program()
-        .expect("parse error");
-    dylang::desugar::desugar_program(&mut program);
-    let result = checker.check_program(&mut program);
-    result.errors().iter().map(|d| d.message.clone()).collect()
-}
+// fn typecheck_errors(source: &str, checker: &mut typechecker::Checker) -> Vec<String> {
+//     let tokens = lexer::Lexer::new(source).lex().expect("lex error");
+//     let mut program = parser::Parser::new(tokens)
+//         .parse_program()
+//         .expect("parse error");
+//     dylang::desugar::desugar_program(&mut program);
+//     let result = checker.check_program(&mut program);
+//     result.errors().iter().map(|d| d.message.clone()).collect()
+// }
 
 #[test]
 fn effect_bare_needs_works_with_import() {

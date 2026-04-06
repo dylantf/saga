@@ -12,7 +12,7 @@ mod records;
 mod resolve;
 mod result;
 mod unify;
-pub use result::CheckResult;
+pub use result::{CheckResult, LetDictInfo};
 
 #[cfg(test)]
 mod tests;
@@ -77,12 +77,18 @@ pub struct EffectRow {
 
 impl EffectRow {
     pub fn closed(effects: Vec<EffectEntry>) -> Self {
-        EffectRow { effects, tail: None }
+        EffectRow {
+            effects,
+            tail: None,
+        }
     }
 
     /// Empty closed row (pure -- no effects).
     pub fn empty() -> Self {
-        EffectRow { effects: vec![], tail: None }
+        EffectRow {
+            effects: vec![],
+            tail: None,
+        }
     }
 
     /// True if this is a closed row with no effects.
@@ -109,17 +115,25 @@ impl EffectRow {
                 effects.push(entry.clone());
             }
         }
-        EffectRow { effects, tail: None }
+        EffectRow {
+            effects,
+            tail: None,
+        }
     }
 
     /// Remove handled effects by name. Only removes unnamed entries.
     /// Remove handled effects by name.
     pub fn subtract(&self, handled: &std::collections::HashSet<String>) -> EffectRow {
-        let effects = self.effects.iter()
+        let effects = self
+            .effects
+            .iter()
             .filter(|e| !handled.contains(&e.name))
             .cloned()
             .collect();
-        EffectRow { effects, tail: self.tail.clone() }
+        EffectRow {
+            effects,
+            tail: self.tail.clone(),
+        }
     }
 }
 
@@ -218,9 +232,7 @@ impl std::fmt::Display for Type {
                         // Wrap multi-arg type applications in parens for readability,
                         // but not tuples (they already render as (A, B))
                         match arg {
-                            Type::Con(n, inner_args)
-                                if !inner_args.is_empty() && n != "Tuple" =>
-                            {
+                            Type::Con(n, inner_args) if !inner_args.is_empty() && n != "Tuple" => {
                                 write!(f, " ({})", arg)?;
                             }
                             _ => write!(f, " {}", arg)?,
@@ -284,19 +296,18 @@ impl Substitution {
                     .collect(),
             ),
             Type::Error => Type::Error,
-
         }
     }
 
     /// Apply the substitution to an effect row, resolving type args and chasing
     /// row variable bindings.
     pub fn apply_effect_row(&self, row: &EffectRow) -> EffectRow {
-        let mut effects: Vec<EffectEntry> = row.effects.iter()
-            .map(|entry| {
-                EffectEntry {
-                    name: entry.name.clone(),
-                    args: entry.args.iter().map(|t| self.apply(t)).collect(),
-                }
+        let mut effects: Vec<EffectEntry> = row
+            .effects
+            .iter()
+            .map(|entry| EffectEntry {
+                name: entry.name.clone(),
+                args: entry.args.iter().map(|t| self.apply(t)).collect(),
             })
             .collect();
         let mut tail = row.tail.as_ref().map(|t| Box::new(self.apply(t)));
@@ -385,7 +396,8 @@ impl Substitution {
             Type::Fun(a, b, row) => {
                 self.occurs(id, a)
                     || self.occurs(id, b)
-                    || row.effects
+                    || row
+                        .effects
                         .iter()
                         .any(|entry| entry.args.iter().any(|t| self.occurs(id, t)))
             }
@@ -454,7 +466,9 @@ impl Scheme {
                 let extra_names: Vec<String> = extra_types
                     .iter()
                     .map(|ty| match ty {
-                        Type::Var(id) => names.get(id).cloned().unwrap_or_else(|| format!("?{}", id)),
+                        Type::Var(id) => {
+                            names.get(id).cloned().unwrap_or_else(|| format!("?{}", id))
+                        }
                         other => format!("{}", rename_vars(other, &names)),
                     })
                     .collect();
@@ -472,9 +486,7 @@ impl Scheme {
 }
 
 // Module export types are defined in check_module.rs and re-exported here.
-pub use check_module::{
-    EffectDef, EffectOpDef, ModuleCodegenInfo, ModuleExports, TraitImplDict,
-};
+pub use check_module::{EffectDef, EffectOpDef, ModuleCodegenInfo, ModuleExports, TraitImplDict};
 
 // --- Type environment ---
 
@@ -802,7 +814,7 @@ pub struct Checker {
     /// Dict params for let bindings with trait constraints.
     /// Keyed by (name, pat_node_id) to avoid collisions between same-named
     /// bindings in different scopes (e.g. multiple test bodies).
-    pub(crate) let_dict_params: HashMap<(String, NodeId), (Vec<(String, String)>, usize)>,
+    pub(crate) let_dict_params: HashMap<(String, NodeId), result::LetDictInfo>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Warnings deferred until after inference, when substitutions are complete.
@@ -868,7 +880,9 @@ impl ScopeMap {
     /// Get the source module for a user-visible name, checking all name kinds.
     pub fn origin_of(&self, name: &str) -> Option<&str> {
         // Resolve the user-visible name to canonical, then look up origin
-        let canonical = self.values.get(name)
+        let canonical = self
+            .values
+            .get(name)
             .or_else(|| self.constructors.get(name))
             .or_else(|| self.effects.get(name))
             .or_else(|| self.traits.get(name))
@@ -895,7 +909,9 @@ impl ScopeMap {
             self.types.entry(k.clone()).or_insert_with(|| v.clone());
         }
         for (k, v) in &other.constructors {
-            self.constructors.entry(k.clone()).or_insert_with(|| v.clone());
+            self.constructors
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
         }
         for (k, v) in &other.effects {
             self.effects.entry(k.clone()).or_insert_with(|| v.clone());
@@ -1167,7 +1183,10 @@ impl Checker {
     pub(crate) fn record_effect_ref(&mut self, effect_ref: &crate::ast::EffectRef) {
         let name_end = effect_ref.span.start + effect_ref.name.len();
         self.lsp.type_references.push((
-            Span { start: effect_ref.span.start, end: name_end },
+            Span {
+                start: effect_ref.span.start,
+                end: name_end,
+            },
             effect_ref.name.clone(),
         ));
     }
@@ -1213,7 +1232,8 @@ impl Checker {
             match warning {
                 PendingWarning::DiscardedValue { span, ty } => {
                     let resolved = self.sub.apply(&ty);
-                    let is_unit = matches!(&resolved, Type::Con(n, args) if n == "Unit" && args.is_empty());
+                    let is_unit =
+                        matches!(&resolved, Type::Con(n, args) if n == "Unit" && args.is_empty());
                     if !is_unit && !matches!(resolved, Type::Var(_) | Type::Error) {
                         let display_ty = self.prettify_type(&ty);
                         self.collected_diagnostics.push(Diagnostic::warning_at(
@@ -1328,7 +1348,9 @@ impl Checker {
     /// Push a single named effect onto the accumulator, deduplicating by name.
     pub(crate) fn emit_effect(&mut self, name: String, args: Vec<Type>) {
         if !self.effect_row.effects.iter().any(|e| e.name == name) {
-            self.effect_row.effects.push(EffectEntry::unnamed(name, args));
+            self.effect_row
+                .effects
+                .push(EffectEntry::unnamed(name, args));
         }
     }
 
@@ -1365,16 +1387,12 @@ impl Checker {
                 &mut self.effect_meta.type_param_cache,
                 scope.effect_cache,
             ),
-            field_candidates: std::mem::replace(
-                &mut self.field_candidates,
-                scope.field_candidates,
-            ),
+            field_candidates: std::mem::replace(&mut self.field_candidates, scope.field_candidates),
         };
         self.resume_type = scope.resume_type;
         self.resume_return_type = scope.resume_return_type;
         result
     }
-
 }
 
 /// Extract all effect names from a type by walking Fun nodes' effect rows.

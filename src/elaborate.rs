@@ -112,11 +112,11 @@ impl Elaborator {
         // whether a specific binding needs dict wrapping.
         let mut let_binding_arities: HashMap<String, usize> = HashMap::new();
         let mut let_dict_pat_ids: HashMap<String, HashSet<crate::ast::NodeId>> = HashMap::new();
-        for ((name, pat_id), (params, arity)) in &result.let_dict_params {
+        for ((name, pat_id), info) in &result.let_dict_params {
             inferred_dict_params
                 .entry(name.clone())
-                .or_insert_with(|| params.clone());
-            let_binding_arities.insert(name.clone(), *arity);
+                .or_insert_with(|| info.params.clone());
+            let_binding_arities.insert(name.clone(), info.value_arity);
             let_dict_pat_ids
                 .entry(name.clone())
                 .or_default()
