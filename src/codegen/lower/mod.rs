@@ -1224,7 +1224,12 @@ impl<'a> Lowerer<'a> {
                             {
                                 self.lambda_effect_context = Some(effs.clone());
                             }
+                            // Save pending_callee_return_k so inner effectful calls
+                            // (e.g. `expr with handler` in argument position) don't
+                            // steal the continuation meant for THIS call.
+                            let saved_pending_k = self.pending_callee_return_k.take();
                             let ce = self.lower_expr(arg);
+                            self.pending_callee_return_k = saved_pending_k;
                             self.lambda_effect_context = saved_ctx;
                             arg_vars.push(v.clone());
                             bindings.push((v, ce));
