@@ -44,6 +44,14 @@ fn count_lambda_params(body: &Expr) -> usize {
     }
 }
 
+fn is_unit_type_expr(ty: &ast::TypeExpr) -> bool {
+    match ty {
+        ast::TypeExpr::Named { name, .. } => name == "Unit",
+        ast::TypeExpr::Labeled { inner, .. } => is_unit_type_expr(inner),
+        _ => false,
+    }
+}
+
 /// Stored handler definition for CPS inlining at `with` sites.
 #[derive(Clone)]
 struct HandlerInfo {
@@ -458,7 +466,6 @@ impl<'a> Lowerer<'a> {
                 // Fall back to fun_info which has CPS-expanded effect info.
                 self.fun_effects(name).cloned()
             }
-            Some(ResolvedName::ExternalFun { .. }) => None,
             // Not in resolution map -> local variable, no effects.
             None => None,
         }
@@ -475,27 +482,6 @@ impl<'a> Lowerer<'a> {
     ) -> CExpr {
         use super::resolve::ResolvedName;
         let call = match self.resolved.get(&head_node_id) {
-            Some(ResolvedName::ExternalFun {
-                erlang_mod,
-                erlang_func,
-                ..
-            }) => {
-                // float_to_list/1 -> float_to_list/2 with [short] option
-                if erlang_mod == "erlang" && erlang_func == "float_to_list" && call_args.len() == 1
-                {
-                    let opts = CExpr::Cons(
-                        Box::new(CExpr::Lit(CLit::Atom("short".into()))),
-                        Box::new(CExpr::Nil),
-                    );
-                    CExpr::Call(
-                        erlang_mod.clone(),
-                        erlang_func.clone(),
-                        vec![call_args.into_iter().next().unwrap(), opts],
-                    )
-                } else {
-                    CExpr::Call(erlang_mod.clone(), erlang_func.clone(), call_args)
-                }
-            }
             Some(ResolvedName::ImportedFun {
                 erlang_mod,
                 name: erl_name,
@@ -660,8 +646,12 @@ impl<'a> Lowerer<'a> {
                 };
                 let arity = params.len();
                 let arg_vars: Vec<String> = (0..arity).map(|i| format!("_Ext{}", i)).collect();
-                let call_args: Vec<CExpr> =
-                    arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
+                let call_args: Vec<CExpr> = arg_vars
+                    .iter()
+                    .zip(params.iter())
+                    .filter(|(_, (_, ty))| !is_unit_type_expr(ty))
+                    .map(|(v, _)| CExpr::Var(v.clone()))
+                    .collect();
                 let call = CExpr::Call(erl_module.clone(), erl_func.clone(), call_args);
                 fun_defs.push(CFunDef {
                     name: name.clone(),
@@ -818,23 +808,10 @@ impl<'a> Lowerer<'a> {
                 let arms: Vec<CArm> = clauses
                     .iter()
                     .map(|(params, guard, body)| {
-                        // Unit params were dropped in arity counting; filter here too.
-                        let non_unit_pats: Vec<&Pat> = params
-                            .iter()
-                            .filter(|p| {
-                                !matches!(
-                                    p,
-                                    Pat::Lit {
-                                        value: ast::Lit::Unit,
-                                        ..
-                                    }
-                                )
-                            })
-                            .collect();
                         // Pattern only matches user params, not handler params
                         let pat = if base_arity == 1 {
                             lower_pat(
-                                non_unit_pats[0],
+                                &params[0],
                                 &self.record_fields,
                                 &self.constructor_atoms,
                             )
@@ -843,7 +820,7 @@ impl<'a> Lowerer<'a> {
                             CPat::Wildcard
                         } else {
                             CPat::Values(
-                                non_unit_pats
+                                params
                                     .iter()
                                     .map(|p| {
                                         lower_pat(p, &self.record_fields, &self.constructor_atoms)
@@ -1013,19 +990,6 @@ impl<'a> Lowerer<'a> {
                             )
                         }
                     }
-                    Some(ResolvedName::ExternalFun {
-                        erlang_mod,
-                        erlang_func,
-                        arity,
-                    }) => CExpr::Call(
-                        "erlang".to_string(),
-                        "make_fun".to_string(),
-                        vec![
-                            CExpr::Lit(CLit::Atom(erlang_mod.clone())),
-                            CExpr::Lit(CLit::Atom(erlang_func.clone())),
-                            CExpr::Lit(CLit::Int(*arity as i64)),
-                        ],
-                    ),
                     Some(ResolvedName::LocalFun {
                         name,
                         arity,
@@ -1192,29 +1156,15 @@ impl<'a> Lowerer<'a> {
                     let effect_count = callee_handler_entries.len();
                     let total_arity = self.fun_arity(func_name);
 
-                    // Filter out unit literal args (they don't count toward arity)
-                    let non_unit_args: Vec<&Expr> = args
-                        .into_iter()
-                        .filter(|a| {
-                            !matches!(
-                                a.kind,
-                                ExprKind::Lit {
-                                    value: ast::Lit::Unit,
-                                    ..
-                                }
-                            )
-                        })
-                        .collect();
-
                     let return_k_count = if effect_count > 0 { 1 } else { 0 };
                     if let Some(arity) = total_arity
-                        && non_unit_args.len() + effect_count + return_k_count == arity
+                        && args.len() + effect_count + return_k_count == arity
                     {
                         // Saturated call: apply fun 'name'/N(arg1, ..., argN, handler1, ...)
                         let mut arg_vars: Vec<String> = Vec::new();
                         let mut bindings: Vec<(String, CExpr)> = Vec::new();
                         let callee_param_effs = self.param_absorbed_effects(func_name).cloned();
-                        for (i, arg) in non_unit_args.iter().enumerate() {
+                        for (i, arg) in args.iter().enumerate() {
                             let v = self.fresh();
                             // If this arg position has absorbed effects, set context
                             // so lambdas at this position get handler params added.
@@ -1283,11 +1233,11 @@ impl<'a> Lowerer<'a> {
                     // (bound by `with`) and the lambda also takes _ReturnK.
                     if let Some(arity) = total_arity {
                         let user_slots = arity - effect_count - return_k_count;
-                        if non_unit_args.len() < user_slots {
-                            let remaining_user = user_slots - non_unit_args.len();
+                        if args.len() < user_slots {
+                            let remaining_user = user_slots - args.len();
                             let mut arg_vars: Vec<String> = Vec::new();
                             let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                            for arg in &non_unit_args {
+                            for arg in &args {
                                 let v = self.fresh();
                                 let ce = self.lower_expr_value(arg);
                                 arg_vars.push(v.clone());
@@ -1336,20 +1286,7 @@ impl<'a> Lowerer<'a> {
                 {
                     let mut arg_vars: Vec<String> = Vec::new();
                     let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                    // Filter out unit literal args
-                    let non_unit_args: Vec<&Expr> = args
-                        .into_iter()
-                        .filter(|a| {
-                            !matches!(
-                                a.kind,
-                                ExprKind::Lit {
-                                    value: ast::Lit::Unit,
-                                    ..
-                                }
-                            )
-                        })
-                        .collect();
-                    for arg in non_unit_args {
+                    for arg in args {
                         let v = self.fresh();
                         let ce = self.lower_expr_value(arg);
                         arg_vars.push(v.clone());
@@ -1397,19 +1334,7 @@ impl<'a> Lowerer<'a> {
                 }
                 args_rev.reverse();
 
-                // Filter out unit literal args
-                let args: Vec<&Expr> = args_rev
-                    .into_iter()
-                    .filter(|a| {
-                        !matches!(
-                            a.kind,
-                            ExprKind::Lit {
-                                value: ast::Lit::Unit,
-                                ..
-                            }
-                        )
-                    })
-                    .collect();
+                let args = args_rev;
 
                 // Check if callee is a known function with mismatched arity.
                 // If so, split into a saturated call + apply of remaining args.
@@ -1778,19 +1703,6 @@ impl<'a> Lowerer<'a> {
                                 )
                             }
                         }
-                        ResolvedName::ExternalFun {
-                            erlang_mod,
-                            erlang_func,
-                            arity,
-                        } => CExpr::Call(
-                            "erlang".to_string(),
-                            "make_fun".to_string(),
-                            vec![
-                                CExpr::Lit(CLit::Atom(erlang_mod.clone())),
-                                CExpr::Lit(CLit::Atom(erlang_func.clone())),
-                                CExpr::Lit(CLit::Int(*arity as i64)),
-                            ],
-                        ),
                         ResolvedName::LocalFun { name, arity, .. } => {
                             if *arity == 0 {
                                 if let Some(inlined) = self.inline_vals.get(name) {
@@ -2158,25 +2070,11 @@ impl<'a> Lowerer<'a> {
             .map(|effs| self.effect_handler_ops(effs))
             .unwrap_or_default();
 
-        // Filter out unit literal args
-        let non_unit_args: Vec<&&Expr> = args
-            .iter()
-            .filter(|a| {
-                !matches!(
-                    a.kind,
-                    ExprKind::Lit {
-                        value: ast::Lit::Unit,
-                        ..
-                    }
-                )
-            })
-            .collect();
-
         let mut arg_vars: Vec<String> = Vec::new();
         let mut bindings: Vec<(String, CExpr)> = Vec::new();
 
         let callee_param_effs = self.param_absorbed_effects(&qualified).cloned();
-        for (i, arg) in non_unit_args.iter().enumerate() {
+        for (i, arg) in args.iter().enumerate() {
             let v = self.fresh();
             // If this arg position has absorbed effects, set context
             // so lambdas at this position get handler params added.
@@ -2218,11 +2116,6 @@ impl<'a> Lowerer<'a> {
         let call_args: Vec<CExpr> = arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
         use super::resolve::ResolvedName;
         let call = match self.resolved.get(&head.id) {
-            Some(ResolvedName::ExternalFun {
-                erlang_mod,
-                erlang_func,
-                ..
-            }) => CExpr::Call(erlang_mod.clone(), erlang_func.clone(), call_args),
             Some(ResolvedName::ImportedFun {
                 erlang_mod, name, ..
             }) => CExpr::Call(erlang_mod.clone(), name.clone(), call_args),

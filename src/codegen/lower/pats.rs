@@ -5,18 +5,13 @@ use std::collections::HashMap;
 use super::util::{core_var, lower_lit, mangle_ctor_atom, process_string_escapes};
 
 /// Map a function's parameter patterns to Core Erlang variable names.
-/// Unit patterns are dropped (they contribute no variable).
 pub(super) fn lower_params(params: &[Pat]) -> Vec<String> {
     params
         .iter()
         .enumerate()
-        .filter_map(|(i, pat)| match pat {
-            Pat::Lit {
-                value: Lit::Unit, ..
-            } => None,
-            Pat::Var { name, .. } => Some(core_var(name)),
-            Pat::Wildcard { .. } => Some(format!("_Arg{}", i)),
-            _ => Some(format!("_Arg{}", i)),
+        .map(|(i, pat)| match pat {
+            Pat::Var { name, .. } => core_var(name),
+            _ => format!("_Arg{}", i),
         })
         .collect()
 }

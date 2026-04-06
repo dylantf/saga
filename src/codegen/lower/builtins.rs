@@ -108,7 +108,7 @@ impl Lowerer<'_> {
         self.current_return_k = saved_return_k;
         self.pending_callee_return_k = saved_pending_k;
 
-        let applied = CExpr::Apply(Box::new(thunk), vec![]);
+        let applied = CExpr::Apply(Box::new(thunk), vec![CExpr::Lit(CLit::Atom("unit".into()))]);
         let ok_var = self.fresh();
         let class_var = self.fresh();
         let reason_var = self.fresh();

@@ -293,7 +293,7 @@ main () = add 1 2
         "double should be exported\n{export_line}"
     );
     assert!(
-        export_line.contains("'main'/0"),
+        export_line.contains("'main'/1"),
         "main should be exported\n{export_line}"
     );
 }
@@ -902,7 +902,7 @@ main () = reveal (make_token \"hello\")
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s~n\", [main:main()]), init:stop().")
+        .arg("io:format(\"~s~n\", [main:main(unit)]), init:stop().")
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);

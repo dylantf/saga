@@ -161,12 +161,6 @@ pub enum ResolvedName {
         arity: usize,
         effects: Vec<String>,
     },
-    /// An @external function (maps to a specific Erlang module:function).
-    ExternalFun {
-        erlang_mod: String,
-        erlang_func: String,
-        arity: usize,
-    },
 }
 
 /// Resolution table: maps each AST NodeId to its resolved meaning.
@@ -186,11 +180,6 @@ enum ScopedName {
         name: String,
         arity: usize,
         effects: Vec<String>,
-    },
-    ExternalFun {
-        erlang_mod: String,
-        erlang_func: String,
-        arity: usize,
     },
 }
 
@@ -381,7 +370,6 @@ pub fn resolve_names(
 
     // Step 1: Register local functions (highest priority)
     let mut local_funs: HashMap<String, usize> = HashMap::new();
-    let mut local_externals: HashMap<String, (String, String, usize)> = HashMap::new();
     for decl in program {
         match decl {
             Decl::FunBinding { name, params, .. } => {
@@ -396,28 +384,17 @@ pub fn resolve_names(
                 annotations,
                 ..
             } => {
-                if let Some((erl_mod, erl_func)) = extract_external(annotations) {
-                    let arity = params.len();
-                    local_externals.insert(name.clone(), (erl_mod, erl_func, arity));
-                } else {
+                if extract_external(annotations).is_none() {
                     // Signature without body: register arity from params
+                    local_funs.entry(name.clone()).or_insert(params.len());
+                } else {
+                    // @external functions lower to generated local wrappers with
+                    // the same source-level arity.
                     local_funs.entry(name.clone()).or_insert(params.len());
                 }
             }
             _ => {}
         }
-    }
-
-    // Register local externals
-    for (name, (erl_mod, erl_func, arity)) in &local_externals {
-        scope.insert(
-            name.clone(),
-            ScopedName::ExternalFun {
-                erlang_mod: erl_mod.clone(),
-                erlang_func: erl_func.clone(),
-                arity: *arity,
-            },
-        );
     }
 
     // Register local functions (overrides externals with same name).
@@ -479,15 +456,6 @@ pub fn resolve_names(
                 }
             };
 
-            // Build a lookup of external functions for this module
-            let ext_map: HashMap<String, (String, String, usize)> = info
-                .external_funs
-                .iter()
-                .map(|(name, erl_mod, erl_func, arity)| {
-                    (name.clone(), (erl_mod.clone(), erl_func.clone(), *arity))
-                })
-                .collect();
-
             // Build effect lookup for this module
             let fun_effects_map: HashMap<&str, &Vec<String>> = info
                 .fun_effects
@@ -514,20 +482,11 @@ pub fn resolve_names(
                 let return_k = if handler_param_count > 0 { 1 } else { 0 };
                 let expanded_arity = arity + dict_params + handler_param_count + return_k;
 
-                // Check if this is an @external function
-                let scoped = if let Some((erl_mod, erl_func, ext_arity)) = ext_map.get(name) {
-                    ScopedName::ExternalFun {
-                        erlang_mod: erl_mod.clone(),
-                        erlang_func: erl_func.clone(),
-                        arity: *ext_arity,
-                    }
-                } else {
-                    ScopedName::ImportedFun {
-                        erlang_mod: erlang_mod.clone(),
-                        name: name.clone(),
-                        arity: expanded_arity,
-                        effects,
-                    }
+                let scoped = ScopedName::ImportedFun {
+                    erlang_mod: erlang_mod.clone(),
+                    name: name.clone(),
+                    arity: expanded_arity,
+                    effects,
                 };
 
                 // Canonical: full module path (e.g. "Std.String.replace")
@@ -547,7 +506,6 @@ pub fn resolve_names(
                 // Register unqualified form only if exposed and not shadowed by local
                 if is_exposed(name)
                     && !local_funs.contains_key(name)
-                    && !local_externals.contains_key(name)
                 {
                     scope.entry(name.clone()).or_insert(scoped);
                 }
@@ -986,15 +944,6 @@ fn scoped_to_resolved(scoped: &ScopedName) -> ResolvedName {
             name: name.clone(),
             arity: *arity,
             effects: effects.clone(),
-        },
-        ScopedName::ExternalFun {
-            erlang_mod,
-            erlang_func,
-            arity,
-        } => ResolvedName::ExternalFun {
-            erlang_mod: erlang_mod.clone(),
-            erlang_func: erlang_func.clone(),
-            arity: *arity,
         },
     }
 }

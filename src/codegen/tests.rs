@@ -100,7 +100,7 @@ main () = {
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("'build_msg'/3"),
+        out.contains("'build_msg'/4"),
         "expected eta-reduced effectful function ref to use lowered arity\n{out}"
     );
     assert!(
@@ -138,7 +138,7 @@ main () = {
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("'build_msg'/3"),
+        out.contains("'build_msg'/4"),
         "expected aliased effectful function ref to use lowered arity\n{out}"
     );
     assert!(
@@ -173,7 +173,7 @@ main () = {
     "#;
     let out = emit_full(src);
     assert!(
-        out.contains("'build_msg'/3"),
+        out.contains("'build_msg'/4"),
         "expected block-local effectful let-fun to use lowered arity\n{out}"
     );
     assert!(
@@ -270,8 +270,8 @@ fn if_else_arms() {
 
 #[test]
 fn fun_arity_zero_for_unit_param() {
-    // `main ()` has a unit param -- should export as 'main'/0
-    assert_contains("main () = 42", "'main'/0");
+    // `main ()` keeps its Unit parameter at the Dylang lowering level.
+    assert_contains("main () = 42", "'main'/1");
 }
 
 #[test]
@@ -803,6 +803,28 @@ main () = get "x" (empty ())
     assert!(
         out.contains("call 'maps':'get'"),
         "Expected call to maps:get in:\n{out}"
+    );
+}
+
+#[test]
+fn external_fun_value_preserves_surface_unit_arity() {
+    let src = r#"
+@external("erlang", "maps", "new")
+fun empty : Unit -> Dict a b
+
+main () = {
+  let f = empty
+  f ()
+}
+"#;
+    let out = emit(src);
+    assert!(
+        out.contains("'empty'/1"),
+        "Expected external wrapper to keep surface Unit arity\n{out}"
+    );
+    assert!(
+        out.contains("call 'maps':'new'"),
+        "Expected wrapper body to call maps:new\n{out}"
     );
 }
 
