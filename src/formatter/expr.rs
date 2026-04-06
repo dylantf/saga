@@ -310,7 +310,13 @@ pub fn format_expr(expr: &Expr) -> Doc {
         }
 
         ExprKind::With { expr, handler } => {
-            let expr_doc = format_expr(expr);
+            // If the inner expression is itself a `with`, wrap it in parens
+            // to preserve associativity: `(e with h1) with h2`
+            let expr_doc = if matches!(expr.kind, ExprKind::With { .. }) {
+                docs![Doc::text("("), format_expr(expr), Doc::text(")")]
+            } else {
+                format_expr(expr)
+            };
             let handler_doc = format_handler(handler);
             match handler.as_ref() {
                 // Inline handler: always break the block, but keep expr with { on same line

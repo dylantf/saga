@@ -1133,6 +1133,17 @@ fn with_inline_handler_braces_on_same_line() {
     assert!(result.contains("with {"), "result: {}", result);
 }
 
+#[test]
+fn with_nested_preserves_parens() {
+    let src = "f x = (g x with h1) with {\n  fail _ = 1\n}";
+    let result = fmt80(src);
+    assert!(
+        result.contains("(g x with h1) with"),
+        "nested with must keep parens: {}",
+        result
+    );
+}
+
 // --- Lambda ---
 
 #[test]
