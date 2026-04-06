@@ -8,7 +8,7 @@ opaque type Dynamic = Dynamic
 
 #@ An error produced when decoding a Dynamic value fails.
 pub type DecodeError =
-  | DecodeError String String (List String)
+  | DecodeError (expected: String) (found: String) (List String)
   deriving (Eq)
 
 impl Debug for DecodeError {

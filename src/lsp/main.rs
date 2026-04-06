@@ -331,29 +331,30 @@ fn find_effect_op_signature_from_result(
     op_name: &str,
 ) -> Option<String> {
     for (effect_name, info) in &tc_result.effects {
-        for op in &info.ops {
-            if op.name == op_name {
-                let params: Vec<String> = op
-                    .params
+        for (name, params, ret) in tc_result.prettify_effect(info) {
+            if name == op_name {
+                let display_name = tc_result
+                    .scope_map
+                    .shortest_alias(effect_name, &tc_result.scope_map.effects)
+                    .unwrap_or(effect_name.as_str());
+                let param_strs: Vec<String> = params
                     .iter()
                     .map(|(label, ty)| {
-                        let resolved = tc_result.sub.apply(ty);
                         if label.starts_with('_') {
-                            format!("{}", resolved)
+                            format!("{}", ty)
                         } else {
-                            format!("({}: {})", label, resolved)
+                            format!("({}: {})", label, ty)
                         }
                     })
                     .collect();
-                let ret = tc_result.sub.apply(&op.return_type);
-                let sig = if params.is_empty() {
-                    format!("{}.{} : Unit -> {}", effect_name, op_name, ret)
+                let sig = if param_strs.is_empty() {
+                    format!("{}.{} : Unit -> {}", display_name, op_name, ret)
                 } else {
                     format!(
                         "{}.{} : {} -> {}",
-                        effect_name,
+                        display_name,
                         op_name,
-                        params.join(" -> "),
+                        param_strs.join(" -> "),
                         ret
                     )
                 };
@@ -1015,10 +1016,7 @@ impl LanguageServer for Backend {
         }))
     }
 
-    async fn formatting(
-        &self,
-        params: DocumentFormattingParams,
-    ) -> Result<Option<Vec<TextEdit>>> {
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         let uri = params.text_document.uri;
         let Some(snap) = self.snapshot(&uri) else {
             return Ok(None);
@@ -1042,7 +1040,11 @@ impl LanguageServer for Backend {
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .and_then(|d| checker::find_project_root(&d))
-            .map(|root| dylang::project_config::ProjectConfig::load(&root).formatter.width)
+            .map(|root| {
+                dylang::project_config::ProjectConfig::load(&root)
+                    .formatter
+                    .width
+            })
             .unwrap_or(formatter::DEFAULT_WIDTH);
 
         let formatted = formatter::format(&annotated, width);

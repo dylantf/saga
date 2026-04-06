@@ -869,6 +869,19 @@ impl ScopeMap {
         self.constructors.get(name).map(|s| s.as_str())
     }
 
+    /// Find the shortest user-visible alias that maps to `canonical` in the given namespace.
+    pub fn shortest_alias<'a>(
+        &'a self,
+        canonical: &str,
+        namespace: &'a HashMap<String, String>,
+    ) -> Option<&'a str> {
+        namespace
+            .iter()
+            .filter(|(_, c)| c.as_str() == canonical)
+            .map(|(alias, _)| alias.as_str())
+            .min_by_key(|a| a.len())
+    }
+
     pub fn resolve_effect(&self, name: &str) -> Option<&str> {
         self.effects.get(name).map(|s| s.as_str())
     }
