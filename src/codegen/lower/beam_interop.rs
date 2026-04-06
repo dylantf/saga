@@ -41,6 +41,8 @@ enum ArgTransform {
     PrependAtom(&'static str),
     /// Reorder args by index (e.g., send_after: `[1, 0, 2]` = pid,ms,msg -> ms,pid,msg).
     Reorder(&'static [usize]),
+    /// Wrap the arg at the given index in a zero-arity thunk that calls it with `unit`.
+    WrapThunk(usize),
 }
 
 /// A BEAM-native effect operation descriptor.
@@ -62,7 +64,7 @@ const BEAM_NATIVE_OPS: &[(&str, BeamNativeOp)] = &[
             module: "erlang",
             func: "spawn",
             param_count: 1,
-            arg_transform: ArgTransform::Identity,
+            arg_transform: ArgTransform::WrapThunk(0),
             exit_reason_arg: None,
         },
     ),
@@ -203,6 +205,23 @@ pub fn build_native_call(
             .iter()
             .map(|&i| CExpr::Var(param_vars[i].clone()))
             .collect(),
+        ArgTransform::WrapThunk(idx) => param_vars
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if i == *idx {
+                    CExpr::Fun(
+                        vec![],
+                        Box::new(CExpr::Apply(
+                            Box::new(CExpr::Var(v.clone())),
+                            vec![CExpr::Lit(CLit::Atom("unit".into()))],
+                        )),
+                    )
+                } else {
+                    CExpr::Var(v.clone())
+                }
+            })
+            .collect(),
     };
 
     // If an arg needs ExitReason ADT->Erlang conversion, wrap it.
@@ -217,6 +236,7 @@ pub fn build_native_call(
             .map(|(i, arg)| {
                 let is_target = match &op.arg_transform {
                     ArgTransform::Reorder(indices) => indices.get(i) == Some(&arg_idx),
+                    ArgTransform::WrapThunk(idx) => *idx == arg_idx && i == arg_idx,
                     _ => i == arg_idx,
                 };
                 if is_target {

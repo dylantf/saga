@@ -311,12 +311,8 @@ pub fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
     let mut arity = 0;
     let mut effects = BTreeSet::new();
     let mut current = ty;
-    while let Type::Fun(param, ret, row) = current {
-        // Unit parameters are stripped by lower_params and filtered at call sites,
-        // so they don't count toward arity.
-        if !matches!(param.as_ref(), Type::Con(name, args) if name == "Unit" && args.is_empty()) {
-            arity += 1;
-        }
+    while let Type::Fun(_param, ret, row) = current {
+        arity += 1;
         for entry in &row.effects {
             effects.insert(entry.name.clone());
         }
@@ -333,11 +329,6 @@ pub(super) fn param_absorbed_effects_from_type(ty: &Type) -> HashMap<usize, Vec<
     let mut current = ty;
     let mut param_index = 0;
     while let Type::Fun(param, ret, _) = current {
-        // Skip Unit parameters (they're stripped at call sites)
-        if matches!(param.as_ref(), Type::Con(name, args) if name == "Unit" && args.is_empty()) {
-            current = ret;
-            continue;
-        }
         let effs = collect_effarrow_effects(param);
         if !effs.is_empty() {
             result.insert(param_index, effs);

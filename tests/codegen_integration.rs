@@ -559,8 +559,8 @@ fun do_work : Unit -> Int needs {Log}
 do_work () = 42
 ";
     let out = emit_elaborated(src);
-    // do_work takes 0 user params + 1 handler param + 1 _ReturnK = arity 2
-    assert_contains(&out, "'do_work'/2");
+    // do_work takes 1 user param (Unit) + 1 handler param + 1 _ReturnK = arity 3
+    assert_contains(&out, "'do_work'/3");
     assert_contains(&out, "_Handle__script_Log_log");
 }
 
@@ -643,7 +643,7 @@ main () = do_work () with silent
     let out = emit_elaborated(src);
     // main should bind _HandleLog from the silent handler and call do_work
     assert_contains(&out, "_Handle__script_Log_log");
-    assert_contains(&out, "apply 'do_work'/2");
+    assert_contains(&out, "apply 'do_work'/3");
 }
 
 #[test]
@@ -663,7 +663,7 @@ main () = risky () with {
     let out = emit_elaborated(src);
     // Should have an inline handler function bound to _HandleFail
     assert_contains(&out, "_Handle__script_Fail_fail");
-    assert_contains(&out, "apply 'risky'/2");
+    assert_contains(&out, "apply 'risky'/3");
 }
 
 #[test]
@@ -759,10 +759,10 @@ main () = outer () with silent
 "#;
     let out = emit_elaborated(src);
     // outer should pass its _HandleLog to inner
-    // inner/1 takes _HandleLog, outer/1 takes _HandleLog,
+    // inner/outer each take Unit + _HandleLog + _ReturnK
     // outer calls inner with its own _HandleLog
-    assert_contains(&out, "'inner'/2");
-    assert_contains(&out, "'outer'/2");
+    assert_contains(&out, "'inner'/3");
+    assert_contains(&out, "'outer'/3");
 }
 
 #[test]
@@ -820,7 +820,7 @@ main () = do_work () with silent
     let out = emit_elaborated(src);
     // do_work should have nested handler applies with continuations
     // wrapping the let bindings and final value
-    assert_contains(&out, "'do_work'/2");
+    assert_contains(&out, "'do_work'/3");
     assert_contains(&out, "apply _Handle__script_Log_log(");
     // x = 10 + 20 should appear inside a continuation
     assert_contains(&out, "call 'erlang':'+'");
@@ -884,11 +884,11 @@ handler silent for Log {
 main () = outer () with silent
 "#;
     let out = emit_elaborated(src);
-    // Both should take _HandleLog
-    assert_contains(&out, "'inner'/2");
-    assert_contains(&out, "'outer'/2");
+    // Both should take Unit + _HandleLog + _ReturnK
+    assert_contains(&out, "'inner'/3");
+    assert_contains(&out, "'outer'/3");
     // outer's body should call inner with _HandleLog and _ReturnK passed through
-    assert_contains(&out, "apply 'inner'/2(_Handle__script_Log_log");
+    assert_contains(&out, "apply 'inner'/3(");
 }
 
 #[test]
@@ -925,8 +925,8 @@ main () = risky_work () with {
 }
 "#;
     let out = emit_elaborated(src);
-    // risky_work needs 2 handler params + 1 _ReturnK (Fail + Log, sorted alphabetically)
-    assert_contains(&out, "'risky_work'/3");
+    // risky_work needs Unit + 2 handler params + 1 _ReturnK
+    assert_contains(&out, "'risky_work'/4");
     // Both handler params should be present
     assert_contains(&out, "_Handle__script_Fail_fail");
     assert_contains(&out, "_Handle__script_Log_log");
@@ -1897,19 +1897,19 @@ main () = {
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("call 'lists':'reverse'"),
-        "List.reverse should emit lists:reverse\n{out}"
+        out.contains("call 'std_list':'reverse'"),
+        "List.reverse should emit std_list:reverse wrapper\n{out}"
     );
     assert!(
-        out.contains("call 'std_string_bridge':'reverse'"),
-        "String.reverse should emit std_string_bridge:reverse\n{out}"
+        out.contains("call 'std_string':'reverse'"),
+        "String.reverse should emit std_string:reverse wrapper\n{out}"
     );
 }
 
 #[test]
 fn exposed_external_overrides_unqualified_lookup() {
     // When reverse is explicitly exposed from Std.String, an unqualified
-    // call to reverse must resolve to std_string_bridge:reverse, not lists:reverse.
+    // call to reverse must resolve to Std.String's wrapper, not Std.List's.
     let src = r#"
 import Std.String (reverse)
 
@@ -1917,12 +1917,12 @@ main () = reverse "hello"
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("call 'std_string_bridge':'reverse'"),
-        "Exposed reverse should emit std_string_bridge:reverse, not lists:reverse\n{out}"
+        out.contains("call 'std_string':'reverse'"),
+        "Exposed reverse should emit std_string:reverse, not std_list:reverse\n{out}"
     );
     assert!(
-        !out.contains("call 'lists':'reverse'"),
-        "Should not contain lists:reverse\n{out}"
+        !out.contains("call 'std_list':'reverse'"),
+        "Should not contain std_list:reverse\n{out}"
     );
 }
 
@@ -1942,12 +1942,12 @@ main () = {
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("call 'std_string_bridge':'reverse'"),
-        "Exposed reverse should emit std_string_bridge:reverse\n{out}"
+        out.contains("call 'std_string':'reverse'"),
+        "Exposed reverse should emit std_string:reverse wrapper\n{out}"
     );
     assert!(
-        out.contains("call 'lists':'reverse'"),
-        "List.reverse should emit lists:reverse\n{out}"
+        out.contains("call 'std_list':'reverse'"),
+        "List.reverse should emit std_list:reverse wrapper\n{out}"
     );
 }
 

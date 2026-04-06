@@ -507,21 +507,9 @@ impl<'a> Lowerer<'a> {
                     let arms: Vec<CArm> = clauses
                         .iter()
                         .map(|(params, guard, body)| {
-                            let non_unit_pats: Vec<&Pat> = params
-                                .iter()
-                                .filter(|p| {
-                                    !matches!(
-                                        p,
-                                        Pat::Lit {
-                                            value: crate::ast::Lit::Unit,
-                                            ..
-                                        }
-                                    )
-                                })
-                                .collect();
                             let pat = if base_arity == 1 {
                                 pats::lower_pat(
-                                    non_unit_pats[0],
+                                    &params[0],
                                     &self.record_fields,
                                     &self.constructor_atoms,
                                 )
@@ -529,7 +517,7 @@ impl<'a> Lowerer<'a> {
                                 CPat::Wildcard
                             } else {
                                 CPat::Values(
-                                    non_unit_pats
+                                    params
                                         .iter()
                                         .map(|p| {
                                             pats::lower_pat(

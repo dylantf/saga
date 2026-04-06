@@ -555,7 +555,7 @@ pub fn run_erlc(build_dir: &Path, build_start: Instant) {
 /// Run a compiled module on the BEAM.
 pub fn exec_erl(build_dir: &Path, stdlib_dir: &Path, extra_pa: &[PathBuf], entry_module: &str) {
     let eval = format!(
-        "try '{}':main() of _ -> init:stop() catch C:R:S -> dylang_runtime:format_crash(C, R, S), init:stop(1) end",
+        "try '{}':main(unit) of _ -> init:stop() catch C:R:S -> dylang_runtime:format_crash(C, R, S), init:stop(1) end",
         entry_module
     );
     let mut cmd = std::process::Command::new("erl");
