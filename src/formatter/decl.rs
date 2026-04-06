@@ -333,7 +333,7 @@ pub fn format_effect_def(
         |op| {
             docs![
                 Doc::text(format!("fun {} : ", op.name)),
-                format_fun_type(&op.params, &op.return_type, &[], &None)
+                format_fun_type(&op.params, &op.return_type, &op.effects, &op.effect_row_var)
             ]
         },
         dangling,

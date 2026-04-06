@@ -1,0 +1,238 @@
+import Std.Actor (
+  Process,
+  Actor,
+  Monitor,
+  Link,
+  Timer,
+  beam_actor,
+  Shutdown,
+  Killed
+)
+import Std.Test (describe, test, assert_eq)
+
+type CounterMsg =
+  | Increment Int
+  | GetCount (Pid Int)
+  | Stop
+
+fun counter : (count: Int) -> Unit needs {Process, Actor CounterMsg}
+counter count = {
+  receive {
+    Increment n -> counter (count + n)
+    GetCount caller -> {
+      send! caller count
+      counter count
+    }
+    Stop -> ()
+  }
+}
+
+type EchoMsg = Echo String (Pid String)
+
+fun echo_server : Unit -> Unit needs {Process, Actor EchoMsg}
+echo_server () = {
+  receive {
+    Echo msg caller -> {
+      send! caller msg
+      echo_server ()
+    }
+  }
+}
+
+# -- Test runner functions --
+
+fun test_echo : Unit -> String needs {Process, Actor String}
+test_echo () = {
+  let pid = spawn! (fun () -> echo_server ())
+  send! pid (Echo "hello" (self! ()))
+  receive {
+    msg -> msg
+  }
+}
+
+fun test_counter_accumulate : Unit -> Int needs {Process, Actor Int}
+test_counter_accumulate () = {
+  let pid = spawn! (fun () -> counter 0)
+  send! pid (Increment 5)
+  send! pid (Increment 3)
+  send! pid (GetCount (self! ()))
+  receive {
+    n -> n
+  }
+}
+
+fun test_counter_stop : Unit -> Maybe Int needs {Process, Actor Int}
+test_counter_stop () = {
+  let pid = spawn! (fun () -> counter 10)
+  send! pid Stop
+  send! pid (GetCount (self! ()))
+  receive {
+    n -> Just n
+    after 200 -> Nothing
+  }
+}
+
+fun test_self : Unit -> String needs {Process, Actor String}
+test_self () = {
+  let me = self! ()
+  let pid = spawn! (fun () -> echo_server ())
+  send! pid (Echo "ping" me)
+  receive {
+    msg -> msg
+  }
+}
+
+fun test_sleep : Unit -> String needs {Timer}
+test_sleep () = {
+  sleep! 50
+  "done"
+}
+
+fun test_receive_timeout : Unit -> Maybe Int needs {Actor Int}
+test_receive_timeout () = {
+  receive {
+    n -> Just n
+    after 50 -> Nothing
+  }
+}
+
+fun test_monitor_shutdown : Unit -> String
+  needs {Process, Actor String, Monitor}
+test_monitor_shutdown () = {
+  let pid = spawn! (fun () -> echo_server ())
+  let _ref = monitor! pid
+  exit! pid Shutdown
+  receive {
+    Down _pid reason -> show reason
+    after 1000 -> "timeout"
+  }
+}
+
+fun test_monitor_killed : Unit -> String needs {Process, Actor String, Monitor}
+test_monitor_killed () = {
+  let pid = spawn! (fun () -> {
+    receive {
+      _ -> ()
+    }
+  })
+  let _ref = monitor! pid
+  exit! pid Killed
+  receive {
+    Down _pid reason -> show reason
+    after 1000 -> "timeout"
+  }
+}
+
+fun test_monitor_normal : Unit -> String needs {Process, Actor String, Monitor}
+test_monitor_normal () = {
+  let pid = spawn! (fun () -> ())
+  let _ref = monitor! pid
+  receive {
+    Down _pid reason -> show reason
+    after 1000 -> "timeout"
+  }
+}
+
+fun test_exit : Unit -> String needs {Process, Actor String, Monitor}
+test_exit () = {
+  let pid = spawn! (fun () -> {
+    receive {
+      _ -> ()
+    }
+  })
+  let _ref = monitor! pid
+  exit! pid Shutdown
+  receive {
+    Down _pid _reason -> "exited"
+    after 1000 -> "timeout"
+  }
+}
+
+fun test_link_unlink : Unit -> String needs {Process, Actor String, Link}
+test_link_unlink () = {
+  let pid = spawn! (fun () -> {
+    receive {
+      _ -> ()
+    }
+  })
+  link! pid
+  unlink! pid
+  exit! pid Shutdown
+  "ok"
+}
+
+describe "Actor" {
+
+  describe "spawn and send" {
+    test "spawn a process and exchange messages" {
+      let result = test_echo () with beam_actor
+      assert_eq result "hello"
+    }
+
+    test "with in arg position" {
+      assert_eq (test_echo () with beam_actor) "hello"
+    }
+  }
+
+  describe "counter" {
+    test "accumulates state across messages" {
+      let result = test_counter_accumulate () with beam_actor
+      assert_eq result 8
+    }
+
+    test "stop terminates the counter" {
+      let result = test_counter_stop () with beam_actor
+      assert_eq result (Nothing : Maybe Int)
+    }
+  }
+
+  describe "self" {
+    test "self returns current process pid" {
+      let result = test_self () with beam_actor
+      assert_eq result "ping"
+    }
+  }
+
+  describe "timer" {
+    test "sleep pauses execution" {
+      let result = test_sleep () with beam_actor
+      assert_eq result "done"
+    }
+
+    test "receive with timeout" {
+      let result = test_receive_timeout () with beam_actor
+      assert_eq result (Nothing : Maybe Int)
+    }
+  }
+
+  describe "monitor" {
+    test "receives Down when monitored process exits with Shutdown" {
+      let result = test_monitor_shutdown () with beam_actor
+      assert_eq result "Shutdown"
+    }
+
+    test "receives Down with Killed reason" {
+      let result = test_monitor_killed () with beam_actor
+      assert_eq result "Killed"
+    }
+
+    test "receives Down Normal when process finishes" {
+      let result = test_monitor_normal () with beam_actor
+      assert_eq result "Normal"
+    }
+  }
+
+  describe "exit" {
+    test "exit terminates a running process" {
+      let result = test_exit () with beam_actor
+      assert_eq result "exited"
+    }
+  }
+
+  describe "link" {
+    test "link and unlink don't crash" {
+      let result = test_link_unlink () with beam_actor
+      assert_eq result "ok"
+    }
+  }
+}

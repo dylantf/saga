@@ -293,6 +293,32 @@ impl Checker {
         }
     }
 
+    /// Apply variable substitution to an effect row.
+    pub(crate) fn replace_vars_in_effect_row(
+        &self,
+        row: &EffectRow,
+        mapping: &HashMap<u32, Type>,
+    ) -> EffectRow {
+        EffectRow {
+            effects: row
+                .effects
+                .iter()
+                .map(|entry| super::EffectEntry {
+                    name: entry.name.clone(),
+                    args: entry
+                        .args
+                        .iter()
+                        .map(|t| self.replace_vars(t, mapping))
+                        .collect(),
+                })
+                .collect(),
+            tail: row
+                .tail
+                .as_ref()
+                .map(|t| Box::new(self.replace_vars(t, mapping))),
+        }
+    }
+
     /// Generalize a type over variables not free in the environment.
     pub(crate) fn generalize(&self, ty: &Type) -> Scheme {
         let resolved = self.sub.apply(ty);

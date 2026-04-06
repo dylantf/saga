@@ -1661,12 +1661,66 @@ impl Checker {
                 })
                 .collect();
             let return_type = self.convert_type_expr(&op.return_type, &mut params_list);
+            // Convert the op's own `needs` clause to an EffectRow
+            let needs = if !op.effects.is_empty() || op.effect_row_var.is_some() {
+                let effect_refs: Vec<EffectEntry> = op
+                    .effects
+                    .iter()
+                    .map(|e| {
+                        let args = e
+                            .type_args
+                            .iter()
+                            .map(|te| self.convert_type_expr(te, &mut params_list))
+                            .collect();
+                        let resolved_name = if let Some(info) = self.resolve_effect(&e.name) {
+                            info.source_module
+                                .as_ref()
+                                .map(|m| {
+                                    format!(
+                                        "{}.{}",
+                                        m,
+                                        e.name.rsplit('.').next().unwrap_or(&e.name)
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    if let Some(m) = &self.current_module {
+                                        format!("{}.{}", m, e.name)
+                                    } else {
+                                        e.name.clone()
+                                    }
+                                })
+                        } else {
+                            e.name.clone()
+                        };
+                        EffectEntry::unnamed(resolved_name, args)
+                    })
+                    .collect();
+                let tail = op.effect_row_var.as_ref().map(|(rv_name, _)| {
+                    let id =
+                        if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
+                            *id
+                        } else {
+                            let id = self.next_var;
+                            self.next_var += 1;
+                            params_list.push((rv_name.clone(), id));
+                            id
+                        };
+                    Box::new(Type::Var(id))
+                });
+                EffectRow {
+                    effects: effect_refs,
+                    tail,
+                }
+            } else {
+                EffectRow::empty()
+            };
             op_spans.insert(op.name.clone(), op.span);
             ops.push(EffectOpSig {
                 name: op.name.clone(),
                 effect_name: name.to_string(),
                 params: param_types,
                 return_type,
+                needs,
             });
         }
         if let Some(info) = self.effects.get_mut(&key) {
@@ -1810,6 +1864,7 @@ impl Checker {
                             })
                             .collect(),
                         return_type: self.replace_vars(&op.return_type, &handler_type_mapping),
+                        needs: op.needs.clone(),
                     };
                     matched_op = Some(specialized);
                 }

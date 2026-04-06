@@ -1,35 +1,26 @@
-import Std.Actor (Process, Actor, Monitor, Timer, beam_actor, Shutdown)
+import Std.Actor (Process, Actor, Link, beam_actor, Shutdown)
 
-type Msg = Ping
+type EchoMsg = Echo String (Pid String)
 
-fun worker : Unit -> Unit needs {Process, Actor Msg}
-worker () = {
+fun echo_server : Unit -> Unit needs {Process, Actor EchoMsg}
+echo_server () = {
   receive {
-    Ping -> {
-      dbg "worker: got ping"
-      worker ()
+    Echo msg caller -> {
+      send! caller msg
+      echo_server ()
     }
   }
 }
 
-fun run : Unit -> Unit needs {Process, Actor Int, Monitor, Timer}
+# Actor String is needed because the spawned lambda captures Actor handlers.
+# Previously this gave a false "unused effect" warning.
+fun run : Unit -> Unit needs {Process, Actor String, Link}
 run () = {
-  let pid = spawn! (fun () -> worker ())
-  let _ref = monitor! pid
-
-  # Send a message to prove it's alive
-  send! pid Ping
-  sleep! 50
-
-  # Now kill it
-  dbg "main: sending exit"
+  let pid = spawn! (fun () -> echo_server ())
+  link! pid
+  unlink! pid
   exit! pid Shutdown
-
-  # Wait for the DOWN message
-  receive {
-    Down pid reason -> dbg $"main: process died with {show reason}"
-    after 1000 -> dbg "main: timed out waiting for DOWN"
-  }
+  dbg "ok"
 }
 
 main () = {
