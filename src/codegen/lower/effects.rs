@@ -122,7 +122,7 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let v = self.fresh();
-            let ce = self.lower_expr(arg);
+            let ce = self.lower_expr_value(arg);
             bindings.push((v.clone(), ce));
             call_args.push(CExpr::Var(v));
         }
@@ -394,17 +394,9 @@ impl<'a> Lowerer<'a> {
             // When there is NO return clause: let the outer pending flow through as
             // _ReturnK so abort-style handlers skip subsequent statements.
             if let Some(rk) = return_k_lambda {
-                let saved_outer = self.pending_callee_return_k.take();
-                self.pending_callee_return_k = Some(rk);
-                let ce = self.lower_expr(expr);
-                self.pending_callee_return_k = saved_outer;
-                ce
+                self.lower_expr_with_pending_return_k(expr, Some(rk))
             } else if let Some(inherited_rk) = saved_return_k.clone() {
-                let saved_outer = self.pending_callee_return_k.take();
-                self.pending_callee_return_k = Some(inherited_rk);
-                let ce = self.lower_expr(expr);
-                self.pending_callee_return_k = saved_outer;
-                ce
+                self.lower_expr_with_pending_return_k(expr, Some(inherited_rk))
             } else {
                 self.lower_expr(expr)
             }
@@ -667,17 +659,9 @@ impl<'a> Lowerer<'a> {
             .unwrap_or(false);
         let result = if is_direct_effectful_call {
             if let Some(rk) = return_k_lambda {
-                let saved_outer = self.pending_callee_return_k.take();
-                self.pending_callee_return_k = Some(rk);
-                let ce = self.lower_expr(expr);
-                self.pending_callee_return_k = saved_outer;
-                ce
+                self.lower_expr_with_pending_return_k(expr, Some(rk))
             } else if let Some(inherited_rk) = saved_return_k.clone() {
-                let saved_outer = self.pending_callee_return_k.take();
-                self.pending_callee_return_k = Some(inherited_rk);
-                let ce = self.lower_expr(expr);
-                self.pending_callee_return_k = saved_outer;
-                ce
+                self.lower_expr_with_pending_return_k(expr, Some(inherited_rk))
             } else {
                 self.lower_expr(expr)
             }

@@ -87,6 +87,20 @@ struct FunInfo {
     param_absorbed_effects: HashMap<usize, Vec<String>>,
 }
 
+/// Explicit lowering context for value-producing vs terminal positions.
+///
+/// This is an incremental step away from relying entirely on ambient mutable
+/// continuation state (`current_return_k`, `pending_callee_return_k`) to infer
+/// whether a node is being lowered as a value or as the terminal computation of
+/// the surrounding CPS context.
+#[derive(Clone)]
+pub(super) enum LowerMode {
+    /// Lower as a value-producing subexpression.
+    Value,
+    /// Lower as a terminal computation whose successful result should flow to K.
+    Tail(CExpr),
+}
+
 pub struct Lowerer<'a> {
     counter: usize,
     /// Cross-module codegen context (compiled modules, effect bindings, prelude imports).
@@ -757,40 +771,7 @@ impl<'a> Lowerer<'a> {
                 // Special case: if the body is a terminal effect call, pass _ReturnK
                 // directly as K so abort-style handlers skip the rest (proper CPS).
                 let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
-                    if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
-                        let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
-                        self.lower_effect_call(
-                            op_name,
-                            qualifier,
-                            &args_owned,
-                            self.current_return_k.clone(),
-                        )
-                    } else if self.has_nested_effectful_expr(body) {
-                        // Nested effect calls in branches (e.g. if/case with fail!):
-                        // thread _ReturnK through branches so abort skips the wrap.
-                        let k_var = self.fresh();
-                        let k_ce = self.current_return_k.clone().unwrap();
-                        let body_ce = self.lower_expr_with_k(body, &k_var);
-                        CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
-                    } else {
-                        // Check for effectful function call: pass _ReturnK directly
-                        let is_eff_call = collect_fun_call(body)
-                            .map(|(name, _, _)| {
-                                self.is_effectful(name)
-                                    || self.current_effectful_vars.contains_key(name)
-                            })
-                            .unwrap_or(false);
-                        if is_eff_call {
-                            let saved = self.pending_callee_return_k.take();
-                            self.pending_callee_return_k = self.current_return_k.clone();
-                            let result = self.lower_expr(body);
-                            self.pending_callee_return_k = saved;
-                            result
-                        } else {
-                            let body_ce = self.lower_expr(body);
-                            self.apply_return_k(body_ce)
-                        }
-                    }
+                    self.lower_terminal_effectful_expr(body)
                 } else {
                     self.lower_expr(body)
                 };
@@ -1115,7 +1096,7 @@ impl<'a> Lowerer<'a> {
                     let (kind, arg) = if func_name == "todo" {
                         (ErrorKind::Todo, lower_string_to_binary("not implemented"))
                     } else {
-                        (ErrorKind::Panic, self.lower_expr(args[0]))
+                        (ErrorKind::Panic, self.lower_expr_value(args[0]))
                     };
                     let error = self.make_error(kind, CExpr::Var(v.clone()), Some(&expr.span));
                     return CExpr::Let(v, Box::new(arg), Box::new(error));
@@ -1202,11 +1183,7 @@ impl<'a> Lowerer<'a> {
                                 arg_vars.push(param.clone());
                             }
                             // Pass _ReturnK: take from pending (set by `with`), or identity
-                            let return_k =
-                                self.pending_callee_return_k.take().unwrap_or_else(|| {
-                                    let p = self.fresh();
-                                    CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
-                                });
+                            let return_k = self.take_pending_return_k_or_identity();
                             let rk_var = self.fresh();
                             bindings.push((rk_var.clone(), return_k));
                             arg_vars.push(rk_var);
@@ -1307,10 +1284,7 @@ impl<'a> Lowerer<'a> {
                     }
                     // Pass _ReturnK: take from pending (set by `with`), or identity
                     {
-                        let return_k = self.pending_callee_return_k.take().unwrap_or_else(|| {
-                            let p = self.fresh();
-                            CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
-                        });
+                        let return_k = self.take_pending_return_k_or_identity();
                         let rk_var = self.fresh();
                         bindings.push((rk_var.clone(), return_k));
                         arg_vars.push(rk_var);
@@ -1413,7 +1387,7 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::UnaryMinus { expr, .. } => {
                 let v = self.fresh();
-                let ce = self.lower_expr(expr);
+                let ce = self.lower_expr_value(expr);
                 CExpr::Let(
                     v.clone(),
                     Box::new(ce),
@@ -1432,7 +1406,7 @@ impl<'a> Lowerer<'a> {
                 ..
             } => {
                 let cond_var = self.fresh();
-                let cond_ce = self.lower_expr(cond);
+                let cond_ce = self.lower_expr_value(cond);
                 let then_ce = self.lower_expr(then_branch);
                 let else_ce = self.lower_expr(else_branch);
                 CExpr::Let(
@@ -1499,38 +1473,7 @@ impl<'a> Lowerer<'a> {
                 }
                 let body_ce = if is_effectful_lambda && !matches!(body.kind, ExprKind::Block { .. })
                 {
-                    if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
-                        let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
-                        self.lower_effect_call(
-                            op_name,
-                            qualifier,
-                            &args_owned,
-                            self.current_return_k.clone(),
-                        )
-                    } else if self.has_nested_effectful_expr(body) {
-                        let k_var = self.fresh();
-                        let k_ce = self.current_return_k.clone().unwrap();
-                        let body_ce = self.lower_expr_with_k(body, &k_var);
-                        CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
-                    } else {
-                        // Check for effectful function call: pass _ReturnK directly
-                        let is_eff_call = collect_fun_call(body)
-                            .map(|(name, _, _)| {
-                                self.is_effectful(name)
-                                    || self.current_effectful_vars.contains_key(name)
-                            })
-                            .unwrap_or(false);
-                        if is_eff_call {
-                            let saved = self.pending_callee_return_k.take();
-                            self.pending_callee_return_k = self.current_return_k.clone();
-                            let result = self.lower_expr(body);
-                            self.pending_callee_return_k = saved;
-                            result
-                        } else {
-                            let body_ce = self.lower_expr(body);
-                            self.apply_return_k(body_ce)
-                        }
-                    }
+                    self.lower_terminal_effectful_expr(body)
                 } else {
                     self.lower_expr(body)
                 };
@@ -1572,7 +1515,7 @@ impl<'a> Lowerer<'a> {
                 scrutinee, arms, ..
             } => {
                 let scrut_var = self.fresh();
-                let scrut_ce = self.lower_expr(scrutinee);
+                let scrut_ce = self.lower_expr_value(scrutinee);
                 let arms: Vec<_> = arms.iter().map(|a| a.node.clone()).collect();
                 let arms_ce = self.lower_case_arms(&scrut_var, &arms);
                 CExpr::Let(
@@ -1659,7 +1602,7 @@ impl<'a> Lowerer<'a> {
                     .collect();
 
                 let (timeout, timeout_body) = if let Some((t, b)) = after_clause {
-                    (self.lower_expr(t), self.lower_expr(b))
+                    (self.lower_expr_value(t), self.lower_expr(b))
                 } else {
                     (
                         CExpr::Lit(CLit::Atom("infinity".into())),
@@ -1732,7 +1675,7 @@ impl<'a> Lowerer<'a> {
                     let e = field_map
                         .get(field_name.as_str())
                         .expect("field missing in RecordCreate");
-                    let ce = self.lower_expr(e);
+                    let ce = self.lower_expr_value(e);
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
@@ -1759,7 +1702,7 @@ impl<'a> Lowerer<'a> {
                     let e = field_map
                         .get(field_name.as_str())
                         .expect("field missing in AnonRecordCreate");
-                    let ce = self.lower_expr(e);
+                    let ce = self.lower_expr_value(e);
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
@@ -1780,7 +1723,7 @@ impl<'a> Lowerer<'a> {
                     .map(|pos| pos + 2) // +1 for tag, +1 for 1-based
                     .unwrap_or(2) as i64;
                 let v = self.fresh();
-                let ce = self.lower_expr(expr);
+                let ce = self.lower_expr_value(expr);
                 CExpr::Let(
                     v.clone(),
                     Box::new(ce),
@@ -1794,7 +1737,7 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::RecordUpdate { record, fields, .. } => {
                 let rec_var = self.fresh();
-                let rec_ce = self.lower_expr(record);
+                let rec_ce = self.lower_expr_value(record);
                 let update_field_names: Vec<String> =
                     fields.iter().map(|(n, _, _)| n.clone()).collect();
                 let record_name = field_access_record_name(record)
@@ -1811,7 +1754,7 @@ impl<'a> Lowerer<'a> {
                 for (pos, field_name) in order.iter().enumerate() {
                     let v = self.fresh();
                     let ce = if let Some(new_expr) = field_map.get(field_name.as_str()) {
-                        self.lower_expr(new_expr)
+                        self.lower_expr_value(new_expr)
                     } else {
                         let idx = (pos + 2) as i64;
                         cerl_call(
@@ -1856,7 +1799,7 @@ impl<'a> Lowerer<'a> {
             } => {
                 // Lower to: let D = <dict> in element(idx+1, D)
                 let dict_var = self.fresh();
-                let dict_ce = self.lower_expr(dict);
+                let dict_ce = self.lower_expr_value(dict);
                 let extract_method = cerl_call(
                     "erlang",
                     "element",
@@ -1977,7 +1920,7 @@ impl<'a> Lowerer<'a> {
                     .clone()
                     .expect("resume used outside handler");
                 let v = self.fresh();
-                let ce = self.lower_expr(value);
+                let ce = self.lower_expr_value(value);
                 let k_call =
                     CExpr::Apply(Box::new(CExpr::Var(k_name)), vec![CExpr::Var(v.clone())]);
                 let k_or_wrapped = if let Some(ref finally_expr) =
@@ -2104,10 +2047,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             // Pass _ReturnK
-            let return_k = self.pending_callee_return_k.take().unwrap_or_else(|| {
-                let p = self.fresh();
-                CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
-            });
+            let return_k = self.take_pending_return_k_or_identity();
             let rk_var = self.fresh();
             bindings.push((rk_var.clone(), return_k));
             arg_vars.push(rk_var);
