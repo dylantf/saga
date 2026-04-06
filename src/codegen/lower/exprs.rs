@@ -29,6 +29,21 @@ fn is_guard_safe(expr: &Expr) -> bool {
 }
 
 impl<'a> Lowerer<'a> {
+    /// Lower an expression as a value-producing subexpression.
+    ///
+    /// This temporarily clears the ambient return continuation so nested
+    /// blocks used in expression position don't tail-call the enclosing
+    /// `_ReturnK` before the surrounding `let`/statement has a chance to
+    /// continue.
+    fn lower_expr_value(&mut self, expr: &Expr) -> CExpr {
+        let saved_return_k = self.current_return_k.take();
+        let saved_pending_k = self.pending_callee_return_k.take();
+        let ce = self.lower_expr(expr);
+        self.pending_callee_return_k = saved_pending_k;
+        self.current_return_k = saved_return_k;
+        ce
+    }
+
     /// Lower a list of case arms, handling complex guards by desugaring them
     /// into conditional expressions inside the arm body.
     ///
@@ -333,7 +348,7 @@ impl<'a> Lowerer<'a> {
             }
             [Stmt::Let { pattern, value, .. }] => {
                 let var = pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
-                let val_ce = self.lower_expr(value);
+                let val_ce = self.lower_expr_value(value);
                 let body = self.apply_return_k(CExpr::Var(var.clone()));
                 CExpr::Let(var, Box::new(val_ce), Box::new(body))
             }
@@ -717,8 +732,8 @@ impl<'a> Lowerer<'a> {
                                 assert,
                                 span,
                                 ..
-                            } => (Some(pattern), *assert, *span, self.lower_expr(value)),
-                            Stmt::Expr(e) => (None, false, e.span, self.lower_expr(e)),
+                            } => (Some(pattern), *assert, *span, self.lower_expr_value(value)),
+                            Stmt::Expr(e) => (None, false, e.span, self.lower_expr_value(e)),
                             Stmt::LetFun { .. } => unreachable!(),
                         };
                         let rest_ce = self.lower_block(rest);
