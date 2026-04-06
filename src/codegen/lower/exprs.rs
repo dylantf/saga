@@ -114,6 +114,15 @@ impl<'a> Lowerer<'a> {
 
     /// Lower a saturated constructor call to the appropriate Core Erlang form.
     pub(super) fn lower_ctor(&mut self, name: &str, args: Vec<&Expr>) -> CExpr {
+        // Check the bare name (after any module prefix) for ExitReason bare atoms
+        let bare_name = name.rsplit('.').next().unwrap_or(name);
+        if args.is_empty() && super::beam_interop::exit_reason_bare_atom(bare_name).is_some() {
+            return CExpr::Lit(CLit::Atom(
+                super::beam_interop::exit_reason_bare_atom(bare_name)
+                    .unwrap()
+                    .to_string(),
+            ));
+        }
         match name {
             "Nil" => CExpr::Nil,
             "Cons" if args.len() == 2 => {

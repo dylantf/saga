@@ -202,14 +202,14 @@ enum ScopedName {
 ///
 /// There are two kinds of local names:
 /// - **Variables** (function params, let bindings, lambda params, case bindings):
-///   block module-scope resolution → the lowerer emits `CExpr::Var`.
+///   block module-scope resolution -> the lowerer emits `CExpr::Var`.
 /// - **Local functions** (`let f x = ...` / LetFun): shadow module-scope names
-///   AND resolve as `LocalFun` → the lowerer emits `CExpr::FunRef`.
+///   AND resolve as `LocalFun` -> the lowerer emits `CExpr::FunRef`.
 ///
 /// Resolution order (first match wins):
-/// 1. Local variables → None (not in map → lowerer defaults to CExpr::Var)
-/// 2. Local functions → Some(LocalFun { .. })
-/// 3. Module-level scope → Some(LocalFun/ImportedFun/ExternalFun)
+/// 1. Local variables -> None (not in map -> lowerer defaults to CExpr::Var)
+/// 2. Local functions -> Some(LocalFun { .. })
+/// 3. Module-level scope -> Some(LocalFun/ImportedFun/ExternalFun)
 struct Scope<'a> {
     /// Module-level unqualified names (local funs, exposed imports, trait dicts).
     module: &'a HashMap<String, ScopedName>,
@@ -667,7 +667,7 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
                     map.insert(expr.id, scoped_to_resolved(scoped));
                 }
             }
-            // If locally bound or not in module scope → not in map →
+            // If locally bound or not in module scope -> not in map ->
             // lowerer treats as local variable (CExpr::Var).
         }
         ExprKind::QualifiedName { module, name, .. } => {
@@ -948,8 +948,7 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
                 resolve_expr(&seg.node, scope, map);
             }
         }
-        ExprKind::PipeBack { segments }
-        | ExprKind::ComposeForward { segments } => {
+        ExprKind::PipeBack { segments } | ExprKind::ComposeForward { segments } => {
             for seg in segments {
                 resolve_expr(&seg.node, scope, map);
             }

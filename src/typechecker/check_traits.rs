@@ -76,13 +76,13 @@ impl Checker {
     }
 
     /// Resolve a trait name to its canonical form.
-    /// Tries: exact match in traits → scope_map.traits → current_module.Name.
+    /// Tries: exact match in traits -> scope_map.traits -> current_module.Name.
     pub(crate) fn resolve_trait_name(&self, name: &str) -> Option<String> {
         // Exact match (already canonical)
         if self.trait_state.traits.contains_key(name) {
             return Some(name.to_string());
         }
-        // Scope map resolution (bare or aliased → canonical)
+        // Scope map resolution (bare or aliased -> canonical)
         if let Some(canonical) = self.scope_map.resolve_trait(name)
             && self.trait_state.traits.contains_key(canonical)
         {

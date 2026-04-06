@@ -1,12 +1,37 @@
-record Person {
-  name: String,
-  age: Int,
-} deriving (Debug, Eq)
+import Std.Actor (Process, Actor, Monitor, Timer, beam_actor, Shutdown)
+
+type Msg = Ping
+
+fun worker : Unit -> Unit needs {Process, Actor Msg}
+worker () = {
+  receive {
+    Ping -> {
+      dbg "worker: got ping"
+      worker ()
+    }
+  }
+}
+
+fun run : Unit -> Unit needs {Process, Actor Int, Monitor, Timer}
+run () = {
+  let pid = spawn! (fun () -> worker ())
+  let _ref = monitor! pid
+
+  # Send a message to prove it's alive
+  send! pid Ping
+  sleep! 50
+
+  # Now kill it
+  dbg "main: sending exit"
+  exit! pid Shutdown
+
+  # Wait for the DOWN message
+  receive {
+    Down pid reason -> dbg $"main: process died with {show reason}"
+    after 1000 -> dbg "main: timed out waiting for DOWN"
+  }
+}
 
 main () = {
-  let x : Maybe (List Person) = Just [
-    Person { name: "Alice", age: 30 },
-    Person { name: "Bob", age: 25 },
-  ]
-  dbg (debug x)
-}
+  run ()
+} with beam_actor

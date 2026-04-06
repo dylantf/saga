@@ -148,28 +148,10 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-    /// Op-name to BEAM BIF mapping for native effect operations.
-    /// Returns (erlang_module, erlang_func, param_count).
-    fn beam_native_op_info(op_name: &str) -> Option<(&'static str, &'static str, usize)> {
-        match op_name {
-            "spawn" => Some(("erlang", "spawn", 1)),
-            "self" => Some(("erlang", "self", 0)),
-            "send" => Some(("erlang", "send", 2)),
-            "monitor" => Some(("erlang", "monitor", 1)), // gets 'process' atom prepended
-            "demonitor" => Some(("erlang", "demonitor", 1)),
-            "link" => Some(("erlang", "link", 1)),
-            "unlink" => Some(("erlang", "unlink", 1)),
-            "sleep" => Some(("timer", "sleep", 1)),
-            "cancel_timer" => Some(("erlang", "cancel_timer", 1)),
-            "send_after" => Some(("erlang", "send_after", 3)), // args reordered
-            _ => None,
-        }
-    }
-
     /// Build a per-op handler function for a single BEAM-native operation.
     /// Synthesizes: `fun (Arg0, ..., ArgN, K) -> let R = mod:func(...) in K(R)`
     fn build_beam_native_op_fun(&mut self, op_name: &str) -> CExpr {
-        let (module, func, param_count) = Self::beam_native_op_info(op_name)
+        let (_, _, param_count) = super::beam_interop::lookup_native_op(op_name)
             .unwrap_or_else(|| panic!("unknown BEAM-native op: {}", op_name));
 
         let k_var = self.fresh();
@@ -178,28 +160,14 @@ impl<'a> Lowerer<'a> {
         let mut fun_params: Vec<String> = param_vars.clone();
         fun_params.push(k_var.clone());
 
-        // Build the BEAM call args from handler params
-        let call_args = match op_name {
-            "self" => vec![],
-            "monitor" => {
-                let mut a = vec![CExpr::Lit(CLit::Atom("process".into()))];
-                a.push(CExpr::Var(param_vars[0].clone()));
-                a
-            }
-            "send_after" => {
-                // reorder: pid, ms, msg -> ms, pid, msg
-                vec![
-                    CExpr::Var(param_vars[1].clone()),
-                    CExpr::Var(param_vars[0].clone()),
-                    CExpr::Var(param_vars[2].clone()),
-                ]
-            }
-            _ => param_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-        };
+        let ctor_atoms = self.constructor_atoms.clone();
+        let call = super::beam_interop::build_native_call(
+            op_name,
+            &param_vars,
+            &ctor_atoms,
+            &mut || self.fresh(),
+        );
 
-        let call = CExpr::Call(module.to_string(), func.to_string(), call_args);
-
-        // let Result = call(...) in K(Result)
         let result_var = self.fresh();
         let body = CExpr::Let(
             result_var.clone(),

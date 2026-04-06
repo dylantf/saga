@@ -24,7 +24,7 @@ fn collect_tuple_args(ty: &TypeExpr) -> Option<Vec<&TypeExpr>> {
 }
 
 pub fn format_type_expr(ty: &TypeExpr) -> Doc {
-    // Tuple sugar: Tuple applied to args → (A, B, ...)
+    // Tuple sugar: Tuple applied to args -> (A, B, ...)
     if let Some(args) = collect_tuple_args(ty) {
         let inner: Vec<Doc> = args.iter().map(|a| format_type_expr(a)).collect();
         return docs![Doc::text("("), Doc::join(Doc::text(", "), inner), Doc::text(")")];

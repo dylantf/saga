@@ -992,7 +992,7 @@ impl Checker {
 ///
 /// This is the name resolution logic: given a module's exports and the import
 /// parameters (module name, alias prefix, exposing list), compute all the
-/// user-visible-name → canonical-name mappings.
+/// user-visible-name -> canonical-name mappings.
 ///
 /// Validates that all exposed names actually exist in the module's exports.
 /// Returns an error message for the first invalid exposed name found.

@@ -40,9 +40,9 @@ impl<'a> Lowerer<'a> {
     ) -> HashMap<String, PendingAnnotation> {
         let mut pending_annotations: HashMap<String, PendingAnnotation> = HashMap::new();
 
-        // Build bare→canonical effect name resolver from all sources.
-        // Local effects: "Log" → "MyModule.Log"
-        // Imported effects: "Assert" → "Std.Test.Assert" (from codegen_info)
+        // Build bare->canonical effect name resolver from all sources.
+        // Local effects: "Log" -> "MyModule.Log"
+        // Imported effects: "Assert" -> "Std.Test.Assert" (from codegen_info)
         // Use source module name (e.g. "Std.Test") for canonical effect names so they
         // match the typechecker's naming (which also uses source module names).
         let source_module_name = program.iter().find_map(|d| {
@@ -69,7 +69,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-        // Also build bare→canonical for handler names.
+        // Also build bare->canonical for handler names.
         let mut handler_canonical: HashMap<String, String> = HashMap::new();
         for decl in program {
             if let Decl::HandlerDef { name, .. } = decl {

@@ -349,7 +349,7 @@ impl Parser {
         Ok(left)
     }
 
-    /// Function application: `f x y` → App(App(f, x), y)
+    /// Function application: `f x y` -> App(App(f, x), y)
     /// Greedily consumes arguments while the next token can start a primary.
     fn parse_application(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_postfix()?;
@@ -447,7 +447,7 @@ impl Parser {
                 };
 
                 // Qualified record create: `A.Animal { field: val }`
-                // Uses unqualified type name, consistent with how `A.Circle(5)` → Constructor("Circle").
+                // Uses unqualified type name, consistent with how `A.Circle(5)` -> Constructor("Circle").
                 if name.chars().next().is_some_and(|c| c.is_uppercase())
                     && matches!(self.peek(), Token::LBrace)
                 {

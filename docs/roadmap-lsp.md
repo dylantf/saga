@@ -16,7 +16,7 @@ lock-free hover/goto/completion.
 - [x] Go-to-definition -- local (same file)
 - [x] Go-to-definition -- cross-module (user modules, not stdlib)
 - [x] Go-to-definition -- module name click opens module file
-- [x] Go-to-definition -- effect calls (two-hop: `op!` → handler arm, handler arm → effect op definition)
+- [x] Go-to-definition -- effect calls (two-hop: `op!` -> handler arm, handler arm -> effect op definition)
 - [x] Completion -- variables, functions, constructors, effects, handlers, keywords
 - [x] Completion -- type info in detail field with constraints
 - [x] Module support -- imports resolve, module map per project root

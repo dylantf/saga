@@ -1,3 +1,4 @@
+mod beam_interop;
 mod builtins;
 mod effects;
 pub mod errors;
@@ -15,8 +16,7 @@ use init::{PendingAnnotation, extract_external};
 use pats::{lower_params, lower_pat};
 use util::{
     cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_qualified_call,
-    core_var, field_access_record_name, lower_lit, lower_string_to_binary,
-    process_string_escapes,
+    core_var, field_access_record_name, lower_lit, lower_string_to_binary, process_string_escapes,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -260,11 +260,6 @@ impl<'a> Lowerer<'a> {
         expr
     }
 
-    /// Known BEAM-native handlers: (module, handler_name) pairs.
-    /// These handlers' effects are lowered to direct BEAM calls instead of CPS.
-    const BEAM_NATIVE_HANDLERS: &'static [(&'static str, &'static str)] =
-        &[("Std.Actor", "Std.Actor.beam_actor")];
-
     /// Resolve a bare effect name to its canonical form.
     fn canonicalize_effect(&self, bare: &str) -> String {
         self.effect_canonical
@@ -306,11 +301,7 @@ impl<'a> Lowerer<'a> {
         self.handler_defs
             .get(&canonical)
             .and_then(|info| info.source_module.as_deref())
-            .is_some_and(|module| {
-                Self::BEAM_NATIVE_HANDLERS
-                    .iter()
-                    .any(|(m, h)| *m == module && *h == canonical.as_str())
-            })
+            .is_some_and(|module| beam_interop::is_beam_native_handler(module, &canonical))
     }
 
     /// Given a list of effect names (from a `needs` clause), return all
@@ -389,10 +380,7 @@ impl<'a> Lowerer<'a> {
 
         if !handler_ops.is_empty() {
             let rk = self.fresh();
-            call_args.push(CExpr::Fun(
-                vec![rk.clone()],
-                Box::new(CExpr::Var(rk)),
-            ));
+            call_args.push(CExpr::Fun(vec![rk.clone()], Box::new(CExpr::Var(rk))));
         }
 
         Some(CExpr::Fun(params, Box::new(make_call(call_args))))
@@ -408,10 +396,7 @@ impl<'a> Lowerer<'a> {
                 then_branch,
                 else_branch,
                 ..
-            } => {
-                self.branch_is_effectful(then_branch)
-                    || self.branch_is_effectful(else_branch)
-            }
+            } => self.branch_is_effectful(then_branch) || self.branch_is_effectful(else_branch),
             ExprKind::Case { arms, .. } => arms
                 .iter()
                 .any(|arm| self.branch_is_effectful(&arm.node.body)),
@@ -431,8 +416,7 @@ impl<'a> Lowerer<'a> {
         collect_effect_call(expr).is_some()
             || collect_fun_call(expr)
                 .map(|(name, _, _)| {
-                    self.is_effectful(name)
-                        || self.current_effectful_vars.contains_key(name)
+                    self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
                 })
                 .unwrap_or(false)
             || self.has_nested_effectful_expr(expr)
@@ -475,7 +459,7 @@ impl<'a> Lowerer<'a> {
                 self.fun_effects(name).cloned()
             }
             Some(ResolvedName::ExternalFun { .. }) => None,
-            // Not in resolution map → local variable, no effects.
+            // Not in resolution map -> local variable, no effects.
             None => None,
         }
     }
@@ -1003,11 +987,9 @@ impl<'a> Lowerer<'a> {
                             let arity = *arity;
                             let erl_mod = erlang_mod.clone();
                             let erl_fn = erl_name.clone();
-                            self.lower_effectful_fun_ref(
-                                &effects,
-                                arity,
-                                |args| CExpr::Call(erl_mod.clone(), erl_fn.clone(), args),
-                            )
+                            self.lower_effectful_fun_ref(&effects, arity, |args| {
+                                CExpr::Call(erl_mod.clone(), erl_fn.clone(), args)
+                            })
                             .unwrap_or_else(|| {
                                 CExpr::Call(
                                     "erlang".to_string(),
@@ -1044,7 +1026,11 @@ impl<'a> Lowerer<'a> {
                             CExpr::Lit(CLit::Int(*arity as i64)),
                         ],
                     ),
-                    Some(ResolvedName::LocalFun { name, arity, effects }) => {
+                    Some(ResolvedName::LocalFun {
+                        name,
+                        arity,
+                        effects,
+                    }) => {
                         if *arity == 0 {
                             // Val reference: check inline_vals first, then call
                             if let Some(inlined) = self.inline_vals.get(name) {
@@ -1063,21 +1049,13 @@ impl<'a> Lowerer<'a> {
                             };
                             if let Some(effects) = eff {
                                 let fun_name = name.clone();
-                                let lowered_arity =
-                                    self.fun_arity(&fun_name).unwrap_or(*arity);
-                                self.lower_effectful_fun_ref(
-                                    &effects,
-                                    lowered_arity,
-                                    |args| {
-                                        CExpr::Apply(
-                                            Box::new(CExpr::FunRef(
-                                                fun_name.clone(),
-                                                lowered_arity,
-                                            )),
-                                            args,
-                                        )
-                                    },
-                                )
+                                let lowered_arity = self.fun_arity(&fun_name).unwrap_or(*arity);
+                                self.lower_effectful_fun_ref(&effects, lowered_arity, |args| {
+                                    CExpr::Apply(
+                                        Box::new(CExpr::FunRef(fun_name.clone(), lowered_arity)),
+                                        args,
+                                    )
+                                })
                                 .unwrap_or(CExpr::FunRef(fun_name, lowered_arity))
                             } else {
                                 let lowered_arity = self.fun_arity(name).unwrap_or(*arity);
@@ -1497,22 +1475,25 @@ impl<'a> Lowerer<'a> {
                 }
             }
 
-            ExprKind::Constructor { name, .. } => match name.as_str() {
-                "Nil" => CExpr::Nil,
-                // Booleans are bare atoms to match Erlang's native true/false
-                "True" => CExpr::Lit(CLit::Atom("true".to_string())),
-                "False" => CExpr::Lit(CLit::Atom("false".to_string())),
-                // ExitReason constructors are bare atoms to match Erlang exit reasons
-                "Normal" => CExpr::Lit(CLit::Atom("normal".to_string())),
-                "Shutdown" => CExpr::Lit(CLit::Atom("shutdown".to_string())),
-                "Killed" => CExpr::Lit(CLit::Atom("killed".to_string())),
-                "Noproc" => CExpr::Lit(CLit::Atom("noproc".to_string())),
-                _ => {
-                    let atom = util::mangle_ctor_atom(name, &self.constructor_atoms);
-                    // Wrap in a 1-tuple to match pattern representation and avoid atom collisions
-                    CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(atom))])
+            ExprKind::Constructor { name, .. } => {
+                let bare_name = name.rsplit('.').next().unwrap_or(name);
+                match bare_name {
+                    "Nil" => CExpr::Nil,
+                    "True" => CExpr::Lit(CLit::Atom("true".to_string())),
+                    "False" => CExpr::Lit(CLit::Atom("false".to_string())),
+                    _ if beam_interop::exit_reason_bare_atom(bare_name).is_some() => {
+                        CExpr::Lit(CLit::Atom(
+                            beam_interop::exit_reason_bare_atom(bare_name)
+                                .unwrap()
+                                .to_string(),
+                        ))
+                    }
+                    _ => {
+                        let atom = util::mangle_ctor_atom(name, &self.constructor_atoms);
+                        CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(atom))])
+                    }
                 }
-            },
+            }
 
             ExprKind::BinOp {
                 op, left, right, ..
@@ -1698,13 +1679,12 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .map(|annotated| {
                         let arm = &annotated.node;
-                        // System message patterns: bind a raw reason variable
-                        // and wrap the body with a conversion case.
+                        // System message patterns (Down/Exit): match raw Erlang
+                        // tuple shapes and convert the reason field.
                         let (pat, reason_wrapper) = if let Pat::Constructor { name, args, .. } =
                             &arm.pattern
                         {
-                            if matches!(name.as_str(), "Down" | "Exit") && args.len() == 2 {
-                                // Check if reason arg is a variable that needs conversion
+                            if beam_interop::is_system_msg(name) && args.len() == 2 {
                                 let (reason_pat, wrapper) =
                                     if let Pat::Var { name: var_name, .. } = &args[1] {
                                         let raw = self.fresh();
@@ -1719,32 +1699,13 @@ impl<'a> Lowerer<'a> {
                                             None,
                                         )
                                     };
-
-                                let tuple_pat = if name == "Down" {
-                                    // {'DOWN', _Ref, 'process', Pid, Reason}
-                                    CPat::Tuple(vec![
-                                        CPat::Lit(CLit::Atom("DOWN".into())),
-                                        CPat::Wildcard,
-                                        CPat::Lit(CLit::Atom("process".into())),
-                                        lower_pat(
-                                            &args[0],
-                                            &self.record_fields,
-                                            &self.constructor_atoms,
-                                        ),
-                                        reason_pat,
-                                    ])
-                                } else {
-                                    // {'EXIT', Pid, Reason}
-                                    CPat::Tuple(vec![
-                                        CPat::Lit(CLit::Atom("EXIT".into())),
-                                        lower_pat(
-                                            &args[0],
-                                            &self.record_fields,
-                                            &self.constructor_atoms,
-                                        ),
-                                        reason_pat,
-                                    ])
-                                };
+                                let pid_pat = lower_pat(
+                                    &args[0],
+                                    &self.record_fields,
+                                    &self.constructor_atoms,
+                                );
+                                let tuple_pat =
+                                    beam_interop::build_system_msg_pattern(name, pid_pat, reason_pat);
                                 (tuple_pat, wrapper)
                             } else {
                                 (
@@ -1766,118 +1727,15 @@ impl<'a> Lowerer<'a> {
                                 None,
                             )
                         };
+
                         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
                         let raw_body = self.lower_expr(&arm.body);
-                        // Convert raw Erlang exit reason to ExitReason type
                         let body = if let Some((user_var, raw_var)) = reason_wrapper {
-                            let cm = &self.constructor_atoms;
-                            let normal = util::mangle_ctor_atom("Normal", cm);
-                            let shutdown = util::mangle_ctor_atom("Shutdown", cm);
-                            let killed = util::mangle_ctor_atom("Killed", cm);
-                            let noproc = util::mangle_ctor_atom("Noproc", cm);
-                            let error = util::mangle_ctor_atom("Error", cm);
-                            let other = util::mangle_ctor_atom("Other", cm);
-                            // case RawReason of
-                            //   'normal' -> Normal
-                            //   'shutdown' -> Shutdown
-                            //   'killed' -> Killed
-                            //   'noproc' -> Noproc
-                            //   {dylang_panic, Msg} -> Error(Msg)
-                            //   {_, Msg, _Stacktrace} -> Error(Msg)
-                            //   Other -> Other(io_lib:format("~p", [Other]))
-                            let other_var = self.fresh();
-                            let fmt_var = self.fresh();
-                            let stringify = cerl_call(
-                                "unicode",
-                                "characters_to_binary",
-                                vec![cerl_call(
-                                    "io_lib",
-                                    "format",
-                                    vec![
-                                        CExpr::Lit(CLit::Str("~p".into())),
-                                        CExpr::Cons(
-                                            Box::new(CExpr::Var(other_var.clone())),
-                                            Box::new(CExpr::Nil),
-                                        ),
-                                    ],
-                                )],
-                            );
-                            let error_msg_var = self.fresh();
-                            let conversion = CExpr::Case(
-                                Box::new(CExpr::Var(raw_var)),
-                                vec![
-                                    CArm {
-                                        pat: CPat::Lit(CLit::Atom("normal".into())),
-                                        guard: None,
-                                        body: CExpr::Lit(CLit::Atom(normal.clone())),
-                                    },
-                                    CArm {
-                                        pat: CPat::Lit(CLit::Atom("shutdown".into())),
-                                        guard: None,
-                                        body: CExpr::Lit(CLit::Atom(shutdown.clone())),
-                                    },
-                                    CArm {
-                                        pat: CPat::Lit(CLit::Atom("killed".into())),
-                                        guard: None,
-                                        body: CExpr::Lit(CLit::Atom(killed.clone())),
-                                    },
-                                    CArm {
-                                        pat: CPat::Lit(CLit::Atom("noproc".into())),
-                                        guard: None,
-                                        body: CExpr::Lit(CLit::Atom(noproc.clone())),
-                                    },
-                                    // {{dylang_error, _Kind, Msg, ...}, _Stacktrace} -> Error(Msg)
-                                    CArm {
-                                        pat: CPat::Tuple(vec![
-                                            CPat::Tuple(vec![
-                                                CPat::Lit(CLit::Atom("dylang_error".into())),
-                                                CPat::Wildcard, // kind
-                                                CPat::Var(error_msg_var.clone()),
-                                                CPat::Wildcard, // module
-                                                CPat::Wildcard, // function
-                                                CPat::Wildcard, // file
-                                                CPat::Wildcard, // line
-                                            ]),
-                                            CPat::Wildcard, // stacktrace
-                                        ]),
-                                        guard: None,
-                                        body: CExpr::Tuple(vec![
-                                            CExpr::Lit(CLit::Atom(error.clone())),
-                                            CExpr::Var(error_msg_var.clone()),
-                                        ]),
-                                    },
-                                    // {Msg, _Stacktrace} when is_binary(Msg) -> Error(Msg)
-                                    {
-                                        let error_msg_var2 = self.fresh();
-                                        CArm {
-                                            pat: CPat::Tuple(vec![
-                                                CPat::Var(error_msg_var2.clone()),
-                                                CPat::Wildcard, // stacktrace
-                                            ]),
-                                            guard: Some(cerl_call(
-                                                "erlang",
-                                                "is_binary",
-                                                vec![CExpr::Var(error_msg_var2.clone())],
-                                            )),
-                                            body: CExpr::Tuple(vec![
-                                                CExpr::Lit(CLit::Atom(error.clone())),
-                                                CExpr::Var(error_msg_var2),
-                                            ]),
-                                        }
-                                    },
-                                    CArm {
-                                        pat: CPat::Var(other_var.clone()),
-                                        guard: None,
-                                        body: CExpr::Let(
-                                            fmt_var.clone(),
-                                            Box::new(stringify),
-                                            Box::new(CExpr::Tuple(vec![
-                                                CExpr::Lit(CLit::Atom(other.clone())),
-                                                CExpr::Var(fmt_var),
-                                            ])),
-                                        ),
-                                    },
-                                ],
+                            let ctor_atoms = self.constructor_atoms.clone();
+                            let conversion = beam_interop::build_exit_reason_from_erlang(
+                                &raw_var,
+                                &ctor_atoms,
+                                &mut || self.fresh(),
                             );
                             CExpr::Let(user_var, Box::new(conversion), Box::new(raw_body))
                         } else {
