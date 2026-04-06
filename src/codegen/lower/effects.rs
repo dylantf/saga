@@ -20,16 +20,12 @@ impl<'a> Lowerer<'a> {
         expr: &Expr,
         return_k: Option<CExpr>,
     ) -> CExpr {
-        self.with_current_return_k(return_k.clone(), |this| {
-            let inner_ce = this.lower_expr(expr);
-            // Block expressions apply the installed return_k at their
-            // terminal statement, so don't wrap them again here.
-            if matches!(expr.kind, ExprKind::Block { .. }) {
-                inner_ce
-            } else {
-                this.apply_return_k_with(return_k, inner_ce)
-            }
-        })
+        let inner_ce = self.lower_expr_with_installed_return_k(expr, return_k.clone());
+        if matches!(expr.kind, ExprKind::Block { .. }) {
+            inner_ce
+        } else {
+            self.apply_return_k_with(return_k, inner_ce)
+        }
     }
 
     fn lower_handled_inner_expr(

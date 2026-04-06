@@ -38,7 +38,7 @@ impl<'a> Lowerer<'a> {
         match mode {
             LowerMode::Value => {
                 let saved_pending_k = self.pending_callee_return_k.take();
-                let ce = self.with_current_return_k(None, |this| this.lower_expr(expr));
+                let ce = self.lower_expr_with_installed_return_k(expr, None);
                 self.pending_callee_return_k = saved_pending_k;
                 ce
             }
@@ -115,6 +115,31 @@ impl<'a> Lowerer<'a> {
         let out = f(self);
         self.current_return_k = saved_return_k;
         out
+    }
+
+    /// Lower an expression with an explicitly installed return continuation.
+    ///
+    /// Block expressions route through block lowering directly so the return
+    /// continuation applies at the terminal statement instead of through an
+    /// extra ambient wrapper.
+    pub(super) fn lower_expr_with_installed_return_k(
+        &mut self,
+        expr: &Expr,
+        return_k: Option<CExpr>,
+    ) -> CExpr {
+        match &expr.kind {
+            ExprKind::Block { stmts, .. } => {
+                let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
+                self.lower_block_with_return_k(&stmts, return_k)
+            }
+            _ => {
+                if return_k.is_some() {
+                    self.lower_terminal_effectful_expr_with_return_k(expr, return_k)
+                } else {
+                    self.lower_expr(expr)
+                }
+            }
+        }
     }
 
     /// Consume the currently pending callee return continuation, or build an
@@ -522,7 +547,11 @@ impl<'a> Lowerer<'a> {
         (tmp, wrapped)
     }
 
-    fn lower_block_with_return_k(&mut self, stmts: &[Stmt], return_k: Option<CExpr>) -> CExpr {
+    pub(super) fn lower_block_with_return_k(
+        &mut self,
+        stmts: &[Stmt],
+        return_k: Option<CExpr>,
+    ) -> CExpr {
         match stmts {
             [] => self.apply_return_k_with(return_k, CExpr::Tuple(vec![])), // unit
             [Stmt::Expr(e)] => self.lower_block_terminal_expr_with_return_k(e, return_k),
@@ -616,9 +645,7 @@ impl<'a> Lowerer<'a> {
                 let has_effects = !handler_params.is_empty();
                 let base_arity = arity - handler_params.len() - if has_effects { 1 } else { 0 };
                 let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
-                let fun_body = self.with_current_return_k(
-                    effect_return_k.clone(),
-                    |this| if clauses.len() == 1 && clauses[0].1.is_none() {
+                let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
                     // Single clause, no guard
                     let mut params_ce = pats::lower_params(clauses[0].0);
                     params_ce.extend(handler_params.iter().cloned());
@@ -627,12 +654,9 @@ impl<'a> Lowerer<'a> {
                     }
                     let body = clauses[0].2;
                     let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
-                        this.lower_terminal_effectful_expr_with_return_k(
-                            body,
-                            effect_return_k.clone(),
-                        )
+                        self.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())
                     } else {
-                        this.lower_expr(body)
+                        self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
                     };
                     CExpr::Fun(params_ce, Box::new(body_ce))
                 } else {
@@ -655,8 +679,8 @@ impl<'a> Lowerer<'a> {
                             let pat = if base_arity == 1 {
                                 pats::lower_pat(
                                     &params[0],
-                                    &this.record_fields,
-                                    &this.constructor_atoms,
+                                    &self.record_fields,
+                                    &self.constructor_atoms,
                                 )
                             } else if base_arity == 0 {
                                 CPat::Wildcard
@@ -667,23 +691,26 @@ impl<'a> Lowerer<'a> {
                                         .map(|p| {
                                             pats::lower_pat(
                                                 p,
-                                                &this.record_fields,
-                                                &this.constructor_atoms,
+                                                &self.record_fields,
+                                                &self.constructor_atoms,
                                             )
                                         })
                                         .collect(),
                                 )
                             };
-                            let guard_ce = guard.as_ref().map(|g| this.lower_expr(g));
+                            let guard_ce = guard.as_ref().map(|g| self.lower_expr(g));
                             let body_ce = if has_effects
                                 && !matches!(body.kind, ExprKind::Block { .. })
                             {
-                                this.lower_terminal_effectful_expr_with_return_k(
+                                self.lower_terminal_effectful_expr_with_return_k(
                                     body,
                                     effect_return_k.clone(),
                                 )
                             } else {
-                                this.lower_expr(body)
+                                self.lower_expr_with_installed_return_k(
+                                    body,
+                                    effect_return_k.clone(),
+                                )
                             };
                             CArm {
                                 pat,
@@ -703,7 +730,7 @@ impl<'a> Lowerer<'a> {
                         },
                         Box::new(CExpr::Case(Box::new(scrutinee), arms)),
                     )
-                });
+                };
                 self.current_handler_params = saved_handler_params;
                 self.current_effectful_vars = saved_effectful_vars;
 
@@ -839,10 +866,6 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-    }
-
-    pub(super) fn lower_block(&mut self, stmts: &[Stmt]) -> CExpr {
-        self.lower_block_with_return_k(stmts, self.current_return_k.clone())
     }
 
     // --- Outer-K threading for nested effect calls in branches ---

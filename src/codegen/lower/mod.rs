@@ -743,9 +743,7 @@ impl<'a> Lowerer<'a> {
                             }
                     )
                 });
-            let fun_body = self.with_current_return_k(
-                effect_return_k.clone(),
-                |this| if clauses.len() == 1 && clauses[0].1.is_none() && all_simple_params {
+            let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() && all_simple_params {
                 // Single clause, no guard: emit directly without a case wrapper.
                 let (params, _, body) = clauses[0];
                 let mut params_ce = lower_params(params);
@@ -769,9 +767,9 @@ impl<'a> Lowerer<'a> {
                 // Special case: if the body is a terminal effect call, pass _ReturnK
                 // directly as K so abort-style handlers skip the rest (proper CPS).
                 let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
-                    this.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())
+                    self.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())
                 } else {
-                    this.lower_expr(body)
+                    self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
                 };
                 CExpr::Fun(params_ce, Box::new(body_ce))
             } else {
@@ -791,8 +789,8 @@ impl<'a> Lowerer<'a> {
                         let pat = if base_arity == 1 {
                             lower_pat(
                                 &params[0],
-                                &this.record_fields,
-                                &this.constructor_atoms,
+                                &self.record_fields,
+                                &self.constructor_atoms,
                             )
                         } else if base_arity == 0 {
                             // No user params to match on -- use wildcard
@@ -802,20 +800,20 @@ impl<'a> Lowerer<'a> {
                                 params
                                     .iter()
                                     .map(|p| {
-                                        lower_pat(p, &this.record_fields, &this.constructor_atoms)
+                                        lower_pat(p, &self.record_fields, &self.constructor_atoms)
                                     })
                                     .collect(),
                             )
                         };
-                        let guard_ce = guard.as_deref().map(|g| this.lower_expr(g));
+                        let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
                         let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. })
                         {
-                            this.lower_terminal_effectful_expr_with_return_k(
+                            self.lower_terminal_effectful_expr_with_return_k(
                                 body,
                                 effect_return_k.clone(),
                             )
                         } else {
-                            this.lower_expr(body)
+                            self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
                         };
                         CArm {
                             pat,
@@ -841,7 +839,7 @@ impl<'a> Lowerer<'a> {
                 };
                 let case_ce = CExpr::Case(Box::new(scrut_ce), arms);
                 CExpr::Fun(arg_vars, Box::new(case_ce))
-            });
+            };
 
             self.current_handler_params = saved_handler_params;
             self.current_effectful_vars = saved_effectful_vars;
@@ -1415,7 +1413,7 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Block { stmts, .. } => {
                 let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
-                self.lower_block(&stmts)
+                self.lower_block_with_return_k(&stmts, self.current_return_k.clone())
             }
 
             ExprKind::Lambda { params, body, .. } => {
@@ -1454,19 +1452,12 @@ impl<'a> Lowerer<'a> {
                 }
                 let effect_return_k =
                     is_effectful_lambda.then(|| CExpr::Var("_ReturnK".to_string()));
-                let body_ce = self.with_current_return_k(
-                    effect_return_k.clone(),
-                    |this| {
-                        if is_effectful_lambda && !matches!(body.kind, ExprKind::Block { .. }) {
-                            this.lower_terminal_effectful_expr_with_return_k(
-                                body,
-                                effect_return_k.clone(),
-                            )
-                        } else {
-                            this.lower_expr(body)
-                        }
-                    },
-                );
+                let body_ce = if is_effectful_lambda && !matches!(body.kind, ExprKind::Block { .. })
+                {
+                    self.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())
+                } else {
+                    self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
+                };
                 self.current_handler_params = saved_handler_params;
                 // If lambda has complex params (tuples, constructors), wrap
                 // the body in a case expression for destructuring.
