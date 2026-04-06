@@ -114,17 +114,23 @@ impl<'a> Lowerer<'a> {
 
     /// Lower a saturated constructor call to the appropriate Core Erlang form.
     pub(super) fn lower_ctor(&mut self, name: &str, args: Vec<&Expr>) -> CExpr {
-        // Check the bare name (after any module prefix) for ExitReason bare atoms
         let bare_name = name.rsplit('.').next().unwrap_or(name);
-        if args.is_empty() && super::beam_interop::exit_reason_bare_atom(bare_name).is_some() {
-            return CExpr::Lit(CLit::Atom(
-                super::beam_interop::exit_reason_bare_atom(bare_name)
-                    .unwrap()
-                    .to_string(),
-            ));
+        match bare_name {
+            "Nil" if args.is_empty() => return CExpr::Nil,
+            "True" if args.is_empty() => return CExpr::Lit(CLit::Atom("true".to_string())),
+            "False" if args.is_empty() => return CExpr::Lit(CLit::Atom("false".to_string())),
+            _ if args.is_empty()
+                && super::beam_interop::exit_reason_bare_atom(bare_name).is_some() =>
+            {
+                return CExpr::Lit(CLit::Atom(
+                    super::beam_interop::exit_reason_bare_atom(bare_name)
+                        .unwrap()
+                        .to_string(),
+                ));
+            }
+            _ => {}
         }
         match name {
-            "Nil" => CExpr::Nil,
             "Cons" if args.len() == 2 => {
                 let head_var = self.fresh();
                 let tail_var = self.fresh();
@@ -431,9 +437,9 @@ impl<'a> Lowerer<'a> {
                         if let Some((op_name, qualifier, args)) = collect_effect_call(body) {
                             let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                             self.lower_effect_call(
-                            op_name,
-                            qualifier,
-                            &args_owned,
+                                op_name,
+                                qualifier,
+                                &args_owned,
                                 self.current_return_k.clone(),
                             )
                         } else if has_nested_effect_call(body) {
@@ -522,9 +528,9 @@ impl<'a> Lowerer<'a> {
                                 {
                                     let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
                                     self.lower_effect_call(
-                            op_name,
-                            qualifier,
-                            &args_owned,
+                                        op_name,
+                                        qualifier,
+                                        &args_owned,
                                         self.current_return_k.clone(),
                                     )
                                 } else if has_nested_effect_call(body) {
@@ -860,9 +866,9 @@ impl<'a> Lowerer<'a> {
             // Direct effect call: pass K as the continuation
             let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
             self.lower_effect_call(
-                            op_name,
-                            qualifier,
-                            &args_owned,
+                op_name,
+                qualifier,
+                &args_owned,
                 Some(CExpr::Var(k_var.to_string())),
             )
         } else if collect_fun_call(expr)
@@ -1070,12 +1076,12 @@ impl<'a> Lowerer<'a> {
                             || self.dynamic_handler_info_from_expr(expr).is_some()
                     })
             }
-            ExprKind::If { then_branch, else_branch, .. } => {
-                self.is_handler_value(then_branch) || self.is_handler_value(else_branch)
-            }
-            ExprKind::App { .. } => {
-                self.dynamic_handler_info_from_expr(expr).is_some()
-            }
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => self.is_handler_value(then_branch) || self.is_handler_value(else_branch),
+            ExprKind::App { .. } => self.dynamic_handler_info_from_expr(expr).is_some(),
             _ => false,
         }
     }
@@ -1111,7 +1117,9 @@ impl<'a> Lowerer<'a> {
         // Handler expression: register arms directly under synthetic name
         if let ExprKind::HandlerExpr { body } = &value.kind {
             let synthetic = format!("__handler_expr_{}", value.id.0);
-            let canonical_effects = body.effects.iter()
+            let canonical_effects = body
+                .effects
+                .iter()
                 .map(|e| self.canonicalize_effect(&e.name))
                 .collect();
             self.handler_defs.insert(
@@ -1154,9 +1162,13 @@ impl<'a> Lowerer<'a> {
         // Dynamic handler: RHS is an arbitrary expression (e.g. function call).
         // Look up effect names from the typechecker's check result.
         if let Some(cr) = &self.check_result {
-            let dynamic_info = cr.handlers.get(name)
+            let dynamic_info = cr
+                .handlers
+                .get(name)
                 .map(|info| {
-                    let effects = info.effects.iter()
+                    let effects = info
+                        .effects
+                        .iter()
                         .map(|e| self.canonicalize_effect(e))
                         .collect();
                     let has_return = info.return_type.is_some();
@@ -1225,7 +1237,11 @@ impl<'a> Lowerer<'a> {
                     }
                 })
                 .collect();
-            if effects.is_empty() { None } else { Some(effects) }
+            if effects.is_empty() {
+                None
+            } else {
+                Some(effects)
+            }
         } else {
             None
         }
@@ -1235,9 +1251,7 @@ impl<'a> Lowerer<'a> {
     /// Walks through variable references, if/else branches, and handler expressions.
     fn resolve_handle_value(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
-            ExprKind::Var { name } => {
-                Some(self.resolve_handler_name(name))
-            }
+            ExprKind::Var { name } => Some(self.resolve_handler_name(name)),
             ExprKind::HandlerExpr { .. } => {
                 // Handler expressions registered under synthetic name
                 let synthetic = format!("__handler_expr_{}", expr.id.0);
@@ -1251,22 +1265,27 @@ impl<'a> Lowerer<'a> {
                 then_branch,
                 else_branch,
                 ..
-            } => {
-                self.resolve_handle_value(then_branch)
-                    .or_else(|| self.resolve_handle_value(else_branch))
-            }
+            } => self
+                .resolve_handle_value(then_branch)
+                .or_else(|| self.resolve_handle_value(else_branch)),
             _ => None,
         }
     }
 
     /// Lower a `<<seg1, seg2, ...>>` bitstring expression to `CExpr::Binary`.
     pub(super) fn lower_bitstring_expr(&mut self, segments: &[BitSegment<Expr>]) -> CExpr {
-        use super::util::{resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size};
+        use super::util::{
+            resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size,
+        };
 
         let mut segs = Vec::new();
         for seg in segments {
             // String literal sugar: expand to byte segments
-            if let ExprKind::Lit { value: Lit::String(s, kind), .. } = &seg.value.kind {
+            if let ExprKind::Lit {
+                value: Lit::String(s, kind),
+                ..
+            } = &seg.value.kind
+            {
                 let resolved = if kind.is_multiline() {
                     super::util::process_string_escapes(s)
                 } else {
@@ -1291,7 +1310,13 @@ impl<'a> Lowerer<'a> {
             let size = seg.size.as_ref().map(|s| self.lower_expr(s));
             let size_expr = resolve_bit_segment_size(size, &type_name, default_size);
 
-            segs.push(CBinSeg::Segment { value, size: size_expr, unit, type_name, flags });
+            segs.push(CBinSeg::Segment {
+                value,
+                size: size_expr,
+                unit,
+                type_name,
+                flags,
+            });
         }
         CExpr::Binary(segs)
     }

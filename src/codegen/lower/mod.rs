@@ -1475,25 +1475,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
 
-            ExprKind::Constructor { name, .. } => {
-                let bare_name = name.rsplit('.').next().unwrap_or(name);
-                match bare_name {
-                    "Nil" => CExpr::Nil,
-                    "True" => CExpr::Lit(CLit::Atom("true".to_string())),
-                    "False" => CExpr::Lit(CLit::Atom("false".to_string())),
-                    _ if beam_interop::exit_reason_bare_atom(bare_name).is_some() => {
-                        CExpr::Lit(CLit::Atom(
-                            beam_interop::exit_reason_bare_atom(bare_name)
-                                .unwrap()
-                                .to_string(),
-                        ))
-                    }
-                    _ => {
-                        let atom = util::mangle_ctor_atom(name, &self.constructor_atoms);
-                        CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(atom))])
-                    }
-                }
-            }
+            ExprKind::Constructor { name, .. } => self.lower_ctor(name, vec![]),
 
             ExprKind::BinOp {
                 op, left, right, ..
@@ -1704,8 +1686,9 @@ impl<'a> Lowerer<'a> {
                                     &self.record_fields,
                                     &self.constructor_atoms,
                                 );
-                                let tuple_pat =
-                                    beam_interop::build_system_msg_pattern(name, pid_pat, reason_pat);
+                                let tuple_pat = beam_interop::build_system_msg_pattern(
+                                    name, pid_pat, reason_pat,
+                                );
                                 (tuple_pat, wrapper)
                             } else {
                                 (
