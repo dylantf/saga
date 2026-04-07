@@ -200,6 +200,23 @@ Each effect call routes to the correct handler based on which effect the operati
 
 `return value -> Ok(value)` wraps the computation's final value on success. The CPS transform wraps the innermost continuation's return value through the `return` clause function. If `fail!` is called, the handler returns `Err(reason)` directly without calling `K`.
 
+### Lowering Structure
+
+Continuation flow is threaded through explicit helpers:
+
+- value-position lowering (`lower_expr_value`)
+- terminal/tail lowering (`lower_expr_tail`, `lower_terminal_effectful_expr_with_return_k`)
+- direct effectful callee lowering with explicit `_ReturnK`
+- handler-owned expression lowering (`lower_handler_owned_expr`)
+
+This keeps handler delimiters and nested `with` boundaries explicit in the
+lowerer:
+
+- value-position expressions produce a value for the enclosing construct
+- terminal expressions route successful completion through an explicit continuation
+- direct effectful callees receive `_ReturnK` explicitly
+- handler-local bodies produce the handled result directly
+
 ### Non-Resumable Effects
 
 No special mechanism needed. A non-resumable handler simply doesn't call `K`. The continuation closure sits unreferenced on the heap and gets garbage collected. Same calling convention as resumable handlers.
@@ -215,8 +232,8 @@ Some effects (Actor, Process, Monitor, Link, Timer) bypass CPS and are lowered t
 ### Key Files
 
 - `codegen/lower/mod.rs` -- `Lowerer`, `FunInfo`, `fun_effects()`, `expanded_arity()`
-- `codegen/lower/effects.rs` -- `lower_effect_call`, `lower_with`, `build_op_handler_fun`, `build_beam_native_op_fun`, `lower_handler_expr_to_tuple`, `lower_handler_def_to_tuple`
-- `codegen/lower/exprs.rs` -- `lower_handle_binding` (static alias, conditional, and dynamic handler binding detection), `is_handler_value`
+- `codegen/lower/effects.rs` -- `lower_effect_call`, `lower_with`, `build_op_handler_fun`, `build_beam_native_op_fun`, `lower_handler_expr_to_tuple`, `lower_handler_def_to_tuple`, handler-owned expression lowering
+- `codegen/lower/exprs.rs` -- explicit value/tail lowering helpers, `lower_handle_binding` (static alias, conditional, and dynamic handler binding detection), `is_handler_value`
 - `codegen/lower/init.rs` -- populates `FunInfo` from type schemes via `arity_and_effects_from_type`
 - `codegen/lower/util.rs` -- `arity_and_effects_from_type`, `param_absorbed_effects_from_type`
 

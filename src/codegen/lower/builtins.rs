@@ -102,11 +102,7 @@ impl Lowerer<'_> {
     /// Clears the CPS return continuation so the thunk returns its value
     /// normally instead of tail-calling into the caller's continuation.
     pub(super) fn lower_catch_panic(&mut self, thunk_expr: &crate::ast::Expr) -> CExpr {
-        let saved_return_k = self.current_return_k.take();
-        let saved_pending_k = self.pending_callee_return_k.take();
-        let thunk = self.lower_expr(thunk_expr);
-        self.current_return_k = saved_return_k;
-        self.pending_callee_return_k = saved_pending_k;
+        let thunk = self.lower_expr_value(thunk_expr);
 
         let applied = CExpr::Apply(Box::new(thunk), vec![CExpr::Lit(CLit::Atom("unit".into()))]);
         let ok_var = self.fresh();
