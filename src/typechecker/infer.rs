@@ -156,6 +156,8 @@ impl Checker {
                 let resolved_ret = self.sub.apply(&ret_ty);
                 self.record_type(node_id, &ret_ty);
 
+                let mut absorbed_entries = Vec::new();
+
                 // Absorption (call-site half): when passing a callback to a HOF,
                 // the lambda's effects propagate immediately during lambda inference.
                 // We subtract the HOF parameter's declared effects here because this
@@ -169,10 +171,32 @@ impl Checker {
                 let func_shallow = self.sub.resolve_var(&func_ty);
                 if let Type::Fun(p, _, _) = func_shallow {
                     let param_shallow = self.sub.resolve_var(p);
-                    if let Type::Fun(_, _, row) = param_shallow {
-                        let absorbed: std::collections::HashSet<String> =
-                            row.effects.iter().map(|e| e.name.clone()).collect();
-                        self.effect_row = self.effect_row.subtract(&absorbed);
+                    if let Type::Fun(_, _, _) = param_shallow {
+                        fn collect_declared_entries_applied(
+                            checker: &Checker,
+                            ty: &Type,
+                            out: &mut Vec<super::EffectEntry>,
+                        ) {
+                            if let Type::Fun(_, ret, row) = ty {
+                                for entry in &row.effects {
+                                    let applied = super::EffectEntry {
+                                        name: entry.name.clone(),
+                                        args: entry
+                                            .args
+                                            .iter()
+                                            .map(|arg| checker.sub.apply(arg))
+                                            .collect(),
+                                    };
+                                    if !out.iter().any(|seen| seen.same_instantiation(&applied)) {
+                                        out.push(applied);
+                                    }
+                                }
+                                collect_declared_entries_applied(checker, ret, out);
+                            }
+                        }
+                        collect_declared_entries_applied(self, param_shallow, &mut absorbed_entries);
+                        let normalized_effect_row = self.sub.apply_effect_row(&self.effect_row);
+                        self.effect_row = normalized_effect_row.subtract_entries(&absorbed_entries);
                     }
                 }
 
@@ -181,7 +205,8 @@ impl Checker {
                     let resolved_func = self.sub.apply(&func_ty);
                     if let Type::Fun(_, _, row) = &resolved_func {
                         let applied_row = self.sub.apply_effect_row(row);
-                        self.emit_effects(&applied_row);
+                        let emitted_row = applied_row.subtract_entries(&absorbed_entries);
+                        self.emit_effects(&emitted_row);
                     }
                 }
 
@@ -367,7 +392,8 @@ impl Checker {
                 }
                 // Emit the effect onto the accumulator.
                 if let Some(effect_name) = self.effect_for_op(name, qualifier.as_deref()) {
-                    self.emit_effect(effect_name.clone(), vec![]);
+                    let effect_args = self.current_effect_args(&effect_name);
+                    self.emit_effect(effect_name.clone(), effect_args);
                 }
                 Ok(ty)
             }
@@ -727,7 +753,7 @@ impl Checker {
             self.unify_at(&result_ty, &body_ty, body.span)?;
         }
 
-        self.emit_effect("Std.Actor.Actor".to_string(), vec![]);
+        self.emit_effect("Std.Actor.Actor".to_string(), vec![self.sub.apply(&msg_ty)]);
         Ok(result_ty)
     }
 

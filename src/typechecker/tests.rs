@@ -3381,6 +3381,174 @@ mixed_actor_messages () = "ok"
 }
 
 #[test]
+fn with_rejects_mixed_effect_instantiations_for_inline_handler() {
+    let err = check(
+        r#"
+import Std.Fail (Fail)
+
+type AppError =
+  | HttpError String
+  | DbError String
+  | ValidationError String
+
+fun run_app : Unit -> Unit needs {Fail AppError}
+run_app () = fail! (HttpError "oops")
+
+fun run_app2 : Unit -> Unit needs {Fail String}
+run_app2 () = fail! "something"
+
+main () = {
+  run_app ()
+  run_app2 ()
+} with {
+  fail _ = ()
+}
+"#,
+    )
+    .err()
+    .expect("expected mixed Fail instantiations to be rejected");
+
+    assert!(
+        err.message.contains("single `with`"),
+        "expected with-scope conflict error, got: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("Fail AppError") && err.message.contains("Fail String"),
+        "expected both Fail instantiations in error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn with_rejects_mixed_effect_instantiations_for_named_handler() {
+    let err = check(
+        r#"
+import Std.Fail (Fail)
+
+type AppError = HttpError String
+
+handler app_fail for Fail AppError {
+  fail _ = ()
+}
+
+fun run_app : Unit -> Unit needs {Fail AppError}
+run_app () = fail! (HttpError "oops")
+
+fun run_app2 : Unit -> Unit needs {Fail String}
+run_app2 () = fail! "something"
+
+main () = {
+  run_app ()
+  run_app2 ()
+} with app_fail
+"#,
+    )
+    .err()
+    .expect("expected named handler to reject mixed Fail instantiations");
+
+    assert!(
+        err.message.contains("Fail AppError") && err.message.contains("Fail String"),
+        "expected both Fail instantiations in error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn with_rejects_mixed_effect_instantiations_for_handler_binding() {
+    let err = check(
+        r#"
+import Std.Fail (Fail)
+
+type AppError = HttpError String
+
+handler app_fail for Fail AppError {
+  fail _ = ()
+}
+
+fun run_app : Unit -> Unit needs {Fail AppError}
+run_app () = fail! (HttpError "oops")
+
+fun run_app2 : Unit -> Unit needs {Fail String}
+run_app2 () = fail! "something"
+
+main () = {
+  let h = app_fail
+  {
+    run_app ()
+    run_app2 ()
+  } with h
+}
+"#,
+    )
+    .err()
+    .expect("expected handler binding to reject mixed Fail instantiations");
+
+    assert!(
+        err.message.contains("Fail AppError") && err.message.contains("Fail String"),
+        "expected both Fail instantiations in error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn with_accepts_same_effect_instantiation_multiple_times() {
+    check(
+        r#"
+import Std.Fail (Fail)
+
+type AppError =
+  | HttpError String
+  | DbError String
+
+handler app_fail for Fail AppError {
+  fail _ = ()
+}
+
+fun run_app : Unit -> Unit needs {Fail AppError}
+run_app () = fail! (HttpError "oops")
+
+fun run_app2 : Unit -> Unit needs {Fail AppError}
+run_app2 () = fail! (DbError "still bad")
+
+main () = {
+  run_app ()
+  run_app2 ()
+} with app_fail
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn nested_with_can_translate_between_effect_instantiations() {
+    check(
+        r#"
+import Std.Fail (Fail)
+
+type AppError =
+  | HttpError String
+  | ValidationError String
+
+fun run_app : Unit -> Unit needs {Fail AppError}
+run_app () = fail! (HttpError "oops")
+
+fun run_app2 : Unit -> Unit needs {Fail String}
+run_app2 () = fail! "something"
+
+fun combined : Unit -> Unit needs {Fail AppError}
+combined () = {
+  run_app ()
+  run_app2 () with {
+    fail msg = fail! (ValidationError msg)
+  }
+}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn error_messages_show_resolved_types() {
     // Type mismatch should show concrete type names, not ?-variables
     let err = check("fun f : (x: Int) -> String\nf x = x")
@@ -4010,6 +4178,55 @@ fn hof_absorption_pure_callback_accepted() {
 }
 
 #[test]
+fn hof_absorption_applies_substitutions_before_exact_subtraction() {
+    check(
+        "effect State s {\n  fun get : Unit -> s\n  fun put : s -> Unit\n}\n\
+         fun run_state : s -> (Unit -> a needs {State s}) -> (a, s)\n\
+         run_state init f = {\n\
+           let state_fn = f () with {\n\
+             get () = fun s -> (resume s) s\n\
+             put new_s = fun _ -> (resume ()) new_s\n\
+             return value = fun s -> (value, s)\n\
+           }\n\
+           state_fn init\n\
+         }\n\
+         fun caller : Unit -> Unit\n\
+         caller () = {\n\
+           let (value, _) = run_state 0 (fun () -> get! ())\n\
+           let _ = value\n\
+           ()\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn nested_hof_absorption_does_not_leak_inner_closed_effects() {
+    check(
+        "effect Assert {\n  fun assert : Bool -> String -> Unit\n}\n\
+         effect State s {\n  fun get : Unit -> s\n  fun put : s -> Unit\n}\n\
+         fun use : (body: Unit -> Unit needs {Assert, ..e}) -> Unit needs {..e}\n\
+         use body = body ()\n\
+         fun run_state : s -> (Unit -> a needs {State s}) -> (a, s)\n\
+         run_state init f = {\n\
+           let state_fn = f () with {\n\
+             get () = fun s -> (resume s) s\n\
+             put new_s = fun _ -> (resume ()) new_s\n\
+             return value = fun s -> (value, s)\n\
+           }\n\
+           state_fn init\n\
+         }\n\
+         fun caller : Unit -> Unit\n\
+         caller () = use (fun () -> {\n\
+           let (value, _) = run_state 0 (fun () -> get! ())\n\
+           let _ = value\n\
+           assert! True \"\"\n\
+         })",
+    )
+    .unwrap();
+}
+
+#[test]
 fn row_var_propagation_extra_effects() {
     // Open row: extra effects from callback propagate through ..e
     check(
@@ -4049,6 +4266,29 @@ fn no_unnecessary_handler_warning_when_used() {
          fun greet : Unit -> Unit needs {Log}\ngreet () = log! \"hello\"\n\
          fun caller : Unit -> Unit\n\
          caller () = greet () with { log msg = () }",
+    )
+    .unwrap();
+    let warnings: Vec<_> = checker
+        .collected_diagnostics
+        .iter()
+        .filter(|d| d.message.contains("unnecessary"))
+        .collect();
+    assert!(warnings.is_empty(), "unexpected warning: {:?}", warnings);
+}
+
+#[test]
+fn no_unnecessary_handler_warning_for_indirect_named_handler_dependencies() {
+    let checker = check(
+        "effect Worker {\n  fun work : Unit -> Unit\n}\n\
+         effect Ref {\n  fun tick : Unit -> Unit\n}\n\
+         handler worker_impl for Worker {\n\
+           work () = resume ()\n\
+         }\n\
+         handler ref_impl for Ref needs {Worker} {\n\
+           tick () = { work! ()\n  resume () }\n\
+         }\n\
+         fun caller : Unit -> Unit\n\
+         caller () = tick! () with { ref_impl, worker_impl }",
     )
     .unwrap();
     let warnings: Vec<_> = checker

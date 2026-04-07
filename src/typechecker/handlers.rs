@@ -3,10 +3,85 @@ use std::collections::HashSet;
 use crate::ast::{self, Expr};
 use crate::token::Span;
 
-use super::{Checker, Diagnostic, EffectRow, Type};
+use super::{Checker, Diagnostic, EffectEntry, EffectRow, Type};
 
 impl Checker {
     // --- Handler inference ---
+
+    fn expand_used_handler_families_for_warning(
+        &self,
+        mut used_families: std::collections::HashSet<String>,
+        handler: &ast::Handler,
+    ) -> std::collections::HashSet<String> {
+        let ast::Handler::Inline { named, .. } = handler else {
+            return used_families;
+        };
+
+        loop {
+            let mut changed = false;
+            for ann in named {
+                let Some(info) = self.handlers.get(&ann.node.name) else {
+                    continue;
+                };
+                if info.effects.iter().any(|effect| used_families.contains(effect)) {
+                    for need in &info.needs_effects.effects {
+                        if used_families.insert(need.name.clone()) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        used_families
+    }
+
+    fn resolve_handled_effect_entries(
+        &self,
+        handled_families: &HashSet<String>,
+        inner_effs: &EffectRow,
+        span: Span,
+    ) -> Result<Vec<EffectEntry>, Diagnostic> {
+        let mut handled_entries = Vec::new();
+
+        for family in handled_families {
+            let mut matches = Vec::new();
+            for entry in &inner_effs.effects {
+                if entry.name == *family
+                    && !matches
+                        .iter()
+                        .any(|seen: &EffectEntry| seen.same_instantiation(entry))
+                {
+                    matches.push(entry.clone());
+                }
+            }
+
+            if matches.len() > 1 {
+                let mut rendered: Vec<String> = matches
+                    .iter()
+                    .map(|entry| self.prettify_effect_entry(entry))
+                    .collect();
+                rendered.sort();
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "a single `with` cannot handle multiple instantiations of `{}` in the same scope: {}",
+                        family.rsplit('.').next().unwrap_or(family),
+                        rendered.join(", "),
+                    ),
+                ));
+            }
+
+            if let Some(entry) = matches.into_iter().next() {
+                handled_entries.push(entry);
+            }
+        }
+
+        Ok(handled_entries)
+    }
 
     /// Infer the type of a `with` expression: `expr with handler`
     pub(crate) fn infer_with(
@@ -87,22 +162,28 @@ impl Checker {
         &mut self,
         expr: &Expr,
         handler: &ast::Handler,
-        handled: HashSet<String>,
+        handled_families: HashSet<String>,
         with_node_id: crate::ast::NodeId,
     ) -> Result<Type, Diagnostic> {
         // --- Scope 1: infer the inner expression with isolated effect tracking ---
         let inner_scope = self.enter_scope();
         let saved_effs = self.save_effects();
         let expr_ty = self.infer_expr(expr)?;
-        let inner_effs = self.restore_effects(saved_effs);
+        let raw_inner_effs = self.restore_effects(saved_effs);
+        let inner_effs = self.sub.apply_effect_row(&raw_inner_effs);
         let inner_result = self.exit_scope(inner_scope);
+        let outer_effect_cache = self.effect_meta.type_param_cache.clone();
+        let handled_entries =
+            self.resolve_handled_effect_entries(&handled_families, &inner_effs, expr.span)?;
+        let direct_used_handled_families: std::collections::HashSet<String> =
+            handled_entries.iter().map(|e| e.name.clone()).collect();
+        let used_handled_families =
+            self.expand_used_handler_families_for_warning(direct_used_handled_families, handler);
 
         // Unnecessary handler check.
         // Named handlers (bundles) only warn when ALL their effects are unused.
         // Inline arms warn per-unused-effect.
-        if !handled.is_empty() {
-            let used: std::collections::HashSet<&String> =
-                inner_effs.effects.iter().map(|e| &e.name).collect();
+        if !handled_families.is_empty() {
             let mut unused = Vec::new();
 
             match handler {
@@ -118,7 +199,9 @@ impl Checker {
                         })
                         .unwrap_or_default();
                     if !handler_effects.is_empty()
-                        && !handler_effects.iter().any(|e| used.contains(e))
+                        && !handler_effects
+                            .iter()
+                            .any(|e| used_handled_families.contains(e))
                     {
                         unused.extend(handler_effects);
                     }
@@ -136,7 +219,9 @@ impl Checker {
                             })
                             .unwrap_or_default();
                         if !handler_effects.is_empty()
-                            && !handler_effects.iter().any(|e| used.contains(e))
+                            && !handler_effects
+                                .iter()
+                                .any(|e| used_handled_families.contains(e))
                         {
                             unused.extend(handler_effects);
                         }
@@ -145,7 +230,7 @@ impl Checker {
                     for arm in arms {
                         if let Some(eff) =
                             self.effect_for_op(&arm.node.op_name, arm.node.qualifier.as_deref())
-                            && !used.contains(&eff)
+                            && !used_handled_families.contains(&eff)
                         {
                             unused.push(eff);
                         }
@@ -169,7 +254,7 @@ impl Checker {
         let inner_effect_cache = inner_result.effect_cache;
 
         // Remaining effects: inner minus handled
-        let remaining_effs = inner_effs.subtract(&handled);
+        let remaining_effs = inner_effs.subtract_entries(&handled_entries);
 
         let with_span = expr.span;
         match handler {
@@ -371,6 +456,7 @@ impl Checker {
                     let saved_env = self.env.clone();
                     let saved_resume = self.resume_type.take();
                     let saved_resume_ret = self.resume_return_type.take();
+                    let saved_effect_cache = self.effect_meta.type_param_cache.clone();
 
                     if let Some(ref sig) = op_sig {
                         self.resume_type = Some(sig.return_type.clone());
@@ -390,19 +476,30 @@ impl Checker {
                         }
                     }
 
+                    // Calls to the same effect family inside the arm body
+                    // delegate to an outer handler, if one exists.
+                    if let Some(ref sig) = op_sig
+                        && let Some(outer_mapping) = outer_effect_cache.get(&sig.effect_name)
+                    {
+                        self.effect_meta
+                            .type_param_cache
+                            .insert(sig.effect_name.clone(), outer_mapping.clone());
+                    }
+
                     // Arm body: subtract effects handled by sibling handlers, but NOT
                     // the effect this arm itself handles (re-entrant calls delegate
                     // to an outer handler, not the current one)
                     let saved_effs = self.save_effects();
                     let arm_ty = self.infer_expr(&arm.body)?;
-                    let arm_effs = self.restore_effects(saved_effs);
+                    let raw_arm_effs = self.restore_effects(saved_effs);
+                    let arm_effs = self.sub.apply_effect_row(&raw_arm_effs);
                     let own_effect = op_sig.as_ref().map(|sig| sig.effect_name.clone());
-                    let sibling_handled: HashSet<String> = handled
+                    let sibling_handled: Vec<EffectEntry> = handled_entries
                         .iter()
-                        .filter(|e| own_effect.as_ref() != Some(e))
+                        .filter(|entry| own_effect.as_ref() != Some(&entry.name))
                         .cloned()
                         .collect();
-                    let unhandled_arm_effs = arm_effs.subtract(&sibling_handled);
+                    let unhandled_arm_effs = arm_effs.subtract_entries(&sibling_handled);
                     self.emit_effects(&unhandled_arm_effs);
 
                     self.unify_at(&arm_ty, &answer_ty, arm.span)?;
@@ -424,12 +521,13 @@ impl Checker {
 
                     self.resume_type = saved_resume;
                     self.resume_return_type = saved_resume_ret;
+                    self.effect_meta.type_param_cache = saved_effect_cache;
                     self.env = saved_env;
                 }
 
                 // Emit remaining effects from the inner expression, plus named handlers' needs
                 // (minus effects handled by sibling handlers in this same block)
-                let unhandled_named_needs = named_needs.subtract(&handled);
+                let unhandled_named_needs = named_needs.subtract(&handled_families);
                 let final_effs = remaining_effs.merge(&unhandled_named_needs);
                 self.emit_effects(&final_effs);
                 Ok(answer_ty)

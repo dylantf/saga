@@ -982,7 +982,8 @@ impl Checker {
             self.handlers = saved_handlers;
         }
         // Collect accumulated effects and restore outer scope
-        let all_body_effs = self.restore_effects(saved_effs);
+        let raw_all_body_effs = self.restore_effects(saved_effs);
+        let all_body_effs = self.sub.apply_effect_row(&raw_all_body_effs);
 
         // Absorption (boundary half): when a function directly calls a callback
         // parameter like `f ()` in `run_state init f = (f (), init)`, the callee's

@@ -60,9 +60,13 @@ impl EffectEntry {
         EffectEntry { name, args }
     }
 
-    /// Two entries match if they have the same effect name.
+    /// Two entries are in the same effect family if they share a canonical name.
     pub fn matches(&self, other: &EffectEntry) -> bool {
         self.name == other.name
+    }
+
+    pub fn same_instantiation(&self, other: &EffectEntry) -> bool {
+        self.name == other.name && self.args == other.args
     }
 }
 
@@ -106,12 +110,12 @@ impl EffectRow {
         }
     }
 
-    /// Merge two closed effect rows (union of effects by identity).
-    /// Identity = (instance, name) pair — unnamed and named entries are distinct.
+    /// Merge two closed effect rows, preserving distinct instantiations of the
+    /// same effect family.
     pub fn merge(&self, other: &EffectRow) -> EffectRow {
         let mut effects = self.effects.clone();
         for entry in &other.effects {
-            if !effects.iter().any(|e| e.matches(entry)) {
+            if !effects.iter().any(|e| e.same_instantiation(entry)) {
                 effects.push(entry.clone());
             }
         }
@@ -121,13 +125,26 @@ impl EffectRow {
         }
     }
 
-    /// Remove handled effects by name. Only removes unnamed entries.
-    /// Remove handled effects by name.
+    /// Remove handled effects by family name.
     pub fn subtract(&self, handled: &std::collections::HashSet<String>) -> EffectRow {
         let effects = self
             .effects
             .iter()
             .filter(|e| !handled.contains(&e.name))
+            .cloned()
+            .collect();
+        EffectRow {
+            effects,
+            tail: self.tail.clone(),
+        }
+    }
+
+    /// Remove handled effects by exact instantiation.
+    pub fn subtract_entries(&self, handled: &[EffectEntry]) -> EffectRow {
+        let effects = self
+            .effects
+            .iter()
+            .filter(|entry| !handled.iter().any(|h| h.same_instantiation(entry)))
             .cloned()
             .collect();
         EffectRow {
@@ -1358,19 +1375,56 @@ impl Checker {
     /// Push effects onto the accumulator, deduplicating by name.
     pub(crate) fn emit_effects(&mut self, effs: &EffectRow) {
         for entry in &effs.effects {
-            if !self.effect_row.effects.iter().any(|e| e.name == entry.name) {
+            if !self
+                .effect_row
+                .effects
+                .iter()
+                .any(|e| e.same_instantiation(entry))
+            {
                 self.effect_row.effects.push(entry.clone());
             }
         }
     }
 
-    /// Push a single named effect onto the accumulator, deduplicating by name.
+    /// Push a single named effect onto the accumulator, deduplicating by exact instantiation.
     pub(crate) fn emit_effect(&mut self, name: String, args: Vec<Type>) {
-        if !self.effect_row.effects.iter().any(|e| e.name == name) {
+        if !self
+            .effect_row
+            .effects
+            .iter()
+            .any(|e| e.name == name && e.args == args)
+        {
             self.effect_row
                 .effects
                 .push(EffectEntry::unnamed(name, args));
         }
+    }
+
+    pub(crate) fn current_effect_args(&self, effect_name: &str) -> Vec<Type> {
+        let Some(info) = self.effects.get(effect_name) else {
+            return vec![];
+        };
+        let Some(cache) = self.effect_meta.type_param_cache.get(effect_name) else {
+            return vec![];
+        };
+        info.type_params
+            .iter()
+            .filter_map(|param_id| cache.get(param_id))
+            .map(|ty| self.sub.apply(ty))
+            .collect()
+    }
+
+    pub(crate) fn prettify_effect_entry(&self, entry: &EffectEntry) -> String {
+        let short = entry
+            .name
+            .rsplit('.')
+            .next()
+            .unwrap_or(entry.name.as_str())
+            .to_string();
+        format!(
+            "{}",
+            self.prettify_type(&Type::Con(short, entry.args.clone()))
+        )
     }
 
     /// Save the current effect accumulator and start a fresh one.
@@ -1427,6 +1481,20 @@ pub fn effects_from_type(ty: &Type) -> HashSet<String> {
     }
     walk(ty, &mut effects);
     effects
+}
+
+/// Collect exact effect entries from a callback parameter type's effect rows.
+/// For `() -> a needs {Fail String, Log}`, collects those concrete entries.
+/// Only collects statically declared row entries (not row variables).
+pub fn collect_callback_effect_entries(ty: &Type, out: &mut Vec<EffectEntry>) {
+    if let Type::Fun(_, ret, row) = ty {
+        for entry in &row.effects {
+            if !out.iter().any(|seen| seen.same_instantiation(entry)) {
+                out.push(entry.clone());
+            }
+        }
+        collect_callback_effect_entries(ret, out);
+    }
 }
 
 /// Collect effect names from a callback parameter type's effect rows.
