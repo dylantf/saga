@@ -90,7 +90,7 @@ Typechecker tests use `check(src)` which loads the prelude then checks the sourc
 ### Build Output
 
 - `_build/{dev,release}/` — compiled project beams
-- `_build/.stdlib/{hash}/` — precompiled stdlib beams (per-project, keyed by content hash)
+- `_build/.stdlib/{fingerprint}/` — precompiled stdlib beams (per-project, keyed by compiler build + embedded stdlib contents)
 - `deps/{name}/` — installed dependencies (Hex and git), with `ebin/` and `priv/`
 - `~/.dylang/cache/` — global download cache (Hex tarballs, git bare clones)
 

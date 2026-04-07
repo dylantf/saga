@@ -12,10 +12,8 @@ use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
 
 const BUILD_HASH: &str = env!("DYLANG_BUILD_HASH");
-/// Compute stdlib hash at runtime from the embedded sources.
-/// This is more reliable than the build-time hash because it always
-/// reflects the actual content compiled into the binary.
-fn stdlib_hash() -> String {
+/// Compute a hash of the embedded stdlib sources and bridge files.
+fn stdlib_content_hash() -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for (name, source) in typechecker::BUILTIN_MODULES {
@@ -29,6 +27,17 @@ fn stdlib_hash() -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// Compute the stdlib artifact fingerprint for this compiler build.
+/// This intentionally includes the compiler build hash so stdlib beams are
+/// never reused across different compiler binaries.
+fn stdlib_fingerprint() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    BUILD_HASH.hash(&mut hasher);
+    stdlib_content_hash().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 /// Build manifest written to `_build/<profile>/.manifest` for cache invalidation.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct BuildManifest {
@@ -36,6 +45,8 @@ struct BuildManifest {
     source_file: String,
     source_mtime: u64,
     compiler_version: String,
+    #[serde(default)]
+    stdlib_fingerprint: String,
 }
 
 impl BuildManifest {
@@ -58,6 +69,33 @@ impl BuildManifest {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StdlibManifest {
+    fingerprint: String,
+    compiler_version: String,
+    content_hash: String,
+}
+
+impl StdlibManifest {
+    fn path(stdlib_dir: &Path) -> PathBuf {
+        stdlib_dir.join(".manifest")
+    }
+
+    fn write(&self, stdlib_dir: &Path) {
+        let path = Self::path(stdlib_dir);
+        let content = toml::to_string(self).expect("failed to serialize stdlib manifest");
+        fs::write(&path, content).unwrap_or_else(|e| {
+            eprintln!("Error writing stdlib manifest: {}", e);
+        });
+    }
+
+    fn read(stdlib_dir: &Path) -> Option<Self> {
+        let path = Self::path(stdlib_dir);
+        let content = fs::read_to_string(&path).ok()?;
+        toml::from_str(&content).ok()
+    }
+}
+
 fn file_mtime(path: &Path) -> u64 {
     fs::metadata(path)
         .and_then(|m| m.modified())
@@ -75,9 +113,14 @@ pub fn check_script_cache(file: &str, profile: &str) -> Option<ScriptBuild> {
         .unwrap_or(Path::new("."))
         .join("_build");
     let build_dir = build_root.join(profile);
+    let stdlib_fingerprint = stdlib_fingerprint();
+    let stdlib_dir = stdlib_cache_dir(&build_root, &stdlib_fingerprint);
 
     let manifest = BuildManifest::read(&build_dir)?;
     if manifest.compiler_version != BUILD_HASH {
+        return None;
+    }
+    if manifest.stdlib_fingerprint != stdlib_fingerprint {
         return None;
     }
 
@@ -97,10 +140,7 @@ pub fn check_script_cache(file: &str, profile: &str) -> Option<ScriptBuild> {
     {
         return None;
     }
-
-    let stdlib_dir = build_root.join(".stdlib");
-    let cached_hash = fs::read_to_string(stdlib_dir.join(".hash")).ok();
-    if cached_hash.as_deref().map(str::trim) != Some(&*stdlib_hash()) {
+    if !stdlib_cache_is_complete(&stdlib_dir, &stdlib_fingerprint) {
         return None;
     }
 
@@ -115,9 +155,15 @@ pub fn check_script_cache(file: &str, profile: &str) -> Option<ScriptBuild> {
 /// Returns `Some((build_dir, stdlib_dir))` if the cache is fresh.
 pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<(PathBuf, PathBuf)> {
     let build_dir = project_root.join("_build").join(profile);
+    let build_root = project_root.join("_build");
+    let stdlib_fingerprint = stdlib_fingerprint();
+    let stdlib_dir = stdlib_cache_dir(&build_root, &stdlib_fingerprint);
 
     let manifest = BuildManifest::read(&build_dir)?;
     if manifest.compiler_version != BUILD_HASH {
+        return None;
+    }
+    if manifest.stdlib_fingerprint != stdlib_fingerprint {
         return None;
     }
 
@@ -133,11 +179,7 @@ pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<(PathBu
     {
         return None;
     }
-
-    let build_root = project_root.join("_build");
-    let stdlib_dir = build_root.join(".stdlib");
-    let cached_hash = fs::read_to_string(stdlib_dir.join(".hash")).ok();
-    if cached_hash.as_deref().map(str::trim) != Some(&*stdlib_hash()) {
+    if !stdlib_cache_is_complete(&stdlib_dir, &stdlib_fingerprint) {
         return None;
     }
 
@@ -372,24 +414,87 @@ fn write_stdlib_bridges(build_dir: &Path) {
     }
 }
 
+fn stdlib_cache_root(build_root: &Path) -> PathBuf {
+    build_root.join(".stdlib")
+}
+
+fn stdlib_cache_dir(build_root: &Path, fingerprint: &str) -> PathBuf {
+    stdlib_cache_root(build_root).join(fingerprint)
+}
+
+fn expected_stdlib_beams() -> Vec<String> {
+    let mut beams = Vec::new();
+    for (module_name, _) in typechecker::BUILTIN_MODULES {
+        beams.push(format!(
+            "{}.beam",
+            module_name.to_lowercase().replace('.', "_")
+        ));
+    }
+    for (filename, _) in stdlib_bridge_files() {
+        let stem = Path::new(filename)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("stdlib bridge file must have stem");
+        beams.push(format!("{}.beam", stem));
+    }
+    beams
+}
+
+fn stdlib_cache_is_complete(stdlib_dir: &Path, fingerprint: &str) -> bool {
+    let Some(manifest) = StdlibManifest::read(stdlib_dir) else {
+        return false;
+    };
+    if manifest.fingerprint != fingerprint {
+        return false;
+    }
+    if manifest.compiler_version != BUILD_HASH {
+        return false;
+    }
+    if manifest.content_hash != stdlib_content_hash() {
+        return false;
+    }
+    expected_stdlib_beams()
+        .into_iter()
+        .all(|beam| stdlib_dir.join(beam).exists())
+}
+
+fn write_build_manifest(
+    build_dir: &Path,
+    entry_module: String,
+    source_file: String,
+    source_mtime: u64,
+) {
+    BuildManifest {
+        entry_module,
+        source_file,
+        source_mtime,
+        compiler_version: BUILD_HASH.to_string(),
+        stdlib_fingerprint: stdlib_fingerprint(),
+    }
+    .write(build_dir);
+}
+
 /// Ensure precompiled stdlib beams exist in the project's _build/.stdlib/ directory.
 /// Returns the stdlib directory path. On a cold cache, creates a fresh checker,
 /// imports ALL builtin modules, elaborates, and compiles them.
 pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
-    let cache_dir = build_root.join(".stdlib");
-    let hash = stdlib_hash();
+    let fingerprint = stdlib_fingerprint();
+    let cache_root = stdlib_cache_root(build_root);
+    let cache_dir = stdlib_cache_dir(build_root, &fingerprint);
 
-    // If marker exists and hash matches, cache is warm
-    if let Ok(cached_hash) = fs::read_to_string(cache_dir.join(".hash"))
-        && cached_hash.trim() == hash
-    {
+    if stdlib_cache_is_complete(&cache_dir, &fingerprint) {
         return cache_dir;
     }
 
     eprintln!("  {} stdlib...", color::dim("Compiling"));
 
-    let _ = fs::remove_dir_all(&cache_dir);
-    fs::create_dir_all(&cache_dir).unwrap_or_else(|e| {
+    fs::create_dir_all(&cache_root).unwrap_or_else(|e| {
+        eprintln!("Error creating stdlib cache root: {}", e);
+        std::process::exit(1);
+    });
+    let temp_dir = cache_root.join(format!(".tmp-{}-{}", fingerprint, std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).unwrap_or_else(|e| {
         eprintln!("Error creating stdlib cache dir: {}", e);
         std::process::exit(1);
     });
@@ -417,16 +522,16 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
             &compiled.elaborated,
             &ctx,
             check_result,
-            &cache_dir,
+            &temp_dir,
             None,
         );
     }
 
     // Write bridge .erl files
-    write_stdlib_bridges(&cache_dir);
+    write_stdlib_bridges(&temp_dir);
 
     // Compile everything with erlc
-    let compilable_files: Vec<_> = fs::read_dir(&cache_dir)
+    let compilable_files: Vec<_> = fs::read_dir(&temp_dir)
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| {
@@ -438,7 +543,7 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
         .collect();
 
     for file in &compilable_files {
-        run_erlc_file(file, &cache_dir);
+        run_erlc_file(file, &temp_dir);
     }
 
     // Clean up source files — only keep .beam
@@ -446,11 +551,28 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
         let _ = fs::remove_file(file);
     }
 
-    // Write hash so we know the cache is complete and which version
-    fs::write(cache_dir.join(".hash"), &hash).unwrap_or_else(|e| {
-        eprintln!("Error writing stdlib cache hash: {}", e);
+    StdlibManifest {
+        fingerprint: fingerprint.clone(),
+        compiler_version: BUILD_HASH.to_string(),
+        content_hash: stdlib_content_hash(),
+    }
+    .write(&temp_dir);
+
+    match fs::rename(&temp_dir, &cache_dir) {
+        Ok(()) => {}
+        Err(_) if stdlib_cache_is_complete(&cache_dir, &fingerprint) => {
+            let _ = fs::remove_dir_all(&temp_dir);
+        }
+        Err(e) => {
+            eprintln!("Error finalizing stdlib cache: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    if !stdlib_cache_is_complete(&cache_dir, &fingerprint) {
+        eprintln!("Error: stdlib cache is incomplete after build");
         std::process::exit(1);
-    });
+    }
 
     cache_dir
 }
@@ -829,13 +951,12 @@ pub fn build_project(profile: &str) -> ProjectBuild {
 
     // Write manifest for cache invalidation
     if has_bin {
-        BuildManifest {
-            entry_module: "main".to_string(),
-            source_file: "project.toml".to_string(),
-            source_mtime: max_project_mtime(&project_root),
-            compiler_version: BUILD_HASH.to_string(),
-        }
-        .write(&build_dir);
+        write_build_manifest(
+            &build_dir,
+            "main".to_string(),
+            "project.toml".to_string(),
+            max_project_mtime(&project_root),
+        );
     }
 
     let extra_ebin_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
@@ -935,13 +1056,12 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
     run_erlc(&build_dir, build_start);
 
     // Write manifest for cache invalidation
-    BuildManifest {
-        entry_module: erlang_name.clone(),
-        source_file: relative_source_path(file),
-        source_mtime: file_mtime(Path::new(file)),
-        compiler_version: BUILD_HASH.to_string(),
-    }
-    .write(&build_dir);
+    write_build_manifest(
+        &build_dir,
+        erlang_name.clone(),
+        relative_source_path(file),
+        file_mtime(Path::new(file)),
+    );
 
     ScriptBuild {
         build_dir,
