@@ -1838,6 +1838,10 @@ impl Checker {
         // Save effects and start fresh for handler body checking
         let handler_saved_effs = self.save_effects();
 
+        // Build effect row from handler's `needs` clause so `finally` blocks can
+        // use these effects (they're already provided by the handler's caller).
+        let needs_row = self.effect_row_from_refs(needs);
+
         // Validate that each arm's operation belongs to the handler's declared effects
         let mut seen_ops: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut arm_spans: std::collections::HashMap<String, Span> =
@@ -1928,14 +1932,15 @@ impl Checker {
                 self.collected_diagnostics.push(e.with_span(arm.span));
             }
 
-            // Typecheck optional `finally` block: effects must be self-contained
+            // Typecheck optional `finally` block: may use the handler's `needs` effects
+            // (they're already provided by the caller) but must not introduce new ones.
             if let Some(ref finally_expr) = arm.finally_block {
                 let saved_effs = self.save_effects();
                 let _finally_ty = self.infer_expr(finally_expr)?;
                 let finally_effs = self.restore_effects(saved_effs);
                 if let Err(e) = self.check_effects_via_row(
                     &finally_effs,
-                    &EffectRow::empty(),
+                    &needs_row,
                     &format!("finally block for '{}'", arm.op_name),
                     finally_expr.span,
                 ) {
