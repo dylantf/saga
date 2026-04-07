@@ -485,7 +485,7 @@ impl<'a> Lowerer<'a> {
     /// Bind a pattern to a single variable name, wrapping the body in a
     /// destructuring `case` if the pattern is non-trivial (tuple, constructor, etc.).
     /// Returns `(var_name, body)` where `var_name` is safe to use in a `Let` or `Fun` param.
-    fn destructure_pat(&mut self, pat: &Pat, body: CExpr) -> (String, CExpr) {
+    pub(super) fn destructure_pat(&mut self, pat: &Pat, body: CExpr) -> (String, CExpr) {
         self.destructure_pat_inner(pat, body, false, None)
     }
 

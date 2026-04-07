@@ -596,7 +596,7 @@ fn resolve_handler_body_names(
             .node
             .params
             .iter()
-            .map(|(name, _)| name.clone())
+            .flat_map(collect_pat_vars)
             .collect();
         scope.push(param_names);
         resolve_expr(&arm.node.body, scope, map);
@@ -606,7 +606,7 @@ fn resolve_handler_body_names(
         scope.pop();
     }
     if let Some(rc) = &body.return_clause {
-        let param_names: HashSet<String> = rc.params.iter().map(|(name, _)| name.clone()).collect();
+        let param_names: HashSet<String> = rc.params.iter().flat_map(collect_pat_vars).collect();
         scope.push(param_names);
         resolve_expr(&rc.body, scope, map);
         scope.pop();
@@ -737,7 +737,7 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
                             .node
                             .params
                             .iter()
-                            .map(|(name, _)| name.clone())
+                            .flat_map(collect_pat_vars)
                             .collect();
                         scope.push(param_names);
                         resolve_expr(&arm.node.body, scope, map);
@@ -748,7 +748,7 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
                     }
                     if let Some(rc) = return_clause {
                         let param_names: HashSet<String> =
-                            rc.params.iter().map(|(name, _)| name.clone()).collect();
+                            rc.params.iter().flat_map(collect_pat_vars).collect();
                         scope.push(param_names);
                         resolve_expr(&rc.body, scope, map);
                         scope.pop();

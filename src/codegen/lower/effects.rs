@@ -12,7 +12,7 @@ use crate::ast::{Expr, ExprKind, Handler, HandlerArm};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::Lowerer;
-use super::util::{cerl_call, collect_fun_call, core_var};
+use super::util::{cerl_call, collect_fun_call};
 
 impl<'a> Lowerer<'a> {
     fn lower_handler_owned_expr(&mut self, expr: &Expr) -> CExpr {
@@ -94,13 +94,13 @@ impl<'a> Lowerer<'a> {
     }
 
     fn build_return_lambda(&mut self, ret: &HandlerArm) -> CExpr {
-        let param = if ret.params.is_empty() {
-            self.fresh()
-        } else {
-            core_var(&ret.params[0].0)
-        };
         let ret_body = self.lower_handler_owned_expr(&ret.body);
-        CExpr::Fun(vec![param], Box::new(ret_body))
+        let (param, body) = if ret.params.is_empty() {
+            (self.fresh(), ret_body)
+        } else {
+            self.destructure_pat(&ret.params[0], ret_body)
+        };
+        CExpr::Fun(vec![param], Box::new(body))
     }
 
     fn compose_return_lambdas(&mut self, lambdas: Vec<CExpr>) -> Option<CExpr> {
@@ -542,12 +542,13 @@ impl<'a> Lowerer<'a> {
 
         self.current_handler_finally = saved_finally;
 
-        // Bind arm's named params to the positional handler args
-        for (i, (param_name, _)) in arm.params.iter().enumerate().rev() {
+        // Bind arm's params (possibly patterns) to the positional handler args
+        for (i, pat) in arm.params.iter().enumerate().rev() {
+            let (var, wrapped_body) = self.destructure_pat(pat, body_ce);
             body_ce = CExpr::Let(
-                core_var(param_name),
+                var,
                 Box::new(CExpr::Var(param_vars[i].clone())),
-                Box::new(body_ce),
+                Box::new(wrapped_body),
             );
         }
 
@@ -736,13 +737,13 @@ impl<'a> Lowerer<'a> {
             }
         }
         if let Some(rc) = &body.return_clause {
-            let param = if rc.params.is_empty() {
-                self.fresh()
-            } else {
-                super::util::core_var(&rc.params[0].0)
-            };
             let ret_body = self.lower_expr(&rc.body);
-            tuple_elements.push(CExpr::Fun(vec![param], Box::new(ret_body)));
+            let (param, body) = if rc.params.is_empty() {
+                (self.fresh(), ret_body)
+            } else {
+                self.destructure_pat(&rc.params[0], ret_body)
+            };
+            tuple_elements.push(CExpr::Fun(vec![param], Box::new(body)));
         }
         CExpr::Tuple(tuple_elements)
     }
@@ -771,13 +772,13 @@ impl<'a> Lowerer<'a> {
             }
         }
         if let Some(rc) = &info.return_clause {
-            let param = if rc.params.is_empty() {
-                self.fresh()
-            } else {
-                super::util::core_var(&rc.params[0].0)
-            };
             let ret_body = self.lower_expr(&rc.body);
-            tuple_elements.push(CExpr::Fun(vec![param], Box::new(ret_body)));
+            let (param, body) = if rc.params.is_empty() {
+                (self.fresh(), ret_body)
+            } else {
+                self.destructure_pat(&rc.params[0], ret_body)
+            };
+            tuple_elements.push(CExpr::Fun(vec![param], Box::new(body)));
         }
         Some(CExpr::Tuple(tuple_elements))
     }

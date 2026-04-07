@@ -144,18 +144,40 @@ fn resolve_decl(decl: &mut Decl, scope: &ScopeMap, local_funs: &HashSet<String>)
     }
 }
 
+fn collect_pat_vars(pat: &Pat, vars: &mut HashSet<String>) {
+    match pat {
+        Pat::Var { name, .. } => { vars.insert(name.clone()); }
+        Pat::Tuple { elements, .. } => { for e in elements { collect_pat_vars(e, vars); } }
+        Pat::Constructor { args, .. } => { for a in args { collect_pat_vars(a, vars); } }
+        Pat::Record { fields, as_name, .. } => {
+            for (name, alias) in fields {
+                if let Some(p) = alias { collect_pat_vars(p, vars); } else { vars.insert(name.clone()); }
+            }
+            if let Some(n) = as_name { vars.insert(n.clone()); }
+        }
+        Pat::AnonRecord { fields, .. } => {
+            for (name, alias) in fields {
+                if let Some(p) = alias { collect_pat_vars(p, vars); } else { vars.insert(name.clone()); }
+            }
+        }
+        Pat::ConsPat { head, tail, .. } => { collect_pat_vars(head, vars); collect_pat_vars(tail, vars); }
+        Pat::StringPrefix { rest, .. } => { collect_pat_vars(rest, vars); }
+        _ => {}
+    }
+}
+
 fn resolve_handler_body(body: &mut HandlerBody, scope: &ScopeMap, local_funs: &HashSet<String>) {
     for arm in body.arms.iter_mut() {
         let mut locals = local_funs.clone();
-        for (param_name, _) in &arm.node.params {
-            locals.insert(param_name.clone());
+        for pat in &arm.node.params {
+            collect_pat_vars(pat, &mut locals);
         }
         resolve_expr(&mut arm.node.body, scope, &locals);
     }
     if let Some(ret) = &mut body.return_clause {
         let mut locals = local_funs.clone();
-        for (param_name, _) in &ret.params {
-            locals.insert(param_name.clone());
+        for pat in &ret.params {
+            collect_pat_vars(pat, &mut locals);
         }
         resolve_expr(&mut ret.body, scope, &locals);
     }

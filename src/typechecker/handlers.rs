@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::ast::{self, Expr};
 use crate::token::Span;
 
-use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
+use super::{Checker, Diagnostic, EffectRow, Type};
 
 impl Checker {
     // --- Handler inference ---
@@ -351,22 +351,8 @@ impl Checker {
 
                 let answer_ty = if let Some(ret_arm) = return_clause {
                     let saved_env = self.env.clone();
-                    if let Some((param_name, param_span)) = ret_arm.params.first() {
-                        let param_id = crate::ast::NodeId::fresh();
-                        self.env.insert_with_def(
-                            param_name.clone(),
-                            Scheme {
-                                forall: vec![],
-                                constraints: vec![],
-                                ty: answer_ty.clone(),
-                            },
-                            param_id,
-                        );
-                        self.lsp.node_spans.insert(param_id, *param_span);
-                        self.lsp.type_at_span.insert(*param_span, answer_ty.clone());
-                        self.lsp
-                            .definitions
-                            .push((param_id, param_name.clone(), *param_span));
+                    if let Some(pat) = ret_arm.params.first() {
+                        self.bind_pattern(pat, &answer_ty)?;
                     }
                     // Return clause effects accumulate on the outer scope
                     let ret_ty = self.infer_expr(&ret_arm.body)?;
@@ -389,46 +375,18 @@ impl Checker {
                     if let Some(ref sig) = op_sig {
                         self.resume_type = Some(sig.return_type.clone());
                         self.resume_return_type = Some(answer_ty.clone());
-                        for (i, (param_name, param_span)) in arm.params.iter().enumerate() {
+                        for (i, pat) in arm.params.iter().enumerate() {
                             let param_ty = if i < sig.params.len() {
                                 sig.params[i].1.clone()
                             } else {
                                 self.fresh_var()
                             };
-                            let param_id = crate::ast::NodeId::fresh();
-                            self.env.insert_with_def(
-                                param_name.clone(),
-                                Scheme {
-                                    forall: vec![],
-                                    constraints: vec![],
-                                    ty: param_ty.clone(),
-                                },
-                                param_id,
-                            );
-                            self.lsp.node_spans.insert(param_id, *param_span);
-                            self.lsp.type_at_span.insert(*param_span, param_ty);
-                            self.lsp
-                                .definitions
-                                .push((param_id, param_name.clone(), *param_span));
+                            self.bind_pattern(pat, &param_ty)?;
                         }
                     } else {
-                        for (param_name, param_span) in &arm.params {
+                        for pat in &arm.params {
                             let param_ty = self.fresh_var();
-                            let param_id = crate::ast::NodeId::fresh();
-                            self.env.insert_with_def(
-                                param_name.clone(),
-                                Scheme {
-                                    forall: vec![],
-                                    constraints: vec![],
-                                    ty: param_ty.clone(),
-                                },
-                                param_id,
-                            );
-                            self.lsp.node_spans.insert(param_id, *param_span);
-                            self.lsp.type_at_span.insert(*param_span, param_ty);
-                            self.lsp
-                                .definitions
-                                .push((param_id, param_name.clone(), *param_span));
+                            self.bind_pattern(pat, &param_ty)?;
                         }
                     }
 

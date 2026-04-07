@@ -1037,7 +1037,7 @@ pub struct HandlerArm {
     pub op_name: String,
     /// Optional effect qualifier for disambiguation (e.g. `Logger` in `Logger.log`)
     pub qualifier: Option<String>,
-    pub params: Vec<(String, Span)>,
+    pub params: Vec<Pat>,
     pub body: Box<Expr>,
     /// Optional `finally { cleanup }` block — runs after resume completes or on abort.
     /// Effects inside must be self-contained (fully handled within the block).
