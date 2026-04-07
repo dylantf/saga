@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::ast;
 use crate::token::Span;
 
-use super::{Checker, Diagnostic, EffectOpSig, EffectRow, Type};
+use super::{Checker, Diagnostic, EffectEntry, EffectOpSig, EffectRow, Type};
 
 impl Checker {
     // --- Effect lookup ---
@@ -57,6 +57,44 @@ impl Checker {
             }
         }
         None
+    }
+
+    /// Build a closed `EffectRow` from a list of `EffectRef`s (e.g. a handler's `needs` clause).
+    /// Each ref is resolved to its canonical name via `resolve_effect`.
+    pub(crate) fn effect_row_from_refs(&mut self, refs: &[ast::EffectRef]) -> EffectRow {
+        EffectRow {
+            effects: refs
+                .iter()
+                .map(|e| {
+                    let resolved_name = self.canonical_effect_name(&e.name);
+                    let args = e
+                        .type_args
+                        .iter()
+                        .map(|te| self.convert_type_expr(te, &mut vec![]))
+                        .collect();
+                    EffectEntry::unnamed(resolved_name, args)
+                })
+                .collect(),
+            tail: None,
+        }
+    }
+
+    /// Resolve an effect name to its canonical form (e.g. "Log" -> "Std.Log.Log").
+    pub(crate) fn canonical_effect_name(&mut self, name: &str) -> String {
+        self.resolve_effect(name)
+            .and_then(|info| {
+                let short = name.rsplit('.').next().unwrap_or(name);
+                info.source_module
+                    .as_ref()
+                    .map(|m| format!("{}.{}", m, short))
+            })
+            .unwrap_or_else(|| {
+                if let Some(m) = &self.current_module {
+                    format!("{}.{}", m, name)
+                } else {
+                    name.to_string()
+                }
+            })
     }
 
     // --- Effect tracking ---
