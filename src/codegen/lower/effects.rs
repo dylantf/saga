@@ -93,8 +93,11 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-    fn build_return_lambda(&mut self, ret: &HandlerArm) -> CExpr {
+    fn build_return_lambda(&mut self, ret: &HandlerArm, source_module: Option<&str>) -> CExpr {
+        let saved_source_module = self.current_handler_source_module.clone();
+        self.current_handler_source_module = source_module.map(str::to_string);
         let ret_body = self.lower_handler_owned_expr(&ret.body);
+        self.current_handler_source_module = saved_source_module;
         let (param, body) = if ret.params.is_empty() {
             (self.fresh(), ret_body)
         } else {
@@ -299,7 +302,8 @@ impl<'a> Lowerer<'a> {
             .and_then(|name| self.handle_cond_vars.get(name).cloned());
 
         // Resolve all handler arms, return clause, and which effects are handled
-        let (all_arms, return_clause, handled_effects) = self.resolve_handler(handler);
+        let (all_arms, return_clause, handled_effects, arm_sources, return_source) =
+            self.resolve_handler(handler);
 
         // Index handler arms by (effect.op or bare op) for quick lookup.
         // Qualified arms use "EffectName.op" as key, unqualified use bare "op".
@@ -387,8 +391,21 @@ impl<'a> Lowerer<'a> {
                             .cloned();
                         if let Some(else_arm) = &else_arm {
                             let cond_var = &cond_info.as_ref().unwrap().0;
-                            let then_fun = self.build_op_handler_fun(arm);
-                            let else_fun = self.build_op_handler_fun(else_arm);
+                            let then_source = arm_sources
+                                .get(&qualified_key)
+                                .or_else(|| arm_sources.get(op.as_str()))
+                                .and_then(|src| src.as_deref());
+                            let else_source = cond_info
+                                .as_ref()
+                                .and_then(|(_, _, _, else_canonical)| {
+                                    self.handler_defs
+                                        .get(else_canonical)
+                                        .and_then(|info| info.source_module.as_deref())
+                                })
+                                .map(str::to_string);
+                            let then_fun = self.build_op_handler_fun(arm, then_source);
+                            let else_fun =
+                                self.build_op_handler_fun(else_arm, else_source.as_deref());
                             // Build a wrapper that dispatches based on condition:
                             // fun(Args..., K) -> case CondVar of true -> then_fun(Args, K); _ -> else_fun(Args, K)
                             let n_params = arm.params.len() + 1; // +1 for K
@@ -422,7 +439,11 @@ impl<'a> Lowerer<'a> {
                             continue;
                         }
                     }
-                    let handler_fun = self.build_op_handler_fun(arm);
+                    let source = arm_sources
+                        .get(&qualified_key)
+                        .or_else(|| arm_sources.get(op.as_str()))
+                        .and_then(|src| src.as_deref());
+                    let handler_fun = self.build_op_handler_fun(arm, source);
                     handler_bindings.push((var_name.clone(), handler_fun));
                 } else {
                     // No handler arm for this op -- passthrough (call K with unit).
@@ -445,7 +466,7 @@ impl<'a> Lowerer<'a> {
         let saved_return_k = None;
         let mut return_lambdas: Vec<CExpr> = Vec::new();
         if let Some(ret) = &return_clause {
-            return_lambdas.push(self.build_return_lambda(ret));
+            return_lambdas.push(self.build_return_lambda(ret, return_source.as_deref()));
         }
         let return_k_lambda = self.compose_return_lambdas(return_lambdas);
 
@@ -507,7 +528,7 @@ impl<'a> Lowerer<'a> {
     /// the cleanup code is lowered in the correct lexical scope (where arm body
     /// variables like `conn` are bound). For abort handlers (no resume), cleanup
     /// is appended after the arm body.
-    fn build_op_handler_fun(&mut self, arm: &HandlerArm) -> CExpr {
+    fn build_op_handler_fun(&mut self, arm: &HandlerArm, source_module: Option<&str>) -> CExpr {
         let has_resume = arm.body.contains_resume();
 
         // If resume is never called, use `_` (Core Erlang wildcard) so the compiler
@@ -534,6 +555,8 @@ impl<'a> Lowerer<'a> {
 
         // Set current_handler_finally so Resume lowering wraps K calls in try/catch.
         let saved_finally = self.current_handler_finally.take();
+        let saved_source_module = self.current_handler_source_module.clone();
+        self.current_handler_source_module = source_module.map(str::to_string);
         if let Some(ref fb) = arm.finally_block {
             self.current_handler_finally = Some(fb.as_ref().clone());
         }
@@ -541,6 +564,7 @@ impl<'a> Lowerer<'a> {
         let mut body_ce = self.lower_handler_owned_expr(&arm.body);
 
         self.current_handler_finally = saved_finally;
+        self.current_handler_source_module = saved_source_module;
 
         // Bind arm's params (possibly patterns) to the positional handler args
         for (i, pat) in arm.params.iter().enumerate().rev() {
@@ -581,17 +605,37 @@ impl<'a> Lowerer<'a> {
     fn resolve_handler(
         &self,
         handler: &Handler,
-    ) -> (Vec<HandlerArm>, Option<Box<HandlerArm>>, Vec<String>) {
+    ) -> (
+        Vec<HandlerArm>,
+        Option<Box<HandlerArm>>,
+        Vec<String>,
+        std::collections::HashMap<String, Option<String>>,
+        Option<String>,
+    ) {
         match handler {
             Handler::Named(name, _) => {
                 let canonical = self.resolve_handler_name(name);
                 let info = self.handler_defs.get(&canonical).unwrap_or_else(|| {
                     panic!("unknown handler: {} (canonical: {})", name, canonical)
                 });
+                let mut arm_sources = std::collections::HashMap::new();
+                for arm in &info.arms {
+                    if let Some(ref q) = arm.qualifier {
+                        let canonical = self.canonicalize_effect(q);
+                        arm_sources.insert(
+                            format!("{}.{}", canonical, arm.op_name),
+                            info.source_module.clone(),
+                        );
+                    } else {
+                        arm_sources.insert(arm.op_name.clone(), info.source_module.clone());
+                    }
+                }
                 (
                     info.arms.clone(),
                     info.return_clause.clone(),
                     info.effects.clone(),
+                    arm_sources,
+                    info.source_module.clone(),
                 )
             }
             Handler::Inline {
@@ -603,6 +647,8 @@ impl<'a> Lowerer<'a> {
                 let mut all_arms = Vec::new();
                 let mut resolved_return = return_clause.clone();
                 let mut handled_effects = Vec::new();
+                let mut arm_sources = std::collections::HashMap::new();
+                let mut return_source = None;
 
                 for ann in named {
                     let name = &ann.node.name;
@@ -612,8 +658,20 @@ impl<'a> Lowerer<'a> {
                     });
                     all_arms.extend(info.arms.iter().cloned());
                     handled_effects.extend(info.effects.iter().cloned());
+                    for arm in &info.arms {
+                        if let Some(ref q) = arm.qualifier {
+                            let canonical = self.canonicalize_effect(q);
+                            arm_sources.insert(
+                                format!("{}.{}", canonical, arm.op_name),
+                                info.source_module.clone(),
+                            );
+                        } else {
+                            arm_sources.insert(arm.op_name.clone(), info.source_module.clone());
+                        }
+                    }
                     if resolved_return.is_none() {
                         resolved_return = info.return_clause.clone();
+                        return_source = info.source_module.clone();
                     }
                 }
 
@@ -631,9 +689,15 @@ impl<'a> Lowerer<'a> {
                     {
                         handled_effects.push(eff);
                     }
+                    if let Some(ref q) = arm.node.qualifier {
+                        let canonical = self.canonicalize_effect(q);
+                        arm_sources.insert(format!("{}.{}", canonical, arm.node.op_name), None);
+                    } else {
+                        arm_sources.insert(arm.node.op_name.clone(), None);
+                    }
                 }
 
-                (all_arms, resolved_return, handled_effects)
+                (all_arms, resolved_return, handled_effects, arm_sources, return_source)
             }
         }
     }
@@ -723,7 +787,7 @@ impl<'a> Lowerer<'a> {
         let mut tuple_elements = Vec::new();
         for (_eff, op) in &handler_ops {
             if let Some(arm) = arms_by_op.get(op.as_str()) {
-                tuple_elements.push(self.build_op_handler_fun(arm));
+                tuple_elements.push(self.build_op_handler_fun(arm, None));
             } else {
                 // Passthrough: identity continuation
                 let k_param = self.fresh();
@@ -759,7 +823,9 @@ impl<'a> Lowerer<'a> {
         let mut tuple_elements = Vec::new();
         for (_eff, op) in &handler_ops {
             if let Some(arm) = info.arms.iter().find(|a| a.op_name == *op) {
-                tuple_elements.push(self.build_op_handler_fun(arm));
+                tuple_elements.push(
+                    self.build_op_handler_fun(arm, info.source_module.as_deref()),
+                );
             } else {
                 let k_param = self.fresh();
                 tuple_elements.push(CExpr::Fun(

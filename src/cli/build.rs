@@ -338,7 +338,7 @@ pub fn compile_std_modules(
             module_name.clone(),
             codegen::CompiledModule {
                 codegen_info: info,
-                elaborated,
+                elaborated: normalized,
                 resolution,
             },
         );
@@ -864,7 +864,7 @@ pub fn build_project(profile: &str) -> ProjectBuild {
                     .get(module_name)
                     .cloned()
                     .unwrap_or_default(),
-                elaborated,
+                elaborated: normalized,
                 resolution,
             },
         );

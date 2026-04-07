@@ -95,7 +95,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         let resolution =
             codegen::resolve::resolve_names(&normalized, codegen_info_map, prelude_imports);
         let entry = modules.entry(name.clone()).or_default();
-        entry.elaborated = elab;
+        entry.elaborated = normalized;
         entry.resolution = resolution;
     }
     let ctx = codegen::CodegenContext {
@@ -108,15 +108,19 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
 
 /// Emit Core Erlang and compile it with erlc, asserting no compilation errors.
 fn assert_compiles(src: &str) {
+    let out = emit_elaborated(src);
+    assert_core_compiles(&out);
+}
+
+fn assert_core_compiles(out: &str) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    let out = emit_elaborated(src);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("dylang_test_{}_{id}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let core_path = dir.join("_script.core");
-    std::fs::write(&core_path, &out).unwrap();
+    std::fs::write(&core_path, out).unwrap();
     let status = std::process::Command::new("erlc")
         .arg("-o")
         .arg(&dir)
@@ -2181,4 +2185,34 @@ main () = outer 10
         !out.contains("'length'/1"),
         "no occurrence of 'length' should become a function reference\n{out}"
     );
+}
+
+#[test]
+fn imported_named_handler_calls_private_external_helper_via_bridge() {
+    let src = r#"
+import Std.File (File, fs)
+
+main () = {
+  let _ = File.write! "/tmp/dylang-file-io-test.txt" "hello"
+  File.exists! "/tmp/dylang-file-io-test.txt"
+} with fs
+"#;
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        out.contains("('std_file_bridge', 'write_file', 2)"),
+        "Std.File.fs should lower write through std_file_bridge\n{out}"
+    );
+    assert!(
+        out.contains("('std_file_bridge', 'file_exists', 1)"),
+        "Std.File.fs should lower exists through std_file_bridge\n{out}"
+    );
+    assert!(
+        !out.contains("apply 'write_file'/2"),
+        "Std.File.fs should not lower write as a local _script function\n{out}"
+    );
+    assert!(
+        !out.contains("apply 'file_exists'/1"),
+        "Std.File.fs should not lower exists as a local _script function\n{out}"
+    );
+    assert_core_compiles(&out);
 }
