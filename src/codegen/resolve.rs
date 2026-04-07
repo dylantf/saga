@@ -151,6 +151,8 @@ pub enum ResolvedName {
     /// A top-level function defined in the current module.
     LocalFun {
         name: String,
+        source_module: Option<String>,
+        canonical_name: String,
         arity: usize,
         effects: Vec<String>,
     },
@@ -158,6 +160,8 @@ pub enum ResolvedName {
     ImportedFun {
         erlang_mod: String,
         name: String,
+        source_module: String,
+        canonical_name: String,
         arity: usize,
         effects: Vec<String>,
     },
@@ -172,12 +176,16 @@ pub type ResolutionMap = HashMap<NodeId, ResolvedName>;
 enum ScopedName {
     LocalFun {
         name: String,
+        source_module: Option<String>,
+        canonical_name: String,
         arity: usize,
         effects: Vec<String>,
     },
     ImportedFun {
         erlang_mod: String,
         name: String,
+        source_module: String,
+        canonical_name: String,
         arity: usize,
         effects: Vec<String>,
     },
@@ -361,10 +369,21 @@ fn collect_pat_vars_into(pat: &Pat, vars: &mut HashSet<String>) {
 /// node, determines whether it refers to a local function, an imported function,
 /// an external function, or a local variable (by absence from the map).
 pub fn resolve_names(
+    module_name: &str,
     program: &Program,
     codegen_info: &HashMap<String, ModuleCodegenInfo>,
     prelude_imports: &[Decl],
 ) -> ResolutionMap {
+    let source_module_name = program
+        .iter()
+        .find_map(|decl| {
+            if let Decl::ModuleDecl { path, .. } = decl {
+                Some(path.join("."))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| module_name.to_string());
     let mut scope: HashMap<String, ScopedName> = HashMap::new();
     let mut qualified_scope: HashMap<String, ScopedName> = HashMap::new();
 
@@ -404,6 +423,8 @@ pub fn resolve_names(
             name.clone(),
             ScopedName::LocalFun {
                 name: name.clone(),
+                source_module: Some(source_module_name.clone()),
+                canonical_name: format!("{}.{}", source_module_name, name),
                 arity: *arity,
                 effects: Vec::new(),
             },
@@ -485,6 +506,8 @@ pub fn resolve_names(
                 let scoped = ScopedName::ImportedFun {
                     erlang_mod: erlang_mod.clone(),
                     name: name.clone(),
+                    source_module: mod_name.clone(),
+                    canonical_name: format!("{}.{}", mod_name, name),
                     arity: expanded_arity,
                     effects,
                 };
@@ -530,6 +553,8 @@ pub fn resolve_names(
                 .or_insert(ScopedName::ImportedFun {
                     erlang_mod: erlang_mod.clone(),
                     name: d.dict_name.clone(),
+                    source_module: mod_name.clone(),
+                    canonical_name: d.dict_name.clone(),
                     arity: d.arity,
                     effects: Vec::new(),
                 });
@@ -673,6 +698,8 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
                             name.clone(),
                             ScopedName::LocalFun {
                                 name: name.clone(),
+                                source_module: None,
+                                canonical_name: name.clone(),
                                 arity,
                                 effects: Vec::new(),
                             },
@@ -927,21 +954,29 @@ fn scoped_to_resolved(scoped: &ScopedName) -> ResolvedName {
     match scoped {
         ScopedName::LocalFun {
             name,
+            source_module,
+            canonical_name,
             arity,
             effects,
         } => ResolvedName::LocalFun {
             name: name.clone(),
+            source_module: source_module.clone(),
+            canonical_name: canonical_name.clone(),
             arity: *arity,
             effects: effects.clone(),
         },
         ScopedName::ImportedFun {
             erlang_mod,
             name,
+            source_module,
+            canonical_name,
             arity,
             effects,
         } => ResolvedName::ImportedFun {
             erlang_mod: erlang_mod.clone(),
             name: name.clone(),
+            source_module: source_module.clone(),
+            canonical_name: canonical_name.clone(),
             arity: *arity,
             effects: effects.clone(),
         },

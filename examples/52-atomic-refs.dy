@@ -1,0 +1,14 @@
+import Std.Actor (Process, Monitor, beam_actor)
+import Std.Ref (Ref, ets_ref)
+import Std.AtomicRef (AtomicMutRef, AtomicRef, atomic_ref, atomic_get, atomic_set, atomic_modify)
+
+main () = {
+  let counter = atomic_new! 0
+  let _ = atomic_modify counter (fun n -> n + 10)
+  let v1 = atomic_get counter
+  dbg $"after modify: {show v1}"
+
+  atomic_set counter 42
+  let v2 = atomic_get counter
+  dbg $"after set: {show v2}"
+} with {atomic_ref, ets_ref, beam_actor}

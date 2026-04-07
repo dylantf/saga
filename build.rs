@@ -40,4 +40,7 @@ fn main() {
     for path in &stdlib_files {
         println!("cargo:rerun-if-changed={}", path.display());
     }
+    // Compiler changes also need to invalidate DYLANG_BUILD_HASH so stdlib and
+    // project caches are not reused across incompatible lowering/codegen builds.
+    println!("cargo:rerun-if-changed=src");
 }

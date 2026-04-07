@@ -7,6 +7,13 @@ use std::collections::HashMap;
 use super::util::{self, collect_type_effects};
 use super::{EffectInfo, FunInfo, HandlerInfo, Lowerer};
 
+fn count_lambda_params(body: &ast::Expr) -> usize {
+    match &body.kind {
+        ast::ExprKind::Lambda { params, body, .. } => params.len() + count_lambda_params(body),
+        _ => 0,
+    }
+}
+
 /// Extract the (module, func) pair from an `@external("runtime", "module", "func")` annotation.
 pub fn extract_external(annotations: &[ast::Annotation]) -> Option<(String, String)> {
     annotations
@@ -30,6 +37,99 @@ pub(super) struct PendingAnnotation {
 }
 
 impl<'a> Lowerer<'a> {
+    fn register_imported_module_local_funs(
+        &mut self,
+        module_name: &str,
+        program: &ast::Program,
+    ) {
+        let source_module_name = program
+            .iter()
+            .find_map(|decl| {
+                if let Decl::ModuleDecl { path, .. } = decl {
+                    Some(path.join("."))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| module_name.to_string());
+        let canonicalize_effect = |bare: &str| -> String {
+            self.effect_canonical
+                .get(bare)
+                .cloned()
+                .unwrap_or_else(|| bare.to_string())
+        };
+
+        let mut pending_annotations: HashMap<String, PendingAnnotation> = HashMap::new();
+        for decl in program {
+            if let Decl::FunSignature {
+                name,
+                effects,
+                params,
+                ..
+            } = decl
+            {
+                let mut sorted_effects: Vec<String> = effects
+                    .iter()
+                    .map(|e| canonicalize_effect(&e.name))
+                    .collect();
+                sorted_effects.sort();
+                let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
+                for (i, (_param_name, type_expr)) in params.iter().enumerate() {
+                    let effs = collect_type_effects(type_expr);
+                    if !effs.is_empty() {
+                        let mut sorted: Vec<String> = effs
+                            .into_iter()
+                            .map(|e| canonicalize_effect(&e))
+                            .collect();
+                        sorted.sort();
+                        param_effs.insert(i, sorted);
+                    }
+                }
+                pending_annotations.insert(
+                    name.clone(),
+                    PendingAnnotation {
+                        effects: sorted_effects,
+                        param_absorbed_effects: param_effs,
+                    },
+                );
+            }
+        }
+
+        for decl in program {
+            match decl {
+                Decl::FunBinding {
+                    name, params, body, ..
+                } => {
+                    let PendingAnnotation {
+                        effects,
+                        param_absorbed_effects,
+                    } = pending_annotations
+                        .remove(name.as_str())
+                        .unwrap_or(PendingAnnotation {
+                            effects: Vec::new(),
+                            param_absorbed_effects: HashMap::new(),
+                        });
+                    let base_arity = params.len() + count_lambda_params(body);
+                    let arity = self.expanded_arity(base_arity, &effects);
+                    let canonical = format!("{}.{}", source_module_name, name);
+                    self.fun_info.entry(canonical).or_insert(FunInfo {
+                        arity,
+                        effects,
+                        param_absorbed_effects,
+                    });
+                }
+                Decl::Val { name, .. } => {
+                    let canonical = format!("{}.{}", source_module_name, name);
+                    self.fun_info.entry(canonical).or_insert(FunInfo {
+                        arity: 0,
+                        ..Default::default()
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Initialize the lowerer's lookup tables from program declarations and
     /// imported module codegen info. Returns pending annotations to be consumed
     /// during function grouping.
@@ -291,6 +391,7 @@ impl<'a> Lowerer<'a> {
                 }
                 // Register Std handler bodies and external functions from elaborated programs
                 if let Some(elab_program) = self.ctx.elaborated_module(mod_name) {
+                    self.register_imported_module_local_funs(mod_name, elab_program);
                     for decl in elab_program {
                         match decl {
                             Decl::HandlerDef {
@@ -437,6 +538,7 @@ impl<'a> Lowerer<'a> {
         // Register imported handler bodies and external functions from elaborated programs
         if let Some(elab_program) = self.ctx.elaborated_module(&module_name) {
             let elab_program = elab_program.clone();
+            self.register_imported_module_local_funs(&module_name, &elab_program);
             for edecl in &elab_program {
                 match edecl {
                     Decl::HandlerDef {

@@ -95,6 +95,7 @@ impl<'a> Lowerer<'a> {
 
     fn build_return_lambda(&mut self, ret: &HandlerArm, source_module: Option<&str>) -> CExpr {
         let saved_source_module = self.current_handler_source_module.clone();
+        let ctor_aliases = self.push_source_module_ctor_aliases(source_module);
         self.current_handler_source_module = source_module.map(str::to_string);
         let ret_body = self.lower_handler_owned_expr(&ret.body);
         self.current_handler_source_module = saved_source_module;
@@ -103,6 +104,7 @@ impl<'a> Lowerer<'a> {
         } else {
             self.destructure_pat(&ret.params[0], ret_body)
         };
+        self.pop_source_module_ctor_aliases(ctor_aliases);
         CExpr::Fun(vec![param], Box::new(body))
     }
 
@@ -556,6 +558,7 @@ impl<'a> Lowerer<'a> {
         // Set current_handler_finally so Resume lowering wraps K calls in try/catch.
         let saved_finally = self.current_handler_finally.take();
         let saved_source_module = self.current_handler_source_module.clone();
+        let ctor_aliases = self.push_source_module_ctor_aliases(source_module);
         self.current_handler_source_module = source_module.map(str::to_string);
         if let Some(ref fb) = arm.finally_block {
             self.current_handler_finally = Some(fb.as_ref().clone());
@@ -596,6 +599,7 @@ impl<'a> Lowerer<'a> {
             );
         }
 
+        self.pop_source_module_ctor_aliases(ctor_aliases);
         self.current_handler_k = prev_handler_k;
         CExpr::Fun(fun_params, Box::new(body_ce))
     }

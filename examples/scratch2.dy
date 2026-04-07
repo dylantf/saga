@@ -54,28 +54,32 @@ effect AtomicRef {
   fun atomic_unlock : AtomicMutRef a -> a -> Unit
 }
 
-# Handler: uses ets_ref for storage, a lock process for mutual exclusion
-handler atomic_ref for AtomicRef needs {Process, Actor LockReply, Monitor, Ref} {
+# Handler: uses ets_ref for storage, a lock process for mutual exclusion.
+# Actor usage is scoped locally with `with beam_actor` so it doesn't
+# leak into the caller's effect requirements.
+handler atomic_ref for AtomicRef needs {Process, Monitor, Ref} {
   atomic_new init = {
     let r = new! init
-    let lock_pid = spawn! (fun () -> lock_server ())
+    let lock_pid = spawn! (fun () -> lock_server ()) with beam_actor
     resume AtomicMutRef r lock_pid
   } finally {
     send! lock_pid Stop
   }
   atomic_lock (AtomicMutRef r lock_pid) = {
-    send! lock_pid (Acquire (self! ()))
-    let _ack = receive {
-      Acquired -> Acquired
-    }
-    resume get! r
+    let _ack = {
+      send! lock_pid (Acquire (self! ()))
+      receive { Acquired -> Acquired }
+    } with beam_actor
+    resume (get! r)
   }
   atomic_try_lock (AtomicMutRef r lock_pid) timeout_ms = {
-    send! lock_pid (Acquire (self! ()))
-    let result = receive {
-      Acquired -> Ok (get! r)
-      after timeout_ms -> Err LockTimeout
-    }
+    let result = {
+      send! lock_pid (Acquire (self! ()))
+      receive {
+        Acquired -> Ok (get! r)
+        after timeout_ms -> Err LockTimeout
+      }
+    } with beam_actor
     resume result
   }
   atomic_unlock (AtomicMutRef r lock_pid) v = {
@@ -117,29 +121,39 @@ increment_n_times r n = {
   increment_n_times r (n - 1)
 }
 
-main () = {
+# This works — main is not an actor, no conflict
+fun test_no_actor : Unit -> Unit needs {AtomicRef}
+test_no_actor () = {
   let counter = atomic_new! 0
   let _ = atomic_modify counter (fun n -> n + 10)
-  let v1 = atomic_get counter
-  dbg $"after modify: {show v1}"
+  dbg $"no actor: {show (atomic_get counter)}"
+}
 
-  atomic_set counter 42
-  let v2 = atomic_get counter
-  dbg $"after set: {show v2}"
+type MyMsg = Ping (Pid String)
 
-  increment_n_times counter 5
-  let v3 = atomic_get counter
-  dbg $"after 5 increments: {show v3}"
-
-  # Test timeout — lock is free so this should succeed instantly
-  let locked = atomic_try_lock! counter 100
-  case locked {
-    Ok v -> {
-      dbg $"try_lock got: {show v}"
-      atomic_unlock! counter (v + 1)
+# The simplest conflict case: an actor receive loop that also
+# uses atomic_lock!. Both need the Actor effect but with
+# different mailbox types.
+fun actor_with_lock : AtomicMutRef Int -> Unit
+  needs {AtomicRef, Actor MyMsg, Process}
+actor_with_lock counter = {
+  receive {
+    Ping caller -> {
+      # This atomic_lock! internally does self!() + receive { Acquired -> ... }
+      # which needs Actor LockReply — but we're already Actor MyMsg
+      let _ = atomic_lock! counter
+      atomic_unlock! counter 42
+      send! caller "done"
     }
-    Err msg -> dbg $"try_lock failed: {msg}"
   }
-  let v4 = atomic_get counter
-  dbg $"after try_lock: {show v4}"
+}
+
+main () = {
+  dbg "start"
+  let counter = atomic_new! 0
+  dbg "after new"
+  let _ = atomic_modify counter (fun n -> n + 10)
+  dbg "after modify"
+  let v = atomic_get counter
+  dbg $"result: {show v}"
 } with {atomic_ref, ets_ref, beam_actor}

@@ -1,0 +1,110 @@
+module Std.AtomicRef
+
+import Std.Actor (Process, Actor, Monitor, beam_actor)
+import Std.Ref (MutRef, Ref, ets_ref)
+
+#@ Opaque handle to an atomic mutable reference. Backed by an ETS ref
+#@ with a lock server process that serializes access. Safe for use
+#@ across concurrent actors.
+opaque type AtomicMutRef a = AtomicMutRef (MutRef a) (Pid LockMsg)
+
+type LockMsg =
+  | Acquire (Pid LockReply)
+  | Release
+  | Stop
+
+type LockReply = Acquired
+
+#@ Error type for timed lock acquisition.
+pub type LockError = LockTimeout deriving (Show)
+
+pub fun lock_server : Unit -> Unit needs {Process, Actor LockMsg, Monitor}
+lock_server () = {
+  receive {
+    Acquire caller -> {
+      let mon = monitor! caller
+      send! caller Acquired
+      receive {
+        Release -> {
+          demonitor! mon
+          lock_server ()
+        }
+        Down _ _ -> {
+          lock_server ()
+        }
+      }
+    }
+    Stop -> ()
+  }
+}
+
+#@ Atomic mutable reference effect. Provides lock-based access to
+#@ shared mutable state that is safe across concurrent processes.
+pub effect AtomicRef {
+  fun atomic_new : a -> AtomicMutRef a
+  fun atomic_lock : AtomicMutRef a -> a
+  fun atomic_try_lock : AtomicMutRef a -> Int -> Result a LockError
+  fun atomic_unlock : AtomicMutRef a -> a -> Unit
+}
+
+#@ Lock-based handler for AtomicRef. Uses ets_ref for storage and a
+#@ serializing process for mutual exclusion. The lock server monitors
+#@ the lock holder — if the holder crashes, the lock releases automatically.
+pub handler atomic_ref for AtomicRef needs {Process, Monitor, Ref} {
+  atomic_new init = {
+    let r = new! init
+    let lock_pid = spawn! (fun () -> lock_server ()) with beam_actor
+    resume AtomicMutRef r lock_pid
+  } finally {
+    send! lock_pid Stop
+  }
+  atomic_lock (AtomicMutRef r lock_pid) = {
+    let _ack = {
+      send! lock_pid (Acquire (self! ()))
+      receive {
+        Acquired -> Acquired
+      }
+    } with beam_actor
+    resume get! r
+  }
+  atomic_try_lock (AtomicMutRef r lock_pid) timeout_ms = {
+    let result = {
+      send! lock_pid (Acquire (self! ()))
+      receive {
+        Acquired -> Ok (get! r)
+        after timeout_ms -> Err LockTimeout
+      }
+    } with beam_actor
+    resume result
+  }
+  atomic_unlock (AtomicMutRef r lock_pid) v = {
+    set! r v
+    send! lock_pid Release
+    resume ()
+  }
+}
+
+#@ Read-modify-write under the lock. Acquires the lock, applies the
+#@ function to the current value, writes the result, and releases.
+pub fun atomic_modify : AtomicMutRef a -> (a -> a) -> a needs {AtomicRef}
+atomic_modify ref f = {
+  let current = atomic_lock! ref
+  let updated = f current
+  atomic_unlock! ref updated
+  updated
+}
+
+#@ Read the current value. Acquires and immediately releases the lock.
+pub fun atomic_get : AtomicMutRef a -> a needs {AtomicRef}
+atomic_get ref = {
+  let v = atomic_lock! ref
+  atomic_unlock! ref v
+  v
+}
+
+#@ Overwrite the value. Acquires the lock, writes, and releases.
+pub fun atomic_set : AtomicMutRef a -> a -> Unit needs {AtomicRef}
+atomic_set ref v = {
+  let _ = atomic_lock! ref
+  atomic_unlock! ref v
+}

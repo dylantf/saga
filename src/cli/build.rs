@@ -332,8 +332,12 @@ pub fn compile_std_modules(
         let info = codegen_info.get(module_name).cloned().unwrap_or_default();
         let elaborated = elaborate::elaborate_module(program, mod_result, module_name);
         let normalized = codegen::normalize::normalize_effects(&elaborated);
-        let resolution =
-            codegen::resolve::resolve_names(&normalized, codegen_info, prelude_imports);
+        let resolution = codegen::resolve::resolve_names(
+            module_name,
+            &normalized,
+            codegen_info,
+            prelude_imports,
+        );
         modules.insert(
             module_name.clone(),
             codegen::CompiledModule {
@@ -855,8 +859,12 @@ pub fn build_project(profile: &str) -> ProjectBuild {
 
         let elaborated = elaborate::elaborate_module(&program, &mod_result, module_name);
         let normalized = codegen::normalize::normalize_effects(&elaborated);
-        let resolution =
-            codegen::resolve::resolve_names(&normalized, codegen_info_map, &result.prelude_imports);
+        let resolution = codegen::resolve::resolve_names(
+            module_name,
+            &normalized,
+            codegen_info_map,
+            &result.prelude_imports,
+        );
         compiled_modules.insert(
             module_name.clone(),
             codegen::CompiledModule {
