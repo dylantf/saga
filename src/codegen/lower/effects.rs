@@ -48,9 +48,9 @@ impl<'a> Lowerer<'a> {
 
         if is_direct_effectful_call {
             if let Some(rk) = handled_return_k {
-                self.lower_expr_with_pending_return_k(expr, Some(rk))
+                self.lower_expr_with_call_return_k(expr, Some(rk))
             } else if let Some(inherited_rk) = inherited_return_k {
-                self.lower_expr_with_pending_return_k(expr, Some(inherited_rk))
+                self.lower_expr_with_call_return_k(expr, Some(inherited_rk))
             } else {
                 self.lower_expr(expr)
             }

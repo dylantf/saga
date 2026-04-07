@@ -81,7 +81,7 @@ impl<'a> Lowerer<'a> {
         self.lower_expr_in(expr, LowerMode::Tail(k))
     }
 
-    pub(super) fn lower_expr_with_pending_return_k(
+    pub(super) fn lower_expr_with_call_return_k(
         &mut self,
         expr: &Expr,
         return_k: Option<CExpr>,
@@ -169,7 +169,7 @@ impl<'a> Lowerer<'a> {
                 })
                 .unwrap_or(false);
             if is_eff_call {
-                self.lower_expr_with_pending_return_k(expr, return_k)
+                self.lower_expr_with_call_return_k(expr, return_k)
             } else {
                 let body_ce = self.lower_expr(expr);
                 self.apply_return_k_with(return_k, body_ce)
@@ -256,7 +256,7 @@ impl<'a> Lowerer<'a> {
             })
             .unwrap_or(false)
         {
-            self.lower_expr_with_pending_return_k(expr, Some(CExpr::Var(k_var.to_string())))
+            self.lower_expr_with_call_return_k(expr, Some(CExpr::Var(k_var.to_string())))
         } else if has_nested_effect_call(expr) || matches!(expr.kind, ExprKind::Block { .. }) {
             self.lower_expr_with_k_inner(expr, k_var)
         } else {
@@ -774,7 +774,7 @@ impl<'a> Lowerer<'a> {
                         };
                         let rest_k =
                             self.lower_rest_block_k_with_return_k(pat_opt, rest, return_k);
-                        return self.lower_expr_with_pending_return_k(value_expr, Some(rest_k));
+                        return self.lower_expr_with_call_return_k(value_expr, Some(rest_k));
                     }
                 }
 
@@ -973,7 +973,7 @@ impl<'a> Lowerer<'a> {
                         .unwrap_or(false);
                     if is_effectful_call {
                         let rest_k = self.lower_rest_block_with_k_k(pat_opt, rest, k_var);
-                        return self.lower_expr_with_pending_return_k(value_expr, Some(rest_k));
+                        return self.lower_expr_with_call_return_k(value_expr, Some(rest_k));
                     }
 
                     if has_nested_effect_call(value_expr) {

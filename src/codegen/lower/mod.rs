@@ -1148,12 +1148,10 @@ impl<'a> Lowerer<'a> {
 
         if let Some((func_name, head_expr, args)) = fun_call.as_ref()
             && self.resolved.contains_key(&head_expr.id)
-        {
-            if let Some(call) =
+            && let Some(call) =
                 self.lower_resolved_fun_call(func_name, head_expr, args, None, Some(&expr.span))
-            {
-                return call;
-            }
+        {
+            return call;
         }
 
         if let Some((var_name, _, args)) = fun_call.as_ref()
