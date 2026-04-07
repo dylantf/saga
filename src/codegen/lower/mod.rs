@@ -66,7 +66,7 @@ struct HandlerInfo {
 /// Stored effect definition: maps op_name -> number of parameters.
 #[allow(dead_code)]
 struct EffectInfo {
-    /// op_name -> param count
+    /// op_name -> runtime parameter count after erasing `Unit` placeholders
     ops: HashMap<String, usize>,
 }
 

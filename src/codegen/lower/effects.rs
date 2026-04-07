@@ -152,17 +152,25 @@ impl<'a> Lowerer<'a> {
 
         // Build: apply Handler(arg1, ..., argN, K)
         // Per-op handlers have natural arity -- no atom dispatch, no padding.
+        let runtime_param_count = self
+            .effect_defs
+            .get(&effect_name)
+            .and_then(|effect| effect.ops.get(op_name))
+            .copied()
+            .unwrap_or(args.len());
+        let mut unit_args_to_erase = args.len().saturating_sub(runtime_param_count);
         let mut call_args = Vec::new();
         let mut bindings = Vec::new();
         for arg in args {
-            // Skip unit literal args (they don't exist at the BEAM level)
-            if matches!(
+            let is_unit_literal = matches!(
                 arg.kind,
                 ExprKind::Lit {
                     value: crate::ast::Lit::Unit,
                     ..
                 }
-            ) {
+            );
+            if is_unit_literal && unit_args_to_erase > 0 {
+                unit_args_to_erase -= 1;
                 continue;
             }
             let v = self.fresh();

@@ -122,7 +122,18 @@ impl<'a> Lowerer<'a> {
                     let canonical_effect = format!("{}.{}", source_module_name, name);
                     let mut ops = HashMap::new();
                     for op in operations {
-                        ops.insert(op.node.name.clone(), op.node.params.len());
+                        let runtime_param_count = op
+                            .node
+                            .params
+                            .iter()
+                            .filter(|(_, ty)| {
+                                !matches!(
+                                    ty,
+                                    crate::ast::TypeExpr::Named { name, .. } if name == "Unit"
+                                )
+                            })
+                            .count();
+                        ops.insert(op.node.name.clone(), runtime_param_count);
                         self.op_to_effect
                             .insert(op.node.name.clone(), canonical_effect.clone());
                     }
@@ -241,7 +252,7 @@ impl<'a> Lowerer<'a> {
                 for eff_def in &info.effect_defs {
                     let mut ops_map = HashMap::new();
                     for op in &eff_def.ops {
-                        ops_map.insert(op.name.clone(), op.param_count);
+                        ops_map.insert(op.name.clone(), op.runtime_param_count);
                         self.op_to_effect
                             .entry(op.name.clone())
                             .or_insert_with(|| eff_def.name.clone());
@@ -363,7 +374,7 @@ impl<'a> Lowerer<'a> {
         for eff_def in &info.effect_defs {
             let mut ops_map = HashMap::new();
             for op in &eff_def.ops {
-                ops_map.insert(op.name.clone(), op.param_count);
+                ops_map.insert(op.name.clone(), op.runtime_param_count);
                 self.op_to_effect
                     .insert(op.name.clone(), eff_def.name.clone());
             }

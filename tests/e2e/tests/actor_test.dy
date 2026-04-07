@@ -82,6 +82,23 @@ test_self () = {
   }
 }
 
+fun test_send_unit : Unit -> String needs {Process, Actor Unit}
+test_send_unit () = {
+  let caller = self! ()
+  let pid = spawn! (fun () -> {
+    receive {
+      _ -> {
+        send! caller ()
+        ()
+      }
+    }
+  })
+  send! pid ()
+  receive {
+    _ -> "ok"
+  }
+}
+
 fun test_sleep : Unit -> String needs {Timer}
 test_sleep () = {
   sleep! 50
@@ -191,6 +208,12 @@ describe "Actor" {
       let result = test_self () with beam_actor
       assert_eq result "ping"
     }
+
+    test "send preserves unit-valued messages" {
+      let result = test_send_unit () with beam_actor
+      assert_eq result "ok"
+    }
+
   }
 
   describe "timer" {

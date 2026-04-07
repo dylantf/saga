@@ -260,7 +260,8 @@ impl ModuleExports {
 #[derive(Debug, Clone)]
 pub struct EffectOpDef {
     pub name: String,
-    pub param_count: usize,
+    /// Runtime handler arity after erasing `Unit` placeholder parameters.
+    pub runtime_param_count: usize,
 }
 
 /// An effect definition for codegen: effect name, its operations, and type parameter count.
@@ -1269,7 +1270,17 @@ fn collect_codegen_info(
                     .iter()
                     .map(|op| EffectOpDef {
                         name: op.node.name.clone(),
-                        param_count: op.node.params.len(),
+                        runtime_param_count: op
+                            .node
+                            .params
+                            .iter()
+                            .filter(|(_, ty)| {
+                                !matches!(
+                                    ty,
+                                    crate::ast::TypeExpr::Named { name, .. } if name == "Unit"
+                                )
+                            })
+                            .count(),
                     })
                     .collect();
                 effect_defs.push(EffectDef {
