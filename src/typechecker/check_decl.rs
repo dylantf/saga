@@ -540,44 +540,64 @@ impl Checker {
 
                 // Build effect row from the function's `needs` clause.
                 let fun_effect_row = if !effects.is_empty() || effect_row_var.is_some() {
-                    let effect_refs: Vec<EffectEntry> = effects
-                        .iter()
-                        .map(|e| {
-                            let args = e
-                                .type_args
-                                .iter()
-                                .map(|te| self.convert_type_expr(te, &mut params_list))
-                                .collect();
-                            // Resolve to canonical effect name. resolve_effect
-                            // handles bare, aliased, and fully-qualified forms.
-                            let name = if let Some(info) = self.resolve_effect(&e.name) {
-                                info.source_module
-                                    .as_ref()
-                                    .map(|m| {
-                                        format!(
-                                            "{}.{}",
-                                            m,
-                                            e.name.rsplit('.').next().unwrap_or(&e.name)
-                                        )
-                                    })
-                                    .unwrap_or_else(|| {
-                                        // Local effect: qualify with current module
-                                        if let Some(m) = &self.current_module {
-                                            format!("{}.{}", m, e.name)
-                                        } else {
-                                            e.name.clone()
-                                        }
-                                    })
-                            } else {
-                                self.collected_diagnostics.push(Diagnostic::error_at(
-                                    e.span,
-                                    format!("undefined effect: {}", e.name),
+                    let mut seen_effects: HashMap<String, Vec<Type>> = HashMap::new();
+                    let mut effect_refs = Vec::new();
+                    for e in effects {
+                        let args: Vec<Type> = e
+                            .type_args
+                            .iter()
+                            .map(|te| self.convert_type_expr(te, &mut params_list))
+                            .collect();
+                        let current_display = self.prettify_type(&Type::Con(
+                            e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
+                            args.clone(),
+                        ));
+                        let name = if let Some(info) = self.resolve_effect(&e.name) {
+                            info.source_module
+                                .as_ref()
+                                .map(|m| {
+                                    format!(
+                                        "{}.{}",
+                                        m,
+                                        e.name.rsplit('.').next().unwrap_or(&e.name)
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    // Local effect: qualify with current module
+                                    if let Some(m) = &self.current_module {
+                                        format!("{}.{}", m, e.name)
+                                    } else {
+                                        e.name.clone()
+                                    }
+                                })
+                        } else {
+                            self.collected_diagnostics.push(Diagnostic::error_at(
+                                e.span,
+                                format!("undefined effect: {}", e.name),
+                            ));
+                            e.name.clone()
+                        };
+                        if let Some(prev_args) = seen_effects.get(&name) {
+                            if prev_args != &args {
+                                let previous_display = self.prettify_type(&Type::Con(
+                                    e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
+                                    prev_args.clone(),
                                 ));
-                                e.name.clone()
-                            };
-                            EffectEntry::unnamed(name, args)
-                        })
-                        .collect();
+                                return Err(vec![Diagnostic::error_at(
+                                    e.span,
+                                    format!(
+                                        "conflicting effect requirements in `needs`: `{}` and `{}` both refer to `{}`, but with different type arguments",
+                                        previous_display,
+                                        current_display,
+                                        e.name.rsplit('.').next().unwrap_or(&e.name),
+                                    ),
+                                )]);
+                            }
+                            continue;
+                        }
+                        seen_effects.insert(name.clone(), args.clone());
+                        effect_refs.push(EffectEntry::unnamed(name, args));
+                    }
                     let tail = effect_row_var.as_ref().map(|(rv_name, _)| {
                         let id =
                             if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {

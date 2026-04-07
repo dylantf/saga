@@ -3356,6 +3356,31 @@ handle_msg () = receive {
 }
 
 #[test]
+fn conflicting_duplicate_effect_requirements_are_rejected() {
+    let err = check(
+        r#"
+import Std.Actor (Process, Actor)
+
+fun mixed_actor_messages : Unit -> String needs {Process, Actor Unit, Actor String}
+mixed_actor_messages () = "ok"
+"#,
+    )
+    .err()
+    .expect("expected conflicting Actor effect error");
+
+    assert!(
+        err.message.contains("conflicting effect requirements"),
+        "expected conflict error, got: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("Actor Unit") && err.message.contains("Actor String"),
+        "expected both Actor instantiations in error, got: {}",
+        err.message
+    );
+}
+
+#[test]
 fn error_messages_show_resolved_types() {
     // Type mismatch should show concrete type names, not ?-variables
     let err = check("fun f : (x: Int) -> String\nf x = x")
