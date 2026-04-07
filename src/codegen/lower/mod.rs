@@ -863,10 +863,56 @@ impl<'a> Lowerer<'a> {
             });
         }
 
+        // If the program uses ets_ref, prepend ETS table creation to main's body.
+        if self
+            .check_result
+            .as_ref()
+            .is_some_and(|cr| cr.needs_ets_ref_table)
+            && let Some(main_def) = fun_defs.iter_mut().find(|f| f.name == "main")
+        {
+            main_def.body = Self::wrap_with_ets_init(main_def.body.clone());
+        }
+
         CModule {
             name: module_name.to_string(),
             exports,
             funs: fun_defs,
+        }
+    }
+
+    /// Wraps a function body with ETS table creation for `dylang_ref_store`.
+    /// Emits: `fun(Args...) -> let _ = ets:new(dylang_ref_store, [set, public, named_table]) in <original body>`
+    fn wrap_with_ets_init(body: CExpr) -> CExpr {
+        // Unwrap the outer Fun to inject the let-binding inside
+        match body {
+            CExpr::Fun(params, inner_body) => {
+                let ets_init = CExpr::Call(
+                    "ets".to_string(),
+                    "new".to_string(),
+                    vec![
+                        CExpr::Lit(CLit::Atom("dylang_ref_store".into())),
+                        CExpr::Cons(
+                            Box::new(CExpr::Lit(CLit::Atom("set".into()))),
+                            Box::new(CExpr::Cons(
+                                Box::new(CExpr::Lit(CLit::Atom("public".into()))),
+                                Box::new(CExpr::Cons(
+                                    Box::new(CExpr::Lit(CLit::Atom("named_table".into()))),
+                                    Box::new(CExpr::Nil),
+                                )),
+                            )),
+                        ),
+                    ],
+                );
+                CExpr::Fun(
+                    params,
+                    Box::new(CExpr::Let(
+                        "_EtsRefInit".to_string(),
+                        Box::new(ets_init),
+                        inner_body,
+                    )),
+                )
+            }
+            other => other,
         }
     }
 

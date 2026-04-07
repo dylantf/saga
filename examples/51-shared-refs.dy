@@ -1,0 +1,67 @@
+# Shared mutable references across actors with ets_ref
+#
+# ets_ref stores refs in a shared ETS table, so multiple processes can
+# read and write the same ref. beam_ref (process dictionary) is
+# process-local — each actor has its own refs.
+#
+# This example spawns worker actors that each increment a shared counter,
+# demonstrating cross-process mutation via the Ref effect.
+
+import Std.Actor (Process, Actor, Timer, beam_actor)
+import Std.Ref (MutRef, Ref, ets_ref)
+
+type WorkerMsg = Done
+
+# A worker that increments a shared ref `n` times, then signals done.
+fun worker : MutRef Int -> Int -> Pid WorkerMsg -> Unit needs {Ref, Process}
+worker counter n parent = {
+  worker_loop counter n
+  send! parent Done
+}
+
+fun worker_loop : MutRef Int -> Int -> Unit needs {Ref}
+worker_loop _ 0 = ()
+worker_loop counter n = {
+  let _ = modify! counter (fun x -> x + 1)
+  worker_loop counter (n - 1)
+}
+
+# Wait for `n` Done messages.
+fun wait_for : Int -> Unit needs {Actor WorkerMsg}
+wait_for 0 = ()
+wait_for n = {
+  receive {
+    Done -> wait_for (n - 1)
+  }
+}
+
+main () = {
+  let counter = new! 0
+
+  let me = self! ()
+  let num_workers = 3
+  let increments_per_worker = 100
+
+  # Spawn workers — each one gets the same shared ref
+  let _ = spawn! (fun () -> worker counter increments_per_worker me)
+  # Wait between spawns to avoid race conditions on modify
+  receive {
+    Done -> ()
+  }
+
+  let _ = spawn! (fun () -> worker counter increments_per_worker me)
+  receive {
+    Done -> ()
+  }
+
+  let _ = spawn! (fun () -> worker counter increments_per_worker me)
+  receive {
+    Done -> ()
+  }
+
+  # Small delay to ensure final ETS write is visible
+  sleep! 10
+
+  let total = get! counter
+  dbg $"{show num_workers} workers x {show increments_per_worker} increments = {show total}"
+} with {ets_ref, beam_actor}

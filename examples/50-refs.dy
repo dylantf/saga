@@ -1,0 +1,86 @@
+# Mutable references with the Ref effect
+#
+# The Ref effect provides typed mutable cells. Two handlers ship with
+# the stdlib:
+#   - beam_ref - backed by the process dictionary (fast, process-local)
+#   - ets_ref - backed by ETS (shared across processes)
+#
+# Same code, swap the handler to change the storage backend.
+
+import Std.Ref (MutRef, Ref, beam_ref, ets_ref)
+
+# --- Example 1: Simple counter ---
+# The classic use case - accumulating a value without threading state
+# through every function call.
+
+fun count_if : (pred: a -> Bool) -> List a -> Int needs {Ref}
+count_if pred xs = {
+  let counter = new! 0
+  List.iter (fun x ->
+    if pred x then {
+      let _ = modify! counter (fun n -> n + 1)
+      ()
+    }
+    else ()) xs
+  get! counter
+}
+
+# --- Example 2: Memoized fibonacci ---
+# Using a ref to a Dict as a memoization cache.
+
+fun fib_memo : MutRef (Dict Int Int) -> Int -> Int needs {Ref}
+fib_memo cache n = {
+  let memo = get! cache
+  case Dict.get n memo {
+    Just result -> result
+    Nothing -> {
+      let result =
+        if n <= 1 then n
+        else fib_memo cache (n - 1) + fib_memo cache (n - 2)
+      let _ = modify! cache (fun m -> Dict.put n result m)
+      result
+    }
+  }
+}
+
+fun fibonacci : Int -> Int needs {Ref}
+fibonacci n = {
+  let cache = new! (Dict.new () : Dict Int Int)
+  fib_memo cache n
+}
+
+# --- Example 3: Running totals ---
+# Building a list of running totals using a ref accumulator.
+
+fun running_totals_loop : MutRef Int -> List Int -> List Int needs {Ref}
+running_totals_loop _ [] = []
+running_totals_loop acc (x :: rest) = {
+  let _ = modify! acc (fun n -> n + x)
+  let current = get! acc
+  current :: running_totals_loop acc rest
+}
+
+fun running_totals : List Int -> List Int needs {Ref}
+running_totals xs = {
+  let acc = new! 0
+  running_totals_loop acc xs
+}
+
+impl Show for List a where {a: Show} {
+  show xs = "[" <> String.join ", " (List.map show xs) <> "]"
+}
+
+# --- Run ---
+
+main () = {
+  # All examples use beam_ref (process dictionary) - the default choice.
+
+  let evens = count_if (fun x -> x % 2 == 0) [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  dbg $"Evens in 1..10: {show evens}"
+
+  let fib_30 = fibonacci 30
+  dbg $"fib(30) = {show fib_30}"
+
+  let totals = running_totals [10, 20, 30, 40]
+  dbg $"Running totals of [10, 20, 30, 40]: {show totals}"
+} with beam_ref

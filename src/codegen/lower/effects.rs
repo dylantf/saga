@@ -193,8 +193,15 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Build a per-op handler function for a single BEAM-native operation.
-    /// Synthesizes: `fun (Arg0, ..., ArgN, K) -> let R = mod:func(...) in K(R)`
-    fn build_beam_native_op_fun(&mut self, op_name: &str) -> CExpr {
+    /// Synthesizes: `fun (Arg0, ..., ArgN, K) -> let R = <native call> in K(R)`
+    ///
+    /// `handler_canonical` identifies which handler is providing this op,
+    /// used to dispatch handler-specific lowerings (e.g. beam_ref vs ets_ref).
+    fn build_beam_native_op_fun(
+        &mut self,
+        op_name: &str,
+        handler_canonical: &str,
+    ) -> CExpr {
         let (_, _, param_count) = super::beam_interop::lookup_native_op(op_name)
             .unwrap_or_else(|| panic!("unknown BEAM-native op: {}", op_name));
 
@@ -204,13 +211,22 @@ impl<'a> Lowerer<'a> {
         let mut fun_params: Vec<String> = param_vars.clone();
         fun_params.push(k_var.clone());
 
-        let ctor_atoms = self.constructor_atoms.clone();
-        let call = super::beam_interop::build_native_call(
-            op_name,
-            &param_vars,
-            &ctor_atoms,
-            &mut || self.fresh(),
-        );
+        let call = if super::beam_interop::is_ref_op(op_name) {
+            super::beam_interop::build_ref_native_call(
+                handler_canonical,
+                op_name,
+                &param_vars,
+                &mut || self.fresh(),
+            )
+        } else {
+            let ctor_atoms = self.constructor_atoms.clone();
+            super::beam_interop::build_native_call(
+                op_name,
+                &param_vars,
+                &ctor_atoms,
+                &mut || self.fresh(),
+            )
+        };
 
         let result_var = self.fresh();
         let body = CExpr::Let(
@@ -237,13 +253,15 @@ impl<'a> Lowerer<'a> {
         }
 
         // Collect effects from BEAM-native handlers in this `with` block.
-        let beam_native_effects: std::collections::HashSet<String> = match handler {
+        // Maps effect name -> handler canonical name, so handler-specific ops
+        // (e.g. beam_ref vs ets_ref) can dispatch on the handler identity.
+        let beam_native_effects: std::collections::HashMap<String, String> = match handler {
             Handler::Named(name, _) if self.is_beam_native_handler(name) => {
                 let canonical = self.resolve_handler_name(name);
                 self.handler_defs[&canonical]
                     .effects
                     .iter()
-                    .cloned()
+                    .map(|eff| (eff.clone(), canonical.clone()))
                     .collect()
             }
             Handler::Inline { named, .. } => named
@@ -251,10 +269,13 @@ impl<'a> Lowerer<'a> {
                 .filter(|a| self.is_beam_native_handler(&a.node.name))
                 .flat_map(|a| {
                     let canonical = self.resolve_handler_name(&a.node.name);
-                    self.handler_defs[&canonical].effects.clone()
+                    self.handler_defs[&canonical]
+                        .effects
+                        .iter()
+                        .map(move |eff| (eff.clone(), canonical.clone()))
                 })
                 .collect(),
-            _ => std::collections::HashSet::new(),
+            _ => std::collections::HashMap::new(),
         };
 
         // Check for conditional handle bindings and extract the handler name
@@ -321,8 +342,8 @@ impl<'a> Lowerer<'a> {
         // (e.g. async_handler's body calls spawn!/send!), so they must come after.
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
         for (eff, op, var_name) in &op_vars {
-            if beam_native_effects.contains(eff) {
-                let handler_fun = self.build_beam_native_op_fun(op);
+            if let Some(handler_canonical) = beam_native_effects.get(eff) {
+                let handler_fun = self.build_beam_native_op_fun(op, handler_canonical);
                 handler_bindings.push((var_name.clone(), handler_fun));
             }
         }
@@ -344,7 +365,7 @@ impl<'a> Lowerer<'a> {
             });
 
         for (eff, op, var_name) in &op_vars {
-            if !beam_native_effects.contains(eff) {
+            if !beam_native_effects.contains_key(eff) {
                 let qualified_key = format!("{}.{}", eff, op);
                 if let Some(arm) = arms_by_op
                     .get(&qualified_key)

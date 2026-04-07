@@ -830,6 +830,9 @@ pub struct Checker {
     pub(crate) current_module: Option<String>,
     /// Import declarations from the prelude (passed through to lowerer).
     pub prelude_imports: Vec<crate::ast::Decl>,
+    /// Set to true when a `with ets_ref` handler is encountered, signalling
+    /// that the `dylang_ref_store` ETS table must be created at startup.
+    pub(crate) needs_ets_ref_table: bool,
 }
 
 /// Maps user-visible name forms to canonical (module-qualified) names.
@@ -1086,6 +1089,7 @@ impl Checker {
             allow_bodyless_annotations: false,
             current_module: None,
             prelude_imports: Vec::new(),
+            needs_ets_ref_table: false,
         };
         checker.register_builtins();
         checker

@@ -78,6 +78,9 @@ pub struct CheckResult {
     pub prelude_imports: Vec<crate::ast::Decl>,
     /// Name resolution map: user-visible names -> canonical names.
     pub scope_map: super::ScopeMap,
+    /// Whether any `with ets_ref` appears in the program, requiring the
+    /// `dylang_ref_store` ETS table to be created at VM startup.
+    pub needs_ets_ref_table: bool,
 }
 
 impl CheckResult {
@@ -343,6 +346,7 @@ impl Checker {
             imported_docs: self.lsp.imported_docs.clone(),
             prelude_imports: self.prelude_imports.clone(),
             scope_map: self.scope_map.clone(),
+            needs_ets_ref_table: self.needs_ets_ref_table,
         }
     }
 }

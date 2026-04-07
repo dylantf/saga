@@ -1,0 +1,27 @@
+module Std.Ref
+
+#@ Opaque mutable reference handle. At runtime this is an Erlang reference
+#@ used as a key into either the process dictionary or an ETS table,
+#@ depending on which handler is attached.
+opaque type MutRef a = MutRef(a)
+
+#@ Mutable reference effect. Provides create, read, write, and
+#@ read-modify-write operations on typed mutable cells.
+pub effect Ref {
+  fun new : a -> MutRef a
+  fun get : MutRef a -> a
+  fun set : MutRef a -> a -> Unit
+  fun modify : MutRef a -> (a -> a) -> a
+}
+
+#@ Process-dictionary-backed handler. Fast, single-process, no setup needed.
+#@ Refs are scoped to the current process and cleaned up on process exit.
+pub handler beam_ref for Ref {
+  # Compiler builtin — ops lower to process dictionary calls.
+}
+
+#@ ETS-backed handler. Refs are stored in a shared ETS table, accessible
+#@ across processes. Useful when refs need to survive process boundaries.
+pub handler ets_ref for Ref {
+  # Compiler builtin — ops lower to ETS calls.
+}

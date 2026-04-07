@@ -18,7 +18,11 @@ use super::util::{cerl_call, mangle_ctor_atom};
 
 /// (source_module, canonical_handler_name) pairs for handlers that skip CPS
 /// and lower effect ops to direct BEAM calls.
-const BEAM_NATIVE_HANDLERS: &[(&str, &str)] = &[("Std.Actor", "Std.Actor.beam_actor")];
+const BEAM_NATIVE_HANDLERS: &[(&str, &str)] = &[
+    ("Std.Actor", "Std.Actor.beam_actor"),
+    ("Std.Ref", "Std.Ref.beam_ref"),
+    ("Std.Ref", "Std.Ref.ets_ref"),
+];
 
 /// Check if a handler is BEAM-native by its source module and canonical name.
 pub fn is_beam_native_handler(source_module: &str, canonical_name: &str) -> bool {
@@ -168,6 +172,48 @@ const BEAM_NATIVE_OPS: &[(&str, BeamNativeOp)] = &[
             exit_reason_arg: None,
         },
     ),
+    // Ref ops — param counts only; actual lowering is handler-specific
+    // (beam_ref vs ets_ref) and handled by build_ref_native_call.
+    (
+        "new",
+        BeamNativeOp {
+            module: "erlang",
+            func: "make_ref",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
+    (
+        "get",
+        BeamNativeOp {
+            module: "erlang",
+            func: "get",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
+    (
+        "set",
+        BeamNativeOp {
+            module: "erlang",
+            func: "put",
+            param_count: 2,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
+    (
+        "modify",
+        BeamNativeOp {
+            module: "erlang",
+            func: "get",
+            param_count: 2,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
 ];
 
 /// Look up a BEAM-native op by name. Returns `(module, func, param_count)`.
@@ -250,6 +296,243 @@ pub fn build_native_call(
         CExpr::Let(converted_var, Box::new(conversion), Box::new(call))
     } else {
         CExpr::Call(op.module.to_string(), op.func.to_string(), raw_args)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ref: handler-specific lowering
+// ---------------------------------------------------------------------------
+
+/// Check if an op is a Ref effect op that needs handler-specific lowering.
+pub fn is_ref_op(op_name: &str) -> bool {
+    matches!(op_name, "new" | "get" | "set" | "modify")
+}
+
+/// Build the CExpr for a Ref op, dispatching on handler identity.
+/// `handler_canonical` is e.g. "Std.Ref.beam_ref" or "Std.Ref.ets_ref".
+pub fn build_ref_native_call(
+    handler_canonical: &str,
+    op_name: &str,
+    param_vars: &[String],
+    fresh: &mut dyn FnMut() -> String,
+) -> CExpr {
+    if handler_canonical.ends_with("beam_ref") {
+        build_ref_procdict(op_name, param_vars, fresh)
+    } else {
+        build_ref_ets(op_name, param_vars, fresh)
+    }
+}
+
+/// Process-dictionary-backed Ref ops.
+fn build_ref_procdict(
+    op_name: &str,
+    param_vars: &[String],
+    fresh: &mut dyn FnMut() -> String,
+) -> CExpr {
+    match op_name {
+        // new(val) -> let Key = erlang:make_ref() in let _ = erlang:put(Key, Val) in Key
+        "new" => {
+            let key = fresh();
+            let discard = fresh();
+            CExpr::Let(
+                key.clone(),
+                Box::new(cerl_call("erlang", "make_ref", vec![])),
+                Box::new(CExpr::Let(
+                    discard,
+                    Box::new(cerl_call(
+                        "erlang",
+                        "put",
+                        vec![CExpr::Var(key.clone()), CExpr::Var(param_vars[0].clone())],
+                    )),
+                    Box::new(CExpr::Var(key)),
+                )),
+            )
+        }
+        // get(ref) -> erlang:get(Ref)
+        "get" => cerl_call("erlang", "get", vec![CExpr::Var(param_vars[0].clone())]),
+        // set(ref, val) -> let _ = erlang:put(Ref, Val) in 'unit'
+        "set" => {
+            let discard = fresh();
+            CExpr::Let(
+                discard,
+                Box::new(cerl_call(
+                    "erlang",
+                    "put",
+                    vec![
+                        CExpr::Var(param_vars[0].clone()),
+                        CExpr::Var(param_vars[1].clone()),
+                    ],
+                )),
+                Box::new(CExpr::Lit(CLit::Atom("unit".into()))),
+            )
+        }
+        // modify(ref, f) -> let Old = erlang:get(Ref) in let New = apply F(Old) in let _ = erlang:put(Ref, New) in New
+        "modify" => {
+            let old = fresh();
+            let new_val = fresh();
+            let discard = fresh();
+            CExpr::Let(
+                old.clone(),
+                Box::new(cerl_call(
+                    "erlang",
+                    "get",
+                    vec![CExpr::Var(param_vars[0].clone())],
+                )),
+                Box::new(CExpr::Let(
+                    new_val.clone(),
+                    Box::new(CExpr::Apply(
+                        Box::new(CExpr::Var(param_vars[1].clone())),
+                        vec![CExpr::Var(old)],
+                    )),
+                    Box::new(CExpr::Let(
+                        discard,
+                        Box::new(cerl_call(
+                            "erlang",
+                            "put",
+                            vec![
+                                CExpr::Var(param_vars[0].clone()),
+                                CExpr::Var(new_val.clone()),
+                            ],
+                        )),
+                        Box::new(CExpr::Var(new_val)),
+                    )),
+                )),
+            )
+        }
+        _ => panic!("unknown Ref op: {op_name}"),
+    }
+}
+
+/// ETS-backed Ref ops. Uses a well-known named table `dylang_ref_store`.
+fn build_ref_ets(
+    op_name: &str,
+    param_vars: &[String],
+    fresh: &mut dyn FnMut() -> String,
+) -> CExpr {
+    let table = CExpr::Lit(CLit::Atom("dylang_ref_store".into()));
+
+    match op_name {
+        // new(val) -> let Key = erlang:make_ref() in let _ = ets:insert(Table, {Key, Val}) in Key
+        "new" => {
+            let key = fresh();
+            let discard = fresh();
+            CExpr::Let(
+                key.clone(),
+                Box::new(cerl_call("erlang", "make_ref", vec![])),
+                Box::new(CExpr::Let(
+                    discard,
+                    Box::new(cerl_call(
+                        "ets",
+                        "insert",
+                        vec![
+                            table,
+                            CExpr::Tuple(vec![
+                                CExpr::Var(key.clone()),
+                                CExpr::Var(param_vars[0].clone()),
+                            ]),
+                        ],
+                    )),
+                    Box::new(CExpr::Var(key)),
+                )),
+            )
+        }
+        // get(ref) -> let [{_, Val}] = ets:lookup(Table, Ref) in Val
+        "get" => {
+            let lookup_result = fresh();
+            let val = fresh();
+            CExpr::Let(
+                lookup_result.clone(),
+                Box::new(cerl_call(
+                    "ets",
+                    "lookup",
+                    vec![table, CExpr::Var(param_vars[0].clone())],
+                )),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(lookup_result)),
+                    vec![CArm {
+                        pat: CPat::Cons(
+                            Box::new(CPat::Tuple(vec![
+                                CPat::Wildcard,
+                                CPat::Var(val.clone()),
+                            ])),
+                            Box::new(CPat::Nil),
+                        ),
+                        guard: None,
+                        body: CExpr::Var(val),
+                    }],
+                )),
+            )
+        }
+        // set(ref, val) -> let _ = ets:insert(Table, {Ref, Val}) in 'unit'
+        "set" => {
+            let discard = fresh();
+            CExpr::Let(
+                discard,
+                Box::new(cerl_call(
+                    "ets",
+                    "insert",
+                    vec![
+                        table,
+                        CExpr::Tuple(vec![
+                            CExpr::Var(param_vars[0].clone()),
+                            CExpr::Var(param_vars[1].clone()),
+                        ]),
+                    ],
+                )),
+                Box::new(CExpr::Lit(CLit::Atom("unit".into()))),
+            )
+        }
+        // modify(ref, f) -> let [{_, Old}] = ets:lookup(...) in let New = apply F(Old) in let _ = ets:insert(..., {Ref, New}) in New
+        "modify" => {
+            let lookup_result = fresh();
+            let old = fresh();
+            let new_val = fresh();
+            let discard = fresh();
+            CExpr::Let(
+                lookup_result.clone(),
+                Box::new(cerl_call(
+                    "ets",
+                    "lookup",
+                    vec![table.clone(), CExpr::Var(param_vars[0].clone())],
+                )),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(lookup_result)),
+                    vec![CArm {
+                        pat: CPat::Cons(
+                            Box::new(CPat::Tuple(vec![
+                                CPat::Wildcard,
+                                CPat::Var(old.clone()),
+                            ])),
+                            Box::new(CPat::Nil),
+                        ),
+                        guard: None,
+                        body: CExpr::Let(
+                            new_val.clone(),
+                            Box::new(CExpr::Apply(
+                                Box::new(CExpr::Var(param_vars[1].clone())),
+                                vec![CExpr::Var(old)],
+                            )),
+                            Box::new(CExpr::Let(
+                                discard,
+                                Box::new(cerl_call(
+                                    "ets",
+                                    "insert",
+                                    vec![
+                                        table,
+                                        CExpr::Tuple(vec![
+                                            CExpr::Var(param_vars[0].clone()),
+                                            CExpr::Var(new_val.clone()),
+                                        ]),
+                                    ],
+                                )),
+                                Box::new(CExpr::Var(new_val)),
+                            )),
+                        ),
+                    }],
+                )),
+            )
+        }
+        _ => panic!("unknown Ref op: {op_name}"),
     }
 }
 

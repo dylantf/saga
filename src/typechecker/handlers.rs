@@ -18,6 +18,21 @@ impl Checker {
     ) -> Result<Type, Diagnostic> {
         let handled = self.handler_handled_effects(handler);
 
+        // Check if this with-expression uses ets_ref, which requires ETS table init.
+        match handler {
+            ast::Handler::Named(name, _) if name == "ets_ref" => {
+                self.needs_ets_ref_table = true;
+            }
+            ast::Handler::Inline { named, .. } => {
+                for ann in named {
+                    if ann.node.name == "ets_ref" {
+                        self.needs_ets_ref_table = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+
         // Build op_name -> (arm_span, source_module) map for LSP go-to-def
         let arm_stack_entry: std::collections::HashMap<String, (Span, Option<String>)> =
             match handler {
