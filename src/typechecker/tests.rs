@@ -573,6 +573,45 @@ fn handler_arm_body_effect_handled_by_sibling() {
 }
 
 #[test]
+fn inline_handler_arm_can_use_stdio_from_sibling_named_handler() {
+    check(
+        "type AppError = HttpError String\n\
+         effect Fail a {\n  fun fail : a -> b\n}\n\
+         fun run_app : Unit -> Unit needs {Fail AppError}\n\
+         run_app () = fail! (HttpError \"oops\")\n\
+         main () = {\n\
+           run_app ()\n\
+         } with {\n\
+           console,\n\
+           fail err = case err {\n\
+             HttpError e -> println (\"HTTP: \" <> e)\n\
+           }\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn inline_handler_return_clause_can_use_stdio_from_sibling_named_handler() {
+    check(
+        "effect Fail {\n  fun fail : String -> a\n}\n\
+         fun run_app : Unit -> String needs {Fail}\n\
+         run_app () = \"ok\"\n\
+         main () = {\n\
+           run_app ()\n\
+         } with {\n\
+           console,\n\
+           fail _ = \"bad\",\n\
+           return value = {\n\
+             println value\n\
+             value\n\
+           }\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
 fn handler_arm_body_unhandled_effect_propagates() {
     // An inline handler arm body uses Log, but Log is NOT handled by the `with`.
     // Should require `needs {Log}` on the enclosing function.

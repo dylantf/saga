@@ -8,6 +8,12 @@ use super::{Checker, Diagnostic, EffectEntry, EffectRow, Type};
 impl Checker {
     // --- Handler inference ---
 
+    fn push_unique_effect_entry(entries: &mut Vec<EffectEntry>, entry: EffectEntry) {
+        if !entries.iter().any(|seen| seen.same_instantiation(&entry)) {
+            entries.push(entry);
+        }
+    }
+
     fn expand_used_handler_families_for_warning(
         &self,
         mut used_families: std::collections::HashSet<String>,
@@ -175,81 +181,6 @@ impl Checker {
         let outer_effect_cache = self.effect_meta.type_param_cache.clone();
         let handled_entries =
             self.resolve_handled_effect_entries(&handled_families, &inner_effs, expr.span)?;
-        let direct_used_handled_families: std::collections::HashSet<String> =
-            handled_entries.iter().map(|e| e.name.clone()).collect();
-        let used_handled_families =
-            self.expand_used_handler_families_for_warning(direct_used_handled_families, handler);
-
-        // Unnecessary handler check.
-        // Named handlers (bundles) only warn when ALL their effects are unused.
-        // Inline arms warn per-unused-effect.
-        if !handled_families.is_empty() {
-            let mut unused = Vec::new();
-
-            match handler {
-                ast::Handler::Named(name, _) => {
-                    // Single named handler: warn only if none of its effects are used
-                    let handler_effects: Vec<String> = self
-                        .handlers
-                        .get(name)
-                        .map(|h| h.effects.to_vec())
-                        .or_else(|| {
-                            self.handler_effects_from_env(name)
-                                .map(|e| e.into_iter().collect())
-                        })
-                        .unwrap_or_default();
-                    if !handler_effects.is_empty()
-                        && !handler_effects
-                            .iter()
-                            .any(|e| used_handled_families.contains(e))
-                    {
-                        unused.extend(handler_effects);
-                    }
-                }
-                ast::Handler::Inline { named, arms, .. } => {
-                    // Named refs within inline block: warn per-handler when all unused
-                    for ann in named {
-                        let handler_effects: Vec<String> = self
-                            .handlers
-                            .get(&ann.node.name)
-                            .map(|h| h.effects.to_vec())
-                            .or_else(|| {
-                                self.handler_effects_from_env(&ann.node.name)
-                                    .map(|e| e.into_iter().collect())
-                            })
-                            .unwrap_or_default();
-                        if !handler_effects.is_empty()
-                            && !handler_effects
-                                .iter()
-                                .any(|e| used_handled_families.contains(e))
-                        {
-                            unused.extend(handler_effects);
-                        }
-                    }
-                    // Inline arms: warn per-unused-effect
-                    for arm in arms {
-                        if let Some(eff) =
-                            self.effect_for_op(&arm.node.op_name, arm.node.qualifier.as_deref())
-                            && !used_handled_families.contains(&eff)
-                        {
-                            unused.push(eff);
-                        }
-                    }
-                }
-            }
-
-            if !unused.is_empty() {
-                unused.sort();
-                unused.dedup();
-                self.collected_diagnostics.push(Diagnostic::warning_at(
-                    expr.span,
-                    format!(
-                        "expression does not use effects {{{}}}; handler is unnecessary",
-                        unused.join(", ")
-                    ),
-                ));
-            }
-        }
 
         let inner_effect_cache = inner_result.effect_cache;
 
@@ -329,10 +260,36 @@ impl Checker {
                         };
                         let final_effs = remaining_effs.merge(&fresh_needs);
                         self.emit_effects(&final_effs);
+                        if !handler_info.effects.is_empty()
+                            && !handled_entries
+                                .iter()
+                                .any(|entry| handler_info.effects.contains(&entry.name))
+                        {
+                            self.collected_diagnostics.push(Diagnostic::warning_at(
+                                expr.span,
+                                format!(
+                                    "expression does not use effects {{{}}}; handler is unnecessary",
+                                    handler_info.effects.join(", ")
+                                ),
+                            ));
+                        }
                         Ok(self.sub.apply(&fresh_ret))
                     } else {
                         let final_effs = remaining_effs.merge(&handler_info.needs_effects);
                         self.emit_effects(&final_effs);
+                        if !handler_info.effects.is_empty()
+                            && !handled_entries
+                                .iter()
+                                .any(|entry| handler_info.effects.contains(&entry.name))
+                        {
+                            self.collected_diagnostics.push(Diagnostic::warning_at(
+                                expr.span,
+                                format!(
+                                    "expression does not use effects {{{}}}; handler is unnecessary",
+                                    handler_info.effects.join(", ")
+                                ),
+                            ));
+                        }
                         Ok(expr_ty)
                     }
                 } else {
@@ -346,6 +303,9 @@ impl Checker {
                 return_clause,
                 ..
             } => {
+                let mut used_handled_families: std::collections::HashSet<String> =
+                    handled_entries.iter().map(|e| e.name.clone()).collect();
+                let mut named_handler_entries = Vec::new();
                 for ann in named {
                     let name = &ann.node.name;
                     let name_span = ann.node.span;
@@ -355,6 +315,27 @@ impl Checker {
                             format!("undefined handler: {}", name),
                         ));
                     }
+                    if let Some(entries) = self.handler_effect_entries_from_env(name) {
+                        for entry in entries {
+                            Self::push_unique_effect_entry(&mut named_handler_entries, entry);
+                        }
+                    } else if let Some(info) = self.handlers.get(name) {
+                        for effect_name in &info.effects {
+                            Self::push_unique_effect_entry(
+                                &mut named_handler_entries,
+                                EffectEntry::unnamed(effect_name.clone(), vec![]),
+                            );
+                        }
+                    }
+                }
+                for entry in &named_handler_entries {
+                    if inner_effs.effects.iter().any(|inner| inner.same_instantiation(entry)) {
+                        used_handled_families.insert(entry.name.clone());
+                    }
+                }
+                let mut block_handled_entries = handled_entries.clone();
+                for entry in &named_handler_entries {
+                    Self::push_unique_effect_entry(&mut block_handled_entries, entry.clone());
                 }
 
                 let mut answer_ty = expr_ty.clone();
@@ -436,11 +417,20 @@ impl Checker {
 
                 let answer_ty = if let Some(ret_arm) = return_clause {
                     let saved_env = self.env.clone();
+                    let saved_effs = self.save_effects();
                     if let Some(pat) = ret_arm.params.first() {
                         self.bind_pattern(pat, &answer_ty)?;
                     }
-                    // Return clause effects accumulate on the outer scope
                     let ret_ty = self.infer_expr(&ret_arm.body)?;
+                    let raw_ret_effs = self.restore_effects(saved_effs);
+                    let ret_effs = self.sub.apply_effect_row(&raw_ret_effs);
+                    for entry in &named_handler_entries {
+                        if ret_effs.effects.iter().any(|eff| eff.same_instantiation(entry)) {
+                            used_handled_families.insert(entry.name.clone());
+                        }
+                    }
+                    let unhandled_ret_effs = ret_effs.subtract_entries(&named_handler_entries);
+                    self.emit_effects(&unhandled_ret_effs);
                     self.env = saved_env;
                     ret_ty
                 } else {
@@ -493,8 +483,13 @@ impl Checker {
                     let arm_ty = self.infer_expr(&arm.body)?;
                     let raw_arm_effs = self.restore_effects(saved_effs);
                     let arm_effs = self.sub.apply_effect_row(&raw_arm_effs);
+                    for entry in &named_handler_entries {
+                        if arm_effs.effects.iter().any(|eff| eff.same_instantiation(entry)) {
+                            used_handled_families.insert(entry.name.clone());
+                        }
+                    }
                     let own_effect = op_sig.as_ref().map(|sig| sig.effect_name.clone());
-                    let sibling_handled: Vec<EffectEntry> = handled_entries
+                    let sibling_handled: Vec<EffectEntry> = block_handled_entries
                         .iter()
                         .filter(|entry| own_effect.as_ref() != Some(&entry.name))
                         .cloned()
@@ -530,6 +525,49 @@ impl Checker {
                 let unhandled_named_needs = named_needs.subtract(&handled_families);
                 let final_effs = remaining_effs.merge(&unhandled_named_needs);
                 self.emit_effects(&final_effs);
+
+                let used_handled_families =
+                    self.expand_used_handler_families_for_warning(used_handled_families, handler);
+                if !handled_families.is_empty() {
+                    let mut unused = Vec::new();
+                    for ann in named {
+                        let handler_effects: Vec<String> = self
+                            .handlers
+                            .get(&ann.node.name)
+                            .map(|h| h.effects.to_vec())
+                            .or_else(|| {
+                                self.handler_effects_from_env(&ann.node.name)
+                                    .map(|e| e.into_iter().collect())
+                            })
+                            .unwrap_or_default();
+                        if !handler_effects.is_empty()
+                            && !handler_effects
+                                .iter()
+                                .any(|e| used_handled_families.contains(e))
+                        {
+                            unused.extend(handler_effects);
+                        }
+                    }
+                    for arm in arms {
+                        if let Some(eff) =
+                            self.effect_for_op(&arm.node.op_name, arm.node.qualifier.as_deref())
+                            && !used_handled_families.contains(&eff)
+                        {
+                            unused.push(eff);
+                        }
+                    }
+                    if !unused.is_empty() {
+                        unused.sort();
+                        unused.dedup();
+                        self.collected_diagnostics.push(Diagnostic::warning_at(
+                            expr.span,
+                            format!(
+                                "expression does not use effects {{{}}}; handler is unnecessary",
+                                unused.join(", ")
+                            ),
+                        ));
+                    }
+                }
                 Ok(answer_ty)
             }
         }
