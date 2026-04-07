@@ -88,11 +88,6 @@ struct FunInfo {
 }
 
 /// Explicit lowering context for value-producing vs terminal positions.
-///
-/// This is an incremental step away from relying entirely on ambient mutable
-/// continuation state (`current_return_k`, `pending_callee_return_k`) to infer
-/// whether a node is being lowered as a value or as the terminal computation of
-/// the surrounding CPS context.
 #[derive(Clone)]
 pub(super) enum LowerMode {
     /// Lower as a value-producing subexpression.
@@ -139,15 +134,6 @@ pub struct Lowerer<'a> {
     /// Effects that the next lambda being lowered should accept as extra params.
     /// Set by the call site that passes the lambda to an effectful parameter.
     lambda_effect_context: Option<Vec<String>>,
-    /// Return continuation for the current `with` expression's return clause.
-    /// Set by `lower_with`, consumed by `lower_block` at its terminal cases.
-    /// This places the return clause inside the CPS chain so handler aborts
-    /// (which don't call K) naturally bypass the return clause.
-    current_return_k: Option<CExpr>,
-    /// Return continuation to pass as `_ReturnK` to the next effectful call.
-    /// Set by `lower_with` when the inner expression is a direct function call,
-    /// consumed by the saturated call path.
-    pending_callee_return_k: Option<CExpr>,
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
@@ -209,8 +195,6 @@ impl<'a> Lowerer<'a> {
             no_resume_ops: std::collections::HashSet::new(),
             current_effectful_vars: HashMap::new(),
             lambda_effect_context: None,
-            current_return_k: None,
-            pending_callee_return_k: None,
             constructor_atoms,
             resolved,
             current_handler_k: None,
@@ -728,9 +712,8 @@ impl<'a> Lowerer<'a> {
             let base_arity = arity - handler_param_names.len() - if has_effects { 1 } else { 0 };
             let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
 
-            // For effectful functions, set _ReturnK as current_return_k so
-            // lower_block applies it at terminal positions. Handler aborts
-            // bypass the function's normal return, so they skip _ReturnK.
+            // For effectful functions, _ReturnK is threaded explicitly into
+            // terminal body lowering so handler aborts bypass normal return.
             let all_simple_params = clauses.len() == 1
                 && clauses[0].0.iter().all(|p| {
                     matches!(
@@ -891,6 +874,168 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn effectful_call_return_k_binding(&mut self, return_k: Option<CExpr>) -> (String, CExpr) {
+        let rk_var = self.fresh();
+        let return_k = return_k.unwrap_or_else(|| {
+            let p = self.fresh();
+            CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
+        });
+        (rk_var, return_k)
+    }
+
+    fn lower_resolved_fun_call(
+        &mut self,
+        func_name: &str,
+        head_expr: &Expr,
+        args: &[&Expr],
+        return_k: Option<CExpr>,
+        call_span: Option<&crate::token::Span>,
+    ) -> Option<CExpr> {
+        if !self.resolved.contains_key(&head_expr.id) {
+            return None;
+        }
+
+        let callee_effects = self.resolved_effects(head_expr.id, func_name);
+        let callee_ops = callee_effects
+            .as_ref()
+            .map(|effs| self.effect_handler_ops(effs))
+            .unwrap_or_default();
+        let mut callee_handler_entries: Vec<(String, String)> = Vec::new();
+        for (eff, op) in &callee_ops {
+            callee_handler_entries.push((format!("{}.{}", eff, op), Self::handler_param_name(eff, op)));
+        }
+        let effect_count = callee_handler_entries.len();
+        let total_arity = self.fun_arity(func_name);
+        let return_k_count = if effect_count > 0 { 1 } else { 0 };
+
+        if let Some(arity) = total_arity
+            && args.len() + effect_count + return_k_count == arity
+        {
+            let mut arg_vars: Vec<String> = Vec::new();
+            let mut bindings: Vec<(String, CExpr)> = Vec::new();
+            let callee_param_effs = self.param_absorbed_effects(func_name).cloned();
+            for (i, arg) in args.iter().enumerate() {
+                let v = self.fresh();
+                let saved_ctx = self.lambda_effect_context.take();
+                if let Some(ref pe) = callee_param_effs
+                    && let Some(effs) = pe.get(&i)
+                {
+                    self.lambda_effect_context = Some(effs.clone());
+                }
+                let ce = self.lower_expr_value(arg);
+                self.lambda_effect_context = saved_ctx;
+                arg_vars.push(v.clone());
+                bindings.push((v, ce));
+            }
+            if !callee_handler_entries.is_empty() {
+                for (key, _) in &callee_handler_entries {
+                    let param = self.current_handler_params.get(key).unwrap_or_else(|| {
+                        panic!(
+                            "ICE: saturated call to '{}' needs handler for '{}' \
+                                         but no handler param in scope. params: {:?}",
+                            func_name, key, self.current_handler_params,
+                        )
+                    });
+                    arg_vars.push(param.clone());
+                }
+                let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
+                bindings.push((rk_var.clone(), rk_ce));
+                arg_vars.push(rk_var);
+            }
+            let call_args: Vec<CExpr> = arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
+            let call = self.emit_call(func_name, head_expr.id, arity, call_args, call_span);
+            return Some(
+                bindings
+                    .into_iter()
+                    .rev()
+                    .fold(call, |body, (var, val)| CExpr::Let(var, Box::new(val), Box::new(body))),
+            );
+        }
+
+        if let Some(arity) = total_arity {
+            let user_slots = arity - effect_count - return_k_count;
+            if args.len() < user_slots {
+                let remaining_user = user_slots - args.len();
+                let mut arg_vars: Vec<String> = Vec::new();
+                let mut bindings: Vec<(String, CExpr)> = Vec::new();
+                for arg in args {
+                    let v = self.fresh();
+                    let ce = self.lower_expr_value(arg);
+                    arg_vars.push(v.clone());
+                    bindings.push((v, ce));
+                }
+                let mut params: Vec<String> = Vec::new();
+                for _ in 0..remaining_user {
+                    params.push(self.fresh());
+                }
+                let mut call_args: Vec<CExpr> =
+                    arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
+                call_args.extend(params.iter().map(|p| CExpr::Var(p.clone())));
+                if !callee_handler_entries.is_empty() {
+                    for (_, p) in &callee_handler_entries {
+                        params.push(p.clone());
+                        call_args.push(CExpr::Var(p.clone()));
+                    }
+                    let rk = "_ReturnK".to_string();
+                    params.push(rk.clone());
+                    call_args.push(CExpr::Var(rk));
+                }
+                let call = self.emit_call(func_name, head_expr.id, arity, call_args, call_span);
+                let lambda = CExpr::Fun(params, Box::new(call));
+                return Some(
+                    bindings
+                        .into_iter()
+                        .rev()
+                        .fold(lambda, |body, (var, val)| CExpr::Let(var, Box::new(val), Box::new(body))),
+                );
+            }
+        }
+
+        None
+    }
+
+    fn lower_effectful_var_call(
+        &mut self,
+        var_name: &str,
+        args: &[&Expr],
+        return_k: Option<CExpr>,
+    ) -> Option<CExpr> {
+        let absorbed = self.current_effectful_vars.get(var_name).cloned()?;
+        let mut arg_vars: Vec<String> = Vec::new();
+        let mut bindings: Vec<(String, CExpr)> = Vec::new();
+        for arg in args {
+            let v = self.fresh();
+            let ce = self.lower_expr_value(arg);
+            arg_vars.push(v.clone());
+            bindings.push((v, ce));
+        }
+        let absorbed_ops = self.effect_handler_ops(&absorbed);
+        for (eff, op) in &absorbed_ops {
+            let key = format!("{}.{}", eff, op);
+            if let Some(param) = self.current_handler_params.get(&key) {
+                arg_vars.push(param.clone());
+            } else {
+                panic!(
+                    "effectful variable '{}' needs handler for '{}.{}' but no handler param in scope",
+                    var_name, eff, op
+                );
+            }
+        }
+        let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
+        bindings.push((rk_var.clone(), rk_ce));
+        arg_vars.push(rk_var);
+        let call = CExpr::Apply(
+            Box::new(CExpr::Var(core_var(var_name))),
+            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+        );
+        Some(
+            bindings
+                .into_iter()
+                .rev()
+                .fold(call, |body, (var, val)| CExpr::Let(var, Box::new(val), Box::new(body))),
+        )
+    }
+
     pub(super) fn lower_expr(&mut self, expr: &Expr) -> CExpr {
         match &expr.kind {
             ExprKind::Lit { value, .. } => match value {
@@ -1039,13 +1184,7 @@ impl<'a> Lowerer<'a> {
                     {
                         return self.lower_ctor(func_name, args);
                     }
-                    return self.lower_qualified_call(
-                        module,
-                        func_name,
-                        head,
-                        &args,
-                        Some(&expr.span),
-                    );
+                    return self.lower_qualified_call(module, func_name, head, &args, None, Some(&expr.span));
                 }
 
                 // Lower print/println/eprint/eprintln to io:format, dbg to stderr+passthrough.
@@ -1104,179 +1243,21 @@ impl<'a> Lowerer<'a> {
                 if let Some((func_name, head_expr, args)) = collect_fun_call(expr)
                     && self.resolved.contains_key(&head_expr.id)
                 {
-                    let callee_effects = self.resolved_effects(head_expr.id, func_name);
-                    let callee_ops = callee_effects
-                        .as_ref()
-                        .map(|effs| self.effect_handler_ops(effs))
-                        .unwrap_or_default();
-                    // Build (key, param_name) list for callee handler params
-                    let mut callee_handler_entries: Vec<(String, String)> = Vec::new();
-                    for (eff, op) in &callee_ops {
-                        callee_handler_entries
-                            .push((format!("{}.{}", eff, op), Self::handler_param_name(eff, op)));
-                    }
-                    let effect_count = callee_handler_entries.len();
-                    let total_arity = self.fun_arity(func_name);
-
-                    let return_k_count = if effect_count > 0 { 1 } else { 0 };
-                    if let Some(arity) = total_arity
-                        && args.len() + effect_count + return_k_count == arity
+                    if let Some(call) =
+                        self.lower_resolved_fun_call(func_name, head_expr, &args, None, Some(&expr.span))
                     {
-                        // Saturated call: apply fun 'name'/N(arg1, ..., argN, handler1, ...)
-                        let mut arg_vars: Vec<String> = Vec::new();
-                        let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                        let callee_param_effs = self.param_absorbed_effects(func_name).cloned();
-                        for (i, arg) in args.iter().enumerate() {
-                            let v = self.fresh();
-                            // If this arg position has absorbed effects, set context
-                            // so lambdas at this position get handler params added.
-                            let saved_ctx = self.lambda_effect_context.take();
-                            if let Some(ref pe) = callee_param_effs
-                                && let Some(effs) = pe.get(&i)
-                            {
-                                self.lambda_effect_context = Some(effs.clone());
-                            }
-                            // Save pending_callee_return_k so inner effectful calls
-                            // (e.g. `expr with handler` in argument position) don't
-                            // steal the continuation meant for THIS call.
-                            let saved_pending_k = self.pending_callee_return_k.take();
-                            let ce = self.lower_expr_value(arg);
-                            self.pending_callee_return_k = saved_pending_k;
-                            self.lambda_effect_context = saved_ctx;
-                            arg_vars.push(v.clone());
-                            bindings.push((v, ce));
-                        }
-                        // Append per-op handler params for effectful callees.
-                        // Every effect op must have a handler param in scope — either
-                        // from the enclosing function's `needs` clause or from a `with` block.
-                        // If one is missing, it's a compiler bug (the type system should
-                        // have ensured all effects are handled).
-                        if !callee_handler_entries.is_empty() {
-                            for (key, _) in &callee_handler_entries {
-                                let param =
-                                    self.current_handler_params.get(key).unwrap_or_else(|| {
-                                        panic!(
-                                            "ICE: saturated call to '{}' needs handler for '{}' \
-                                         but no handler param in scope. params: {:?}",
-                                            func_name, key, self.current_handler_params,
-                                        )
-                                    });
-                                arg_vars.push(param.clone());
-                            }
-                            // Pass _ReturnK: take from pending (set by `with`), or identity
-                            let return_k = self.take_pending_return_k_or_identity();
-                            let rk_var = self.fresh();
-                            bindings.push((rk_var.clone(), return_k));
-                            arg_vars.push(rk_var);
-                        }
-                        {
-                            let call_args: Vec<CExpr> =
-                                arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-                            let call = self.emit_call(
-                                func_name,
-                                head_expr.id,
-                                arity,
-                                call_args,
-                                Some(&expr.span),
-                            );
-                            return bindings.into_iter().rev().fold(call, |body, (var, val)| {
-                                CExpr::Let(var, Box::new(val), Box::new(body))
-                            });
-                        }
-                    }
-
-                    // Partial application: fewer user args than user-arg slots.
-                    // Wraps in a lambda taking the remaining user args.
-                    // For effectful functions, handler params are captured from scope
-                    // (bound by `with`) and the lambda also takes _ReturnK.
-                    if let Some(arity) = total_arity {
-                        let user_slots = arity - effect_count - return_k_count;
-                        if args.len() < user_slots {
-                            let remaining_user = user_slots - args.len();
-                            let mut arg_vars: Vec<String> = Vec::new();
-                            let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                            for arg in &args {
-                                let v = self.fresh();
-                                let ce = self.lower_expr_value(arg);
-                                arg_vars.push(v.clone());
-                                bindings.push((v, ce));
-                            }
-                            // Remaining user-visible params
-                            let mut params: Vec<String> = Vec::new();
-                            for _ in 0..remaining_user {
-                                params.push(self.fresh());
-                            }
-                            // Build call args: given args + remaining user params
-                            let mut call_args: Vec<CExpr> =
-                                arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-                            call_args.extend(params.iter().map(|p| CExpr::Var(p.clone())));
-                            // For effectful functions, include handler params and
-                            // _ReturnK in the lambda. Handlers will be provided at
-                            // the eventual call site via `with`.
-                            if !callee_handler_entries.is_empty() {
-                                for (_, p) in &callee_handler_entries {
-                                    params.push(p.clone());
-                                    call_args.push(CExpr::Var(p.clone()));
-                                }
-                                let rk = "_ReturnK".to_string();
-                                params.push(rk.clone());
-                                call_args.push(CExpr::Var(rk));
-                            }
-                            let call = self.emit_call(
-                                func_name,
-                                head_expr.id,
-                                arity,
-                                call_args,
-                                Some(&expr.span),
-                            );
-                            let lambda = CExpr::Fun(params, Box::new(call));
-                            return bindings.into_iter().rev().fold(lambda, |body, (var, val)| {
-                                CExpr::Let(var, Box::new(val), Box::new(body))
-                            });
-                        }
+                        return call;
                     }
                 }
 
                 // Check for call to an effectful variable (HOF absorption).
                 // e.g. `computation ()` where computation absorbs Fail
                 if let Some((var_name, _, args)) = collect_fun_call(expr)
-                    && let Some(absorbed) = self.current_effectful_vars.get(var_name).cloned()
+                    && self.current_effectful_vars.contains_key(var_name)
                 {
-                    let mut arg_vars: Vec<String> = Vec::new();
-                    let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                    for arg in args {
-                        let v = self.fresh();
-                        let ce = self.lower_expr_value(arg);
-                        arg_vars.push(v.clone());
-                        bindings.push((v, ce));
-                    }
-                    // Append per-op handler params for absorbed effects
-                    let absorbed_ops = self.effect_handler_ops(&absorbed);
-                    for (eff, op) in &absorbed_ops {
-                        let key = format!("{}.{}", eff, op);
-                        if let Some(param) = self.current_handler_params.get(&key) {
-                            arg_vars.push(param.clone());
-                        } else {
-                            panic!(
-                                "effectful variable '{}' needs handler for '{}.{}' but no handler param in scope",
-                                var_name, eff, op
-                            );
-                        }
-                    }
-                    // Pass _ReturnK: take from pending (set by `with`), or identity
-                    {
-                        let return_k = self.take_pending_return_k_or_identity();
-                        let rk_var = self.fresh();
-                        bindings.push((rk_var.clone(), return_k));
-                        arg_vars.push(rk_var);
-                    }
-                    let call = CExpr::Apply(
-                        Box::new(CExpr::Var(core_var(var_name))),
-                        arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-                    );
-                    return bindings.into_iter().rev().fold(call, |body, (var, val)| {
-                        CExpr::Let(var, Box::new(val), Box::new(body))
-                    });
+                    return self
+                        .lower_effectful_var_call(var_name, &args, None)
+                        .expect("effectful variable call should lower");
                 }
 
                 // Collect the full App chain and emit a single multi-arg Apply.
@@ -1413,7 +1394,7 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Block { stmts, .. } => {
                 let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
-                self.lower_block_with_return_k(&stmts, self.current_return_k.clone())
+                self.lower_block_with_return_k(&stmts, None)
             }
 
             ExprKind::Lambda { params, body, .. } => {
@@ -1978,6 +1959,7 @@ impl<'a> Lowerer<'a> {
         func_name: &str,
         head: &Expr,
         args: &[&Expr],
+        return_k: Option<CExpr>,
         call_span: Option<&crate::token::Span>,
     ) -> CExpr {
         let erlang_module = self
@@ -2026,10 +2008,8 @@ impl<'a> Lowerer<'a> {
                     );
                 }
             }
-            // Pass _ReturnK
-            let return_k = self.take_pending_return_k_or_identity();
-            let rk_var = self.fresh();
-            bindings.push((rk_var.clone(), return_k));
+            let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
+            bindings.push((rk_var.clone(), rk_ce));
             arg_vars.push(rk_var);
         }
 

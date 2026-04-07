@@ -15,6 +15,12 @@ use super::Lowerer;
 use super::util::{cerl_call, collect_fun_call, core_var};
 
 impl<'a> Lowerer<'a> {
+    fn lower_handler_owned_expr(&mut self, expr: &Expr) -> CExpr {
+        // Handler-local computations produce the handled result itself, so they
+        // must not inherit an enclosing function/handler return continuation.
+        self.lower_expr_value(expr)
+    }
+
     fn lower_handled_expr_with_return_k(
         &mut self,
         expr: &Expr,
@@ -93,7 +99,7 @@ impl<'a> Lowerer<'a> {
         } else {
             core_var(&ret.params[0].0)
         };
-        let ret_body = self.lower_expr(&ret.body);
+        let ret_body = self.lower_handler_owned_expr(&ret.body);
         CExpr::Fun(vec![param], Box::new(ret_body))
     }
 
@@ -407,14 +413,11 @@ impl<'a> Lowerer<'a> {
         }
 
         // Build the return clause lambda (if present).
-        let saved_return_k = self.current_return_k.clone();
-        let return_lambdas = self.with_current_return_k(None, |this| {
-            let mut return_lambdas: Vec<CExpr> = Vec::new();
-            if let Some(ret) = &return_clause {
-                return_lambdas.push(this.build_return_lambda(ret));
-            }
-            return_lambdas
-        });
+        let saved_return_k = None;
+        let mut return_lambdas: Vec<CExpr> = Vec::new();
+        if let Some(ret) = &return_clause {
+            return_lambdas.push(self.build_return_lambda(ret));
+        }
         let return_k_lambda = self.compose_return_lambdas(return_lambdas);
 
         // Direct effectful calls receive the handled return-k as `_ReturnK`.
@@ -495,12 +498,10 @@ impl<'a> Lowerer<'a> {
         fun_params.push(k_var.clone());
 
         // Set up K for resume references in the body.
-        // Clear current_return_k so the handler arm body doesn't leak the
-        // function-level _ReturnK. The handler's result is the with-block
-        // value, which flows to the rest of the block via rest_k, not through
-        // the function's own return continuation.
+        // The handler arm body is owned by the handler: it produces the
+        // handled computation's result itself rather than flowing into an
+        // enclosing function-level return continuation.
         let prev_handler_k = self.current_handler_k.replace(k_var);
-        let saved_pending_k = self.pending_callee_return_k.take();
 
         // Set current_handler_finally so Resume lowering wraps K calls in try/catch.
         let saved_finally = self.current_handler_finally.take();
@@ -508,10 +509,9 @@ impl<'a> Lowerer<'a> {
             self.current_handler_finally = Some(fb.as_ref().clone());
         }
 
-        let mut body_ce = self.with_current_return_k(None, |this| this.lower_expr(&arm.body));
+        let mut body_ce = self.lower_handler_owned_expr(&arm.body);
 
         self.current_handler_finally = saved_finally;
-        self.pending_callee_return_k = saved_pending_k;
 
         // Bind arm's named params to the positional handler args
         for (i, (param_name, _)) in arm.params.iter().enumerate().rev() {
@@ -654,7 +654,7 @@ impl<'a> Lowerer<'a> {
 
         // Lower the inner expression
         let return_k_lambda = Some(self.dynamic_return_lambda(&tuple_var, handler_ops.len()));
-        let inherited_return_k = self.current_return_k.clone();
+        let inherited_return_k = None;
         let result = self.lower_handled_inner_expr(expr, return_k_lambda, inherited_return_k);
 
         self.current_handler_params = saved_handler_params;

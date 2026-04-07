@@ -36,12 +36,7 @@ impl<'a> Lowerer<'a> {
     /// explicit value/tail intent before simplifying the internals further.
     pub(super) fn lower_expr_in(&mut self, expr: &Expr, mode: LowerMode) -> CExpr {
         match mode {
-            LowerMode::Value => {
-                let saved_pending_k = self.pending_callee_return_k.take();
-                let ce = self.lower_expr_with_installed_return_k(expr, None);
-                self.pending_callee_return_k = saved_pending_k;
-                ce
-            }
+            LowerMode::Value => self.lower_expr_with_installed_return_k(expr, None),
             LowerMode::Tail(k) => self.lower_expr_tail_compat(expr, k),
         }
     }
@@ -86,35 +81,26 @@ impl<'a> Lowerer<'a> {
         self.lower_expr_in(expr, LowerMode::Tail(k))
     }
 
-    /// Lower an expression while temporarily providing `_ReturnK` to the next
-    /// effectful callee it lowers.
-    ///
-    /// This is distinct from generic value lowering: we want the expression to
-    /// lower normally, but any direct effectful function call inside it should
-    /// consume `return_k` via `pending_callee_return_k`.
     pub(super) fn lower_expr_with_pending_return_k(
         &mut self,
         expr: &Expr,
         return_k: Option<CExpr>,
     ) -> CExpr {
-        let saved_pending_k = self.pending_callee_return_k.take();
-        self.pending_callee_return_k = return_k;
-        let ce = self.lower_expr(expr);
-        self.pending_callee_return_k = saved_pending_k;
-        ce
-    }
+        if let Some((module, func_name, head, args)) = super::util::collect_qualified_call(expr) {
+            return self.lower_qualified_call(module, func_name, head, &args, return_k, Some(&expr.span));
+        }
+        if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
+            if let Some(call) =
+                self.lower_resolved_fun_call(func_name, head_expr, &args, return_k.clone(), Some(&expr.span))
+            {
+                return call;
+            }
+            if let Some(call) = self.lower_effectful_var_call(func_name, &args, return_k) {
+                return call;
+            }
+        }
 
-    /// Run lowering with `current_return_k` temporarily replaced.
-    pub(super) fn with_current_return_k<T>(
-        &mut self,
-        return_k: Option<CExpr>,
-        f: impl FnOnce(&mut Self) -> T,
-    ) -> T {
-        let saved_return_k = self.current_return_k.take();
-        self.current_return_k = return_k;
-        let out = f(self);
-        self.current_return_k = saved_return_k;
-        out
+        self.lower_expr(expr)
     }
 
     /// Lower an expression with an explicitly installed return continuation.
@@ -142,20 +128,10 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Consume the currently pending callee return continuation, or build an
-    /// identity continuation when none has been provided by the surrounding
-    /// lowering context.
-    pub(super) fn take_pending_return_k_or_identity(&mut self) -> CExpr {
-        self.pending_callee_return_k.take().unwrap_or_else(|| {
-            let p = self.fresh();
-            CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
-        })
-    }
-
     /// Compatibility implementation for explicit tail-mode lowering.
     ///
     /// We currently preserve the old branch-aware K-threading behavior rather
-    /// than approximating tail lowering by just setting `current_return_k`.
+    /// than approximating tail lowering with an ambient return continuation.
     /// That old structural lowering is what correctly threads continuations
     /// through `if`, `case`, and nested blocks.
     fn lower_expr_tail_compat(&mut self, expr: &Expr, k: CExpr) -> CExpr {
@@ -171,7 +147,7 @@ impl<'a> Lowerer<'a> {
     /// bodies and lambdas:
     /// - direct effect ops receive `return_k` as their continuation
     /// - nested effectful control flow threads `return_k` through branches
-    /// - direct effectful function calls receive it via `pending_callee_return_k`
+    /// - direct effectful function calls receive it explicitly as `_ReturnK`
     /// - pure expressions are lowered normally and wrapped with `return_k`
     pub(super) fn lower_terminal_effectful_expr_with_return_k(
         &mut self,
@@ -201,8 +177,8 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Lower the terminal expression of a block, respecting any ambient
-    /// `current_return_k` installed by an enclosing handled computation.
+    /// Lower the terminal expression of a block, respecting any enclosing
+    /// handled-computation return continuation passed explicitly.
     ///
     /// `with` remains a delimiter here: it manages inherited return handling
     /// internally and must not be wrapped again outside.

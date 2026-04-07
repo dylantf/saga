@@ -25,7 +25,7 @@ issue in lowering.
 
 ## Diagnosis
 
-The lowerer currently relies on ambient mutable state to describe continuation
+The lowerer originally relied on ambient mutable state to describe continuation
 mode:
 
 - `current_return_k`
@@ -122,8 +122,8 @@ With clear semantics:
 
 These always use `Value`.
 
-That removes the need for ad hoc helper logic that temporarily clears
-`current_return_k` when lowering subexpressions.
+That removes the need for ad hoc helper logic that temporarily clears ambient
+return state when lowering subexpressions.
 
 ### Terminal block positions
 
@@ -174,7 +174,7 @@ These sites should never inherit terminal continuation behavior.
 ### Phase 3: Convert block terminal lowering
 
 Refactor `lower_block` around explicit tail mode instead of checking ambient
-`current_return_k`.
+return-continuation state.
 
 This should subsume much of:
 
@@ -202,6 +202,13 @@ Once the major call sites are migrated, remove or sharply reduce:
 
 Ideally these disappear entirely. If anything remains, it should be a very
 local implementation detail rather than the main lowering control mechanism.
+
+Status:
+
+- `current_return_k` has now been removed from active lowering.
+- `pending_callee_return_k` has also now been removed from active lowering.
+- Continuation flow is now expressed through explicit lowering helpers rather
+  than ambient mutable lowering state.
 
 ## Interaction With Typechecking
 
@@ -236,3 +243,58 @@ This refactor is worth doing if it makes these classes of bugs harder to write:
 
 The practical goal is not just fewer bugs today, but making future effect
 features less likely to require continuation-scoping patchwork.
+
+## Handler-Specific Endgame
+
+After the general lowering cleanup, the remaining continuation complexity is
+mostly concentrated in `effects.rs`.
+
+That remaining logic is not accidental in the same way as the earlier ambient
+state usage; it represents a few real handler-specific invariants:
+
+1. Handler return clauses are *owned by the handler*
+
+When lowering a handler `return` clause body, inherited function/outer-handler
+return behavior must be cleared. The `return` clause should describe the
+handler's success mapping, not compose implicitly with an enclosing `_ReturnK`.
+
+2. Handler arm bodies are *owned by the handler*
+
+When lowering an op arm body, inherited return behavior must also be cleared.
+The arm result becomes the handled computation's result. It should not
+accidentally jump into the enclosing function's return continuation.
+
+3. A handled direct call may still inherit an outer return continuation
+
+For:
+
+```text
+expr with handler
+```
+
+if `expr` is a direct effectful function call and the handler has no local
+`return` clause, then the outer handled return behavior may still need to flow
+through to that call so abort-style handlers can skip subsequent computation
+correctly.
+
+### Recommended Next Refactor
+
+Refactor `effects.rs` around these invariants directly, rather than around
+"removing ambient state everywhere" as a goal in itself.
+
+That likely means:
+
+- introducing explicit helper names for "lower with no inherited return"
+- introducing explicit helper names for "lower handled inner expression with
+  handled return + inherited return"
+- keeping any remaining ambient mechanism tightly local to handler semantics
+  unless a clearer explicit representation emerges naturally
+
+### Exit Criteria For The Handler Phase
+
+This phase is successful if:
+
+- handler-specific continuation behavior is concentrated in a few named helpers
+- general lowering no longer depends on handler ambient state
+- `effects.rs` reads like a description of handler semantics rather than a set
+  of continuation-state manipulations
