@@ -152,10 +152,8 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                         ));
                     }
                     // Check handler arm parameters
-                    for (param_name, param_span) in &arm.params {
-                        if contains_ident(param_span, offset) {
-                            return Some((param_name.clone(), *param_span, None));
-                        }
+                    if let Some(r) = find_in_pats(&arm.params, offset) {
+                        return Some(r);
                     }
                 }
                 if let Some(r) = find_in_expr(&arm.body, offset) {
@@ -168,10 +166,8 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
                 }
             }
             if let Some(rc) = &body.return_clause {
-                for (param_name, param_span) in &rc.params {
-                    if contains_ident(param_span, offset) {
-                        return Some((param_name.clone(), *param_span, None));
-                    }
+                if let Some(r) = find_in_pats(&rc.params, offset) {
+                    return Some(r);
                 }
                 if let Some(r) = find_in_expr(&rc.body, offset) {
                     return Some(r);
@@ -425,10 +421,8 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
                                 return find_in_expr(fb, offset);
                             }
                             // Check inline handler arm parameters
-                            for (param_name, param_span) in &arm.params {
-                                if contains_ident(param_span, offset) {
-                                    return Some((param_name.clone(), *param_span, None));
-                                }
+                            if let Some(r) = find_in_pats(&arm.params, offset) {
+                                return Some(r);
                             }
                             let qualifier_len = arm.qualifier.as_ref().map_or(0, |q| q.len() + 1);
                             let op_name_end = arm.span.start + qualifier_len + arm.op_name.len();

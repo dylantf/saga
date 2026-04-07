@@ -1727,7 +1727,7 @@ fn handler_def_simple() {
                 .node
                 .params
                 .iter()
-                .map(|(n, _)| n.as_str())
+                .map(|p| match p { Pat::Var { name, .. } => name.as_str(), _ => panic!("expected Var pat") })
                 .collect();
             assert_eq!(param_names, vec!["level", "msg"]);
             assert!(body.return_clause.is_none());
@@ -1753,7 +1753,7 @@ fn handler_def_with_return_clause() {
             assert_eq!(body.arms[0].node.op_name, "fail");
             assert!(body.return_clause.is_some());
             let rc = body.return_clause.as_ref().unwrap();
-            let rc_names: Vec<&str> = rc.params.iter().map(|(n, _)| n.as_str()).collect();
+            let rc_names: Vec<&str> = rc.params.iter().map(|p| match p { Pat::Var { name, .. } => name.as_str(), _ => panic!("expected Var pat") }).collect();
             assert_eq!(rc_names, vec!["value"]);
         }
         _ => panic!("expected HandlerDef, got {:?}", decls[0]),
@@ -1984,7 +1984,7 @@ fn with_inline_handler() {
                     .node
                     .params
                     .iter()
-                    .map(|(n, _)| n.as_str())
+                    .map(|p| match p { Pat::Var { name, .. } => name.as_str(), _ => panic!("expected Var pat") })
                     .collect();
                 assert_eq!(param_names, vec!["level", "msg"]);
                 assert!(return_clause.is_none());

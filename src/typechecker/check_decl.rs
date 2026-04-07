@@ -1913,27 +1913,13 @@ impl Checker {
             self.resume_type = Some(op_sig.return_type.clone());
             self.resume_return_type = Some(answer_ty.clone());
 
-            for (i, (param_name, param_span)) in arm.params.iter().enumerate() {
+            for (i, pat) in arm.params.iter().enumerate() {
                 let param_ty = if i < op_sig.params.len() {
                     op_sig.params[i].1.clone()
                 } else {
                     self.fresh_var()
                 };
-                let param_id = crate::ast::NodeId::fresh();
-                self.env.insert_with_def(
-                    param_name.clone(),
-                    Scheme {
-                        forall: vec![],
-                        constraints: vec![],
-                        ty: param_ty.clone(),
-                    },
-                    param_id,
-                );
-                self.lsp.node_spans.insert(param_id, *param_span);
-                self.lsp.type_at_span.insert(*param_span, param_ty);
-                self.lsp
-                    .definitions
-                    .push((param_id, param_name.clone(), *param_span));
+                self.bind_pattern(pat, &param_ty)?;
             }
 
             let body_ty = self.infer_expr(&arm.body)?;
@@ -1970,22 +1956,8 @@ impl Checker {
                 Type::Var(id) => *id,
                 _ => unreachable!(),
             };
-            if let Some((param_name, param_span)) = rc.params.first() {
-                let param_id = crate::ast::NodeId::fresh();
-                self.env.insert_with_def(
-                    param_name.clone(),
-                    Scheme {
-                        forall: vec![],
-                        constraints: vec![],
-                        ty: param_ty.clone(),
-                    },
-                    param_id,
-                );
-                self.lsp.node_spans.insert(param_id, *param_span);
-                self.lsp.type_at_span.insert(*param_span, param_ty);
-                self.lsp
-                    .definitions
-                    .push((param_id, param_name.clone(), *param_span));
+            if let Some(pat) = rc.params.first() {
+                self.bind_pattern(pat, &param_ty)?;
             }
             let ret_ty = self.infer_expr(&rc.body)?;
             // Constrain answer_ty to match the return clause's body type

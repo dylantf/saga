@@ -177,8 +177,8 @@ pub fn format_handler_arm(arm: &crate::ast::HandlerArm) -> Doc {
         // Zero-arg effect ops need explicit () in handler arms
         d = d.append(Doc::text(" ()"));
     } else {
-        for (param, _) in &arm.params {
-            d = d.append(Doc::text(format!(" {}", param)));
+        for pat in &arm.params {
+            d = d.append(Doc::text(" ")).append(super::pat::format_pat_atom(pat));
         }
     }
     d = d.append(Doc::text(" = ")).append(super::expr::format_expr(&arm.body));

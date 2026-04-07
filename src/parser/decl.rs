@@ -587,15 +587,14 @@ impl Parser {
                 if matches!(self.peek(), Token::Return) {
                     // return clause: `return value = body`
                     self.advance();
-                    let param_span = self.tokens[self.pos].span;
-                    let param = self.expect_ident()?;
+                    let param = self.parse_pattern()?;
                     self.expect(Token::Eq)?;
                     let body = self.parse_expr(0)?;
                     let arm_end = body.span;
                     return_clause = Some(Box::new(HandlerArm {
                         op_name: "return".to_string(),
                         qualifier: None,
-                        params: vec![(param, param_span)],
+                        params: vec![param],
                         body: Box::new(body),
                         finally_block: None,
                         span: arm_start.to(arm_end),
@@ -612,8 +611,7 @@ impl Parser {
                             self.advance(); // consume ')'
                             continue;
                         }
-                        let pspan = self.tokens[self.pos].span;
-                        params.push((self.expect_ident()?, pspan));
+                        params.push(self.parse_pattern()?);
                     }
                     self.expect(Token::Eq)?;
                     let body = self.parse_expr(0)?;
@@ -652,14 +650,13 @@ impl Parser {
                 self.pos = save;
                 if let Token::Ident(_) = self.peek() {
                     let op_name = self.expect_ident().unwrap();
-                    let mut params = Vec::new();
+                    let mut params: Vec<Pat> = Vec::new();
                     while !matches!(
                         self.peek(),
                         Token::Eq | Token::RBrace | Token::Eof
                     ) {
-                        let pspan = self.tokens[self.pos].span;
-                        if let Ok(p) = self.expect_ident() {
-                            params.push((p, pspan));
+                        if let Ok(p) = self.parse_pattern() {
+                            params.push(p);
                         } else {
                             break;
                         }

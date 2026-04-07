@@ -673,8 +673,8 @@ fn normalize_case_arm(arm: &mut CaseArm) {
 
 fn normalize_handler_arm(arm: &mut HandlerArm) {
     arm.span = S;
-    for (_, s) in arm.params.iter_mut() {
-        *s = S;
+    for pat in arm.params.iter_mut() {
+        normalize_pat(pat);
     }
     normalize_expr(&mut arm.body);
     if let Some(ref mut fb) = arm.finally_block {
