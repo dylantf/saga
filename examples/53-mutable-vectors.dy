@@ -1,0 +1,252 @@
+import Std.Time (monotonic_ms)
+# Mutable vectors with the Vec effect
+#
+# MutVec provides O(1) indexed access and mutation backed by ETS composite
+# keys. This example rewrites the sorting algorithms from 09-sorting.dy
+# using in-place mutation via thaw/freeze.
+
+
+import Std.Vec (MutVec, Vec, beam_vec)
+
+# @external("erlang", "rand", "uniform")
+# fun rand_uniform : Int -> Int
+# @external("erlang", "lists", "seq")
+# fun seq : Int -> Int -> List Int
+
+impl Show for List a where {a: Show} {
+  show xs = "[" <> String.join ", " (List.map show xs) <> "]"
+}
+
+# --- Helper: swap two elements in a MutVec ---
+
+fun swap : MutVec a -> Int -> Int -> Unit needs {Vec}
+swap v i j = {
+  let tmp = vec_get! v i
+  vec_set! v i (vec_get! v j)
+  vec_set! v j tmp
+}
+
+# --- Insertion sort (in-place) ---
+# For each element, shift it left until it's in the right position.
+
+fun insertion_sort_loop : MutVec Int -> Int -> Int -> Unit needs {Vec}
+insertion_sort_loop v i n =
+  if i >= n then ()
+  else {
+    insert_at v i
+    insertion_sort_loop v (i + 1) n
+  }
+
+fun insert_at : MutVec Int -> Int -> Unit needs {Vec}
+insert_at v i =
+  if i <= 0 then ()
+  else {
+    let curr = vec_get! v i
+    let prev = vec_get! v (i - 1)
+    if curr < prev then {
+      swap v i (i - 1)
+      insert_at v (i - 1)
+    }
+    else ()
+  }
+
+fun insertion_sort : List Int -> List Int needs {Vec}
+insertion_sort xs = {
+  let v = thaw! xs
+  let n = vec_len! v
+  insertion_sort_loop v 1 n
+  freeze! v
+}
+
+# --- Bubble sort (in-place) ---
+# Repeatedly bubble the largest unsorted element to the end.
+
+fun bubble_pass : MutVec Int -> Int -> Bool needs {Vec}
+bubble_pass v end_idx = bubble_pass_loop v 0 end_idx False
+
+fun bubble_pass_loop : MutVec Int -> Int -> Int -> Bool -> Bool needs {Vec}
+bubble_pass_loop v i end_idx swapped =
+  if i >= end_idx then swapped
+  else {
+    let a = vec_get! v i
+    let b = vec_get! v (i + 1)
+    if a > b then {
+      swap v i (i + 1)
+      bubble_pass_loop v (i + 1) end_idx True
+    }
+    else bubble_pass_loop v (i + 1) end_idx swapped
+  }
+
+fun bubble_sort_loop : MutVec Int -> Int -> Unit needs {Vec}
+bubble_sort_loop v end_idx =
+  if end_idx <= 0 then ()
+  else {
+    let swapped = bubble_pass v end_idx
+    if swapped then bubble_sort_loop v (end_idx - 1)
+    else ()
+  }
+
+fun bubblesort : List Int -> List Int needs {Vec}
+bubblesort xs = {
+  let v = thaw! xs
+  let n = vec_len! v
+  bubble_sort_loop v (n - 1)
+  freeze! v
+}
+
+# --- Quicksort (in-place, Lomuto partition) ---
+
+fun partition : MutVec Int -> Int -> Int -> Int needs {Vec}
+partition v lo hi = {
+  let pivot = vec_get! v hi
+  partition_loop v lo hi pivot lo lo
+}
+
+fun partition_loop : MutVec Int -> Int -> Int -> Int -> Int -> Int -> Int
+  needs {Vec}
+partition_loop v lo hi pivot i j =
+  if j >= hi then {
+    swap v i hi
+    i
+  }
+  else {
+    let x = vec_get! v j
+    if x <= pivot then {
+      swap v i j
+      partition_loop v lo hi pivot (i + 1) (j + 1)
+    }
+    else partition_loop v lo hi pivot i (j + 1)
+  }
+
+fun quicksort_range : MutVec Int -> Int -> Int -> Unit needs {Vec}
+quicksort_range v lo hi =
+  if lo >= hi then ()
+  else {
+    let p = partition v lo hi
+    quicksort_range v lo (p - 1)
+    quicksort_range v (p + 1) hi
+  }
+
+fun quicksort : List Int -> List Int needs {Vec}
+quicksort xs = {
+  let v = thaw! xs
+  let n = vec_len! v
+  if n <= 1 then xs
+  else {
+    quicksort_range v 0 (n - 1)
+    freeze! v
+  }
+}
+
+# --- Merge sort (in-place with temp buffer) ---
+# Uses two MutVecs: the source array and a scratch buffer.
+# Recursively sorts halves, then merges by copying to tmp and
+# merging back into src.
+
+fun copy_range : MutVec Int -> MutVec Int -> Int -> Int -> Unit needs {Vec}
+copy_range src dst i limit =
+  if i >= limit then ()
+  else {
+    vec_set! dst i (vec_get! src i)
+    copy_range src dst (i + 1) limit
+  }
+
+fun merge_into : MutVec Int -> MutVec Int -> Int -> Int -> Int -> Unit
+  needs {Vec}
+merge_into src tmp lo mid hi = {
+  # Copy the working region into tmp
+  copy_range src tmp lo hi
+  # Merge from tmp back into src
+  # i scans left half [lo..mid), j scans right half [mid..hi)
+  merge_loop src tmp lo mid hi lo mid lo
+}
+
+fun merge_loop : MutVec Int -> MutVec Int -> Int -> Int -> Int -> Int -> Int -> Int -> Unit
+  needs {Vec}
+merge_loop src tmp lo mid hi i j k =
+  if i >= mid && j >= hi then ()
+  else if i >= mid then {
+    # Left exhausted, copy remaining right
+    vec_set! src k (vec_get! tmp j)
+    merge_loop src tmp lo mid hi i (j + 1) (k + 1)
+  }
+  else if j >= hi then {
+    # Right exhausted, copy remaining left
+    vec_set! src k (vec_get! tmp i)
+    merge_loop src tmp lo mid hi (i + 1) j (k + 1)
+  }
+  else {
+    let a = vec_get! tmp i
+    let b = vec_get! tmp j
+    if a <= b then {
+      vec_set! src k a
+      merge_loop src tmp lo mid hi (i + 1) j (k + 1)
+    }
+    else {
+      vec_set! src k b
+      merge_loop src tmp lo mid hi i (j + 1) (k + 1)
+    }
+  }
+
+fun mergesort_go : MutVec Int -> MutVec Int -> Int -> Int -> Unit needs {Vec}
+mergesort_go src tmp lo hi =
+  if hi - lo <= 1 then ()
+  else {
+    let mid = (lo + hi) / 2
+    mergesort_go src tmp lo mid
+    mergesort_go src tmp mid hi
+    merge_into src tmp lo mid hi
+  }
+
+fun mergesort : List Int -> List Int needs {Vec}
+mergesort xs = {
+  let src = thaw! xs
+  let n = vec_len! src
+  if n <= 1 then xs
+  else {
+    # Allocate scratch buffer of same size
+    let tmp = thaw! xs
+    mergesort_go src tmp 0 n
+    freeze! src
+  }
+}
+
+main () = {
+  let nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
+
+  let sorted1 = insertion_sort nums
+  dbg $"insertion sort: {show sorted1}"
+
+  let sorted2 = bubblesort nums
+  dbg $"bubble sort:    {show sorted2}"
+
+  let sorted3 = quicksort nums
+  dbg $"quicksort:      {show sorted3}"
+
+  let sorted4 = mergesort nums
+  dbg $"merge sort:     {show sorted4}"
+  #
+  # Don't run these, they are slow af
+  # --- Benchmark: O(n^2) sorts on 500 elements ---
+  # let small = List.map (fun _ -> rand_uniform 10000) (seq 1 500)
+  # dbg $"\nSorting 500 random integers (O(n^2) sorts):"
+  # let t0 = monotonic_ms ()
+  # let _ = insertion_sort small
+  # let t1 = monotonic_ms ()
+  # dbg $"  insertion sort: {show (t1 - t0)}ms"
+  # let t2 = monotonic_ms ()
+  # let _ = bubblesort small
+  # let t3 = monotonic_ms ()
+  # dbg $"  bubble sort:    {show (t3 - t2)}ms"
+  # # # --- Benchmark: O(n log n) sorts on 10k elements ---
+  # let big = List.map (fun _ -> rand_uniform 100000) (seq 1 1000000)
+  # dbg $"\nSorting 10,000 random integers (O(n log n) sorts):"
+  # let t4 = monotonic_ms ()
+  # let _ = quicksort big
+  # let t5 = monotonic_ms ()
+  # dbg $"  quicksort:      {show (t5 - t4)}ms"
+  # let t6 = monotonic_ms ()
+  # let _ = mergesort big
+  # let t7 = monotonic_ms ()
+  # dbg $"  merge sort:     {show (t7 - t6)}ms"
+} with beam_vec

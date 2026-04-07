@@ -130,6 +130,11 @@ pub struct Lowerer<'a> {
     /// Used to pass a cheap atom instead of a real continuation closure at the call site,
     /// avoiding the Erlang "a term is constructed but never used" warning.
     no_resume_ops: std::collections::HashSet<String>,
+    /// Maps "effect.op" -> handler canonical name for ops that are guaranteed to
+    /// resume exactly once with the result value. These ops can be inlined as direct
+    /// `let` bindings instead of going through CPS continuation-passing, avoiding
+    /// closure allocation. Currently all BEAM-native ops satisfy this property.
+    direct_ops: HashMap<String, String>,
     /// When lowering inside a function, maps local variable name -> effects it absorbs.
     /// Set from FunInfo.param_absorbed_effects for the current function.
     current_effectful_vars: HashMap<String, Vec<String>>,
@@ -200,6 +205,7 @@ impl<'a> Lowerer<'a> {
             op_to_effect: HashMap::new(),
             current_handler_params: HashMap::new(),
             no_resume_ops: std::collections::HashSet::new(),
+            direct_ops: HashMap::new(),
             current_effectful_vars: HashMap::new(),
             lambda_effect_context: None,
             constructor_atoms,
@@ -236,24 +242,17 @@ impl<'a> Lowerer<'a> {
         name: &str,
         arity: usize,
     ) -> Option<(String, String)> {
-        self.ctx
-            .modules
-            .get(source_module)
-            .and_then(|compiled| {
-                compiled
-                    .codegen_info
-                    .external_funs
-                    .iter()
-                    .find(|(fun_name, _, _, fun_arity)| fun_name == name && *fun_arity == arity)
-                    .map(|(_, erl_mod, erl_fun, _)| (erl_mod.clone(), erl_fun.clone()))
-            })
+        self.ctx.modules.get(source_module).and_then(|compiled| {
+            compiled
+                .codegen_info
+                .external_funs
+                .iter()
+                .find(|(fun_name, _, _, fun_arity)| fun_name == name && *fun_arity == arity)
+                .map(|(_, erl_mod, erl_fun, _)| (erl_mod.clone(), erl_fun.clone()))
+        })
     }
 
-    fn resolved_fun_info(
-        &self,
-        node_id: crate::ast::NodeId,
-        fallback: &str,
-    ) -> Option<&FunInfo> {
+    fn resolved_fun_info(&self, node_id: crate::ast::NodeId, fallback: &str) -> Option<&FunInfo> {
         use super::resolve::ResolvedName;
         match self.resolved.get(&node_id) {
             Some(ResolvedName::ImportedFun { canonical_name, .. })
@@ -277,7 +276,7 @@ impl<'a> Lowerer<'a> {
         {
             let (erlang_mod, target_name) = self
                 .imported_handler_external_target(source_module, name, arity)
-                .unwrap_or_else(|| (Self::module_name_to_erlang(&source_module), name.to_string()));
+                .unwrap_or_else(|| (Self::module_name_to_erlang(source_module), name.to_string()));
             if arity == 0 {
                 return CExpr::Call(erlang_mod, target_name, vec![]);
             }
@@ -326,7 +325,10 @@ impl<'a> Lowerer<'a> {
             let fun_name = name.to_string();
             let lowered_arity = self.fun_arity(&fun_name).unwrap_or(arity);
             self.lower_effectful_fun_ref(&effects, lowered_arity, |args| {
-                CExpr::Apply(Box::new(CExpr::FunRef(fun_name.clone(), lowered_arity)), args)
+                CExpr::Apply(
+                    Box::new(CExpr::FunRef(fun_name.clone(), lowered_arity)),
+                    args,
+                )
             })
             .unwrap_or_else(|| CExpr::FunRef(name.to_string(), lowered_arity))
         } else {
@@ -347,7 +349,7 @@ impl<'a> Lowerer<'a> {
         {
             let (erlang_mod, target_name) = self
                 .imported_handler_external_target(source_module, name, arity)
-                .unwrap_or_else(|| (Self::module_name_to_erlang(&source_module), name.to_string()));
+                .unwrap_or_else(|| (Self::module_name_to_erlang(source_module), name.to_string()));
             CExpr::Call(erlang_mod, target_name, call_args)
         } else {
             CExpr::Apply(Box::new(CExpr::FunRef(name.to_string(), arity)), call_args)
@@ -683,9 +685,7 @@ impl<'a> Lowerer<'a> {
                 name,
                 source_module,
                 ..
-            }) => {
-                self.lower_local_fun_call(name, arity, call_args, source_module.as_deref())
-            }
+            }) => self.lower_local_fun_call(name, arity, call_args, source_module.as_deref()),
             _ => {
                 // Not in resolution map: local function or variable apply
                 CExpr::Apply(
@@ -895,9 +895,36 @@ impl<'a> Lowerer<'a> {
             }
 
             let saved_handler_params = std::mem::take(&mut self.current_handler_params);
+            let saved_direct_ops = std::mem::take(&mut self.direct_ops);
             for (key, param) in &handler_entries {
                 self.current_handler_params
                     .insert(key.clone(), param.clone());
+            }
+            // Mark ops as direct if every handler for their effect is BEAM-native.
+            // This means the ops will always be direct regardless of which handler
+            // the caller provides, so we can inline them in the function body.
+            for eff in &effects {
+                // Collect all handlers that handle this effect
+                let handlers_for_eff: Vec<(&String, &HandlerInfo)> = self
+                    .handler_defs
+                    .iter()
+                    .filter(|(_, info)| info.effects.contains(eff))
+                    .collect();
+                let all_native = !handlers_for_eff.is_empty()
+                    && handlers_for_eff.iter().all(|(canonical, info)| {
+                        info.source_module
+                            .as_deref()
+                            .is_some_and(|sm| beam_interop::is_beam_native_handler(sm, canonical))
+                    });
+                if all_native {
+                    let canonical = handlers_for_eff[0].0.clone();
+                    if let Some(effect_info) = self.effect_defs.get(eff) {
+                        for op_name in effect_info.ops.keys() {
+                            let key = format!("{}.{}", eff, op_name);
+                            self.direct_ops.insert(key, canonical.clone());
+                        }
+                    }
+                }
             }
             let handler_param_names: Vec<String> =
                 handler_entries.iter().map(|(_, p)| p.clone()).collect();
@@ -1029,6 +1056,7 @@ impl<'a> Lowerer<'a> {
             };
 
             self.current_handler_params = saved_handler_params;
+            self.direct_ops = saved_direct_ops;
             self.current_effectful_vars = saved_effectful_vars;
 
             // fun_span is available for future use (e.g. function-level metadata)
@@ -1081,6 +1109,16 @@ impl<'a> Lowerer<'a> {
             main_def.body = Self::wrap_with_ets_init(main_def.body.clone());
         }
 
+        // If the program uses beam_vec, prepend ETS table creation for dylang_vec_store.
+        if self
+            .check_result
+            .as_ref()
+            .is_some_and(|cr| cr.needs_vec_table)
+            && let Some(main_def) = fun_defs.iter_mut().find(|f| f.name == "main")
+        {
+            main_def.body = Self::wrap_with_vec_init(main_def.body.clone());
+        }
+
         CModule {
             name: module_name.to_string(),
             exports,
@@ -1115,6 +1153,40 @@ impl<'a> Lowerer<'a> {
                     params,
                     Box::new(CExpr::Let(
                         "_EtsRefInit".to_string(),
+                        Box::new(ets_init),
+                        inner_body,
+                    )),
+                )
+            }
+            other => other,
+        }
+    }
+
+    /// Wraps a function body with ETS table creation for `dylang_vec_store`.
+    fn wrap_with_vec_init(body: CExpr) -> CExpr {
+        match body {
+            CExpr::Fun(params, inner_body) => {
+                let ets_init = CExpr::Call(
+                    "ets".to_string(),
+                    "new".to_string(),
+                    vec![
+                        CExpr::Lit(CLit::Atom("dylang_vec_store".into())),
+                        CExpr::Cons(
+                            Box::new(CExpr::Lit(CLit::Atom("set".into()))),
+                            Box::new(CExpr::Cons(
+                                Box::new(CExpr::Lit(CLit::Atom("public".into()))),
+                                Box::new(CExpr::Cons(
+                                    Box::new(CExpr::Lit(CLit::Atom("named_table".into()))),
+                                    Box::new(CExpr::Nil),
+                                )),
+                            )),
+                        ),
+                    ],
+                );
+                CExpr::Fun(
+                    params,
+                    Box::new(CExpr::Let(
+                        "_EtsVecInit".to_string(),
                         Box::new(ets_init),
                         inner_body,
                     )),
@@ -1201,7 +1273,9 @@ impl<'a> Lowerer<'a> {
                 .push((format!("{}.{}", eff, op), Self::handler_param_name(eff, op)));
         }
         let effect_count = callee_handler_entries.len();
-        let total_arity = self.resolved_fun_info(head_expr.id, func_name).map(|f| f.arity);
+        let total_arity = self
+            .resolved_fun_info(head_expr.id, func_name)
+            .map(|f| f.arity);
         let return_k_count = if effect_count > 0 { 1 } else { 0 };
 
         if let Some(arity) = total_arity
@@ -1461,7 +1535,6 @@ impl<'a> Lowerer<'a> {
                             // aren't available (e.g. passed to a HOF that
                             // handles effects internally).
                             let effects = effects.clone();
-                            let arity = arity;
                             let erl_mod = erlang_mod.clone();
                             let erl_fn = erl_name.clone();
                             self.lower_effectful_fun_ref(&effects, arity, |args| {

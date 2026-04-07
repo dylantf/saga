@@ -22,6 +22,7 @@ const BEAM_NATIVE_HANDLERS: &[(&str, &str)] = &[
     ("Std.Actor", "Std.Actor.beam_actor"),
     ("Std.Ref", "Std.Ref.beam_ref"),
     ("Std.Ref", "Std.Ref.ets_ref"),
+    ("Std.Vec", "Std.Vec.beam_vec"),
 ];
 
 /// Check if a handler is BEAM-native by its source module and canonical name.
@@ -210,6 +211,87 @@ const BEAM_NATIVE_OPS: &[(&str, BeamNativeOp)] = &[
             module: "erlang",
             func: "get",
             param_count: 2,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
+    // Vec ops — param counts only; actual lowering handled by build_vec_native_call.
+    (
+        "vec_new",
+        BeamNativeOp {
+            module: "erlang",
+            func: "make_ref",
+            param_count: 0,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
+    (
+        "vec_push",
+        BeamNativeOp {
+            module: "ets",
+            func: "insert",
+            param_count: 2,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
+    (
+        "vec_get",
+        BeamNativeOp {
+            module: "ets",
+            func: "lookup",
+            param_count: 2,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
+    (
+        "vec_set",
+        BeamNativeOp {
+            module: "ets",
+            func: "insert",
+            param_count: 3,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
+    (
+        "vec_pop",
+        BeamNativeOp {
+            module: "ets",
+            func: "lookup",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
+    (
+        "vec_len",
+        BeamNativeOp {
+            module: "ets",
+            func: "lookup",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
+    (
+        "freeze",
+        BeamNativeOp {
+            module: "ets",
+            func: "lookup",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
+    (
+        "thaw",
+        BeamNativeOp {
+            module: "ets",
+            func: "insert",
+            param_count: 1,
             arg_transform: ArgTransform::Identity,
             exit_reason_arg: None,
         },
@@ -533,6 +615,575 @@ fn build_ref_ets(
             )
         }
         _ => panic!("unknown Ref op: {op_name}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vec: ETS-backed mutable vector
+// ---------------------------------------------------------------------------
+
+/// Check if an op is a Vec effect op that needs handler-specific lowering.
+pub fn is_vec_op(op_name: &str) -> bool {
+    matches!(
+        op_name,
+        "vec_new" | "vec_push" | "vec_get" | "vec_set" | "vec_pop" | "vec_len" | "freeze" | "thaw"
+    )
+}
+
+/// Build the CExpr for a Vec op. Always ETS-backed (single handler).
+pub fn build_vec_native_call(
+    op_name: &str,
+    param_vars: &[String],
+    fresh: &mut dyn FnMut() -> String,
+) -> CExpr {
+    build_vec_ets(op_name, param_vars, fresh)
+}
+
+/// ETS-backed Vec ops. Uses a dedicated named table `dylang_vec_store`.
+///
+/// Storage layout:
+/// - `{VecId, 'length'}` -> current length (Int)
+/// - `{VecId, 0}` -> element at index 0
+/// - `{VecId, 1}` -> element at index 1
+/// - etc.
+fn build_vec_ets(
+    op_name: &str,
+    param_vars: &[String],
+    fresh: &mut dyn FnMut() -> String,
+) -> CExpr {
+    let table = CExpr::Lit(CLit::Atom("dylang_vec_store".into()));
+    let length_atom = CExpr::Lit(CLit::Atom("length".into()));
+
+    match op_name {
+        // vec_new(()) -> let Id = make_ref() in let _ = ets:insert(T, {{Id,length}, 0}) in Id
+        "vec_new" => {
+            let id = fresh();
+            let discard = fresh();
+            CExpr::Let(
+                id.clone(),
+                Box::new(cerl_call("erlang", "make_ref", vec![])),
+                Box::new(CExpr::Let(
+                    discard,
+                    Box::new(cerl_call(
+                        "ets",
+                        "insert",
+                        vec![
+                            table,
+                            CExpr::Tuple(vec![
+                                CExpr::Tuple(vec![CExpr::Var(id.clone()), length_atom]),
+                                CExpr::Lit(CLit::Int(0)),
+                            ]),
+                        ],
+                    )),
+                    Box::new(CExpr::Var(id)),
+                )),
+            )
+        }
+
+        // vec_push(vec, val) -> lookup length, insert at {Vec,Len}, bump length, return unit
+        "vec_push" => {
+            let lookup = fresh();
+            let len = fresh();
+            let d1 = fresh();
+            let d2 = fresh();
+            let vec_var = CExpr::Var(param_vars[0].clone());
+            let val_var = CExpr::Var(param_vars[1].clone());
+
+            CExpr::Let(
+                lookup.clone(),
+                Box::new(cerl_call(
+                    "ets",
+                    "lookup",
+                    vec![
+                        table.clone(),
+                        CExpr::Tuple(vec![vec_var.clone(), length_atom.clone()]),
+                    ],
+                )),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(lookup)),
+                    vec![CArm {
+                        pat: CPat::Cons(
+                            Box::new(CPat::Tuple(vec![
+                                CPat::Wildcard,
+                                CPat::Var(len.clone()),
+                            ])),
+                            Box::new(CPat::Nil),
+                        ),
+                        guard: None,
+                        body: CExpr::Let(
+                            d1,
+                            Box::new(cerl_call(
+                                "ets",
+                                "insert",
+                                vec![
+                                    table.clone(),
+                                    CExpr::Tuple(vec![
+                                        CExpr::Tuple(vec![
+                                            vec_var.clone(),
+                                            CExpr::Var(len.clone()),
+                                        ]),
+                                        val_var,
+                                    ]),
+                                ],
+                            )),
+                            Box::new(CExpr::Let(
+                                d2,
+                                Box::new(cerl_call(
+                                    "ets",
+                                    "insert",
+                                    vec![
+                                        table,
+                                        CExpr::Tuple(vec![
+                                            CExpr::Tuple(vec![vec_var, length_atom]),
+                                            cerl_call(
+                                                "erlang",
+                                                "+",
+                                                vec![
+                                                    CExpr::Var(len),
+                                                    CExpr::Lit(CLit::Int(1)),
+                                                ],
+                                            ),
+                                        ]),
+                                    ],
+                                )),
+                                Box::new(CExpr::Lit(CLit::Atom("unit".into()))),
+                            )),
+                        ),
+                    }],
+                )),
+            )
+        }
+
+        // vec_get(vec, index) -> let [{_, Val}] = ets:lookup(T, {Vec, Index}) in Val
+        "vec_get" => {
+            let lookup = fresh();
+            let val = fresh();
+            CExpr::Let(
+                lookup.clone(),
+                Box::new(cerl_call(
+                    "ets",
+                    "lookup",
+                    vec![
+                        table,
+                        CExpr::Tuple(vec![
+                            CExpr::Var(param_vars[0].clone()),
+                            CExpr::Var(param_vars[1].clone()),
+                        ]),
+                    ],
+                )),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(lookup)),
+                    vec![CArm {
+                        pat: CPat::Cons(
+                            Box::new(CPat::Tuple(vec![
+                                CPat::Wildcard,
+                                CPat::Var(val.clone()),
+                            ])),
+                            Box::new(CPat::Nil),
+                        ),
+                        guard: None,
+                        body: CExpr::Var(val),
+                    }],
+                )),
+            )
+        }
+
+        // vec_set(vec, index, val) -> let _ = ets:insert(T, {{Vec,Index}, Val}) in unit
+        "vec_set" => {
+            let d = fresh();
+            CExpr::Let(
+                d,
+                Box::new(cerl_call(
+                    "ets",
+                    "insert",
+                    vec![
+                        table,
+                        CExpr::Tuple(vec![
+                            CExpr::Tuple(vec![
+                                CExpr::Var(param_vars[0].clone()),
+                                CExpr::Var(param_vars[1].clone()),
+                            ]),
+                            CExpr::Var(param_vars[2].clone()),
+                        ]),
+                    ],
+                )),
+                Box::new(CExpr::Lit(CLit::Atom("unit".into()))),
+            )
+        }
+
+        // vec_pop(vec) -> lookup length, read element at len-1, delete it, decrement length, return element
+        "vec_pop" => {
+            let lookup = fresh();
+            let len = fresh();
+            let new_len = fresh();
+            let elem_lookup = fresh();
+            let elem = fresh();
+            let d1 = fresh();
+            let d2 = fresh();
+            let vec_var = CExpr::Var(param_vars[0].clone());
+
+            CExpr::Let(
+                lookup.clone(),
+                Box::new(cerl_call(
+                    "ets",
+                    "lookup",
+                    vec![
+                        table.clone(),
+                        CExpr::Tuple(vec![vec_var.clone(), length_atom.clone()]),
+                    ],
+                )),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(lookup)),
+                    vec![CArm {
+                        pat: CPat::Cons(
+                            Box::new(CPat::Tuple(vec![
+                                CPat::Wildcard,
+                                CPat::Var(len.clone()),
+                            ])),
+                            Box::new(CPat::Nil),
+                        ),
+                        guard: None,
+                        body:
+                            // new_len = len - 1
+                            CExpr::Let(
+                                new_len.clone(),
+                                Box::new(cerl_call(
+                                    "erlang",
+                                    "-",
+                                    vec![
+                                        CExpr::Var(len),
+                                        CExpr::Lit(CLit::Int(1)),
+                                    ],
+                                )),
+                                // lookup element at new_len
+                                Box::new(CExpr::Let(
+                                    elem_lookup.clone(),
+                                    Box::new(cerl_call(
+                                        "ets",
+                                        "lookup",
+                                        vec![
+                                            table.clone(),
+                                            CExpr::Tuple(vec![
+                                                vec_var.clone(),
+                                                CExpr::Var(new_len.clone()),
+                                            ]),
+                                        ],
+                                    )),
+                                    Box::new(CExpr::Case(
+                                        Box::new(CExpr::Var(elem_lookup)),
+                                        vec![CArm {
+                                            pat: CPat::Cons(
+                                                Box::new(CPat::Tuple(vec![
+                                                    CPat::Wildcard,
+                                                    CPat::Var(elem.clone()),
+                                                ])),
+                                                Box::new(CPat::Nil),
+                                            ),
+                                            guard: None,
+                                            body:
+                                                // delete the element entry
+                                                CExpr::Let(
+                                                    d1,
+                                                    Box::new(cerl_call(
+                                                        "ets",
+                                                        "delete",
+                                                        vec![
+                                                            table.clone(),
+                                                            CExpr::Tuple(vec![
+                                                                vec_var.clone(),
+                                                                CExpr::Var(new_len.clone()),
+                                                            ]),
+                                                        ],
+                                                    )),
+                                                    // update length
+                                                    Box::new(CExpr::Let(
+                                                        d2,
+                                                        Box::new(cerl_call(
+                                                            "ets",
+                                                            "insert",
+                                                            vec![
+                                                                table,
+                                                                CExpr::Tuple(vec![
+                                                                    CExpr::Tuple(vec![
+                                                                        vec_var,
+                                                                        length_atom,
+                                                                    ]),
+                                                                    CExpr::Var(new_len),
+                                                                ]),
+                                                            ],
+                                                        )),
+                                                        Box::new(CExpr::Var(elem)),
+                                                    )),
+                                                ),
+                                        }],
+                                    )),
+                                )),
+                            ),
+                    }],
+                )),
+            )
+        }
+
+        // vec_len(vec) -> let [{_, Len}] = ets:lookup(T, {Vec, length}) in Len
+        "vec_len" => {
+            let lookup = fresh();
+            let len = fresh();
+            CExpr::Let(
+                lookup.clone(),
+                Box::new(cerl_call(
+                    "ets",
+                    "lookup",
+                    vec![
+                        table,
+                        CExpr::Tuple(vec![
+                            CExpr::Var(param_vars[0].clone()),
+                            length_atom,
+                        ]),
+                    ],
+                )),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(lookup)),
+                    vec![CArm {
+                        pat: CPat::Cons(
+                            Box::new(CPat::Tuple(vec![
+                                CPat::Wildcard,
+                                CPat::Var(len.clone()),
+                            ])),
+                            Box::new(CPat::Nil),
+                        ),
+                        guard: None,
+                        body: CExpr::Var(len),
+                    }],
+                )),
+            )
+        }
+
+        // freeze(vec) -> build list from elements 0..len-1
+        // Emits a call to a helper: dylang_vec_freeze(Table, VecId, Len, Acc)
+        // Since we can't emit recursive functions inline, we use lists:reverse
+        // on a fold built from ets:lookup calls. We emit an Erlang sequence
+        // that iterates via erlang:seq + lists:map + lists:reverse.
+        //
+        // Actually, simplest approach: use ets:match to get all element entries,
+        // then sort by index. But ets:match returns unordered results.
+        //
+        // Practical approach: build the list backwards from len-1 to 0 using
+        // a generated chain of lets. But we don't know len at compile time.
+        //
+        // Best runtime approach: call a helper BIF sequence:
+        //   Indices = lists:seq(0, Len-1)
+        //   Elements = lists:map(fun(I) -> [{_, V}] = ets:lookup(T, {Vec, I}), V end, Indices)
+        "freeze" => {
+            let lookup = fresh();
+            let len = fresh();
+            let last_idx = fresh();
+            let indices = fresh();
+            let idx_var = fresh();
+            let inner_lookup = fresh();
+            let inner_val = fresh();
+            let vec_var = CExpr::Var(param_vars[0].clone());
+
+            // Lookup length
+            CExpr::Let(
+                lookup.clone(),
+                Box::new(cerl_call(
+                    "ets",
+                    "lookup",
+                    vec![
+                        table.clone(),
+                        CExpr::Tuple(vec![vec_var.clone(), length_atom]),
+                    ],
+                )),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(lookup)),
+                    vec![CArm {
+                        pat: CPat::Cons(
+                            Box::new(CPat::Tuple(vec![
+                                CPat::Wildcard,
+                                CPat::Var(len.clone()),
+                            ])),
+                            Box::new(CPat::Nil),
+                        ),
+                        guard: None,
+                        body: CExpr::Case(
+                            Box::new(CExpr::Var(len.clone())),
+                            vec![
+                                // Length 0 -> empty list
+                                CArm {
+                                    pat: CPat::Lit(CLit::Int(0)),
+                                    guard: None,
+                                    body: CExpr::Nil,
+                                },
+                                // Length > 0 -> lists:seq(0, Len-1) |> lists:map(lookup, _)
+                                CArm {
+                                    pat: CPat::Wildcard,
+                                    guard: None,
+                                    body: CExpr::Let(
+                                        last_idx.clone(),
+                                        Box::new(cerl_call(
+                                            "erlang",
+                                            "-",
+                                            vec![
+                                                CExpr::Var(len),
+                                                CExpr::Lit(CLit::Int(1)),
+                                            ],
+                                        )),
+                                        Box::new(CExpr::Let(
+                                            indices.clone(),
+                                            Box::new(cerl_call(
+                                                "lists",
+                                                "seq",
+                                                vec![
+                                                    CExpr::Lit(CLit::Int(0)),
+                                                    CExpr::Var(last_idx),
+                                                ],
+                                            )),
+                                            // lists:map(fun(I) -> element(2, hd(ets:lookup(T, {V, I}))) end, Indices)
+                                            Box::new(cerl_call(
+                                                "lists",
+                                                "map",
+                                                vec![
+                                                    CExpr::Fun(
+                                                        vec![idx_var.clone()],
+                                                        Box::new(CExpr::Let(
+                                                            inner_lookup.clone(),
+                                                            Box::new(cerl_call(
+                                                                "ets",
+                                                                "lookup",
+                                                                vec![
+                                                                    table,
+                                                                    CExpr::Tuple(vec![
+                                                                        vec_var,
+                                                                        CExpr::Var(idx_var),
+                                                                    ]),
+                                                                ],
+                                                            )),
+                                                            Box::new(CExpr::Case(
+                                                                Box::new(CExpr::Var(inner_lookup)),
+                                                                vec![CArm {
+                                                                    pat: CPat::Cons(
+                                                                        Box::new(CPat::Tuple(vec![
+                                                                            CPat::Wildcard,
+                                                                            CPat::Var(inner_val.clone()),
+                                                                        ])),
+                                                                        Box::new(CPat::Nil),
+                                                                    ),
+                                                                    guard: None,
+                                                                    body: CExpr::Var(inner_val),
+                                                                }],
+                                                            )),
+                                                        )),
+                                                    ),
+                                                    CExpr::Var(indices),
+                                                ],
+                                            )),
+                                        )),
+                                    ),
+                                },
+                            ],
+                        ),
+                    }],
+                )),
+            )
+        }
+
+        // thaw(list) -> create vec, bulk-insert elements with indices
+        // Uses lists:foldl to insert each element with an incrementing index.
+        "thaw" => {
+            let id = fresh();
+            let d_init = fresh();
+            let list_var = CExpr::Var(param_vars[0].clone());
+            let acc_var = fresh();
+            let elem_var = fresh();
+            let d_insert = fresh();
+            let final_len = fresh();
+            let d_len = fresh();
+
+            // Create new vec id and init length to 0
+            CExpr::Let(
+                id.clone(),
+                Box::new(cerl_call("erlang", "make_ref", vec![])),
+                Box::new(CExpr::Let(
+                    d_init.clone(),
+                    Box::new(cerl_call(
+                        "ets",
+                        "insert",
+                        vec![
+                            table.clone(),
+                            CExpr::Tuple(vec![
+                                CExpr::Tuple(vec![
+                                    CExpr::Var(id.clone()),
+                                    length_atom.clone(),
+                                ]),
+                                CExpr::Lit(CLit::Int(0)),
+                            ]),
+                        ],
+                    )),
+                    // Use lists:foldl to insert elements with incrementing index
+                    // foldl(fun(Elem, Idx) -> ets:insert(T, {{Id, Idx}, Elem}), Idx+1 end, 0, List)
+                    Box::new(CExpr::Let(
+                        final_len.clone(),
+                        Box::new(cerl_call(
+                            "lists",
+                            "foldl",
+                            vec![
+                                CExpr::Fun(
+                                    vec![elem_var.clone(), acc_var.clone()],
+                                    Box::new(CExpr::Let(
+                                        d_insert.clone(),
+                                        Box::new(cerl_call(
+                                            "ets",
+                                            "insert",
+                                            vec![
+                                                table.clone(),
+                                                CExpr::Tuple(vec![
+                                                    CExpr::Tuple(vec![
+                                                        CExpr::Var(id.clone()),
+                                                        CExpr::Var(acc_var.clone()),
+                                                    ]),
+                                                    CExpr::Var(elem_var),
+                                                ]),
+                                            ],
+                                        )),
+                                        Box::new(cerl_call(
+                                            "erlang",
+                                            "+",
+                                            vec![
+                                                CExpr::Var(acc_var),
+                                                CExpr::Lit(CLit::Int(1)),
+                                            ],
+                                        )),
+                                    )),
+                                ),
+                                CExpr::Lit(CLit::Int(0)),
+                                list_var,
+                            ],
+                        )),
+                        // Update length to final count
+                        Box::new(CExpr::Let(
+                            d_len,
+                            Box::new(cerl_call(
+                                "ets",
+                                "insert",
+                                vec![
+                                    table,
+                                    CExpr::Tuple(vec![
+                                        CExpr::Tuple(vec![
+                                            CExpr::Var(id.clone()),
+                                            length_atom,
+                                        ]),
+                                        CExpr::Var(final_len),
+                                    ]),
+                                ],
+                            )),
+                            Box::new(CExpr::Var(id)),
+                        )),
+                    )),
+                )),
+            )
+        }
+
+        _ => panic!("unknown Vec op: {op_name}"),
     }
 }
 

@@ -850,6 +850,9 @@ pub struct Checker {
     /// Set to true when a `with ets_ref` handler is encountered, signalling
     /// that the `dylang_ref_store` ETS table must be created at startup.
     pub(crate) needs_ets_ref_table: bool,
+    /// Set to true when a `with beam_vec` handler is encountered, signalling
+    /// that the `dylang_vec_store` ETS table must be created at startup.
+    pub(crate) needs_vec_table: bool,
 }
 
 /// Maps user-visible name forms to canonical (module-qualified) names.
@@ -1107,6 +1110,7 @@ impl Checker {
             current_module: None,
             prelude_imports: Vec::new(),
             needs_ets_ref_table: false,
+            needs_vec_table: false,
         };
         checker.register_builtins();
         checker

@@ -1,145 +1,49 @@
-import Std.Actor (Process, Actor, Monitor, beam_actor)
-import Std.Ref (MutRef, Ref, ets_ref)
+import Std.Fail (Fail)
+import Std.Vec (MutVec, Vec, beam_vec)
 
-# -- AtomicRef: lock-based mutable refs backed by ETS --
-#
-# Each AtomicRef is an ETS ref + a lock process. The lock process
-# monitors whoever holds the lock — if they crash, the lock releases
-# automatically (no deadlock).
+impl Show for List a where {a: Show} {
+  show xs = "[" <> String.join ", " (List.map show xs) <> "]"
+}
 
-# Opaque handle to an atomic ref — hides the lock server pid
-opaque type AtomicMutRef a = AtomicMutRef (MutRef a) (Pid LockMsg)
+# Vec ops (direct) mixed with Fail (CPS) in the same function
+fun safe_sum : MutVec Int -> Int needs {Vec, Fail String}
+safe_sum v = {
+  let n = vec_len! v
+  if n == 0 then fail! "empty vec"
+  else sum_loop v 0 n 0
+}
 
-# Messages to the lock server
-type LockMsg =
-  | Acquire (Pid LockReply)
-  | Release
-  | Stop
-
-type LockReply = Acquired
-
-type LockError = LockTimeout deriving (Show)
-
-# The lock server: tracks whether the lock is held.
-# When acquired, monitors the holder. If the holder crashes (Down),
-# the lock releases automatically.
-fun lock_server : Unit -> Unit needs {Process, Actor LockMsg, Monitor}
-lock_server () = {
-  # Unlocked: wait for an acquire request or shutdown
-  receive {
-    Acquire caller -> {
-      let mon = monitor! caller
-      send! caller Acquired
-      # Locked: wait for release or holder crash
-      receive {
-        Release -> {
-          demonitor! mon
-          lock_server ()
-        }
-        Down _ _ -> {
-          # Holder crashed -- auto-release
-          lock_server ()
-        }
-      }
-    }
-    Stop -> ()
+fun sum_loop : MutVec Int -> Int -> Int -> Int -> Int needs {Vec}
+sum_loop v i n acc =
+  if i >= n then acc
+  else {
+    let x = vec_get! v i
+    sum_loop v (i + 1) n (acc + x)
   }
-}
 
-# The effect
-effect AtomicRef {
-  fun atomic_new : a -> AtomicMutRef a
-  fun atomic_lock : AtomicMutRef a -> a
-  fun atomic_try_lock : AtomicMutRef a -> Int -> Result a LockError
-  fun atomic_unlock : AtomicMutRef a -> a -> Unit
-}
-
-# Handler: uses ets_ref for storage, a lock process for mutual exclusion
-handler atomic_ref for AtomicRef needs {Process, Actor LockReply, Monitor, Ref} {
-  atomic_new init = {
-    let r = new! init
-    let lock_pid = spawn! (fun () -> lock_server ())
-    resume AtomicMutRef r lock_pid
-  } finally {
-    send! lock_pid Stop
-  }
-  atomic_lock (AtomicMutRef r lock_pid) = {
-    send! lock_pid (Acquire (self! ()))
-    let _ack = receive {
-      Acquired -> Acquired
-    }
-    resume get! r
-  }
-  atomic_try_lock (AtomicMutRef r lock_pid) timeout_ms = {
-    send! lock_pid (Acquire (self! ()))
-    let result = receive {
-      Acquired -> Ok (get! r)
-      after timeout_ms -> Err LockTimeout
-    }
-    resume result
-  }
-  atomic_unlock (AtomicMutRef r lock_pid) v = {
-    set! r v
-    send! lock_pid Release
-    resume ()
-  }
-}
-
-# -- Convenience functions --
-
-fun atomic_modify : AtomicMutRef a -> (a -> a) -> a needs {AtomicRef}
-atomic_modify ref f = {
-  let current = atomic_lock! ref
-  let updated = f current
-  atomic_unlock! ref updated
-  updated
-}
-
-fun atomic_get : AtomicMutRef a -> a needs {AtomicRef}
-atomic_get ref = {
-  let v = atomic_lock! ref
-  atomic_unlock! ref v
-  v
-}
-
-fun atomic_set : AtomicMutRef a -> a -> Unit needs {AtomicRef}
-atomic_set ref v = {
-  let _ = atomic_lock! ref
-  atomic_unlock! ref v
-}
-
-# -- Test it --
-
-fun increment_n_times : AtomicMutRef Int -> Int -> Unit needs {AtomicRef}
-increment_n_times _ 0 = ()
-increment_n_times r n = {
-  let _ = atomic_modify r (fun x -> x + 1)
-  increment_n_times r (n - 1)
+# Fail handler: convert to Result
+handler to_result for Fail String {
+  fail reason = Err reason
+  return value = Ok value
 }
 
 main () = {
-  let counter = atomic_new! 0
-  let _ = atomic_modify counter (fun n -> n + 10)
-  let v1 = atomic_get counter
-  dbg $"after modify: {show v1}"
+  # Test 1: Vec + Fail, success case
+  let v = thaw! [10, 20, 30]
+  let result1 = safe_sum v with to_result
+  dbg $"sum of [10,20,30]: {debug result1}"
 
-  atomic_set counter 42
-  let v2 = atomic_get counter
-  dbg $"after set: {show v2}"
+  # Test 2: Vec + Fail, failure case
+  let empty = (vec_new! () : MutVec Int)
+  let result2 = safe_sum empty with to_result
+  dbg $"sum of []: {debug result2}"
 
-  increment_n_times counter 5
-  let v3 = atomic_get counter
-  dbg $"after 5 increments: {show v3}"
+  # Test 3: Vec ops around a fail handler boundary
+  let v2 = thaw! [1, 2, 3, 4, 5]
+  vec_set! v2 2 99
+  let result3 = safe_sum v2 with to_result
+  dbg $"sum after set: {debug result3}"
 
-  # Test timeout — lock is free so this should succeed instantly
-  let locked = atomic_try_lock! counter 100
-  case locked {
-    Ok v -> {
-      dbg $"try_lock got: {show v}"
-      atomic_unlock! counter (v + 1)
-    }
-    Err msg -> dbg $"try_lock failed: {msg}"
-  }
-  let v4 = atomic_get counter
-  dbg $"after try_lock: {show v4}"
-} with {atomic_ref, ets_ref, beam_actor}
+  let frozen = freeze! v2
+  dbg $"frozen: {show frozen}"
+} with beam_vec

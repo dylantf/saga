@@ -143,20 +143,7 @@ impl<'a> Lowerer<'a> {
         };
         let effect_key = format!("{}.{}", effect_name, op_name);
 
-        // Find the per-op handler param variable.
-        let handler_var = self
-            .current_handler_params
-            .get(&effect_key)
-            .unwrap_or_else(|| {
-                panic!(
-                    "no handler param for op '{}.{}', handler_params: {:?}",
-                    effect_name, op_name, self.current_handler_params
-                )
-            })
-            .clone();
-
-        // Build: apply Handler(arg1, ..., argN, K)
-        // Per-op handlers have natural arity -- no atom dispatch, no padding.
+        // Lower args (shared between direct and CPS paths).
         let runtime_param_count = self
             .effect_defs
             .get(&effect_name)
@@ -164,7 +151,7 @@ impl<'a> Lowerer<'a> {
             .copied()
             .unwrap_or(args.len());
         let mut unit_args_to_erase = args.len().saturating_sub(runtime_param_count);
-        let mut call_args = Vec::new();
+        let mut param_vars = Vec::new();
         let mut bindings = Vec::new();
         for arg in args {
             let is_unit_literal = matches!(
@@ -181,8 +168,80 @@ impl<'a> Lowerer<'a> {
             let v = self.fresh();
             let ce = self.lower_expr_value(arg);
             bindings.push((v.clone(), ce));
-            call_args.push(CExpr::Var(v));
+            param_vars.push(v);
         }
+
+        // Direct path: ops that always resume exactly once can be inlined as
+        // `let Result = <native call> in <continuation body>` — no closure allocation.
+        if let Some(handler_canonical) = self.direct_ops.get(&effect_key).cloned() {
+            let param_var_strs: Vec<String> = param_vars.clone();
+            let native_call = if super::beam_interop::is_ref_op(op_name) {
+                super::beam_interop::build_ref_native_call(
+                    &handler_canonical,
+                    op_name,
+                    &param_var_strs,
+                    &mut || self.fresh(),
+                )
+            } else if super::beam_interop::is_vec_op(op_name) {
+                super::beam_interop::build_vec_native_call(
+                    op_name,
+                    &param_var_strs,
+                    &mut || self.fresh(),
+                )
+            } else {
+                let ctor_atoms = self.constructor_atoms.clone();
+                super::beam_interop::build_native_call(
+                    op_name,
+                    &param_var_strs,
+                    &ctor_atoms,
+                    &mut || self.fresh(),
+                )
+            };
+
+            // Unwrap the continuation closure to inline its body directly.
+            // K is Fun([result_param], body) — we bind result_param via let.
+            let result = if let Some(k) = continuation {
+                match k {
+                    CExpr::Fun(params, body) if params.len() == 1 => {
+                        let result_var = params[0].clone();
+                        CExpr::Let(result_var, Box::new(native_call), body)
+                    }
+                    // K is a variable reference (e.g. _ReturnK) — apply it
+                    other => {
+                        let result_var = self.fresh();
+                        CExpr::Let(
+                            result_var.clone(),
+                            Box::new(native_call),
+                            Box::new(CExpr::Apply(
+                                Box::new(other),
+                                vec![CExpr::Var(result_var)],
+                            )),
+                        )
+                    }
+                }
+            } else {
+                // No continuation — standalone effect call, just return the result
+                native_call
+            };
+
+            return bindings.into_iter().rev().fold(result, |body, (var, val)| {
+                CExpr::Let(var, Box::new(val), Box::new(body))
+            });
+        }
+
+        // CPS path: apply Handler(arg1, ..., argN, K)
+        let handler_var = self
+            .current_handler_params
+            .get(&effect_key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no handler param for op '{}.{}', handler_params: {:?}",
+                    effect_name, op_name, self.current_handler_params
+                )
+            })
+            .clone();
+
+        let mut call_args: Vec<CExpr> = param_vars.into_iter().map(CExpr::Var).collect();
 
         // Append continuation. If the handler arm never calls resume, pass a cheap atom
         // instead of a real closure so Erlang doesn't warn about a constructed-but-unused term.
@@ -227,6 +286,12 @@ impl<'a> Lowerer<'a> {
         let call = if super::beam_interop::is_ref_op(op_name) {
             super::beam_interop::build_ref_native_call(
                 handler_canonical,
+                op_name,
+                &param_vars,
+                &mut || self.fresh(),
+            )
+        } else if super::beam_interop::is_vec_op(op_name) {
+            super::beam_interop::build_vec_native_call(
                 op_name,
                 &param_vars,
                 &mut || self.fresh(),
@@ -329,6 +394,18 @@ impl<'a> Lowerer<'a> {
         // then build the handler functions.
         let saved_handler_params = self.current_handler_params.clone();
         let saved_no_resume_ops = self.no_resume_ops.clone();
+        let saved_direct_ops = self.direct_ops.clone();
+
+        // Register BEAM-native ops as direct (always resume once, can be inlined
+        // as let-bindings instead of CPS continuation-passing).
+        for (eff, handler_canonical) in &beam_native_effects {
+            if let Some(effect_info) = self.effect_defs.get(eff) {
+                for op_name in effect_info.ops.keys() {
+                    let key = format!("{}.{}", eff, op_name);
+                    self.direct_ops.insert(key, handler_canonical.clone());
+                }
+            }
+        }
 
         // Pass 1: register all handler param variables (one per op)
         let mut op_vars: Vec<(String, String, String)> = Vec::new(); // (effect, op, var_name)
@@ -479,6 +556,7 @@ impl<'a> Lowerer<'a> {
 
         self.current_handler_params = saved_handler_params;
         self.no_resume_ops = saved_no_resume_ops;
+        self.direct_ops = saved_direct_ops;
         // Post-hoc reachability: scan the lowered body for _Handle_* references,
         // then transitively close through handler binding values.
         let mut needed: HashSet<String> = HashSet::new();

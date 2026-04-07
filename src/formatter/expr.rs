@@ -11,6 +11,29 @@ use crate::docs;
 use crate::token::Span;
 use crate::token::StringKind;
 
+/// Return the precedence level of a binary operator, matching the parser.
+fn binop_precedence(op: &BinOp) -> u8 {
+    match op {
+        BinOp::Or => 2,
+        BinOp::And => 3,
+        BinOp::Eq | BinOp::NotEq => 4,
+        BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => 5,
+        BinOp::Add | BinOp::Sub | BinOp::Concat => 6,
+        BinOp::Mul | BinOp::FloatDiv | BinOp::IntDiv | BinOp::Mod | BinOp::FloatMod => 7,
+    }
+}
+
+/// Format a BinOp operand, wrapping in parens if its precedence is lower than
+/// the outer operator (i.e. parens are needed to preserve meaning).
+fn format_binop_operand(operand: &Expr, outer_prec: u8) -> Doc {
+    if let ExprKind::BinOp { op: inner_op, .. } = &operand.kind
+        && binop_precedence(inner_op) < outer_prec
+    {
+        return docs![Doc::text("("), format_expr(operand), Doc::text(")")];
+    }
+    format_expr(operand)
+}
+
 /// Flatten a left-nested BinOp chain of the same operator.
 /// `(a + b) + c` with op=Add -> ([a, b, c], Add)
 /// Stops flattening when the operator changes (respects precedence).
@@ -85,9 +108,9 @@ pub fn format_expr(expr: &Expr) -> Doc {
             // the call site, not nested inside the arg list.
             // Check if any arg is a lambda with a block body ("trailing lambda").
             // Keep `(fun params -> {` on the same line as the call.
-            if let Some(lambda_idx) = args.iter().position(|a| {
-                matches!(&a.kind, ExprKind::Lambda { body, .. } if is_block_like(body))
-            }) {
+            if let Some(lambda_idx) = args.iter().position(
+                |a| matches!(&a.kind, ExprKind::Lambda { body, .. } if is_block_like(body)),
+            ) {
                 let ExprKind::Lambda { params, body } = &args[lambda_idx].kind else {
                     unreachable!()
                 };
@@ -114,7 +137,11 @@ pub fn format_expr(expr: &Expr) -> Doc {
 
                 // For block bodies, inline the `{` onto the `-> ` line so we get
                 // `(fun x -> {` instead of C#-style brace on its own line.
-                if let ExprKind::Block { stmts, dangling_trivia } = &body.kind {
+                if let ExprKind::Block {
+                    stmts,
+                    dangling_trivia,
+                } = &body.kind
+                {
                     let mut body_items = Vec::new();
                     for ann in stmts {
                         body_items.push(Doc::hardline());
@@ -124,9 +151,14 @@ pub fn format_expr(expr: &Expr) -> Doc {
                     }
                     let inner = super::helpers::format_braced_body(&body_items, dangling_trivia);
                     return docs![
-                        prefix, Doc::text(" "), lhs, Doc::text("{"),
+                        prefix,
+                        Doc::text(" "),
+                        lhs,
+                        Doc::text("{"),
                         Doc::nest(2, inner),
-                        Doc::hardline(), Doc::text("}"), suffix
+                        Doc::hardline(),
+                        Doc::text("}"),
+                        suffix
                     ];
                 }
                 let body_doc = format_expr(body);
@@ -148,14 +180,15 @@ pub fn format_expr(expr: &Expr) -> Doc {
             // Break before operator: keeps operators aligned on the left.
             let (operands, chain_op) = flatten_binop(expr, op);
             let op_str = format_binop(chain_op);
+            let outer_prec = binop_precedence(chain_op);
 
-            let first = format_expr(operands[0]);
+            let first = format_binop_operand(operands[0], outer_prec);
             let mut tail = Doc::Nil;
             for operand in &operands[1..] {
                 tail = tail
                     .append(Doc::line())
                     .append(Doc::text(format!("{} ", op_str)))
-                    .append(format_expr(operand));
+                    .append(format_binop_operand(operand, outer_prec));
             }
             Doc::group(docs![first, Doc::nest(2, tail)])
         }
@@ -474,8 +507,11 @@ pub fn format_expr(expr: &Expr) -> Doc {
                         || !s.trailing_trivia.is_empty()
                 });
 
+            // All ops in a chain share the same precedence level
+            let chain_prec = binop_precedence(&ops[0]);
+
             // Head segment
-            let mut head = format_expr(&segments[0].node);
+            let mut head = format_binop_operand(&segments[0].node, chain_prec);
             head = head.append(format_trailing(&segments[0].trailing_comment));
 
             // Tail segments: `+ operand` pairs, indented when broken
@@ -491,7 +527,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 }
                 let op_str = format_binop(&ops[i]);
                 tail = tail.append(Doc::text(format!("{} ", op_str)));
-                tail = tail.append(format_expr(&seg.node));
+                tail = tail.append(format_binop_operand(&seg.node, chain_prec));
                 tail = tail.append(format_trailing(&seg.trailing_comment));
                 if !seg.trailing_trivia.is_empty() {
                     tail = tail.append(Doc::hardline());
@@ -554,17 +590,26 @@ pub fn format_expr(expr: &Expr) -> Doc {
             if segments.is_empty() {
                 Doc::text("<<>>")
             } else {
-                let seg_docs: Vec<Doc> = segments.iter().map(|seg| {
-                    let mut d = format_expr(&seg.value);
-                    if let Some(size) = &seg.size {
-                        d = d.append(Doc::text(":")).append(format_expr(size));
-                    }
-                    if !seg.specs.is_empty() {
-                        d = d.append(Doc::text("/")).append(Doc::text(super::pat::format_bit_specs(&seg.specs)));
-                    }
-                    d
-                }).collect();
-                docs![Doc::text("<<"), Doc::join(Doc::text(", "), seg_docs), Doc::text(">>")]
+                let seg_docs: Vec<Doc> = segments
+                    .iter()
+                    .map(|seg| {
+                        let mut d = format_expr(&seg.value);
+                        if let Some(size) = &seg.size {
+                            d = d.append(Doc::text(":")).append(format_expr(size));
+                        }
+                        if !seg.specs.is_empty() {
+                            d = d
+                                .append(Doc::text("/"))
+                                .append(Doc::text(super::pat::format_bit_specs(&seg.specs)));
+                        }
+                        d
+                    })
+                    .collect();
+                docs![
+                    Doc::text("<<"),
+                    Doc::join(Doc::text(", "), seg_docs),
+                    Doc::text(">>")
+                ]
             }
         }
 
@@ -667,16 +712,13 @@ fn format_handler(handler: &Handler) -> Doc {
             dangling_trivia,
         } => {
             let has_inline = !arms.is_empty() || return_clause.is_some();
-            let has_trivia = named.iter().any(|a| {
-                a.trailing_comment.is_some() || !a.leading_trivia.is_empty()
-            });
+            let has_trivia = named
+                .iter()
+                .any(|a| a.trailing_comment.is_some() || !a.leading_trivia.is_empty());
 
             // Named-only handlers can go on one line: `{ h1, h2 }`
             if !has_inline && !has_trivia && dangling_trivia.is_empty() {
-                let named_docs: Vec<Doc> = named
-                    .iter()
-                    .map(|a| Doc::text(&a.node.name))
-                    .collect();
+                let named_docs: Vec<Doc> = named.iter().map(|a| Doc::text(&a.node.name)).collect();
                 let joined = Doc::join(Doc::text(", "), named_docs);
                 return docs![Doc::text("{"), joined, Doc::text("}")];
             }

@@ -1,0 +1,25 @@
+module Std.Vec
+
+#@ Opaque mutable vector handle. At runtime this is an Erlang reference
+#@ used as a composite key prefix into an ETS table. Elements are stored
+#@ at {VecId, Index} and the length at {VecId, 'length'}.
+opaque type MutVec a = MutVec(a)
+
+#@ Mutable vector effect. Provides efficient O(1) indexed access and
+#@ mutation backed by ETS composite keys.
+pub effect Vec {
+  fun vec_new : Unit -> MutVec a
+  fun vec_push : MutVec a -> a -> Unit
+  fun vec_get : MutVec a -> Int -> a
+  fun vec_set : MutVec a -> Int -> a -> Unit
+  fun vec_pop : MutVec a -> a
+  fun vec_len : MutVec a -> Int
+  fun freeze : MutVec a -> List a
+  fun thaw : List a -> MutVec a
+}
+
+#@ ETS-backed handler. Elements are stored in a dedicated `dylang_vec_store`
+#@ named ETS table with composite keys {VecId, Index}.
+pub handler beam_vec for Vec {
+  # Compiler builtin — ops lower to ETS calls with composite keys.
+}

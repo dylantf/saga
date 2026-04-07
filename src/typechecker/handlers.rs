@@ -99,15 +99,21 @@ impl Checker {
     ) -> Result<Type, Diagnostic> {
         let handled = self.handler_handled_effects(handler);
 
-        // Check if this with-expression uses ets_ref, which requires ETS table init.
+        // Check if this with-expression uses ets_ref or beam_vec, which require ETS table init.
         match handler {
             ast::Handler::Named(name, _) if name == "ets_ref" => {
                 self.needs_ets_ref_table = true;
+            }
+            ast::Handler::Named(name, _) if name == "beam_vec" => {
+                self.needs_vec_table = true;
             }
             ast::Handler::Inline { named, .. } => {
                 for ann in named {
                     if ann.node.name == "ets_ref" {
                         self.needs_ets_ref_table = true;
+                    }
+                    if ann.node.name == "beam_vec" {
+                        self.needs_vec_table = true;
                     }
                 }
             }
