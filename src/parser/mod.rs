@@ -13,7 +13,10 @@ mod pat;
 ///
 /// If there's no BlankLines, everything goes into `before_blank` (all comments are trailing).
 pub(super) fn split_trivia_at_blank_line(trivia: Vec<Trivia>) -> (Vec<Trivia>, Vec<Trivia>) {
-    if let Some(pos) = trivia.iter().position(|t| matches!(t, Trivia::BlankLines(_))) {
+    if let Some(pos) = trivia
+        .iter()
+        .position(|t| matches!(t, Trivia::BlankLines(_)))
+    {
         let mut before = trivia;
         let after = before.split_off(pos);
         (before, after)
@@ -51,7 +54,12 @@ impl Parser {
     // --- Helpers ---
 
     pub fn new(tokens: Vec<Spanned>) -> Self {
-        Parser { tokens, pos: 0, no_brace_app: false, test_mode: false }
+        Parser {
+            tokens,
+            pos: 0,
+            no_brace_app: false,
+            test_mode: false,
+        }
     }
 
     /// Allocate a fresh NodeId from the global counter.
@@ -127,9 +135,11 @@ impl Parser {
     pub(super) fn save(&self) -> ParserSnapshot {
         ParserSnapshot {
             pos: self.pos,
-            trivia: self.tokens.iter().map(|t| {
-                (t.leading_trivia.clone(), t.trailing_comment.clone())
-            }).collect(),
+            trivia: self
+                .tokens
+                .iter()
+                .map(|t| (t.leading_trivia.clone(), t.trailing_comment.clone()))
+                .collect(),
         }
     }
 

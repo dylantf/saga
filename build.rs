@@ -31,10 +31,7 @@ fn main() {
         .expect("cannot read src/stdlib")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
-                .is_some_and(|ext| ext == "dy" || ext == "erl")
-        })
+        .filter(|p| p.extension().is_some_and(|ext| ext == "dy" || ext == "erl"))
         .collect();
     stdlib_files.sort();
     for path in &stdlib_files {

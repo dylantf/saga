@@ -111,9 +111,9 @@ pub(super) fn is_block_like(expr: &Expr) -> bool {
         // App with a trailing lambda whose body is block-like: `f (fun x -> { ... })`
         ExprKind::App { .. } => {
             let (_, args) = crate::formatter::expr::flatten_app(expr);
-            args.last().is_some_and(|last| {
-                matches!(&last.kind, ExprKind::Lambda { body, .. } if is_block_like(body))
-            })
+            args.last().is_some_and(
+                |last| matches!(&last.kind, ExprKind::Lambda { body, .. } if is_block_like(body)),
+            )
         }
         _ => false,
     }
@@ -171,7 +171,11 @@ pub fn format_type_def(decl: &Decl) -> Doc {
             vdoc = vdoc.append(Doc::text(" "));
             match label {
                 Some(l) => {
-                    vdoc = vdoc.append(docs![Doc::text(format!("({}: ", l)), format_type_expr(ty), Doc::text(")")]);
+                    vdoc = vdoc.append(docs![
+                        Doc::text(format!("({}: ", l)),
+                        format_type_expr(ty),
+                        Doc::text(")")
+                    ]);
                 }
                 None => {
                     vdoc = vdoc.append(format_type_expr_atom(ty));
@@ -198,7 +202,9 @@ pub fn format_type_def(decl: &Decl) -> Doc {
                 .append(format_variant(ann));
         }
         if !deriving.is_empty() {
-            broken_variants = broken_variants.append(Doc::hardline()).append(deriving_bare);
+            broken_variants = broken_variants
+                .append(Doc::hardline())
+                .append(deriving_bare);
         }
         parts.push(Doc::nest(2, broken_variants));
     } else {
@@ -221,7 +227,9 @@ pub fn format_type_def(decl: &Decl) -> Doc {
                 .append(format_variant(ann));
         }
         if !deriving.is_empty() {
-            broken_variants = broken_variants.append(Doc::hardline()).append(deriving_bare);
+            broken_variants = broken_variants
+                .append(Doc::hardline())
+                .append(deriving_bare);
         }
 
         parts.push(Doc::group(Doc::if_break(
@@ -282,18 +290,27 @@ pub fn format_record_def(decl: &Decl) -> Doc {
             },
             dangling,
         );
-        docs![Doc::text(" {"), Doc::nest(2, body), Doc::hardline(), Doc::text("}"), deriving_doc.clone()]
+        docs![
+            Doc::text(" {"),
+            Doc::nest(2, body),
+            Doc::hardline(),
+            Doc::text("}"),
+            deriving_doc.clone()
+        ]
     };
 
     if *multiline {
         parts.push(broken_fields);
     } else {
-        let field_docs: Vec<Doc> = fields.iter().map(|ann| {
-            let (fname, ty) = &ann.node;
-            let mut d = docs![Doc::text(format!("{}: ", fname)), format_type_expr(ty)];
-            d = d.append(format_trailing(&ann.trailing_comment));
-            d
-        }).collect();
+        let field_docs: Vec<Doc> = fields
+            .iter()
+            .map(|ann| {
+                let (fname, ty) = &ann.node;
+                let mut d = docs![Doc::text(format!("{}: ", fname)), format_type_expr(ty)];
+                d = d.append(format_trailing(&ann.trailing_comment));
+                d
+            })
+            .collect();
         let flat_fields = {
             let joined = Doc::join(Doc::text(", "), field_docs);
             docs![Doc::text(" { "), joined, Doc::text(" }"), deriving_doc]

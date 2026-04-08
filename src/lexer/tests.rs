@@ -30,19 +30,28 @@ fn float() {
 
 #[test]
 fn integer_with_separators() {
-    assert_eq!(toks("1_000_000"), vec![Int("1_000_000".into(), 1_000_000), Eof]);
+    assert_eq!(
+        toks("1_000_000"),
+        vec![Int("1_000_000".into(), 1_000_000), Eof]
+    );
     assert_eq!(toks("1_0"), vec![Int("1_0".into(), 10), Eof]);
 }
 
 #[test]
 fn float_with_separators() {
-    assert_eq!(toks("1_000.000_1"), vec![Float("1_000.000_1".into(), 1_000.000_1), Eof]);
+    assert_eq!(
+        toks("1_000.000_1"),
+        vec![Float("1_000.000_1".into(), 1_000.000_1), Eof]
+    );
 }
 
 #[test]
 fn trailing_underscore_is_not_separator() {
     // 42_ should lex as int 42 then ident _foo
-    assert_eq!(toks("42_foo"), vec![Int("42".into(), 42), Ident("_foo".into()), Eof]);
+    assert_eq!(
+        toks("42_foo"),
+        vec![Int("42".into(), 42), Ident("_foo".into()), Eof]
+    );
 }
 
 #[test]
@@ -59,17 +68,26 @@ fn leading_underscore_is_ident() {
 #[test]
 fn integer_then_dot_ident() {
     // 3.foo should be int, dot, ident - not a float
-    assert_eq!(toks("3.foo"), vec![Int("3".into(), 3), Dot, Ident("foo".into()), Eof]);
+    assert_eq!(
+        toks("3.foo"),
+        vec![Int("3".into(), 3), Dot, Ident("foo".into()), Eof]
+    );
 }
 
 #[test]
 fn string_simple() {
-    assert_eq!(toks(r#""hello""#), vec![String("hello".into(), StringKind::Normal), Eof]);
+    assert_eq!(
+        toks(r#""hello""#),
+        vec![String("hello".into(), StringKind::Normal), Eof]
+    );
 }
 
 #[test]
 fn string_escape_sequences() {
-    assert_eq!(toks(r#""\n\t\\\"""#), vec![String("\n\t\\\"".into(), StringKind::Normal), Eof]);
+    assert_eq!(
+        toks(r#""\n\t\\\"""#),
+        vec![String("\n\t\\\"".into(), StringKind::Normal), Eof]
+    );
 }
 
 #[test]
@@ -203,7 +221,10 @@ fn comment_on_own_line_is_leading_trivia() {
     // Only significant tokens: Int("42".into(), 42), Eof
     assert_eq!(tokens.len(), 2);
     assert_eq!(tokens[0].token, Int("42".into(), 42));
-    assert_eq!(tokens[0].leading_trivia, vec![Trivia::Comment("comment".into())]);
+    assert_eq!(
+        tokens[0].leading_trivia,
+        vec![Trivia::Comment("comment".into())]
+    );
 }
 
 #[test]
@@ -228,7 +249,10 @@ fn comment_at_end_of_file_is_eof_leading_trivia() {
     let tokens = lex("# comment");
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens[0].token, Eof);
-    assert_eq!(tokens[0].leading_trivia, vec![Trivia::Comment("comment".into())]);
+    assert_eq!(
+        tokens[0].leading_trivia,
+        vec![Trivia::Comment("comment".into())]
+    );
 }
 
 // --- Newlines produce no tokens (no Terminator) ---
@@ -238,7 +262,10 @@ fn newlines_produce_no_extra_tokens() {
     // Only significant tokens remain in the stream
     assert_eq!(toks("42\n"), vec![Int("42".into(), 42), Eof]);
     assert_eq!(toks("3.144\n"), vec![Float("3.144".into(), 3.144), Eof]);
-    assert_eq!(toks("\"hi\"\n"), vec![String("hi".into(), StringKind::Normal), Eof]);
+    assert_eq!(
+        toks("\"hi\"\n"),
+        vec![String("hi".into(), StringKind::Normal), Eof]
+    );
     assert_eq!(toks("True\n"), vec![True, Eof]);
     assert_eq!(toks("foo\n"), vec![Ident("foo".into()), Eof]);
 }
@@ -258,7 +285,10 @@ fn no_extra_tokens_after_keywords() {
 
 #[test]
 fn no_extra_tokens_inside_parens() {
-    assert_eq!(toks("(\n42\n)"), vec![LParen, Int("42".into(), 42), RParen, Eof]);
+    assert_eq!(
+        toks("(\n42\n)"),
+        vec![LParen, Int("42".into(), 42), RParen, Eof]
+    );
     assert_eq!(
         toks("(foo\nbar)"),
         vec![
@@ -388,7 +418,10 @@ fn spans_are_byte_offsets() {
 
 #[test]
 fn raw_string_simple() {
-    assert_eq!(toks(r#"@"hello""#), vec![String("hello".into(), StringKind::Raw), Eof]);
+    assert_eq!(
+        toks(r#"@"hello""#),
+        vec![String("hello".into(), StringKind::Raw), Eof]
+    );
 }
 
 #[test]
@@ -402,7 +435,10 @@ fn raw_string_no_escapes() {
 
 #[test]
 fn raw_string_empty() {
-    assert_eq!(toks(r#"@"""#), vec![String("".into(), StringKind::Raw), Eof]);
+    assert_eq!(
+        toks(r#"@"""#),
+        vec![String("".into(), StringKind::Raw), Eof]
+    );
 }
 
 #[test]
@@ -417,12 +453,18 @@ fn raw_string_unterminated() {
 #[test]
 fn multiline_string_basic() {
     let src = "\"\"\"\n    hello\n    world\n    \"\"\"";
-    assert_eq!(toks(src), vec![String("hello\nworld".into(), StringKind::Multiline), Eof]);
+    assert_eq!(
+        toks(src),
+        vec![String("hello\nworld".into(), StringKind::Multiline), Eof]
+    );
 }
 
 #[test]
 fn multiline_string_empty() {
-    assert_eq!(toks("\"\"\"\"\"\""), vec![String("".into(), StringKind::Multiline), Eof]);
+    assert_eq!(
+        toks("\"\"\"\"\"\""),
+        vec![String("".into(), StringKind::Multiline), Eof]
+    );
 }
 
 #[test]
@@ -456,7 +498,10 @@ fn multiline_string_preserves_relative_indent() {
     let src = "\"\"\"\n        deep\n    shallow\n    \"\"\"";
     assert_eq!(
         toks(src),
-        vec![String("    deep\nshallow".into(), StringKind::Multiline), Eof]
+        vec![
+            String("    deep\nshallow".into(), StringKind::Multiline),
+            Eof
+        ]
     );
 }
 
@@ -476,7 +521,10 @@ fn multiline_string_no_extra_tokens_for_inner_newlines() {
     let tokens = toks(src);
     // Should just be String + Eof
     assert_eq!(tokens.len(), 2);
-    assert_eq!(tokens[0], String("hello\nworld".into(), StringKind::Multiline));
+    assert_eq!(
+        tokens[0],
+        String("hello\nworld".into(), StringKind::Multiline)
+    );
 }
 
 // --- Raw multiline strings ---
@@ -487,13 +535,19 @@ fn raw_multiline_string_basic() {
     // \n should be literal backslash-n, not a newline
     assert_eq!(
         toks(src),
-        vec![String("hello\\nworld".into(), StringKind::RawMultiline), Eof]
+        vec![
+            String("hello\\nworld".into(), StringKind::RawMultiline),
+            Eof
+        ]
     );
 }
 
 #[test]
 fn raw_multiline_string_empty() {
-    assert_eq!(toks("@\"\"\"\"\"\""), vec![String("".into(), StringKind::RawMultiline), Eof]);
+    assert_eq!(
+        toks("@\"\"\"\"\"\""),
+        vec![String("".into(), StringKind::RawMultiline), Eof]
+    );
 }
 
 #[test]

@@ -74,7 +74,9 @@ impl Parser {
         // Record as-pattern: Student as s, Student { name } as s
         if matches!(self.peek(), Token::As) {
             match pat {
-                Pat::Constructor { name, args, span, .. } if args.is_empty() => {
+                Pat::Constructor {
+                    name, args, span, ..
+                } if args.is_empty() => {
                     self.advance(); // consume 'as'
                     let as_ident = self.expect_ident()?;
                     let end = self.tokens[self.pos - 1].span;
@@ -87,7 +89,14 @@ impl Parser {
                         span: span.to(end),
                     });
                 }
-                Pat::Record { id, name, fields, rest, span, .. } => {
+                Pat::Record {
+                    id,
+                    name,
+                    fields,
+                    rest,
+                    span,
+                    ..
+                } => {
                     self.advance(); // consume 'as'
                     let as_ident = self.expect_ident()?;
                     let end = self.tokens[self.pos - 1].span;
@@ -235,8 +244,15 @@ impl Parser {
                     span: span.to(end),
                 })
             }
-            Token::Ident(s) if s == "_" => Ok(Pat::Wildcard { id: NodeId::fresh(), span }),
-            Token::Ident(s) => Ok(Pat::Var { id: NodeId::fresh(), name: s, span }),
+            Token::Ident(s) if s == "_" => Ok(Pat::Wildcard {
+                id: NodeId::fresh(),
+                span,
+            }),
+            Token::Ident(s) => Ok(Pat::Var {
+                id: NodeId::fresh(),
+                name: s,
+                span,
+            }),
             Token::Minus => match self.advance() {
                 Token::Int(s, n) => Ok(Pat::Lit {
                     id: NodeId::fresh(),
@@ -385,12 +401,22 @@ impl Parser {
                 Token::Int(s, n) => {
                     let sp = self.tokens[self.pos].span;
                     self.advance();
-                    Expr { id: NodeId::fresh(), span: sp, kind: ExprKind::Lit { value: Lit::Int(s, n) } }
+                    Expr {
+                        id: NodeId::fresh(),
+                        span: sp,
+                        kind: ExprKind::Lit {
+                            value: Lit::Int(s, n),
+                        },
+                    }
                 }
                 Token::Ident(name) => {
                     let sp = self.tokens[self.pos].span;
                     self.advance();
-                    Expr { id: NodeId::fresh(), span: sp, kind: ExprKind::Var { name } }
+                    Expr {
+                        id: NodeId::fresh(),
+                        span: sp,
+                        kind: ExprKind::Var { name },
+                    }
                 }
                 _ => {
                     return Err(ParseError {

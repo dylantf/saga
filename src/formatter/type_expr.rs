@@ -1,7 +1,7 @@
-use crate::ast::*;
-use crate::token::Span;
-use crate::docs;
 use super::Doc;
+use crate::ast::*;
+use crate::docs;
+use crate::token::Span;
 
 /// If `ty` is `Tuple` applied to 2+ args, return those args.
 /// The parser desugars `(A, B)` into `App(App(Named("Tuple"), A), B)`.
@@ -27,7 +27,11 @@ pub fn format_type_expr(ty: &TypeExpr) -> Doc {
     // Tuple sugar: Tuple applied to args -> (A, B, ...)
     if let Some(args) = collect_tuple_args(ty) {
         let inner: Vec<Doc> = args.iter().map(|a| format_type_expr(a)).collect();
-        return docs![Doc::text("("), Doc::join(Doc::text(", "), inner), Doc::text(")")];
+        return docs![
+            Doc::text("("),
+            Doc::join(Doc::text(", "), inner),
+            Doc::text(")")
+        ];
     }
     match ty {
         TypeExpr::Named { name, .. } => Doc::text(name),
@@ -43,24 +47,43 @@ pub fn format_type_expr(ty: &TypeExpr) -> Doc {
             };
             docs![format_type_expr(func), Doc::text(" "), arg_doc]
         }
-        TypeExpr::Arrow { from, to, effects, effect_row_var, .. } => {
+        TypeExpr::Arrow {
+            from,
+            to,
+            effects,
+            effect_row_var,
+            ..
+        } => {
             let from_doc = match from.as_ref() {
-                TypeExpr::Arrow { .. } => docs![Doc::text("("), format_type_expr(from), Doc::text(")")],
+                TypeExpr::Arrow { .. } => {
+                    docs![Doc::text("("), format_type_expr(from), Doc::text(")")]
+                }
                 _ => format_type_expr(from),
             };
             let mut d = docs![from_doc, Doc::text(" -> "), format_type_expr(to)];
             if !effects.is_empty() || effect_row_var.is_some() {
-                d = docs![d, Doc::text(" "), format_needs_inner(effects, effect_row_var)];
+                d = docs![
+                    d,
+                    Doc::text(" "),
+                    format_needs_inner(effects, effect_row_var)
+                ];
             }
             d
         }
         TypeExpr::Labeled { label, inner, .. } => {
-            docs![Doc::text(format!("({}: ", label)), format_type_expr(inner), Doc::text(")")]
+            docs![
+                Doc::text(format!("({}: ", label)),
+                format_type_expr(inner),
+                Doc::text(")")
+            ]
         }
-        TypeExpr::Record { fields, multiline, .. } => {
-            let field_docs: Vec<Doc> = fields.iter().map(|(name, ty)| {
-                docs![Doc::text(format!("{}: ", name)), format_type_expr(ty)]
-            }).collect();
+        TypeExpr::Record {
+            fields, multiline, ..
+        } => {
+            let field_docs: Vec<Doc> = fields
+                .iter()
+                .map(|(name, ty)| docs![Doc::text(format!("{}: ", name)), format_type_expr(ty)])
+                .collect();
             if *multiline {
                 let fields_joined = Doc::join(docs![Doc::text(","), Doc::hardline()], field_docs);
                 docs![
@@ -92,9 +115,10 @@ pub fn format_type_expr_atom(ty: &TypeExpr) -> Doc {
         return format_type_expr(ty);
     }
     match ty {
-        TypeExpr::Named { .. } | TypeExpr::Var { .. } | TypeExpr::Labeled { .. } | TypeExpr::Record { .. } => {
-            format_type_expr(ty)
-        }
+        TypeExpr::Named { .. }
+        | TypeExpr::Var { .. }
+        | TypeExpr::Labeled { .. }
+        | TypeExpr::Record { .. } => format_type_expr(ty),
         // App and Arrow need wrapping
         _ => docs![Doc::text("("), format_type_expr(ty), Doc::text(")")],
     }
@@ -103,29 +127,44 @@ pub fn format_type_expr_atom(ty: &TypeExpr) -> Doc {
 /// Format a function type signature: params -> return_type [needs {...}]
 /// Used for effect ops and trait methods where needs/where always inline.
 pub fn format_fun_type(
-    params: &[(String, TypeExpr)], return_type: &TypeExpr,
-    effects: &[EffectRef], effect_row_var: &Option<(String, Span)>,
+    params: &[(String, TypeExpr)],
+    return_type: &TypeExpr,
+    effects: &[EffectRef],
+    effect_row_var: &Option<(String, Span)>,
 ) -> Doc {
     let type_doc = format_arrow_chain(params, return_type);
     if effects.is_empty() && effect_row_var.is_none() {
         type_doc
     } else {
-        docs![type_doc, Doc::text(" "), format_needs(effects, effect_row_var)]
+        docs![
+            type_doc,
+            Doc::text(" "),
+            format_needs(effects, effect_row_var)
+        ]
     }
 }
 
 /// Format just the arrow chain: A -> B -> C
 pub fn format_arrow_chain(params: &[(String, TypeExpr)], return_type: &TypeExpr) -> Doc {
-    let mut parts: Vec<Doc> = params.iter().map(|(label, ty)| {
-        if label.starts_with('_') {
-            match ty {
-                TypeExpr::Arrow { .. } => docs![Doc::text("("), format_type_expr(ty), Doc::text(")")],
-                _ => format_type_expr(ty),
+    let mut parts: Vec<Doc> = params
+        .iter()
+        .map(|(label, ty)| {
+            if label.starts_with('_') {
+                match ty {
+                    TypeExpr::Arrow { .. } => {
+                        docs![Doc::text("("), format_type_expr(ty), Doc::text(")")]
+                    }
+                    _ => format_type_expr(ty),
+                }
+            } else {
+                docs![
+                    Doc::text(format!("({}: ", label)),
+                    format_type_expr(ty),
+                    Doc::text(")")
+                ]
             }
-        } else {
-            docs![Doc::text(format!("({}: ", label)), format_type_expr(ty), Doc::text(")")]
-        }
-    }).collect();
+        })
+        .collect();
     parts.push(format_type_expr(return_type));
     Doc::join(Doc::text(" -> "), parts)
 }
@@ -144,7 +183,11 @@ fn format_needs_inner(effects: &[EffectRef], effect_row_var: &Option<(String, Sp
     if let Some((var, _)) = effect_row_var {
         parts.push(Doc::text(format!("..{}", var)));
     }
-    docs![Doc::text("needs {"), Doc::join(Doc::text(", "), parts), Doc::text("}")]
+    docs![
+        Doc::text("needs {"),
+        Doc::join(Doc::text(", "), parts),
+        Doc::text("}")
+    ]
 }
 
 pub fn format_effect_ref(e: &EffectRef) -> Doc {
@@ -152,20 +195,35 @@ pub fn format_effect_ref(e: &EffectRef) -> Doc {
         Doc::text(&e.name)
     } else {
         let args: Vec<Doc> = e.type_args.iter().map(format_type_expr).collect();
-        docs![Doc::text(&e.name), Doc::text(" "), Doc::join(Doc::text(" "), args)]
+        docs![
+            Doc::text(&e.name),
+            Doc::text(" "),
+            Doc::join(Doc::text(" "), args)
+        ]
     }
 }
 
 pub fn format_where_clause(bounds: &[TraitBound]) -> Doc {
-    let bound_docs: Vec<Doc> = bounds.iter().map(|b| {
-        let traits: Vec<String> = b.traits.iter().map(|(name, type_args, _)| {
-            if type_args.is_empty() {
-                name.clone()
-            } else {
-                format!("{} {}", name, type_args.join(" "))
-            }
-        }).collect();
-        Doc::text(format!("{}: {}", b.type_var, traits.join(" + ")))
-    }).collect();
-    docs![Doc::text("where {"), Doc::join(Doc::text(", "), bound_docs), Doc::text("}")]
+    let bound_docs: Vec<Doc> = bounds
+        .iter()
+        .map(|b| {
+            let traits: Vec<String> = b
+                .traits
+                .iter()
+                .map(|(name, type_args, _)| {
+                    if type_args.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{} {}", name, type_args.join(" "))
+                    }
+                })
+                .collect();
+            Doc::text(format!("{}: {}", b.type_var, traits.join(" + ")))
+        })
+        .collect();
+    docs![
+        Doc::text("where {"),
+        Doc::join(Doc::text(", "), bound_docs),
+        Doc::text("}")
+    ]
 }

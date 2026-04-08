@@ -2,7 +2,6 @@ module Main
 
 import Std.BitString as BitString
 
-pub fun main : Unit -> Unit
 main () = {
   # Construction from stdlib functions
   let bs = BitString.from_list [72, 101, 108, 108, 111]

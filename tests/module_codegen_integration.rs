@@ -33,16 +33,29 @@ fn emit_from_program(
         .unwrap_or_default();
     let result = checker.to_result();
     let elaborated = elaborate::elaborate_module(program, &result, &original_module_name);
-    // Populate modules with codegen_info so the resolver can find dicts/exports
     let mut modules = std::collections::HashMap::new();
     for (name, info) in result.codegen_info().iter() {
-        modules.insert(
-            name.clone(),
-            codegen::CompiledModule {
-                codegen_info: info.clone(),
-                ..Default::default()
-            },
-        );
+        let mut compiled = codegen::CompiledModule {
+            codegen_info: info.clone(),
+            ..Default::default()
+        };
+        if let (Some(module_program), Some(module_result)) = (
+            result.programs().get(name),
+            result.module_check_results().get(name),
+        ) {
+            let elaborated_module =
+                elaborate::elaborate_module(module_program, module_result, name);
+            let normalized = codegen::normalize::normalize_effects(&elaborated_module);
+            let resolution = codegen::resolve::resolve_names(
+                name,
+                &normalized,
+                result.codegen_info(),
+                &result.prelude_imports,
+            );
+            compiled.elaborated = normalized;
+            compiled.resolution = resolution;
+        }
+        modules.insert(name.clone(), compiled);
     }
     let ctx = codegen::CodegenContext {
         modules,
@@ -139,7 +152,7 @@ fn qualified_call_emits_inter_module_call() {
     let main_src = "
 module Main
 import Math
-pub fun main : Unit -> Int
+
 main () = Math.add 10 20
 ";
     let mut checker = make_project_checker();
@@ -192,7 +205,7 @@ fn qualified_call_with_alias() {
     let main_src = "
 module Main
 import Math as M
-pub fun main : Unit -> Int
+
 main () = M.add 1 2
 ";
     let mut checker = make_project_checker();
@@ -210,7 +223,7 @@ fn exposed_import_emits_inter_module_call() {
     let main_src = "
 module Main
 import Math (add)
-pub fun main : Unit -> Int
+
 main () = add 10 20
 ";
     let mut checker = make_project_checker();
@@ -226,7 +239,7 @@ fn exposed_and_qualified_same_module() {
     let main_src = "
 module Main
 import Math (add)
-pub fun main : Unit -> Int
+
 main () = add 1 (Math.double 3)
 ";
     let mut checker = make_project_checker();
@@ -325,7 +338,7 @@ fn two_module_qualified_call_compiles() {
     let main_src = "
 module Main
 import Math
-pub fun main : Unit -> Int
+
 main () = Math.add 10 20
 ";
 
@@ -361,7 +374,7 @@ fn two_module_exposed_import_compiles() {
     let main_src = "
 module Main
 import Math (add, double)
-pub fun main : Unit -> Int
+
 main () = add 1 (double 10)
 ";
 
@@ -395,7 +408,7 @@ fn imported_record_fields_available() {
     let main_src = "
 module Main
 import Animals (Animal)
-pub fun main : Unit -> String
+
 main () = {
   let a = Animal { name: \"Rex\", species: \"Dog\" }
   a.name
@@ -418,7 +431,7 @@ fn imports_from_multiple_modules() {
 module Main
 import Math
 import Shapes (area, Circle)
-pub fun main : Unit -> Int
+
 main () = {
   let _ = area (Circle 5.0)
   Math.add 1 2
@@ -456,7 +469,7 @@ fn stdlib_import_does_not_crash_lowerer() {
     let main_src = "
 module Main
 import Std.List as List
-pub fun main : Unit -> String
+
 main () = debug (List.map (fun x -> x + 1) [1, 2, 3])
 ";
     let mut checker = make_project_checker();
@@ -472,7 +485,7 @@ fn exposed_constructor_emits_correctly() {
     let main_src = "
 module Main
 import Shapes (Circle, Rect, area)
-pub fun main : Unit -> Float
+
 main () = area (Circle 5.0) + area (Rect 3.0 4.0)
 ";
     // Note: this won't emit inter-module calls for constructors since
@@ -492,7 +505,7 @@ fn cross_module_effectful_qualified_call() {
 module Main
 import Logger
 
-pub fun main : Unit -> String
+
 main () = Logger.greet \"world\" with {
   log msg = {
     dbg msg
@@ -517,7 +530,7 @@ fn cross_module_effectful_exposed_call() {
 module Main
 import Logger (greet)
 
-pub fun main : Unit -> String
+
 main () = greet \"world\" with {
   log msg = {
     dbg msg
@@ -552,7 +565,7 @@ fn cross_module_effectful_compiles_with_erlc() {
 module Main
 import Logger
 
-pub fun main : Unit -> String
+
 main () = Logger.greet \"world\" with {
   log msg = {
     dbg msg
@@ -593,7 +606,7 @@ fn cross_module_trait_dict_show_animal() {
     let main_src = "
 module Main
 import Animals (Animal)
-pub fun main : Unit -> String
+
 main () = show (Animal { name: \"Rex\", species: \"Dog\" })
 ";
     let mut checker = make_project_checker();
@@ -610,7 +623,7 @@ fn cross_module_trait_dict_compiles_with_erlc() {
     let main_src = "
 module Main
 import Animals (Animal)
-pub fun main : Unit -> String
+
 main () = show (Animal { name: \"Rex\", species: \"Dog\" })
 ";
     let mut checker = make_project_checker();
@@ -674,7 +687,7 @@ fn imported_constructors_mangled_with_source_module() {
     let main_src = "
 module Main
 import Shapes (Circle, Rect, area)
-pub fun main : Unit -> Float
+
 main () = area (Circle 5.0) + area (Rect 3.0 4.0)
 ";
     let mut checker = make_project_checker();
@@ -692,7 +705,7 @@ fn record_constructors_mangled() {
     let main_src = "
 module Main
 import Animals (Animal)
-pub fun main : Unit -> String
+
 main () = {
   let a = Animal { name: \"Rex\", species: \"Dog\" }
   a.name
@@ -710,7 +723,7 @@ main () = {
 fn prelude_constructors_mangled_with_std_prefix() {
     let main_src = "
 module Main
-pub fun main : Unit -> Int
+
 main () = case Just(42) {
   Just(x) -> x
   Nothing -> 0
@@ -741,7 +754,7 @@ fn cross_module_constructor_consistency() {
     let main_src = "
 module Main
 import Shapes (Circle, area)
-pub fun main : Unit -> Float
+
 main () = area (Circle 5.0)
 ";
     let mut checker = make_project_checker();
@@ -761,7 +774,7 @@ fn mangled_constructors_compile_with_erlc() {
     let main_src = "
 module Main
 import Shapes (Circle, Rect, area)
-pub fun main : Unit -> Float
+
 main () = area (Circle 5.0) + area (Rect 3.0 4.0)
 ";
     let mut checker = make_project_checker();
@@ -793,7 +806,7 @@ main () = area (Circle 5.0) + area (Rect 3.0 4.0)
 fn prelude_fst_snd_compile_in_project_mode() {
     let main_src = "
 module Main
-pub fun main : Unit -> Int
+
 main () = {
   let pair = (10, 20)
   let x = fst pair
@@ -820,7 +833,7 @@ make_token s = Secret s
     let main_src = "
 module Main
 import OpaqueLib (Token, make_token)
-pub fun main : Unit -> Token
+
 main () = make_token \"abc\"
 ";
     let lib_path = fixtures_root().join("OpaqueLib.dy");
@@ -842,7 +855,7 @@ make_token s = Secret s
     let main_src = "
 module Main
 import OpaqueLib2 (Token, Secret)
-pub fun main : Unit -> Token
+
 main () = Secret \"abc\"
 ";
     let lib_path = fixtures_root().join("OpaqueLib2.dy");
@@ -869,8 +882,9 @@ reveal t = case t { Secret(s) -> s }
     let main_src = "
 module Main
 import OpaqueLib3 (Token, make_token, reveal)
-pub fun main : Unit -> String
-main () = reveal (make_token \"hello\")
+
+pub fun run : Unit -> String
+run () = reveal (make_token \"hello\")
 ";
     let lib_path = fixtures_root().join("OpaqueLib3.dy");
     std::fs::write(&lib_path, lib_src).unwrap();
@@ -902,7 +916,7 @@ main () = reveal (make_token \"hello\")
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s~n\", [main:main(unit)]), init:stop().")
+        .arg("io:format(\"~s~n\", [main:run(unit)]), init:stop().")
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -971,10 +985,38 @@ fn handler_not_exposed_requires_qualified_with() {
 module Main
 import Logger (greet)
 
-pub fun main : Unit -> String
+
 main () = greet \"world\" with {
   log msg = { dbg msg; resume () }
 }
+";
+    let mut checker = make_project_checker();
+    let program = typecheck_source(src, &mut checker);
+    let _out = emit_from_program(&program, "main", &checker);
+}
+
+#[test]
+fn aliased_effect_and_handler_names_canonicalize_for_lowering() {
+    let src = "
+module Main
+import Std.DateTime as DateTime
+
+
+main () = DateTime.Clock.today! () with {DateTime.system_clock}
+";
+    let mut checker = make_project_checker();
+    let program = typecheck_source(src, &mut checker);
+    let _out = emit_from_program(&program, "main", &checker);
+}
+
+#[test]
+fn exposed_named_handler_resolves_by_bare_name() {
+    let src = "
+module Main
+import Std.DateTime (Clock, system_clock)
+
+
+main () = Clock.now! () with {system_clock}
 ";
     let mut checker = make_project_checker();
     let program = typecheck_source(src, &mut checker);
@@ -988,7 +1030,7 @@ fn cross_module_effect_inline_handler_works() {
 module Main
 import Logger
 
-pub fun main : Unit -> String
+
 main () = Logger.greet \"world\" with {
   log msg = { dbg msg; resume () }
 }
@@ -1006,7 +1048,7 @@ fn cross_module_effect_exposed_inline_handler() {
 module Main
 import Logger (greet)
 
-pub fun main : Unit -> String
+
 main () = greet \"world\" with {
   log msg = { dbg msg; resume () }
 }

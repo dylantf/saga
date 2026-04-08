@@ -70,7 +70,10 @@ impl Doc {
 
     /// Emit `broken` in break mode, `flat` in flat mode.
     pub fn if_break(broken: Doc, flat: Doc) -> Doc {
-        Doc::IfBreak { broken: Box::new(broken), flat: Box::new(flat) }
+        Doc::IfBreak {
+            broken: Box::new(broken),
+            flat: Box::new(flat),
+        }
     }
 
     /// Structurally flatten a document: remove all group-breaking decisions
@@ -82,10 +85,7 @@ impl Doc {
             Doc::Nil | Doc::Text(_) => doc,
             Doc::HardLine => Doc::HardLine,
             Doc::Line { flat_alt } => Doc::text(flat_alt),
-            Doc::Concat(a, b) => Doc::Concat(
-                Box::new(Doc::flat(*a)),
-                Box::new(Doc::flat(*b)),
-            ),
+            Doc::Concat(a, b) => Doc::Concat(Box::new(Doc::flat(*a)), Box::new(Doc::flat(*b))),
             Doc::Nest(n, inner) => Doc::Nest(n, Box::new(Doc::flat(*inner))),
             Doc::Group(inner) => Doc::flat(*inner),
             Doc::IfBreak { flat, .. } => Doc::flat(*flat),

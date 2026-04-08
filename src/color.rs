@@ -34,4 +34,3 @@ pub fn cyan(text: &str) -> String {
 pub fn dim(text: &str) -> String {
     wrap("2", text)
 }
-

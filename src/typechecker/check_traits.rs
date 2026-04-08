@@ -38,15 +38,15 @@ impl Checker {
                     effects: row
                         .effects
                         .iter()
-                        .map(|entry| {
-                            super::EffectEntry {
-                                name: entry.name.clone(),
-                                args: entry.args.iter()
-                                    .map(|t| {
-                                        self.substitute_trait_param(trait_param_id, replacement, t)
-                                    })
-                                    .collect(),
-                            }
+                        .map(|entry| super::EffectEntry {
+                            name: entry.name.clone(),
+                            args: entry
+                                .args
+                                .iter()
+                                .map(|t| {
+                                    self.substitute_trait_param(trait_param_id, replacement, t)
+                                })
+                                .collect(),
                         })
                         .collect(),
                     tail: row.tail.as_ref().map(|t| {

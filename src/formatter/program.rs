@@ -102,10 +102,8 @@ fn sort_imports(decls: &[Annotated<Decl>]) -> Vec<Annotated<Decl>> {
     }
 
     // Extract imports, sort them, put them back
-    let mut imports: Vec<Annotated<Decl>> = import_indices
-        .iter()
-        .map(|&i| result[i].clone())
-        .collect();
+    let mut imports: Vec<Annotated<Decl>> =
+        import_indices.iter().map(|&i| result[i].clone()).collect();
 
     imports.sort_by(|a, b| {
         let path_a = import_path(&a.node);
@@ -157,7 +155,9 @@ fn format_decl(decl: &Decl) -> Doc {
         } => {
             let mut preamble = Doc::Nil;
             for ann in annotations {
-                preamble = preamble.append(format_annotation(ann)).append(Doc::hardline());
+                preamble = preamble
+                    .append(format_annotation(ann))
+                    .append(Doc::hardline());
             }
 
             let mut sig_head = Doc::Nil;
@@ -223,7 +223,9 @@ fn format_decl(decl: &Decl) -> Doc {
         } => {
             let mut preamble = Doc::Nil;
             for ann in annotations {
-                preamble = preamble.append(format_annotation(ann)).append(Doc::hardline());
+                preamble = preamble
+                    .append(format_annotation(ann))
+                    .append(Doc::hardline());
             }
             let mut lhs = Doc::Nil;
             if *public {

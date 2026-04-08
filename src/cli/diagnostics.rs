@@ -26,7 +26,13 @@ fn get_source_line(source: &str, line_num: usize) -> Option<&str> {
 }
 
 /// Print a diagnostic (error or warning) with source context and underline.
-pub fn print_diagnostic(source: &str, source_path: &str, label: &str, span: Option<token::Span>, message: &str) {
+pub fn print_diagnostic(
+    source: &str,
+    source_path: &str,
+    label: &str,
+    span: Option<token::Span>,
+    message: &str,
+) {
     let (start_line, start_col) = if let Some(span) = span {
         byte_offset_to_line_col(source, span.start)
     } else {

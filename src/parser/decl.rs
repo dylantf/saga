@@ -11,7 +11,12 @@ pub(super) struct ParsedHandlerBody {
 }
 
 /// Parsed type annotation: labeled params, return type, and effect requirements.
-type AnnotatedSignature = (Vec<(String, TypeExpr)>, TypeExpr, Vec<EffectRef>, Option<(String, Span)>);
+type AnnotatedSignature = (
+    Vec<(String, TypeExpr)>,
+    TypeExpr,
+    Vec<EffectRef>,
+    Option<(String, Span)>,
+);
 
 impl Parser {
     // Parse `Name` or `Module.Name`, returning the full qualified string.
@@ -503,7 +508,8 @@ impl Parser {
             let op_name = self.expect_ident()?;
 
             self.expect(Token::Colon)?;
-            let (params, return_type, effects, effect_row_var) = self.parse_annotated_signature()?;
+            let (params, return_type, effects, effect_row_var) =
+                self.parse_annotated_signature()?;
             let op_end = self.tokens[self.pos - 1].span;
 
             let trailing_comment = self.take_trailing_comment(self.pos - 1);
@@ -544,9 +550,7 @@ impl Parser {
     /// Parse a handler body: `for Effect1, Effect2 needs {E3} where {a: Show} { arms... }`.
     /// Shared by handler declarations and handler expressions.
     /// Returns (HandlerBody, recovered_arms, dangling_trivia).
-    pub(super) fn parse_handler_body(
-        &mut self,
-    ) -> Result<ParsedHandlerBody, ParseError> {
+    pub(super) fn parse_handler_body(&mut self) -> Result<ParsedHandlerBody, ParseError> {
         self.expect(Token::For)?;
 
         let mut effects = vec![self.parse_effect_ref()?];
@@ -651,10 +655,7 @@ impl Parser {
                 if let Token::Ident(_) = self.peek() {
                     let op_name = self.expect_ident().unwrap();
                     let mut params: Vec<Pat> = Vec::new();
-                    while !matches!(
-                        self.peek(),
-                        Token::Eq | Token::RBrace | Token::Eof
-                    ) {
+                    while !matches!(self.peek(), Token::Eq | Token::RBrace | Token::Eof) {
                         if let Ok(p) = self.parse_pattern() {
                             params.push(p);
                         } else {
@@ -732,9 +733,7 @@ impl Parser {
         // Parse type parameters: first is self, rest are extras
         // e.g. `trait ConvertTo a b` -> type_params = ["a", "b"]
         let mut type_params = vec![self.expect_ident()?];
-        while matches!(self.peek(), Token::Ident(_))
-            && !matches!(self.peek(), Token::Where)
-        {
+        while matches!(self.peek(), Token::Ident(_)) && !matches!(self.peek(), Token::Where) {
             type_params.push(self.expect_ident()?);
         }
 
@@ -779,7 +778,8 @@ impl Parser {
             let method_name = self.expect_ident()?;
 
             self.expect(Token::Colon)?;
-            let (params, return_type, _effects, _effect_row_var) = self.parse_annotated_signature()?;
+            let (params, return_type, _effects, _effect_row_var) =
+                self.parse_annotated_signature()?;
             let method_end = self.tokens[self.pos - 1].span;
 
             let trailing_comment = self.take_trailing_comment(self.pos - 1);
@@ -932,7 +932,12 @@ impl Parser {
             let body = self.parse_expr(0)?;
             let trailing_comment = self.take_trailing_comment(self.pos - 1);
             methods.push(Annotated {
-                node: ImplMethod { name, name_span, params, body },
+                node: ImplMethod {
+                    name,
+                    name_span,
+                    params,
+                    body,
+                },
                 leading_trivia: self.take_leading_trivia(start_pos),
                 trailing_comment,
                 trailing_trivia: vec![],
@@ -966,7 +971,10 @@ impl Parser {
         let name = self.expect_ident()?;
 
         let mut params = Vec::new();
-        while !matches!(self.peek(), Token::Eq | Token::When | Token::LBrace | Token::Eof) {
+        while !matches!(
+            self.peek(),
+            Token::Eq | Token::When | Token::LBrace | Token::Eof
+        ) {
             params.push(self.parse_pattern()?);
         }
 
@@ -1078,7 +1086,11 @@ impl Parser {
         while self.can_start_type_atom() && !self.next_on_new_line() {
             let arg = self.parse_type_atom()?;
             let span = seg_start.to(arg.span());
-            left = TypeExpr::App { func: Box::new(left), arg: Box::new(arg), span };
+            left = TypeExpr::App {
+                func: Box::new(left),
+                arg: Box::new(arg),
+                span,
+            };
         }
         Ok((None, left))
     }
@@ -1108,7 +1120,11 @@ impl Parser {
         while self.can_start_type_atom() && !self.next_on_new_line() {
             let arg = self.parse_type_atom()?;
             let span = start.to(arg.span());
-            left = TypeExpr::App { func: Box::new(left), arg: Box::new(arg), span };
+            left = TypeExpr::App {
+                func: Box::new(left),
+                arg: Box::new(arg),
+                span,
+            };
         }
 
         // Then: check for arrow (right-associative)
@@ -1141,7 +1157,13 @@ impl Parser {
             }
             let end = self.tokens[self.pos - 1].span;
             let span = start.to(end);
-            Ok(TypeExpr::Arrow { from: Box::new(left), to: Box::new(right), effects: needs, effect_row_var: row_var, span })
+            Ok(TypeExpr::Arrow {
+                from: Box::new(left),
+                to: Box::new(right),
+                effects: needs,
+                effect_row_var: row_var,
+                span,
+            })
         } else {
             Ok(left)
         }
@@ -1156,12 +1178,21 @@ impl Parser {
                     self.advance(); // consume '.'
                     let end = self.tokens[self.pos].span;
                     let name = self.expect_upper_ident()?;
-                    Ok(TypeExpr::Named { name: format!("{}.{}", s, name), span: start.to(end) })
+                    Ok(TypeExpr::Named {
+                        name: format!("{}.{}", s, name),
+                        span: start.to(end),
+                    })
                 } else {
-                    Ok(TypeExpr::Named { name: s, span: start })
+                    Ok(TypeExpr::Named {
+                        name: s,
+                        span: start,
+                    })
                 }
             }
-            Token::Ident(s) => Ok(TypeExpr::Var { name: s, span: start }),
+            Token::Ident(s) => Ok(TypeExpr::Var {
+                name: s,
+                span: start,
+            }),
             Token::LParen => {
                 // Check for labeled parameter: `(label: Type)`
                 if self.is_labeled_param_at(self.pos - 1) {
@@ -1190,10 +1221,17 @@ impl Parser {
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RParen)?;
                     let span = start.to(end);
-                    let mut result = TypeExpr::Named { name: "Tuple".into(), span };
+                    let mut result = TypeExpr::Named {
+                        name: "Tuple".into(),
+                        span,
+                    };
                     for elem in elements {
                         let elem_span = start.to(elem.span());
-                        result = TypeExpr::App { func: Box::new(result), arg: Box::new(elem), span: elem_span };
+                        result = TypeExpr::App {
+                            func: Box::new(result),
+                            arg: Box::new(elem),
+                            span: elem_span,
+                        };
                     }
                     Ok(result)
                 } else {
@@ -1221,7 +1259,11 @@ impl Parser {
                 }
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;
-                Ok(TypeExpr::Record { fields, multiline, span: start.to(end) })
+                Ok(TypeExpr::Record {
+                    fields,
+                    multiline,
+                    span: start.to(end),
+                })
             }
             tok => {
                 self.pos -= 1; // put back

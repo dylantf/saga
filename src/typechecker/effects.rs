@@ -147,8 +147,7 @@ impl Checker {
                 span,
                 format!(
                     "{} uses effects {{{}}} but has no 'needs' declaration",
-                    label,
-                    effects_str,
+                    label, effects_str,
                 ),
             ))
         } else {
@@ -156,8 +155,7 @@ impl Checker {
                 span,
                 format!(
                     "{} uses effects {{{}}} not declared in its 'needs' clause",
-                    label,
-                    effects_str,
+                    label, effects_str,
                 ),
             ))
         }
@@ -168,7 +166,9 @@ impl Checker {
     pub(crate) fn effect_for_op(&self, op_name: &str, qualifier: Option<&str>) -> Option<String> {
         if let Some(effect_name) = qualifier {
             // Resolve qualifier through scope_map, matching lookup_effect_op's logic
-            let canonical = self.scope_map.resolve_effect(effect_name)
+            let canonical = self
+                .scope_map
+                .resolve_effect(effect_name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| effect_name.to_string());
             if self.effects.contains_key(&canonical) {
@@ -210,7 +210,9 @@ impl Checker {
                     }
                 }
                 for arm in arms {
-                    if let Some(effect_name) = self.effect_for_op(&arm.node.op_name, arm.node.qualifier.as_deref()) {
+                    if let Some(effect_name) =
+                        self.effect_for_op(&arm.node.op_name, arm.node.qualifier.as_deref())
+                    {
                         handled.insert(effect_name);
                     }
                 }
@@ -227,41 +229,44 @@ impl Checker {
         if let Type::Con(ref con_name, ref args) = ty
             && con_name == "Handler"
         {
-                let effects: Vec<String> = args
-                    .iter()
-                    .filter_map(|arg| {
-                        let resolved = self.sub.apply(arg);
-                        if let Type::Con(eff_name, _) = resolved {
-                            // Try to find canonical name from known effects
-                            let canonical = self.effects.keys()
-                                .find(|k| {
-                                    k.ends_with(&format!(".{}", eff_name)) || *k == &eff_name
-                                })
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    if let Some(m) = &self.current_module {
-                                        format!("{}.{}", m, eff_name)
-                                    } else {
-                                        eff_name
-                                    }
-                                });
-                            Some(canonical)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                if effects.is_empty() {
-                    return None;
-                }
-                return Some(effects);
+            let effects: Vec<String> = args
+                .iter()
+                .filter_map(|arg| {
+                    let resolved = self.sub.apply(arg);
+                    if let Type::Con(eff_name, _) = resolved {
+                        // Try to find canonical name from known effects
+                        let canonical = self
+                            .effects
+                            .keys()
+                            .find(|k| k.ends_with(&format!(".{}", eff_name)) || *k == &eff_name)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                if let Some(m) = &self.current_module {
+                                    format!("{}.{}", m, eff_name)
+                                } else {
+                                    eff_name
+                                }
+                            });
+                        Some(canonical)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if effects.is_empty() {
+                return None;
+            }
+            return Some(effects);
         }
         None
     }
 
     /// Extract exact handled effect entries from a `Handler(...)` type in the env.
     /// Used for same-block sibling subtraction in inline handlers.
-    pub(crate) fn handler_effect_entries_from_env(&self, name: &str) -> Option<Vec<super::EffectEntry>> {
+    pub(crate) fn handler_effect_entries_from_env(
+        &self,
+        name: &str,
+    ) -> Option<Vec<super::EffectEntry>> {
         let scheme = self.env.get(name)?;
         let ty = self.sub.apply(&scheme.ty);
         if let Type::Con(ref con_name, ref args) = ty
@@ -272,7 +277,9 @@ impl Checker {
                 .filter_map(|arg| {
                     let resolved = self.sub.apply(arg);
                     if let Type::Con(eff_name, eff_args) = resolved {
-                        let canonical = self.effects.keys()
+                        let canonical = self
+                            .effects
+                            .keys()
                             .find(|k| k.ends_with(&format!(".{}", eff_name)) || *k == &eff_name)
                             .cloned()
                             .unwrap_or_else(|| {
@@ -360,22 +367,35 @@ impl Checker {
                 .iter()
                 .map(|&old_id| (old_id, self.fresh_var()))
                 .collect();
-            self.effect_meta.type_param_cache
+            self.effect_meta
+                .type_param_cache
                 .insert(effect_name.to_string(), mapping.clone());
             mapping
         };
         // Also freshen any free vars NOT in the type_params (e.g. `a` in
         // `Fail e { fun fail : e -> a }`). These must be fresh per call
         // site, unlike effect-level params which are shared across ops.
-        let type_param_set: std::collections::HashSet<u32> =
-            type_params.iter().copied().collect();
+        let type_param_set: std::collections::HashSet<u32> = type_params.iter().copied().collect();
         let mut free_vars = std::collections::HashSet::new();
         fn collect_vars2(ty: &Type, vars: &mut std::collections::HashSet<u32>) {
             match ty {
-                Type::Var(id) => { vars.insert(*id); }
-                Type::Fun(a, b, _) => { collect_vars2(a, vars); collect_vars2(b, vars); }
-                Type::Con(_, args) => { for a in args { collect_vars2(a, vars); } }
-                Type::Record(fields) => { for (_, ty) in fields { collect_vars2(ty, vars); } }
+                Type::Var(id) => {
+                    vars.insert(*id);
+                }
+                Type::Fun(a, b, _) => {
+                    collect_vars2(a, vars);
+                    collect_vars2(b, vars);
+                }
+                Type::Con(_, args) => {
+                    for a in args {
+                        collect_vars2(a, vars);
+                    }
+                }
+                Type::Record(fields) => {
+                    for (_, ty) in fields {
+                        collect_vars2(ty, vars);
+                    }
+                }
                 Type::Error => {}
             }
         }
@@ -411,7 +431,9 @@ impl Checker {
     ) -> Result<EffectOpSig, Diagnostic> {
         if let Some(effect_name) = qualifier {
             // Resolve qualifier through scope_map (bare/aliased -> canonical)
-            let canonical = self.scope_map.resolve_effect(effect_name)
+            let canonical = self
+                .scope_map
+                .resolve_effect(effect_name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| effect_name.to_string());
             let info = self
@@ -419,7 +441,8 @@ impl Checker {
                 .get(&canonical)
                 .or_else(|| {
                     // Local module fallback: try Module.Name
-                    self.current_module.as_ref()
+                    self.current_module
+                        .as_ref()
                         .and_then(|m| self.effects.get(&format!("{}.{}", m, effect_name)))
                 })
                 .ok_or_else(|| {

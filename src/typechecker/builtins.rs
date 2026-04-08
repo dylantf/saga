@@ -98,7 +98,6 @@ impl Checker {
             );
         }
 
-
         // List constructors
         let a = self.fresh_var();
         let a_id = match &a {
@@ -125,10 +124,7 @@ impl Checker {
             Scheme {
                 forall: vec![a_id],
                 constraints: vec![],
-                ty: Type::arrow(
-                    a,
-                    Type::arrow(list_a.clone(), list_a),
-                ),
+                ty: Type::arrow(a, Type::arrow(list_a.clone(), list_a)),
             },
         );
 
@@ -241,8 +237,5 @@ impl Checker {
                 span: None,
             },
         );
-
-
-
     }
 }

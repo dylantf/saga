@@ -175,10 +175,7 @@ impl Parser {
             }
 
             // For <|, >> collect flat chain like |>
-            if matches!(
-                self.peek(),
-                Token::PipeBack | Token::ComposeForward
-            ) {
+            if matches!(self.peek(), Token::PipeBack | Token::ComposeForward) {
                 let chain_token = self.peek().clone();
                 let mut segments = vec![Annotated::bare(left)];
                 while self.peek() == &chain_token {
@@ -382,9 +379,11 @@ impl Parser {
                 // Check for effect qualifier (uppercase: Cache.get!)
                 let qualifier = match &expr.kind {
                     ExprKind::Constructor { name: q, .. } => Some(q.clone()),
-                    ExprKind::QualifiedName { module, name: prev_name, .. }
-                        if prev_name.starts_with(|c: char| c.is_uppercase()) =>
-                    {
+                    ExprKind::QualifiedName {
+                        module,
+                        name: prev_name,
+                        ..
+                    } if prev_name.starts_with(|c: char| c.is_uppercase()) => {
                         Some(format!("{}.{}", module, prev_name))
                     }
                     _ => None,
@@ -467,22 +466,39 @@ impl Parser {
                 expr = Expr {
                     id: self.next_id(),
                     span: qspan,
-                    kind: ExprKind::QualifiedName { module, name, canonical_module: None },
+                    kind: ExprKind::QualifiedName {
+                        module,
+                        name,
+                        canonical_module: None,
+                    },
                 };
                 continue;
             }
             // Multi-level module access: `Std.String.replace` when LHS is already QualifiedName
             // and its name part is uppercase (a module segment, not a function).
-            if let ExprKind::QualifiedName { module: prev_module, name: prev_name, .. } = &expr.kind
+            if let ExprKind::QualifiedName {
+                module: prev_module,
+                name: prev_name,
+                ..
+            } = &expr.kind
                 && prev_name.starts_with(|c: char| c.is_uppercase())
             {
                 let extended_module = format!("{}.{}", prev_module, prev_name);
                 let name = match self.peek().clone() {
-                    Token::Ident(n) => { self.advance(); n }
-                    Token::UpperIdent(n) => { self.advance(); n }
+                    Token::Ident(n) => {
+                        self.advance();
+                        n
+                    }
+                    Token::UpperIdent(n) => {
+                        self.advance();
+                        n
+                    }
                     _ => {
                         let end = self.tokens[self.pos - 1].span;
-                        let qspan = Span { start, end: end.end };
+                        let qspan = Span {
+                            start,
+                            end: end.end,
+                        };
                         expr = Expr {
                             id: self.next_id(),
                             span: qspan,
@@ -496,7 +512,10 @@ impl Parser {
                     }
                 };
                 let end = self.tokens[self.pos - 1].span;
-                let qspan = Span { start, end: end.end };
+                let qspan = Span {
+                    start,
+                    end: end.end,
+                };
 
                 // Qualified record create with multi-level module path
                 if name.chars().next().is_some_and(|c| c.is_uppercase())
@@ -518,7 +537,11 @@ impl Parser {
                 expr = Expr {
                     id: self.next_id(),
                     span: qspan,
-                    kind: ExprKind::QualifiedName { module: extended_module, name, canonical_module: None },
+                    kind: ExprKind::QualifiedName {
+                        module: extended_module,
+                        name,
+                        canonical_module: None,
+                    },
                 };
                 continue;
             }
@@ -549,7 +572,6 @@ impl Parser {
         Ok(expr)
     }
 
-
     /// Parses the handler reference after `with`:
     /// - `with console_log` -> Handler::Named
     /// - `with { h1, h2, op args -> body }` -> Handler::Inline
@@ -565,26 +587,41 @@ impl Parser {
             // Named refs must come before inline arms. Supports both bare
             // (console_log) and qualified (Logger.console_log) forms.
             while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                // A named ref is an ident followed by `,` or `}`,
-                // or an ident.ident followed by `,` or `}`
-                let is_named_ref = matches!(self.peek(), Token::Ident(_))
-                    && (matches!(self.peek_at(1), Token::Comma | Token::RBrace)
-                        || (matches!(self.peek_at(1), Token::Dot)
-                            && matches!(self.peek_at(2), Token::Ident(_))
-                            && matches!(self.peek_at(3), Token::Comma | Token::RBrace)));
+                // A named ref is a (possibly module-qualified) dotted path ending
+                // in a lowercase ident, followed by `,` or `}`.
+                // e.g. `console`, `foo.bar`, `DateTime.system_clock`, `IO.Unsafe.handler`
+                let is_named_ref = {
+                    let mut i = 0;
+                    // Skip (UpperIdent|Ident) "." prefix segments
+                    while matches!(self.peek_at(i), Token::UpperIdent(_) | Token::Ident(_))
+                        && matches!(self.peek_at(i + 1), Token::Dot)
+                    {
+                        i += 2;
+                    }
+                    // Final segment: lowercase Ident followed by , or }
+                    matches!(self.peek_at(i), Token::Ident(_))
+                        && matches!(self.peek_at(i + 1), Token::Comma | Token::RBrace)
+                };
                 if is_named_ref {
                     let start = self.pos;
                     let name_start = self.tokens[self.pos].span;
-                    let name = self.expect_ident()?;
-                    let name = if matches!(self.peek(), Token::Dot)
-                        && matches!(self.peek_at(1), Token::Ident(_))
+                    // Parse (possibly module-qualified) dotted path
+                    let mut name = if matches!(self.peek(), Token::UpperIdent(_)) {
+                        self.expect_upper_ident()?
+                    } else {
+                        self.expect_ident()?
+                    };
+                    while matches!(self.peek(), Token::Dot)
+                        && matches!(self.peek_at(1), Token::Ident(_) | Token::UpperIdent(_))
                     {
                         self.advance(); // consume '.'
-                        let qualified = self.expect_ident()?;
-                        format!("{}.{}", name, qualified)
-                    } else {
-                        name
-                    };
+                        let segment = if matches!(self.peek(), Token::UpperIdent(_)) {
+                            self.expect_upper_ident()?
+                        } else {
+                            self.expect_ident()?
+                        };
+                        name = format!("{name}.{segment}");
+                    }
                     let name_end = self.tokens[self.pos - 1].span;
                     let mut trailing_comment = None;
                     if matches!(self.peek(), Token::Comma) {
@@ -713,18 +750,24 @@ impl Parser {
                 dangling_trivia,
             })
         } else {
-            // Single named handler: `with console_log` or `with Logger.console_log`
+            // Single named handler: `with console_log` or `with DateTime.system_clock`
             let handler_span = self.tokens[self.pos].span;
-            let name = self.expect_ident()?;
-            let name = if matches!(self.peek(), Token::Dot)
-                && matches!(self.peek_at(1), Token::Ident(_))
+            let mut name = if matches!(self.peek(), Token::UpperIdent(_)) {
+                self.expect_upper_ident()?
+            } else {
+                self.expect_ident()?
+            };
+            while matches!(self.peek(), Token::Dot)
+                && matches!(self.peek_at(1), Token::Ident(_) | Token::UpperIdent(_))
             {
                 self.advance(); // consume '.'
-                let qualified = self.expect_ident()?;
-                format!("{}.{}", name, qualified)
-            } else {
-                name
-            };
+                let segment = if matches!(self.peek(), Token::UpperIdent(_)) {
+                    self.expect_upper_ident()?
+                } else {
+                    self.expect_ident()?
+                };
+                name = format!("{name}.{segment}");
+            }
             Ok(Handler::Named(name, handler_span))
         }
     }
@@ -1546,4 +1589,3 @@ impl Parser {
         Ok(specs)
     }
 }
-

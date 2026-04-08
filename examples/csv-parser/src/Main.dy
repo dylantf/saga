@@ -11,7 +11,6 @@ read_csv filename = case File.read! filename {
   Err _ -> panic $"Failed to read {filename}"
 }
 
-pub fun main : Unit -> Unit
 main () = {
   "data.csv"
   |> read_csv

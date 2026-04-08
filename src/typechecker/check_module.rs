@@ -147,7 +147,12 @@ impl ModuleExports {
                 Decl::HandlerDef {
                     public: true, name, ..
                 } => {
-                    if let Some(info) = checker.handlers.get(name) {
+                    let canonical = checker
+                        .current_module
+                        .as_ref()
+                        .map(|m| format!("{}.{}", m, name))
+                        .unwrap_or_else(|| name.clone());
+                    if let Some(info) = checker.handlers.get(&canonical) {
                         handlers.insert(name.clone(), info.clone());
                     }
                 }
@@ -453,6 +458,7 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("Std.File", include_str!("../stdlib/File.dy")),
     ("Std.Set", include_str!("../stdlib/Set.dy")),
     ("Std.Time", include_str!("../stdlib/Time.dy")),
+    ("Std.DateTime", include_str!("../stdlib/DateTime.dy")),
     ("Std.BitString", include_str!("../stdlib/BitString.dy")),
     ("Std.Dynamic", include_str!("../stdlib/Dynamic.dy")),
     ("Std.Ref", include_str!("../stdlib/Ref.dy")),
@@ -640,8 +646,13 @@ impl Checker {
 
         // Build codegen info from the module's public declarations.
         // Pass the effects map so fun_effects can use canonical effect names.
-        let codegen_info =
-            collect_codegen_info(&module_name, &program, &exports, &mod_checker.effects, &mod_checker.scope_map);
+        let codegen_info = collect_codegen_info(
+            &module_name,
+            &program,
+            &exports,
+            &mod_checker.effects,
+            &mod_checker.scope_map,
+        );
         self.modules
             .codegen_info
             .insert(module_name.clone(), codegen_info);
@@ -849,13 +860,12 @@ impl Checker {
             }
         }
 
-        // Handlers: qualified always, bare only when exposed.
-        // Unlike effects, handlers are values explicitly referenced in `with`
-        // expressions, not implicitly referenced by the type system.
+        // Handlers: canonical always, bare only when exposed.
+        // Uses module_name (canonical) not prefix (alias), matching effects.
         for (name, info) in handlers {
-            let qualified = format!("{}.{}", prefix, name);
+            let canonical = format!("{}.{}", module_name, name);
             self.handlers
-                .entry(qualified)
+                .entry(canonical)
                 .or_insert_with(|| info.clone());
             if is_exposed(name) {
                 self.handlers
@@ -1072,6 +1082,22 @@ pub(super) fn resolve_import(
         }
     }
 
+    // Handlers: canonical + aliased qualified forms
+    for handler_name in exports.handlers.keys() {
+        let handler_canonical = format!("{}.{}", module_name, handler_name);
+        scope
+            .handlers
+            .entry(handler_canonical.clone())
+            .or_insert_with(|| handler_canonical.clone());
+        if prefix != module_name {
+            let aliased = format!("{}.{}", prefix, handler_name);
+            scope
+                .handlers
+                .entry(aliased)
+                .or_insert_with(|| handler_canonical.clone());
+        }
+    }
+
     // Value bindings: canonical + aliased
     for (name, _) in &exports.bindings {
         let canonical = format!("{}.{}", module_name, name);
@@ -1193,6 +1219,13 @@ pub(super) fn resolve_import(
                 if scope.values.contains_key(&canonical) {
                     scope.values.entry(name.clone()).or_insert(canonical);
                 }
+                if is_handler {
+                    let handler_canonical = format!("{}.{}", module_name, name);
+                    scope
+                        .handlers
+                        .entry(name.clone())
+                        .or_insert(handler_canonical);
+                }
             }
         }
     }
@@ -1201,6 +1234,12 @@ pub(super) fn resolve_import(
     // Collect all canonical names from the maps we just built.
     let module = module_name.to_string();
     for canonical in scope.values.values() {
+        scope
+            .origins
+            .entry(canonical.clone())
+            .or_insert_with(|| module.clone());
+    }
+    for canonical in scope.handlers.values() {
         scope
             .origins
             .entry(canonical.clone())
@@ -1322,7 +1361,8 @@ fn collect_codegen_info(
                     })
                     .map(|e| {
                         // Resolve effect name to canonical via scope_map
-                        scope_map.resolve_effect(&e.name)
+                        scope_map
+                            .resolve_effect(&e.name)
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| {
                                 // Fallback: try effects_map directly, or qualify with module
@@ -1394,15 +1434,15 @@ fn collect_codegen_info(
                             .copied()
                             .unwrap_or(0);
                         bound.traits.iter().map(move |(t, _, _)| {
-                            let resolved = scope_map.resolve_trait(t)
-                                .unwrap_or(t.as_str())
-                                .to_string();
+                            let resolved =
+                                scope_map.resolve_trait(t).unwrap_or(t.as_str()).to_string();
                             (resolved, idx)
                         })
                     })
                     .collect();
                 // Resolve trait name to canonical form via scope_map
-                let canonical_trait = scope_map.resolve_trait(trait_name)
+                let canonical_trait = scope_map
+                    .resolve_trait(trait_name)
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("{}.{}", module_name, trait_name));
                 trait_impl_dicts.push(TraitImplDict {

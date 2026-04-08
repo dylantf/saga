@@ -437,8 +437,7 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
                 normalize_annotated(seg, normalize_expr);
             }
         }
-        ExprKind::PipeBack { segments }
-        | ExprKind::ComposeForward { segments } => {
+        ExprKind::PipeBack { segments } | ExprKind::ComposeForward { segments } => {
             for seg in segments.iter_mut() {
                 normalize_annotated(seg, normalize_expr);
             }
@@ -555,9 +554,16 @@ fn normalize_pat(p: &mut Pat) {
         Pat::ListPat { id, elements, span } => {
             *id = NID;
             *span = S;
-            for e in elements { normalize_pat(e); }
+            for e in elements {
+                normalize_pat(e);
+            }
         }
-        Pat::ConsPat { id, head, tail, span } => {
+        Pat::ConsPat {
+            id,
+            head,
+            tail,
+            span,
+        } => {
             *id = NID;
             *span = S;
             normalize_pat(head);
@@ -566,7 +572,9 @@ fn normalize_pat(p: &mut Pat) {
         Pat::Or { id, patterns, span } => {
             *id = NID;
             *span = S;
-            for p in patterns { normalize_pat(p); }
+            for p in patterns {
+                normalize_pat(p);
+            }
         }
         Pat::BitStringPat { id, segments, span } => {
             *id = NID;
@@ -648,7 +656,11 @@ fn normalize_type_expr(te: &mut TypeExpr) {
                 *s = S;
             }
         }
-        TypeExpr::Record { fields, multiline, span } => {
+        TypeExpr::Record {
+            fields,
+            multiline,
+            span,
+        } => {
             *span = S;
             *multiline = false;
             for (_, te) in fields.iter_mut() {
@@ -1022,7 +1034,11 @@ fn record_def_short_stays_on_one_line() {
 fn record_def_multiline_preserved() {
     let src = "record User {\n  name: String,\n  age: Int,\n}";
     let result = fmt80(src);
-    assert!(result.contains("record User {\n"), "should stay multiline: {}", result);
+    assert!(
+        result.contains("record User {\n"),
+        "should stay multiline: {}",
+        result
+    );
     assert!(result.contains("  name: String,\n"), "result: {}", result);
 }
 
@@ -1040,7 +1056,11 @@ fn type_def_short_stays_on_one_line() {
 fn type_def_multiline_preserved() {
     let src = "type Tree =\n  | Empty\n  | Node(Tree, Int, Tree)";
     let result = fmt80(src);
-    assert!(result.contains("type Tree =\n"), "should stay multiline: {}", result);
+    assert!(
+        result.contains("type Tree =\n"),
+        "should stay multiline: {}",
+        result
+    );
     assert!(result.contains("  | Empty\n"), "result: {}", result);
 }
 
@@ -1446,14 +1466,22 @@ fn fun_sig_arrow_return_type_no_parens() {
 fn effect_op_arrow_param_gets_parens() {
     let src = "effect Scope {\n  fun acquire_scoped : (Unit -> a) -> (a -> Unit) -> a\n}";
     let result = fmt80(src);
-    assert!(result.contains("(Unit -> a) -> (a -> Unit) -> a"), "arrow params should be parenthesized: {}", result);
+    assert!(
+        result.contains("(Unit -> a) -> (a -> Unit) -> a"),
+        "arrow params should be parenthesized: {}",
+        result
+    );
 }
 
 #[test]
 fn trait_method_arrow_param_gets_parens() {
     let src = "trait Functor a {\n  fun map : (b -> c) -> a b -> a c\n}";
     let result = fmt80(src);
-    assert!(result.contains("(b -> c) -> a b -> a c"), "arrow param should be parenthesized: {}", result);
+    assert!(
+        result.contains("(b -> c) -> a b -> a c"),
+        "arrow param should be parenthesized: {}",
+        result
+    );
 }
 
 #[test]
@@ -1480,14 +1508,22 @@ fn trailing_lambda_with_block_body() {
 fn handler_arm_zero_arg_gets_unit() {
     let src = "f x = compute () with {\n  get () = resume 0\n  put v = resume ()\n}";
     let result = fmt80(src);
-    assert!(result.contains("get () ="), "should preserve (): {}", result);
+    assert!(
+        result.contains("get () ="),
+        "should preserve (): {}",
+        result
+    );
 }
 
 #[test]
 fn named_handler_def_zero_arg_gets_unit() {
     let src = "handler my_state for State {\n  get () = resume 42\n  put v = resume ()\n}";
     let result = fmt80(src);
-    assert!(result.contains("get () ="), "named handler should preserve () for zero-arg ops: {}", result);
+    assert!(
+        result.contains("get () ="),
+        "named handler should preserve () for zero-arg ops: {}",
+        result
+    );
 }
 
 #[test]
@@ -1495,8 +1531,16 @@ fn inline_handler_named_then_inline_no_comma_before_inline() {
     let src = "f x = compute () with {\n  console,\n  fail msg = Err msg\n}";
     let result = fmt80(src);
     // Named handler always gets trailing comma
-    assert!(result.contains("console,\n"), "named handler should have trailing comma: {}", result);
-    assert!(!result.contains("Err msg,"), "no comma after inline arm: {}", result);
+    assert!(
+        result.contains("console,\n"),
+        "named handler should have trailing comma: {}",
+        result
+    );
+    assert!(
+        !result.contains("Err msg,"),
+        "no comma after inline arm: {}",
+        result
+    );
 }
 
 #[test]
@@ -1504,16 +1548,29 @@ fn inline_handler_only_named_gets_commas() {
     let src = "f x = compute () with {\n  console,\n  to_result,\n}";
     let result = fmt80(src);
     // Named-only handlers go on one line: `{ console, to_result }`
-    assert!(result.contains("{console, to_result}"), "result: {}", result);
+    assert!(
+        result.contains("{console, to_result}"),
+        "result: {}",
+        result
+    );
 }
 
 #[test]
 fn inline_handler_named_with_comments_preserves_multiline() {
-    let src = "main () = {\n  f () with {\n    console_log,\n    console_log2,\n    # a comment\n  }\n}";
+    let src =
+        "main () = {\n  f () with {\n    console_log,\n    console_log2,\n    # a comment\n  }\n}";
     let result = fmt80(src);
     // Comments inside the handler block must be preserved; block must NOT collapse
-    assert!(result.contains("# a comment"), "comment was dropped: {}", result);
-    assert!(result.contains("console_log,\n"), "must stay multiline: {}", result);
+    assert!(
+        result.contains("# a comment"),
+        "comment was dropped: {}",
+        result
+    );
+    assert!(
+        result.contains("console_log,\n"),
+        "must stay multiline: {}",
+        result
+    );
 }
 
 // --- Comments ---
@@ -1522,7 +1579,11 @@ fn inline_handler_named_with_comments_preserves_multiline() {
 fn comment_indentation_preserved() {
     let src = "#   indented comment\nlet x = 1";
     let result = fmt80(src);
-    assert!(result.contains("#   indented comment"), "should preserve indent: {}", result);
+    assert!(
+        result.contains("#   indented comment"),
+        "should preserve indent: {}",
+        result
+    );
 }
 
 // --- With on block-like ---
@@ -1576,17 +1637,37 @@ fn binop_chain_stays_on_eq_line() {
 fn binop_chain_breaks_before_operator_indented() {
     let src = "f x = some_long_name + another_long_name + yet_another_long_name";
     let result = fmt(src, 40);
-    assert!(result.contains("f x = some_long_name\n"), "first operand on = line: {}", result);
-    assert!(result.contains("  + another_long_name\n"), "indented continuation: {}", result);
+    assert!(
+        result.contains("f x = some_long_name\n"),
+        "first operand on = line: {}",
+        result
+    );
+    assert!(
+        result.contains("  + another_long_name\n"),
+        "indented continuation: {}",
+        result
+    );
 }
 
 #[test]
 fn binop_chain_preserves_comments() {
     let src = "f x = \"{\"\n  # join pairs\n  <> join \", \" pairs\n  # close\n  <> \"}\"";
     let result = fmt80(src);
-    assert!(result.contains("# join pairs"), "should preserve comment: {}", result);
-    assert!(result.contains("# close"), "should preserve comment: {}", result);
-    assert!(result.contains("<> join"), "should have operator: {}", result);
+    assert!(
+        result.contains("# join pairs"),
+        "should preserve comment: {}",
+        result
+    );
+    assert!(
+        result.contains("# close"),
+        "should preserve comment: {}",
+        result
+    );
+    assert!(
+        result.contains("<> join"),
+        "should have operator: {}",
+        result
+    );
 }
 
 #[test]
@@ -1594,18 +1675,23 @@ fn binop_chain_multiline_preserved() {
     // User explicitly put operators on new lines - should stay multi-line
     let src = "f x = a\n  + b\n  + c";
     let result = fmt80(src);
-    assert!(result.contains("\n  + b"), "should stay multiline: {}", result);
-    assert!(result.contains("\n  + c"), "should stay multiline: {}", result);
+    assert!(
+        result.contains("\n  + b"),
+        "should stay multiline: {}",
+        result
+    );
+    assert!(
+        result.contains("\n  + c"),
+        "should stay multiline: {}",
+        result
+    );
 }
 
 // --- List comprehensions ---
 
 #[test]
 fn list_comprehension_simple() {
-    assert_eq!(
-        fmt80("f x = [y * 2 | y <- x]"),
-        "f x = [y * 2 | y <- x]\n"
-    );
+    assert_eq!(fmt80("f x = [y * 2 | y <- x]"), "f x = [y * 2 | y <- x]\n");
 }
 
 #[test]

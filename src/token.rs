@@ -112,7 +112,10 @@ pub enum StringKind {
 impl StringKind {
     /// True for triple-quoted variants that use `"""` delimiters.
     pub fn is_multiline(self) -> bool {
-        matches!(self, StringKind::Multiline | StringKind::RawMultiline | StringKind::InterpolatedMultiline)
+        matches!(
+            self,
+            StringKind::Multiline | StringKind::RawMultiline | StringKind::InterpolatedMultiline
+        )
     }
 }
 

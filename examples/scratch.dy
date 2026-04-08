@@ -1,49 +1,20 @@
-import Std.Fail (Fail)
-import Std.Vec (MutVec, Vec, beam_vec)
+import Std.DateTime
+import Std.IO (console)
 
-impl Show for List a where {a: Show} {
-  show xs = "[" <> String.join ", " (List.map show xs) <> "]"
-}
-
-# Vec ops (direct) mixed with Fail (CPS) in the same function
-fun safe_sum : MutVec Int -> Int needs {Vec, Fail String}
-safe_sum v = {
-  let n = vec_len! v
-  if n == 0 then fail! "empty vec"
-  else sum_loop v 0 n 0
-}
-
-fun sum_loop : MutVec Int -> Int -> Int -> Int -> Int needs {Vec}
-sum_loop v i n acc =
-  if i >= n then acc
-  else {
-    let x = vec_get! v i
-    sum_loop v (i + 1) n (acc + x)
-  }
-
-# Fail handler: convert to Result
-handler to_result for Fail String {
-  fail reason = Err reason
-  return value = Ok value
-}
-
+pub fun main : Unit -> Unit
 main () = {
-  # Test 1: Vec + Fail, success case
-  let v = thaw! [10, 20, 30]
-  let result1 = safe_sum v with to_result
-  dbg $"sum of [10,20,30]: {debug result1}"
+  let dt = DateTime.Clock.now! ()
+  println $"Now: {show dt.year}-{show dt.month}-{show dt.day} {show dt.hour}:{show dt.minute}:{show dt.second}"
 
-  # Test 2: Vec + Fail, failure case
-  let empty = (vec_new! () : MutVec Int)
-  let result2 = safe_sum empty with to_result
-  dbg $"sum of []: {debug result2}"
+  let d = DateTime.Clock.today! ()
+  println $"Today: {show d.year}-{show d.month}-{show d.day}"
+  println $"Day of week: {show (DateTime.day_of_week d)}"
+  println $"Leap year: {show (DateTime.is_leap_year d.year)}"
+  println $"Days in month: {show (DateTime.days_in_month d.year d.month)}"
 
-  # Test 3: Vec ops around a fail handler boundary
-  let v2 = thaw! [1, 2, 3, 4, 5]
-  vec_set! v2 2 99
-  let result3 = safe_sum v2 with to_result
-  dbg $"sum after set: {debug result3}"
+  let dt2 = DateTime.add_seconds 3600 dt
+  println $"Plus 1 hour: {show dt2.hour}:{show dt2.minute}:{show dt2.second}"
 
-  let frozen = freeze! v2
-  dbg $"frozen: {show frozen}"
-} with beam_vec
+  let diff = DateTime.diff_seconds dt2 dt
+  println $"Diff: {show diff} seconds"
+} with {console, DateTime.system_clock}

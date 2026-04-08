@@ -101,9 +101,7 @@ impl SymbolIndex {
         // Locally-defined names: anything with a def_id that isn't from an import
         if let Some(ref local_mod) = local_module {
             for (name, did) in tc_result.env.all_def_ids() {
-                if !def_id_to_symbol.contains_key(&did)
-                    && !tc_result.scope_map.is_import(&name)
-                {
+                if !def_id_to_symbol.contains_key(&did) && !tc_result.scope_map.is_import(&name) {
                     def_id_to_symbol.insert(
                         did,
                         SymbolKey {

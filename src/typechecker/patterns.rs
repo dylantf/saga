@@ -38,12 +38,25 @@ impl Checker {
                 self.unify_at(ty, &lit_ty, *span)
             }
             Pat::Constructor {
-                id, name, args, span, ..
+                id,
+                name,
+                args,
+                span,
+                ..
             } => {
                 // Look up constructor by name, with scope_map resolution as fallback.
-                let resolved_ctor = self.scope_map.resolve_constructor(name).map(|s| s.to_string());
-                let ctor_scheme = self.constructors.get(name)
-                    .or_else(|| resolved_ctor.as_ref().and_then(|r| self.constructors.get(r.as_str())))
+                let resolved_ctor = self
+                    .scope_map
+                    .resolve_constructor(name)
+                    .map(|s| s.to_string());
+                let ctor_scheme = self
+                    .constructors
+                    .get(name)
+                    .or_else(|| {
+                        resolved_ctor
+                            .as_ref()
+                            .and_then(|r| self.constructors.get(r.as_str()))
+                    })
                     .cloned()
                     .ok_or_else(|| {
                         Diagnostic::error_at(
@@ -53,8 +66,15 @@ impl Checker {
                     })?;
                 // Record reference to constructor definition for find-references/rename
                 {
-                    let def_id = self.lsp.constructor_def_ids.get(name)
-                        .or_else(|| resolved_ctor.as_ref().and_then(|r| self.lsp.constructor_def_ids.get(r.as_str())))
+                    let def_id = self
+                        .lsp
+                        .constructor_def_ids
+                        .get(name)
+                        .or_else(|| {
+                            resolved_ctor
+                                .as_ref()
+                                .and_then(|r| self.lsp.constructor_def_ids.get(r.as_str()))
+                        })
                         .copied();
                     if let Some(def_id) = def_id {
                         self.record_reference(*id, *span, def_id);
@@ -95,7 +115,10 @@ impl Checker {
                 // Record the type name reference for find-references/rename
                 let name_end = span.start + name.len();
                 self.lsp.type_references.push((
-                    crate::token::Span { start: span.start, end: name_end },
+                    crate::token::Span {
+                        start: span.start,
+                        end: name_end,
+                    },
                     name.to_string(),
                 ));
                 // When `..` is absent, all fields must be listed
@@ -202,10 +225,7 @@ impl Checker {
             }
 
             Pat::AnonRecord {
-                fields,
-                rest,
-                span,
-                ..
+                fields, rest, span, ..
             } => {
                 if *rest {
                     // With `..`: unify against the expected type, then bind
@@ -261,8 +281,7 @@ impl Checker {
                     self.unify_at(ty, &record_ty, *span)?;
 
                     for (fname, alias_pat) in fields {
-                        let (_, field_ty) =
-                            field_tys.iter().find(|(n, _)| n == fname).unwrap();
+                        let (_, field_ty) = field_tys.iter().find(|(n, _)| n == fname).unwrap();
                         let resolved_field_ty = self.sub.apply(field_ty);
                         match alias_pat {
                             Some(pat) => self.bind_pattern(pat, &resolved_field_ty)?,
@@ -413,10 +432,7 @@ impl Checker {
         // For non-ADT, non-primitive types (e.g. Unit), skip.
         // Tuples and anonymous records are allowed through -- they're
         // single-constructor types handled by the Maranget algorithm.
-        if !is_anon_record
-            && !self.adt_variants.contains_key(&type_name)
-            && type_name != "Tuple"
-        {
+        if !is_anon_record && !self.adt_variants.contains_key(&type_name) && type_name != "Tuple" {
             return Ok(());
         }
 

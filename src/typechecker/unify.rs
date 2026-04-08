@@ -18,12 +18,12 @@ pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
             Box::new(rename_vars(a, names)),
             Box::new(rename_vars(b, names)),
             EffectRow {
-                effects: row.effects.iter()
-                    .map(|entry| {
-                        super::EffectEntry {
-                            name: entry.name.clone(),
-                            args: entry.args.iter().map(|t| rename_vars(t, names)).collect(),
-                        }
+                effects: row
+                    .effects
+                    .iter()
+                    .map(|entry| super::EffectEntry {
+                        name: entry.name.clone(),
+                        args: entry.args.iter().map(|t| rename_vars(t, names)).collect(),
                     })
                     .collect(),
                 tail: row.tail.as_ref().map(|t| Box::new(rename_vars(t, names))),
@@ -40,7 +40,6 @@ pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
                 .collect(),
         ),
         Type::Error => Type::Error,
-
     }
 }
 
@@ -154,11 +153,15 @@ impl Checker {
         }
 
         // Collect unmatched effects from each side
-        let extras1: Vec<_> = r1.effects.iter()
+        let extras1: Vec<_> = r1
+            .effects
+            .iter()
             .filter(|e| !r2.effects.iter().any(|e2| e2.matches(e)))
             .cloned()
             .collect();
-        let extras2: Vec<_> = r2.effects.iter()
+        let extras2: Vec<_> = r2
+            .effects
+            .iter()
             .filter(|e| !r1.effects.iter().any(|e1| e1.matches(e)))
             .cloned()
             .collect();
@@ -175,7 +178,9 @@ impl Checker {
                     Ok(())
                 } else {
                     // Both have unmatched effects -- genuinely incompatible
-                    let mut extras: Vec<_> = extras1.iter().chain(extras2.iter())
+                    let mut extras: Vec<_> = extras1
+                        .iter()
+                        .chain(extras2.iter())
                         .map(|e| e.name.as_str())
                         .collect();
                     extras.sort();
@@ -187,21 +192,29 @@ impl Checker {
                 }
             }
             // row1 is open: bind its tail to the extras from row2
-            (Some(tail1), None) => {
-                self.sub.bind_row(tail1, EffectRow::closed(extras2))
-            }
+            (Some(tail1), None) => self.sub.bind_row(tail1, EffectRow::closed(extras2)),
             // row2 is open: bind its tail to the extras from row1
-            (None, Some(tail2)) => {
-                self.sub.bind_row(tail2, EffectRow::closed(extras1))
-            }
+            (None, Some(tail2)) => self.sub.bind_row(tail2, EffectRow::closed(extras1)),
             // Both open: create a fresh row variable for the shared tail
             (Some(tail1), Some(tail2)) => {
                 if tail1 == tail2 {
                     return Ok(());
                 }
                 let fresh_var = self.fresh_var();
-                self.sub.bind_row(tail1, EffectRow { effects: extras2, tail: Some(Box::new(fresh_var.clone())) })?;
-                self.sub.bind_row(tail2, EffectRow { effects: extras1, tail: Some(Box::new(fresh_var)) })
+                self.sub.bind_row(
+                    tail1,
+                    EffectRow {
+                        effects: extras2,
+                        tail: Some(Box::new(fresh_var.clone())),
+                    },
+                )?;
+                self.sub.bind_row(
+                    tail2,
+                    EffectRow {
+                        effects: extras1,
+                        tail: Some(Box::new(fresh_var)),
+                    },
+                )
             }
         }
     }
@@ -236,7 +249,10 @@ impl Checker {
     /// Replace forall'd variables with fresh type variables.
     /// Returns the instantiated type and any trait constraints (remapped to fresh vars).
     /// Each constraint is (trait_name, self_type, extra_type_arg_types).
-    pub(crate) fn instantiate(&mut self, scheme: &Scheme) -> (Type, Vec<(String, Type, Vec<Type>)>) {
+    pub(crate) fn instantiate(
+        &mut self,
+        scheme: &Scheme,
+    ) -> (Type, Vec<(String, Type, Vec<Type>)>) {
         let mapping: HashMap<u32, Type> = scheme
             .forall
             .iter()
@@ -261,23 +277,28 @@ impl Checker {
     pub(crate) fn replace_vars(&self, ty: &Type, mapping: &HashMap<u32, Type>) -> Type {
         match ty {
             Type::Var(id) => mapping.get(id).cloned().unwrap_or_else(|| ty.clone()),
-            Type::Fun(a, b, row) => {
-                Type::Fun(
-                    Box::new(self.replace_vars(a, mapping)),
-                    Box::new(self.replace_vars(b, mapping)),
-                    EffectRow {
-                        effects: row.effects.iter()
-                            .map(|entry| {
-                                super::EffectEntry {
-                                    name: entry.name.clone(),
-                                    args: entry.args.iter().map(|t| self.replace_vars(t, mapping)).collect(),
-                                }
-                            })
-                            .collect(),
-                        tail: row.tail.as_ref().map(|t| Box::new(self.replace_vars(t, mapping))),
-                    },
-                )
-            }
+            Type::Fun(a, b, row) => Type::Fun(
+                Box::new(self.replace_vars(a, mapping)),
+                Box::new(self.replace_vars(b, mapping)),
+                EffectRow {
+                    effects: row
+                        .effects
+                        .iter()
+                        .map(|entry| super::EffectEntry {
+                            name: entry.name.clone(),
+                            args: entry
+                                .args
+                                .iter()
+                                .map(|t| self.replace_vars(t, mapping))
+                                .collect(),
+                        })
+                        .collect(),
+                    tail: row
+                        .tail
+                        .as_ref()
+                        .map(|t| Box::new(self.replace_vars(t, mapping))),
+                },
+            ),
             Type::Con(name, args) => Type::Con(
                 name.clone(),
                 args.iter().map(|a| self.replace_vars(a, mapping)).collect(),
@@ -289,7 +310,6 @@ impl Checker {
                     .collect(),
             ),
             Type::Error => Type::Error,
-    
         }
     }
 
@@ -423,7 +443,11 @@ impl Checker {
                 }
             }
             crate::ast::TypeExpr::Arrow {
-                from, to, effects, effect_row_var, ..
+                from,
+                to,
+                effects,
+                effect_row_var,
+                ..
             } => {
                 let a_ty = self.convert_type_expr(from, params);
                 let b_ty = self.convert_type_expr(to, params);
@@ -434,7 +458,10 @@ impl Checker {
                             // Record effect name reference
                             let name_end = e.span.start + e.name.len();
                             self.lsp.type_references.push((
-                                Span { start: e.span.start, end: name_end },
+                                Span {
+                                    start: e.span.start,
+                                    end: name_end,
+                                },
                                 e.name.clone(),
                             ));
                             let args = e
@@ -445,7 +472,8 @@ impl Checker {
                             // Canonicalize effect name so it matches canonical-only self.effects
                             let name = if let Some(info) = self.resolve_effect(&e.name) {
                                 let short = e.name.rsplit('.').next().unwrap_or(&e.name);
-                                info.source_module.as_ref()
+                                info.source_module
+                                    .as_ref()
                                     .map(|m| format!("{}.{}", m, short))
                                     .unwrap_or_else(|| {
                                         if let Some(m) = &self.current_module {
@@ -478,7 +506,14 @@ impl Checker {
                     if effect_refs.is_empty() && tail.is_none() {
                         Type::arrow(a_ty, b_ty)
                     } else {
-                        Type::Fun(Box::new(a_ty), Box::new(b_ty), EffectRow { effects: effect_refs, tail })
+                        Type::Fun(
+                            Box::new(a_ty),
+                            Box::new(b_ty),
+                            EffectRow {
+                                effects: effect_refs,
+                                tail,
+                            },
+                        )
                     }
                 }
             }
@@ -490,9 +525,7 @@ impl Checker {
                 typed_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
                 Type::Record(typed_fields)
             }
-            crate::ast::TypeExpr::Labeled { inner, .. } => {
-                self.convert_type_expr(inner, params)
-            }
+            crate::ast::TypeExpr::Labeled { inner, .. } => self.convert_type_expr(inner, params),
         }
     }
 }

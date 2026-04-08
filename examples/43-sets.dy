@@ -2,7 +2,6 @@ module SetExample
 
 import Std.Set
 
-pub fun main : Unit -> Unit
 main () = {
   let s =
     Set.new ()

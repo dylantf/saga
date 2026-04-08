@@ -18,7 +18,10 @@ impl Checker {
         // Record the type name reference for find-references/rename
         let name_end = span.start + name.len();
         self.lsp.type_references.push((
-            crate::token::Span { start: span.start, end: name_end },
+            crate::token::Span {
+                start: span.start,
+                end: name_end,
+            },
             name.to_string(),
         ));
         let (inst_fields, result_ty) = self.instantiate_record(name, &info);
@@ -116,15 +119,16 @@ impl Checker {
                 // so that type params flow from the input record to the field types.
                 self.unify_at(&resolved, &result_ty, span)?;
                 for (fname, fspan, fexpr) in fields {
-                    let expected = inst_fields
-                        .iter()
-                        .find(|(n, _)| n == fname)
-                        .ok_or_else(|| {
-                            Diagnostic::error_at(
-                                *fspan,
-                                format!("unknown field '{}' on record {}", fname, name),
-                            )
-                        })?;
+                    let expected =
+                        inst_fields
+                            .iter()
+                            .find(|(n, _)| n == fname)
+                            .ok_or_else(|| {
+                                Diagnostic::error_at(
+                                    *fspan,
+                                    format!("unknown field '{}' on record {}", fname, name),
+                                )
+                            })?;
                     let actual = self.infer_expr(fexpr)?;
                     self.unify_at(&expected.1, &actual, fexpr.span)?;
                 }

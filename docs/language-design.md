@@ -30,7 +30,7 @@ double x = x * 2
 triple x = x * 3
 
 # Zero-arg functions take Unit
-pub fun main : Unit -> Unit
+
 main () = {
   let x = add 3 4
   let y = double x
@@ -38,7 +38,7 @@ main () = {
 }
 
 # Pipe operator
-pub fun main : Unit -> Unit
+
 main () = {
   5
   |> add 3
@@ -300,7 +300,7 @@ main () = {
 }
 
 # Attach a named handler
-pub fun main : Unit -> Unit
+
 main () = {
   greet "Dylan"
 } with std_io
@@ -425,7 +425,7 @@ import Math
 import Math (abs, max)
 import Math as M
 
-pub fun main : Unit -> Unit
+
 main () = {
   M.abs (-5) |> print
 }
@@ -558,7 +558,7 @@ handler collect_logs for Log {
   log msg -> resume ()
 }
 
-pub fun main : Unit -> Unit
+
 main () = {
   let user = fetch_user 42
   let updated = { user | name: "New Name" }
@@ -719,6 +719,7 @@ val pi = 3.141592653589793
 ```
 
 **Rules:**
+
 - RHS must be pure (no effects). If the expression performs effects, it's an error.
 - Inferred type must not be a function (`a -> b`). Use `fun` for functions.
 - Can reference other vals and call pure functions.

@@ -20,7 +20,10 @@ pub fn is_compiled(project_root: &Path, name: &str) -> bool {
 /// Global cache directory for Hex tarball downloads.
 fn hex_tarball_cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".dylang").join("cache").join("hex")
+    PathBuf::from(home)
+        .join(".dylang")
+        .join("cache")
+        .join("hex")
 }
 
 // --- Hex API types ---
@@ -68,10 +71,7 @@ fn hex_client() -> reqwest::blocking::Client {
 
 /// Fetch release metadata from the Hex API.
 pub fn fetch_release(name: &str, version: &str) -> Result<HexRelease, String> {
-    let url = format!(
-        "https://hex.pm/api/packages/{}/releases/{}",
-        name, version
-    );
+    let url = format!("https://hex.pm/api/packages/{}/releases/{}", name, version);
     let resp = hex_client()
         .get(&url)
         .header("Accept", "application/json")
@@ -87,8 +87,12 @@ pub fn fetch_release(name: &str, version: &str) -> Result<HexRelease, String> {
         ));
     }
 
-    resp.json::<HexRelease>()
-        .map_err(|e| format!("failed to parse release metadata for {}-{}: {}", name, version, e))
+    resp.json::<HexRelease>().map_err(|e| {
+        format!(
+            "failed to parse release metadata for {}-{}: {}",
+            name, version, e
+        )
+    })
 }
 
 /// Fetch package info (all versions) from the Hex API.
@@ -145,7 +149,9 @@ pub fn download_and_extract(
         if !resp.status().is_success() {
             return Err(format!(
                 "failed to download Hex tarball for {}-{} (HTTP {})",
-                name, version, resp.status()
+                name,
+                version,
+                resp.status()
             ));
         }
 
@@ -162,8 +168,7 @@ pub fn download_and_extract(
         bytes
     };
 
-    std::fs::create_dir_all(&pkg_dir)
-        .map_err(|e| format!("failed to create deps dir: {}", e))?;
+    std::fs::create_dir_all(&pkg_dir).map_err(|e| format!("failed to create deps dir: {}", e))?;
 
     // The outer tarball is uncompressed and contains: VERSION, CHECKSUM, metadata.config, contents.tar.gz
     let mut outer_tar = tar::Archive::new(tarball_bytes.as_ref());
@@ -233,7 +238,12 @@ pub fn compile_with_rebar3(pkg_dir: &Path, name: &str) -> Result<PathBuf, String
     // rebar3 bare compile outputs to <output_dir>/ebin/.
     // Point it at the package dir so ebin/ lands where we expect.
     let output = std::process::Command::new("rebar3")
-        .args(["bare", "compile", "--paths", ebin_dir.to_str().unwrap_or(".")])
+        .args([
+            "bare",
+            "compile",
+            "--paths",
+            ebin_dir.to_str().unwrap_or("."),
+        ])
         .current_dir(pkg_dir)
         .env("REBAR_BARE_COMPILER_OUTPUT_DIR", pkg_dir)
         .env("REBAR_PROFILE", "prod")
@@ -308,8 +318,8 @@ pub fn compile_with_rebar3(pkg_dir: &Path, name: &str) -> Result<PathBuf, String
 /// Recursively copy a directory.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| format!("failed to create dir: {}", e))?;
-    for entry in
-        std::fs::read_dir(src).map_err(|e| format!("failed to read dir {}: {}", src.display(), e))?
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| format!("failed to read dir {}: {}", src.display(), e))?
     {
         let entry = entry.map_err(|e| format!("failed to read entry: {}", e))?;
         let dest = dst.join(entry.file_name());
@@ -425,8 +435,7 @@ pub fn install_package(
     let release = fetch_release(name, version)?;
 
     // Cache release.json
-    std::fs::create_dir_all(&pkg_dir)
-        .map_err(|e| format!("failed to create deps dir: {}", e))?;
+    std::fs::create_dir_all(&pkg_dir).map_err(|e| format!("failed to create deps dir: {}", e))?;
     let release_json = serde_json::to_string_pretty(&release)
         .map_err(|e| format!("failed to serialize release metadata: {}", e))?;
     std::fs::write(pkg_dir.join("release.json"), release_json)

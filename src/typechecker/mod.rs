@@ -868,6 +868,8 @@ pub struct Checker {
 pub struct ScopeMap {
     /// User-visible name -> canonical name for value bindings (functions, let bindings).
     pub values: HashMap<String, String>,
+    /// User-visible name -> canonical name for handlers.
+    pub handlers: HashMap<String, String>,
     /// User-visible name -> canonical (bare) name for type names.
     pub types: HashMap<String, String>,
     /// User-visible name -> canonical name for constructors.
@@ -884,6 +886,10 @@ pub struct ScopeMap {
 impl ScopeMap {
     pub fn resolve_value(&self, name: &str) -> Option<&str> {
         self.values.get(name).map(|s| s.as_str())
+    }
+
+    pub fn resolve_handler(&self, name: &str) -> Option<&str> {
+        self.handlers.get(name).map(|s| s.as_str())
     }
 
     pub fn resolve_type(&self, name: &str) -> Option<&str> {
@@ -921,6 +927,7 @@ impl ScopeMap {
         let canonical = self
             .values
             .get(name)
+            .or_else(|| self.handlers.get(name))
             .or_else(|| self.constructors.get(name))
             .or_else(|| self.effects.get(name))
             .or_else(|| self.traits.get(name))
@@ -942,6 +949,9 @@ impl ScopeMap {
     pub fn merge(&mut self, other: &ScopeMap) {
         for (k, v) in &other.values {
             self.values.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.handlers {
+            self.handlers.entry(k.clone()).or_insert_with(|| v.clone());
         }
         for (k, v) in &other.types {
             self.types.entry(k.clone()).or_insert_with(|| v.clone());

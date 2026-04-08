@@ -318,11 +318,7 @@ pub enum Decl {
 
     /// A bare expression at the top level (test/describe sugar in test files).
     /// Converted to `Let { name: "_", .. }` by the desugar pass.
-    TopExpr {
-        id: NodeId,
-        value: Expr,
-        span: Span,
-    },
+    TopExpr { id: NodeId, value: Expr, span: Span },
 
     // --- Elaboration-only (never produced by the parser) ---
     /// Synthesized dictionary constructor function for a trait impl.
@@ -486,9 +482,7 @@ pub enum ExprKind {
     },
 
     /// `<<seg1, seg2, ...>>` -- bitstring construction
-    BitString {
-        segments: Vec<BitSegment<Expr>>,
-    },
+    BitString { segments: Vec<BitSegment<Expr>> },
 
     /// `(expr : Type)` -- inline type annotation / ascription
     Ascription {
@@ -622,10 +616,7 @@ impl Expr {
             ExprKind::Ascription { expr, .. } => expr.contains_resume(),
             ExprKind::BitString { segments } => segments.iter().any(|seg| {
                 seg.value.contains_resume()
-                    || seg
-                        .size
-                        .as_ref()
-                        .is_some_and(|s| s.contains_resume())
+                    || seg.size.as_ref().is_some_and(|s| s.contains_resume())
             }),
             // Handler expression arm bodies have their own resume context,
             // similar to With -- don't look through them.
@@ -633,8 +624,7 @@ impl Expr {
             ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {
                 segments.iter().any(|s| s.node.contains_resume())
             }
-            ExprKind::PipeBack { segments }
-            | ExprKind::ComposeForward { segments } => {
+            ExprKind::PipeBack { segments } | ExprKind::ComposeForward { segments } => {
                 segments.iter().any(|s| s.node.contains_resume())
             }
             ExprKind::Cons { head, tail } => head.contains_resume() || tail.contains_resume(),
@@ -915,7 +905,18 @@ impl PartialEq for TypeExpr {
                 },
             ) => f1 == f2 && t1 == t2 && e1 == e2,
             (TypeExpr::Record { fields: f1, .. }, TypeExpr::Record { fields: f2, .. }) => f1 == f2,
-            (TypeExpr::Labeled { label: l1, inner: i1, .. }, TypeExpr::Labeled { label: l2, inner: i2, .. }) => l1 == l2 && i1 == i2,
+            (
+                TypeExpr::Labeled {
+                    label: l1,
+                    inner: i1,
+                    ..
+                },
+                TypeExpr::Labeled {
+                    label: l2,
+                    inner: i2,
+                    ..
+                },
+            ) => l1 == l2 && i1 == i2,
             _ => false,
         }
     }

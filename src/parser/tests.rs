@@ -1216,7 +1216,9 @@ fn labeled_params_in_lambda_type() {
             // The inner type should be Arrow with a Labeled `from`
             match &params[0].1 {
                 TypeExpr::Arrow { from, .. } => {
-                    assert!(matches!(from.as_ref(), TypeExpr::Labeled { label, .. } if label == "input"));
+                    assert!(
+                        matches!(from.as_ref(), TypeExpr::Labeled { label, .. } if label == "input")
+                    );
                 }
                 other => panic!("expected Arrow, got {:?}", other),
             }
@@ -1234,11 +1236,15 @@ fn multiple_labeled_params_in_lambda_type() {
             assert_eq!(params[0].0, "f");
             match &params[0].1 {
                 TypeExpr::Arrow { from, to, .. } => {
-                    assert!(matches!(from.as_ref(), TypeExpr::Labeled { label, .. } if label == "acc"));
+                    assert!(
+                        matches!(from.as_ref(), TypeExpr::Labeled { label, .. } if label == "acc")
+                    );
                     // to should be (key: k) -> (value: v) -> a
                     match to.as_ref() {
                         TypeExpr::Arrow { from: from2, .. } => {
-                            assert!(matches!(from2.as_ref(), TypeExpr::Labeled { label, .. } if label == "key"));
+                            assert!(
+                                matches!(from2.as_ref(), TypeExpr::Labeled { label, .. } if label == "key")
+                            );
                         }
                         other => panic!("expected inner Arrow, got {:?}", other),
                     }
@@ -1714,11 +1720,7 @@ fn handler_def_simple() {
     let decls = parse("handler console_log for Log {\n  log level msg = print! (level <> msg)\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::HandlerDef {
-            name,
-            body,
-            ..
-        } => {
+        Decl::HandlerDef { name, body, .. } => {
             assert_eq!(name, "console_log");
             assert_eq!(effect_names(&body.effects), vec!["Log"]);
             assert_eq!(body.arms.len(), 1);
@@ -1727,7 +1729,10 @@ fn handler_def_simple() {
                 .node
                 .params
                 .iter()
-                .map(|p| match p { Pat::Var { name, .. } => name.as_str(), _ => panic!("expected Var pat") })
+                .map(|p| match p {
+                    Pat::Var { name, .. } => name.as_str(),
+                    _ => panic!("expected Var pat"),
+                })
                 .collect();
             assert_eq!(param_names, vec!["level", "msg"]);
             assert!(body.return_clause.is_none());
@@ -1743,17 +1748,20 @@ fn handler_def_with_return_clause() {
     );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::HandlerDef {
-            name,
-            body,
-            ..
-        } => {
+        Decl::HandlerDef { name, body, .. } => {
             assert_eq!(name, "to_result");
             assert_eq!(body.arms.len(), 1);
             assert_eq!(body.arms[0].node.op_name, "fail");
             assert!(body.return_clause.is_some());
             let rc = body.return_clause.as_ref().unwrap();
-            let rc_names: Vec<&str> = rc.params.iter().map(|p| match p { Pat::Var { name, .. } => name.as_str(), _ => panic!("expected Var pat") }).collect();
+            let rc_names: Vec<&str> = rc
+                .params
+                .iter()
+                .map(|p| match p {
+                    Pat::Var { name, .. } => name.as_str(),
+                    _ => panic!("expected Var pat"),
+                })
+                .collect();
             assert_eq!(rc_names, vec!["value"]);
         }
         _ => panic!("expected HandlerDef, got {:?}", decls[0]),
@@ -1782,11 +1790,7 @@ fn handler_def_with_needs() {
     );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::HandlerDef {
-            name,
-            body,
-            ..
-        } => {
+        Decl::HandlerDef { name, body, .. } => {
             assert_eq!(name, "stripe");
             assert_eq!(effect_names(&body.effects), vec!["Billing"]);
             assert_eq!(effect_names(&body.needs), vec!["Log", "Http"]);
@@ -1984,7 +1988,10 @@ fn with_inline_handler() {
                     .node
                     .params
                     .iter()
-                    .map(|p| match p { Pat::Var { name, .. } => name.as_str(), _ => panic!("expected Var pat") })
+                    .map(|p| match p {
+                        Pat::Var { name, .. } => name.as_str(),
+                        _ => panic!("expected Var pat"),
+                    })
                     .collect();
                 assert_eq!(param_names, vec!["level", "msg"]);
                 assert!(return_clause.is_none());
@@ -2706,11 +2713,7 @@ fn handler_for_parameterized_effect() {
         parse("handler counter for State Int {\n  get () = resume 0\n  put v = resume ()\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::HandlerDef {
-            name,
-            body,
-            ..
-        } => {
+        Decl::HandlerDef { name, body, .. } => {
             assert_eq!(name, "counter");
             assert_eq!(body.effects.len(), 1);
             assert_eq!(body.effects[0].name, "State");
@@ -2735,11 +2738,7 @@ fn handler_with_where_clause() {
     );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::HandlerDef {
-            name,
-            body,
-            ..
-        } => {
+        Decl::HandlerDef { name, body, .. } => {
             assert_eq!(name, "show_store");
             assert_eq!(body.effects.len(), 1);
             assert_eq!(body.effects[0].name, "Store");
@@ -2760,11 +2759,7 @@ fn handler_with_needs_and_where_clause() {
     );
     assert_eq!(decls.len(), 1);
     match &decls[0] {
-        Decl::HandlerDef {
-            name,
-            body,
-            ..
-        } => {
+        Decl::HandlerDef { name, body, .. } => {
             assert_eq!(name, "logged_store");
             assert_eq!(body.effects[0].name, "Store");
             assert_eq!(effect_names(&body.needs), vec!["Log"]);

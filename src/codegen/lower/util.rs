@@ -1,16 +1,11 @@
 use crate::ast::{BinOp, BitSegSpec, Expr, ExprKind, Lit, Pat, Stmt, TypeExpr};
-use crate::codegen::cerl::{
-    BinSegFlags, BinSegSize, BinSegType, CBinSeg, CExpr, CLit, Endianness,
-};
+use crate::codegen::cerl::{BinSegFlags, BinSegSize, BinSegType, CBinSeg, CExpr, CLit, Endianness};
 use crate::typechecker::Type;
 use std::collections::{BTreeSet, HashMap};
 
 /// Look up a constructor's mangled Erlang atom from the pre-computed table.
 /// Falls back to the bare name if not found.
-pub(super) fn mangle_ctor_atom(
-    name: &str,
-    constructor_atoms: &HashMap<String, String>,
-) -> String {
+pub(super) fn mangle_ctor_atom(name: &str, constructor_atoms: &HashMap<String, String>) -> String {
     if let Some(atom) = constructor_atoms.get(name) {
         return atom.clone();
     }

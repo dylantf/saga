@@ -42,10 +42,7 @@ impl Lowerer<'_> {
     ///
     /// Also handles the 1-arg case (partial application / eta reduction):
     /// `dbg(dict)` returns a lambda `fun(value) -> ...dbg logic...`.
-    pub(super) fn lower_builtin_dbg(
-        &mut self,
-        args: &[&crate::ast::Expr],
-    ) -> Option<CExpr> {
+    pub(super) fn lower_builtin_dbg(&mut self, args: &[&crate::ast::Expr]) -> Option<CExpr> {
         match args.len() {
             1 => {
                 // Partial application: fn2 = dbg -> fn2(dict) = fun(v) -> dbg_inline(dict, v)
@@ -76,11 +73,7 @@ impl Lowerer<'_> {
     fn dbg_body(&mut self, dict: CExpr, val: CExpr) -> CExpr {
         let debug_fn = self.fresh();
         let s = self.fresh();
-        let extract = cerl_call(
-            "erlang",
-            "element",
-            vec![CExpr::Lit(CLit::Int(1)), dict],
-        );
+        let extract = cerl_call("erlang", "element", vec![CExpr::Lit(CLit::Int(1)), dict]);
         let apply = CExpr::Apply(Box::new(CExpr::Var(debug_fn.clone())), vec![val]);
         let print = cerl_call(
             "io",
@@ -123,12 +116,12 @@ impl Lowerer<'_> {
                 CArm {
                     pat: CPat::Tuple(vec![
                         CPat::Lit(CLit::Atom("dylang_error".into())),
-                        CPat::Wildcard,          // kind
+                        CPat::Wildcard, // kind
                         CPat::Var(msg_var.clone()),
-                        CPat::Wildcard,          // module
-                        CPat::Wildcard,          // function
-                        CPat::Wildcard,          // file
-                        CPat::Wildcard,          // line
+                        CPat::Wildcard, // module
+                        CPat::Wildcard, // function
+                        CPat::Wildcard, // file
+                        CPat::Wildcard, // line
                     ]),
                     guard: None,
                     body: CExpr::Tuple(vec![

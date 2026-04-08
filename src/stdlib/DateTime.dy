@@ -1,0 +1,96 @@
+module Std.DateTime
+
+pub record Date {
+  year: Int,
+  month: Int,
+  day: Int,
+}
+
+pub record Time {
+  hour: Int,
+  minute: Int,
+  second: Int,
+  microsecond: Int,
+}
+
+pub record NaiveDateTime {
+  year: Int,
+  month: Int,
+  day: Int,
+  hour: Int,
+  minute: Int,
+  second: Int,
+  microsecond: Int,
+}
+
+pub effect Clock {
+  fun now : Unit -> NaiveDateTime
+  fun today : Unit -> Date
+  fun time_of_day : Unit -> Time
+}
+
+pub fun from_date_time : Date -> Time -> NaiveDateTime
+from_date_time d t = NaiveDateTime {
+  year: d.year,
+  month: d.month,
+  day: d.day,
+  hour: t.hour,
+  minute: t.minute,
+  second: t.second,
+  microsecond: t.microsecond,
+}
+
+pub fun new : Int -> Int -> Int -> Int -> Int -> Int -> NaiveDateTime
+new year month day hour minute second = NaiveDateTime {
+  year: year,
+  month: month,
+  day: day,
+  hour: hour,
+  minute: minute,
+  second: second,
+  microsecond: 0,
+}
+
+pub fun to_date : NaiveDateTime -> Date
+to_date dt = Date { year: dt.year, month: dt.month, day: dt.day }
+
+pub fun to_time : NaiveDateTime -> Time
+to_time dt = Time {
+  hour: dt.hour,
+  minute: dt.minute,
+  second: dt.second,
+  microsecond: dt.microsecond,
+}
+
+@external("erlang", "std_datetime_bridge", "day_of_week")
+pub fun day_of_week : Date -> Int
+
+@external("erlang", "std_datetime_bridge", "is_leap_year")
+pub fun is_leap_year : Int -> Bool
+
+@external("erlang", "std_datetime_bridge", "days_in_month")
+pub fun days_in_month : (year: Int) -> (month: Int) -> Int
+
+@external("erlang", "std_datetime_bridge", "valid_date")
+pub fun valid_date : Date -> Bool
+
+@external("erlang", "std_datetime_bridge", "add_seconds")
+pub fun add_seconds : Int -> NaiveDateTime -> NaiveDateTime
+
+@external("erlang", "std_datetime_bridge", "diff_seconds")
+pub fun diff_seconds : NaiveDateTime -> NaiveDateTime -> Int
+
+@external("erlang", "std_datetime_bridge", "now_utc")
+fun now_utc : Unit -> NaiveDateTime
+
+@external("erlang", "std_datetime_bridge", "today_utc")
+fun today_utc : Unit -> Date
+
+@external("erlang", "std_datetime_bridge", "time_of_day_utc")
+fun time_of_day_utc : Unit -> Time
+
+pub handler system_clock for Clock {
+  now () = resume now_utc ()
+  today () = resume today_utc ()
+  time_of_day () = resume time_of_day_utc ()
+}

@@ -10,8 +10,7 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
     if release {
         // --release: use cached build if still valid, otherwise rebuild
         if let Some(f) = file {
-            let sb =
-                check_script_cache(f, "release").unwrap_or_else(|| build_script(f, "release"));
+            let sb = check_script_cache(f, "release").unwrap_or_else(|| build_script(f, "release"));
             exec_erl(&sb.build_dir, &sb.stdlib_dir, &[], &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
@@ -201,7 +200,7 @@ main = "Main.dy"
         fs::write(dir.join("project.toml"), project_toml).unwrap();
         fs::write(
             dir.join("Main.dy"),
-            "module Main\n\nimport Std.IO (console)\n\npub fun main : Unit -> Unit\nmain () = {\n  println \"hello!\"\n} with console\n",
+            "module Main\n\nimport Std.IO (console)\n\n\nmain () = {\n  println \"hello!\"\n} with console\n",
         )
         .unwrap();
     }
@@ -431,7 +430,6 @@ pub fn cmd_test(filter: Option<&str>) {
         exec_erl(&pb.build_dir, &pb.stdlib_dir, &pb.extra_ebin_dirs, "_test");
     }
 }
-
 
 fn discover_test_files(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut files = Vec::new();

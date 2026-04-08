@@ -26,14 +26,27 @@ pub(super) fn lower_pat(
         Pat::Var { name, .. } => CPat::Var(core_var(name)),
         Pat::Lit { value, .. } => match value {
             Lit::String(s, kind) => {
-                let resolved = if kind.is_multiline() { process_string_escapes(s) } else { s.clone() };
-                CPat::Binary(resolved.as_bytes().iter().map(|&b| CBinSeg::Byte(b)).collect())
+                let resolved = if kind.is_multiline() {
+                    process_string_escapes(s)
+                } else {
+                    s.clone()
+                };
+                CPat::Binary(
+                    resolved
+                        .as_bytes()
+                        .iter()
+                        .map(|&b| CBinSeg::Byte(b))
+                        .collect(),
+                )
             }
             _ => CPat::Lit(lower_lit(value)),
         },
-        Pat::Tuple { elements, .. } => {
-            CPat::Tuple(elements.iter().map(|p| lower_pat(p, record_fields, constructor_atoms)).collect())
-        }
+        Pat::Tuple { elements, .. } => CPat::Tuple(
+            elements
+                .iter()
+                .map(|p| lower_pat(p, record_fields, constructor_atoms))
+                .collect(),
+        ),
         Pat::Constructor { name, args, .. } => match name.as_str() {
             "Cons" if args.len() == 2 => CPat::Cons(
                 Box::new(lower_pat(&args[0], record_fields, constructor_atoms)),
@@ -53,11 +66,19 @@ pub(super) fn lower_pat(
             _ => {
                 let atom = mangle_ctor_atom(name, constructor_atoms);
                 let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
-                elems.extend(args.iter().map(|p| lower_pat(p, record_fields, constructor_atoms)));
+                elems.extend(
+                    args.iter()
+                        .map(|p| lower_pat(p, record_fields, constructor_atoms)),
+                );
                 CPat::Tuple(elems)
             }
-        }
-        Pat::Record { name, fields, as_name, .. } => {
+        },
+        Pat::Record {
+            name,
+            fields,
+            as_name,
+            ..
+        } => {
             // Records are tagged tuples in declared field order.
             let atom = mangle_ctor_atom(name, constructor_atoms);
             let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
@@ -107,19 +128,22 @@ pub(super) fn lower_pat(
             }
             CPat::Tuple(elems)
         }
-        Pat::StringPrefix {
-            prefix, rest, ..
-        } => {
+        Pat::StringPrefix { prefix, rest, .. } => {
             // "abc" <> rest  =>  #{#<97>(...),#<98>(...),#<99>(...),#<Rest>('all',8,'binary',...)}#
-            let mut segs: Vec<CBinSeg<CPat>> = prefix.as_bytes().iter().map(|&b| CBinSeg::Byte(b)).collect();
+            let mut segs: Vec<CBinSeg<CPat>> = prefix
+                .as_bytes()
+                .iter()
+                .map(|&b| CBinSeg::Byte(b))
+                .collect();
             let tail = lower_pat(rest, record_fields, constructor_atoms);
             segs.push(CBinSeg::BinaryAll(tail));
             CPat::Binary(segs)
         }
         Pat::BitStringPat { segments, .. } => {
-            let segs = segments.iter().map(|seg| {
-                lower_bit_segment_pat(seg, record_fields, constructor_atoms)
-            }).collect();
+            let segs = segments
+                .iter()
+                .map(|seg| lower_bit_segment_pat(seg, record_fields, constructor_atoms))
+                .collect();
             CPat::Binary(segs)
         }
         Pat::ListPat { .. } | Pat::ConsPat { .. } | Pat::Or { .. } => {
@@ -133,7 +157,9 @@ fn lower_bit_segment_pat(
     record_fields: &std::collections::HashMap<String, Vec<String>>,
     constructor_atoms: &std::collections::HashMap<String, String>,
 ) -> CBinSeg<CPat> {
-    use super::util::{resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size};
+    use super::util::{
+        resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size,
+    };
     use crate::ast::BitSegSpec;
 
     let is_binary = seg.specs.contains(&BitSegSpec::Binary);
@@ -148,5 +174,11 @@ fn lower_bit_segment_pat(
     let size = seg.size.as_ref().map(|s| super::lower_size_expr(s));
     let size_expr = resolve_bit_segment_size(size, &type_name, default_size);
 
-    CBinSeg::Segment { value: pat, size: size_expr, unit, type_name, flags }
+    CBinSeg::Segment {
+        value: pat,
+        size: size_expr,
+        unit,
+        type_name,
+        flags,
+    }
 }

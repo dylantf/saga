@@ -87,12 +87,23 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
     ) -> CExpr {
         if let Some((module, func_name, head, args)) = super::util::collect_qualified_call(expr) {
-            return self.lower_qualified_call(module, func_name, head, &args, return_k, Some(&expr.span));
+            return self.lower_qualified_call(
+                module,
+                func_name,
+                head,
+                &args,
+                return_k,
+                Some(&expr.span),
+            );
         }
         if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
-            if let Some(call) =
-                self.lower_resolved_fun_call(func_name, head_expr, &args, return_k.clone(), Some(&expr.span))
-            {
+            if let Some(call) = self.lower_resolved_fun_call(
+                func_name,
+                head_expr,
+                &args,
+                return_k.clone(),
+                Some(&expr.span),
+            ) {
                 return call;
             }
             if let Some(call) = self.lower_effectful_var_call(func_name, &args, return_k) {
@@ -216,7 +227,12 @@ impl<'a> Lowerer<'a> {
 
     /// Build the continuation representing the rest of a K-threaded block after
     /// the current statement, optionally destructuring the result through `pat`.
-    fn lower_rest_block_with_k_k(&mut self, pat: Option<&Pat>, rest: &[Stmt], k_var: &str) -> CExpr {
+    fn lower_rest_block_with_k_k(
+        &mut self,
+        pat: Option<&Pat>,
+        rest: &[Stmt],
+        k_var: &str,
+    ) -> CExpr {
         let rest_ce = self.lower_block_with_k(rest, k_var);
         let (k_param, rest_ce) = match pat {
             Some(p) => self.destructure_pat(p, rest_ce),
@@ -630,7 +646,10 @@ impl<'a> Lowerer<'a> {
                     }
                     let body = clauses[0].2;
                     let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
-                        self.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())
+                        self.lower_terminal_effectful_expr_with_return_k(
+                            body,
+                            effect_return_k.clone(),
+                        )
                     } else {
                         self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
                     };
@@ -675,19 +694,18 @@ impl<'a> Lowerer<'a> {
                                 )
                             };
                             let guard_ce = guard.as_ref().map(|g| self.lower_expr(g));
-                            let body_ce = if has_effects
-                                && !matches!(body.kind, ExprKind::Block { .. })
-                            {
-                                self.lower_terminal_effectful_expr_with_return_k(
-                                    body,
-                                    effect_return_k.clone(),
-                                )
-                            } else {
-                                self.lower_expr_with_installed_return_k(
-                                    body,
-                                    effect_return_k.clone(),
-                                )
-                            };
+                            let body_ce =
+                                if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
+                                    self.lower_terminal_effectful_expr_with_return_k(
+                                        body,
+                                        effect_return_k.clone(),
+                                    )
+                                } else {
+                                    self.lower_expr_with_installed_return_k(
+                                        body,
+                                        effect_return_k.clone(),
+                                    )
+                                };
                             CArm {
                                 pat,
                                 guard: guard_ce,
@@ -772,8 +790,7 @@ impl<'a> Lowerer<'a> {
                             Stmt::Expr(e) => (None, e),
                             Stmt::LetFun { .. } => unreachable!(),
                         };
-                        let rest_k =
-                            self.lower_rest_block_k_with_return_k(pat_opt, rest, return_k);
+                        let rest_k = self.lower_rest_block_k_with_return_k(pat_opt, rest, return_k);
                         return self.lower_expr_with_call_return_k(value_expr, Some(rest_k));
                     }
                 }

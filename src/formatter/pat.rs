@@ -1,7 +1,7 @@
-use crate::ast::*;
-use crate::docs;
 use super::Doc;
 use super::helpers::format_lit;
+use crate::ast::*;
+use crate::docs;
 
 pub fn format_pat(pat: &Pat) -> Doc {
     match pat {
@@ -20,22 +20,33 @@ pub fn format_pat(pat: &Pat) -> Doc {
                 d
             }
         }
-        Pat::Record { name, fields, rest, as_name, .. } => {
+        Pat::Record {
+            name,
+            fields,
+            rest,
+            as_name,
+            ..
+        } => {
             let mut d = if fields.is_empty() && *rest {
                 Doc::text(format!("{} {{ .. }}", name))
             } else if fields.is_empty() {
                 Doc::text(format!("{} {{}}", name))
             } else {
-                let mut parts: Vec<Doc> = fields.iter().map(|(fname, alias)| {
-                    match alias {
+                let mut parts: Vec<Doc> = fields
+                    .iter()
+                    .map(|(fname, alias)| match alias {
                         Some(p) => docs![Doc::text(format!("{}: ", fname)), format_pat(p)],
                         None => Doc::text(fname),
-                    }
-                }).collect();
+                    })
+                    .collect();
                 if *rest {
                     parts.push(Doc::text(".."));
                 }
-                docs![Doc::text(format!("{} {{ ", name)), Doc::join(Doc::text(", "), parts), Doc::text(" }")]
+                docs![
+                    Doc::text(format!("{} {{ ", name)),
+                    Doc::join(Doc::text(", "), parts),
+                    Doc::text(" }")
+                ]
             };
             if let Some(a) = as_name {
                 d = d.append(Doc::text(format!(" as {}", a)));
@@ -43,20 +54,29 @@ pub fn format_pat(pat: &Pat) -> Doc {
             d
         }
         Pat::AnonRecord { fields, rest, .. } => {
-            let mut parts: Vec<Doc> = fields.iter().map(|(fname, alias)| {
-                match alias {
+            let mut parts: Vec<Doc> = fields
+                .iter()
+                .map(|(fname, alias)| match alias {
                     Some(p) => docs![Doc::text(format!("{}: ", fname)), format_pat(p)],
                     None => Doc::text(fname),
-                }
-            }).collect();
+                })
+                .collect();
             if *rest {
                 parts.push(Doc::text(".."));
             }
-            docs![Doc::text("{ "), Doc::join(Doc::text(", "), parts), Doc::text(" }")]
+            docs![
+                Doc::text("{ "),
+                Doc::join(Doc::text(", "), parts),
+                Doc::text(" }")
+            ]
         }
         Pat::Tuple { elements, .. } => {
             let elem_docs: Vec<Doc> = elements.iter().map(format_pat).collect();
-            docs![Doc::text("("), Doc::join(Doc::text(", "), elem_docs), Doc::text(")")]
+            docs![
+                Doc::text("("),
+                Doc::join(Doc::text(", "), elem_docs),
+                Doc::text(")")
+            ]
         }
         Pat::StringPrefix { prefix, rest, .. } => {
             docs![Doc::text(format!("\"{}\" <> ", prefix)), format_pat(rest)]
@@ -66,7 +86,11 @@ pub fn format_pat(pat: &Pat) -> Doc {
                 Doc::text("<<>>")
             } else {
                 let seg_docs: Vec<Doc> = segments.iter().map(format_bit_segment_pat).collect();
-                docs![Doc::text("<<"), Doc::join(Doc::text(", "), seg_docs), Doc::text(">>")]
+                docs![
+                    Doc::text("<<"),
+                    Doc::join(Doc::text(", "), seg_docs),
+                    Doc::text(">>")
+                ]
             }
         }
         Pat::ListPat { elements, .. } => {
@@ -74,7 +98,11 @@ pub fn format_pat(pat: &Pat) -> Doc {
                 Doc::text("[]")
             } else {
                 let elem_docs: Vec<Doc> = elements.iter().map(format_pat).collect();
-                docs![Doc::text("["), Doc::join(Doc::text(", "), elem_docs), Doc::text("]")]
+                docs![
+                    Doc::text("["),
+                    Doc::join(Doc::text(", "), elem_docs),
+                    Doc::text("]")
+                ]
             }
         }
         Pat::ConsPat { head, tail, .. } => {
@@ -110,24 +138,32 @@ pub fn format_pat_atom(pat: &Pat) -> Doc {
 fn format_bit_segment_pat(seg: &BitSegment<Pat>) -> Doc {
     let mut d = format_pat(&seg.value);
     if let Some(size) = &seg.size {
-        d = d.append(Doc::text(":")).append(super::expr::format_expr(size));
+        d = d
+            .append(Doc::text(":"))
+            .append(super::expr::format_expr(size));
     }
     if !seg.specs.is_empty() {
-        d = d.append(Doc::text("/")).append(Doc::text(format_bit_specs(&seg.specs)));
+        d = d
+            .append(Doc::text("/"))
+            .append(Doc::text(format_bit_specs(&seg.specs)));
     }
     d
 }
 
 pub fn format_bit_specs(specs: &[BitSegSpec]) -> String {
-    specs.iter().map(|s| match s {
-        BitSegSpec::Integer => "integer",
-        BitSegSpec::Float => "float",
-        BitSegSpec::Binary => "binary",
-        BitSegSpec::Utf8 => "utf8",
-        BitSegSpec::Big => "big",
-        BitSegSpec::Little => "little",
-        BitSegSpec::Native => "native",
-        BitSegSpec::Signed => "signed",
-        BitSegSpec::Unsigned => "unsigned",
-    }).collect::<Vec<_>>().join("-")
+    specs
+        .iter()
+        .map(|s| match s {
+            BitSegSpec::Integer => "integer",
+            BitSegSpec::Float => "float",
+            BitSegSpec::Binary => "binary",
+            BitSegSpec::Utf8 => "utf8",
+            BitSegSpec::Big => "big",
+            BitSegSpec::Little => "little",
+            BitSegSpec::Native => "native",
+            BitSegSpec::Signed => "signed",
+            BitSegSpec::Unsigned => "unsigned",
+        })
+        .collect::<Vec<_>>()
+        .join("-")
 }

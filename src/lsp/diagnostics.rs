@@ -12,7 +12,11 @@ pub struct CheckSnapshot {
     pub source: String,
 }
 
-fn tc_to_lsp_diagnostic(line_index: &LineIndex, source: &str, d: &typechecker::Diagnostic) -> Diagnostic {
+fn tc_to_lsp_diagnostic(
+    line_index: &LineIndex,
+    source: &str,
+    d: &typechecker::Diagnostic,
+) -> Diagnostic {
     let start_offset = d.span.map(|s| s.start).unwrap_or(0);
     let end_offset = d.span.map(|s| s.end).unwrap_or(1);
     let (start_line, start_col) = line_index.offset_to_line_col(start_offset, source);
@@ -32,7 +36,12 @@ fn tc_to_lsp_diagnostic(line_index: &LineIndex, source: &str, d: &typechecker::D
     }
 }
 
-fn make_diagnostic(line_index: &LineIndex, source: &str, message: String, offset: usize) -> Diagnostic {
+fn make_diagnostic(
+    line_index: &LineIndex,
+    source: &str,
+    message: String,
+    offset: usize,
+) -> Diagnostic {
     let (line, col) = line_index.offset_to_line_col(offset, source);
     Diagnostic {
         range: Range {
@@ -69,7 +78,12 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckSnapshot {
         Ok(program) => program,
         Err(e) => {
             return CheckSnapshot {
-                diagnostics: vec![make_diagnostic(&line_index, &source, e.message, e.span.start)],
+                diagnostics: vec![make_diagnostic(
+                    &line_index,
+                    &source,
+                    e.message,
+                    e.span.start,
+                )],
                 tc_result: checker.to_result(),
                 program: None,
                 line_index,
@@ -98,11 +112,16 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckSnapshot {
     }
 
     let tc_result = checker.check_program(&mut program);
-    let mut diagnostics: Vec<Diagnostic> = derive_errors.iter()
+    let mut diagnostics: Vec<Diagnostic> = derive_errors
+        .iter()
         .map(|d| tc_to_lsp_diagnostic(&line_index, &source, d))
         .collect();
-    diagnostics.extend(tc_result.diagnostics.iter()
-        .map(|d| tc_to_lsp_diagnostic(&line_index, &source, d)));
+    diagnostics.extend(
+        tc_result
+            .diagnostics
+            .iter()
+            .map(|d| tc_to_lsp_diagnostic(&line_index, &source, d)),
+    );
 
     CheckSnapshot {
         diagnostics,

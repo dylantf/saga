@@ -178,10 +178,14 @@ pub fn format_handler_arm(arm: &crate::ast::HandlerArm) -> Doc {
         d = d.append(Doc::text(" ()"));
     } else {
         for pat in &arm.params {
-            d = d.append(Doc::text(" ")).append(super::pat::format_pat_atom(pat));
+            d = d
+                .append(Doc::text(" "))
+                .append(super::pat::format_pat_atom(pat));
         }
     }
-    d = d.append(Doc::text(" = ")).append(super::expr::format_expr(&arm.body));
+    d = d
+        .append(Doc::text(" = "))
+        .append(super::expr::format_expr(&arm.body));
     if let Some(ref finally_expr) = arm.finally_block {
         d = d
             .append(Doc::text(" finally "))
@@ -204,7 +208,9 @@ pub fn format_braced_body(items: &[Doc], dangling_trivia: &[Trivia]) -> Doc {
         .collect();
     if !comments.is_empty() {
         body = body.append(Doc::hardline());
-        body = body.append(format_trivia_dangling(&comments.iter().map(|t| (*t).clone()).collect::<Vec<_>>()));
+        body = body.append(format_trivia_dangling(
+            &comments.iter().map(|t| (*t).clone()).collect::<Vec<_>>(),
+        ));
     }
     body
 }

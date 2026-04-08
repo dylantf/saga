@@ -3,8 +3,8 @@
 //! impls are validated like any hand-written impl.
 
 use crate::ast::*;
-use crate::token::StringKind;
 use crate::token::Span;
+use crate::token::StringKind;
 use crate::typechecker::{Diagnostic, Severity};
 
 /// Expand all `deriving` clauses in a program, appending synthetic `ImplDef`
@@ -81,7 +81,14 @@ fn generate_record_derive(
 ) -> Option<Decl> {
     let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
     match bare {
-        "Show" | "Debug" => Some(derive_record_stringify(bare, if bare == "Show" { "show" } else { "debug" }, record_name, type_params, fields, span)),
+        "Show" | "Debug" => Some(derive_record_stringify(
+            bare,
+            if bare == "Show" { "show" } else { "debug" },
+            record_name,
+            type_params,
+            fields,
+            span,
+        )),
         "Eq" => Some(derive_marker_trait("Eq", record_name, type_params, span)),
         _ => None,
     }
@@ -97,7 +104,12 @@ fn derive_record_stringify(
     span: Span,
 ) -> Decl {
     let param_name = "__val".to_string();
-    let param_var = Expr::synth(span, ExprKind::Var { name: param_name.clone() });
+    let param_var = Expr::synth(
+        span,
+        ExprKind::Var {
+            name: param_name.clone(),
+        },
+    );
 
     let plain_fields: Vec<(String, TypeExpr)> = fields.iter().map(|a| a.node.clone()).collect();
     let body = build_record_debug_expr(method_name, record_name, &plain_fields, &param_var, span);
@@ -111,7 +123,9 @@ fn derive_record_stringify(
         })
         .collect();
 
-    Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
+    Decl::ImplDef {
+        trait_name_span: crate::token::Span { start: 0, end: 0 },
+        target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
         doc: vec![],
         trait_name: trait_name.into(),
@@ -123,7 +137,11 @@ fn derive_record_stringify(
         methods: vec![Annotated::bare(ImplMethod {
             name: method_name.into(),
             name_span: Span { start: 0, end: 0 },
-            params: vec![Pat::Var { id: NodeId::fresh(), name: param_name, span }],
+            params: vec![Pat::Var {
+                id: NodeId::fresh(),
+                name: param_name,
+                span,
+            }],
             body,
         })],
         span,
@@ -153,39 +171,72 @@ fn build_record_debug_expr(
         }
         prefix.push_str(field_name);
         prefix.push_str(": ");
-        parts.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(prefix.clone(), StringKind::Normal) }));
+        parts.push(Expr::synth(
+            span,
+            ExprKind::Lit {
+                value: Lit::String(prefix.clone(), StringKind::Normal),
+            },
+        ));
         prefix.clear();
 
-        let field_access = Expr::synth(span, ExprKind::FieldAccess {
-            expr: Box::new(base_expr.clone()),
-            field: field_name.clone(),
-        });
+        let field_access = Expr::synth(
+            span,
+            ExprKind::FieldAccess {
+                expr: Box::new(base_expr.clone()),
+                field: field_name.clone(),
+            },
+        );
 
         match ty {
-            TypeExpr::Record { fields: inner_fields, .. } => {
+            TypeExpr::Record {
+                fields: inner_fields,
+                ..
+            } => {
                 // Inline the anonymous record's debug output
-                parts.push(build_record_debug_expr(method_name, "", inner_fields, &field_access, span));
+                parts.push(build_record_debug_expr(
+                    method_name,
+                    "",
+                    inner_fields,
+                    &field_access,
+                    span,
+                ));
             }
             _ => {
                 // Call debug/show on the field value
-                parts.push(Expr::synth(span, ExprKind::App {
-                    func: Box::new(Expr::synth(span, ExprKind::Var { name: method_name.into() })),
-                    arg: Box::new(field_access),
-                }));
+                parts.push(Expr::synth(
+                    span,
+                    ExprKind::App {
+                        func: Box::new(Expr::synth(
+                            span,
+                            ExprKind::Var {
+                                name: method_name.into(),
+                            },
+                        )),
+                        arg: Box::new(field_access),
+                    },
+                ));
             }
         }
     }
 
-    parts.push(Expr::synth(span, ExprKind::Lit { value: Lit::String(" }".into(), StringKind::Normal) }));
+    parts.push(Expr::synth(
+        span,
+        ExprKind::Lit {
+            value: Lit::String(" }".into(), StringKind::Normal),
+        },
+    ));
 
     parts
         .into_iter()
         .reduce(|acc, part| {
-            Expr::synth(span, ExprKind::BinOp {
-                op: BinOp::Concat,
-                left: Box::new(acc),
-                right: Box::new(part),
-            })
+            Expr::synth(
+                span,
+                ExprKind::BinOp {
+                    op: BinOp::Concat,
+                    left: Box::new(acc),
+                    right: Box::new(part),
+                },
+            )
         })
         .unwrap()
 }
@@ -201,8 +252,22 @@ fn generate_derive(
     // The parser may produce qualified names (e.g. "Std.Base.Show") if written that way.
     let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
     match bare {
-        "Show" => Some(derive_stringify("Show", "show", type_name, type_params, variants, span)),
-        "Debug" => Some(derive_stringify("Debug", "debug", type_name, type_params, variants, span)),
+        "Show" => Some(derive_stringify(
+            "Show",
+            "show",
+            type_name,
+            type_params,
+            variants,
+            span,
+        )),
+        "Debug" => Some(derive_stringify(
+            "Debug",
+            "debug",
+            type_name,
+            type_params,
+            variants,
+            span,
+        )),
         "Eq" => Some(derive_marker_trait("Eq", type_name, type_params, span)),
         "Ord" => Some(derive_ord(type_name, type_params, variants, span)),
         "Enum" => Some(derive_enum(type_name, variants, span)),
@@ -359,7 +424,9 @@ fn derive_stringify(
         })
         .collect();
 
-    Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
+    Decl::ImplDef {
+        trait_name_span: crate::token::Span { start: 0, end: 0 },
+        target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
         doc: vec![],
         trait_name: trait_name.into(),
@@ -467,7 +534,10 @@ fn derive_ord(
                         .map(|(i, ann_v)| {
                             let v = &ann_v.node;
                             let wildcards: Vec<Pat> = (0..v.fields.len())
-                                .map(|_| Pat::Wildcard { id: NodeId::fresh(), span })
+                                .map(|_| Pat::Wildcard {
+                                    id: NodeId::fresh(),
+                                    span,
+                                })
                                 .collect();
                             Annotated::bare(CaseArm {
                                 pattern: Pat::Constructor {
@@ -513,7 +583,10 @@ fn derive_ord(
         );
 
         arms.push(Annotated::bare(CaseArm {
-            pattern: Pat::Wildcard { id: NodeId::fresh(), span },
+            pattern: Pat::Wildcard {
+                id: NodeId::fresh(),
+                span,
+            },
             guard: None,
             body: compare_indices,
             span,
@@ -548,7 +621,9 @@ fn derive_ord(
         })
         .collect();
 
-    Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
+    Decl::ImplDef {
+        trait_name_span: crate::token::Span { start: 0, end: 0 },
+        target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
         doc: vec![],
         trait_name: "Ord".into(),
@@ -560,7 +635,18 @@ fn derive_ord(
         methods: vec![Annotated::bare(ImplMethod {
             name: "compare".into(),
             name_span: Span { start: 0, end: 0 },
-            params: vec![Pat::Var { id: NodeId::fresh(), name: x, span }, Pat::Var { id: NodeId::fresh(), name: y, span }],
+            params: vec![
+                Pat::Var {
+                    id: NodeId::fresh(),
+                    name: x,
+                    span,
+                },
+                Pat::Var {
+                    id: NodeId::fresh(),
+                    name: y,
+                    span,
+                },
+            ],
             body,
         })],
         span,
@@ -665,7 +751,9 @@ fn derive_marker_trait(
         })
         .collect();
 
-    Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
+    Decl::ImplDef {
+        trait_name_span: crate::token::Span { start: 0, end: 0 },
+        target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
         doc: vec![],
         trait_name: trait_name.into(),
@@ -682,11 +770,7 @@ fn derive_marker_trait(
 
 /// Generate `impl Enum for T { to_enum x = case x { ... }; from_enum n = case n { ... } }`
 /// Only valid for types with all nullary constructors.
-fn derive_enum(
-    type_name: &str,
-    variants: &[Annotated<TypeConstructor>],
-    span: Span,
-) -> Decl {
+fn derive_enum(type_name: &str, variants: &[Annotated<TypeConstructor>], span: Span) -> Decl {
     for ann_v in variants {
         let v = &ann_v.node;
         if !v.fields.is_empty() {
@@ -699,48 +783,110 @@ fn derive_enum(
 
     // to_enum x = case x { Red -> 0 | Green -> 1 | Blue -> 2 }
     let to_enum_param = "__val".to_string();
-    let to_enum_body = Expr::synth(span, ExprKind::Case {
-        scrutinee: Box::new(Expr::synth(span, ExprKind::Var { name: to_enum_param.clone() })),
-        arms: variants.iter().enumerate().map(|(i, ann_v)| {
-            Annotated::bare(CaseArm {
-                pattern: Pat::Constructor { id: NodeId::fresh(), name: ann_v.node.name.clone(), args: vec![], span },
-                guard: None,
-                body: Expr::synth(span, ExprKind::Lit { value: Lit::Int((i as i64).to_string(), i as i64) }),
+    let to_enum_body = Expr::synth(
+        span,
+        ExprKind::Case {
+            scrutinee: Box::new(Expr::synth(
                 span,
-            })
-        }).collect(),
-        dangling_trivia: vec![],
-    });
+                ExprKind::Var {
+                    name: to_enum_param.clone(),
+                },
+            )),
+            arms: variants
+                .iter()
+                .enumerate()
+                .map(|(i, ann_v)| {
+                    Annotated::bare(CaseArm {
+                        pattern: Pat::Constructor {
+                            id: NodeId::fresh(),
+                            name: ann_v.node.name.clone(),
+                            args: vec![],
+                            span,
+                        },
+                        guard: None,
+                        body: Expr::synth(
+                            span,
+                            ExprKind::Lit {
+                                value: Lit::Int((i as i64).to_string(), i as i64),
+                            },
+                        ),
+                        span,
+                    })
+                })
+                .collect(),
+            dangling_trivia: vec![],
+        },
+    );
 
     // from_enum n = case n { 0 -> Red | 1 -> Green | 2 -> Blue | _ -> panic "invalid enum index" }
     let from_enum_param = "__n".to_string();
-    let mut from_enum_arms: Vec<Annotated<CaseArm>> = variants.iter().enumerate().map(|(i, ann_v)| {
-        Annotated::bare(CaseArm {
-            pattern: Pat::Lit { id: NodeId::fresh(), value: Lit::Int((i as i64).to_string(), i as i64), span },
-            guard: None,
-            body: Expr::synth(span, ExprKind::Constructor { name: ann_v.node.name.clone() }),
-            span,
+    let mut from_enum_arms: Vec<Annotated<CaseArm>> = variants
+        .iter()
+        .enumerate()
+        .map(|(i, ann_v)| {
+            Annotated::bare(CaseArm {
+                pattern: Pat::Lit {
+                    id: NodeId::fresh(),
+                    value: Lit::Int((i as i64).to_string(), i as i64),
+                    span,
+                },
+                guard: None,
+                body: Expr::synth(
+                    span,
+                    ExprKind::Constructor {
+                        name: ann_v.node.name.clone(),
+                    },
+                ),
+                span,
+            })
         })
-    }).collect();
+        .collect();
     // Wildcard arm: panic on invalid index
     from_enum_arms.push(Annotated::bare(CaseArm {
-        pattern: Pat::Wildcard { id: NodeId::fresh(), span },
+        pattern: Pat::Wildcard {
+            id: NodeId::fresh(),
+            span,
+        },
         guard: None,
-        body: Expr::synth(span, ExprKind::App {
-            func: Box::new(Expr::synth(span, ExprKind::Var { name: "panic".into() })),
-            arg: Box::new(Expr::synth(span, ExprKind::Lit {
-                value: Lit::String(format!("invalid enum index for {}", type_name), StringKind::Normal),
-            })),
-        }),
+        body: Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(Expr::synth(
+                    span,
+                    ExprKind::Var {
+                        name: "panic".into(),
+                    },
+                )),
+                arg: Box::new(Expr::synth(
+                    span,
+                    ExprKind::Lit {
+                        value: Lit::String(
+                            format!("invalid enum index for {}", type_name),
+                            StringKind::Normal,
+                        ),
+                    },
+                )),
+            },
+        ),
         span,
     }));
-    let from_enum_body = Expr::synth(span, ExprKind::Case {
-        scrutinee: Box::new(Expr::synth(span, ExprKind::Var { name: from_enum_param.clone() })),
-        arms: from_enum_arms,
-        dangling_trivia: vec![],
-    });
+    let from_enum_body = Expr::synth(
+        span,
+        ExprKind::Case {
+            scrutinee: Box::new(Expr::synth(
+                span,
+                ExprKind::Var {
+                    name: from_enum_param.clone(),
+                },
+            )),
+            arms: from_enum_arms,
+            dangling_trivia: vec![],
+        },
+    );
 
-    Decl::ImplDef { trait_name_span: crate::token::Span { start: 0, end: 0 }, target_type_span: crate::token::Span { start: 0, end: 0 },
+    Decl::ImplDef {
+        trait_name_span: crate::token::Span { start: 0, end: 0 },
+        target_type_span: crate::token::Span { start: 0, end: 0 },
         id: NodeId::fresh(),
         doc: vec![],
         trait_name: "Enum".into(),
@@ -753,13 +899,21 @@ fn derive_enum(
             Annotated::bare(ImplMethod {
                 name: "to_enum".into(),
                 name_span: Span { start: 0, end: 0 },
-                params: vec![Pat::Var { id: NodeId::fresh(), name: to_enum_param, span }],
+                params: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: to_enum_param,
+                    span,
+                }],
                 body: to_enum_body,
             }),
             Annotated::bare(ImplMethod {
                 name: "from_enum".into(),
                 name_span: Span { start: 0, end: 0 },
-                params: vec![Pat::Var { id: NodeId::fresh(), name: from_enum_param, span }],
+                params: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: from_enum_param,
+                    span,
+                }],
                 body: from_enum_body,
             }),
         ],

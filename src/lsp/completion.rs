@@ -617,8 +617,19 @@ pub fn collect_completions(
 
     // Built-in type names
     let type_names = [
-        "Int", "Float", "String", "Bool", "Unit", "List", "Maybe", "Result", "Tuple", "Pid",
-        "Dict", "Set", "BitString",
+        "Int",
+        "Float",
+        "String",
+        "Bool",
+        "Unit",
+        "List",
+        "Maybe",
+        "Result",
+        "Tuple",
+        "Pid",
+        "Dict",
+        "Set",
+        "BitString",
     ];
     for type_name in type_names {
         if !prefix.is_empty() && !type_name.to_lowercase().starts_with(&prefix_lower) {
@@ -680,7 +691,8 @@ pub fn collect_completions(
             && offset >= span.start
             && offset <= span.end
         {
-            let handled: HashSet<&str> = body.arms
+            let handled: HashSet<&str> = body
+                .arms
                 .iter()
                 .chain(recovered_arms.iter())
                 .map(|a| a.node.op_name.as_str())

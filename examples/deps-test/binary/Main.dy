@@ -17,7 +17,6 @@ fun b64_round_trip : String -> (String, String)
 @external("erlang", "argon2_bridge", "hash")
 fun argon2_hash : String -> String
 
-pub fun main : Unit -> Unit
 main () = {
   let result = add 3 4
   println (show result)

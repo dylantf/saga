@@ -396,6 +396,10 @@ fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
             include_str!("../stdlib/Time.bridge.erl"),
         ),
         (
+            "std_datetime_bridge.erl",
+            include_str!("../stdlib/DateTime.bridge.erl"),
+        ),
+        (
             "std_bitstring_bridge.erl",
             include_str!("../stdlib/BitString.bridge.erl"),
         ),

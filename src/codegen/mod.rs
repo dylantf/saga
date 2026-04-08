@@ -43,7 +43,6 @@ impl CodegenContext {
     pub fn elaborated_module(&self, name: &str) -> Option<&ast::Program> {
         self.modules.get(name).map(|m| &m.elaborated)
     }
-
 }
 
 pub fn emit_module(module_name: &str, program: &ast::Program) -> String {
@@ -90,6 +89,6 @@ pub fn emit_module_with_context(
         check_result,
         source_info,
     )
-        .lower_module(module_name, &program);
+    .lower_module(module_name, &program);
     cerl::print_module(&cmod)
 }

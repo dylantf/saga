@@ -17,8 +17,8 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
 }
 
 pub fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
-    let mut checker =
-        typechecker::Checker::with_prelude(project_root.clone()).expect("failed to initialize checker");
+    let mut checker = typechecker::Checker::with_prelude(project_root.clone())
+        .expect("failed to initialize checker");
 
     // Resolve dependencies if we have a project root with deps configured
     if let Some(root) = &project_root {

@@ -1717,15 +1717,14 @@ impl Checker {
                     })
                     .collect();
                 let tail = op.effect_row_var.as_ref().map(|(rv_name, _)| {
-                    let id =
-                        if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
-                            *id
-                        } else {
-                            let id = self.next_var;
-                            self.next_var += 1;
-                            params_list.push((rv_name.clone(), id));
-                            id
-                        };
+                    let id = if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
+                        *id
+                    } else {
+                        let id = self.next_var;
+                        self.next_var += 1;
+                        params_list.push((rv_name.clone(), id));
+                        id
+                    };
                     Box::new(Type::Var(id))
                 });
                 EffectRow {
@@ -2144,18 +2143,19 @@ impl Checker {
                     })
             })
             .collect();
-        self.handlers.insert(
-            name.into(),
-            HandlerInfo {
-                effects: canonical_effects,
-                return_type: handler_return_type,
-                needs_effects: all_handler_effs,
-                forall,
-                arm_spans,
-                where_constraints,
-                source_module: self.current_module.clone(),
-            },
-        );
+        let info = HandlerInfo {
+            effects: canonical_effects,
+            return_type: handler_return_type,
+            needs_effects: all_handler_effs,
+            forall,
+            arm_spans,
+            where_constraints,
+            source_module: self.current_module.clone(),
+        };
+        self.handlers.insert(name.into(), info.clone());
+        if let Some(module) = &self.current_module {
+            self.handlers.insert(format!("{}.{}", module, name), info);
+        }
 
         // Build Handler type from the effects this handler handles.
         // E.g. `handler h for Log` -> Con("Handler", [Con("Log", [])])

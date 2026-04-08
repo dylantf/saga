@@ -200,7 +200,12 @@ impl CExpr {
                 timeout.collect_handle_refs(out);
                 timeout_body.collect_handle_refs(out);
             }
-            CExpr::Try { expr, ok_body, catch_body, .. } => {
+            CExpr::Try {
+                expr,
+                ok_body,
+                catch_body,
+                ..
+            } => {
                 expr.collect_handle_refs(out);
                 ok_body.collect_handle_refs(out);
                 catch_body.collect_handle_refs(out);
@@ -433,7 +438,13 @@ impl Printer {
                 self.newline();
             }
 
-            CExpr::Try { expr, ok_var, ok_body, catch_vars: (class, reason, trace), catch_body } => {
+            CExpr::Try {
+                expr,
+                ok_var,
+                ok_body,
+                catch_vars: (class, reason, trace),
+                catch_body,
+            } => {
                 self.push("try");
                 self.with_indent(2, |p| {
                     p.newline();
@@ -517,13 +528,16 @@ impl Printer {
     }
 
     fn print_bin_seg_byte(&mut self, b: u8) {
-        self.push(&format!(
-            "#<{}>(8,1,'integer',['unsigned'|['big']])",
-            b
-        ));
+        self.push(&format!("#<{}>(8,1,'integer',['unsigned'|['big']])", b));
     }
 
-    fn print_segment_suffix(&mut self, size: &BinSegSize, unit: u8, type_name: &BinSegType, flags: &BinSegFlags) {
+    fn print_segment_suffix(
+        &mut self,
+        size: &BinSegSize,
+        unit: u8,
+        type_name: &BinSegType,
+        flags: &BinSegFlags,
+    ) {
         self.push(">(");
         match size {
             BinSegSize::Expr(e) => self.print_expr(e),
@@ -537,7 +551,11 @@ impl Printer {
             BinSegType::Utf8 => self.push("utf8"),
         }
         self.push("',['");
-        if flags.signed { self.push("signed") } else { self.push("unsigned") }
+        if flags.signed {
+            self.push("signed")
+        } else {
+            self.push("unsigned")
+        }
         self.push("'|['");
         match flags.endianness {
             Endianness::Big => self.push("big"),
@@ -560,7 +578,13 @@ impl Printer {
                     self.print_expr(expr);
                     self.push(">('all',8,'binary',['unsigned'|['big']])");
                 }
-                CBinSeg::Segment { value, size, unit, type_name, flags } => {
+                CBinSeg::Segment {
+                    value,
+                    size,
+                    unit,
+                    type_name,
+                    flags,
+                } => {
                     self.push("#<");
                     self.print_expr(value);
                     self.print_segment_suffix(size, *unit, type_name, flags);
@@ -583,7 +607,13 @@ impl Printer {
                     self.print_pat(pat);
                     self.push(">('all',8,'binary',['unsigned'|['big']])");
                 }
-                CBinSeg::Segment { value, size, unit, type_name, flags } => {
+                CBinSeg::Segment {
+                    value,
+                    size,
+                    unit,
+                    type_name,
+                    flags,
+                } => {
                     self.push("#<");
                     self.print_pat(value);
                     self.print_segment_suffix(size, *unit, type_name, flags);

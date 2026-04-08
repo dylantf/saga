@@ -72,9 +72,7 @@ pub(crate) fn simplify_pat(pat: &Pat, ty: Option<&Type>, ctx: &SimplifyCtx) -> S
             let bare = name.rsplit('.').next().unwrap_or(name);
             SPat::Constructor(
                 bare.to_string(),
-                args.iter()
-                    .map(|p| simplify_pat(p, None, ctx))
-                    .collect(),
+                args.iter().map(|p| simplify_pat(p, None, ctx)).collect(),
             )
         }
         Pat::Tuple { elements, .. } => {
@@ -94,12 +92,8 @@ pub(crate) fn simplify_pat(pat: &Pat, ty: Option<&Type>, ctx: &SimplifyCtx) -> S
                     .collect(),
             )
         }
-        Pat::Record { name, fields, .. } => {
-            simplify_record_pat(name, fields, ctx)
-        }
-        Pat::AnonRecord { fields, .. } => {
-            simplify_anon_record_pat(fields, ty, ctx)
-        }
+        Pat::Record { name, fields, .. } => simplify_record_pat(name, fields, ctx),
+        Pat::AnonRecord { fields, .. } => simplify_anon_record_pat(fields, ty, ctx),
         Pat::StringPrefix { .. } | Pat::BitStringPat { .. } => {
             // String prefix and bitstring patterns are non-covering (infinite domain)
             // Treat as wildcard so exhaustiveness requires a catch-all arm
@@ -113,11 +107,7 @@ pub(crate) fn simplify_pat(pat: &Pat, ty: Option<&Type>, ctx: &SimplifyCtx) -> S
 
 /// Simplify a named record pattern into a positional constructor.
 /// Looks up the record definition to get the canonical field order and types.
-fn simplify_record_pat(
-    name: &str,
-    fields: &[(String, Option<Pat>)],
-    ctx: &SimplifyCtx,
-) -> SPat {
+fn simplify_record_pat(name: &str, fields: &[(String, Option<Pat>)], ctx: &SimplifyCtx) -> SPat {
     let Some(info) = ctx.records.get(name) else {
         return SPat::Wildcard;
     };
@@ -169,14 +159,12 @@ fn simplify_anon_record_pat(
     );
     let sub_pats: Vec<SPat> = all_fields
         .iter()
-        .map(|(fname, field_ty)| {
-            match field_map.get(fname.as_str()) {
-                Some(Some(pat)) => {
-                    let resolved = ctx.sub.apply(field_ty);
-                    simplify_pat(pat, Some(&resolved), ctx)
-                }
-                _ => SPat::Wildcard,
+        .map(|(fname, field_ty)| match field_map.get(fname.as_str()) {
+            Some(Some(pat)) => {
+                let resolved = ctx.sub.apply(field_ty);
+                simplify_pat(pat, Some(&resolved), ctx)
             }
+            _ => SPat::Wildcard,
         })
         .collect();
     SPat::Constructor(ctor_name, sub_pats)

@@ -8,6 +8,10 @@ use super::{Checker, Diagnostic, EffectEntry, EffectRow, Type};
 impl Checker {
     // --- Handler inference ---
 
+    fn handler_name_matches(name: &str, expected_bare: &str) -> bool {
+        name == expected_bare || name.ends_with(&format!(".{expected_bare}"))
+    }
+
     fn push_unique_effect_entry(entries: &mut Vec<EffectEntry>, entry: EffectEntry) {
         if !entries.iter().any(|seen| seen.same_instantiation(&entry)) {
             entries.push(entry);
@@ -29,7 +33,11 @@ impl Checker {
                 let Some(info) = self.handlers.get(&ann.node.name) else {
                     continue;
                 };
-                if info.effects.iter().any(|effect| used_families.contains(effect)) {
+                if info
+                    .effects
+                    .iter()
+                    .any(|effect| used_families.contains(effect))
+                {
                     for need in &info.needs_effects.effects {
                         if used_families.insert(need.name.clone()) {
                             changed = true;
@@ -101,18 +109,22 @@ impl Checker {
 
         // Check if this with-expression uses ets_ref or beam_vec, which require ETS table init.
         match handler {
-            ast::Handler::Named(name, _) if name == "ets_ref" => {
+            ast::Handler::Named(name, _)
+                if Self::handler_name_matches(name, "ets_ref") =>
+            {
                 self.needs_ets_ref_table = true;
             }
-            ast::Handler::Named(name, _) if name == "beam_vec" => {
+            ast::Handler::Named(name, _)
+                if Self::handler_name_matches(name, "beam_vec") =>
+            {
                 self.needs_vec_table = true;
             }
             ast::Handler::Inline { named, .. } => {
                 for ann in named {
-                    if ann.node.name == "ets_ref" {
+                    if Self::handler_name_matches(&ann.node.name, "ets_ref") {
                         self.needs_ets_ref_table = true;
                     }
-                    if ann.node.name == "beam_vec" {
+                    if Self::handler_name_matches(&ann.node.name, "beam_vec") {
                         self.needs_vec_table = true;
                     }
                 }
@@ -335,7 +347,11 @@ impl Checker {
                     }
                 }
                 for entry in &named_handler_entries {
-                    if inner_effs.effects.iter().any(|inner| inner.same_instantiation(entry)) {
+                    if inner_effs
+                        .effects
+                        .iter()
+                        .any(|inner| inner.same_instantiation(entry))
+                    {
                         used_handled_families.insert(entry.name.clone());
                     }
                 }
@@ -431,7 +447,11 @@ impl Checker {
                     let raw_ret_effs = self.restore_effects(saved_effs);
                     let ret_effs = self.sub.apply_effect_row(&raw_ret_effs);
                     for entry in &named_handler_entries {
-                        if ret_effs.effects.iter().any(|eff| eff.same_instantiation(entry)) {
+                        if ret_effs
+                            .effects
+                            .iter()
+                            .any(|eff| eff.same_instantiation(entry))
+                        {
                             used_handled_families.insert(entry.name.clone());
                         }
                     }
@@ -490,7 +510,11 @@ impl Checker {
                     let raw_arm_effs = self.restore_effects(saved_effs);
                     let arm_effs = self.sub.apply_effect_row(&raw_arm_effs);
                     for entry in &named_handler_entries {
-                        if arm_effs.effects.iter().any(|eff| eff.same_instantiation(entry)) {
+                        if arm_effs
+                            .effects
+                            .iter()
+                            .any(|eff| eff.same_instantiation(entry))
+                        {
                             used_handled_families.insert(entry.name.clone());
                         }
                     }

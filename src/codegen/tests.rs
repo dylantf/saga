@@ -36,13 +36,7 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    emit_module_with_context(
-        "_script",
-        &elaborated,
-        &ctx,
-        Some(&result),
-        source_file,
-    )
+    emit_module_with_context("_script", &elaborated, &ctx, Some(&result), source_file)
 }
 
 /// Assert that `emit(src)` contains `needle` as a substring.
@@ -230,7 +224,10 @@ fn lit_int() {
 #[test]
 fn lit_string() {
     // Strings are emitted as binaries: #{#<byte>(8,1,'integer',['unsigned'|['big']]),..}#
-    assert_contains(r#"main () = "hello""#, "#{#<104>(8,1,'integer',['unsigned'|['big']])");
+    assert_contains(
+        r#"main () = "hello""#,
+        "#{#<104>(8,1,'integer',['unsigned'|['big']])",
+    );
 }
 
 #[test]
@@ -253,7 +250,10 @@ fn binop_add() {
 #[test]
 fn binop_concat() {
     // <> emits binary concat: #{#<A>('all',8,'binary',...),#<B>('all',8,'binary',...)}#
-    assert_contains(r#"main () = "a" <> "b""#, "('all',8,'binary',['unsigned'|['big']])");
+    assert_contains(
+        r#"main () = "a" <> "b""#,
+        "('all',8,'binary',['unsigned'|['big']])",
+    );
 }
 
 // --- If/else ---
@@ -911,17 +911,12 @@ fn todo_emits_structured_error_term() {
         out.contains("'dylang_error'"),
         "Expected dylang_error atom in:\n{out}"
     );
-    assert!(
-        out.contains("'todo'"),
-        "Expected todo kind atom in:\n{out}"
-    );
+    assert!(out.contains("'todo'"), "Expected todo kind atom in:\n{out}");
 }
 
 #[test]
 fn let_assert_emits_structured_error_term() {
-    let out = emit_full(
-        "main () = {\n  let assert 1 = 2\n  1\n}",
-    );
+    let out = emit_full("main () = {\n  let assert 1 = 2\n  1\n}");
     assert!(
         out.contains("'dylang_error'"),
         "Expected dylang_error atom in:\n{out}"

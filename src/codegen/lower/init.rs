@@ -21,7 +21,8 @@ pub fn extract_external(annotations: &[ast::Annotation]) -> Option<(String, Stri
         .find(|a| a.name == "external")
         .and_then(|a| {
             if a.args.len() >= 3
-                && let (ast::Lit::String(module, _), ast::Lit::String(func, _)) = (&a.args[1], &a.args[2])
+                && let (ast::Lit::String(module, _), ast::Lit::String(func, _)) =
+                    (&a.args[1], &a.args[2])
             {
                 return Some((module.clone(), func.clone()));
             }
@@ -37,11 +38,7 @@ pub(super) struct PendingAnnotation {
 }
 
 impl<'a> Lowerer<'a> {
-    fn register_imported_module_local_funs(
-        &mut self,
-        module_name: &str,
-        program: &ast::Program,
-    ) {
+    fn register_imported_module_local_funs(&mut self, module_name: &str, program: &ast::Program) {
         let source_module_name = program
             .iter()
             .find_map(|decl| {
@@ -77,10 +74,8 @@ impl<'a> Lowerer<'a> {
                 for (i, (_param_name, type_expr)) in params.iter().enumerate() {
                     let effs = collect_type_effects(type_expr);
                     if !effs.is_empty() {
-                        let mut sorted: Vec<String> = effs
-                            .into_iter()
-                            .map(|e| canonicalize_effect(&e))
-                            .collect();
+                        let mut sorted: Vec<String> =
+                            effs.into_iter().map(|e| canonicalize_effect(&e)).collect();
                         sorted.sort();
                         param_effs.insert(i, sorted);
                     }
@@ -145,13 +140,16 @@ impl<'a> Lowerer<'a> {
         // Imported effects: "Assert" -> "Std.Test.Assert" (from codegen_info)
         // Use source module name (e.g. "Std.Test") for canonical effect names so they
         // match the typechecker's naming (which also uses source module names).
-        let source_module_name = program.iter().find_map(|d| {
-            if let Decl::ModuleDecl { path, .. } = d {
-                Some(path.join("."))
-            } else {
-                None
-            }
-        }).unwrap_or_else(|| module_name.to_string());
+        let source_module_name = program
+            .iter()
+            .find_map(|d| {
+                if let Decl::ModuleDecl { path, .. } = d {
+                    Some(path.join("."))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| module_name.to_string());
         let mut effect_canonical: HashMap<String, String> = HashMap::new();
         for decl in program {
             if let Decl::EffectDef { name, .. } = decl {
@@ -240,16 +238,13 @@ impl<'a> Lowerer<'a> {
                     self.effect_defs
                         .insert(canonical_effect, EffectInfo { ops });
                 }
-                Decl::HandlerDef {
-                    name,
-                    body,
-                    ..
-                } => {
+                Decl::HandlerDef { name, body, .. } => {
                     let canonical_handler = format!("{}.{}", source_module_name, name);
                     self.handler_defs.insert(
                         canonical_handler,
                         HandlerInfo {
-                            effects: body.effects
+                            effects: body
+                                .effects
                                 .iter()
                                 .map(|e| canonicalize_effect(&e.name))
                                 .collect(),
@@ -275,7 +270,10 @@ impl<'a> Lowerer<'a> {
                         let real_arity = params.len();
                         let mut sorted_effects = Vec::new();
                         if !effects.is_empty() {
-                            sorted_effects = effects.iter().map(|e| canonicalize_effect(&e.name)).collect();
+                            sorted_effects = effects
+                                .iter()
+                                .map(|e| canonicalize_effect(&e.name))
+                                .collect();
                             sorted_effects.sort();
                         }
                         let expanded_arity = self.expanded_arity(real_arity, &sorted_effects);
@@ -289,7 +287,8 @@ impl<'a> Lowerer<'a> {
                         );
                     } else {
                         // Regular function signature
-                        let mut sorted_effects: Vec<String> = effects.iter()
+                        let mut sorted_effects: Vec<String> = effects
+                            .iter()
                             .map(|e| canonicalize_effect(&e.name))
                             .collect();
                         sorted_effects.sort();
@@ -297,10 +296,8 @@ impl<'a> Lowerer<'a> {
                         for (i, (_param_name, type_expr)) in params.iter().enumerate() {
                             let effs = collect_type_effects(type_expr);
                             if !effs.is_empty() {
-                                let mut sorted: Vec<String> = effs
-                                    .into_iter()
-                                    .map(|e| canonicalize_effect(&e))
-                                    .collect();
+                                let mut sorted: Vec<String> =
+                                    effs.into_iter().map(|e| canonicalize_effect(&e)).collect();
                                 sorted.sort();
                                 param_effs.insert(i, sorted);
                             }
@@ -314,9 +311,7 @@ impl<'a> Lowerer<'a> {
                         );
                     }
                 }
-                Decl::Val {
-                    public, name, ..
-                } => {
+                Decl::Val { public, name, .. } => {
                     if *public {
                         self.pub_names.insert(name.clone());
                     }
@@ -370,10 +365,8 @@ impl<'a> Lowerer<'a> {
                     let effects = self.canonicalize_effects(effects);
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
                     let expanded_arity =
-                        self.expanded_arity(base_arity, &effects)
-                            + dict_param_count;
-                    let param_absorbed =
-                        util::param_absorbed_effects_from_type(&scheme.ty);
+                        self.expanded_arity(base_arity, &effects) + dict_param_count;
+                    let param_absorbed = util::param_absorbed_effects_from_type(&scheme.ty);
                     let param_absorbed: HashMap<usize, Vec<String>> = param_absorbed
                         .into_iter()
                         .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
@@ -394,16 +387,16 @@ impl<'a> Lowerer<'a> {
                     self.register_imported_module_local_funs(mod_name, elab_program);
                     for decl in elab_program {
                         match decl {
-                            Decl::HandlerDef {
-                                name,
-                                body,
-                                ..
-                            } => {
+                            Decl::HandlerDef { name, body, .. } => {
                                 let canonical_handler = canonicalize_handler(name);
                                 self.handler_defs
                                     .entry(canonical_handler)
                                     .or_insert(HandlerInfo {
-                                        effects: body.effects.iter().map(|e| canonicalize_effect(&e.name)).collect(),
+                                        effects: body
+                                            .effects
+                                            .iter()
+                                            .map(|e| canonicalize_effect(&e.name))
+                                            .collect(),
                                         arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                                         return_clause: body.return_clause.clone(),
                                         source_module: Some(mod_name.clone()),
@@ -491,9 +484,7 @@ impl<'a> Lowerer<'a> {
             let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
             let effects = self.canonicalize_effects(effects);
             let dict_param_count = util::dict_param_count(&scheme.constraints);
-            let expanded_arity =
-                self.expanded_arity(base_arity, &effects)
-                    + dict_param_count;
+            let expanded_arity = self.expanded_arity(base_arity, &effects) + dict_param_count;
             let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
             // Canonicalize absorbed effect names too
             let param_effs: HashMap<usize, Vec<String>> = param_effs
@@ -541,12 +532,9 @@ impl<'a> Lowerer<'a> {
             self.register_imported_module_local_funs(&module_name, &elab_program);
             for edecl in &elab_program {
                 match edecl {
-                    Decl::HandlerDef {
-                        name,
-                        body,
-                        ..
-                    } => {
-                        let canonical_effects: Vec<String> = body.effects
+                    Decl::HandlerDef { name, body, .. } => {
+                        let canonical_effects: Vec<String> = body
+                            .effects
                             .iter()
                             .map(|e| self.canonicalize_effect(&e.name))
                             .collect();

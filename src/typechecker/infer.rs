@@ -194,7 +194,11 @@ impl Checker {
                                 collect_declared_entries_applied(checker, ret, out);
                             }
                         }
-                        collect_declared_entries_applied(self, param_shallow, &mut absorbed_entries);
+                        collect_declared_entries_applied(
+                            self,
+                            param_shallow,
+                            &mut absorbed_entries,
+                        );
                         let normalized_effect_row = self.sub.apply_effect_row(&self.effect_row);
                         self.effect_row = normalized_effect_row.subtract_entries(&absorbed_entries);
                     }
@@ -349,9 +353,7 @@ impl Checker {
             }
 
             ExprKind::EffectCall {
-                name,
-                qualifier,
-                ..
+                name, qualifier, ..
             } => {
                 let op_sig = self.lookup_effect_op(name, qualifier.as_deref(), span)?;
 
@@ -591,7 +593,10 @@ impl Checker {
                     } else {
                         // Default or explicit /integer: check for string literal sugar
                         match &seg.value.kind {
-                            ExprKind::Lit { value: Lit::String(..), .. } => Type::string(),
+                            ExprKind::Lit {
+                                value: Lit::String(..),
+                                ..
+                            } => Type::string(),
                             _ => Type::int(),
                         }
                     };
@@ -769,8 +774,9 @@ impl Checker {
         }
         match &expr.kind {
             ExprKind::Var { name } => self.handlers.get(name).cloned(),
-            ExprKind::App { .. } => applied_fun_name(expr)
-                .and_then(|name| self.handler_funs.get(name).cloned()),
+            ExprKind::App { .. } => {
+                applied_fun_name(expr).and_then(|name| self.handler_funs.get(name).cloned())
+            }
             ExprKind::If {
                 then_branch,
                 else_branch,
@@ -1001,7 +1007,6 @@ impl Checker {
                     continue;
                 }
 
-
                 Stmt::Expr(expr) => {
                     match self.infer_expr(expr) {
                         Ok(ty) => {
@@ -1089,8 +1094,13 @@ impl Checker {
                 arity += 1;
                 t = ret;
             }
-            self.let_dict_params
-                .insert((name.to_string(), pat_id), crate::typechecker::result::LetDictInfo { params: dict_params, value_arity: arity });
+            self.let_dict_params.insert(
+                (name.to_string(), pat_id),
+                crate::typechecker::result::LetDictInfo {
+                    params: dict_params,
+                    value_arity: arity,
+                },
+            );
         }
 
         self.env.insert_with_def(name.to_string(), scheme, pat_id);

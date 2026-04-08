@@ -37,7 +37,9 @@ pub struct FormatterSection {
 
 impl Default for FormatterSection {
     fn default() -> Self {
-        FormatterSection { width: Self::default_width() }
+        FormatterSection {
+            width: Self::default_width(),
+        }
     }
 }
 
@@ -488,7 +490,15 @@ fn install_deps_recursive(
 
     for (dep_name, dep_entry) in &deps {
         if dep_entry.is_hex() {
-            install_hex_dep_recursive(project_root, dep_name, dep_entry, lockfile, installing, &indent, depth)?;
+            install_hex_dep_recursive(
+                project_root,
+                dep_name,
+                dep_entry,
+                lockfile,
+                installing,
+                &indent,
+                depth,
+            )?;
             continue;
         }
 
@@ -522,7 +532,11 @@ fn install_deps_recursive(
 
             eprintln!(
                 "{}{} {} ({} @ {})...",
-                indent, dim("Fetching"), dep_name, url, ref_label
+                indent,
+                dim("Fetching"),
+                dep_name,
+                url,
+                ref_label
             );
 
             let target_dir = crate::hex::package_dir(project_root, dep_name);
@@ -537,7 +551,13 @@ fn install_deps_recursive(
             }
 
             let short_commit = &commit[..commit.len().min(12)];
-            eprintln!("{}{} {} -> {}", indent, cyan("Resolved"), dep_name, short_commit);
+            eprintln!(
+                "{}{} {} -> {}",
+                indent,
+                cyan("Resolved"),
+                dep_name,
+                short_commit
+            );
 
             lockfile.deps.insert(
                 dep_name.clone(),
@@ -618,7 +638,13 @@ fn install_hex_dep_recursive(
         return Ok(());
     }
 
-    eprintln!("{}{} {} (hex @ {})...", indent, dim("Fetching"), dep_name, version);
+    eprintln!(
+        "{}{} {} (hex @ {})...",
+        indent,
+        dim("Fetching"),
+        dep_name,
+        version
+    );
 
     let (_ebin_dir, release) = crate::hex::install_package(project_root, dep_name, version)?;
 
@@ -712,7 +738,10 @@ fn resolve_hex_requirement(name: &str, requirement: &str) -> Result<String, Stri
 /// Find the latest version compatible with a ~> requirement.
 /// `~> 1.0` means >= 1.0.0, < 2.0.0
 /// `~> 1.4.2` means >= 1.4.2, < 1.5.0
-fn find_latest_compatible(releases: &[crate::hex::HexPackageRelease], base: &str) -> Option<String> {
+fn find_latest_compatible(
+    releases: &[crate::hex::HexPackageRelease],
+    base: &str,
+) -> Option<String> {
     let base_parts: Vec<u64> = base.split('.').filter_map(|s| s.parse().ok()).collect();
     if base_parts.is_empty() {
         return None;
@@ -789,8 +818,7 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
         for (name, new_entry) in &lockfile.deps {
             if let Some(old_entry) = existing.deps.get(name) {
                 // Compare git commits
-                if let (Some(old_commit), Some(new_commit)) =
-                    (&old_entry.commit, &new_entry.commit)
+                if let (Some(old_commit), Some(new_commit)) = (&old_entry.commit, &new_entry.commit)
                     && old_commit != new_commit
                 {
                     eprintln!(
@@ -802,14 +830,15 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
                     );
                 }
                 // Compare hex versions
-                if let (Some(old_ver), Some(new_ver)) =
-                    (&old_entry.version, &new_entry.version)
+                if let (Some(old_ver), Some(new_ver)) = (&old_entry.version, &new_entry.version)
                     && old_ver != new_ver
                 {
                     eprintln!(
                         "  {} {} ({} -> {})",
                         cyan("Updated"),
-                        name, old_ver, new_ver
+                        name,
+                        old_ver,
+                        new_ver
                     );
                 }
             }
@@ -855,7 +884,12 @@ fn resolve_deps_recursive(
             ));
         }
 
-        eprintln!("{}{} dependency '{}'...", indent, dim("Resolving"), dep_name);
+        eprintln!(
+            "{}{} dependency '{}'...",
+            indent,
+            dim("Resolving"),
+            dep_name
+        );
 
         let dep_config = ProjectConfig::load(&dep_path);
         let lib = dep_config.library.ok_or_else(|| {
@@ -973,10 +1007,7 @@ pub fn resolve_deps(
 }
 
 /// Collect the root paths of all direct dependencies (non-Hex only).
-pub fn dep_root_paths(
-    project_root: &Path,
-    deps: &HashMap<String, DepEntry>,
-) -> Vec<PathBuf> {
+pub fn dep_root_paths(project_root: &Path, deps: &HashMap<String, DepEntry>) -> Vec<PathBuf> {
     let lockfile = Lockfile::load(project_root);
     let mut roots = Vec::new();
     for (dep_name, dep_entry) in deps {
@@ -993,7 +1024,10 @@ pub fn dep_root_paths(
 
 /// Collect ebin directories for all dependencies.
 /// Scans deps/ for Hex packages, and resolves git/path deps from lockfile.
-pub fn extra_ebin_dirs(project_root: &Path, deps: Option<&HashMap<String, DepEntry>>) -> Vec<PathBuf> {
+pub fn extra_ebin_dirs(
+    project_root: &Path,
+    deps: Option<&HashMap<String, DepEntry>>,
+) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
     // Scan deps/ directory (Hex + git deps)

@@ -1,5 +1,5 @@
-mod doc;
 mod decl;
+mod doc;
 mod expr;
 mod helpers;
 mod pat;

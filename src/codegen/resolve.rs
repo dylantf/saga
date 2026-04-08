@@ -527,9 +527,7 @@ pub fn resolve_names(
                 }
 
                 // Register unqualified form only if exposed and not shadowed by local
-                if is_exposed(name)
-                    && !local_funs.contains_key(name)
-                {
+                if is_exposed(name) && !local_funs.contains_key(name) {
                     scope.entry(name.clone()).or_insert(scoped);
                 }
             }
@@ -617,12 +615,8 @@ fn resolve_handler_body_names(
     map: &mut ResolutionMap,
 ) {
     for arm in &body.arms {
-        let param_names: HashSet<String> = arm
-            .node
-            .params
-            .iter()
-            .flat_map(collect_pat_vars)
-            .collect();
+        let param_names: HashSet<String> =
+            arm.node.params.iter().flat_map(collect_pat_vars).collect();
         scope.push(param_names);
         resolve_expr(&arm.node.body, scope, map);
         if let Some(ref fb) = arm.node.finally_block {
@@ -760,12 +754,8 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
                     ..
                 } => {
                     for arm in arms {
-                        let param_names: HashSet<String> = arm
-                            .node
-                            .params
-                            .iter()
-                            .flat_map(collect_pat_vars)
-                            .collect();
+                        let param_names: HashSet<String> =
+                            arm.node.params.iter().flat_map(collect_pat_vars).collect();
                         scope.push(param_names);
                         resolve_expr(&arm.node.body, scope, map);
                         if let Some(ref fb) = arm.node.finally_block {

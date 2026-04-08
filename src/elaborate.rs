@@ -201,7 +201,9 @@ impl Elaborator {
         for bound in where_clause {
             for (trait_name, _, _) in &bound.traits {
                 if trait_name != "Num" && trait_name != "Semigroup" && trait_name != "Eq" {
-                    let resolved = self.scope_map_traits.get(trait_name)
+                    let resolved = self
+                        .scope_map_traits
+                        .get(trait_name)
                         .cloned()
                         .unwrap_or_else(|| trait_name.clone());
                     dict_params.push((resolved, bound.type_var.clone()));
@@ -223,7 +225,9 @@ impl Elaborator {
         );
         for bound in where_clause {
             for (req_trait, _, _) in &bound.traits {
-                let resolved = self.scope_map_traits.get(req_trait)
+                let resolved = self
+                    .scope_map_traits
+                    .get(req_trait)
                     .cloned()
                     .unwrap_or_else(|| req_trait.clone());
                 // Use bare trait name in param name to avoid dots in Erlang identifiers
@@ -281,7 +285,9 @@ impl Elaborator {
                     ..
                 } => {
                     // Resolve trait name to canonical form
-                    let canonical_trait = self.scope_map_traits.get(trait_name)
+                    let canonical_trait = self
+                        .scope_map_traits
+                        .get(trait_name)
                         .cloned()
                         .unwrap_or_else(|| trait_name.clone());
                     // Include trait type args in dict name for uniqueness
@@ -324,8 +330,8 @@ impl Elaborator {
                                 .copied()
                                 .unwrap_or(0);
                             bound.traits.iter().map(move |(t, _, _)| {
-                                let resolved = scope_traits.get(t).cloned()
-                                    .unwrap_or_else(|| t.clone());
+                                let resolved =
+                                    scope_traits.get(t).cloned().unwrap_or_else(|| t.clone());
                                 (resolved, idx)
                             })
                         })
@@ -339,9 +345,7 @@ impl Elaborator {
                         params,
                     );
                 }
-                Decl::HandlerDef {
-                    name, body, ..
-                } => {
+                Decl::HandlerDef { name, body, .. } => {
                     let dict_params = self.dict_params_from_where(&body.where_clause);
                     if !dict_params.is_empty() {
                         self.handler_dict_params.insert(name.clone(), dict_params);
@@ -388,7 +392,9 @@ impl Elaborator {
                     span,
                     ..
                 } => {
-                    let canonical_trait = self.scope_map_traits.get(trait_name)
+                    let canonical_trait = self
+                        .scope_map_traits
+                        .get(trait_name)
                         .cloned()
                         .unwrap_or_else(|| trait_name.clone());
                     let dict_name = self
@@ -527,7 +533,8 @@ impl Elaborator {
                     // reference trait dicts (e.g. `show entity` -> `__dict_Show_a`)
                     let saved = self.setup_dict_params(&body.where_clause);
 
-                    let elab_arms: Vec<Annotated<HandlerArm>> = body.arms
+                    let elab_arms: Vec<Annotated<HandlerArm>> = body
+                        .arms
                         .iter()
                         .map(|ann| {
                             let arm = &ann.node;
@@ -536,7 +543,10 @@ impl Elaborator {
                                 qualifier: arm.qualifier.clone(),
                                 params: arm.params.clone(),
                                 body: Box::new(self.elaborate_expr(&arm.body)),
-                                finally_block: arm.finally_block.as_ref().map(|fb| Box::new(self.elaborate_expr(fb))),
+                                finally_block: arm
+                                    .finally_block
+                                    .as_ref()
+                                    .map(|fb| Box::new(self.elaborate_expr(fb))),
                                 span: arm.span,
                             })
                         })
@@ -930,20 +940,19 @@ impl Elaborator {
                                     // Check if this specific let binding has trait constraints.
                                     // Use pat_id to distinguish same-named bindings in
                                     // different scopes (e.g. `result` in multiple test bodies).
-                                    let dict_info =
-                                        if let Pat::Var { name, id, .. } = pattern {
-                                            let is_this_binding = self
-                                                .let_dict_pat_ids
-                                                .get(name.as_str())
-                                                .is_some_and(|ids| ids.contains(id));
-                                            if is_this_binding {
-                                                self.fun_dict_params.get(name).cloned()
-                                            } else {
-                                                None
-                                            }
+                                    let dict_info = if let Pat::Var { name, id, .. } = pattern {
+                                        let is_this_binding = self
+                                            .let_dict_pat_ids
+                                            .get(name.as_str())
+                                            .is_some_and(|ids| ids.contains(id));
+                                        if is_this_binding {
+                                            self.fun_dict_params.get(name).cloned()
                                         } else {
                                             None
-                                        };
+                                        }
+                                    } else {
+                                        None
+                                    };
 
                                     if let Some(dict_param_info) = dict_info {
                                         // Set up dict params for elaborating the value.
@@ -957,7 +966,8 @@ impl Elaborator {
                                         let mut lambda_params = Vec::new();
 
                                         for (trait_name, type_var) in &dict_param_info {
-                                            let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                                            let bare =
+                                                trait_name.rsplit('.').next().unwrap_or(trait_name);
                                             let param_name =
                                                 format!("__dict_{}_{}", bare, type_var);
                                             self.current_dict_params
@@ -1250,16 +1260,24 @@ impl Elaborator {
                         effects: body.effects.clone(),
                         needs: body.needs.clone(),
                         where_clause: body.where_clause.clone(),
-                        arms: body.arms.iter().map(|ann| {
-                            Annotated::bare(HandlerArm {
-                                op_name: ann.node.op_name.clone(),
-                                qualifier: ann.node.qualifier.clone(),
-                                params: ann.node.params.clone(),
-                                body: Box::new(self.elaborate_expr(&ann.node.body)),
-                                finally_block: ann.node.finally_block.as_ref().map(|fb| Box::new(self.elaborate_expr(fb))),
-                                span: ann.node.span,
+                        arms: body
+                            .arms
+                            .iter()
+                            .map(|ann| {
+                                Annotated::bare(HandlerArm {
+                                    op_name: ann.node.op_name.clone(),
+                                    qualifier: ann.node.qualifier.clone(),
+                                    params: ann.node.params.clone(),
+                                    body: Box::new(self.elaborate_expr(&ann.node.body)),
+                                    finally_block: ann
+                                        .node
+                                        .finally_block
+                                        .as_ref()
+                                        .map(|fb| Box::new(self.elaborate_expr(fb))),
+                                    span: ann.node.span,
+                                })
                             })
-                        }).collect(),
+                            .collect(),
                         return_clause: body.return_clause.as_ref().map(|rc| {
                             Box::new(HandlerArm {
                                 op_name: rc.op_name.clone(),
@@ -1322,12 +1340,15 @@ impl Elaborator {
             ExprKind::BitString { segments } => Expr::synth(
                 span,
                 ExprKind::BitString {
-                    segments: segments.iter().map(|seg| BitSegment {
-                        value: self.elaborate_expr(&seg.value),
-                        size: seg.size.as_ref().map(|s| Box::new(self.elaborate_expr(s))),
-                        specs: seg.specs.clone(),
-                        span: seg.span,
-                    }).collect(),
+                    segments: segments
+                        .iter()
+                        .map(|seg| BitSegment {
+                            value: self.elaborate_expr(&seg.value),
+                            size: seg.size.as_ref().map(|s| Box::new(self.elaborate_expr(s))),
+                            specs: seg.specs.clone(),
+                            span: seg.span,
+                        })
+                        .collect(),
                 },
             ),
 
@@ -1367,7 +1388,10 @@ impl Elaborator {
                             qualifier: arm.qualifier.clone(),
                             params: arm.params.clone(),
                             body: Box::new(self.elaborate_expr(&arm.body)),
-                            finally_block: arm.finally_block.as_ref().map(|fb| Box::new(self.elaborate_expr(fb))),
+                            finally_block: arm
+                                .finally_block
+                                .as_ref()
+                                .map(|fb| Box::new(self.elaborate_expr(fb))),
                             span: arm.span,
                         })
                     })
@@ -1571,8 +1595,7 @@ impl Elaborator {
     ) -> Option<Expr> {
         match ty {
             Type::Con(name, args)
-                if name == "Tuple"
-                    && (trait_name == SHOW || trait_name == DEBUG) =>
+                if name == "Tuple" && (trait_name == SHOW || trait_name == DEBUG) =>
             {
                 // Tuples don't have a dict constructor; build an inline dict
                 // containing the show lambda: {fun t -> "(" ++ ... ++ ")"}

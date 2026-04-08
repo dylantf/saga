@@ -486,11 +486,7 @@ fn build_ref_procdict(
 }
 
 /// ETS-backed Ref ops. Uses a well-known named table `dylang_ref_store`.
-fn build_ref_ets(
-    op_name: &str,
-    param_vars: &[String],
-    fresh: &mut dyn FnMut() -> String,
-) -> CExpr {
+fn build_ref_ets(op_name: &str, param_vars: &[String], fresh: &mut dyn FnMut() -> String) -> CExpr {
     let table = CExpr::Lit(CLit::Atom("dylang_ref_store".into()));
 
     match op_name {
@@ -533,10 +529,7 @@ fn build_ref_ets(
                     Box::new(CExpr::Var(lookup_result)),
                     vec![CArm {
                         pat: CPat::Cons(
-                            Box::new(CPat::Tuple(vec![
-                                CPat::Wildcard,
-                                CPat::Var(val.clone()),
-                            ])),
+                            Box::new(CPat::Tuple(vec![CPat::Wildcard, CPat::Var(val.clone())])),
                             Box::new(CPat::Nil),
                         ),
                         guard: None,
@@ -581,10 +574,7 @@ fn build_ref_ets(
                     Box::new(CExpr::Var(lookup_result)),
                     vec![CArm {
                         pat: CPat::Cons(
-                            Box::new(CPat::Tuple(vec![
-                                CPat::Wildcard,
-                                CPat::Var(old.clone()),
-                            ])),
+                            Box::new(CPat::Tuple(vec![CPat::Wildcard, CPat::Var(old.clone())])),
                             Box::new(CPat::Nil),
                         ),
                         guard: None,
@@ -646,11 +636,7 @@ pub fn build_vec_native_call(
 /// - `{VecId, 0}` -> element at index 0
 /// - `{VecId, 1}` -> element at index 1
 /// - etc.
-fn build_vec_ets(
-    op_name: &str,
-    param_vars: &[String],
-    fresh: &mut dyn FnMut() -> String,
-) -> CExpr {
+fn build_vec_ets(op_name: &str, param_vars: &[String], fresh: &mut dyn FnMut() -> String) -> CExpr {
     let table = CExpr::Lit(CLit::Atom("dylang_vec_store".into()));
     let length_atom = CExpr::Lit(CLit::Atom("length".into()));
 
@@ -703,10 +689,7 @@ fn build_vec_ets(
                     Box::new(CExpr::Var(lookup)),
                     vec![CArm {
                         pat: CPat::Cons(
-                            Box::new(CPat::Tuple(vec![
-                                CPat::Wildcard,
-                                CPat::Var(len.clone()),
-                            ])),
+                            Box::new(CPat::Tuple(vec![CPat::Wildcard, CPat::Var(len.clone())])),
                             Box::new(CPat::Nil),
                         ),
                         guard: None,
@@ -738,10 +721,7 @@ fn build_vec_ets(
                                             cerl_call(
                                                 "erlang",
                                                 "+",
-                                                vec![
-                                                    CExpr::Var(len),
-                                                    CExpr::Lit(CLit::Int(1)),
-                                                ],
+                                                vec![CExpr::Var(len), CExpr::Lit(CLit::Int(1))],
                                             ),
                                         ]),
                                     ],
@@ -775,10 +755,7 @@ fn build_vec_ets(
                     Box::new(CExpr::Var(lookup)),
                     vec![CArm {
                         pat: CPat::Cons(
-                            Box::new(CPat::Tuple(vec![
-                                CPat::Wildcard,
-                                CPat::Var(val.clone()),
-                            ])),
+                            Box::new(CPat::Tuple(vec![CPat::Wildcard, CPat::Var(val.clone())])),
                             Box::new(CPat::Nil),
                         ),
                         guard: None,
@@ -935,20 +912,14 @@ fn build_vec_ets(
                     "lookup",
                     vec![
                         table,
-                        CExpr::Tuple(vec![
-                            CExpr::Var(param_vars[0].clone()),
-                            length_atom,
-                        ]),
+                        CExpr::Tuple(vec![CExpr::Var(param_vars[0].clone()), length_atom]),
                     ],
                 )),
                 Box::new(CExpr::Case(
                     Box::new(CExpr::Var(lookup)),
                     vec![CArm {
                         pat: CPat::Cons(
-                            Box::new(CPat::Tuple(vec![
-                                CPat::Wildcard,
-                                CPat::Var(len.clone()),
-                            ])),
+                            Box::new(CPat::Tuple(vec![CPat::Wildcard, CPat::Var(len.clone())])),
                             Box::new(CPat::Nil),
                         ),
                         guard: None,
@@ -998,10 +969,7 @@ fn build_vec_ets(
                     Box::new(CExpr::Var(lookup)),
                     vec![CArm {
                         pat: CPat::Cons(
-                            Box::new(CPat::Tuple(vec![
-                                CPat::Wildcard,
-                                CPat::Var(len.clone()),
-                            ])),
+                            Box::new(CPat::Tuple(vec![CPat::Wildcard, CPat::Var(len.clone())])),
                             Box::new(CPat::Nil),
                         ),
                         guard: None,
@@ -1023,10 +991,7 @@ fn build_vec_ets(
                                         Box::new(cerl_call(
                                             "erlang",
                                             "-",
-                                            vec![
-                                                CExpr::Var(len),
-                                                CExpr::Lit(CLit::Int(1)),
-                                            ],
+                                            vec![CExpr::Var(len), CExpr::Lit(CLit::Int(1))],
                                         )),
                                         Box::new(CExpr::Let(
                                             indices.clone(),
@@ -1062,10 +1027,15 @@ fn build_vec_ets(
                                                                 Box::new(CExpr::Var(inner_lookup)),
                                                                 vec![CArm {
                                                                     pat: CPat::Cons(
-                                                                        Box::new(CPat::Tuple(vec![
-                                                                            CPat::Wildcard,
-                                                                            CPat::Var(inner_val.clone()),
-                                                                        ])),
+                                                                        Box::new(CPat::Tuple(
+                                                                            vec![
+                                                                                CPat::Wildcard,
+                                                                                CPat::Var(
+                                                                                    inner_val
+                                                                                        .clone(),
+                                                                                ),
+                                                                            ],
+                                                                        )),
                                                                         Box::new(CPat::Nil),
                                                                     ),
                                                                     guard: None,
@@ -1111,10 +1081,7 @@ fn build_vec_ets(
                         vec![
                             table.clone(),
                             CExpr::Tuple(vec![
-                                CExpr::Tuple(vec![
-                                    CExpr::Var(id.clone()),
-                                    length_atom.clone(),
-                                ]),
+                                CExpr::Tuple(vec![CExpr::Var(id.clone()), length_atom.clone()]),
                                 CExpr::Lit(CLit::Int(0)),
                             ]),
                         ],
@@ -1148,10 +1115,7 @@ fn build_vec_ets(
                                         Box::new(cerl_call(
                                             "erlang",
                                             "+",
-                                            vec![
-                                                CExpr::Var(acc_var),
-                                                CExpr::Lit(CLit::Int(1)),
-                                            ],
+                                            vec![CExpr::Var(acc_var), CExpr::Lit(CLit::Int(1))],
                                         )),
                                     )),
                                 ),
@@ -1168,10 +1132,7 @@ fn build_vec_ets(
                                 vec![
                                     table,
                                     CExpr::Tuple(vec![
-                                        CExpr::Tuple(vec![
-                                            CExpr::Var(id.clone()),
-                                            length_atom,
-                                        ]),
+                                        CExpr::Tuple(vec![CExpr::Var(id.clone()), length_atom]),
                                         CExpr::Var(final_len),
                                     ]),
                                 ],
