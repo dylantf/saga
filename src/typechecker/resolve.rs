@@ -34,6 +34,47 @@ fn canonicalize_effect_qualifier(qualifier: &mut Option<String>, scope: &ScopeMa
     }
 }
 
+/// Rewrite type names in a TypeExpr to canonical form.
+fn resolve_type_expr(texpr: &mut TypeExpr, scope: &ScopeMap) {
+    match texpr {
+        TypeExpr::Named { name, .. } => {
+            if let Some(canonical) = scope.resolve_type(name) {
+                *name = canonical.to_string();
+            } else {
+                // Builtin type canonicalization (Int -> Std.Int.Int, etc.)
+                let canonical = super::canonicalize_type_name(name);
+                if canonical != name {
+                    *name = canonical.to_string();
+                }
+            }
+        }
+        TypeExpr::App { func, arg, .. } => {
+            resolve_type_expr(func, scope);
+            resolve_type_expr(arg, scope);
+        }
+        TypeExpr::Arrow {
+            from, to, effects, ..
+        } => {
+            resolve_type_expr(from, scope);
+            resolve_type_expr(to, scope);
+            for eff in effects {
+                for arg in &mut eff.type_args {
+                    resolve_type_expr(arg, scope);
+                }
+            }
+        }
+        TypeExpr::Record { fields, .. } => {
+            for (_, field_ty) in fields {
+                resolve_type_expr(field_ty, scope);
+            }
+        }
+        TypeExpr::Labeled { inner, .. } => {
+            resolve_type_expr(inner, scope);
+        }
+        TypeExpr::Var { .. } => {}
+    }
+}
+
 /// Collect all variable names bound by a pattern.
 fn collect_pat_bindings(pat: &Pat, out: &mut HashSet<String>) {
     match pat {
@@ -133,13 +174,28 @@ pub(crate) fn resolve_names(program: &mut [Decl], scope_map: &ScopeMap) {
 
 fn resolve_decl(decl: &mut Decl, scope: &ScopeMap, local_funs: &HashSet<String>) {
     match decl {
+        Decl::FunSignature {
+            params,
+            return_type,
+            effects,
+            ..
+        } => {
+            for (_, texpr) in params.iter_mut() {
+                resolve_type_expr(texpr, scope);
+            }
+            resolve_type_expr(return_type, scope);
+            for eff in effects.iter_mut() {
+                for arg in &mut eff.type_args {
+                    resolve_type_expr(arg, scope);
+                }
+            }
+        }
         Decl::FunBinding {
             params,
             body,
             guard,
             ..
         } => {
-            // Params introduce local bindings that shadow imports in the body
             let mut locals = local_funs.clone();
             for p in params.iter_mut() {
                 resolve_pat(p, scope);
@@ -153,7 +209,32 @@ fn resolve_decl(decl: &mut Decl, scope: &ScopeMap, local_funs: &HashSet<String>)
         Decl::Val { value, .. } => {
             resolve_expr(value, scope, local_funs);
         }
-        Decl::ImplDef { methods, .. } => {
+        Decl::TypeDef { variants, .. } => {
+            for variant in variants.iter_mut() {
+                for (_, texpr) in &mut variant.node.fields {
+                    resolve_type_expr(texpr, scope);
+                }
+            }
+        }
+        Decl::RecordDef { fields, .. } => {
+            for field in fields.iter_mut() {
+                resolve_type_expr(&mut field.node.1, scope);
+            }
+        }
+        Decl::ImplDef {
+            target_type,
+            methods,
+            ..
+        } => {
+            // Resolve the target type name (e.g. "Ordering" -> "Std.Base.Ordering")
+            if let Some(canonical) = scope.resolve_type(target_type) {
+                *target_type = canonical.to_string();
+            } else {
+                let canonical = super::canonicalize_type_name(target_type);
+                if canonical != target_type {
+                    *target_type = canonical.to_string();
+                }
+            }
             for method in methods.iter_mut() {
                 let m = &mut method.node;
                 let mut locals = local_funs.clone();
@@ -162,6 +243,23 @@ fn resolve_decl(decl: &mut Decl, scope: &ScopeMap, local_funs: &HashSet<String>)
                     collect_pat_bindings(p, &mut locals);
                 }
                 resolve_expr(&mut m.body, scope, &locals);
+            }
+        }
+        Decl::TraitDef { methods, .. } => {
+            for method in methods.iter_mut() {
+                let m = &mut method.node;
+                for (_, texpr) in &mut m.params {
+                    resolve_type_expr(texpr, scope);
+                }
+                resolve_type_expr(&mut m.return_type, scope);
+            }
+        }
+        Decl::EffectDef { operations, .. } => {
+            for op in operations.iter_mut() {
+                for (_, texpr) in &mut op.node.params {
+                    resolve_type_expr(texpr, scope);
+                }
+                resolve_type_expr(&mut op.node.return_type, scope);
             }
         }
         Decl::HandlerDef { body, .. } => {
@@ -324,7 +422,15 @@ fn resolve_expr(expr: &mut Expr, scope: &ScopeMap, locals: &HashSet<String>) {
                 resolve_expr(e, scope, locals);
             }
         }
-        ExprKind::RecordCreate { fields, .. } => {
+        ExprKind::RecordCreate { name, fields, .. } => {
+            if let Some(canonical) = scope.resolve_type(name) {
+                *name = canonical.to_string();
+            } else {
+                let canonical = super::canonicalize_type_name(name);
+                if canonical != name {
+                    *name = canonical.to_string();
+                }
+            }
             for f in fields.iter_mut() {
                 resolve_expr(&mut f.2, scope, locals);
             }

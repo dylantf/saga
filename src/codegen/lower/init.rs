@@ -140,6 +140,9 @@ impl<'a> Lowerer<'a> {
         // Imported effects: "Assert" -> "Std.Test.Assert" (from codegen_info)
         // Use source module name (e.g. "Std.Test") for canonical effect names so they
         // match the typechecker's naming (which also uses source module names).
+        let has_module_decl = program
+            .iter()
+            .any(|d| matches!(d, Decl::ModuleDecl { .. }));
         let source_module_name = program
             .iter()
             .find_map(|d| {
@@ -209,7 +212,12 @@ impl<'a> Lowerer<'a> {
             match decl {
                 Decl::RecordDef { name, fields, .. } => {
                     let field_names = fields.iter().map(|a| a.node.0.clone()).collect();
-                    self.record_fields.insert(name.clone(), field_names);
+                    let key = if has_module_decl {
+                        format!("{}.{}", source_module_name, name)
+                    } else {
+                        name.clone()
+                    };
+                    self.record_fields.insert(key, field_names);
                 }
                 Decl::TypeDef { .. } => {
                     // Constructor atom mangling is handled by resolve::build_constructor_atoms
@@ -227,7 +235,7 @@ impl<'a> Lowerer<'a> {
                             .filter(|(_, ty)| {
                                 !matches!(
                                     ty,
-                                    crate::ast::TypeExpr::Named { name, .. } if name == "Unit"
+                                    crate::ast::TypeExpr::Named { name, .. } if name == crate::typechecker::canonicalize_type_name("Unit")
                                 )
                             })
                             .count();
@@ -513,9 +521,10 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        // Register imported record field orders
+        // Register imported record field orders (canonical key)
         for (rec_name, fields) in &info.record_fields {
-            self.record_fields.insert(rec_name.clone(), fields.clone());
+            let canonical = format!("{}.{}", module_name, rec_name);
+            self.record_fields.insert(canonical, fields.clone());
         }
 
         // Register imported trait impl dicts for cross-module calls

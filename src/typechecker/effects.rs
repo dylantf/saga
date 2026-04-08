@@ -227,7 +227,7 @@ impl Checker {
         let scheme = self.env.get(name)?;
         let ty = self.sub.apply(&scheme.ty);
         if let Type::Con(ref con_name, ref args) = ty
-            && con_name == "Handler"
+            && con_name == super::canonicalize_type_name("Handler")
         {
             let effects: Vec<String> = args
                 .iter()
@@ -270,7 +270,7 @@ impl Checker {
         let scheme = self.env.get(name)?;
         let ty = self.sub.apply(&scheme.ty);
         if let Type::Con(ref con_name, ref args) = ty
-            && con_name == "Handler"
+            && con_name == super::canonicalize_type_name("Handler")
         {
             let entries: Vec<super::EffectEntry> = args
                 .iter()

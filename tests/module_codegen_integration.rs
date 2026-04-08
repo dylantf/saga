@@ -83,6 +83,16 @@ fn typecheck_source(source: &str, checker: &mut typechecker::Checker) -> Vec<dyl
         .parse_program()
         .expect("parse error");
     dylang::desugar::desugar_program(&mut program);
+    // Set current_module from the module declaration, matching the real pipeline
+    if let Some(module_name) = program.iter().find_map(|d| {
+        if let dylang::ast::Decl::ModuleDecl { path, .. } = d {
+            Some(path.join("."))
+        } else {
+            None
+        }
+    }) {
+        checker.set_current_module(module_name);
+    }
     let result = checker.check_program(&mut program);
     assert!(
         !result.has_errors(),
@@ -623,7 +633,8 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
     let out = emit_from_program(&program, "main", &checker);
 
     // The dict should be referenced as a cross-module call to animals module
-    assert_contains(&out, "call 'animals':'__dict_Show_animals_Animal'");
+    let mangled = typechecker::mangle_type_name("Animals.Animal");
+    assert_contains(&out, &format!("call 'animals':'__dict_Show_animals_{}'", mangled));
 }
 
 #[test]
@@ -664,13 +675,14 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
 #[test]
 fn local_dict_names_are_module_qualified() {
     // When Animals.dy defines impl Show for Animal, the dict should be
-    // named __dict_Show_animals_Animal (not __dict_Show_Animal)
+    // named __dict_Show_animals_Animals_Animal (not __dict_Show_Animal)
     let animals_src = std::fs::read_to_string(fixtures_root().join("Animals.dy")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&animals_src, &mut checker);
     let out = emit_from_program(&program, "animals", &checker);
 
-    assert_contains(&out, "'__dict_Show_animals_Animal'");
+    let mangled = typechecker::mangle_type_name("Animals.Animal");
+    assert_contains(&out, &format!("'__dict_Show_animals_{}'", mangled));
     assert!(
         !out.contains("'__dict_Show_Animal'"),
         "dict name should be module-qualified\n{out}"

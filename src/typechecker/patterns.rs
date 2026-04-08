@@ -188,7 +188,7 @@ impl Checker {
 
             Pat::Tuple { elements, span, .. } => {
                 let elem_tys: Vec<Type> = elements.iter().map(|_| self.fresh_var()).collect();
-                let tuple_ty = Type::Con("Tuple".into(), elem_tys.clone());
+                let tuple_ty = Type::Con(super::canonicalize_type_name("Tuple").into(), elem_tys.clone());
                 self.unify_at(ty, &tuple_ty, *span)?;
                 for (pat, elem_ty) in elements.iter().zip(elem_tys.iter()) {
                     self.bind_pattern(pat, elem_ty)?;
@@ -411,7 +411,12 @@ impl Checker {
         // exhaustiveness requires an unguarded wildcard/variable catchall arm.
         if !is_anon_record
             && !self.adt_variants.contains_key(&type_name)
-            && matches!(type_name.as_str(), "Int" | "Float" | "String")
+            && [
+                super::canonicalize_type_name("Int"),
+                super::canonicalize_type_name("Float"),
+                super::canonicalize_type_name("String"),
+            ]
+            .contains(&type_name.as_str())
         {
             let has_catchall = arms.iter().any(|arm| {
                 arm.node.guard.is_none()
@@ -432,7 +437,7 @@ impl Checker {
         // For non-ADT, non-primitive types (e.g. Unit), skip.
         // Tuples and anonymous records are allowed through -- they're
         // single-constructor types handled by the Maranget algorithm.
-        if !is_anon_record && !self.adt_variants.contains_key(&type_name) && type_name != "Tuple" {
+        if !is_anon_record && !self.adt_variants.contains_key(&type_name) && type_name != super::canonicalize_type_name("Tuple") {
             return Ok(());
         }
 
