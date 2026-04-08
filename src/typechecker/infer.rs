@@ -346,7 +346,11 @@ impl Checker {
 
             ExprKind::FieldAccess {
                 expr: inner, field, ..
-            } => self.infer_field_access(inner, field, span),
+            } => {
+                let ty = self.infer_field_access(inner, field, span)?;
+                self.record_type(node_id, &ty);
+                Ok(ty)
+            }
 
             ExprKind::RecordUpdate { record, fields, .. } => {
                 self.infer_record_update(record, fields, span)

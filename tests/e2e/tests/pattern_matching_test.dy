@@ -17,6 +17,11 @@ type Wrapped a = Wrapped a
 
 record Box a { value: a }
 
+record House {
+  year_built: Int,
+  address: { number: Int, street: String },
+}
+
 # --- Helper functions ---
 
 fun area : Shape -> Float
@@ -374,6 +379,23 @@ describe "records" {
       let b = Box { value: 42 }
       let b2 = { b | value: 99 }
       assert_eq (unwrap_box b2) 99
+    }
+  }
+
+  describe "anonymous record updates" {
+    test "update nested anonymous record" {
+      let h = House { year_built: 2005, address: { number: 123, street: "Fake Street" } }
+      let h2 = { h | address: { h.address | street: "Real Street" } }
+      assert_eq h2.address.street "Real Street"
+      assert_eq h2.address.number 123
+      assert_eq h2.year_built 2005
+    }
+
+    test "update named record containing anonymous record" {
+      let h = House { year_built: 2005, address: { number: 123, street: "Fake Street" } }
+      let h2 = { h | year_built: 2020 }
+      assert_eq h2.year_built 2020
+      assert_eq h2.address.street "Fake Street"
     }
   }
 }

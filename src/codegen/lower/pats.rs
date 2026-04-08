@@ -111,9 +111,10 @@ pub(super) fn lower_pat(
         }
         Pat::AnonRecord { fields, .. } => {
             // Anonymous records are tagged tuples with a deterministic tag.
-            let mut sorted_fields: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+            let field_names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+            let tag = crate::ast::anon_record_tag(&field_names);
+            let mut sorted_fields: Vec<&str> = field_names.clone();
             sorted_fields.sort();
-            let tag = format!("__anon_{}", sorted_fields.join("_"));
             let mut elems = vec![CPat::Lit(CLit::Atom(tag))];
             let field_map: HashMap<&str, Option<&Pat>> = fields
                 .iter()

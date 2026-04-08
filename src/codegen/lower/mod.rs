@@ -1868,10 +1868,10 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::AnonRecordCreate { fields, .. } => {
-                let mut sorted_names: Vec<String> =
-                    fields.iter().map(|(n, _, _)| n.clone()).collect();
+                let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
+                let tag = crate::ast::anon_record_tag(&names);
+                let mut sorted_names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
                 sorted_names.sort();
-                let tag = format!("__anon_{}", sorted_names.join("_"));
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
                 let mut vars: Vec<String> = Vec::new();

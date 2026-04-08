@@ -628,6 +628,10 @@ impl Elaborator {
         let resolved = self.sub.apply(ty);
         match resolved {
             Type::Con(name, _) => Some(name),
+            Type::Record(fields) => {
+                let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+                Some(crate::ast::anon_record_tag(&names))
+            }
             _ => None,
         }
     }
