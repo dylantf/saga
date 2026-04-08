@@ -1,0 +1,60 @@
+# Backtracking search with multishot continuations
+#
+# The Choose effect lets you write search as straight-line code.
+# The handler explores all branches by resuming once per option.
+# The computation reads like "pick a value" but the handler
+# silently tries every possibility.
+#
+# Expected output:
+#   Pythagorean triples up to 20:
+#   (3, 4, 5)
+#   (5, 12, 13)
+#   (6, 8, 10)
+#   (8, 15, 17)
+#   (9, 12, 15)
+#   (12, 16, 20)
+
+effect Choose {
+  fun choose : List a -> a
+}
+
+effect Fail {
+  fun fail : String -> a
+}
+
+# Collect all solutions into a list.
+# Each `choose!` branches: resume is called once per option.
+# Each `fail!` prunes: that branch produces no results.
+handler all_solutions for Choose, Fail {
+  choose options = List.flat_map (fun x -> resume x) options
+  fail _ = []
+  return value = [value]
+}
+
+# A guard that prunes branches where the condition is false
+fun guard : Bool -> Unit needs {Fail}
+guard True = ()
+guard False = fail! "pruned"
+
+# Find all Pythagorean triples (a, b, c) where a <= b <= c <= n
+fun pythagorean_triples : Int -> List (Int, Int, Int)
+pythagorean_triples n = {
+  let nums = List.range 1 n
+
+  # This looks like it picks one value, but the handler
+  # explores all combinations
+  let a = choose! nums
+  let b = choose! (List.range a n)
+  let c = choose! (List.range b n)
+
+  # Prune branches that don't satisfy the constraint
+  guard (a * a + b * b == c * c)
+
+  (a, b, c)
+} with all_solutions
+
+main () = {
+  dbg "Pythagorean triples up to 20:"
+  let triples = pythagorean_triples 20
+  List.iter (fun triple -> dbg (debug triple)) triples
+}
