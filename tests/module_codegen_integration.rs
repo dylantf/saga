@@ -633,8 +633,8 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
     let out = emit_from_program(&program, "main", &checker);
 
     // The dict should be referenced as a cross-module call to animals module
-    let mangled = typechecker::mangle_type_name("Animals.Animal");
-    assert_contains(&out, &format!("call 'animals':'__dict_Show_animals_{}'", mangled));
+    let dict = typechecker::make_dict_name("Std.Base.Show", &[], "animals", "Animals.Animal");
+    assert_contains(&out, &format!("call 'animals':'{dict}'"));
 }
 
 #[test]
@@ -675,16 +675,16 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
 #[test]
 fn local_dict_names_are_module_qualified() {
     // When Animals.dy defines impl Show for Animal, the dict should be
-    // named __dict_Show_animals_Animals_Animal (not __dict_Show_Animal)
+    // named with canonical trait + module-qualified type (not bare __dict_Show_Animal)
     let animals_src = std::fs::read_to_string(fixtures_root().join("Animals.dy")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&animals_src, &mut checker);
     let out = emit_from_program(&program, "animals", &checker);
 
-    let mangled = typechecker::mangle_type_name("Animals.Animal");
-    assert_contains(&out, &format!("'__dict_Show_animals_{}'", mangled));
+    let dict = typechecker::make_dict_name("Std.Base.Show", &[], "animals", "Animals.Animal");
+    assert_contains(&out, &format!("'{dict}'"));
     assert!(
-        !out.contains("'__dict_Show_Animal'"),
+        !out.contains("'__dict_Show_Animal'") && !out.contains("'__dict_Std_Base_Show_Animal'"),
         "dict name should be module-qualified\n{out}"
     );
 }

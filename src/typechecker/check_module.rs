@@ -1390,16 +1390,16 @@ fn collect_codegen_info(
                 where_clause,
                 ..
             } => {
-                // Include trait type args in dict name for uniqueness
-                let type_args_suffix = if trait_type_args.is_empty() {
-                    String::new()
-                } else {
-                    format!("_{}", trait_type_args.join("_"))
-                };
-                let mangled_type = super::mangle_type_name(target_type);
-                let dict_name = format!(
-                    "__dict_{}{}_{}_{}",
-                    trait_name, type_args_suffix, erlang_module, mangled_type
+                // Resolve trait name to canonical form via scope_map
+                let canonical_trait = scope_map
+                    .resolve_trait(trait_name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("{}.{}", module_name, trait_name));
+                let dict_name = super::make_dict_name(
+                    &canonical_trait,
+                    trait_type_args,
+                    &erlang_module,
+                    target_type,
                 );
                 let arity = where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
                 let var_to_idx: std::collections::HashMap<&str, usize> = type_params
@@ -1421,11 +1421,6 @@ fn collect_codegen_info(
                         })
                     })
                     .collect();
-                // Resolve trait name to canonical form via scope_map
-                let canonical_trait = scope_map
-                    .resolve_trait(trait_name)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("{}.{}", module_name, trait_name));
                 trait_impl_dicts.push(TraitImplDict {
                     trait_name: canonical_trait,
                     trait_type_args: trait_type_args.clone(),
