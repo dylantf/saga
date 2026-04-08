@@ -1,4 +1,4 @@
-mod beam_interop;
+pub(crate) mod beam_interop;
 mod builtins;
 mod effects;
 pub mod errors;

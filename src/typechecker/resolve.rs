@@ -16,6 +16,24 @@ use crate::ast::*;
 
 use super::ScopeMap;
 
+/// Rewrite a handler name to its canonical form if it's not locally shadowed.
+fn canonicalize_handler_name(name: &mut String, scope: &ScopeMap, locals: &HashSet<String>) {
+    if !locals.contains(name.as_str())
+        && let Some(canonical) = scope.resolve_handler(name)
+    {
+        *name = canonical.to_string();
+    }
+}
+
+/// Rewrite an effect qualifier to its canonical form.
+fn canonicalize_effect_qualifier(qualifier: &mut Option<String>, scope: &ScopeMap) {
+    if let Some(q) = qualifier
+        && let Some(canonical) = scope.resolve_effect(q)
+    {
+        *q = canonical.to_string();
+    }
+}
+
 /// Collect all variable names bound by a pattern.
 fn collect_pat_bindings(pat: &Pat, out: &mut HashSet<String>) {
     match pat {
@@ -204,11 +222,7 @@ fn collect_pat_vars(pat: &Pat, vars: &mut HashSet<String>) {
 
 fn resolve_handler_body(body: &mut HandlerBody, scope: &ScopeMap, local_funs: &HashSet<String>) {
     for arm in body.arms.iter_mut() {
-        if let Some(qualifier) = &mut arm.node.qualifier
-            && let Some(canonical) = scope.resolve_effect(qualifier)
-        {
-            *qualifier = canonical.to_string();
-        }
+        canonicalize_effect_qualifier(&mut arm.node.qualifier, scope);
         let mut locals = local_funs.clone();
         for pat in &arm.node.params {
             collect_pat_vars(pat, &mut locals);
@@ -328,11 +342,7 @@ fn resolve_expr(expr: &mut Expr, scope: &ScopeMap, locals: &HashSet<String>) {
             resolve_expr(expr, scope, locals);
             match handler.as_mut() {
                 Handler::Named(name, _) => {
-                    if !locals.contains(name.as_str())
-                        && let Some(canonical) = scope.resolve_handler(name)
-                    {
-                        *name = canonical.to_string();
-                    }
+                    canonicalize_handler_name(name, scope, locals);
                 }
                 Handler::Inline {
                     named,
@@ -341,19 +351,10 @@ fn resolve_expr(expr: &mut Expr, scope: &ScopeMap, locals: &HashSet<String>) {
                     ..
                 } => {
                     for ann in named.iter_mut() {
-                        let n = &mut ann.node.name;
-                        if !locals.contains(n.as_str())
-                            && let Some(canonical) = scope.resolve_handler(n)
-                        {
-                            *n = canonical.to_string();
-                        }
+                        canonicalize_handler_name(&mut ann.node.name, scope, locals);
                     }
                     for arm in arms.iter_mut() {
-                        if let Some(qualifier) = &mut arm.node.qualifier
-                            && let Some(canonical) = scope.resolve_effect(qualifier)
-                        {
-                            *qualifier = canonical.to_string();
-                        }
+                        canonicalize_effect_qualifier(&mut arm.node.qualifier, scope);
                         let mut arm_locals = locals.clone();
                         for pat in &arm.node.params {
                             collect_pat_vars(pat, &mut arm_locals);
@@ -415,11 +416,7 @@ fn resolve_expr(expr: &mut Expr, scope: &ScopeMap, locals: &HashSet<String>) {
         ExprKind::EffectCall {
             qualifier, args, ..
         } => {
-            if let Some(qualifier) = qualifier
-                && let Some(canonical) = scope.resolve_effect(qualifier)
-            {
-                *qualifier = canonical.to_string();
-            }
+            canonicalize_effect_qualifier(qualifier, scope);
             for a in args.iter_mut() {
                 resolve_expr(a, scope, locals);
             }

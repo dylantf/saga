@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::{
-    Checker, Diagnostic, EffectDefInfo, HandlerInfo, ImplInfo, RecordInfo, Scheme, TraitInfo, Type,
+    Checker, Diagnostic, EffectDefInfo, HandlerInfo, ImplInfo, RecordInfo, Scheme, ScopeMap,
+    TraitInfo, Type,
 };
 use crate::token::Span;
 
@@ -1038,22 +1039,13 @@ pub(super) fn resolve_import(
     // Traits: canonical + aliased + bare (traits are always available for impl/where
     // when the module is imported, regardless of exposing clause)
     for trait_name in exports.traits.keys() {
+        ScopeMap::register_qualified(&mut scope.traits, module_name, prefix, trait_name);
+        // Traits also get a bare entry (always available without qualification)
         let trait_canonical = format!("{}.{}", module_name, trait_name);
         scope
             .traits
-            .entry(trait_canonical.clone())
-            .or_insert_with(|| trait_canonical.clone());
-        scope
-            .traits
             .entry(trait_name.clone())
-            .or_insert_with(|| trait_canonical.clone());
-        if prefix != module_name {
-            let aliased = format!("{}.{}", prefix, trait_name);
-            scope
-                .traits
-                .entry(aliased)
-                .or_insert_with(|| trait_canonical.clone());
-        }
+            .or_insert_with(|| trait_canonical);
     }
 
     // Trait methods: bare -> Module.Trait.method
@@ -1068,68 +1060,29 @@ pub(super) fn resolve_import(
 
     // Effects: canonical + aliased qualified forms
     for effect_name in exports.effects.keys() {
-        let effect_canonical = format!("{}.{}", module_name, effect_name);
-        scope
-            .effects
-            .entry(effect_canonical.clone())
-            .or_insert_with(|| effect_canonical.clone());
-        if prefix != module_name {
-            let aliased = format!("{}.{}", prefix, effect_name);
-            scope
-                .effects
-                .entry(aliased)
-                .or_insert_with(|| effect_canonical.clone());
-        }
+        ScopeMap::register_qualified(&mut scope.effects, module_name, prefix, effect_name);
     }
 
     // Handlers: canonical + aliased qualified forms
     for handler_name in exports.handlers.keys() {
-        let handler_canonical = format!("{}.{}", module_name, handler_name);
-        scope
-            .handlers
-            .entry(handler_canonical.clone())
-            .or_insert_with(|| handler_canonical.clone());
-        if prefix != module_name {
-            let aliased = format!("{}.{}", prefix, handler_name);
-            scope
-                .handlers
-                .entry(aliased)
-                .or_insert_with(|| handler_canonical.clone());
-        }
+        ScopeMap::register_qualified(&mut scope.handlers, module_name, prefix, handler_name);
     }
 
     // Value bindings: canonical + aliased
     for (name, _) in &exports.bindings {
-        let canonical = format!("{}.{}", module_name, name);
-        scope
-            .values
-            .entry(canonical.clone())
-            .or_insert_with(|| canonical.clone());
-        if prefix != module_name {
-            let aliased = format!("{}.{}", prefix, name);
-            scope
-                .values
-                .entry(aliased)
-                .or_insert_with(|| canonical.clone());
-        }
+        ScopeMap::register_qualified(&mut scope.values, module_name, prefix, name);
     }
 
     // Constructors: canonical + aliased
     for ctors in exports.type_constructors.values() {
         for ctor in ctors {
             if binding_map.contains_key(ctor.as_str()) {
-                let canonical = format!("{}.{}", module_name, ctor);
-                scope
-                    .constructors
-                    .entry(canonical.clone())
-                    .or_insert_with(|| canonical.clone());
-                if prefix != module_name {
-                    let aliased = format!("{}.{}", prefix, ctor);
-                    scope
-                        .constructors
-                        .entry(aliased)
-                        .or_insert_with(|| canonical.clone());
-                }
+                ScopeMap::register_qualified(
+                    &mut scope.constructors,
+                    module_name,
+                    prefix,
+                    ctor,
+                );
             }
         }
     }

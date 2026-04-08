@@ -1,16 +1,13 @@
 use std::collections::HashSet;
 
 use crate::ast::{self, Expr};
+use crate::codegen::lower::beam_interop;
 use crate::token::Span;
 
 use super::{Checker, Diagnostic, EffectEntry, EffectRow, Type};
 
 impl Checker {
     // --- Handler inference ---
-
-    fn handler_name_matches(name: &str, expected_bare: &str) -> bool {
-        name == expected_bare || name.ends_with(&format!(".{expected_bare}"))
-    }
 
     fn push_unique_effect_entry(entries: &mut Vec<EffectEntry>, entry: EffectEntry) {
         if !entries.iter().any(|seen| seen.same_instantiation(&entry)) {
@@ -107,29 +104,21 @@ impl Checker {
     ) -> Result<Type, Diagnostic> {
         let handled = self.handler_handled_effects(handler);
 
-        // Check if this with-expression uses ets_ref or beam_vec, which require ETS table init.
-        match handler {
-            ast::Handler::Named(name, _)
-                if Self::handler_name_matches(name, "ets_ref") =>
-            {
+        // Check if this with-expression uses handlers that require runtime resource init.
+        // Handler names are already canonical at this point (resolve pass ran first).
+        let handler_names: Vec<&str> = match handler {
+            ast::Handler::Named(name, _) => vec![name.as_str()],
+            ast::Handler::Inline { named, .. } => {
+                named.iter().map(|ann| ann.node.name.as_str()).collect()
+            }
+        };
+        for name in &handler_names {
+            if beam_interop::handler_needs_ets_table(name) {
                 self.needs_ets_ref_table = true;
             }
-            ast::Handler::Named(name, _)
-                if Self::handler_name_matches(name, "beam_vec") =>
-            {
+            if beam_interop::handler_needs_vec_table(name) {
                 self.needs_vec_table = true;
             }
-            ast::Handler::Inline { named, .. } => {
-                for ann in named {
-                    if Self::handler_name_matches(&ann.node.name, "ets_ref") {
-                        self.needs_ets_ref_table = true;
-                    }
-                    if Self::handler_name_matches(&ann.node.name, "beam_vec") {
-                        self.needs_vec_table = true;
-                    }
-                }
-            }
-            _ => {}
         }
 
         // Build op_name -> (arm_span, source_module) map for LSP go-to-def

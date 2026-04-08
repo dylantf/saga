@@ -32,7 +32,16 @@ fn emit_from_program(
         })
         .unwrap_or_default();
     let result = checker.to_result();
-    let elaborated = elaborate::elaborate_module(program, &result, &original_module_name);
+    // Use module-specific CheckResult when available (has correct type_at_node),
+    // falling back to the top-level result for the main module.
+    let module_result = result
+        .module_check_results()
+        .get(&original_module_name);
+    let elaborated = elaborate::elaborate_module(
+        program,
+        module_result.unwrap_or(&result),
+        &original_module_name,
+    );
     let mut modules = std::collections::HashMap::new();
     for (name, info) in result.codegen_info().iter() {
         let mut compiled = codegen::CompiledModule {
@@ -619,7 +628,6 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
 
 #[test]
 fn cross_module_trait_dict_compiles_with_erlc() {
-    let animals_src = std::fs::read_to_string(fixtures_root().join("Animals.dy")).unwrap();
     let main_src = "
 module Main
 import Animals (Animal)
@@ -629,7 +637,11 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
     let mut checker = make_project_checker();
     let main_program = typecheck_source(main_src, &mut checker);
 
-    let animals_core = emit_project_module(&animals_src, "animals", &checker);
+    let result = checker.to_result();
+    // Use the stored program from the checker (correct NodeIds) instead of
+    // re-parsing, which would produce new NodeIds that don't match type_at_node.
+    let animals_program = result.programs().get("Animals").expect("Animals module not found");
+    let animals_core = emit_from_program(animals_program, "animals", &checker);
     let main_core = emit_from_program(&main_program, "main", &checker);
 
     let dir = assert_erlc_compiles(&animals_core, "animals");
