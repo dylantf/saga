@@ -213,7 +213,6 @@ describe "Actor" {
       let result = test_send_unit () with beam_actor
       assert_eq result "ok"
     }
-
   }
 
   describe "timer" {
