@@ -96,6 +96,14 @@ pub fn set_decl_doc(decl: &mut Decl, doc: Vec<String>) {
     }
 }
 
+/// Compute the canonical tag for an anonymous record given its field names.
+/// The fields are sorted to produce a stable key regardless of declaration order.
+pub fn anon_record_tag(field_names: &[&str]) -> String {
+    let mut sorted: Vec<&str> = field_names.to_vec();
+    sorted.sort();
+    format!("__anon_{}", sorted.join("_"))
+}
+
 static NEXT_NODE_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Unique identifier for an expression node. Every node (parsed or synthetic)

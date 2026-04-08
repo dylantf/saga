@@ -591,9 +591,10 @@ impl<'a> Lowerer<'a> {
     ) {
         match type_expr {
             ast::TypeExpr::Record { fields, .. } => {
-                let mut sorted_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+                let tag = ast::anon_record_tag(&names);
+                let mut sorted_names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
                 sorted_names.sort();
-                let tag = format!("__anon_{}", sorted_names.join("_"));
                 record_fields.entry(tag).or_insert(sorted_names);
                 // Recurse into field types for nested anonymous records
                 for (_, inner_type) in fields {
@@ -621,10 +622,10 @@ impl<'a> Lowerer<'a> {
     ) {
         match &expr.kind {
             ast::ExprKind::AnonRecordCreate { fields } => {
-                let mut sorted_names: Vec<String> =
-                    fields.iter().map(|(n, _, _)| n.clone()).collect();
+                let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
+                let tag = ast::anon_record_tag(&names);
+                let mut sorted_names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
                 sorted_names.sort();
-                let tag = format!("__anon_{}", sorted_names.join("_"));
                 record_fields.entry(tag).or_insert(sorted_names);
                 for (_, _, e) in fields {
                     Self::collect_anon_records_from_expr(e, record_fields);
