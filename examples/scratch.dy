@@ -4,17 +4,29 @@ import Std.IO (console)
 pub fun main : Unit -> Unit
 main () = {
   let dt = DateTime.Clock.now! ()
-  println $"Now: {show dt.year}-{show dt.month}-{show dt.day} {show dt.hour}:{show dt.minute}:{show dt.second}"
+  println $"ISO 8601: {DateTime.to_iso8601 dt}"
 
-  let d = DateTime.Clock.today! ()
-  println $"Today: {show d.year}-{show d.month}-{show d.day}"
-  println $"Day of week: {show (DateTime.day_of_week d)}"
-  println $"Leap year: {show (DateTime.is_leap_year d.year)}"
-  println $"Days in month: {show (DateTime.days_in_month d.year d.month)}"
+  let tomorrow = DateTime.add_days 1 dt
+  println $"Tomorrow: {DateTime.to_iso8601 tomorrow}"
 
-  let dt2 = DateTime.add_seconds 3600 dt
-  println $"Plus 1 hour: {show dt2.hour}:{show dt2.minute}:{show dt2.second}"
+  let plus2h = DateTime.add_hours 2 dt
+  println $"Plus 2 hours: {DateTime.format "%T" plus2h}"
 
-  let diff = DateTime.diff_seconds dt2 dt
-  println $"Diff: {show diff} seconds"
+  let custom = DateTime.format "%d/%m/%Y %H:%M" dt
+  println $"Custom: {custom}"
+
+  case DateTime.from_iso8601 "2026-12-25T00:00:00" {
+    Ok xmas -> println $"Christmas: {DateTime.to_iso8601 xmas}"
+    Err e -> println $"Parse error: {e}"
+  }
+
+  case DateTime.from_iso8601 "not-a-date" {
+    Ok _ -> println "should not happen"
+    Err e -> println $"Expected error: {e}"
+  }
+
+  # Ord test
+  let earlier = DateTime.new 2026 1 1 0 0 0
+  let later = DateTime.new 2026 12 31 23 59 59
+  println $"earlier < later: {show (compare earlier later)}"
 } with {console, DateTime.system_clock}

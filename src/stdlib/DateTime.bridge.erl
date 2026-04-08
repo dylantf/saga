@@ -8,6 +8,7 @@
     days_in_month/2,
     valid_date/1,
     add_seconds/2,
+    add_days/2,
     diff_seconds/2
 ]).
 
@@ -46,6 +47,11 @@ add_seconds(Secs, {std_datetime_NaiveDateTime, Y, Mo, D, H, Mi, S, Micro}) ->
     GregSecs = calendar:datetime_to_gregorian_seconds({{Y, Mo, D}, {H, Mi, S}}),
     {{Y2, Mo2, D2}, {H2, Mi2, S2}} = calendar:gregorian_seconds_to_datetime(GregSecs + Secs),
     {std_datetime_NaiveDateTime, Y2, Mo2, D2, H2, Mi2, S2, Micro}.
+
+add_days(Days, {std_datetime_NaiveDateTime, Y, Mo, D, H, Mi, S, Micro}) ->
+    GregDays = calendar:date_to_gregorian_days(Y, Mo, D),
+    {Y2, Mo2, D2} = calendar:gregorian_days_to_date(GregDays + Days),
+    {std_datetime_NaiveDateTime, Y2, Mo2, D2, H, Mi, S, Micro}.
 
 diff_seconds(
     {std_datetime_NaiveDateTime, Y1, Mo1, D1, H1, Mi1, S1, _},
