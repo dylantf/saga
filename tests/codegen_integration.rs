@@ -324,9 +324,10 @@ main () = describe Red
 fn show_int_uses_dict_dispatch() {
     let src = "main () = show 42";
     let out = emit_elaborated(src);
-    // Should reference the Show/Int dict from the std_int module
+    // Hardcoded check: validates the exact dict name format (canonical trait + mangled type).
+    // Other tests use make_dict_name helper to avoid brittleness.
     assert!(
-        out.contains("__dict_Show_std_int_Std_Int_Int"),
+        out.contains("__dict_Std_Base_Show_std_int_Std_Int_Int"),
         "expected Show/Int dict reference\n{out}"
     );
     // main should call the dict via element() dispatch
@@ -340,9 +341,9 @@ fn show_int_uses_dict_dispatch() {
 fn show_bool_uses_case() {
     let src = "main () = show True";
     let out = emit_elaborated(src);
-    // Should reference the Show/Bool dict from the std_bool module
+    let dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_bool", "Std.Bool.Bool");
     assert!(
-        out.contains("__dict_Show_std_bool_Std_Bool_Bool"),
+        out.contains(&dict),
         "expected Show/Bool dict reference\n{out}"
     );
 }
@@ -357,8 +358,9 @@ fn print_uses_show_dict() {
         "expected io:format call in dbg\n{out}"
     );
     // show 42 should reference the Show/Int dict
+    let dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_int", "Std.Int.Int");
     assert!(
-        out.contains("__dict_Show_std_int_Std_Int_Int"),
+        out.contains(&dict),
         "expected Show/Int dict reference\n{out}"
     );
 }
@@ -367,8 +369,9 @@ fn print_uses_show_dict() {
 fn show_string_is_identity() {
     let src = "main () = show \"hello\"";
     let out = emit_elaborated(src);
+    let dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_string", "Std.String.String");
     assert!(
-        out.contains("__dict_Show_std_string_Std_String_String"),
+        out.contains(&dict),
         "expected Show/String dict constructor\n{out}"
     );
 }
@@ -377,9 +380,9 @@ fn show_string_is_identity() {
 fn string_interpolation_uses_show_dict() {
     let src = r#"main () = $"value is {42}""#;
     let out = emit_elaborated(src);
-    // String interpolation desugars to show(x), which should use dict dispatch
+    let dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_int", "Std.Int.Int");
     assert!(
-        out.contains("__dict_Show_std_int_Std_Int_Int"),
+        out.contains(&dict),
         "expected Show/Int dict for interpolation\n{out}"
     );
 }
@@ -388,9 +391,11 @@ fn string_interpolation_uses_show_dict() {
 fn show_tuple_inlines_per_element() {
     let src = "main () = show (1, True)";
     let out = emit_elaborated(src);
-    // Tuple show is inlined: no __dict_Show_Tuple, instead direct element extraction
+    let int_dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_int", "Std.Int.Int");
+    let bool_dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_bool", "Std.Bool.Bool");
+    // Tuple show is inlined: no Tuple dict constructor, instead direct element extraction
     assert!(
-        !out.contains("__dict_Show_Tuple"),
+        !out.contains("__dict_Show_Tuple") && !out.contains("__dict_Std_Base_Show_Tuple"),
         "should NOT have a Tuple dict constructor\n{out}"
     );
     // Should extract elements with erlang:element
@@ -400,11 +405,11 @@ fn show_tuple_inlines_per_element() {
     );
     // Should reference Show dicts for the element types
     assert!(
-        out.contains("__dict_Show_std_int_Std_Int_Int"),
+        out.contains(&int_dict),
         "expected Show/Int dict for first element\n{out}"
     );
     assert!(
-        out.contains("__dict_Show_std_bool_Std_Bool_Bool"),
+        out.contains(&bool_dict),
         "expected Show/Bool dict for second element\n{out}"
     );
     // Should produce parens and comma separator (now as binaries)
@@ -436,17 +441,19 @@ fn show_tuple_inlines_per_element() {
 fn show_triple_tuple_has_three_elements() {
     let src = r#"main () = show (1, "hi", True)"#;
     let out = emit_elaborated(src);
-    // Should reference Show dicts for all three element types
+    let int_dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_int", "Std.Int.Int");
+    let string_dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_string", "Std.String.String");
+    let bool_dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_bool", "Std.Bool.Bool");
     assert!(
-        out.contains("__dict_Show_std_int_Std_Int_Int"),
+        out.contains(&int_dict),
         "expected Show/Int dict\n{out}"
     );
     assert!(
-        out.contains("__dict_Show_std_string_Std_String_String"),
+        out.contains(&string_dict),
         "expected Show/String dict\n{out}"
     );
     assert!(
-        out.contains("__dict_Show_std_bool_Std_Bool_Bool"),
+        out.contains(&bool_dict),
         "expected Show/Bool dict\n{out}"
     );
     // Should have the inline tuple lambda, not a Tuple dict
@@ -455,7 +462,7 @@ fn show_triple_tuple_has_three_elements() {
         "expected inline tuple show lambda\n{out}"
     );
     assert!(
-        !out.contains("__dict_Show_Tuple"),
+        !out.contains("__dict_Show_Tuple") && !out.contains("__dict_Std_Base_Show_Tuple"),
         "should NOT have a Tuple dict constructor\n{out}"
     );
 }
@@ -476,14 +483,15 @@ impl Show for Color {
 main () = show Red
 ";
     let out = emit_elaborated(src);
+    let dict = typechecker::make_dict_name("Std.Base.Show", &[], "", "Color");
     // Should emit the user's dict constructor
     assert!(
-        out.contains("'__dict_Show_Color'/0"),
+        out.contains(&format!("'{dict}'/0")),
         "expected Show/Color dict constructor\n{out}"
     );
     // main should dispatch show through the user's dict
     assert!(
-        out.contains("'__dict_Show_Color'"),
+        out.contains(&format!("'{dict}'")),
         "main should reference the user Show impl\n{out}"
     );
     // The user impl body should appear (case arms with color strings as binaries)
@@ -510,9 +518,10 @@ impl Show for Color {
 main () = dbg (show Red)
 ";
     let out = emit_elaborated(src);
+    let dict = typechecker::make_dict_name("Std.Base.Show", &[], "", "Color");
     // show should use the user's Show dict
     assert!(
-        out.contains("'__dict_Show_Color'"),
+        out.contains(&format!("'{dict}'")),
         "expected Show/Color dict passed to show\n{out}"
     );
     // dbg should call io:format
@@ -538,13 +547,15 @@ impl Show for Box a where {a: Show} {
 main () = show (Wrap 42)
 "#;
     let out = emit_elaborated(src);
+    let box_dict = typechecker::make_dict_name("Std.Base.Show", &[], "", "Box");
+    let int_dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_int", "Std.Int.Int");
     // The dict constructor should be applied with a sub-dict, not used as a bare ref.
     assert!(
-        out.contains("'__dict_Show_Box'"),
+        out.contains(&format!("'{box_dict}'")),
         "expected Show/Box dict constructor\n{out}"
     );
     assert!(
-        out.contains("__dict_Show_std_int_Std_Int_Int"),
+        out.contains(&int_dict),
         "expected Show/Int sub-dict applied to Box dict\n{out}"
     );
 }

@@ -218,6 +218,31 @@ pub fn mangle_type_name(canonical: &str) -> String {
     canonical.replace('.', "_")
 }
 
+/// Build a dict constructor name from canonical trait name, type args, erlang module, and target type.
+/// Both `elaborate.rs` and `check_module.rs` must produce identical names for the same impl.
+pub fn make_dict_name(
+    canonical_trait: &str,
+    trait_type_args: &[String],
+    erlang_module: &str,
+    target_type: &str,
+) -> String {
+    let mangled_trait = mangle_type_name(canonical_trait);
+    let type_args_suffix = if trait_type_args.is_empty() {
+        String::new()
+    } else {
+        format!("_{}", trait_type_args.join("_"))
+    };
+    let mangled_type = mangle_type_name(target_type);
+    if erlang_module.is_empty() {
+        format!("__dict_{}{}_{}", mangled_trait, type_args_suffix, mangled_type)
+    } else {
+        format!(
+            "__dict_{}{}_{}_{}",
+            mangled_trait, type_args_suffix, erlang_module, mangled_type
+        )
+    }
+}
+
 /// Convenience constructors for built-in types
 impl Type {
     /// Pure function type: a -> b with empty closed effect row.

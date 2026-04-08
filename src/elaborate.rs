@@ -296,22 +296,12 @@ impl Elaborator {
                         .get(trait_name)
                         .cloned()
                         .unwrap_or_else(|| trait_name.clone());
-                    // Include trait type args in dict name for uniqueness
-                    let type_args_suffix = if trait_type_args.is_empty() {
-                        String::new()
-                    } else {
-                        format!("_{}", trait_type_args.join("_"))
-                    };
-                    // Mangle canonical type name for Erlang-safe dict naming
-                    let mangled_type = crate::typechecker::mangle_type_name(target_type);
-                    let dict_name = if self.erlang_module.is_empty() {
-                        format!("__dict_{}{}_{}", trait_name, type_args_suffix, mangled_type)
-                    } else {
-                        format!(
-                            "__dict_{}{}_{}_{}",
-                            trait_name, type_args_suffix, self.erlang_module, mangled_type
-                        )
-                    };
+                    let dict_name = crate::typechecker::make_dict_name(
+                        &canonical_trait,
+                        trait_type_args,
+                        &self.erlang_module,
+                        target_type,
+                    );
                     self.dict_names.insert(
                         (
                             canonical_trait.clone(),
