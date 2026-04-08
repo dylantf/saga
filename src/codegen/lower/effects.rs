@@ -6,13 +6,21 @@
 /// - `build_op_handler_fun`: building per-op CPS handler functions
 /// - `build_beam_native_op_fun`: synthesizing handlers for BEAM-native ops
 /// - `resolve_handler`: resolving named/inline handlers to arms
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Expr, ExprKind, Handler, HandlerArm};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::Lowerer;
 use super::util::{cerl_call, collect_fun_call};
+
+struct ResolvedHandler {
+    arms: Vec<HandlerArm>,
+    return_clause: Option<Box<HandlerArm>>,
+    handled_effects: Vec<String>,
+    arm_sources: HashMap<String, Option<String>>,
+    return_source: Option<String>,
+}
 
 impl<'a> Lowerer<'a> {
     fn lower_handler_owned_expr(&mut self, expr: &Expr) -> CExpr {
@@ -21,11 +29,7 @@ impl<'a> Lowerer<'a> {
         self.lower_expr_value(expr)
     }
 
-    fn lower_handled_expr_with_return_k(
-        &mut self,
-        expr: &Expr,
-        return_k: Option<CExpr>,
-    ) -> CExpr {
+    fn lower_handled_expr_with_return_k(&mut self, expr: &Expr, return_k: Option<CExpr>) -> CExpr {
         let inner_ce = self.lower_expr_with_installed_return_k(expr, return_k.clone());
         if matches!(expr.kind, ExprKind::Block { .. }) {
             inner_ce
@@ -183,11 +187,9 @@ impl<'a> Lowerer<'a> {
                     &mut || self.fresh(),
                 )
             } else if super::beam_interop::is_vec_op(op_name) {
-                super::beam_interop::build_vec_native_call(
-                    op_name,
-                    &param_var_strs,
-                    &mut || self.fresh(),
-                )
+                super::beam_interop::build_vec_native_call(op_name, &param_var_strs, &mut || {
+                    self.fresh()
+                })
             } else {
                 let ctor_atoms = self.constructor_atoms.clone();
                 super::beam_interop::build_native_call(
@@ -212,10 +214,7 @@ impl<'a> Lowerer<'a> {
                         CExpr::Let(
                             result_var.clone(),
                             Box::new(native_call),
-                            Box::new(CExpr::Apply(
-                                Box::new(other),
-                                vec![CExpr::Var(result_var)],
-                            )),
+                            Box::new(CExpr::Apply(Box::new(other), vec![CExpr::Var(result_var)])),
                         )
                     }
                 }
@@ -269,11 +268,7 @@ impl<'a> Lowerer<'a> {
     ///
     /// `handler_canonical` identifies which handler is providing this op,
     /// used to dispatch handler-specific lowerings (e.g. beam_ref vs ets_ref).
-    fn build_beam_native_op_fun(
-        &mut self,
-        op_name: &str,
-        handler_canonical: &str,
-    ) -> CExpr {
+    fn build_beam_native_op_fun(&mut self, op_name: &str, handler_canonical: &str) -> CExpr {
         let (_, _, param_count) = super::beam_interop::lookup_native_op(op_name)
             .unwrap_or_else(|| panic!("unknown BEAM-native op: {}", op_name));
 
@@ -291,19 +286,12 @@ impl<'a> Lowerer<'a> {
                 &mut || self.fresh(),
             )
         } else if super::beam_interop::is_vec_op(op_name) {
-            super::beam_interop::build_vec_native_call(
-                op_name,
-                &param_vars,
-                &mut || self.fresh(),
-            )
+            super::beam_interop::build_vec_native_call(op_name, &param_vars, &mut || self.fresh())
         } else {
             let ctor_atoms = self.constructor_atoms.clone();
-            super::beam_interop::build_native_call(
-                op_name,
-                &param_vars,
-                &ctor_atoms,
-                &mut || self.fresh(),
-            )
+            super::beam_interop::build_native_call(op_name, &param_vars, &ctor_atoms, &mut || {
+                self.fresh()
+            })
         };
 
         let result_var = self.fresh();
@@ -369,8 +357,13 @@ impl<'a> Lowerer<'a> {
             .and_then(|name| self.handle_cond_vars.get(name).cloned());
 
         // Resolve all handler arms, return clause, and which effects are handled
-        let (all_arms, return_clause, handled_effects, arm_sources, return_source) =
-            self.resolve_handler(handler);
+        let ResolvedHandler {
+            arms: all_arms,
+            return_clause,
+            handled_effects,
+            arm_sources,
+            return_source,
+        } = self.resolve_handler(handler);
 
         // Index handler arms by (effect.op or bare op) for quick lookup.
         // Qualified arms use "EffectName.op" as key, unqualified use bare "op".
@@ -684,23 +677,14 @@ impl<'a> Lowerer<'a> {
 
     /// Resolve a Handler into a flat list of arms, optional return clause,
     /// and the set of handled effects.
-    fn resolve_handler(
-        &self,
-        handler: &Handler,
-    ) -> (
-        Vec<HandlerArm>,
-        Option<Box<HandlerArm>>,
-        Vec<String>,
-        std::collections::HashMap<String, Option<String>>,
-        Option<String>,
-    ) {
+    fn resolve_handler(&self, handler: &Handler) -> ResolvedHandler {
         match handler {
             Handler::Named(name, _) => {
                 let canonical = self.resolve_handler_name(name);
                 let info = self.handler_defs.get(&canonical).unwrap_or_else(|| {
                     panic!("unknown handler: {} (canonical: {})", name, canonical)
                 });
-                let mut arm_sources = std::collections::HashMap::new();
+                let mut arm_sources = HashMap::new();
                 for arm in &info.arms {
                     if let Some(ref q) = arm.qualifier {
                         let canonical = self.canonicalize_effect(q);
@@ -712,13 +696,13 @@ impl<'a> Lowerer<'a> {
                         arm_sources.insert(arm.op_name.clone(), info.source_module.clone());
                     }
                 }
-                (
-                    info.arms.clone(),
-                    info.return_clause.clone(),
-                    info.effects.clone(),
+                ResolvedHandler {
+                    arms: info.arms.clone(),
+                    return_clause: info.return_clause.clone(),
+                    handled_effects: info.effects.clone(),
                     arm_sources,
-                    info.source_module.clone(),
-                )
+                    return_source: info.source_module.clone(),
+                }
             }
             Handler::Inline {
                 named,
@@ -729,7 +713,7 @@ impl<'a> Lowerer<'a> {
                 let mut all_arms = Vec::new();
                 let mut resolved_return = return_clause.clone();
                 let mut handled_effects = Vec::new();
-                let mut arm_sources = std::collections::HashMap::new();
+                let mut arm_sources = HashMap::new();
                 let mut return_source = None;
 
                 for ann in named {
@@ -779,7 +763,13 @@ impl<'a> Lowerer<'a> {
                     }
                 }
 
-                (all_arms, resolved_return, handled_effects, arm_sources, return_source)
+                ResolvedHandler {
+                    arms: all_arms,
+                    return_clause: resolved_return,
+                    handled_effects,
+                    arm_sources,
+                    return_source,
+                }
             }
         }
     }
@@ -905,9 +895,7 @@ impl<'a> Lowerer<'a> {
         let mut tuple_elements = Vec::new();
         for (_eff, op) in &handler_ops {
             if let Some(arm) = info.arms.iter().find(|a| a.op_name == *op) {
-                tuple_elements.push(
-                    self.build_op_handler_fun(arm, info.source_module.as_deref()),
-                );
+                tuple_elements.push(self.build_op_handler_fun(arm, info.source_module.as_deref()));
             } else {
                 let k_param = self.fresh();
                 tuple_elements.push(CExpr::Fun(
