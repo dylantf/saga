@@ -199,6 +199,9 @@ impl Checker {
                             param_shallow,
                             &mut absorbed_entries,
                         );
+                        for entry in &absorbed_entries {
+                            self.call_site_absorbed.insert(entry.name.clone());
+                        }
                         let normalized_effect_row = self.sub.apply_effect_row(&self.effect_row);
                         self.effect_row = normalized_effect_row.subtract_entries(&absorbed_entries);
                     }

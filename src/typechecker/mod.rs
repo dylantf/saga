@@ -884,6 +884,12 @@ pub struct Checker {
     /// Effect accumulator: effects from the current scope are pushed here automatically
     /// during inference. Isolation scopes (handlers, lambdas) save/restore this field.
     pub(crate) effect_row: EffectRow,
+    /// Effects absorbed during call-site HOF absorption (infer.rs App). Tracks effect
+    /// names that were subtracted from the accumulator when passing callbacks to HOFs.
+    /// Used by the unused-effects warning to avoid false positives: an absorbed effect
+    /// was genuinely needed in scope even though it no longer appears in the accumulator.
+    /// Cleared at the start of each function body in check_fun_clauses.
+    pub(crate) call_site_absorbed: std::collections::HashSet<String>,
     /// Trait system state (definitions, impls, constraints, where bounds).
     pub(crate) trait_state: TraitState,
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
@@ -1195,6 +1201,7 @@ impl Checker {
             resume_return_type: None,
             effect_meta: EffectMeta::default(),
             effect_row: EffectRow::empty(),
+            call_site_absorbed: std::collections::HashSet::new(),
             trait_state: TraitState::default(),
             field_candidates: HashMap::new(),
             modules: ModuleContext::default(),

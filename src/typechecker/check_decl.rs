@@ -943,6 +943,7 @@ impl Checker {
         }
 
         // Save effects and start fresh for this function body
+        let saved_absorbed = std::mem::take(&mut self.call_site_absorbed);
         let saved_effs = self.save_effects();
         for clause in clauses {
             let Decl::FunBinding {
@@ -1111,7 +1112,10 @@ impl Checker {
                 err_span,
             )?;
 
-            // Check for effects declared but never used
+            // Check for effects declared but never used.
+            // Effects that were absorbed during call-site HOF absorption (e.g. Actor
+            // on spawn!) are excluded: absorption proves the effect was needed in scope
+            // even though it no longer appears in the accumulator.
             let body_effect_names: std::collections::HashSet<String> = all_body_effs
                 .effects
                 .iter()
@@ -1122,7 +1126,10 @@ impl Checker {
                 .iter()
                 .map(|e| e.name.clone())
                 .collect();
-            let unused: Vec<_> = declared_effects.difference(&body_effect_names).collect();
+            let unused: Vec<_> = declared_effects
+                .difference(&body_effect_names)
+                .filter(|name| !self.call_site_absorbed.contains(*name))
+                .collect();
             if !unused.is_empty() {
                 let span = annotation_span.expect("unused effects implies annotation exists");
                 let mut effects: Vec<_> = unused.into_iter().cloned().collect();
@@ -1135,6 +1142,9 @@ impl Checker {
                     });
             }
         }
+
+        // Restore call_site_absorbed for outer scope
+        self.call_site_absorbed = saved_absorbed;
 
         // Check for unresolved ambiguous field accesses. Any var still in field_candidates
         // after the full body was checked is genuinely ambiguous -- the programmer needs
