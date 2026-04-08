@@ -1251,7 +1251,7 @@ impl<'a> Lowerer<'a> {
 
     fn dynamic_handler_info_from_type(&self, ty: &Type) -> Option<Vec<String>> {
         if let Type::Con(name, args) = ty
-            && name == "Handler"
+            && name == crate::typechecker::canonicalize_type_name("Handler")
         {
             let effects: Vec<String> = args
                 .iter()

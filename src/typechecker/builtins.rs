@@ -1,6 +1,11 @@
-use super::{Checker, ImplInfo, Scheme, TraitInfo, Type};
+use super::{Checker, ImplInfo, Scheme, TraitInfo, Type, canonicalize_type_name};
 
 impl Checker {
+    /// Helper to get the canonical name of a builtin type.
+    fn ct(bare: &str) -> String {
+        canonicalize_type_name(bare).to_string()
+    }
+
     pub(crate) fn register_builtins(&mut self) {
         // Note: Show and Ord traits are defined in Std.Base
         // (loaded before stdlib modules).
@@ -18,7 +23,7 @@ impl Checker {
         );
         for prim in &["Int", "Float"] {
             self.trait_state.impls.insert(
-                ("Num".into(), vec![], prim.to_string()),
+                ("Num".into(), vec![], Self::ct(prim)),
                 ImplInfo {
                     param_constraints: vec![],
                     trait_type_args: vec![],
@@ -38,7 +43,7 @@ impl Checker {
         );
         for prim in &["String", "List", "BitString"] {
             self.trait_state.impls.insert(
-                ("Semigroup".into(), vec![], prim.to_string()),
+                ("Semigroup".into(), vec![], Self::ct(prim)),
                 ImplInfo {
                     param_constraints: vec![],
                     trait_type_args: vec![],
@@ -58,7 +63,7 @@ impl Checker {
         );
         for prim in &["Int", "Float", "String", "Bool", "Unit", "BitString"] {
             self.trait_state.impls.insert(
-                ("Eq".into(), vec![], prim.to_string()),
+                ("Eq".into(), vec![], Self::ct(prim)),
                 ImplInfo {
                     param_constraints: vec![],
                     trait_type_args: vec![],
@@ -109,7 +114,7 @@ impl Checker {
             Scheme {
                 forall: vec![a_id],
                 constraints: vec![],
-                ty: Type::Con("List".into(), vec![a.clone()]),
+                ty: Type::Con(Self::ct("List"), vec![a.clone()]),
             },
         );
 
@@ -118,7 +123,7 @@ impl Checker {
             Type::Var(id) => *id,
             _ => unreachable!(),
         };
-        let list_a = Type::Con("List".into(), vec![a.clone()]);
+        let list_a = Type::Con(Self::ct("List"), vec![a.clone()]);
         self.constructors.insert(
             "Cons".into(),
             Scheme {
@@ -147,50 +152,50 @@ impl Checker {
         );
 
         // Built-in ADT variant maps (for exhaustiveness checking)
-        self.adt_variants
-            .insert("List".into(), vec![("Nil".into(), 0), ("Cons".into(), 2)]);
-        self.adt_variants
-            .insert("Bool".into(), vec![("True".into(), 0), ("False".into(), 0)]);
+        self.adt_variants.insert(
+            Self::ct("List"),
+            vec![("Nil".into(), 0), ("Cons".into(), 2)],
+        );
+        self.adt_variants.insert(
+            Self::ct("Bool"),
+            vec![("True".into(), 0), ("False".into(), 0)],
+        );
 
         // Built-in type arities
         for name in &["Int", "Float", "String", "Bool", "Unit", "BitString"] {
-            self.type_arity.insert(name.to_string(), 0);
+            self.type_arity.insert(Self::ct(name), 0);
         }
-        self.type_arity.insert("List".into(), 1);
+        self.type_arity.insert(Self::ct("List"), 1);
 
         // Show, Debug, and Eq for Tuple (any arity -- all params must satisfy the trait)
-        // We use "Tuple" as the type name; param_constraints are checked dynamically
-        // based on actual type args at constraint resolution time
         self.trait_state.impls.insert(
-            ("Show".into(), vec![], "Tuple".into()),
+            ("Show".into(), vec![], Self::ct("Tuple")),
             ImplInfo {
                 param_constraints: vec![],
                 trait_type_args: vec![],
                 span: None,
-            }, // handled specially in check_pending_constraints
+            },
         );
         self.trait_state.impls.insert(
-            ("Debug".into(), vec![], "Tuple".into()),
+            ("Debug".into(), vec![], Self::ct("Tuple")),
             ImplInfo {
                 param_constraints: vec![],
                 trait_type_args: vec![],
                 span: None,
-            }, // handled specially in check_pending_constraints
+            },
         );
         self.trait_state.impls.insert(
-            ("Eq".into(), vec![], "Tuple".into()),
+            ("Eq".into(), vec![], Self::ct("Tuple")),
             ImplInfo {
                 param_constraints: vec![],
                 trait_type_args: vec![],
                 span: None,
-            }, // handled specially in check_pending_constraints
+            },
         );
-
-        // --- Dict type ---
 
         // Eq for List a: requires Eq on a
         self.trait_state.impls.insert(
-            ("Eq".into(), vec![], "List".into()),
+            ("Eq".into(), vec![], Self::ct("List")),
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0)],
                 trait_type_args: vec![],
@@ -200,7 +205,7 @@ impl Checker {
 
         // Eq for Maybe a: requires Eq on a
         self.trait_state.impls.insert(
-            ("Eq".into(), vec![], "Maybe".into()),
+            ("Eq".into(), vec![], Self::ct("Maybe")),
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0)],
                 trait_type_args: vec![],
@@ -210,7 +215,7 @@ impl Checker {
 
         // Eq for Result a b: requires Eq on both a and b
         self.trait_state.impls.insert(
-            ("Eq".into(), vec![], "Result".into()),
+            ("Eq".into(), vec![], Self::ct("Result")),
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],
                 trait_type_args: vec![],
@@ -220,7 +225,7 @@ impl Checker {
 
         // Eq for Dict k v: requires Eq on both k and v
         self.trait_state.impls.insert(
-            ("Eq".into(), vec![], "Dict".into()),
+            ("Eq".into(), vec![], Self::ct("Dict")),
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],
                 trait_type_args: vec![],
@@ -230,7 +235,7 @@ impl Checker {
 
         // Eq for Set a: requires Eq on a
         self.trait_state.impls.insert(
-            ("Eq".into(), vec![], "Set".into()),
+            ("Eq".into(), vec![], Self::ct("Set")),
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0)],
                 trait_type_args: vec![],

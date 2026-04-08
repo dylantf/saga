@@ -326,7 +326,7 @@ fn show_int_uses_dict_dispatch() {
     let out = emit_elaborated(src);
     // Should reference the Show/Int dict from the std_int module
     assert!(
-        out.contains("__dict_Show_std_int_Int"),
+        out.contains("__dict_Show_std_int_Std_Int_Int"),
         "expected Show/Int dict reference\n{out}"
     );
     // main should call the dict via element() dispatch
@@ -342,7 +342,7 @@ fn show_bool_uses_case() {
     let out = emit_elaborated(src);
     // Should reference the Show/Bool dict from the std_bool module
     assert!(
-        out.contains("__dict_Show_std_bool_Bool"),
+        out.contains("__dict_Show_std_bool_Std_Bool_Bool"),
         "expected Show/Bool dict reference\n{out}"
     );
 }
@@ -358,7 +358,7 @@ fn print_uses_show_dict() {
     );
     // show 42 should reference the Show/Int dict
     assert!(
-        out.contains("__dict_Show_std_int_Int"),
+        out.contains("__dict_Show_std_int_Std_Int_Int"),
         "expected Show/Int dict reference\n{out}"
     );
 }
@@ -368,7 +368,7 @@ fn show_string_is_identity() {
     let src = "main () = show \"hello\"";
     let out = emit_elaborated(src);
     assert!(
-        out.contains("__dict_Show_std_string_String"),
+        out.contains("__dict_Show_std_string_Std_String_String"),
         "expected Show/String dict constructor\n{out}"
     );
 }
@@ -379,7 +379,7 @@ fn string_interpolation_uses_show_dict() {
     let out = emit_elaborated(src);
     // String interpolation desugars to show(x), which should use dict dispatch
     assert!(
-        out.contains("__dict_Show_std_int_Int"),
+        out.contains("__dict_Show_std_int_Std_Int_Int"),
         "expected Show/Int dict for interpolation\n{out}"
     );
 }
@@ -400,11 +400,11 @@ fn show_tuple_inlines_per_element() {
     );
     // Should reference Show dicts for the element types
     assert!(
-        out.contains("__dict_Show_std_int_Int"),
+        out.contains("__dict_Show_std_int_Std_Int_Int"),
         "expected Show/Int dict for first element\n{out}"
     );
     assert!(
-        out.contains("__dict_Show_std_bool_Bool"),
+        out.contains("__dict_Show_std_bool_Std_Bool_Bool"),
         "expected Show/Bool dict for second element\n{out}"
     );
     // Should produce parens and comma separator (now as binaries)
@@ -438,15 +438,15 @@ fn show_triple_tuple_has_three_elements() {
     let out = emit_elaborated(src);
     // Should reference Show dicts for all three element types
     assert!(
-        out.contains("__dict_Show_std_int_Int"),
+        out.contains("__dict_Show_std_int_Std_Int_Int"),
         "expected Show/Int dict\n{out}"
     );
     assert!(
-        out.contains("__dict_Show_std_string_String"),
+        out.contains("__dict_Show_std_string_Std_String_String"),
         "expected Show/String dict\n{out}"
     );
     assert!(
-        out.contains("__dict_Show_std_bool_Bool"),
+        out.contains("__dict_Show_std_bool_Std_Bool_Bool"),
         "expected Show/Bool dict\n{out}"
     );
     // Should have the inline tuple lambda, not a Tuple dict
@@ -544,7 +544,7 @@ main () = show (Wrap 42)
         "expected Show/Box dict constructor\n{out}"
     );
     assert!(
-        out.contains("__dict_Show_std_int_Int"),
+        out.contains("__dict_Show_std_int_Std_Int_Int"),
         "expected Show/Int sub-dict applied to Box dict\n{out}"
     );
 }

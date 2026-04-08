@@ -424,7 +424,7 @@ impl Checker {
                     .iter()
                     .map(|e| self.infer_expr(e))
                     .collect::<Result<_, Diagnostic>>()?;
-                Ok(Type::Con("Tuple".into(), tys))
+                Ok(Type::Con(super::canonicalize_type_name("Tuple").into(), tys))
             }
 
             ExprKind::QualifiedName {
@@ -734,9 +734,9 @@ impl Checker {
                     ));
                 }
                 let msg_var = self.fresh_var();
-                let pid_ty = Type::Con("Pid".into(), vec![msg_var]);
+                let pid_ty = Type::Con(super::canonicalize_type_name("Pid").into(), vec![msg_var]);
                 self.bind_pattern(&args[0], &pid_ty)?;
-                self.bind_pattern(&args[1], &Type::Con("ExitReason".into(), vec![]))?;
+                self.bind_pattern(&args[1], &Type::Con(super::canonicalize_type_name("ExitReason").into(), vec![]))?;
             } else {
                 self.bind_pattern(&arm.pattern, &msg_ty)?;
             }
@@ -801,7 +801,7 @@ impl Checker {
     fn handler_info_from_type(&self, ty: &Type) -> Option<super::HandlerInfo> {
         let resolved = self.sub.apply(ty);
         if let Type::Con(ref name, ref args) = resolved
-            && name == "Handler"
+            && name == super::canonicalize_type_name("Handler")
         {
             let effects: Vec<String> = args
                 .iter()

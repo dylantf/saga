@@ -252,7 +252,13 @@ fn mutual_recursion() {
 fn list_cons_expression() {
     let checker = check("let xs = 1 :: 2 :: Nil").unwrap();
     let ty = checker.sub.apply(&checker.env.get("xs").unwrap().ty);
-    assert_eq!(ty, Type::Con("List".into(), vec![Type::int()]));
+    assert_eq!(
+        ty,
+        Type::Con(
+            crate::typechecker::canonicalize_type_name("List").into(),
+            vec![Type::int()]
+        )
+    );
 }
 
 #[test]

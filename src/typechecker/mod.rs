@@ -174,6 +174,50 @@ pub enum Type {
     Error,
 }
 
+/// Maps bare builtin type names to their canonical (module-qualified) forms.
+/// This is the single source of truth for which module each builtin type belongs to.
+pub const BUILTIN_TYPE_CANONICAL: &[(&str, &str)] = &[
+    ("Int", "Std.Int.Int"),
+    ("Float", "Std.Float.Float"),
+    ("String", "Std.String.String"),
+    ("Bool", "Std.Bool.Bool"),
+    ("Unit", "Std.Base.Unit"),
+    ("List", "Std.List.List"),
+    ("Dict", "Std.Dict.Dict"),
+    ("Set", "Std.Set.Set"),
+    ("BitString", "Std.BitString.BitString"),
+    ("Tuple", "Std.Base.Tuple"),
+    ("Handler", "Std.Base.Handler"),
+    // Types defined in stdlib .dy files but referenced in the typechecker
+    ("Maybe", "Std.Maybe.Maybe"),
+    ("Result", "Std.Result.Result"),
+    ("Ordering", "Std.Base.Ordering"),
+    ("Pid", "Std.Actor.Pid"),
+    ("ExitReason", "Std.Actor.ExitReason"),
+];
+
+/// Resolve a bare builtin type name to its canonical form.
+/// Returns the input unchanged if it's not a known builtin.
+pub fn canonicalize_type_name(name: &str) -> &str {
+    BUILTIN_TYPE_CANONICAL
+        .iter()
+        .find(|(bare, _)| *bare == name)
+        .map(|(_, canonical)| *canonical)
+        .unwrap_or(name)
+}
+
+/// Get the bare (user-facing) name from a canonical type name.
+/// `"Std.Int.Int"` → `"Int"`, `"MyMod.Foo"` → `"Foo"`, `"Handler"` → `"Handler"`.
+pub fn bare_type_name(canonical: &str) -> &str {
+    canonical.rsplit('.').next().unwrap_or(canonical)
+}
+
+/// Mangle a canonical type name for use in Erlang identifiers (e.g. dict names).
+/// Replaces dots with underscores: `"Std.Int.Int"` → `"Std_Int_Int"`.
+pub fn mangle_type_name(canonical: &str) -> String {
+    canonical.replace('.', "_")
+}
+
 /// Convenience constructors for built-in types
 impl Type {
     /// Pure function type: a -> b with empty closed effect row.
@@ -181,22 +225,22 @@ impl Type {
         Type::Fun(Box::new(a), Box::new(b), EffectRow::closed(vec![]))
     }
     pub fn con(name: &str) -> Type {
-        Type::Con(name.into(), vec![])
+        Type::Con(canonicalize_type_name(name).into(), vec![])
     }
     pub fn int() -> Type {
-        Type::con("Int")
+        Type::con(canonicalize_type_name("Int"))
     }
     pub fn float() -> Type {
-        Type::con("Float")
+        Type::con(canonicalize_type_name("Float"))
     }
     pub fn string() -> Type {
-        Type::con("String")
+        Type::con(canonicalize_type_name("String"))
     }
     pub fn bool() -> Type {
-        Type::con("Bool")
+        Type::con(canonicalize_type_name("Bool"))
     }
     pub fn unit() -> Type {
-        Type::con("Unit")
+        Type::con(canonicalize_type_name("Unit"))
     }
 }
 
@@ -231,9 +275,11 @@ impl std::fmt::Display for Type {
                 Ok(())
             }
             Type::Con(name, args) => {
+                let display_name = bare_type_name(name);
+                let is_tuple = display_name == "Tuple";
                 if args.is_empty() {
-                    write!(f, "{}", name)
-                } else if name == "Tuple" && args.len() >= 2 {
+                    write!(f, "{}", display_name)
+                } else if is_tuple && args.len() >= 2 {
                     // Display as (A, B, ...) instead of Tuple A B
                     write!(f, "(")?;
                     for (i, arg) in args.iter().enumerate() {
@@ -244,12 +290,12 @@ impl std::fmt::Display for Type {
                     }
                     write!(f, ")")
                 } else {
-                    write!(f, "{}", name)?;
+                    write!(f, "{}", display_name)?;
                     for arg in args {
                         // Wrap multi-arg type applications in parens for readability,
                         // but not tuples (they already render as (A, B))
                         match arg {
-                            Type::Con(n, inner_args) if !inner_args.is_empty() && n != "Tuple" => {
+                            Type::Con(n, inner_args) if !inner_args.is_empty() && bare_type_name(n) != "Tuple" => {
                                 write!(f, " ({})", arg)?;
                             }
                             _ => write!(f, " {}", arg)?,
@@ -1302,7 +1348,7 @@ impl Checker {
                 PendingWarning::DiscardedValue { span, ty } => {
                     let resolved = self.sub.apply(&ty);
                     let is_unit =
-                        matches!(&resolved, Type::Con(n, args) if n == "Unit" && args.is_empty());
+                        matches!(&resolved, Type::Con(n, args) if n == canonicalize_type_name("Unit") && args.is_empty());
                     if !is_unit && !matches!(resolved, Type::Var(_) | Type::Error) {
                         let display_ty = self.prettify_type(&ty);
                         self.collected_diagnostics.push(Diagnostic::warning_at(
@@ -1351,6 +1397,10 @@ impl Checker {
 
     pub fn handler_names(&self) -> Vec<String> {
         self.handlers.keys().cloned().collect()
+    }
+
+    pub fn set_current_module(&mut self, name: String) {
+        self.current_module = Some(name);
     }
 
     pub fn set_module_map(&mut self, map: check_module::ModuleMap) {

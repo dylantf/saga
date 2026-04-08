@@ -67,6 +67,22 @@ impl Checker {
         &mut self,
         program: &mut [Decl],
     ) -> std::result::Result<(), Vec<Diagnostic>> {
+        // Add local type names to scope_map BEFORE register_definitions, so that
+        // convert_type_expr can resolve local types during trait/effect registration.
+        // Local types shadow imported types (use `insert`, not `or_insert`).
+        for decl in program.iter() {
+            let type_name = match decl {
+                Decl::TypeDef { name, .. } | Decl::RecordDef { name, .. } => Some(name),
+                _ => None,
+            };
+            if let Some(name) = type_name {
+                let canonical = match &self.current_module {
+                    Some(module) => format!("{}.{}", module, name),
+                    None => name.clone(),
+                };
+                self.scope_map.types.insert(name.clone(), canonical);
+            }
+        }
         self.register_definitions(program)?;
         self.process_imports(program)?;
         super::resolve::resolve_names(program, &self.scope_map);
@@ -1403,7 +1419,7 @@ impl Checker {
         // Only check if at least one param resolves to a known ADT or Tuple
         let resolved_types: Vec<_> = param_types.iter().map(|t| self.sub.apply(t)).collect();
         let has_adt_param = resolved_types.iter().any(|t| match t {
-            Type::Con(name, _) => self.adt_variants.contains_key(name) || name == "Tuple",
+            Type::Con(name, _) => self.adt_variants.contains_key(name) || name == super::canonicalize_type_name("Tuple"),
             _ => false,
         });
         if !has_adt_param {
@@ -1498,8 +1514,16 @@ impl Checker {
             })
             .collect();
 
+        // Canonical type name: "Module.TypeName" for module types, bare for non-module.
+        // Don't apply builtin canonicalization here — a locally-defined "Maybe" is NOT
+        // the stdlib Std.Maybe.Maybe.
+        let canonical_name = match &self.current_module {
+            Some(module) => format!("{}.{}", module, name),
+            None => name.to_string(),
+        };
+
         let result_type = Type::Con(
-            name.into(),
+            canonical_name.clone(),
             param_vars.iter().map(|(_, id)| Type::Var(*id)).collect(),
         );
 
@@ -1533,14 +1557,15 @@ impl Checker {
         }
 
         self.adt_variants.insert(
-            name.into(),
+            canonical_name.clone(),
             variants
                 .iter()
                 .map(|v| (v.name.clone(), v.fields.len()))
                 .collect(),
         );
 
-        self.type_arity.insert(name.into(), type_params.len());
+        self.type_arity
+            .insert(canonical_name, type_params.len());
 
         Ok(())
     }
@@ -1574,9 +1599,15 @@ impl Checker {
 
         let forall: Vec<u32> = param_vars.iter().map(|(_, id)| *id).collect();
 
-        // Build result type: e.g. Box a -> Con("Box", [Var(a_id)])
+        // Canonical type name: "Module.TypeName" for module types, bare for non-module.
+        let canonical_name = match &self.current_module {
+            Some(module) => format!("{}.{}", module, name),
+            None => name.to_string(),
+        };
+
+        // Build result type: e.g. Box a -> Con("MyMod.Box", [Var(a_id)])
         let result_type = Type::Con(
-            name.into(),
+            canonical_name.clone(),
             forall.iter().map(|&id| Type::Var(id)).collect(),
         );
 
@@ -1598,7 +1629,7 @@ impl Checker {
 
         let num_fields = field_types.len();
         self.records.insert(
-            name.into(),
+            canonical_name.clone(),
             RecordInfo {
                 type_params: forall,
                 fields: field_types,
@@ -1606,8 +1637,9 @@ impl Checker {
         );
         // Register as a single-constructor ADT for exhaustiveness checking
         self.adt_variants
-            .insert(name.into(), vec![(name.into(), num_fields)]);
-        self.type_arity.insert(name.into(), type_params.len());
+            .insert(canonical_name.clone(), vec![(name.into(), num_fields)]);
+        self.type_arity
+            .insert(canonical_name, type_params.len());
         Ok(())
     }
 
@@ -2171,7 +2203,7 @@ impl Checker {
                 Type::Con(e.name.clone(), type_args)
             })
             .collect();
-        let handler_ty = Type::Con("Handler".into(), handler_effect_types);
+        let handler_ty = Type::Con(super::canonicalize_type_name("Handler").into(), handler_effect_types);
 
         // Put the handler name in the env so it can be referenced
         self.env.insert_with_def(
@@ -2318,7 +2350,7 @@ impl Checker {
                                     trait_type_args: resolved_extra_types,
                                 });
                                 // Push conditional constraints for type parameters
-                                if type_name == "Tuple" {
+                                if type_name == super::canonicalize_type_name("Tuple") {
                                     // Tuples: propagate the trait to all elements
                                     for arg_ty in args {
                                         self.trait_state.pending_constraints.push((

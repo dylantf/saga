@@ -100,7 +100,13 @@ impl ModuleExports {
                 Decl::RecordDef {
                     public: true, name, ..
                 } => {
-                    if let Some(fields) = checker.records.get(name.as_str()) {
+                    // records map uses canonical keys
+                    let canonical = checker
+                        .current_module
+                        .as_ref()
+                        .map(|m| format!("{}.{}", m, name))
+                        .unwrap_or_else(|| name.clone());
+                    if let Some(fields) = checker.records.get(&canonical) {
                         record_defs.insert(name.clone(), fields.clone());
                     }
                 }
@@ -161,15 +167,27 @@ impl ModuleExports {
             }
         }
 
-        // Collect type arities for all exported types
+        // Collect type arities for all exported types.
+        // The checker stores type_arity under canonical names, but exports use bare names.
         let mut type_arity: HashMap<String, usize> = HashMap::new();
+        let module_prefix = checker.current_module.as_deref().unwrap_or("");
         for name in type_constructors.keys() {
-            if let Some(&arity) = checker.type_arity.get(name) {
+            let canonical = if module_prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}.{}", module_prefix, name)
+            };
+            if let Some(&arity) = checker.type_arity.get(&canonical) {
                 type_arity.insert(name.clone(), arity);
             }
         }
         for name in record_defs.keys() {
-            if let Some(&arity) = checker.type_arity.get(name) {
+            let canonical = if module_prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}.{}", module_prefix, name)
+            };
+            if let Some(&arity) = checker.type_arity.get(&canonical) {
                 type_arity.insert(name.clone(), arity);
             }
         }
@@ -615,6 +633,11 @@ impl Checker {
                 )
             })?;
 
+        // Update the stored program with the resolved AST (resolve_names ran during check)
+        self.modules
+            .programs
+            .insert(module_name.clone(), program.clone());
+
         // Collect all public exports into a single struct
         let exports = ModuleExports::collect(&program, &mod_checker);
 
@@ -881,10 +904,10 @@ impl Checker {
             }
         }
 
-        // Type arities and scope_map entries for qualified type name resolution
+        // Type arities: register under canonical (module-qualified) name
         for (name, arity) in type_arity {
-            // Bare name (canonical internal form)
-            self.type_arity.entry(name.clone()).or_insert(*arity);
+            let canonical = format!("{}.{}", module_name, name);
+            self.type_arity.entry(canonical).or_insert(*arity);
         }
 
         // Function effects (for cross-module `with` validation and effect propagation).
@@ -939,10 +962,11 @@ impl Checker {
             }
         }
 
-        // Record definitions
+        // Record definitions (canonical key)
         for (rec_name, fields) in record_defs {
+            let canonical = format!("{}.{}", module_name, rec_name);
             self.records
-                .entry(rec_name.clone())
+                .entry(canonical)
                 .or_insert_with(|| fields.clone());
         }
 
@@ -962,7 +986,8 @@ impl Checker {
                 let is_type = name.starts_with(|c: char| c.is_uppercase());
                 if is_type {
                     if let Some(fields) = record_defs.get(name.as_str()) {
-                        self.records.insert(name.clone(), fields.clone());
+                        let record_canonical = format!("{}.{}", module_name, name);
+                        self.records.insert(record_canonical, fields.clone());
                     }
                     if let Some(ctors) = type_constructors.get(name) {
                         let mut variants = Vec::new();
@@ -1087,14 +1112,15 @@ pub(super) fn resolve_import(
         }
     }
 
-    // Type names: qualified -> bare
+    // Type names: bare, qualified, and aliased -> canonical (module-qualified)
     for name in exports.type_arity.keys() {
-        let canonical = format!("{}.{}", module_name, name);
-        scope.types.entry(canonical).or_insert_with(|| name.clone());
-        if prefix != module_name {
-            let aliased = format!("{}.{}", prefix, name);
-            scope.types.entry(aliased).or_insert_with(|| name.clone());
-        }
+        ScopeMap::register_qualified(&mut scope.types, module_name, prefix, name);
+        // Types also get a bare entry (e.g. "Maybe" -> "Std.Maybe.Maybe")
+        let type_canonical = format!("{}.{}", module_name, name);
+        scope
+            .types
+            .entry(name.clone())
+            .or_insert_with(|| type_canonical);
     }
 
     // Exposed items: bare -> canonical, with validation
@@ -1108,11 +1134,12 @@ pub(super) fn resolve_import(
                     let type_canonical = format!("{}.{}", module_name, name);
                     scope.values.entry(name.clone()).or_insert(type_canonical);
                 }
-                // Bare type name resolves to itself
+                // Bare type name resolves to canonical
+                let type_canonical = format!("{}.{}", module_name, name);
                 scope
                     .types
                     .entry(name.clone())
-                    .or_insert_with(|| name.clone());
+                    .or_insert(type_canonical);
                 // Record types count as found
                 if exports.record_defs.contains_key(name.as_str()) {
                     found = true;
@@ -1271,7 +1298,7 @@ fn collect_codegen_info(
                             .filter(|(_, ty)| {
                                 !matches!(
                                     ty,
-                                    crate::ast::TypeExpr::Named { name, .. } if name == "Unit"
+                                    crate::ast::TypeExpr::Named { name, .. } if name == super::canonicalize_type_name("Unit")
                                 )
                             })
                             .count(),
@@ -1369,9 +1396,10 @@ fn collect_codegen_info(
                 } else {
                     format!("_{}", trait_type_args.join("_"))
                 };
+                let mangled_type = super::mangle_type_name(target_type);
                 let dict_name = format!(
                     "__dict_{}{}_{}_{}",
-                    trait_name, type_args_suffix, erlang_module, target_type
+                    trait_name, type_args_suffix, erlang_module, mangled_type
                 );
                 let arity = where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
                 let var_to_idx: std::collections::HashMap<&str, usize> = type_params

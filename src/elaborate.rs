@@ -302,12 +302,14 @@ impl Elaborator {
                     } else {
                         format!("_{}", trait_type_args.join("_"))
                     };
+                    // Mangle canonical type name for Erlang-safe dict naming
+                    let mangled_type = crate::typechecker::mangle_type_name(target_type);
                     let dict_name = if self.erlang_module.is_empty() {
-                        format!("__dict_{}{}_{}", trait_name, type_args_suffix, target_type)
+                        format!("__dict_{}{}_{}", trait_name, type_args_suffix, mangled_type)
                     } else {
                         format!(
                             "__dict_{}{}_{}_{}",
-                            trait_name, type_args_suffix, self.erlang_module, target_type
+                            trait_name, type_args_suffix, self.erlang_module, mangled_type
                         )
                     };
                     self.dict_names.insert(
@@ -843,7 +845,12 @@ impl Elaborator {
                         .and_then(|evs| evs.iter().find(|ev| ev.trait_name == ORD))
                         .and_then(|ev| ev.resolved_type.as_ref())
                         .is_some_and(|(name, _)| {
-                            matches!(name.as_str(), "Int" | "Float" | "String")
+                            [
+                                crate::typechecker::canonicalize_type_name("Int"),
+                                crate::typechecker::canonicalize_type_name("Float"),
+                                crate::typechecker::canonicalize_type_name("String"),
+                            ]
+                            .contains(&name.as_str())
                         });
 
                     if !is_primitive
@@ -862,7 +869,7 @@ impl Elaborator {
                         .get(&node_id)
                         .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Num"))
                         .and_then(|ev| ev.resolved_type.as_ref())
-                        .is_some_and(|(name, _)| name == "Int");
+                        .is_some_and(|(name, _)| name == crate::typechecker::canonicalize_type_name("Int"));
                     if is_int {
                         BinOp::IntDiv
                     } else {
@@ -874,7 +881,7 @@ impl Elaborator {
                         .get(&node_id)
                         .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Num"))
                         .and_then(|ev| ev.resolved_type.as_ref())
-                        .is_some_and(|(name, _)| name == "Float");
+                        .is_some_and(|(name, _)| name == crate::typechecker::canonicalize_type_name("Float"));
                     if is_float {
                         BinOp::FloatMod
                     } else {
@@ -1621,7 +1628,7 @@ impl Elaborator {
     ) -> Option<Expr> {
         match ty {
             Type::Con(name, args)
-                if name == "Tuple" && (trait_name == SHOW || trait_name == DEBUG) =>
+                if name == crate::typechecker::canonicalize_type_name("Tuple") && (trait_name == SHOW || trait_name == DEBUG) =>
             {
                 // Tuples don't have a dict constructor; build an inline dict
                 // containing the show lambda: {fun t -> "(" ++ ... ++ ")"}
@@ -1723,7 +1730,7 @@ impl Elaborator {
                 && ev
                     .resolved_type
                     .as_ref()
-                    .is_some_and(|(name, _)| name == "Tuple")
+                    .is_some_and(|(name, _)| name == crate::typechecker::canonicalize_type_name("Tuple"))
         })?;
         let (_type_name, type_args) = tuple_ev.resolved_type.as_ref()?;
         self.build_tuple_show_lambda(trait_name, type_args, span)

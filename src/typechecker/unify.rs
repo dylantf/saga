@@ -382,23 +382,17 @@ impl Checker {
                 if name.starts_with(|c: char| c.is_uppercase()) {
                     self.lsp.type_references.push((*span, name.clone()));
                 }
-                // Resolve qualified type names (e.g. "M.Maybe" -> "Maybe") through
-                // the scope map.
-                let resolved = if name.contains('.') {
-                    match self.scope_map.resolve_type(name).map(|s| s.to_string()) {
-                        Some(canonical) => canonical,
-                        None => {
-                            self.collected_diagnostics.push(Diagnostic {
-                                severity: Severity::Error,
-                                message: format!("unknown qualified type '{}'", name),
-                                span: Some(*span),
-                            });
-                            return Type::Error;
-                        }
-                    }
-                } else {
-                    name.clone()
-                };
+                // Resolve type names to canonical form.
+                // After the resolve pass, names may already be canonical (e.g.
+                // "Std.Bool.Bool"). Try scope_map first, then accept the name
+                // as-is if it's already known (in type_arity or builtin table).
+                let resolved = self
+                    .scope_map
+                    .resolve_type(name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        super::canonicalize_type_name(name).to_string()
+                    });
                 Type::Con(resolved, vec![])
             }
             crate::ast::TypeExpr::Var { name, .. } => {
