@@ -945,6 +945,25 @@ impl ScopeMap {
         self.origin_of(name).is_some()
     }
 
+    /// Register a name under its canonical and (optionally) aliased qualified forms.
+    ///
+    /// Inserts `"Module.Name" -> "Module.Name"` (canonical) and, when the alias
+    /// prefix differs from the module name, `"Alias.Name" -> "Module.Name"`.
+    pub fn register_qualified(
+        map: &mut HashMap<String, String>,
+        module_name: &str,
+        prefix: &str,
+        bare_name: &str,
+    ) {
+        let canonical = format!("{}.{}", module_name, bare_name);
+        map.entry(canonical.clone())
+            .or_insert_with(|| canonical.clone());
+        if prefix != module_name {
+            let aliased = format!("{}.{}", prefix, bare_name);
+            map.entry(aliased).or_insert_with(|| canonical);
+        }
+    }
+
     /// Merge another scope_map into this one (first-insert-wins).
     pub fn merge(&mut self, other: &ScopeMap) {
         for (k, v) in &other.values {
