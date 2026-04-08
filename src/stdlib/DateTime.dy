@@ -6,10 +6,10 @@ import Std.String
 
 pub type ParseError =
   | UnexpectedEnd
-  | InvalidDigits(String)
-  | UnexpectedChar(String, String)
-  | UnknownSpecifier(String)
-  | MissingField(String)
+  | InvalidDigits String
+  | UnexpectedChar (String, String)
+  | UnknownSpecifier String
+  | MissingField String
   deriving (Show, Debug, Eq)
 
 pub record Date {
@@ -111,15 +111,91 @@ to_time dt = Time {
 
 # --- Formatting ---
 
+fun hour24_to_12 : Int -> Int
+hour24_to_12 h = case h % 12 {
+  0 -> 12
+  n -> n
+}
+
 fun pad2 : Int -> String
 pad2 n = show n |> String.pad_left 2 "0"
 
 fun pad4 : Int -> String
 pad4 n = show n |> String.pad_left 4 "0"
 
+val short_months = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+]
+
+val long_months = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+]
+
+val short_days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+val long_days = [
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+]
+
+fun nth : Int -> List String -> String
+nth n xs = case xs {
+  [] -> ""
+  h :: t -> if n == 0 then h else nth (n - 1) t
+}
+
+fun month_short : Int -> String
+month_short m = nth (m - 1) short_months
+
+fun month_long : Int -> String
+month_long m = nth (m - 1) long_months
+
+fun day_short : Int -> String
+day_short d = nth (d - 1) short_days
+
+fun day_long : Int -> String
+day_long d = nth (d - 1) long_days
+
+fun find_index : String -> List String -> Maybe Int
+find_index target xs = find_index_loop target xs 0
+
+fun find_index_loop : String -> List String -> Int -> Maybe Int
+find_index_loop target xs i = case xs {
+  [] -> Nothing
+  h :: t -> if h == target then Just i else find_index_loop target t (i + 1)
+}
+
 #@ Format a NaiveDateTime using strftime-style specifiers.
 #@ Supported: %Y (year), %m (month), %d (day), %H (hour), %M (minute),
-#@ %S (second), %T (%H:%M:%S), %F (%Y-%m-%d), %% (literal %)
+#@ %S (second), %T (%H:%M:%S), %F (%Y-%m-%d), %b/%B (month name),
+#@ %a/%A (weekday name), %% (literal %)
 pub fun format : String -> NaiveDateTime -> String
 format fmt dt = format_loop fmt dt ""
 
@@ -147,6 +223,12 @@ format_loop fmt dt acc = case fmt {
         <> pad2 dt.month
         <> "-"
         <> pad2 dt.day)
+    "I" <> r -> format_loop r dt (acc <> pad2 (hour24_to_12 dt.hour))
+    "p" <> r -> format_loop r dt (acc <> if dt.hour < 12 then "AM" else "PM")
+    "b" <> r -> format_loop r dt (acc <> month_short dt.month)
+    "B" <> r -> format_loop r dt (acc <> month_long dt.month)
+    "a" <> r -> format_loop r dt (acc <> day_short (day_of_week (to_date dt)))
+    "A" <> r -> format_loop r dt (acc <> day_long (day_of_week (to_date dt)))
     "%" <> r -> format_loop r dt (acc <> "%")
     _ -> format_loop rest dt (acc <> "%")
   }
@@ -221,12 +303,18 @@ record ParseParts {
   hour: Maybe Int,
   minute: Maybe Int,
   second: Maybe Int,
+  is_pm: Maybe Bool,
 }
 
 fun empty_parts : Unit -> ParseParts
 empty_parts () = ParseParts {
-  year: Nothing, month: Nothing, day: Nothing,
-  hour: Nothing, minute: Nothing, second: Nothing,
+  year: Nothing,
+  month: Nothing,
+  day: Nothing,
+  hour: Nothing,
+  minute: Nothing,
+  second: Nothing,
+  is_pm: Nothing,
 }
 
 fun require_field : String -> Maybe Int -> Result Int ParseError
@@ -235,14 +323,23 @@ require_field name m = case m {
   Nothing -> Err (MissingField name)
 }
 
+fun apply_ampm : Int -> Maybe Bool -> Int
+apply_ampm h is_pm = case is_pm {
+  Nothing -> h
+  Just True -> if h == 12 then 12 else h + 12
+  Just False -> if h == 12 then 0 else h
+}
+
 fun parts_to_datetime : ParseParts -> Result NaiveDateTime ParseError
 parts_to_datetime p = do {
   Ok year <- require_field "year" p.year
   Ok month <- require_field "month" p.month
   Ok day <- require_field "day" p.day
   Ok (NaiveDateTime {
-    year: year, month: month, day: day,
-    hour: p.hour |> Maybe.unwrap_or 0,
+    year: year,
+    month: month,
+    day: day,
+    hour: apply_ampm (p.hour |> Maybe.unwrap_or 0) p.is_pm,
     minute: p.minute |> Maybe.unwrap_or 0,
     second: p.second |> Maybe.unwrap_or 0,
     microsecond: 0,
@@ -277,8 +374,12 @@ parse_loop fmt input parts = case fmt {
     "m" <> r -> parse_digits 2 r input parts set_month
     "d" <> r -> parse_digits 2 r input parts set_day
     "H" <> r -> parse_digits 2 r input parts set_hour
+    "I" <> r -> parse_digits 2 r input parts set_hour
+    "p" <> r -> parse_ampm r input parts
     "M" <> r -> parse_digits 2 r input parts set_minute
     "S" <> r -> parse_digits 2 r input parts set_second
+    "b" <> r -> parse_month_name 3 short_months r input parts
+    "B" <> r -> parse_month_name_var long_months r input parts
     "F" <> r -> parse_loop ("%Y-%m-%d" <> r) input parts
     "T" <> r -> parse_loop ("%H:%M:%S" <> r) input parts
     "%" <> r -> match_literal "%" r input parts
@@ -311,7 +412,47 @@ match_literal expected fmt_rest input parts =
         - String.length expected) input
     parse_loop fmt_rest remaining parts
   }
-  else Err (UnexpectedChar(expected, String.slice 0 1 input))
+  else Err (UnexpectedChar (expected, String.slice 0 1 input))
+
+fun parse_ampm : String -> String -> ParseParts -> Result (ParseParts, String) ParseError
+parse_ampm fmt_rest input parts =
+  if String.length input < 2 then Err UnexpectedEnd
+  else {
+    let chunk = String.to_upper (String.slice 0 2 input)
+    let remaining = String.slice 2 (String.length input - 2) input
+    if chunk == "PM" then parse_loop fmt_rest remaining { parts | is_pm: Just True }
+    else if chunk == "AM" then parse_loop fmt_rest remaining { parts | is_pm: Just False }
+    else Err (InvalidDigits chunk)
+  }
+
+# Parse a fixed-width month name (e.g. %b = "Jan", 3 chars)
+fun parse_month_name : Int -> List String -> String -> String -> ParseParts -> Result (ParseParts, String) ParseError
+parse_month_name width names fmt_rest input parts =
+  if String.length input < width then Err UnexpectedEnd
+  else {
+    let chunk = String.slice 0 width input
+    let remaining = String.slice width (String.length input - width) input
+    case find_index chunk names {
+      Just i -> parse_loop fmt_rest remaining (set_month parts (i + 1))
+      Nothing -> Err (InvalidDigits chunk)
+    }
+  }
+
+# Parse a variable-width month name (e.g. %B = "January")
+fun parse_month_name_var : List String -> String -> String -> ParseParts -> Result (ParseParts, String) ParseError
+parse_month_name_var names fmt_rest input parts =
+  try_match_names names 0 fmt_rest input parts
+
+fun try_match_names : List String -> Int -> String -> String -> ParseParts -> Result (ParseParts, String) ParseError
+try_match_names names i fmt_rest input parts = case names {
+  [] -> Err (InvalidDigits (String.slice 0 3 input))
+  name :: rest ->
+    if String.starts_with name input then {
+      let remaining = String.slice (String.length name) (String.length input - String.length name) input
+      parse_loop fmt_rest remaining (set_month parts (i + 1))
+    }
+    else try_match_names rest (i + 1) fmt_rest input parts
+}
 
 #@ Parse a datetime string using a strftime-style format.
 #@ Supported: %Y, %m, %d, %H, %M, %S, %F (%Y-%m-%d), %T (%H:%M:%S), %% (literal %)

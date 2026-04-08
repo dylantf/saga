@@ -204,6 +204,52 @@ describe "DateTime" {
       let dt = DateTime.new 2026 1 1 0 0 0
       assert_eq (DateTime.format "100%%" dt) "100%"
     }
+
+    test "short month name" {
+      let dt = DateTime.new 2026 4 8 0 0 0
+      assert_eq (DateTime.format "%b" dt) "Apr"
+    }
+
+    test "long month name" {
+      let dt = DateTime.new 2026 12 25 0 0 0
+      assert_eq (DateTime.format "%B" dt) "December"
+    }
+
+    test "short weekday name" {
+      # 2026-04-08 is a Wednesday
+      let dt = DateTime.new 2026 4 8 0 0 0
+      assert_eq (DateTime.format "%a" dt) "Wed"
+    }
+
+    test "long weekday name" {
+      let dt = DateTime.new 2026 4 8 0 0 0
+      assert_eq (DateTime.format "%A" dt) "Wednesday"
+    }
+
+    test "mixed format with names" {
+      let dt = DateTime.new 2026 4 8 14 30 0
+      assert_eq (DateTime.format "%a, %d %b %Y %H:%M" dt) "Wed, 08 Apr 2026 14:30"
+    }
+
+    test "12-hour format PM" {
+      let dt = DateTime.new 2026 4 8 14 30 0
+      assert_eq (DateTime.format "%I:%M %p" dt) "02:30 PM"
+    }
+
+    test "12-hour format AM" {
+      let dt = DateTime.new 2026 4 8 9 5 0
+      assert_eq (DateTime.format "%I:%M %p" dt) "09:05 AM"
+    }
+
+    test "12-hour noon" {
+      let dt = DateTime.new 2026 4 8 12 0 0
+      assert_eq (DateTime.format "%I:%M %p" dt) "12:00 PM"
+    }
+
+    test "12-hour midnight" {
+      let dt = DateTime.new 2026 4 8 0 0 0
+      assert_eq (DateTime.format "%I:%M %p" dt) "12:00 AM"
+    }
   }
 
   describe "parse" {
@@ -239,9 +285,51 @@ describe "DateTime" {
       assert_eq (DateTime.parse "%Y-%m-%d" "2026-01-01T12:00:00.123Z") (Ok expected)
     }
 
+    test "parse short month name" {
+      let expected = DateTime.new 2026 4 8 0 0 0
+      assert_eq (DateTime.parse "%d %b %Y" "08 Apr 2026") (Ok expected)
+    }
+
+    test "parse long month name" {
+      let expected = DateTime.new 2026 12 25 0 0 0
+      assert_eq (DateTime.parse "%B %d, %Y" "December 25, 2026") (Ok expected)
+    }
+
+    test "roundtrip with month names" {
+      let dt = DateTime.new 2026 4 8 14 30 0
+      let fmt = "%d %b %Y %H:%M:%S"
+      assert_eq (DateTime.parse fmt (DateTime.format fmt dt)) (Ok dt)
+    }
+
     test "roundtrip with format" {
       let dt = DateTime.new 2024 2 29 13 45 30
       let fmt = "%Y-%m-%d %H:%M:%S"
+      assert_eq (DateTime.parse fmt (DateTime.format fmt dt)) (Ok dt)
+    }
+
+    test "parse 12-hour PM" {
+      let expected = DateTime.new 2026 4 8 14 30 0
+      assert_eq (DateTime.parse "%Y-%m-%d %I:%M %p" "2026-04-08 02:30 PM") (Ok expected)
+    }
+
+    test "parse 12-hour AM" {
+      let expected = DateTime.new 2026 4 8 9 5 0
+      assert_eq (DateTime.parse "%Y-%m-%d %I:%M %p" "2026-04-08 09:05 AM") (Ok expected)
+    }
+
+    test "parse 12-hour noon" {
+      let expected = DateTime.new 2026 4 8 12 0 0
+      assert_eq (DateTime.parse "%Y-%m-%d %I:%M %p" "2026-04-08 12:00 PM") (Ok expected)
+    }
+
+    test "parse 12-hour midnight" {
+      let expected = DateTime.new 2026 4 8 0 0 0
+      assert_eq (DateTime.parse "%Y-%m-%d %I:%M %p" "2026-04-08 12:00 AM") (Ok expected)
+    }
+
+    test "roundtrip 12-hour" {
+      let dt = DateTime.new 2026 4 8 14 30 0
+      let fmt = "%Y-%m-%d %I:%M:%S %p"
       assert_eq (DateTime.parse fmt (DateTime.format fmt dt)) (Ok dt)
     }
   }
