@@ -1,5 +1,3 @@
-module SetExample
-
 import Std.Set
 
 main () = {
