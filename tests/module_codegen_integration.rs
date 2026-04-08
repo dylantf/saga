@@ -43,28 +43,20 @@ fn emit_from_program(
         &original_module_name,
     );
     let mut modules = std::collections::HashMap::new();
-    for (name, info) in result.codegen_info().iter() {
-        let mut compiled = codegen::CompiledModule {
-            codegen_info: info.clone(),
-            ..Default::default()
-        };
-        if let (Some(module_program), Some(module_result)) = (
-            result.programs().get(name),
-            result.module_check_results().get(name),
-        ) {
-            let elaborated_module =
-                elaborate::elaborate_module(module_program, module_result, name);
-            let normalized = codegen::normalize::normalize_effects(&elaborated_module);
-            let resolution = codegen::resolve::resolve_names(
-                name,
-                &normalized,
-                result.codegen_info(),
-                &result.prelude_imports,
+    for name in result.codegen_info().keys() {
+        if let Some(compiled) = codegen::compile_module_from_result(name, &result) {
+            modules.insert(name.clone(), compiled);
+        } else {
+            // Stub entry: codegen_info exists but no program/result (e.g. prelude-only modules)
+            let info = result.codegen_info().get(name).cloned().unwrap_or_default();
+            modules.insert(
+                name.clone(),
+                codegen::CompiledModule {
+                    codegen_info: info,
+                    ..Default::default()
+                },
             );
-            compiled.elaborated = normalized;
-            compiled.resolution = resolution;
         }
-        modules.insert(name.clone(), compiled);
     }
     let ctx = codegen::CodegenContext {
         modules,

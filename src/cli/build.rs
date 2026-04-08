@@ -318,36 +318,14 @@ pub fn compile_std_modules(
     result: &typechecker::CheckResult,
 ) -> HashMap<String, codegen::CompiledModule> {
     let mut modules = HashMap::new();
-    let codegen_info = result.codegen_info();
-    let prelude_imports = &result.prelude_imports;
-
-    for (module_name, mod_result) in result.module_check_results() {
+    for module_name in result.module_check_results().keys() {
         if !module_name.starts_with("Std.") {
             continue;
         }
-        let program = match result.programs().get(module_name) {
-            Some(p) => p,
-            None => continue,
-        };
-        let info = codegen_info.get(module_name).cloned().unwrap_or_default();
-        let elaborated = elaborate::elaborate_module(program, mod_result, module_name);
-        let normalized = codegen::normalize::normalize_effects(&elaborated);
-        let resolution = codegen::resolve::resolve_names(
-            module_name,
-            &normalized,
-            codegen_info,
-            prelude_imports,
-        );
-        modules.insert(
-            module_name.clone(),
-            codegen::CompiledModule {
-                codegen_info: info,
-                elaborated: normalized,
-                resolution,
-            },
-        );
+        if let Some(compiled) = codegen::compile_module_from_result(module_name, result) {
+            modules.insert(module_name.clone(), compiled);
+        }
     }
-
     modules
 }
 

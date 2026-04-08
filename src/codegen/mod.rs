@@ -45,6 +45,31 @@ impl CodegenContext {
     }
 }
 
+/// Compile a single module from a CheckResult into a CompiledModule.
+/// Used by the build pipeline and integration tests.
+pub fn compile_module_from_result(
+    module_name: &str,
+    result: &crate::typechecker::CheckResult,
+) -> Option<CompiledModule> {
+    let program = result.programs().get(module_name)?;
+    let mod_result = result.module_check_results().get(module_name)?;
+    let codegen_info = result.codegen_info();
+    let info = codegen_info.get(module_name).cloned().unwrap_or_default();
+    let elaborated = crate::elaborate::elaborate_module(program, mod_result, module_name);
+    let normalized = normalize::normalize_effects(&elaborated);
+    let resolution = resolve::resolve_names(
+        module_name,
+        &normalized,
+        codegen_info,
+        &result.prelude_imports,
+    );
+    Some(CompiledModule {
+        codegen_info: info,
+        elaborated: normalized,
+        resolution,
+    })
+}
+
 pub fn emit_module(module_name: &str, program: &ast::Program) -> String {
     let ctx = CodegenContext::default();
     emit_module_with_context(module_name, program, &ctx, None, None)
