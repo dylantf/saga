@@ -10,7 +10,7 @@ fun print_it : a -> String where {a: Show}
 print_it x = show x
 
 # After elaboration (conceptual)
-__dict_Show_Int = { fun n -> int_to_string n }
+__dict_Std_Base_Show_Int = { fun n -> int_to_string n }
 print_it __dict_Show_a x = element(1, __dict_Show_a)(x)
 ```
 
@@ -78,7 +78,7 @@ The elaborator scans declarations to build lookup tables:
 | `dict_names`       | (trait, type_args, type) | constructor name                | `ImplDef`                   |
 | `impl_dict_params` | (trait, type_args, type) | [(constraint_trait, param_idx)] | `ImplDef` where clause      |
 
-Dict constructor names follow the pattern `__dict_{Trait}_{module}_{Type}`, e.g., `__dict_Show_std_int_Int`.
+Dict constructor names follow the pattern `__dict_{CanonicalTrait}_{module}_{CanonicalType}` with dots mangled to underscores, e.g., `__dict_Std_Base_Show_std_int_Std_Int_Int`. Built via `typechecker::make_dict_name`.
 
 ### Pass 2: AST Transformation
 
@@ -133,17 +133,17 @@ For parameterized types, `dict_for_type` recursively applies sub-dictionaries:
 ```
 # dict_for_type(Show, List String)
 App(
-  DictRef("__dict_Show_List"),       # List's Show dict constructor (takes 1 dict param)
-  DictRef("__dict_Show_String")      # String's Show dict (element's dict)
+  DictRef("__dict_Std_Base_Show_std_list_List"),       # List's Show dict constructor (takes 1 dict param)
+  DictRef("__dict_Std_Base_Show_std_string_Std_String_String")  # String's Show dict (element's dict)
 )
 
 # dict_for_type(Debug, Dict String Int)
 App(
   App(
-    DictRef("__dict_Debug_Dict"),    # Dict's Debug dict (takes 2 dict params)
-    DictRef("__dict_Debug_String")   # key dict
+    DictRef("__dict_Std_Base_Debug_std_dict_Dict"),    # Dict's Debug dict (takes 2 dict params)
+    DictRef("__dict_Std_Base_Debug_std_string_Std_String_String")   # key dict
   ),
-  DictRef("__dict_Debug_Int")        # value dict
+  DictRef("__dict_Std_Base_Debug_std_int_Std_Int_Int")        # value dict
 )
 ```
 
@@ -164,7 +164,7 @@ Source: `src/codegen/lower/`
 Emitted as a regular Core Erlang function. Dict parameters become function parameters; methods become a tuple body:
 
 ```erlang
-'__dict_Show_std_list_List'/1 =
+'__dict_Std_Base_Show_std_list_List'/1 =
 fun (___dict_Show_a) ->
     {fun (Xs) -> ... show each element using ___dict_Show_a ...}
 ```
@@ -188,19 +188,19 @@ Method indices are 0-based in the AST, 1-based in Core Erlang's `element/2`.
 
 Resolved by the lowerer based on the resolution map:
 
-- **Imported dict**: `call 'std_int':'__dict_Show_std_int_Int'()`
-- **Local dict**: `apply '__dict_Show_Foo'/0()`
+- **Imported dict**: `call 'std_int':'__dict_Std_Base_Show_std_int_Std_Int_Int'()`
+- **Local dict**: `apply '__dict_Std_Base_Show_Foo'/0()`
 - **Dict parameter variable**: plain `Var` reference (e.g., `___dict_Show_a`)
 
 ---
 
 ## Naming Conventions
 
-| Context          | Pattern                          | Example                               |
-| ---------------- | -------------------------------- | ------------------------------------- |
-| Dict constructor | `__dict_{Trait}_{module}_{Type}` | `__dict_Show_std_int_Int`             |
-| Dict parameter   | `__dict_{Trait}_{typevar}`       | `__dict_Debug_k`                      |
-| Core Erlang var  | `___dict_{Trait}_{typevar}`      | `___dict_Debug_k` (triple underscore) |
+| Context          | Pattern                                        | Example                                          |
+| ---------------- | ---------------------------------------------- | ------------------------------------------------ |
+| Dict constructor | `__dict_{CanonicalTrait}_{module}_{CanonicalType}` | `__dict_Std_Base_Show_std_int_Std_Int_Int`   |
+| Dict parameter   | `__dict_{BareTrait}_{typevar}`                 | `__dict_Debug_k`                                 |
+| Core Erlang var  | `___dict_{BareTrait}_{typevar}`                | `___dict_Debug_k` (triple underscore)             |
 
 The triple underscore in Core Erlang comes from `core_var()` prefixing names that start with lowercase.
 

@@ -151,7 +151,7 @@ Trait names follow the same canonical pattern as effects:
 - Evidence (`TraitEvidence.trait_name`) uses canonical names
 - Builtin traits (Num, Eq, Semigroup) have no module and keep bare names
 
-**Dict parameter naming**: Dictionary parameters use bare trait names to avoid dots in Erlang identifiers: `__dict_Show_a`, not `__dict_Std.Base.Show_a`. The canonical name is used for map keys; the bare name is used for variable names.
+**Dict naming**: Dict constructor names use canonical trait and type names with dots mangled to underscores (e.g. `__dict_Std_Base_Show_std_int_Std_Int_Int`), built via `typechecker::make_dict_name`. Dict parameter names (for where-clause type variables) use bare trait names since they're local variables: `__dict_Show_a`, not `__dict_Std_Base_Show_a`.
 
 **Well-known trait constants**: The elaborator defines `SHOW`, `DEBUG`, `ORD` constants for canonical names used in special-cased codegen (tuple Show inlining, Ord comparison desugaring).
 
