@@ -403,18 +403,18 @@ fn field_access_uses_element() {
 record Point { x: Int, y: Int }
 get_x p = p.x
 ";
-    assert_contains(src, "call 'erlang':'element'");
+    assert_contains_full(src, "call 'erlang':'element'");
 }
 
 #[test]
 fn record_update_on_variable() {
     // When the record expression is a variable (not a literal RecordCreate),
-    // the lowerer must resolve the record name from the update's field names.
+    // the lowerer must resolve the record name from elaboration's type info.
     let src = "
 record Point { x: Int, y: Int }
 translate p = { p | x: 10, y: 20 }
 ";
-    let out = emit(src);
+    let out = emit_full(src);
     // The tag is extracted at runtime via element(1, rec), not a literal atom.
     // Both updated field values must appear in the output.
     assert!(out.contains("10"), "missing updated x\n{out}");

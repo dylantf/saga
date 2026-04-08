@@ -184,6 +184,7 @@ fn build_record_debug_expr(
             ExprKind::FieldAccess {
                 expr: Box::new(base_expr.clone()),
                 field: field_name.clone(),
+                record_name: None,
             },
         );
 

@@ -684,6 +684,17 @@ pub fn run_erlc(build_dir: &Path, build_start: Instant) {
 
 /// Run a compiled module on the BEAM.
 pub fn exec_erl(build_dir: &Path, stdlib_dir: &Path, extra_pa: &[PathBuf], entry_module: &str) {
+    exec_erl_with_timeout(build_dir, stdlib_dir, extra_pa, entry_module, None);
+}
+
+/// Run a compiled module on the BEAM, optionally enforcing a wall-clock timeout.
+pub fn exec_erl_with_timeout(
+    build_dir: &Path,
+    stdlib_dir: &Path,
+    extra_pa: &[PathBuf],
+    entry_module: &str,
+    timeout: Option<std::time::Duration>,
+) {
     let eval = format!(
         "try '{}':main(unit) of _ -> init:stop() catch C:R:S -> dylang_runtime:format_crash(C, R, S), init:stop(1) end",
         entry_module
@@ -701,10 +712,38 @@ pub fn exec_erl(build_dir: &Path, stdlib_dir: &Path, extra_pa: &[PathBuf], entry
 
     cmd.arg("-eval").arg(&eval);
 
-    let status = cmd.status().unwrap_or_else(|e| {
+    let mut child = cmd.spawn().unwrap_or_else(|e| {
         eprintln!("Failed to run erl: {}", e);
         std::process::exit(1);
     });
+
+    let status = if let Some(timeout) = timeout {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(status) = child.try_wait().unwrap_or_else(|e| {
+                eprintln!("Failed while waiting for erl: {}", e);
+                std::process::exit(1);
+            }) {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!(
+                    "Test run timed out after {}s while executing module '{}'",
+                    timeout.as_secs(),
+                    entry_module
+                );
+                std::process::exit(124);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    } else {
+        child.wait().unwrap_or_else(|e| {
+            eprintln!("Failed while waiting for erl: {}", e);
+            std::process::exit(1);
+        })
+    };
 
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));

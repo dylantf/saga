@@ -705,28 +705,6 @@ impl<'a> Lowerer<'a> {
             .filter(|m| !m.is_empty())
     }
 
-    /// Find a record name that contains the given field.
-    fn find_record_by_field(&self, field: &str) -> Option<&str> {
-        self.record_fields.iter().find_map(|(rname, fields)| {
-            if fields.iter().any(|f| f == field) {
-                Some(rname.as_str())
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Find a record name whose field list contains all the given update field names.
-    fn find_record_by_fields(&self, field_names: &[String]) -> Option<&str> {
-        self.record_fields.iter().find_map(|(rname, fields)| {
-            if field_names.iter().all(|f| fields.contains(f)) {
-                Some(rname.as_str())
-            } else {
-                None
-            }
-        })
-    }
-
     pub fn lower_module(&mut self, module_name: &str, program: &ast::Program) -> CModule {
         self.current_module = module_name.to_string();
         self.current_source_module = program
@@ -899,32 +877,6 @@ impl<'a> Lowerer<'a> {
             for (key, param) in &handler_entries {
                 self.current_handler_params
                     .insert(key.clone(), param.clone());
-            }
-            // Mark ops as direct if every handler for their effect is BEAM-native.
-            // This means the ops will always be direct regardless of which handler
-            // the caller provides, so we can inline them in the function body.
-            for eff in &effects {
-                // Collect all handlers that handle this effect
-                let handlers_for_eff: Vec<(&String, &HandlerInfo)> = self
-                    .handler_defs
-                    .iter()
-                    .filter(|(_, info)| info.effects.contains(eff))
-                    .collect();
-                let all_native = !handlers_for_eff.is_empty()
-                    && handlers_for_eff.iter().all(|(canonical, info)| {
-                        info.source_module
-                            .as_deref()
-                            .is_some_and(|sm| beam_interop::is_beam_native_handler(sm, canonical))
-                    });
-                if all_native {
-                    let canonical = handlers_for_eff[0].0.clone();
-                    if let Some(effect_info) = self.effect_defs.get(eff) {
-                        for op_name in effect_info.ops.keys() {
-                            let key = format!("{}.{}", eff, op_name);
-                            self.direct_ops.insert(key, canonical.clone());
-                        }
-                    }
-                }
             }
             let handler_param_names: Vec<String> =
                 handler_entries.iter().map(|(_, p)| p.clone()).collect();
@@ -1939,14 +1891,24 @@ impl<'a> Lowerer<'a> {
                 })
             }
 
-            ExprKind::FieldAccess { expr, field, .. } => {
-                let record_name =
-                    field_access_record_name(expr).or_else(|| self.find_record_by_field(field));
+            ExprKind::FieldAccess {
+                expr,
+                field,
+                record_name: resolved_name,
+            } => {
+                let record_name = resolved_name
+                    .as_deref()
+                    .or_else(|| field_access_record_name(expr));
                 let idx = record_name
                     .and_then(|rname| self.record_fields.get(rname))
                     .and_then(|fields| fields.iter().position(|f| f == field))
                     .map(|pos| pos + 2) // +1 for tag, +1 for 1-based
-                    .unwrap_or(2) as i64;
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "codegen: could not resolve record type for field access '.{}'",
+                            field
+                        )
+                    }) as i64;
                 let v = self.fresh();
                 let ce = self.lower_expr_value(expr);
                 CExpr::Let(
@@ -1960,17 +1922,22 @@ impl<'a> Lowerer<'a> {
                 )
             }
 
-            ExprKind::RecordUpdate { record, fields, .. } => {
+            ExprKind::RecordUpdate {
+                record,
+                fields,
+                record_name: resolved_name,
+            } => {
                 let rec_var = self.fresh();
                 let rec_ce = self.lower_expr_value(record);
-                let update_field_names: Vec<String> =
-                    fields.iter().map(|(n, _, _)| n.clone()).collect();
-                let record_name = field_access_record_name(record)
-                    .or_else(|| self.find_record_by_fields(&update_field_names));
+                let record_name = resolved_name
+                    .as_deref()
+                    .or_else(|| field_access_record_name(record));
                 let order = record_name
                     .and_then(|rname| self.record_fields.get(rname))
                     .cloned()
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| {
+                        panic!("codegen: could not resolve record type for record update")
+                    });
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
 

@@ -313,13 +313,18 @@ impl Normalizer {
             }
 
             // FieldAccess: normalize the base expression.
-            ExprKind::FieldAccess { expr: inner, field } => {
+            ExprKind::FieldAccess {
+                expr: inner,
+                field,
+                record_name,
+            } => {
                 let new_inner = self.normalize_and_lift(inner, lifted);
                 Expr::synth(
                     span,
                     ExprKind::FieldAccess {
                         expr: Box::new(new_inner),
                         field: field.clone(),
+                        record_name: record_name.clone(),
                     },
                 )
             }
@@ -349,7 +354,11 @@ impl Normalizer {
             }
 
             // RecordUpdate: normalize record and field values.
-            ExprKind::RecordUpdate { record, fields } => {
+            ExprKind::RecordUpdate {
+                record,
+                fields,
+                record_name,
+            } => {
                 let new_record = self.normalize_and_lift(record, lifted);
                 let new_fields = fields
                     .iter()
@@ -360,6 +369,7 @@ impl Normalizer {
                     ExprKind::RecordUpdate {
                         record: Box::new(new_record),
                         fields: new_fields,
+                        record_name: record_name.clone(),
                     },
                 )
             }

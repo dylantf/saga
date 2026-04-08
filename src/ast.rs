@@ -416,7 +416,12 @@ pub enum ExprKind {
     Lambda { params: Vec<Pat>, body: Box<Expr> },
 
     /// `user.name`
-    FieldAccess { expr: Box<Expr>, field: String },
+    FieldAccess {
+        expr: Box<Expr>,
+        field: String,
+        /// Resolved record type name (filled in by elaboration).
+        record_name: Option<String>,
+    },
 
     /// `User { name: "Dylan", age: 30 }`
     RecordCreate {
@@ -431,6 +436,8 @@ pub enum ExprKind {
     RecordUpdate {
         record: Box<Expr>,
         fields: Vec<(String, Span, Expr)>,
+        /// Resolved record type name (filled in by elaboration).
+        record_name: Option<String>,
     },
 
     /// `log! "hello"`, `Cache.get! key`

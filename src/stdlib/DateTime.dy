@@ -4,14 +4,14 @@ pub record Date {
   year: Int,
   month: Int,
   day: Int,
-}
+} deriving (Show, Debug, Eq)
 
 pub record Time {
   hour: Int,
   minute: Int,
   second: Int,
   microsecond: Int,
-}
+} deriving (Show, Debug, Eq)
 
 pub record NaiveDateTime {
   year: Int,
@@ -21,6 +21,41 @@ pub record NaiveDateTime {
   minute: Int,
   second: Int,
   microsecond: Int,
+} deriving (Show, Debug, Eq)
+
+impl Ord for Date {
+  compare a b = do {
+    Eq <- compare a.year b.year
+    Eq <- compare a.month b.month
+    compare a.day b.day
+  } else {
+    r -> r
+  }
+}
+
+impl Ord for Time {
+  compare a b = do {
+    Eq <- compare a.hour b.hour
+    Eq <- compare a.minute b.minute
+    Eq <- compare a.second b.second
+    compare a.microsecond b.microsecond
+  } else {
+    r -> r
+  }
+}
+
+impl Ord for NaiveDateTime {
+  compare a b = do {
+    Eq <- compare a.year b.year
+    Eq <- compare a.month b.month
+    Eq <- compare a.day b.day
+    Eq <- compare a.hour b.hour
+    Eq <- compare a.minute b.minute
+    Eq <- compare a.second b.second
+    compare a.microsecond b.microsecond
+  } else {
+    r -> r
+  }
 }
 
 pub effect Clock {

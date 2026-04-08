@@ -2,9 +2,19 @@ use dylang::{codegen, elaborate, project_config, project_config::ProjectConfig};
 
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use super::build::*;
 use super::color;
+
+fn test_timeout() -> Duration {
+    let secs = std::env::var("DYLANG_TEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(30);
+    Duration::from_secs(secs)
+}
 
 pub fn cmd_run(file: Option<&str>, release: bool) {
     if release {
@@ -427,7 +437,13 @@ pub fn cmd_test(filter: Option<&str>) {
         });
 
         run_erlc_file(&core_path, &pb.build_dir);
-        exec_erl(&pb.build_dir, &pb.stdlib_dir, &pb.extra_ebin_dirs, "_test");
+        exec_erl_with_timeout(
+            &pb.build_dir,
+            &pb.stdlib_dir,
+            &pb.extra_ebin_dirs,
+            "_test",
+            Some(test_timeout()),
+        );
     }
 }
 

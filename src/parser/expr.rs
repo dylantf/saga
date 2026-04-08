@@ -565,6 +565,7 @@ impl Parser {
                 kind: ExprKind::FieldAccess {
                     expr: Box::new(expr),
                     field,
+                    record_name: None,
                 },
             };
         }
@@ -1047,6 +1048,7 @@ impl Parser {
                             kind: ExprKind::RecordUpdate {
                                 record: Box::new(record),
                                 fields,
+                                record_name: None,
                             },
                         });
                     }

@@ -308,14 +308,14 @@ pub fn format_expr(expr: &Expr) -> Doc {
             Doc::group(docs![lhs, Doc::nest(2, docs![Doc::line(), body_doc])])
         }
 
-        ExprKind::FieldAccess { expr, field } => {
+        ExprKind::FieldAccess { expr, field, .. } => {
             docs![format_expr(expr), Doc::text(format!(".{}", field))]
         }
 
         ExprKind::RecordCreate { name, fields } => format_record_create(Some(name), fields),
         ExprKind::AnonRecordCreate { fields } => format_record_create(None, fields),
 
-        ExprKind::RecordUpdate { record, fields } => {
+        ExprKind::RecordUpdate { record, fields, .. } => {
             let field_docs: Vec<Doc> = fields
                 .iter()
                 .map(|(name, _, val)| docs![Doc::text(format!("{}: ", name)), format_expr(val)])

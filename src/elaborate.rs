@@ -68,6 +68,10 @@ struct Elaborator {
     scope_map_values: HashMap<String, String>,
     /// Scope map traits for resolving bare trait names to canonical
     scope_map_traits: HashMap<String, String>,
+    /// Per-node type information for resolving record names in FieldAccess/RecordUpdate.
+    type_at_node: HashMap<crate::ast::NodeId, Type>,
+    /// Substitution for resolving type variables.
+    sub: crate::typechecker::Substitution,
 }
 
 impl Elaborator {
@@ -186,6 +190,8 @@ impl Elaborator {
             let_dict_pat_ids,
             scope_map_values: result.scope_map.values.clone(),
             scope_map_traits: result.scope_map.traits.clone(),
+            type_at_node: result.type_at_node.clone(),
+            sub: result.sub.clone(),
         }
     }
 
@@ -612,6 +618,16 @@ impl Elaborator {
         }
 
         output
+    }
+
+    /// Resolve the record type name from a node's inferred type.
+    fn resolve_record_name(&self, node_id: crate::ast::NodeId) -> Option<String> {
+        let ty = self.type_at_node.get(&node_id)?;
+        let resolved = self.sub.apply(ty);
+        match resolved {
+            Type::Con(name, _) => Some(name),
+            _ => None,
+        }
     }
 
     fn elaborate_expr(&mut self, expr: &Expr) -> Expr {
@@ -1079,13 +1095,17 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::FieldAccess { expr: e, field } => Expr::synth(
-                span,
-                ExprKind::FieldAccess {
-                    expr: Box::new(self.elaborate_expr(e)),
-                    field: field.clone(),
-                },
-            ),
+            ExprKind::FieldAccess { expr: e, field, .. } => {
+                let record_name = self.resolve_record_name(e.id);
+                Expr::synth(
+                    span,
+                    ExprKind::FieldAccess {
+                        expr: Box::new(self.elaborate_expr(e)),
+                        field: field.clone(),
+                        record_name,
+                    },
+                )
+            }
 
             ExprKind::RecordCreate { name, fields } => Expr::synth(
                 span,
@@ -1108,16 +1128,22 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::RecordUpdate { record, fields } => Expr::synth(
-                span,
-                ExprKind::RecordUpdate {
-                    record: Box::new(self.elaborate_expr(record)),
-                    fields: fields
-                        .iter()
-                        .map(|(n, s, e)| (n.clone(), *s, self.elaborate_expr(e)))
-                        .collect(),
-                },
-            ),
+            ExprKind::RecordUpdate {
+                record, fields, ..
+            } => {
+                let record_name = self.resolve_record_name(record.id);
+                Expr::synth(
+                    span,
+                    ExprKind::RecordUpdate {
+                        record: Box::new(self.elaborate_expr(record)),
+                        fields: fields
+                            .iter()
+                            .map(|(n, s, e)| (n.clone(), *s, self.elaborate_expr(e)))
+                            .collect(),
+                        record_name,
+                    },
+                )
+            }
 
             ExprKind::Tuple { elements } => Expr::synth(
                 span,
