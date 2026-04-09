@@ -67,6 +67,18 @@ impl Checker {
         &mut self,
         program: &mut [Decl],
     ) -> std::result::Result<(), Vec<Diagnostic>> {
+        // Infer current_module from the program's module declaration if not
+        // already set by the caller. This ensures type name canonicalization
+        // works regardless of which entry point invoked the checker.
+        if self.current_module.is_none() {
+            for decl in program.iter() {
+                if let Decl::ModuleDecl { path, .. } = decl {
+                    self.current_module = Some(path.join("."));
+                    break;
+                }
+            }
+        }
+
         // Add local type names to scope_map BEFORE register_definitions, so that
         // convert_type_expr can resolve local types during declaration registration.
         // Local types shadow imported types (use `insert`, not `or_insert`).
