@@ -82,6 +82,22 @@ main () = {
 }
 ```
 
+The outer `with` can also use handler bindings introduced inside the wrapped
+block. This is useful for handler factory functions:
+
+```
+main () = {
+  let db = connect config
+
+  {
+    run_app ()
+  }
+} with { db, console_log }
+```
+
+Think of `with` as attaching handlers to the fully evaluated inner expression,
+not as opening a separate lexical scope before the block runs.
+
 ## Handler Expressions and Factory Functions
 
 `handler for Effect { ... }` is an expression that produces a `Handler Effect`

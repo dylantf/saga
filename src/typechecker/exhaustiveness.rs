@@ -78,7 +78,9 @@ pub(crate) fn simplify_pat(pat: &Pat, ty: Option<&Type>, ctx: &SimplifyCtx) -> S
         Pat::Tuple { elements, .. } => {
             // Extract element types from Tuple type if available
             let elem_types: Option<Vec<Type>> = ty.and_then(|t| match t {
-                Type::Con(name, args) if name == super::canonicalize_type_name("Tuple") => Some(args.clone()),
+                Type::Con(name, args) if name == super::canonicalize_type_name("Tuple") => {
+                    Some(args.clone())
+                }
                 _ => None,
             });
             SPat::Tuple(

@@ -1103,12 +1103,7 @@ pub(super) fn resolve_import(
     for ctors in exports.type_constructors.values() {
         for ctor in ctors {
             if binding_map.contains_key(ctor.as_str()) {
-                ScopeMap::register_qualified(
-                    &mut scope.constructors,
-                    module_name,
-                    prefix,
-                    ctor,
-                );
+                ScopeMap::register_qualified(&mut scope.constructors, module_name, prefix, ctor);
             }
         }
     }
@@ -1137,10 +1132,7 @@ pub(super) fn resolve_import(
                 }
                 // Bare type name resolves to canonical
                 let type_canonical = format!("{}.{}", module_name, name);
-                scope
-                    .types
-                    .entry(name.clone())
-                    .or_insert(type_canonical);
+                scope.types.entry(name.clone()).or_insert(type_canonical);
                 // Record types count as found
                 if exports.record_defs.contains_key(name.as_str()) {
                     found = true;

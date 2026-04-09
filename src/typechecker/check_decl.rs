@@ -286,7 +286,7 @@ impl Checker {
             } => {
                 let ty = self.infer_expr(value)?;
                 if let Some(ann) = annotation {
-                    let ann_ty = self.convert_type_expr(ann, &mut vec![]);
+                    let ann_ty = self.convert_user_type_expr(ann, &mut vec![]);
                     self.unify_at(&ty, &ann_ty, *span)?;
                 }
                 let scheme = self.generalize(&ty);
@@ -471,9 +471,9 @@ impl Checker {
                     continue;
                 }
                 let mut params_list: Vec<(String, u32)> = vec![];
-                let mut fun_ty = self.convert_type_expr(return_type, &mut params_list);
+                let mut fun_ty = self.convert_user_type_expr(return_type, &mut params_list);
                 for (_, texpr) in params.iter().rev() {
-                    let param_ty = self.convert_type_expr(texpr, &mut params_list);
+                    let param_ty = self.convert_user_type_expr(texpr, &mut params_list);
                     fun_ty = Type::arrow(param_ty, fun_ty);
                 }
 
@@ -564,7 +564,7 @@ impl Checker {
             } = decl
             {
                 let mut params_list: Vec<(String, u32)> = vec![];
-                let mut fun_ty = self.convert_type_expr(return_type, &mut params_list);
+                let mut fun_ty = self.convert_user_type_expr(return_type, &mut params_list);
 
                 // Build effect row from the function's `needs` clause.
                 let fun_effect_row = if !effects.is_empty() || effect_row_var.is_some() {
@@ -574,7 +574,7 @@ impl Checker {
                         let args: Vec<Type> = e
                             .type_args
                             .iter()
-                            .map(|te| self.convert_type_expr(te, &mut params_list))
+                            .map(|te| self.convert_user_type_expr(te, &mut params_list))
                             .collect();
                         let current_display = self.prettify_type(&Type::Con(
                             e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
@@ -649,7 +649,7 @@ impl Checker {
                 // Place effect row on the innermost arrow.
                 let mut first_arrow = true;
                 for (_, texpr) in params.iter().rev() {
-                    let param_ty = self.convert_type_expr(texpr, &mut params_list);
+                    let param_ty = self.convert_user_type_expr(texpr, &mut params_list);
                     if first_arrow {
                         fun_ty =
                             Type::Fun(Box::new(param_ty), Box::new(fun_ty), fun_effect_row.clone());
@@ -672,7 +672,7 @@ impl Checker {
                             let concrete_types: Vec<Type> = eff
                                 .type_args
                                 .iter()
-                                .map(|ta| self.convert_type_expr(ta, &mut params_list))
+                                .map(|ta| self.convert_user_type_expr(ta, &mut params_list))
                                 .collect();
                             // Use canonical effect name so lookups against
                             // canonical-only self.effects succeed later.
@@ -1441,7 +1441,10 @@ impl Checker {
         // Only check if at least one param resolves to a known ADT or Tuple
         let resolved_types: Vec<_> = param_types.iter().map(|t| self.sub.apply(t)).collect();
         let has_adt_param = resolved_types.iter().any(|t| match t {
-            Type::Con(name, _) => self.adt_variants.contains_key(name) || name == super::canonicalize_type_name("Tuple"),
+            Type::Con(name, _) => {
+                self.adt_variants.contains_key(name)
+                    || name == super::canonicalize_type_name("Tuple")
+            }
             _ => false,
         });
         if !has_adt_param {
@@ -1558,7 +1561,7 @@ impl Checker {
                 // Build: field1 -> field2 -> ... -> ResultType
                 let mut ty = result_type.clone();
                 for (_, field) in variant.fields.iter().rev() {
-                    let field_ty = self.convert_type_expr(field, &mut param_vars);
+                    let field_ty = self.convert_user_type_expr(field, &mut param_vars);
                     ty = Type::arrow(field_ty, ty);
                 }
                 ty
@@ -1586,8 +1589,7 @@ impl Checker {
                 .collect(),
         );
 
-        self.type_arity
-            .insert(canonical_name, type_params.len());
+        self.type_arity.insert(canonical_name, type_params.len());
 
         Ok(())
     }
@@ -1614,7 +1616,7 @@ impl Checker {
             .map(|(fname, texpr)| {
                 (
                     fname.clone(),
-                    self.convert_type_expr(texpr, &mut param_vars),
+                    self.convert_user_type_expr(texpr, &mut param_vars),
                 )
             })
             .collect();
@@ -1660,8 +1662,7 @@ impl Checker {
         // Register as a single-constructor ADT for exhaustiveness checking
         self.adt_variants
             .insert(canonical_name.clone(), vec![(name.into(), num_fields)]);
-        self.type_arity
-            .insert(canonical_name, type_params.len());
+        self.type_arity.insert(canonical_name, type_params.len());
         Ok(())
     }
 
@@ -1694,6 +1695,10 @@ impl Checker {
         );
         self.type_arity
             .insert(name.into(), effect_type_params.len());
+        if let Some(module) = &self.current_module {
+            self.type_arity
+                .insert(format!("{}.{}", module, name), effect_type_params.len());
+        }
     }
 
     /// Phase 2: Fill in effect op signatures (after all effect stubs are registered).
@@ -1731,11 +1736,11 @@ impl Checker {
                 .map(|(label, texpr)| {
                     (
                         label.clone(),
-                        self.convert_type_expr(texpr, &mut params_list),
+                        self.convert_user_type_expr(texpr, &mut params_list),
                     )
                 })
                 .collect();
-            let return_type = self.convert_type_expr(&op.return_type, &mut params_list);
+            let return_type = self.convert_user_type_expr(&op.return_type, &mut params_list);
             // Convert the op's own `needs` clause to an EffectRow
             let needs = if !op.effects.is_empty() || op.effect_row_var.is_some() {
                 let effect_refs: Vec<EffectEntry> = op
@@ -1745,7 +1750,7 @@ impl Checker {
                         let args = e
                             .type_args
                             .iter()
-                            .map(|te| self.convert_type_expr(te, &mut params_list))
+                            .map(|te| self.convert_user_type_expr(te, &mut params_list))
                             .collect();
                         let resolved_name = if let Some(info) = self.resolve_effect(&e.name) {
                             info.source_module
@@ -1841,7 +1846,7 @@ impl Checker {
                 for (i, &param_id) in info.type_params.iter().enumerate() {
                     if let Some(type_arg_expr) = effect_ref.type_args.get(i) {
                         let concrete_ty =
-                            self.convert_type_expr(type_arg_expr, &mut type_var_params);
+                            self.convert_user_type_expr(type_arg_expr, &mut type_var_params);
                         handler_type_mapping.insert(param_id, concrete_ty);
                     }
                 }
@@ -2220,12 +2225,15 @@ impl Checker {
                 let type_args: Vec<Type> = e
                     .type_args
                     .iter()
-                    .map(|ta| self.convert_type_expr(ta, &mut vec![]))
+                    .map(|ta| self.convert_user_type_expr(ta, &mut vec![]))
                     .collect();
-                Type::Con(e.name.clone(), type_args)
+                Type::Con(self.canonical_effect_name(&e.name), type_args)
             })
             .collect();
-        let handler_ty = Type::Con(super::canonicalize_type_name("Handler").into(), handler_effect_types);
+        let handler_ty = Type::Con(
+            super::canonicalize_type_name("Handler").into(),
+            handler_effect_types,
+        );
 
         // Put the handler name in the env so it can be referenced
         self.env.insert_with_def(

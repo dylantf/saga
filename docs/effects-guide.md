@@ -304,6 +304,19 @@ main () = {
 }
 ```
 
+Handler values created inside the wrapped block can also be attached at the
+outer `with` boundary:
+
+```
+main () = {
+  let db = connect config
+
+  {
+    run_server ()
+  }
+} with { db, console_log }
+```
+
 Mix named handlers with inline arms in the same block:
 
 ```

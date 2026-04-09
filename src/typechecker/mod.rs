@@ -234,7 +234,10 @@ pub fn make_dict_name(
     };
     let mangled_type = mangle_type_name(target_type);
     if erlang_module.is_empty() {
-        format!("__dict_{}{}_{}", mangled_trait, type_args_suffix, mangled_type)
+        format!(
+            "__dict_{}{}_{}",
+            mangled_trait, type_args_suffix, mangled_type
+        )
     } else {
         format!(
             "__dict_{}{}_{}_{}",
@@ -320,7 +323,9 @@ impl std::fmt::Display for Type {
                         // Wrap multi-arg type applications in parens for readability,
                         // but not tuples (they already render as (A, B))
                         match arg {
-                            Type::Con(n, inner_args) if !inner_args.is_empty() && bare_type_name(n) != "Tuple" => {
+                            Type::Con(n, inner_args)
+                                if !inner_args.is_empty() && bare_type_name(n) != "Tuple" =>
+                            {
                                 write!(f, " ({})", arg)?;
                             }
                             _ => write!(f, " {}", arg)?,
@@ -915,6 +920,8 @@ pub struct Checker {
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Warnings deferred until after inference, when substitutions are complete.
     pub(crate) pending_warnings: Vec<PendingWarning>,
+    /// Dedupes internal warnings when a non-canonical handler effect name is normalized.
+    pub(crate) internal_handler_normalization_warnings: HashSet<String>,
     /// LSP/IDE state: type info, references, definitions, go-to-def targets.
     pub(crate) lsp: LspState,
     /// When true, function annotations without matching bodies are allowed
@@ -1212,6 +1219,7 @@ impl Checker {
             let_dict_params: HashMap::new(),
             collected_diagnostics: Vec::new(),
             pending_warnings: Vec::new(),
+            internal_handler_normalization_warnings: HashSet::new(),
             lsp: LspState::default(),
             allow_bodyless_annotations: false,
             current_module: None,
@@ -1379,8 +1387,7 @@ impl Checker {
             match warning {
                 PendingWarning::DiscardedValue { span, ty } => {
                     let resolved = self.sub.apply(&ty);
-                    let is_unit =
-                        matches!(&resolved, Type::Con(n, args) if n == canonicalize_type_name("Unit") && args.is_empty());
+                    let is_unit = matches!(&resolved, Type::Con(n, args) if n == canonicalize_type_name("Unit") && args.is_empty());
                     if !is_unit && !matches!(resolved, Type::Var(_) | Type::Error) {
                         let display_ty = self.prettify_type(&ty);
                         self.collected_diagnostics.push(Diagnostic::warning_at(

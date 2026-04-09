@@ -34,9 +34,7 @@ fn emit_from_program(
     let result = checker.to_result();
     // Use module-specific CheckResult when available (has correct type_at_node),
     // falling back to the top-level result for the main module.
-    let module_result = result
-        .module_check_results()
-        .get(&original_module_name);
+    let module_result = result.module_check_results().get(&original_module_name);
     let elaborated = elaborate::elaborate_module(
         program,
         module_result.unwrap_or(&result),
@@ -643,7 +641,10 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
     let result = checker.to_result();
     // Use the stored program from the checker (correct NodeIds) instead of
     // re-parsing, which would produce new NodeIds that don't match type_at_node.
-    let animals_program = result.programs().get("Animals").expect("Animals module not found");
+    let animals_program = result
+        .programs()
+        .get("Animals")
+        .expect("Animals module not found");
     let animals_core = emit_from_program(animals_program, "animals", &checker);
     let main_core = emit_from_program(&main_program, "main", &checker);
 

@@ -431,7 +431,10 @@ impl Checker {
                     .iter()
                     .map(|e| self.infer_expr(e))
                     .collect::<Result<_, Diagnostic>>()?;
-                Ok(Type::Con(super::canonicalize_type_name("Tuple").into(), tys))
+                Ok(Type::Con(
+                    super::canonicalize_type_name("Tuple").into(),
+                    tys,
+                ))
             }
 
             ExprKind::QualifiedName {
@@ -558,7 +561,7 @@ impl Checker {
                 ..
             } => {
                 let inferred = self.infer_expr(inner)?;
-                let ann_ty = self.convert_type_expr(type_expr, &mut vec![]);
+                let ann_ty = self.convert_user_type_expr(type_expr, &mut vec![]);
                 self.unify_at(&inferred, &ann_ty, span)?;
                 self.record_type(node_id, &ann_ty);
                 Ok(ann_ty)
@@ -743,7 +746,10 @@ impl Checker {
                 let msg_var = self.fresh_var();
                 let pid_ty = Type::Con(super::canonicalize_type_name("Pid").into(), vec![msg_var]);
                 self.bind_pattern(&args[0], &pid_ty)?;
-                self.bind_pattern(&args[1], &Type::Con(super::canonicalize_type_name("ExitReason").into(), vec![]))?;
+                self.bind_pattern(
+                    &args[1],
+                    &Type::Con(super::canonicalize_type_name("ExitReason").into(), vec![]),
+                )?;
             } else {
                 self.bind_pattern(&arm.pattern, &msg_ty)?;
             }
@@ -805,7 +811,7 @@ impl Checker {
 
     /// Build a minimal HandlerInfo from a Handler type.
     /// Used for dynamic handle bindings where the handler arms aren't statically known.
-    fn handler_info_from_type(&self, ty: &Type) -> Option<super::HandlerInfo> {
+    fn handler_info_from_type(&mut self, ty: &Type) -> Option<super::HandlerInfo> {
         let resolved = self.sub.apply(ty);
         if let Type::Con(ref name, ref args) = resolved
             && name == super::canonicalize_type_name("Handler")
@@ -814,12 +820,7 @@ impl Checker {
                 .iter()
                 .filter_map(|arg| {
                     if let Type::Con(eff_name, _) = self.sub.apply(arg) {
-                        // Try to find canonical name
-                        self.effects
-                            .keys()
-                            .find(|k| k.ends_with(&format!(".{}", eff_name)) || *k == &eff_name)
-                            .cloned()
-                            .or(Some(eff_name))
+                        Some(self.normalize_handler_effect_name(eff_name))
                     } else {
                         None
                     }
@@ -861,7 +862,7 @@ impl Checker {
                     let ty = match self.infer_expr(value) {
                         Ok(ty) => {
                             if let Some(ann) = annotation {
-                                let ann_ty = self.convert_type_expr(ann, &mut vec![]);
+                                let ann_ty = self.convert_user_type_expr(ann, &mut vec![]);
                                 if let Err(e) = self.unify_at(&ty, &ann_ty, *span) {
                                     errors.push(e);
                                     Type::Error

@@ -442,20 +442,15 @@ fn show_triple_tuple_has_three_elements() {
     let src = r#"main () = show (1, "hi", True)"#;
     let out = emit_elaborated(src);
     let int_dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_int", "Std.Int.Int");
-    let string_dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_string", "Std.String.String");
+    let string_dict =
+        typechecker::make_dict_name("Std.Base.Show", &[], "std_string", "Std.String.String");
     let bool_dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_bool", "Std.Bool.Bool");
-    assert!(
-        out.contains(&int_dict),
-        "expected Show/Int dict\n{out}"
-    );
+    assert!(out.contains(&int_dict), "expected Show/Int dict\n{out}");
     assert!(
         out.contains(&string_dict),
         "expected Show/String dict\n{out}"
     );
-    assert!(
-        out.contains(&bool_dict),
-        "expected Show/Bool dict\n{out}"
-    );
+    assert!(out.contains(&bool_dict), "expected Show/Bool dict\n{out}");
     // Should have the inline tuple lambda, not a Tuple dict
     assert!(
         out.contains("fun (___tup)"),

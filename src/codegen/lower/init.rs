@@ -140,9 +140,7 @@ impl<'a> Lowerer<'a> {
         // Imported effects: "Assert" -> "Std.Test.Assert" (from codegen_info)
         // Use source module name (e.g. "Std.Test") for canonical effect names so they
         // match the typechecker's naming (which also uses source module names).
-        let has_module_decl = program
-            .iter()
-            .any(|d| matches!(d, Decl::ModuleDecl { .. }));
+        let has_module_decl = program.iter().any(|d| matches!(d, Decl::ModuleDecl { .. }));
         let source_module_name = program
             .iter()
             .find_map(|d| {

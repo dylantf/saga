@@ -26,10 +26,30 @@ struct BeamNativeHandler {
 }
 
 const BEAM_NATIVE_HANDLERS: &[BeamNativeHandler] = &[
-    BeamNativeHandler { source_module: "Std.Actor", canonical_name: "Std.Actor.beam_actor", needs_ets_table: false, needs_vec_table: false },
-    BeamNativeHandler { source_module: "Std.Ref",   canonical_name: "Std.Ref.beam_ref",     needs_ets_table: false, needs_vec_table: false },
-    BeamNativeHandler { source_module: "Std.Ref",   canonical_name: "Std.Ref.ets_ref",      needs_ets_table: true,  needs_vec_table: false },
-    BeamNativeHandler { source_module: "Std.Vec",   canonical_name: "Std.Vec.beam_vec",      needs_ets_table: false, needs_vec_table: true  },
+    BeamNativeHandler {
+        source_module: "Std.Actor",
+        canonical_name: "Std.Actor.beam_actor",
+        needs_ets_table: false,
+        needs_vec_table: false,
+    },
+    BeamNativeHandler {
+        source_module: "Std.Ref",
+        canonical_name: "Std.Ref.beam_ref",
+        needs_ets_table: false,
+        needs_vec_table: false,
+    },
+    BeamNativeHandler {
+        source_module: "Std.Ref",
+        canonical_name: "Std.Ref.ets_ref",
+        needs_ets_table: true,
+        needs_vec_table: false,
+    },
+    BeamNativeHandler {
+        source_module: "Std.Vec",
+        canonical_name: "Std.Vec.beam_vec",
+        needs_ets_table: false,
+        needs_vec_table: true,
+    },
 ];
 
 /// Check if a handler is BEAM-native by its source module and canonical name.

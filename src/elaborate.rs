@@ -863,7 +863,9 @@ impl Elaborator {
                         .get(&node_id)
                         .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Num"))
                         .and_then(|ev| ev.resolved_type.as_ref())
-                        .is_some_and(|(name, _)| name == crate::typechecker::canonicalize_type_name("Int"));
+                        .is_some_and(|(name, _)| {
+                            name == crate::typechecker::canonicalize_type_name("Int")
+                        });
                     if is_int {
                         BinOp::IntDiv
                     } else {
@@ -875,7 +877,9 @@ impl Elaborator {
                         .get(&node_id)
                         .and_then(|evs| evs.iter().find(|ev| ev.trait_name == "Num"))
                         .and_then(|ev| ev.resolved_type.as_ref())
-                        .is_some_and(|(name, _)| name == crate::typechecker::canonicalize_type_name("Float"));
+                        .is_some_and(|(name, _)| {
+                            name == crate::typechecker::canonicalize_type_name("Float")
+                        });
                     if is_float {
                         BinOp::FloatMod
                     } else {
@@ -1129,9 +1133,7 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::RecordUpdate {
-                record, fields, ..
-            } => {
+            ExprKind::RecordUpdate { record, fields, .. } => {
                 let record_name = self.resolve_record_name(record.id);
                 Expr::synth(
                     span,
@@ -1622,7 +1624,8 @@ impl Elaborator {
     ) -> Option<Expr> {
         match ty {
             Type::Con(name, args)
-                if name == crate::typechecker::canonicalize_type_name("Tuple") && (trait_name == SHOW || trait_name == DEBUG) =>
+                if name == crate::typechecker::canonicalize_type_name("Tuple")
+                    && (trait_name == SHOW || trait_name == DEBUG) =>
             {
                 // Tuples don't have a dict constructor; build an inline dict
                 // containing the show lambda: {fun t -> "(" ++ ... ++ ")"}
@@ -1721,10 +1724,9 @@ impl Elaborator {
         let evidence_list = self.evidence_by_node.get(&node_id)?;
         let tuple_ev = evidence_list.iter().find(|ev| {
             ev.trait_name == trait_name
-                && ev
-                    .resolved_type
-                    .as_ref()
-                    .is_some_and(|(name, _)| name == crate::typechecker::canonicalize_type_name("Tuple"))
+                && ev.resolved_type.as_ref().is_some_and(|(name, _)| {
+                    name == crate::typechecker::canonicalize_type_name("Tuple")
+                })
         })?;
         let (_type_name, type_args) = tuple_ev.resolved_type.as_ref()?;
         self.build_tuple_show_lambda(trait_name, type_args, span)

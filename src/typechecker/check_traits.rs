@@ -123,9 +123,9 @@ impl Checker {
             let param_types: Vec<Type> = method
                 .params
                 .iter()
-                .map(|(_, texpr)| self.convert_type_expr(texpr, &mut params_list))
+                .map(|(_, texpr)| self.convert_user_type_expr(texpr, &mut params_list))
                 .collect();
-            let return_type = self.convert_type_expr(&method.return_type, &mut params_list);
+            let return_type = self.convert_user_type_expr(&method.return_type, &mut params_list);
 
             // Find the var ID assigned to the trait's self type param
             let trait_param_id = params_list

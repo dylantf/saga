@@ -19,7 +19,10 @@ fn e2e_test_suite() {
 
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
-        if let Some(status) = child.try_wait().expect("failed while waiting for dylang test") {
+        if let Some(status) = child
+            .try_wait()
+            .expect("failed while waiting for dylang test")
+        {
             break status;
         }
         if std::time::Instant::now() >= deadline {

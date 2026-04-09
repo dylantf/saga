@@ -390,9 +390,7 @@ impl Checker {
                     .scope_map
                     .resolve_type(name)
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| {
-                        super::canonicalize_type_name(name).to_string()
-                    });
+                    .unwrap_or_else(|| super::canonicalize_type_name(name).to_string());
                 Type::Con(resolved, vec![])
             }
             crate::ast::TypeExpr::Var { name, .. } => {
@@ -520,6 +518,66 @@ impl Checker {
                 Type::Record(typed_fields)
             }
             crate::ast::TypeExpr::Labeled { inner, .. } => self.convert_type_expr(inner, params),
+        }
+    }
+
+    pub(crate) fn convert_user_type_expr(
+        &mut self,
+        texpr: &crate::ast::TypeExpr,
+        params: &mut Vec<(String, u32)>,
+    ) -> Type {
+        let ty = self.convert_type_expr(texpr, params);
+        self.canonicalize_handler_effect_types(ty)
+    }
+
+    pub(crate) fn canonicalize_handler_effect_types(&mut self, ty: Type) -> Type {
+        match ty {
+            Type::Fun(param, ret, row) => Type::Fun(
+                Box::new(self.canonicalize_handler_effect_types(*param)),
+                Box::new(self.canonicalize_handler_effect_types(*ret)),
+                EffectRow {
+                    effects: row
+                        .effects
+                        .into_iter()
+                        .map(|entry| super::EffectEntry {
+                            name: entry.name,
+                            args: entry
+                                .args
+                                .into_iter()
+                                .map(|arg| self.canonicalize_handler_effect_types(arg))
+                                .collect(),
+                        })
+                        .collect(),
+                    tail: row.tail,
+                },
+            ),
+            Type::Con(name, args) => {
+                let args: Vec<Type> = args
+                    .into_iter()
+                    .map(|arg| self.canonicalize_handler_effect_types(arg))
+                    .collect();
+                if name == super::canonicalize_type_name("Handler") {
+                    let canonical_args = args
+                        .into_iter()
+                        .map(|arg| match arg {
+                            Type::Con(effect_name, effect_args) if !effect_name.contains('.') => {
+                                Type::Con(self.canonical_effect_name(&effect_name), effect_args)
+                            }
+                            other => other,
+                        })
+                        .collect();
+                    Type::Con(name, canonical_args)
+                } else {
+                    Type::Con(name, args)
+                }
+            }
+            Type::Record(fields) => Type::Record(
+                fields
+                    .into_iter()
+                    .map(|(name, ty)| (name, self.canonicalize_handler_effect_types(ty)))
+                    .collect(),
+            ),
+            other => other,
         }
     }
 }

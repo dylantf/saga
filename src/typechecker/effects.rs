@@ -3,9 +3,49 @@ use std::collections::HashSet;
 use crate::ast;
 use crate::token::Span;
 
-use super::{Checker, Diagnostic, EffectEntry, EffectOpSig, EffectRow, Type};
+use super::{Checker, Diagnostic, EffectEntry, EffectOpSig, EffectRow, Severity, Type};
 
 impl Checker {
+    pub(crate) fn normalize_handler_effect_name(&mut self, effect_name: String) -> String {
+        if effect_name.contains('.') {
+            return effect_name;
+        }
+
+        let canonical = if let Some(canonical) = self.scope_map.resolve_effect(&effect_name) {
+            canonical.to_string()
+        } else {
+            self.effects
+                .keys()
+                .find(|k| k.ends_with(&format!(".{}", effect_name)) || *k == &effect_name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    if let Some(module) = &self.current_module {
+                        format!("{}.{}", module, effect_name)
+                    } else {
+                        effect_name.clone()
+                    }
+                })
+        };
+
+        if canonical != effect_name {
+            let warning_key = format!("{} -> {}", effect_name, canonical);
+            if self
+                .internal_handler_normalization_warnings
+                .insert(warning_key)
+            {
+                self.collected_diagnostics.push(Diagnostic::new(
+                    Severity::Warning,
+                    format!(
+                        "internal warning: normalized bare effect `{}` inside `Handler` type to `{}`; handler effect names should already be canonical",
+                        effect_name, canonical
+                    ),
+                ));
+            }
+        }
+
+        canonical
+    }
+
     // --- Effect lookup ---
 
     /// Look up an effect by name. Effects are stored under canonical names
@@ -70,7 +110,7 @@ impl Checker {
                     let args = e
                         .type_args
                         .iter()
-                        .map(|te| self.convert_type_expr(te, &mut vec![]))
+                        .map(|te| self.convert_user_type_expr(te, &mut vec![]))
                         .collect();
                     EffectEntry::unnamed(resolved_name, args)
                 })
@@ -191,7 +231,7 @@ impl Checker {
     }
 
     /// Determine which effects a handler handles.
-    pub(crate) fn handler_handled_effects(&self, handler: &ast::Handler) -> HashSet<String> {
+    pub(crate) fn handler_handled_effects(&mut self, handler: &ast::Handler) -> HashSet<String> {
         let mut handled = HashSet::new();
         match handler {
             ast::Handler::Named(name, _) => {
@@ -223,7 +263,7 @@ impl Checker {
 
     /// Extract handled effect names from a `Handler(...)` type in the env.
     /// Used as a fallback when a name is not in `self.handlers` (e.g. handle bindings).
-    pub(crate) fn handler_effects_from_env(&self, name: &str) -> Option<Vec<String>> {
+    pub(crate) fn handler_effects_from_env(&mut self, name: &str) -> Option<Vec<String>> {
         let scheme = self.env.get(name)?;
         let ty = self.sub.apply(&scheme.ty);
         if let Type::Con(ref con_name, ref args) = ty
@@ -234,20 +274,7 @@ impl Checker {
                 .filter_map(|arg| {
                     let resolved = self.sub.apply(arg);
                     if let Type::Con(eff_name, _) = resolved {
-                        // Try to find canonical name from known effects
-                        let canonical = self
-                            .effects
-                            .keys()
-                            .find(|k| k.ends_with(&format!(".{}", eff_name)) || *k == &eff_name)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                if let Some(m) = &self.current_module {
-                                    format!("{}.{}", m, eff_name)
-                                } else {
-                                    eff_name
-                                }
-                            });
-                        Some(canonical)
+                        Some(self.normalize_handler_effect_name(eff_name))
                     } else {
                         None
                     }
@@ -264,7 +291,7 @@ impl Checker {
     /// Extract exact handled effect entries from a `Handler(...)` type in the env.
     /// Used for same-block sibling subtraction in inline handlers.
     pub(crate) fn handler_effect_entries_from_env(
-        &self,
+        &mut self,
         name: &str,
     ) -> Option<Vec<super::EffectEntry>> {
         let scheme = self.env.get(name)?;
@@ -277,18 +304,7 @@ impl Checker {
                 .filter_map(|arg| {
                     let resolved = self.sub.apply(arg);
                     if let Type::Con(eff_name, eff_args) = resolved {
-                        let canonical = self
-                            .effects
-                            .keys()
-                            .find(|k| k.ends_with(&format!(".{}", eff_name)) || *k == &eff_name)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                if let Some(m) = &self.current_module {
-                                    format!("{}.{}", m, eff_name)
-                                } else {
-                                    eff_name
-                                }
-                            });
+                        let canonical = self.normalize_handler_effect_name(eff_name);
                         Some(super::EffectEntry::unnamed(canonical, eff_args))
                     } else {
                         None

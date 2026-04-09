@@ -102,8 +102,6 @@ impl Checker {
         _with_span: Span,
         with_node_id: crate::ast::NodeId,
     ) -> Result<Type, Diagnostic> {
-        let handled = self.handler_handled_effects(handler);
-
         // Check if this with-expression uses handlers that require runtime resource init.
         // Handler names are already canonical at this point (resolve pass ran first).
         let handler_names: Vec<&str> = match handler {
@@ -165,7 +163,7 @@ impl Checker {
             };
         self.lsp.with_arm_stacks.push(arm_stack_entry);
 
-        let result = self.infer_with_inner(expr, handler, handled, with_node_id)?;
+        let result = self.infer_with_inner(expr, handler, with_node_id)?;
         self.lsp.with_arm_stacks.pop();
 
         Ok(result)
@@ -175,13 +173,29 @@ impl Checker {
         &mut self,
         expr: &Expr,
         handler: &ast::Handler,
-        handled_families: HashSet<String>,
         with_node_id: crate::ast::NodeId,
     ) -> Result<Type, Diagnostic> {
         // --- Scope 1: infer the inner expression with isolated effect tracking ---
         let inner_scope = self.enter_scope();
         let saved_effs = self.save_effects();
         let expr_ty = self.infer_expr(expr)?;
+        match handler {
+            ast::Handler::Named(name, handler_span) => {
+                if let Some(def_id) = self.env.def_id(name) {
+                    let usage_id = crate::ast::NodeId::fresh();
+                    self.record_reference(usage_id, *handler_span, def_id);
+                }
+            }
+            ast::Handler::Inline { named, .. } => {
+                for ann in named {
+                    if let Some(def_id) = self.env.def_id(&ann.node.name) {
+                        let usage_id = crate::ast::NodeId::fresh();
+                        self.record_reference(usage_id, ann.node.span, def_id);
+                    }
+                }
+            }
+        }
+        let handled_families = self.handler_handled_effects(handler);
         let raw_inner_effs = self.restore_effects(saved_effs);
         let inner_effs = self.sub.apply_effect_row(&raw_inner_effs);
         let inner_result = self.exit_scope(inner_scope);

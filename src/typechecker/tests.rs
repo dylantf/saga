@@ -1,6 +1,9 @@
 use super::*;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use std::fs;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn check(src: &str) -> Result<Checker, Diagnostic> {
     let mut lexer = Lexer::new(src);
@@ -33,6 +36,62 @@ fn infer_expr_type(src: &str) -> Result<Type, Diagnostic> {
     let checker = check(&wrapped)?;
     let scheme = checker.env.get("_result").expect("_result not in env");
     Ok(checker.sub.apply(&scheme.ty))
+}
+
+fn check_with_project_files(files: &[(&str, &str)], main_src: &str) -> Result<Checker, Diagnostic> {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "dylang-typechecker-{}-{}",
+        std::process::id(),
+        unique
+    ));
+
+    fn write_file(root: &PathBuf, rel: &str, src: &str) {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create temp module dir");
+        }
+        fs::write(path, src).expect("write temp module");
+    }
+
+    fs::create_dir_all(&root).expect("create temp project root");
+    for (rel, src) in files {
+        write_file(&root, rel, src);
+    }
+
+    let result = (|| -> Result<Checker, Diagnostic> {
+        let mut checker = Checker::with_project_root(root.clone());
+        let module_map = crate::typechecker::scan_project_modules(&root).expect("scan modules");
+        checker.set_module_map(module_map);
+
+        let prelude_src = include_str!("../stdlib/prelude.dy");
+        let prelude_tokens = Lexer::new(prelude_src).lex().expect("prelude lex error");
+        let mut prelude_program = Parser::new(prelude_tokens)
+            .parse_program()
+            .expect("prelude parse error");
+        crate::derive::expand_derives(&mut prelude_program);
+        crate::desugar::desugar_program(&mut prelude_program);
+        checker
+            .check_program_inner(&mut prelude_program)
+            .map_err(|e| e.into_iter().next().unwrap())?;
+
+        let mut lexer = Lexer::new(main_src);
+        let tokens = lexer.lex().expect("lex error");
+        let mut parser = Parser::new(tokens);
+        let mut program = parser.parse_program().expect("parse error");
+        crate::derive::expand_derives(&mut program);
+        crate::desugar::desugar_program(&mut program);
+        checker
+            .check_program_inner(&mut program)
+            .map_err(|e| e.into_iter().next().unwrap())?;
+        Ok(checker)
+    })();
+
+    let _ = fs::remove_dir_all(&root);
+    result
 }
 
 #[test]
@@ -4044,6 +4103,80 @@ fn with_on_partial_application_is_error() {
         err.message.contains("type mismatch") || err.message.contains("unnecessary"),
         "expected type mismatch or unnecessary handler message, got: {}",
         err.message
+    );
+}
+
+#[test]
+fn imported_handler_factory_with_private_effect_typechecks() {
+    let db_module = r#"module Db
+
+effect Postgres {
+  fun ping : Unit -> Unit
+}
+
+pub fun run : Unit -> Unit needs {Postgres}
+run () = ping! ()
+
+pub fun connect : Unit -> Handler Postgres
+connect () = handler for Postgres {
+  ping () = resume ()
+}
+"#;
+
+    let main_src = r#"import Db (connect, run)
+
+main () = {
+  let db = connect ()
+  {
+    run ()
+  } with db
+}
+"#;
+
+    check_with_project_files(&[("lib/Db.dy", db_module)], main_src).unwrap();
+}
+
+#[test]
+fn imported_handler_binding_inside_wrapped_block_typechecks_in_inline_list() {
+    let db_module = r#"module Db
+
+effect Postgres {
+  fun ping : Unit -> Unit
+}
+
+pub fun run : Unit -> Unit needs {Postgres}
+run () = ping! ()
+
+pub fun connect : Unit -> Handler Postgres
+connect () = handler for Postgres {
+  ping () = resume ()
+}
+"#;
+
+    let main_src = r#"import Std.IO (console)
+import Db (connect, run)
+
+main () = {
+  let db = connect ()
+  {
+    run ()
+    println "ok"
+  }
+} with {db, console}
+"#;
+
+    let checker = check_with_project_files(&[("lib/Db.dy", db_module)], main_src).unwrap();
+    assert!(
+        !checker
+            .collected_diagnostics
+            .iter()
+            .any(|d| d.message.contains("unused variable: `db`")),
+        "unexpected diagnostics: {:?}",
+        checker
+            .collected_diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
     );
 }
 
