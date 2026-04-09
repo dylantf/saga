@@ -624,23 +624,26 @@ fn effect_propagation_handled_by_caller() {
 }
 
 #[test]
-fn handler_arm_body_effect_handled_by_sibling() {
-    // An inline handler arm body uses Log, which is handled by a sibling
-    // named handler in the same `with`. Should not require `needs` on caller.
-    check(
+fn handler_arm_body_effect_from_sibling_is_unhandled_under_nested_semantics() {
+    // Under nested handler semantics, `with {silent, fail msg = { log! ... }}`
+    // desugars to `(expr with silent) with { fail msg = ... }`.
+    // The `fail` arm body uses `log!`, but `silent` only wraps the inner
+    // expression, not the outer arm body. So `log!` is unhandled.
+    let result = check(
         "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
          effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
          handler silent for Log {\n  log msg = resume ()\n}\n\
          fun risky : Unit -> Int needs {Fail, Log}\n\
          risky () = fail! \"oops\"\n\
          main () = risky () with {\n  silent,\n  fail msg = {\n    log! (\"caught: \" <> msg)\n    0\n  }\n}",
-    )
-    .unwrap();
+    );
+    assert!(result.is_err(), "expected unhandled Log error");
 }
 
 #[test]
-fn inline_handler_arm_can_use_stdio_from_sibling_named_handler() {
-    check(
+fn inline_handler_arm_effect_from_sibling_is_unhandled_under_nested_semantics() {
+    // `console` is now an inner handler; the `fail` arm body's `println` is unhandled.
+    let result = check(
         "type AppError = HttpError String\n\
          effect Fail a {\n  fun fail : a -> b\n}\n\
          fun run_app : Unit -> Unit needs {Fail AppError}\n\
@@ -653,13 +656,14 @@ fn inline_handler_arm_can_use_stdio_from_sibling_named_handler() {
              HttpError e -> println (\"HTTP: \" <> e)\n\
            }\n\
          }",
-    )
-    .unwrap();
+    );
+    assert!(result.is_err(), "expected unhandled Stdio error");
 }
 
 #[test]
-fn inline_handler_return_clause_can_use_stdio_from_sibling_named_handler() {
-    check(
+fn inline_handler_return_clause_effect_from_sibling_is_unhandled_under_nested_semantics() {
+    // `console` is now an inner handler; the `return` clause's `println` is unhandled.
+    let result = check(
         "effect Fail {\n  fun fail : String -> a\n}\n\
          fun run_app : Unit -> String needs {Fail}\n\
          run_app () = \"ok\"\n\
@@ -673,6 +677,25 @@ fn inline_handler_return_clause_can_use_stdio_from_sibling_named_handler() {
              value\n\
            }\n\
          }",
+    );
+    assert!(result.is_err(), "expected unhandled Stdio error");
+}
+
+#[test]
+fn inline_handler_finally_effect_can_be_handled_by_outer_scope_under_nested_semantics() {
+    check(
+        "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         handler silent for Log {\n  log _ = resume ()\n}\n\
+         fun risky : Unit -> Int needs {Fail}\n\
+         risky () = fail! \"oops\"\n\
+         main () = {\n\
+           risky () with {\n\
+             fail msg = 0 finally {\n\
+               log! \"cleanup\"\n\
+             }\n\
+           }\n\
+         } with silent",
     )
     .unwrap();
 }

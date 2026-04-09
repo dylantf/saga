@@ -2117,9 +2117,7 @@ fn with_named_between_inline_arms() {
             Handler::Inline { items, .. } => {
                 assert_eq!(items.len(), 3);
                 assert!(matches!(&items[0].node, HandlerItem::Arm(a) if a.op_name == "get"));
-                assert!(
-                    matches!(&items[1].node, HandlerItem::Named(r) if r.name == "console_log")
-                );
+                assert!(matches!(&items[1].node, HandlerItem::Named(r) if r.name == "console_log"));
                 assert!(matches!(&items[2].node, HandlerItem::Arm(a) if a.op_name == "fail"));
             }
             _ => panic!("expected Inline handler"),
@@ -2141,9 +2139,7 @@ fn with_return_between_items() {
         } => match handler.as_ref() {
             Handler::Inline { items, .. } => {
                 assert_eq!(items.len(), 3);
-                assert!(
-                    matches!(&items[0].node, HandlerItem::Named(r) if r.name == "console_log")
-                );
+                assert!(matches!(&items[0].node, HandlerItem::Named(r) if r.name == "console_log"));
                 assert!(matches!(&items[1].node, HandlerItem::Return(_)));
                 assert!(matches!(&items[2].node, HandlerItem::Arm(a) if a.op_name == "fail"));
             }
@@ -2155,7 +2151,9 @@ fn with_return_between_items() {
 
 #[test]
 fn with_rejects_multiple_return_clauses_in_same_inline_segment() {
-    let err = parse_expr_error("run () with {\n  return value = Ok value\n  fail msg = 0\n  return value = value\n}");
+    let err = parse_expr_error(
+        "run () with {\n  return value = Ok value\n  fail msg = 0\n  return value = value\n}",
+    );
     assert!(
         err.message.contains("at most one return clause"),
         "unexpected error: {}",

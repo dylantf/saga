@@ -1069,8 +1069,16 @@ main () = do_work () with console_log
 
 #[test]
 fn handler_needs_effect_from_sibling_handler() {
-    // A named handler for Fail that uses Log in its arm body.
-    // Both handlers provided in the same `with`.
+    // Under nested handler semantics, `with { silent, logging_fail }` desugars to
+    // `(expr with silent) with logging_fail`. The `logging_fail` handler has
+    // `needs {Log}`, but `silent` only wraps the inner expression — it doesn't
+    // handle `Log` for `logging_fail`'s arm body. So `Log` propagates outward.
+    //
+    // To make this work, the user must provide `Log` at a level that wraps
+    // `logging_fail`, e.g. stacked `with`s: `(expr with {silent, logging_fail}) with silent`
+    //
+    // Test: verify that `with {silent, logging_fail}` correctly lowers when
+    // `logging_fail`'s Log need is handled by wrapping the whole thing in `silent`.
     let src = r#"
 effect Log {
   fun log : (msg: String) -> Unit
@@ -1097,20 +1105,20 @@ risky () = {
   fail! "oops"
 }
 
-main () = risky () with { silent, logging_fail }
+main () = {
+  risky () with { silent, logging_fail }
+} with silent
 "#;
     let out = emit_elaborated(src);
-    // The Fail handler arm body contains log!, which should reference _HandleLog
     assert_contains(&out, "_Handle__script_Log_log");
-    assert_contains(&out, "_Handle__script_Fail_fail");
-    // The fail arm body should apply _HandleLog for the log! call
     assert_contains(&out, "apply _Handle__script_Log_log(");
+    assert_contains(&out, "_Handle__script_Fail_fail");
 }
 
 #[test]
 fn handler_needs_effect_from_outer_scope() {
-    // A named handler for Fail that needs Log.
-    // Log comes from the enclosing function's handler param.
+    // Under nested handler semantics, `logging_fail`'s `needs {Log}` is not
+    // satisfied by sibling `silent`. Provide `silent` at an outer scope.
     let src = r#"
 effect Log {
   fun log : (msg: String) -> Unit
@@ -1137,10 +1145,11 @@ do_work () = {
   fail! "boom"
 }
 
-main () = do_work () with { silent, logging_fail }
+main () = {
+  do_work () with { silent, logging_fail }
+} with silent
 "#;
     let out = emit_elaborated(src);
-    // logging_fail's arm body uses log!, should reference _HandleLog
     assert_contains(&out, "apply _Handle__script_Log_log(");
     assert_contains(&out, "_Handle__script_Fail_fail");
 }
