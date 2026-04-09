@@ -1,14 +1,26 @@
-import Std.Array
+effect Counter {
+  fun get : Unit -> Int
+}
+
+handler add_one for Counter {
+  get () = resume 10
+  return value = value + 1
+}
+
+handler times_two for Counter {
+  get () = resume 20
+  return value = value * 2
+}
+
+fun first_named_return_wins : Unit -> Int
+first_named_return_wins () =
+  (get! ()) with {add_one, times_two}
+
+fun reversed_order : Unit -> Int
+reversed_order () =
+  (get! ()) with {times_two, add_one}
 
 main () = {
-  let arr = Array.from_list [10, 20, 30, 40, 50]
-  dbg (Array.size arr)
-  dbg (Array.get 2 arr)
-  dbg (Array.get 99 arr)
-  let arr2 = Array.set 2 99 arr
-  dbg (Array.to_list arr2)
-  let arr3 = Array.map (fun x -> x * 2) arr
-  dbg (Array.to_list arr3)
-  let sum = Array.foldl Int.add 0 arr
-  dbg sum
+  dbg (first_named_return_wins ())
+  dbg (reversed_order ())
 }

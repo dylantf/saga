@@ -1092,7 +1092,7 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Check if an expression produces a handler value.
-    fn is_handler_value(&self, expr: &Expr) -> bool {
+    pub(super) fn is_handler_value(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::HandlerExpr { .. } => true,
             ExprKind::Var { name } => {
@@ -1131,7 +1131,12 @@ impl<'a> Lowerer<'a> {
     /// a compile-time alias. For conditionals, the condition is lowered and the
     /// handle binding stores a flag variable; handler dispatch uses both handlers'
     /// arms wrapped in a conditional at runtime.
-    fn lower_handle_binding(&mut self, name: &str, value: &Expr) {
+    pub(super) fn lower_handle_binding(&mut self, name: &str, value: &Expr) {
+        if self.handle_dynamic_vars.contains_key(name) || self.handle_cond_vars.contains_key(name)
+        {
+            return;
+        }
+
         // Direct handler reference: compile-time alias
         if let ExprKind::Var { name: handler_name } = &value.kind
             && self.resolve_handler_name_opt(handler_name).is_some()

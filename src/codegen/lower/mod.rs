@@ -496,15 +496,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Check if a handler is BEAM-native (should be lowered to direct BEAM calls).
-    pub(super) fn is_beam_native_handler(&self, name: &str) -> bool {
-        let canonical = self.resolve_handler_name(name);
-        self.handler_defs
-            .get(&canonical)
-            .and_then(|info| info.source_module.as_deref())
-            .is_some_and(|module| beam_interop::is_beam_native_handler(module, &canonical))
-    }
-
     /// Given a list of effect names (from a `needs` clause), return all
     /// (effect_name, op_name) pairs. This is the single source of truth for
     /// what handler params a function needs.

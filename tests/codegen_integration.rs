@@ -190,6 +190,103 @@ fn assert_contains(out: &str, needle: &str) {
     );
 }
 
+#[test]
+fn dynamic_handler_is_pruned_when_later_static_handler_wins_same_effect() {
+    let src = r#"
+effect Log {
+  fun log : (msg: String) -> Unit
+}
+
+handler silent for Log {
+  log _ = resume ()
+}
+
+make_logger () = handler for Log {
+  log _ = resume ()
+}
+
+main () = {
+  let logger = make_logger ()
+  {
+    log! "hello"
+  } with {logger, silent}
+}
+"#;
+
+    let out = emit_elaborated(src);
+    assert!(
+        !out.contains("call 'erlang':'element'"),
+        "later static handler should override dynamic tuple dispatch\n{out}"
+    );
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn inline_arm_overrides_dynamic_handler_for_same_op() {
+    let src = r#"
+effect Log {
+  fun log : (msg: String) -> Unit
+}
+
+make_logger () = handler for Log {
+  log _ = resume ()
+}
+
+main () = {
+  let logger = make_logger ()
+  {
+    log! "hello"
+  } with {logger, log _ = resume ()}
+}
+"#;
+
+    let out = emit_elaborated(src);
+    assert!(
+        !out.contains("call 'erlang':'element'"),
+        "inline arm should override dynamic tuple dispatch for the same op\n{out}"
+    );
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn beam_native_handler_named_reference_lowers_to_native_ops() {
+    let src = r#"
+import Std.Actor (beam_actor)
+
+main () = {
+  let _pid = spawn! (fun () -> ())
+  ()
+} with beam_actor
+"#;
+
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        out.contains("call 'erlang':'spawn'"),
+        "beam_actor should lower spawn! to native erlang:spawn\n{out}"
+    );
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn async_handler_with_beam_actor_lowers_without_scoped_binding_cycle() {
+    let src = r#"
+import Std.Actor (beam_actor)
+import Std.Async (async_handler)
+
+main () = {
+  let f = async! (fun () -> 1)
+  await! f
+} with {async_handler, beam_actor}
+"#;
+
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        out.contains("call 'erlang':'spawn'"),
+        "async_handler should be able to use beam_actor native ops\n{out}"
+    );
+    assert_core_compiles(&out);
+}
+
 // --- Tail call position ---
 
 /// A tail-recursive function should have its recursive `apply` in tail position:

@@ -1,5 +1,7 @@
 use dylang::{codegen, elaborate, lexer, parser, typechecker};
+use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/modules")
@@ -95,7 +97,10 @@ fn typecheck_source(source: &str, checker: &mut typechecker::Checker) -> Vec<dyl
 /// Create a project-mode checker pointed at the test fixtures directory,
 /// with prelude loaded.
 fn make_project_checker() -> typechecker::Checker {
-    let root = fixtures_root();
+    make_project_checker_for_root(fixtures_root())
+}
+
+fn make_project_checker_for_root(root: PathBuf) -> typechecker::Checker {
     let module_map = typechecker::scan_project_modules(&root).expect("scan failed");
     let mut checker = typechecker::Checker::with_project_root(root);
     checker.set_module_map(module_map);
@@ -121,6 +126,39 @@ fn make_project_checker() -> typechecker::Checker {
         result.errors()
     );
     checker
+}
+
+fn with_temp_project_files<T>(
+    files: &[(&str, &str)],
+    main_src: &str,
+    f: impl FnOnce(&typechecker::Checker, &Vec<dylang::ast::Decl>) -> T,
+) -> T {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "dylang-module-codegen-{}-{unique}",
+        std::process::id()
+    ));
+
+    fs::create_dir_all(&root).expect("create temp project root");
+    for (rel, src) in files {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create temp project dir");
+        }
+        fs::write(path, src).expect("write temp project file");
+    }
+
+    let result = {
+        let mut checker = make_project_checker_for_root(root.clone());
+        let program = typecheck_source(main_src, &mut checker);
+        f(&checker, &program)
+    };
+
+    let _ = fs::remove_dir_all(&root);
+    result
 }
 
 /// Compile Core Erlang to .beam with erlc, asserting success.
@@ -152,6 +190,132 @@ fn assert_contains(out: &str, needle: &str) {
         out.contains(needle),
         "Expected to find:\n  {needle}\nIn output:\n{out}"
     );
+}
+
+#[test]
+fn imported_handler_factory_with_named_shorthand_lowers_as_dynamic_handler() {
+    let db_module = r#"module Db
+
+pub effect Postgres {
+  fun ping : Unit -> Unit
+}
+
+pub fun run : Unit -> Unit needs {Postgres}
+run () = ping! ()
+
+pub fun connect : Unit -> Handler Postgres
+connect () = handler for Postgres {
+  ping () = resume ()
+}
+"#;
+
+    let main_src = r#"module Main
+import Db (connect, run)
+
+main () = {
+  let db = connect ()
+  {
+    run ()
+  } with db
+}
+"#;
+
+    with_temp_project_files(&[("lib/Db.dy", db_module)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        assert_contains(&out, "call 'erlang':'element'");
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
+fn imported_handler_factory_with_single_entry_inline_block_matches_named_shorthand() {
+    let db_module = r#"module Db
+
+pub effect Postgres {
+  fun ping : Unit -> Unit
+}
+
+pub fun run : Unit -> Unit needs {Postgres}
+run () = ping! ()
+
+pub fun connect : Unit -> Handler Postgres
+connect () = handler for Postgres {
+  ping () = resume ()
+}
+"#;
+
+    let named_src = r#"module Main
+import Db (connect, run)
+
+main () = {
+  let db = connect ()
+  {
+    run ()
+  } with db
+}
+"#;
+
+    let inline_src = r#"module Main
+import Db (connect, run)
+
+main () = {
+  let db = connect ()
+  {
+    run ()
+  } with {db}
+}
+"#;
+
+    let named_out = with_temp_project_files(&[("lib/Db.dy", db_module)], named_src, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    let inline_out = with_temp_project_files(&[("lib/Db.dy", db_module)], inline_src, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert_eq!(
+        named_out, inline_out,
+        "`with db` and `with {{db}}` should lower identically"
+    );
+    assert_erlc_compiles(&inline_out, "main");
+}
+
+#[test]
+fn imported_handler_factory_inside_wrapped_block_mixes_dynamic_and_static_handlers() {
+    let db_module = r#"module Db
+
+pub effect Postgres {
+  fun ping : Unit -> Unit
+}
+
+pub fun run : Unit -> Unit needs {Postgres}
+run () = ping! ()
+
+pub fun connect : Unit -> Handler Postgres
+connect () = handler for Postgres {
+  ping () = resume ()
+}
+"#;
+
+    let main_src = r#"module Main
+import Std.IO (console, println)
+import Db (connect, run)
+
+main () = {
+  let db = connect ()
+  {
+    run ()
+    println "ok"
+  }
+} with {db, console}
+"#;
+
+    with_temp_project_files(&[("lib/Db.dy", db_module)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        assert_contains(&out, "call 'erlang':'element'");
+        assert_contains(&out, "call 'io':'format'");
+        assert_erlc_compiles(&out, "main");
+    });
 }
 
 // ---- Qualified call emission ----
