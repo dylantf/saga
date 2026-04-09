@@ -456,29 +456,28 @@ fn resolve_expr(expr: &mut Expr, scope: &ScopeMap, locals: &HashSet<String>) {
                 Handler::Named(name, _) => {
                     canonicalize_handler_name(name, scope, locals);
                 }
-                Handler::Inline {
-                    named,
-                    arms,
-                    return_clause,
-                    ..
-                } => {
-                    for ann in named.iter_mut() {
-                        canonicalize_handler_name(&mut ann.node.name, scope, locals);
-                    }
-                    for arm in arms.iter_mut() {
-                        canonicalize_effect_qualifier(&mut arm.node.qualifier, scope);
-                        let mut arm_locals = locals.clone();
-                        for pat in &arm.node.params {
-                            collect_pat_vars(pat, &mut arm_locals);
+                Handler::Inline { items, .. } => {
+                    for ann in items.iter_mut() {
+                        match &mut ann.node {
+                            HandlerItem::Named(named_ref) => {
+                                canonicalize_handler_name(&mut named_ref.name, scope, locals);
+                            }
+                            HandlerItem::Arm(arm) => {
+                                canonicalize_effect_qualifier(&mut arm.qualifier, scope);
+                                let mut arm_locals = locals.clone();
+                                for pat in &arm.params {
+                                    collect_pat_vars(pat, &mut arm_locals);
+                                }
+                                resolve_expr(&mut arm.body, scope, &arm_locals);
+                            }
+                            HandlerItem::Return(ret) => {
+                                let mut ret_locals = locals.clone();
+                                for pat in &ret.params {
+                                    collect_pat_vars(pat, &mut ret_locals);
+                                }
+                                resolve_expr(&mut ret.body, scope, &ret_locals);
+                            }
                         }
-                        resolve_expr(&mut arm.node.body, scope, &arm_locals);
-                    }
-                    if let Some(ret) = return_clause {
-                        let mut ret_locals = locals.clone();
-                        for pat in &ret.params {
-                            collect_pat_vars(pat, &mut ret_locals);
-                        }
-                        resolve_expr(&mut ret.body, scope, &ret_locals);
                     }
                 }
             }

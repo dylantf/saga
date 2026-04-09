@@ -576,168 +576,193 @@ impl Parser {
     /// Parses the handler reference after `with`:
     /// - `with console_log` -> Handler::Named
     /// - `with { h1, h2, op args -> body }` -> Handler::Inline
+    /// Check if the current position is a named handler ref: a (possibly
+    /// module-qualified) dotted path ending in a lowercase ident, followed
+    /// by `,` or `}`. e.g. `console`, `foo.bar`, `DateTime.system_clock`.
+    fn is_named_handler_ref(&self) -> bool {
+        let mut i = 0;
+        while matches!(self.peek_at(i), Token::UpperIdent(_) | Token::Ident(_))
+            && matches!(self.peek_at(i + 1), Token::Dot)
+        {
+            i += 2;
+        }
+        matches!(self.peek_at(i), Token::Ident(_))
+            && matches!(self.peek_at(i + 1), Token::Comma | Token::RBrace)
+    }
+
+    /// Parse a named handler ref: a (possibly module-qualified) dotted path.
+    fn parse_named_handler_ref(&mut self) -> Result<Annotated<HandlerItem>, ParseError> {
+        let start = self.pos;
+        let name_start = self.tokens[self.pos].span;
+        let mut name = if matches!(self.peek(), Token::UpperIdent(_)) {
+            self.expect_upper_ident()?
+        } else {
+            self.expect_ident()?
+        };
+        while matches!(self.peek(), Token::Dot)
+            && matches!(self.peek_at(1), Token::Ident(_) | Token::UpperIdent(_))
+        {
+            self.advance(); // consume '.'
+            let segment = if matches!(self.peek(), Token::UpperIdent(_)) {
+                self.expect_upper_ident()?
+            } else {
+                self.expect_ident()?
+            };
+            name = format!("{name}.{segment}");
+        }
+        let name_end = self.tokens[self.pos - 1].span;
+        let mut trailing_comment = None;
+        if matches!(self.peek(), Token::Comma) {
+            self.advance();
+            trailing_comment = self.take_trailing_comment(self.pos - 1);
+        }
+        Ok(Annotated {
+            node: HandlerItem::Named(NamedHandlerRef {
+                name,
+                span: name_start.to(name_end),
+            }),
+            leading_trivia: self.take_leading_trivia(start),
+            trailing_comment,
+            trailing_trivia: vec![],
+        })
+    }
+
+    /// Parse an inline handler arm: `[Qualifier.]op params = body [finally cleanup]`
+    fn parse_inline_handler_arm(&mut self) -> Result<Annotated<HandlerItem>, ParseError> {
+        let start = self.pos;
+        let arm_start = self.tokens[self.pos].span;
+
+        // Check for qualified name: `Effect.op` (UpperIdent.Ident)
+        let (qualifier, name) = if matches!(self.peek(), Token::UpperIdent(_))
+            && matches!(self.peek_at(1), Token::Dot)
+            && matches!(self.peek_at(2), Token::Ident(_))
+        {
+            let q = self.expect_upper_ident()?;
+            self.advance(); // consume '.'
+            let op = self.expect_ident()?;
+            (Some(q), op)
+        } else {
+            (None, self.expect_ident()?)
+        };
+
+        // Inline arm: op params = body
+        let mut params = Vec::new();
+        while !matches!(self.peek(), Token::Eq | Token::Eof) {
+            // Skip `()` unit params (zero-param effect ops)
+            if matches!(self.peek(), Token::LParen)
+                && matches!(self.peek_at(1), Token::RParen)
+            {
+                self.advance(); // consume '('
+                self.advance(); // consume ')'
+                continue;
+            }
+            params.push(self.parse_pattern()?);
+        }
+        self.expect(Token::Eq)?;
+        let body = self.parse_expr(0)?;
+        let mut arm_end = body.span;
+
+        // Parse optional `finally { cleanup }` block
+        let finally_block = if matches!(self.peek(), Token::Finally) {
+            self.advance(); // consume 'finally'
+            let fb = self.parse_expr(0)?;
+            arm_end = fb.span;
+            Some(Box::new(fb))
+        } else {
+            None
+        };
+
+        let trailing_comment = self.take_trailing_comment(self.pos - 1);
+        Ok(Annotated {
+            node: HandlerItem::Arm(HandlerArm {
+                op_name: name,
+                qualifier,
+                params,
+                body: Box::new(body),
+                finally_block,
+                span: arm_start.to(arm_end),
+            }),
+            leading_trivia: self.take_leading_trivia(start),
+            trailing_comment,
+            trailing_trivia: vec![],
+        })
+    }
+
+    /// Parse a return clause: `return param = body`
+    fn parse_return_clause(&mut self) -> Result<Annotated<HandlerItem>, ParseError> {
+        let start = self.pos;
+        let arm_start = self.tokens[self.pos].span;
+        self.advance(); // consume 'return'
+        let param = self.parse_pattern()?;
+        self.expect(Token::Eq)?;
+        let body = self.parse_expr(0)?;
+        let arm_end = body.span;
+        let trailing_comment = self.take_trailing_comment(self.pos - 1);
+        Ok(Annotated {
+            node: HandlerItem::Return(HandlerArm {
+                op_name: "return".to_string(),
+                qualifier: None,
+                params: vec![param],
+                body: Box::new(body),
+                finally_block: None,
+                span: arm_start.to(arm_end),
+            }),
+            leading_trivia: self.take_leading_trivia(start),
+            trailing_comment,
+            trailing_trivia: vec![],
+        })
+    }
+
+    fn current_inline_segment_has_return(items: &[Annotated<HandlerItem>]) -> bool {
+        items.iter().rev().take_while(|ann| !matches!(ann.node, HandlerItem::Named(_))).any(
+            |ann| matches!(ann.node, HandlerItem::Return(_)),
+        )
+    }
+
+    /// Parses the handler reference after `with`:
+    /// - `with console_log` -> Handler::Named
+    /// - `with { h1, h2, op args -> body }` -> Handler::Inline
     pub(super) fn parse_handler_ref(&mut self) -> Result<Handler, ParseError> {
         if matches!(self.peek(), Token::LBrace) {
             self.advance(); // consume '{'
 
-            let mut named = Vec::new();
-            let mut arms = Vec::new();
-            let mut return_clause = None;
-
-            // Phase 1: Parse comma-separated named handler refs.
-            // Named refs must come before inline arms. Supports both bare
-            // (console_log) and qualified (Logger.console_log) forms.
-            while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                // A named ref is a (possibly module-qualified) dotted path ending
-                // in a lowercase ident, followed by `,` or `}`.
-                // e.g. `console`, `foo.bar`, `DateTime.system_clock`, `IO.Unsafe.handler`
-                let is_named_ref = {
-                    let mut i = 0;
-                    // Skip (UpperIdent|Ident) "." prefix segments
-                    while matches!(self.peek_at(i), Token::UpperIdent(_) | Token::Ident(_))
-                        && matches!(self.peek_at(i + 1), Token::Dot)
-                    {
-                        i += 2;
-                    }
-                    // Final segment: lowercase Ident followed by , or }
-                    matches!(self.peek_at(i), Token::Ident(_))
-                        && matches!(self.peek_at(i + 1), Token::Comma | Token::RBrace)
-                };
-                if is_named_ref {
-                    let start = self.pos;
-                    let name_start = self.tokens[self.pos].span;
-                    // Parse (possibly module-qualified) dotted path
-                    let mut name = if matches!(self.peek(), Token::UpperIdent(_)) {
-                        self.expect_upper_ident()?
-                    } else {
-                        self.expect_ident()?
-                    };
-                    while matches!(self.peek(), Token::Dot)
-                        && matches!(self.peek_at(1), Token::Ident(_) | Token::UpperIdent(_))
-                    {
-                        self.advance(); // consume '.'
-                        let segment = if matches!(self.peek(), Token::UpperIdent(_)) {
-                            self.expect_upper_ident()?
-                        } else {
-                            self.expect_ident()?
-                        };
-                        name = format!("{name}.{segment}");
-                    }
-                    let name_end = self.tokens[self.pos - 1].span;
-                    let mut trailing_comment = None;
-                    if matches!(self.peek(), Token::Comma) {
-                        self.advance();
-                        trailing_comment = self.take_trailing_comment(self.pos - 1);
-                    }
-                    named.push(Annotated {
-                        node: NamedHandlerRef {
-                            name,
-                            span: name_start.to(name_end),
-                        },
-                        leading_trivia: self.take_leading_trivia(start),
-                        trailing_comment,
-                        trailing_trivia: vec![],
-                    });
-                } else {
-                    break;
-                }
+            if matches!(self.peek(), Token::RBrace) {
+                return Err(ParseError {
+                    message: "expected identifier, got RBrace".to_string(),
+                    span: self.tokens[self.pos].span,
+                });
             }
 
-            // Phase 2: Parse inline handler arms (newline-separated, commas optional).
+            let mut items: Vec<Annotated<HandlerItem>> = Vec::new();
+
+            // Unified loop: parse named refs, inline arms, and return clauses
+            // in any order.
             while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                let start = self.pos;
-                let arm_start = self.tokens[self.pos].span;
-
                 if matches!(self.peek(), Token::Return) {
-                    // return clause: `return value = body`
-                    self.advance();
-                    let param = self.parse_pattern()?;
-                    self.expect(Token::Eq)?;
-                    let body = self.parse_expr(0)?;
-                    let arm_end = body.span;
-                    return_clause = Some(Box::new(HandlerArm {
-                        op_name: "return".to_string(),
-                        qualifier: None,
-                        params: vec![param],
-                        body: Box::new(body),
-                        finally_block: None,
-                        span: arm_start.to(arm_end),
-                    }));
-                } else {
-                    // Check for qualified name: `Effect.op` (UpperIdent.Ident)
-                    let (qualifier, name) = if matches!(self.peek(), Token::UpperIdent(_))
-                        && matches!(self.peek_at(1), Token::Dot)
-                        && matches!(self.peek_at(2), Token::Ident(_))
-                    {
-                        let q = self.expect_upper_ident()?;
-                        self.advance(); // consume '.'
-                        let op = self.expect_ident()?;
-                        (Some(q), op)
-                    } else {
-                        (None, self.expect_ident()?)
-                    };
-
-                    if matches!(self.peek(), Token::Comma | Token::RBrace) {
-                        // Named ref after inline arms
+                    if Self::current_inline_segment_has_return(&items) {
                         return Err(ParseError {
-                            message: "named handler refs must come before inline handler arms"
-                                .to_string(),
-                            span: arm_start,
+                            message:
+                                "inline handler segment may contain at most one return clause"
+                                    .to_string(),
+                            span: self.tokens[self.pos].span,
                         });
                     }
-
-                    // Inline arm: op params = body
-                    let mut params = Vec::new();
-                    while !matches!(self.peek(), Token::Eq | Token::Eof) {
-                        // Skip `()` unit params (zero-param effect ops)
-                        if matches!(self.peek(), Token::LParen)
-                            && matches!(self.peek_at(1), Token::RParen)
-                        {
-                            self.advance(); // consume '('
-                            self.advance(); // consume ')'
-                            continue;
-                        }
-                        params.push(self.parse_pattern()?);
-                    }
-                    self.expect(Token::Eq)?;
-                    let body = self.parse_expr(0)?;
-                    let mut arm_end = body.span;
-
-                    // Parse optional `finally { cleanup }` block
-                    let finally_block = if matches!(self.peek(), Token::Finally) {
-                        self.advance(); // consume 'finally'
-                        let fb = self.parse_expr(0)?;
-                        arm_end = fb.span;
-                        Some(Box::new(fb))
-                    } else {
-                        None
-                    };
-
-                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
-                    arms.push(Annotated {
-                        node: HandlerArm {
-                            op_name: name,
-                            qualifier,
-                            params,
-                            body: Box::new(body),
-                            finally_block,
-                            span: arm_start.to(arm_end),
-                        },
-                        leading_trivia: self.take_leading_trivia(start),
-                        trailing_comment,
-                        trailing_trivia: vec![],
-                    });
+                    items.push(self.parse_return_clause()?);
+                } else if self.is_named_handler_ref() {
+                    items.push(self.parse_named_handler_ref()?);
+                } else {
+                    items.push(self.parse_inline_handler_arm()?);
                 }
 
-                // Commas between inline arms are optional
+                // Commas between items are optional
                 if matches!(self.peek(), Token::Comma) {
                     self.advance();
-                    // Transfer trailing comment from comma to the last arm
+                    // Transfer trailing comment from comma to the last item
                     if let Some(comment) = self.tokens[self.pos - 1].trailing_comment.take()
-                        && let Some(last_arm) = arms.last_mut()
-                        && last_arm.trailing_comment.is_none()
+                        && let Some(last_item) = items.last_mut()
+                        && last_item.trailing_comment.is_none()
                     {
-                        last_arm.trailing_comment = Some(comment);
+                        last_item.trailing_comment = Some(comment);
                     }
                 }
             }
@@ -745,9 +770,7 @@ impl Parser {
             self.expect(Token::RBrace)?;
 
             Ok(Handler::Inline {
-                named,
-                arms,
-                return_clause,
+                items,
                 dangling_trivia,
             })
         } else {

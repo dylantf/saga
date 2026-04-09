@@ -706,39 +706,42 @@ fn format_handler(handler: &Handler) -> Doc {
     match handler {
         Handler::Named(name, _) => Doc::text(name),
         Handler::Inline {
-            named,
-            arms,
-            return_clause,
+            items,
             dangling_trivia,
         } => {
-            let has_inline = !arms.is_empty() || return_clause.is_some();
-            let has_trivia = named
+            let has_non_named = items
+                .iter()
+                .any(|a| !matches!(a.node, HandlerItem::Named(_)));
+            let has_trivia = items
                 .iter()
                 .any(|a| a.trailing_comment.is_some() || !a.leading_trivia.is_empty());
 
             // Named-only handlers can go on one line: `{ h1, h2 }`
-            if !has_inline && !has_trivia && dangling_trivia.is_empty() {
-                let named_docs: Vec<Doc> = named.iter().map(|a| Doc::text(&a.node.name)).collect();
+            if !has_non_named && !has_trivia && dangling_trivia.is_empty() {
+                let named_docs: Vec<Doc> = items
+                    .iter()
+                    .filter_map(|a| match &a.node {
+                        HandlerItem::Named(r) => Some(Doc::text(&r.name)),
+                        _ => None,
+                    })
+                    .collect();
                 let joined = Doc::join(Doc::text(", "), named_docs);
                 return docs![Doc::text("{"), joined, Doc::text("}")];
             }
 
             let mut body_items = Vec::new();
-            for ann in named {
+            for ann in items {
                 body_items.push(Doc::hardline());
                 body_items.push(format_trivia(&ann.leading_trivia));
-                body_items.push(Doc::text(format!("{},", ann.node.name)));
+                match &ann.node {
+                    HandlerItem::Named(r) => {
+                        body_items.push(Doc::text(format!("{},", r.name)));
+                    }
+                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
+                        body_items.push(format_handler_arm(arm));
+                    }
+                }
                 body_items.push(format_trailing(&ann.trailing_comment));
-            }
-            for ann in arms {
-                body_items.push(Doc::hardline());
-                body_items.push(format_trivia(&ann.leading_trivia));
-                body_items.push(format_handler_arm(&ann.node));
-                body_items.push(format_trailing(&ann.trailing_comment));
-            }
-            if let Some(rc) = return_clause {
-                body_items.push(Doc::hardline());
-                body_items.push(format_handler_arm(rc));
             }
             let body = format_braced_body(&body_items, dangling_trivia);
             docs![

@@ -191,7 +191,7 @@ fn assert_contains(out: &str, needle: &str) {
 }
 
 #[test]
-fn dynamic_handler_is_pruned_when_later_static_handler_wins_same_effect() {
+fn inner_dynamic_handler_is_kept_when_outer_static_handler_handles_same_effect() {
     let src = r#"
 effect Log {
   fun log : (msg: String) -> Unit
@@ -215,14 +215,14 @@ main () = {
 
     let out = emit_elaborated(src);
     assert!(
-        !out.contains("call 'erlang':'element'"),
-        "later static handler should override dynamic tuple dispatch\n{out}"
+        out.contains("call 'erlang':'element'"),
+        "inner dynamic handler should remain when nested inside an outer static handler\n{out}"
     );
     assert_core_compiles(&out);
 }
 
 #[test]
-fn inline_arm_overrides_dynamic_handler_for_same_op() {
+fn inner_dynamic_handler_is_kept_when_outer_inline_handler_handles_same_op() {
     let src = r#"
 effect Log {
   fun log : (msg: String) -> Unit
@@ -242,8 +242,8 @@ main () = {
 
     let out = emit_elaborated(src);
     assert!(
-        !out.contains("call 'erlang':'element'"),
-        "inline arm should override dynamic tuple dispatch for the same op\n{out}"
+        out.contains("call 'erlang':'element'"),
+        "inner dynamic handler should remain when nested inside an outer inline handler\n{out}"
     );
     assert_core_compiles(&out);
 }

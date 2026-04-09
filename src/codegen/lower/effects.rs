@@ -8,7 +8,7 @@
 /// - named/inline handler composition for `with` lowering
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::ast::{Expr, ExprKind, Handler, HandlerArm, Pat, Stmt};
+use crate::ast::{Expr, ExprKind, Handler, HandlerArm, HandlerItem, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::Lowerer;
@@ -690,16 +690,21 @@ impl<'a> Lowerer<'a> {
     ) -> (Vec<String>, Vec<HandlerArm>, Option<Box<HandlerArm>>) {
         match handler {
             Handler::Named(name, _) => (vec![name.clone()], vec![], None),
-            Handler::Inline {
-                named,
-                arms,
-                return_clause,
-                ..
-            } => (
-                named.iter().map(|ann| ann.node.name.clone()).collect(),
-                arms.iter().map(|ann| ann.node.clone()).collect(),
-                return_clause.clone(),
-            ),
+            Handler::Inline { items, .. } => {
+                let mut named_refs = Vec::new();
+                let mut inline_arms = Vec::new();
+                let mut return_clause = None;
+                for ann in items {
+                    match &ann.node {
+                        HandlerItem::Named(r) => named_refs.push(r.name.clone()),
+                        HandlerItem::Arm(a) => inline_arms.push(a.clone()),
+                        HandlerItem::Return(rc) => {
+                            return_clause = Some(Box::new(rc.clone()));
+                        }
+                    }
+                }
+                (named_refs, inline_arms, return_clause)
+            }
         }
     }
 

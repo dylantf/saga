@@ -706,20 +706,17 @@ fn normalize_handler(h: &mut Handler) {
     match h {
         Handler::Named(_, span) => *span = S,
         Handler::Inline {
-            named,
-            arms,
-            return_clause,
+            items,
             dangling_trivia,
             ..
         } => {
-            for ann in named.iter_mut() {
-                normalize_annotated(ann, |n| n.span = S);
-            }
-            for arm in arms.iter_mut() {
-                normalize_annotated(arm, normalize_handler_arm);
-            }
-            if let Some(rc) = return_clause {
-                normalize_handler_arm(rc);
+            for ann in items.iter_mut() {
+                normalize_annotated(ann, |item| match item {
+                    HandlerItem::Named(r) => r.span = S,
+                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
+                        normalize_handler_arm(arm)
+                    }
+                });
             }
             dangling_trivia.clear();
         }

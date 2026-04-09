@@ -400,15 +400,14 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
                 dylang::ast::Handler::Named(name, span) if contains(span, offset) => {
                     return Some((name.clone(), *span, None));
                 }
-                dylang::ast::Handler::Inline {
-                    arms,
-                    return_clause,
-                    ..
-                } => {
-                    let all_arms: Vec<&dylang::ast::HandlerArm> = arms
+                dylang::ast::Handler::Inline { items, .. } => {
+                    let all_arms: Vec<&dylang::ast::HandlerArm> = items
                         .iter()
-                        .map(|a| &a.node)
-                        .chain(return_clause.iter().map(|r| r.as_ref()))
+                        .filter_map(|a| match &a.node {
+                            dylang::ast::HandlerItem::Arm(arm)
+                            | dylang::ast::HandlerItem::Return(arm) => Some(arm),
+                            dylang::ast::HandlerItem::Named(_) => None,
+                        })
                         .collect();
                     for arm in &all_arms {
                         if contains(&arm.span, offset) {
