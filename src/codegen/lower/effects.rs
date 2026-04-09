@@ -414,7 +414,9 @@ impl<'a> Lowerer<'a> {
                     self.no_resume_ops.insert(key.clone());
                 }
                 OpHandlerPlan::BeamNative { handler_canonical } => {
-                    self.direct_ops.insert(key.clone(), handler_canonical.clone());
+                    if self.use_direct_native_fast_path(handler_canonical) {
+                        self.direct_ops.insert(key.clone(), handler_canonical.clone());
+                    }
                 }
                 OpHandlerPlan::Static {
                     arm,
@@ -424,7 +426,9 @@ impl<'a> Lowerer<'a> {
                     if !arm.body.contains_resume() {
                         self.no_resume_ops.insert(key.clone());
                     }
-                    if self.is_beam_native_handler_canonical(handler_canonical) {
+                    if self.is_beam_native_handler_canonical(handler_canonical)
+                        && self.use_direct_native_fast_path(handler_canonical)
+                    {
                         self.direct_ops.insert(key.clone(), handler_canonical.clone());
                     }
                 }
@@ -1040,14 +1044,24 @@ impl<'a> Lowerer<'a> {
         pending: &mut VecDeque<PendingLet>,
         bound: &mut HashSet<String>,
     ) -> CExpr {
-        loop {
-            let Some(ready_idx) = pending.iter().position(|item| item.deps.is_subset(bound)) else {
-                break;
-            };
-            let item = pending.remove(ready_idx).expect("pending let vanished");
-            bound.insert(item.var.clone());
+        let bound_snapshot = bound.clone();
+        let mut ready = Vec::new();
+        let mut waiting = VecDeque::new();
+
+        while let Some(item) = pending.pop_front() {
+            if item.deps.is_subset(&bound_snapshot) {
+                ready.push(item);
+            } else {
+                waiting.push_back(item);
+            }
+        }
+
+        *pending = waiting;
+
+        for item in ready.into_iter().rev() {
             body = CExpr::Let(item.var, Box::new(item.val), Box::new(body));
         }
+
         body
     }
 
@@ -1199,6 +1213,10 @@ impl<'a> Lowerer<'a> {
             .get(canonical)
             .and_then(|info| info.source_module.as_deref())
             .is_some_and(|module| super::beam_interop::is_beam_native_handler(module, canonical))
+    }
+
+    fn use_direct_native_fast_path(&self, canonical: &str) -> bool {
+        canonical != "Std.Actor.beam_actor"
     }
 }
 
