@@ -13,12 +13,10 @@ handler times_two for Counter {
 }
 
 fun first_named_return_wins : Unit -> Int
-first_named_return_wins () =
-  (get! ()) with {add_one, times_two}
+first_named_return_wins () = get! () with {add_one, times_two}
 
 fun reversed_order : Unit -> Int
-reversed_order () =
-  (get! ()) with {times_two, add_one}
+reversed_order () = get! () with {times_two, add_one}
 
 main () = {
   dbg (first_named_return_wins ())
