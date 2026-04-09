@@ -76,6 +76,29 @@ enum WithHandlerLayer {
 }
 
 impl<'a> Lowerer<'a> {
+    fn compose_return_k(
+        &mut self,
+        inner: Option<CExpr>,
+        outer: Option<CExpr>,
+    ) -> Option<CExpr> {
+        match (inner, outer) {
+            (Some(inner), Some(outer)) => {
+                let param = self.fresh();
+                let inner_value = self.fresh();
+                Some(CExpr::Fun(
+                    vec![param.clone()],
+                    Box::new(CExpr::Let(
+                        inner_value.clone(),
+                        Box::new(CExpr::Apply(Box::new(inner), vec![CExpr::Var(param)])),
+                        Box::new(CExpr::Apply(Box::new(outer), vec![CExpr::Var(inner_value)])),
+                    )),
+                ))
+            }
+            (Some(k), None) | (None, Some(k)) => Some(k),
+            (None, None) => None,
+        }
+    }
+
     fn lower_handler_owned_expr(&mut self, expr: &Expr) -> CExpr {
         // Handler-local computations produce the handled result itself, so they
         // must not inherit an enclosing function/handler return continuation.
@@ -83,12 +106,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_handled_expr_with_return_k(&mut self, expr: &Expr, return_k: Option<CExpr>) -> CExpr {
-        let inner_ce = self.lower_expr_with_installed_return_k(expr, return_k.clone());
-        if matches!(expr.kind, ExprKind::Block { .. } | ExprKind::With { .. }) {
-            inner_ce
-        } else {
-            self.apply_return_k_with(return_k, inner_ce)
-        }
+        self.lower_expr_with_installed_return_k(expr, return_k)
     }
 
     fn lower_handled_inner_expr(
@@ -97,6 +115,7 @@ impl<'a> Lowerer<'a> {
         handled_return_k: Option<CExpr>,
         inherited_return_k: Option<CExpr>,
     ) -> CExpr {
+        let return_k = self.compose_return_k(handled_return_k, inherited_return_k);
         let is_direct_effectful_call = collect_fun_call(expr)
             .map(|(name, _, _)| {
                 self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
@@ -104,15 +123,9 @@ impl<'a> Lowerer<'a> {
             .unwrap_or(false);
 
         if is_direct_effectful_call {
-            if let Some(rk) = handled_return_k {
-                self.lower_expr_with_call_return_k(expr, Some(rk))
-            } else if let Some(inherited_rk) = inherited_return_k {
-                self.lower_expr_with_call_return_k(expr, Some(inherited_rk))
-            } else {
-                self.lower_expr(expr)
-            }
+            self.lower_expr_with_call_return_k(expr, return_k)
         } else {
-            self.lower_handled_expr_with_return_k(expr, handled_return_k)
+            self.lower_handled_expr_with_return_k(expr, return_k)
         }
     }
 

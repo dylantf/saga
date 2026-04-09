@@ -4532,6 +4532,30 @@ fn no_unnecessary_handler_warning_for_indirect_named_handler_dependencies() {
 }
 
 #[test]
+fn no_unnecessary_handler_warning_for_nested_named_return_handlers() {
+    let checker = check(
+        "effect Counter {\n  fun get : Unit -> Int\n}\n\
+         handler add_one for Counter {\n\
+           get () = resume 10\n\
+           return value = value + 1\n\
+         }\n\
+         handler times_two for Counter {\n\
+           get () = resume 20\n\
+           return value = value * 2\n\
+         }\n\
+         fun caller : Unit -> Int\n\
+         caller () = get! () with {add_one, times_two}",
+    )
+    .unwrap();
+    let warnings: Vec<_> = checker
+        .collected_diagnostics
+        .iter()
+        .filter(|d| d.message.contains("unnecessary"))
+        .collect();
+    assert!(warnings.is_empty(), "unexpected warning: {:?}", warnings);
+}
+
+#[test]
 fn effect_in_if_branches_merge() {
     check(
         "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
