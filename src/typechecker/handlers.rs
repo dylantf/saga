@@ -278,7 +278,8 @@ impl Checker {
                         };
                         let final_effs = remaining_effs.merge(&fresh_needs);
                         self.emit_effects(&final_effs);
-                        if !handler_info.effects.is_empty()
+                        if handler_info.return_type.is_none()
+                            && !handler_info.effects.is_empty()
                             && !handled_entries
                                 .iter()
                                 .any(|entry| handler_info.effects.contains(&entry.name))
@@ -295,7 +296,8 @@ impl Checker {
                     } else {
                         let final_effs = remaining_effs.merge(&handler_info.needs_effects);
                         self.emit_effects(&final_effs);
-                        if !handler_info.effects.is_empty()
+                        if handler_info.return_type.is_none()
+                            && !handler_info.effects.is_empty()
                             && !handled_entries
                                 .iter()
                                 .any(|entry| handler_info.effects.contains(&entry.name))
@@ -417,7 +419,7 @@ impl Checker {
                         unused.push(eff);
                     }
                 }
-                if !unused.is_empty() {
+                if handler.return_clause().is_none() && !unused.is_empty() {
                     unused.sort();
                     unused.dedup();
                     self.collected_diagnostics.push(Diagnostic::warning_at(

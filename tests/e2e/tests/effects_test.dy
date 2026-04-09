@@ -142,7 +142,7 @@ branch_statement_with cond =
 
 fun nested_with_marker : Unit -> String
 nested_with_marker () = {
-  # NB: intentionally testing multiple with-boundaries
+  # NB: intentionally testing multiple with-boundaries, should be a warning too
   let x = (inner_swallow () with swallow_fail) with {
     fail _ = 1
   }
@@ -253,6 +253,10 @@ effect Scope {
   fun acquire_scoped : (acquire: Unit -> a) -> (release: a -> Unit) -> a
 }
 
+effect Counter {
+  fun get_counter : Unit -> Int
+}
+
 handler managed for Resource {
   acquire name = {
     let r = $"[{name}]"
@@ -271,6 +275,16 @@ handler run_scoped for Scope {
   }
 }
 
+handler add_one_counter for Counter {
+  get_counter () = resume 10
+  return value = value + 1
+}
+
+handler times_two_counter for Counter {
+  get_counter () = resume 20
+  return value = value * 2
+}
+
 fun work : Unit -> String needs {Resource}
 work () = {
   let db = acquire! "db"
@@ -282,6 +296,73 @@ fun work_and_fail : Unit -> String needs {Resource, Fail String}
 work_and_fail () = {
   let _db = acquire! "db"
   fail! "something went wrong"
+}
+
+fun nested_named_returns_first_order : Unit -> Int
+nested_named_returns_first_order () = get_counter! () with {add_one_counter, times_two_counter}
+
+fun nested_named_returns_reversed_order : Unit -> Int
+nested_named_returns_reversed_order () = get_counter! () with {times_two_counter, add_one_counter}
+
+fun stacked_named_returns_match_list_sugar : Unit -> Int
+stacked_named_returns_match_list_sugar () =
+  (get_counter! () with add_one_counter) with times_two_counter
+
+fun return_only_inline_inside_named_handler : Unit -> Int
+return_only_inline_inside_named_handler () = get_counter! () with {
+  return value = value + 1
+  times_two_counter,
+}
+
+fun return_only_inline_outside_named_handler : Unit -> Int
+return_only_inline_outside_named_handler () = get_counter! () with {
+  times_two_counter,
+  return value = value + 1
+}
+
+fun nested_returns_stop_at_binding_boundary : Unit -> Int
+nested_returns_stop_at_binding_boundary () = {
+  let x = get_counter! () with {add_one_counter, times_two_counter}
+  x + 1
+}
+
+fun nested_returns_in_block_remain_local : Unit -> Int
+nested_returns_in_block_remain_local () = {
+  let x = {
+    get_counter! () with {add_one_counter, times_two_counter}
+  }
+  x
+}
+
+fun counter_inner_return_only : Unit -> Int needs {Counter}
+counter_inner_return_only () = get_counter! () with {
+  return value = value + 1
+}
+
+fun counter_middle_handles : Unit -> Int
+counter_middle_handles () = counter_inner_return_only () with times_two_counter
+
+fun counter_outer_wraps : Unit -> Int
+counter_outer_wraps () = counter_middle_handles () with {
+  return value = value - 2
+}
+
+fun counter_bubble_a : Unit -> Int needs {Counter}
+counter_bubble_a () = get_counter! () with {
+  return value = value + 1
+}
+
+fun counter_bubble_b : Unit -> Int needs {Counter}
+counter_bubble_b () = counter_bubble_a () with {
+  return value = value * 2
+}
+
+fun counter_bubble_c : Unit -> Int
+counter_bubble_c () = counter_bubble_b () with times_two_counter
+
+fun counter_bubble_outer : Unit -> Int
+counter_bubble_outer () = counter_bubble_c () with {
+  return value = value - 3
 }
 
 # --- Tests ---
@@ -386,6 +467,53 @@ describe "effects" {
         try_fail (fun () -> safe_div 42 6)
         |> Result.map (fun x -> x * 10)
       assert_eq result (Ok 70)
+    }
+  }
+
+  describe "nested handler return composition" {
+    test "lexical order composes returns from inner to outer" {
+      let result = nested_named_returns_first_order ()
+      assert_eq result 22
+    }
+
+    test "reversed lexical order changes the composed result" {
+      let result = nested_named_returns_reversed_order ()
+      assert_eq result 41
+    }
+
+    test "stacked with matches list sugar" {
+      let result = stacked_named_returns_match_list_sugar ()
+      assert_eq result 22
+    }
+
+    test "return-only inline layer inside named handler still composes" {
+      let result = return_only_inline_inside_named_handler ()
+      assert_eq result 42
+    }
+
+    test "return-only inline layer outside named handler still composes" {
+      let result = return_only_inline_outside_named_handler ()
+      assert_eq result 41
+    }
+
+    test "returns stop at let binding boundary" {
+      let result = nested_returns_stop_at_binding_boundary ()
+      assert_eq result 23
+    }
+
+    test "returns stay local to the wrapped block result" {
+      let result = nested_returns_in_block_remain_local ()
+      assert_eq result 22
+    }
+
+    test "effects propagate across function boundaries before outer handlers apply" {
+      let result = counter_outer_wraps ()
+      assert_eq result 40
+    }
+
+    test "effect can bubble through multiple wrapped functions before being handled" {
+      let result = counter_bubble_outer ()
+      assert_eq result 81
     }
   }
 
