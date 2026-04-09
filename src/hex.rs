@@ -207,53 +207,42 @@ pub fn download_and_extract(
 
 // --- Compilation ---
 
-/// Whether a package directory needs rebar3 to compile (has NIFs, hooks, etc.).
-pub fn needs_rebar3(pkg_dir: &Path) -> bool {
-    // Has c_src/ or native/ directory (NIF source)
-    if pkg_dir.join("c_src").exists() || pkg_dir.join("native").exists() {
-        return true;
-    }
-
-    // Has rebar.config with pre_hooks or port_specs
-    let rebar_config = pkg_dir.join("rebar.config");
-    if rebar_config.exists()
-        && let Ok(contents) = std::fs::read_to_string(&rebar_config)
-        && (contents.contains("pre_hooks")
-            || contents.contains("port_specs")
-            || contents.contains("provider_hooks"))
-    {
-        return true;
-    }
-
-    false
-}
-
 /// Compile a package using rebar3 bare compile.
 /// `pkg_dir` is the directory containing the source and rebar.config.
+/// `project_root` is used to find dependency ebin dirs for `--paths`.
 /// `name` is used for error messages and to find rebar3's output dir.
 /// Returns the ebin directory path.
-pub fn compile_with_rebar3(pkg_dir: &Path, name: &str) -> Result<PathBuf, String> {
+pub fn compile_with_rebar3(
+    pkg_dir: &Path,
+    name: &str,
+    project_root: &Path,
+) -> Result<PathBuf, String> {
     let ebin_dir = pkg_dir.join("ebin");
+
+    // Build --paths: the package's own ebin dir plus all dep ebin dirs
+    let dep_ebin_dirs = collect_dep_ebin_dirs(project_root);
+    let mut paths = vec![ebin_dir.to_string_lossy().to_string()];
+    for dir in &dep_ebin_dirs {
+        paths.push(dir.to_string_lossy().to_string());
+    }
+    let paths_arg = paths.join(":");
 
     // rebar3 bare compile outputs to <output_dir>/ebin/.
     // Point it at the package dir so ebin/ lands where we expect.
-    let output = std::process::Command::new("rebar3")
-        .args([
-            "bare",
-            "compile",
-            "--paths",
-            ebin_dir.to_str().unwrap_or("."),
-        ])
+    // ERL_LIBS lets rebar3 find dep application roots for -include_lib resolution
+    let deps_dir = project_root.join("deps");
+
+    let status = std::process::Command::new("rebar3")
+        .args(["bare", "compile", "--paths", &paths_arg])
         .current_dir(pkg_dir)
         .env("REBAR_BARE_COMPILER_OUTPUT_DIR", pkg_dir)
         .env("REBAR_PROFILE", "prod")
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .output()
+        .env("ERL_LIBS", &deps_dir)
+        .status()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 format!(
-                    "dependency '{}' requires rebar3 for compilation (has native code), \
+                    "dependency '{}' requires rebar3 for compilation, \
                      but rebar3 is not on PATH. Install rebar3: https://rebar3.org",
                     name
                 )
@@ -262,16 +251,9 @@ pub fn compile_with_rebar3(pkg_dir: &Path, name: &str) -> Result<PathBuf, String
             }
         })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    if !status.success() {
         let _ = std::fs::remove_dir_all(&ebin_dir);
-        return Err(format!(
-            "rebar3 bare compile failed for '{}':\n{}\n{}",
-            name,
-            stdout.trim(),
-            stderr.trim()
-        ));
+        return Err(format!("rebar3 bare compile failed for '{}'", name));
     }
 
     // rebar3 may put ebin inside _build — copy beams to our ebin dir if needed
@@ -333,9 +315,25 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Collect ebin directories from all installed deps under `project_root/deps/`.
+fn collect_dep_ebin_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let deps_dir = project_root.join("deps");
+    let Ok(entries) = std::fs::read_dir(&deps_dir) else {
+        return vec![];
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let ebin = e.path().join("ebin");
+            ebin.exists().then_some(ebin)
+        })
+        .collect()
+}
+
 /// Compile .erl files in a package's src/ directory with erlc.
+/// `project_root` is used to find dependency ebin dirs for `-pa` and `-include_lib`.
 /// Returns the ebin directory path.
-pub fn compile_erlang(pkg_dir: &Path, name: &str) -> Result<PathBuf, String> {
+pub fn compile_erlang(pkg_dir: &Path, name: &str, project_root: &Path) -> Result<PathBuf, String> {
     let src_dir = pkg_dir.join("src");
     let ebin_dir = pkg_dir.join("ebin");
 
@@ -360,23 +358,35 @@ pub fn compile_erlang(pkg_dir: &Path, name: &str) -> Result<PathBuf, String> {
         return Err(format!("dependency '{}' has no .erl files in src/", name));
     }
 
+    // Collect -pa flags for dependency ebin dirs (needed for -include_lib resolution)
+    let dep_ebin_dirs = collect_dep_ebin_dirs(project_root);
+
     for erl_file in &erl_files {
-        let output = std::process::Command::new("erlc")
-            .arg("-o")
-            .arg(&ebin_dir)
-            .arg(erl_file)
-            .stderr(std::process::Stdio::piped())
-            .output()
+        let mut cmd = std::process::Command::new("erlc");
+        cmd.arg("-o").arg(&ebin_dir);
+
+        // Add -I for the package's own include/ and src/ dirs
+        let include_dir = pkg_dir.join("include");
+        if include_dir.exists() {
+            cmd.arg("-I").arg(&include_dir);
+        }
+        cmd.arg("-I").arg(&src_dir);
+
+        // Add -pa for each dep ebin dir (resolves -include_lib)
+        for ebin in &dep_ebin_dirs {
+            cmd.arg("-pa").arg(ebin);
+        }
+
+        cmd.arg(erl_file);
+
+        // Let stderr inherit so the user sees erlc output directly
+        let status = cmd
+            .status()
             .map_err(|e| format!("failed to run erlc: {}", e))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if !status.success() {
             let _ = std::fs::remove_dir_all(&ebin_dir);
-            return Err(format!(
-                "erlc failed for {}: {}",
-                erl_file.display(),
-                stderr.trim()
-            ));
+            return Err(format!("erlc failed for {}", erl_file.display()));
         }
     }
 
@@ -400,52 +410,42 @@ pub fn compile_package(project_root: &Path, name: &str) -> Result<PathBuf, Strin
         return Ok(pkg_dir.join("ebin"));
     }
 
-    if needs_rebar3(&pkg_dir) {
-        compile_with_rebar3(&pkg_dir, name)
+    if pkg_dir.join("rebar.config").exists() {
+        compile_with_rebar3(&pkg_dir, name, project_root)
     } else {
-        compile_erlang(&pkg_dir, name)
+        compile_erlang(&pkg_dir, name, project_root)
     }
 }
 
-/// Full install pipeline for a single Hex package: fetch metadata, download, extract, compile.
-/// Returns (ebin_dir, release_info).
-pub fn install_package(
+/// Fetch metadata, download, and extract a Hex package without compiling it.
+/// Returns the release metadata (needed to discover transitive deps).
+pub fn prepare_package(
     project_root: &Path,
     name: &str,
     version: &str,
-) -> Result<(PathBuf, HexRelease), String> {
+) -> Result<HexRelease, String> {
     let pkg_dir = package_dir(project_root, name);
+    let release_json_path = pkg_dir.join("release.json");
 
-    // Check if already compiled
-    if is_compiled(project_root, name) {
-        // Load cached release.json for dep info
-        let release_json_path = pkg_dir.join("release.json");
-        let release = if release_json_path.exists() {
-            let contents = std::fs::read_to_string(&release_json_path)
-                .map_err(|e| format!("failed to read cached release.json: {}", e))?;
-            serde_json::from_str(&contents)
-                .map_err(|e| format!("failed to parse cached release.json: {}", e))?
-        } else {
-            fetch_release(name, version)?
-        };
-        return Ok((package_ebin_dir(project_root, name), release));
-    }
+    // Load cached release.json if available, otherwise fetch from API
+    let release = if release_json_path.exists() {
+        let contents = std::fs::read_to_string(&release_json_path)
+            .map_err(|e| format!("failed to read cached release.json: {}", e))?;
+        serde_json::from_str(&contents)
+            .map_err(|e| format!("failed to parse cached release.json: {}", e))?
+    } else {
+        let release = fetch_release(name, version)?;
+        std::fs::create_dir_all(&pkg_dir)
+            .map_err(|e| format!("failed to create deps dir: {}", e))?;
+        let json = serde_json::to_string_pretty(&release)
+            .map_err(|e| format!("failed to serialize release metadata: {}", e))?;
+        std::fs::write(&release_json_path, json)
+            .map_err(|e| format!("failed to write release.json: {}", e))?;
+        release
+    };
 
-    // Fetch release metadata
-    let release = fetch_release(name, version)?;
-
-    // Cache release.json
-    std::fs::create_dir_all(&pkg_dir).map_err(|e| format!("failed to create deps dir: {}", e))?;
-    let release_json = serde_json::to_string_pretty(&release)
-        .map_err(|e| format!("failed to serialize release metadata: {}", e))?;
-    std::fs::write(pkg_dir.join("release.json"), release_json)
-        .map_err(|e| format!("failed to write release.json: {}", e))?;
-
-    // Download and extract tarball
+    // Download and extract tarball (skips if already extracted)
     download_and_extract(project_root, name, version)?;
 
-    // Compile
-    let ebin_dir = compile_package(project_root, name)?;
-
-    Ok((ebin_dir, release))
+    Ok(release)
 }

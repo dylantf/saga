@@ -577,10 +577,10 @@ fn install_deps_recursive(
             continue;
         };
 
-        // Build native code if needed (rebar3 for NIFs, erlc for plain .erl)
-        if crate::hex::needs_rebar3(&dep_path) {
-            eprintln!("{}{} {} (native)...", indent, dim("Compiling"), dep_name);
-            crate::hex::compile_with_rebar3(&dep_path, dep_name)?;
+        // Compile Erlang sources: rebar3 if rebar.config present, erlc otherwise
+        if dep_path.join("rebar.config").exists() {
+            eprintln!("{}{} {} (rebar3)...", indent, dim("Compiling"), dep_name);
+            crate::hex::compile_with_rebar3(&dep_path, dep_name, project_root)?;
         } else if dep_path.join("src").exists()
             && std::fs::read_dir(dep_path.join("src"))
                 .map(|entries| {
@@ -594,7 +594,7 @@ fn install_deps_recursive(
             let ebin_dir = dep_path.join("ebin");
             if !ebin_dir.exists() {
                 eprintln!("{}{} {} (erlang)...", indent, dim("Compiling"), dep_name);
-                crate::hex::compile_erlang(&dep_path, dep_name)?;
+                crate::hex::compile_erlang(&dep_path, dep_name, project_root)?;
             }
         }
 
@@ -638,6 +638,51 @@ fn install_hex_dep_recursive(
         return Ok(());
     }
 
+    // Skip if already compiled and locked at this version
+    if crate::hex::is_compiled(project_root, dep_name) {
+        // Still need release info to recurse into transitive deps
+        let release = crate::hex::prepare_package(project_root, dep_name, version)?;
+
+        lockfile.deps.insert(
+            dep_name.to_string(),
+            LockEntry::new_hex(
+                dep_name.to_string(),
+                version.to_string(),
+                release.checksum.clone(),
+            ),
+        );
+
+        // Recursively install transitive deps (they may not be installed yet)
+        let child_indent = "  ".repeat(depth + 2);
+        for (req_name, req) in &release.requirements {
+            if req.optional {
+                continue;
+            }
+            let resolved_version = resolve_hex_requirement(req_name, &req.requirement)?;
+            let transitive_entry = DepEntry {
+                path: None,
+                git: None,
+                tag: None,
+                branch: None,
+                rev: None,
+                alias: None,
+                version: Some(resolved_version),
+            };
+            install_hex_dep_recursive(
+                project_root,
+                req_name,
+                &transitive_entry,
+                lockfile,
+                installing,
+                &child_indent,
+                depth + 1,
+            )?;
+        }
+
+        installing.remove(&dep_key);
+        return Ok(());
+    }
+
     eprintln!(
         "{}{} {} (hex @ {})...",
         indent,
@@ -646,9 +691,8 @@ fn install_hex_dep_recursive(
         version
     );
 
-    let (_ebin_dir, release) = crate::hex::install_package(project_root, dep_name, version)?;
-
-    eprintln!("{}{} {} -> {}", indent, cyan("Resolved"), dep_name, version);
+    // Step 1: Fetch metadata and download/extract (no compilation yet)
+    let release = crate::hex::prepare_package(project_root, dep_name, version)?;
 
     lockfile.deps.insert(
         dep_name.to_string(),
@@ -659,18 +703,13 @@ fn install_hex_dep_recursive(
         ),
     );
 
-    // Recursively install non-optional transitive Hex deps
+    // Step 2: Recursively install transitive deps BEFORE compiling this package
     let child_indent = "  ".repeat(depth + 2);
     for (req_name, req) in &release.requirements {
         if req.optional {
             continue;
         }
-
-        // For now, resolve the requirement to an exact version.
-        // v1: if requirement looks like an exact version, use it directly.
-        // Otherwise, fetch package info and pick the latest matching version.
         let resolved_version = resolve_hex_requirement(req_name, &req.requirement)?;
-
         let transitive_entry = DepEntry {
             path: None,
             git: None,
@@ -680,7 +719,6 @@ fn install_hex_dep_recursive(
             alias: None,
             version: Some(resolved_version),
         };
-
         install_hex_dep_recursive(
             project_root,
             req_name,
@@ -691,6 +729,12 @@ fn install_hex_dep_recursive(
             depth + 1,
         )?;
     }
+
+    // Step 3: Compile now that all transitive deps are available
+    eprintln!("{}{} {}...", indent, dim("Compiling"), dep_name);
+    crate::hex::compile_package(project_root, dep_name)?;
+
+    eprintln!("{}{} {} -> {}", indent, cyan("Resolved"), dep_name, version);
 
     installing.remove(&dep_key);
     Ok(())
