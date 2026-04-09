@@ -281,6 +281,7 @@ pub fn cmd_emit(file: &str) {
         &ctx,
         Some(&result),
         Some(&source_file),
+        Some("main"),
     );
     print!("{}", core_src);
 }
@@ -429,6 +430,7 @@ pub fn cmd_test(filter: Option<&str>) {
             &test_ctx,
             Some(&result),
             Some(&test_source_file),
+            Some("main"),
         );
         let core_path = pb.build_dir.join("_test.core");
         fs::write(&core_path, &core_src).unwrap_or_else(|e| {

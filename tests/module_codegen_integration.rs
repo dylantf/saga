@@ -63,7 +63,7 @@ fn emit_from_program(
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    codegen::emit_module_with_context(module_name, &elaborated, &ctx, Some(&result), None)
+    codegen::emit_module_with_context(module_name, &elaborated, &ctx, Some(&result), None, None)
 }
 
 /// Parse and typecheck a source file with the given checker (project mode).
@@ -228,6 +228,43 @@ main () = {
 }
 
 #[test]
+fn imported_private_effect_factory_threads_handler_into_imported_effectful_call() {
+    let db_module = r#"module Db
+
+effect Postgres {
+  fun ping : Unit -> Unit
+}
+
+pub fun run : Unit -> Unit needs {Postgres}
+run () = ping! ()
+
+pub fun connect : Unit -> Handler Postgres
+connect () = handler for Postgres {
+  ping () = resume ()
+}
+"#;
+
+    let main_src = r#"module Main
+import Db (connect, run)
+
+main () = {
+  let db = connect ()
+  {
+    run ()
+  } with db
+}
+"#;
+
+    with_temp_project_files(&[("lib/Db.dy", db_module)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        assert_contains(&out, "_Handle_Db_Postgres_ping");
+        assert_contains(&out, "call 'db':'run'");
+        assert_contains(&out, "(_Cor2, _Handle_Db_Postgres_ping, _Cor3)");
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
 fn imported_handler_factory_with_single_entry_inline_block_matches_named_shorthand() {
     let db_module = r#"module Db
 
@@ -320,6 +357,41 @@ main () = {
         assert_contains(&out, "call 'io':'format'");
         assert_erlc_compiles(&out, "main");
     });
+}
+
+#[test]
+fn entry_module_main_is_exported_without_pub() {
+    let main_src = r#"module Main
+
+main () = 42
+"#;
+
+    let mut checker = make_project_checker();
+    let program = typecheck_source(main_src, &mut checker);
+    let result = checker.to_result();
+    let elaborated = elaborate::elaborate_module(&program, &result, "Main");
+    let mut modules = std::collections::HashMap::new();
+    for name in result.codegen_info().keys() {
+        if let Some(compiled) = codegen::compile_module_from_result(name, &result) {
+            modules.insert(name.clone(), compiled);
+        }
+    }
+    let ctx = codegen::CodegenContext {
+        modules,
+        let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
+    };
+    let out = codegen::emit_module_with_context(
+        "main",
+        &elaborated,
+        &ctx,
+        Some(&result),
+        None,
+        Some("main"),
+    );
+
+    assert_contains(&out, "module 'main' ['main'/1]");
+    assert_erlc_compiles(&out, "main");
 }
 
 // ---- Qualified call emission ----

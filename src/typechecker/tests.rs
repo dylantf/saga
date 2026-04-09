@@ -2,7 +2,7 @@ use super::*;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn check(src: &str) -> Result<Checker, Diagnostic> {
@@ -49,7 +49,7 @@ fn check_with_project_files(files: &[(&str, &str)], main_src: &str) -> Result<Ch
         unique
     ));
 
-    fn write_file(root: &PathBuf, rel: &str, src: &str) {
+    fn write_file(root: &Path, rel: &str, src: &str) {
         let path = root.join(rel);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create temp module dir");

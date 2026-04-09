@@ -76,11 +76,7 @@ enum WithHandlerLayer {
 }
 
 impl<'a> Lowerer<'a> {
-    fn compose_return_k(
-        &mut self,
-        inner: Option<CExpr>,
-        outer: Option<CExpr>,
-    ) -> Option<CExpr> {
+    fn compose_return_k(&mut self, inner: Option<CExpr>, outer: Option<CExpr>) -> Option<CExpr> {
         match (inner, outer) {
             (Some(inner), Some(outer)) => {
                 let param = self.fresh();
@@ -436,7 +432,7 @@ impl<'a> Lowerer<'a> {
         // Pass 1: register all handler param variables (one per op)
         let mut op_vars: Vec<(String, String, String, OpHandlerPlan)> = Vec::new();
         for (eff, op) in &handler_ops {
-            let var_name = Self::handler_param_name(eff, op);
+            let var_name = self.fresh_handler_binding_name(eff, op);
             let key = format!("{}.{}", eff, op);
             self.current_handler_params
                 .insert(key.clone(), var_name.clone());

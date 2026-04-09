@@ -181,6 +181,9 @@ pub struct Lowerer<'a> {
     /// resolvable, the RHS is lowered to a tuple-of-lambdas and bound to a variable.
     /// At `with` sites, the tuple is destructured to extract per-op handler functions.
     handle_dynamic_vars: HashMap<String, (String, Vec<String>, bool)>,
+    /// Optional function name that should be exported even if it is not `pub`.
+    /// Used by the build pipeline to mark the chosen entrypoint explicitly.
+    entry_export: Option<String>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -190,6 +193,7 @@ impl<'a> Lowerer<'a> {
         resolved: super::resolve::ResolutionMap,
         check_result: Option<&crate::typechecker::CheckResult>,
         source_info: Option<SourceInfo>,
+        entry_export: Option<String>,
     ) -> Self {
         Lowerer {
             counter: 0,
@@ -221,6 +225,7 @@ impl<'a> Lowerer<'a> {
             check_result: check_result.cloned(),
             handle_cond_vars: HashMap::new(),
             handle_dynamic_vars: HashMap::new(),
+            entry_export,
         }
     }
 
@@ -519,6 +524,15 @@ impl<'a> Lowerer<'a> {
     /// Dots are replaced with underscores for valid Core Erlang variable names.
     pub(super) fn handler_param_name(effect: &str, op: &str) -> String {
         format!("_Handle_{}_{}", effect.replace('.', "_"), op)
+    }
+
+    /// Generate a fresh scoped handler binding name for a specific effect op.
+    /// Used for local `with` layers so nested handlers for the same op don't
+    /// shadow each other and trigger backend "constructed but never used" warnings.
+    pub(super) fn fresh_handler_binding_name(&mut self, effect: &str, op: &str) -> String {
+        let suffix = self.counter;
+        self.counter += 1;
+        format!("{}__{}", Self::handler_param_name(effect, op), suffix)
     }
 
     /// Compute the expanded arity for a function with the given base arity
@@ -852,7 +866,8 @@ impl<'a> Lowerer<'a> {
 
         for (name, arity, clauses, fun_span) in clause_groups {
             self.current_function = name.clone();
-            if !is_module || self.pub_names.contains(&name) {
+            let is_entry_export = self.entry_export.as_deref() == Some(name.as_str());
+            if !is_module || self.pub_names.contains(&name) || is_entry_export {
                 exports.push((name.clone(), arity));
             }
 
