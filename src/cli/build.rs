@@ -302,10 +302,17 @@ pub fn emit_module(
     check_result: Option<&typechecker::CheckResult>,
     build_dir: &Path,
     source_file: Option<&codegen::SourceFile>,
+    entry_export: Option<&str>,
 ) {
     let erlang_name = module_name.to_lowercase().replace('.', "_");
-    let core_src =
-        codegen::emit_module_with_context(&erlang_name, elaborated, ctx, check_result, source_file);
+    let core_src = codegen::emit_module_with_context(
+        &erlang_name,
+        elaborated,
+        ctx,
+        check_result,
+        source_file,
+        entry_export,
+    );
     let core_path = build_dir.join(format!("{}.core", erlang_name));
     fs::write(&core_path, &core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
@@ -514,6 +521,7 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
             check_result,
             &temp_dir,
             None,
+            None,
         );
     }
 
@@ -537,9 +545,9 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
     }
 
     // Clean up source files — only keep .beam
-    for file in &compilable_files {
-        let _ = fs::remove_file(file);
-    }
+    // for file in &compilable_files {
+    //     let _ = fs::remove_file(file);
+    // }
 
     StdlibManifest {
         fingerprint: fingerprint.clone(),
@@ -591,7 +599,7 @@ fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Res
         if path.is_dir() {
             if path
                 .file_name()
-                .is_some_and(|n| n == "_build" || n == "tests")
+                .is_some_and(|n| n == "_build" || n == "tests" || n == "deps")
             {
                 continue;
             }
@@ -613,13 +621,13 @@ fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Res
     Ok(())
 }
 
-/// Compile a single .core file with erlc, suppressing warnings.
+/// Compile a single .core or .erl file with erlc.
 pub fn run_erlc_file(core_file: &Path, build_dir: &Path) {
+    let verbose = super::is_verbose();
     let output = std::process::Command::new("erlc")
         .arg("-o")
         .arg(build_dir)
         .arg(core_file)
-        .stderr(std::process::Stdio::piped())
         .output()
         .unwrap_or_else(|e| {
             eprintln!("Failed to run erlc: {}", e);
@@ -627,16 +635,32 @@ pub fn run_erlc_file(core_file: &Path, build_dir: &Path) {
         });
 
     if !output.status.success() {
-        // Show erlc stderr only on failure
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stdout.is_empty() {
+            eprintln!("{}", stdout.trim());
+        }
         if !stderr.is_empty() {
             eprintln!("{}", stderr.trim());
         }
         eprintln!("erlc failed on {}", core_file.display());
         std::process::exit(1);
     }
-    // Warnings on success are suppressed -- they're either redundant with
-    // our own diagnostics or refer to BEAM internals the user can't act on.
+
+    if verbose {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let has_output = !stdout.trim().is_empty() || !stderr.trim().is_empty();
+        if has_output {
+            eprintln!("  erlc {}", core_file.display());
+        }
+        if !stdout.is_empty() {
+            eprintln!("{}", stdout.trim());
+        }
+        if !stderr.is_empty() {
+            eprintln!("{}", stderr.trim());
+        }
+    }
 }
 
 /// Compile all .core and .erl files in a directory with erlc.
@@ -961,6 +985,11 @@ pub fn build_project(profile: &str) -> ProjectBuild {
             check_result,
             &build_dir,
             sf,
+            if *module_name == "Main" {
+                Some("main")
+            } else {
+                None
+            },
         );
     }
 
@@ -1084,6 +1113,7 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
         Some(&result),
         &build_dir,
         Some(&script_source),
+        Some("main"),
     );
 
     run_erlc(&build_dir, build_start);

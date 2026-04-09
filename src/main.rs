@@ -18,6 +18,9 @@ enum Command {
         /// Use release profile
         #[arg(long)]
         release: bool,
+        /// Show full erlc/erl output
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Build a project or single file
     Build {
@@ -26,6 +29,9 @@ enum Command {
         /// Use release profile
         #[arg(long)]
         release: bool,
+        /// Show full erlc/erl output
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Typecheck without building
     Check {
@@ -41,6 +47,9 @@ enum Command {
     Test {
         /// Filter pattern (file path or substring match)
         filter: Option<String>,
+        /// Show full erlc/erl output
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Create a new project
     New {
@@ -72,10 +81,20 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run { file, release } => {
+        Command::Run {
+            file,
+            release,
+            verbose,
+        } => {
+            cli::set_verbose(verbose);
             cli::commands::cmd_run(file.as_deref(), release);
         }
-        Command::Build { file, release } => {
+        Command::Build {
+            file,
+            release,
+            verbose,
+        } => {
+            cli::set_verbose(verbose);
             cli::commands::cmd_build(file.as_deref(), release);
         }
         Command::Check { file } => {
@@ -84,7 +103,8 @@ fn main() {
         Command::Emit { file } => {
             cli::commands::cmd_emit(&file);
         }
-        Command::Test { filter } => {
+        Command::Test { filter, verbose } => {
+            cli::set_verbose(verbose);
             cli::commands::cmd_test(filter.as_deref());
         }
         Command::New { name, lib } => {

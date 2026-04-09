@@ -782,118 +782,6 @@ fn desugar_handler(handler: &mut Handler) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lexer::Lexer;
-    use crate::parser::Parser;
-
-    fn parse_and_desugar(source: &str) -> Expr {
-        let tokens = Lexer::new(source).lex().unwrap();
-        let mut expr = Parser::new(tokens).parse_expr(0).unwrap();
-        desugar_expr(&mut expr);
-        expr
-    }
-
-    /// Helper: unwrap one With layer, returning (inner_expr, handler).
-    fn unwrap_with(expr: &Expr) -> (&Expr, &Handler) {
-        match &expr.kind {
-            ExprKind::With { expr, handler } => (expr, handler),
-            _ => panic!("expected With, got {:?}", expr.kind),
-        }
-    }
-
-    #[test]
-    fn single_named_desugars_to_named_handler() {
-        let expr = parse_and_desugar("run () with {console_log}");
-        let (_, handler) = unwrap_with(&expr);
-        assert!(matches!(handler, Handler::Named(name, _) if name == "console_log"));
-    }
-
-    #[test]
-    fn single_inline_arm_stays_inline() {
-        let expr = parse_and_desugar("run () with { fail msg = 0 }");
-        let (_, handler) = unwrap_with(&expr);
-        match handler {
-            Handler::Inline { items, .. } => {
-                assert_eq!(items.len(), 1);
-                assert!(matches!(&items[0].node, HandlerItem::Arm(a) if a.op_name == "fail"));
-            }
-            _ => panic!("expected Inline handler"),
-        }
-    }
-
-    #[test]
-    fn named_plus_inline_splits_into_nested_with() {
-        // with {console_log, fail msg = 0, return value = Ok value}
-        // => (expr with console_log) with { fail msg = 0, return value = Ok value }
-        let expr =
-            parse_and_desugar("run () with {console_log, fail msg = 0, return value = Ok value}");
-
-        let (inner, outer_handler) = unwrap_with(&expr);
-        // Outer: inline block with fail arm + return
-        match outer_handler {
-            Handler::Inline { items, .. } => {
-                assert_eq!(items.len(), 2);
-                assert!(matches!(&items[0].node, HandlerItem::Arm(a) if a.op_name == "fail"));
-                assert!(matches!(&items[1].node, HandlerItem::Return(_)));
-            }
-            _ => panic!("expected Inline handler"),
-        }
-
-        // Inner: named handler
-        let (_, inner_handler) = unwrap_with(inner);
-        assert!(matches!(inner_handler, Handler::Named(name, _) if name == "console_log"));
-    }
-
-    #[test]
-    fn named_between_inline_groups_creates_three_layers() {
-        // with {fail msg = 0, return v = Ok v, console_log, log msg = resume ()}
-        // => ((expr with {fail, return}) with console_log) with {log}
-        let expr = parse_and_desugar(
-            "run () with {fail msg = 0, return value = Ok value, console_log, log msg = resume ()}",
-        );
-
-        let (mid, outer_handler) = unwrap_with(&expr);
-        match outer_handler {
-            Handler::Inline { items, .. } => {
-                assert_eq!(items.len(), 1);
-                assert!(matches!(&items[0].node, HandlerItem::Arm(a) if a.op_name == "log"));
-            }
-            _ => panic!("expected outer Inline"),
-        }
-
-        let (inner, mid_handler) = unwrap_with(mid);
-        assert!(matches!(mid_handler, Handler::Named(name, _) if name == "console_log"));
-
-        let (_, inner_handler) = unwrap_with(inner);
-        match inner_handler {
-            Handler::Inline { items, .. } => {
-                assert_eq!(items.len(), 2);
-                assert!(matches!(&items[0].node, HandlerItem::Arm(a) if a.op_name == "fail"));
-                assert!(matches!(&items[1].node, HandlerItem::Return(_)));
-            }
-            _ => panic!("expected inner Inline"),
-        }
-    }
-
-    #[test]
-    fn all_inline_items_no_desugaring() {
-        // No named refs => no splitting, just one Inline layer
-        let expr =
-            parse_and_desugar("run () with { fail msg = 0, return value = Ok value }");
-        let (_, handler) = unwrap_with(&expr);
-        match handler {
-            Handler::Inline { items, .. } => {
-                assert_eq!(items.len(), 2);
-                assert!(matches!(&items[0].node, HandlerItem::Arm(_)));
-                assert!(matches!(&items[1].node, HandlerItem::Return(_)));
-            }
-            _ => panic!("expected Inline handler"),
-        }
-    }
-}
-
 // --- Desugaring helpers ---
 
 /// `first >> second` -> `fun _x -> second (first _x)`
@@ -1023,6 +911,117 @@ fn desugar_comprehension(body: Expr, qualifiers: &[ComprehensionQualifier], span
                     ],
                 },
             )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn parse_and_desugar(source: &str) -> Expr {
+        let tokens = Lexer::new(source).lex().unwrap();
+        let mut expr = Parser::new(tokens).parse_expr(0).unwrap();
+        desugar_expr(&mut expr);
+        expr
+    }
+
+    /// Helper: unwrap one With layer, returning (inner_expr, handler).
+    fn unwrap_with(expr: &Expr) -> (&Expr, &Handler) {
+        match &expr.kind {
+            ExprKind::With { expr, handler } => (expr, handler),
+            _ => panic!("expected With, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn single_named_desugars_to_named_handler() {
+        let expr = parse_and_desugar("run () with {console_log}");
+        let (_, handler) = unwrap_with(&expr);
+        assert!(matches!(handler, Handler::Named(name, _) if name == "console_log"));
+    }
+
+    #[test]
+    fn single_inline_arm_stays_inline() {
+        let expr = parse_and_desugar("run () with { fail msg = 0 }");
+        let (_, handler) = unwrap_with(&expr);
+        match handler {
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 1);
+                assert!(matches!(&items[0].node, HandlerItem::Arm(a) if a.op_name == "fail"));
+            }
+            _ => panic!("expected Inline handler"),
+        }
+    }
+
+    #[test]
+    fn named_plus_inline_splits_into_nested_with() {
+        // with {console_log, fail msg = 0, return value = Ok value}
+        // => (expr with console_log) with { fail msg = 0, return value = Ok value }
+        let expr =
+            parse_and_desugar("run () with {console_log, fail msg = 0, return value = Ok value}");
+
+        let (inner, outer_handler) = unwrap_with(&expr);
+        // Outer: inline block with fail arm + return
+        match outer_handler {
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(&items[0].node, HandlerItem::Arm(a) if a.op_name == "fail"));
+                assert!(matches!(&items[1].node, HandlerItem::Return(_)));
+            }
+            _ => panic!("expected Inline handler"),
+        }
+
+        // Inner: named handler
+        let (_, inner_handler) = unwrap_with(inner);
+        assert!(matches!(inner_handler, Handler::Named(name, _) if name == "console_log"));
+    }
+
+    #[test]
+    fn named_between_inline_groups_creates_three_layers() {
+        // with {fail msg = 0, return v = Ok v, console_log, log msg = resume ()}
+        // => ((expr with {fail, return}) with console_log) with {log}
+        let expr = parse_and_desugar(
+            "run () with {fail msg = 0, return value = Ok value, console_log, log msg = resume ()}",
+        );
+
+        let (mid, outer_handler) = unwrap_with(&expr);
+        match outer_handler {
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 1);
+                assert!(matches!(&items[0].node, HandlerItem::Arm(a) if a.op_name == "log"));
+            }
+            _ => panic!("expected outer Inline"),
+        }
+
+        let (inner, mid_handler) = unwrap_with(mid);
+        assert!(matches!(mid_handler, Handler::Named(name, _) if name == "console_log"));
+
+        let (_, inner_handler) = unwrap_with(inner);
+        match inner_handler {
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(&items[0].node, HandlerItem::Arm(a) if a.op_name == "fail"));
+                assert!(matches!(&items[1].node, HandlerItem::Return(_)));
+            }
+            _ => panic!("expected inner Inline"),
+        }
+    }
+
+    #[test]
+    fn all_inline_items_no_desugaring() {
+        // No named refs => no splitting, just one Inline layer
+        let expr = parse_and_desugar("run () with { fail msg = 0, return value = Ok value }");
+        let (_, handler) = unwrap_with(&expr);
+        match handler {
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(&items[0].node, HandlerItem::Arm(_)));
+                assert!(matches!(&items[1].node, HandlerItem::Return(_)));
+            }
+            _ => panic!("expected Inline handler"),
         }
     }
 }

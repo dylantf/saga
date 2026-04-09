@@ -939,9 +939,11 @@ impl<'a> Lowerer<'a> {
                 let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
                 self.lower_block_in(&stmts, LowerMode::Tail(CExpr::Var(k_var.to_string())))
             }
-            ExprKind::With { expr, handler, .. } => {
-                self.lower_with_inherited_return_k(expr, handler, Some(CExpr::Var(k_var.to_string())))
-            }
+            ExprKind::With { expr, handler, .. } => self.lower_with_inherited_return_k(
+                expr,
+                handler,
+                Some(CExpr::Var(k_var.to_string())),
+            ),
             _ => self.lower_value_to_k(expr, k_var),
         }
     }
@@ -1062,11 +1064,16 @@ impl<'a> Lowerer<'a> {
                 body: inner,
             };
             let mut else_with_fallthrough: Vec<CArm> = else_arms_ce.clone();
-            else_with_fallthrough.push(CArm {
-                pat: CPat::Var(fail_var.clone()),
-                guard: None,
-                body: CExpr::Var(fail_var),
+            let has_catchall = else_with_fallthrough.iter().any(|arm| {
+                arm.guard.is_none() && matches!(arm.pat, CPat::Var(_) | CPat::Wildcard)
             });
+            if !has_catchall {
+                else_with_fallthrough.push(CArm {
+                    pat: CPat::Var(fail_var.clone()),
+                    guard: None,
+                    body: CExpr::Var(fail_var),
+                });
+            }
             let fail_arm = CArm {
                 pat: CPat::Var(self.fresh()),
                 guard: None,

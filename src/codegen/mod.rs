@@ -72,7 +72,7 @@ pub fn compile_module_from_result(
 
 pub fn emit_module(module_name: &str, program: &ast::Program) -> String {
     let ctx = CodegenContext::default();
-    emit_module_with_context(module_name, program, &ctx, None, None)
+    emit_module_with_context(module_name, program, &ctx, None, None, None)
 }
 
 /// Source file path and source text for error location tracking.
@@ -89,6 +89,7 @@ pub fn emit_module_with_context(
     ctx: &CodegenContext,
     check_result: Option<&crate::typechecker::CheckResult>,
     source_file: Option<&SourceFile>,
+    entry_export: Option<&str>,
 ) -> String {
     let codegen_info = ctx.codegen_info();
     let program = normalize::normalize_effects(program);
@@ -113,6 +114,7 @@ pub fn emit_module_with_context(
         resolution_map,
         check_result,
         source_info,
+        entry_export.map(str::to_string),
     )
     .lower_module(module_name, &program);
     cerl::print_module(&cmod)

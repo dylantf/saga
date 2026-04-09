@@ -1273,7 +1273,6 @@ fn collect_codegen_info(
     for decl in program {
         match decl {
             Decl::EffectDef {
-                public: true,
                 name,
                 type_params,
                 operations,
@@ -1297,6 +1296,10 @@ fn collect_codegen_info(
                             .count(),
                     })
                     .collect();
+                // Codegen metadata is internal compiler state, so keep effect
+                // op counts even for private effects. Public functions can
+                // still `needs {PrivateEffect}`, and imported call sites need
+                // the effect's runtime op arity to thread handler callbacks.
                 effect_defs.push(EffectDef {
                     name: canonical_effect,
                     ops,

@@ -36,7 +36,14 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    emit_module_with_context("_script", &elaborated, &ctx, Some(&result), source_file)
+    emit_module_with_context(
+        "_script",
+        &elaborated,
+        &ctx,
+        Some(&result),
+        source_file,
+        None,
+    )
 }
 
 /// Assert that `emit(src)` contains `needle` as a substring.
@@ -441,6 +448,31 @@ safe_head xs = do {
     assert!(out.contains("case"), "expected case\n{out}");
 }
 
+#[test]
+fn do_else_multiple_bindings_with_wildcard_fallback_lowers() {
+    let src = r#"
+type Result = Ok | Err
+
+one flag = if flag then Ok else Err
+two flag = if flag then Ok else Err
+
+main a b = do {
+  Ok <- one a
+  Ok <- two b
+  1
+} else {
+  Err -> 2
+  _ -> 3
+}
+"#;
+    let out = emit(src);
+    assert!(out.contains("case"), "expected nested case lowering\n{out}");
+    assert!(
+        out.contains("{'error'}"),
+        "expected explicit else constructor arm in lowered Core\n{out}"
+    );
+}
+
 // --- Guards ---
 
 #[test]
@@ -652,6 +684,39 @@ middle body = {
             "handler arm body must not reference _ReturnK!\nHandler region:\n{handler_body}\n\nFull output:\n{out}"
         );
     }
+}
+
+#[test]
+fn nested_named_handlers_use_distinct_local_handle_bindings() {
+    let src = r#"
+effect Counter {
+  fun get : Unit -> Int
+}
+
+handler add_one for Counter {
+  get () = resume 10
+  return value = value + 1
+}
+
+handler times_two for Counter {
+  get () = resume 20
+  return value = value * 2
+}
+
+main () = {
+  dbg (get! () with {add_one, times_two})
+}
+"#;
+    let out = emit_full(src);
+    let shadowed = "let <_Handle__script_Counter_get> =\n      fun";
+    assert!(
+        !out.contains(shadowed),
+        "expected nested named handlers to use fresh local binding names\n{out}"
+    );
+    assert!(
+        out.contains("_Handle__script_Counter_get__"),
+        "expected fresh scoped handler binding suffix in output\n{out}"
+    );
 }
 
 // --- Short-circuit operators ---

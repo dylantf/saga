@@ -151,6 +151,29 @@ score_or_zero id = do {
   Err _ -> 0
 }
 
+type Gate = Open | Closed | Stuck
+
+fun first_gate : Int -> Gate
+first_gate n =
+  if n > 0 then Open
+  else if n == 0 then Stuck
+  else Closed
+
+fun second_gate : Bool -> Gate
+second_gate ok =
+  if ok then Open
+  else Closed
+
+fun guarded_gate_chain : Int -> Bool -> Int
+guarded_gate_chain n ok = do {
+  Open <- first_gate n
+  Open <- second_gate ok
+  1
+} else {
+  Closed -> 2
+  _ -> 3
+}
+
 # --- Tests ---
 
 describe "pattern matching" {
@@ -416,6 +439,18 @@ describe "do...else" {
 
   test "failure returns default" {
     assert_eq (score_or_zero 99) 0
+  }
+
+  test "constructor else arm can handle a later failed binding" {
+    assert_eq (guarded_gate_chain 1 False) 2
+  }
+
+  test "constructor else arm can handle a first-step mismatch" {
+    assert_eq (guarded_gate_chain (-1) True) 2
+  }
+
+  test "wildcard else arm handles constructors not matched by constructor else arm" {
+    assert_eq (guarded_gate_chain 0 True) 3
   }
 }
 
