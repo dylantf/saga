@@ -1,32 +1,14 @@
-import Std.DateTime
-import Std.IO (console)
+import Std.Array
 
-pub fun main : Unit -> Unit
 main () = {
-  let dt = DateTime.Clock.now! ()
-  println $"ISO 8601: {DateTime.to_iso8601 dt}"
-
-  let tomorrow = DateTime.add_days 1 dt
-  println $"Tomorrow: {DateTime.to_iso8601 tomorrow}"
-
-  let plus2h = DateTime.add_hours 2 dt
-  println $"Plus 2 hours: {DateTime.format "%T" plus2h}"
-
-  let custom = DateTime.format "%d/%m/%Y %H:%M" dt
-  println $"Custom: {custom}"
-
-  case DateTime.from_iso8601 "2026-12-25T00:00:00" {
-    Ok xmas -> println $"Christmas: {DateTime.to_iso8601 xmas}"
-    Err e -> println $"Parse error: {e}"
-  }
-
-  case DateTime.from_iso8601 "not-a-date" {
-    Ok _ -> println "should not happen"
-    Err e -> println $"Expected error: {e}"
-  }
-
-  # Ord test
-  let earlier = DateTime.new 2026 1 1 0 0 0
-  let later = DateTime.new 2026 12 31 23 59 59
-  println $"earlier < later: {show (compare earlier later)}"
-} with {console, DateTime.system_clock}
+  let arr = Array.from_list [10, 20, 30, 40, 50]
+  dbg (Array.size arr)
+  dbg (Array.get 2 arr)
+  dbg (Array.get 99 arr)
+  let arr2 = Array.set 2 99 arr
+  dbg (Array.to_list arr2)
+  let arr3 = Array.map (fun x -> x * 2) arr
+  dbg (Array.to_list arr3)
+  let sum = Array.foldl Int.add 0 arr
+  dbg sum
+}

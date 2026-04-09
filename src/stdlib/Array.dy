@@ -1,0 +1,41 @@
+module Std.Array
+
+import Std.Maybe (Maybe)
+
+#@ A persistent, immutable indexed collection backed by Erlang's `array` module.
+#@ Provides O(log n) random access by index — much faster than linked lists
+#@ for index-heavy workloads, but slower than lists for sequential processing.
+opaque type Array a = Array(a)
+
+#@ Creates a new empty array.
+@external("erlang", "std_array_bridge", "new")
+pub fun new : Unit -> Array a
+
+#@ Creates an array from a list.
+@external("erlang", "array", "from_list")
+pub fun from_list : (xs: List a) -> Array a
+
+#@ Returns the number of elements in the array.
+@external("erlang", "array", "size")
+pub fun size : (arr: Array a) -> Int
+
+#@ Gets the element at the given index. Returns Nothing if out of bounds.
+@external("erlang", "std_array_bridge", "get")
+pub fun get : (index: Int) -> (arr: Array a) -> Maybe a
+
+#@ Sets the element at the given index, returning a new array.
+#@ If the index is beyond the current size, the array is extended with a default value.
+@external("erlang", "array", "set")
+pub fun set : (index: Int) -> (value: a) -> (arr: Array a) -> Array a
+
+#@ Converts an array to a list.
+@external("erlang", "array", "to_list")
+pub fun to_list : (arr: Array a) -> List a
+
+#@ Applies a function to every element, returning a new array.
+@external("erlang", "std_array_bridge", "map")
+pub fun map : (f: a -> b) -> (arr: Array a) -> Array b
+
+#@ Left fold over the array elements, in index order.
+@external("erlang", "std_array_bridge", "foldl")
+pub fun foldl : (f: b -> a -> b) -> (acc: b) -> (arr: Array a) -> b
