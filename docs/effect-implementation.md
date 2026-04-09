@@ -81,7 +81,29 @@ The row variable `..e` captures any extra effects from the callback and forwards
 
 ### Handler Effect Subtraction
 
-`expr with { log msg = ... }` infers the inner expression to get `(ty, inner_effs)`, then subtracts handled effects from `inner_effs` via `EffectRow::subtract`. Handler arm bodies' effects are merged with the remaining effects.
+`with` blocks are desugared early into nested handlers. For example:
+
+```dy
+expr with {a, b, c}
+```
+
+becomes:
+
+```dy
+((expr with a) with b) with c
+```
+
+using lexical order.
+
+Typechecking then happens one handler layer at a time: infer the inner
+expression to get `(ty, inner_effs)`, subtract the effects handled by this
+layer from `inner_effs` via `EffectRow::subtract`, then merge in any effects
+performed by this layer's arm bodies that escape outward.
+
+This has one important consequence: sibling items in a surface `with {...}`
+block do not satisfy each other's arm-body effects. If an inline arm body uses
+`Log`, that `Log` must be handled by an outer scope after desugaring, not by a
+sibling item later in the same surface block.
 
 ### Function Body Checking
 
@@ -185,20 +207,45 @@ apply 'do_work'/1('console_log'/3)
 
 The effectful function takes its handler(s) as extra parameter(s).
 
-### Handler Stacking (Multiple Effects)
+### Handler Stacking
 
-When a function needs multiple effects, it takes multiple handler parameters. `with` passes them:
+Handler stacking is modeled as nested handlers, not a merged handler table.
 
-```erlang
-% run () with { console_log, to_result }
-apply 'run'/2('console_log'/3, 'to_result_fail'/3)
+```dy
+run () with {console_log, to_result}
 ```
 
-Each effect call routes to the correct handler based on which effect the operation belongs to (known at compile time from effect declarations).
+is treated like:
+
+```dy
+(run () with console_log) with to_result
+```
+
+The nearest enclosing handler gets the first chance to handle an operation. If
+it does not define that operation, the operation propagates outward to the next
+handler layer.
 
 ### The `return` Clause
 
-`return value -> Ok(value)` wraps the computation's final value on success. The CPS transform wraps the innermost continuation's return value through the `return` clause function. If `fail!` is called, the handler returns `Err(reason)` directly without calling `K`.
+`return value -> Ok(value)` wraps the computation's final value on success for
+that handler boundary. Under nested semantics, `return` clauses compose by
+nesting.
+
+Given:
+
+```dy
+((expr with a) with b) with c
+```
+
+the success path flows through:
+
+1. `a.return`
+2. `b.return`
+3. `c.return`
+
+assuming each layer defines a `return` clause and completes normally. If an op
+handler aborts instead of resuming, outer `return` clauses still run only when
+their own surrounding handled expression completes.
 
 ### Lowering Structure
 
@@ -227,7 +274,10 @@ On BEAM, multishot is essentially free. `K` is an immutable closure on the heap.
 
 ### BEAM-Native Effects
 
-Some effects (Actor, Process, Monitor, Link, Timer) bypass CPS and are lowered to direct BEAM calls. These are filtered out of `ModuleCodegenInfo.fun_effects` during codegen info collection and handled by `build_beam_native_op_fun` in the lowerer.
+Some effects (for example Actor, Process, Monitor, Link, Timer, and Ref
+families) use custom BEAM-native op bodies in the lowerer, but they still flow
+through handler-owned CPS lambdas. They do not bypass handler delimitation or
+nested `with` semantics; the native interop happens inside the handler body.
 
 ### Key Files
 

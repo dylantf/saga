@@ -68,7 +68,17 @@ run_app () with { logger, db, http }
 ```
 
 Each handler is independently selected, then composed in a single `with` block.
-No duplication of `run_app ()`.
+No duplication of `run_app ()`. The order of items in the `with` block matters:
+
+```dy
+run_app () with { logger, db, http }
+```
+
+is sugar for:
+
+```dy
+((run_app () with logger) with db) with http
+```
 
 Handler bindings are block-scoped, like any `let`:
 
@@ -95,8 +105,9 @@ main () = {
 } with { db, console_log }
 ```
 
-Think of `with` as attaching handlers to the fully evaluated inner expression,
-not as opening a separate lexical scope before the block runs.
+Think of the wrapped block as staying in scope for the trailing `with`. The
+handler suffix does not open a fresh lexical scope; it wraps the expression you
+just built.
 
 ## Handler Expressions and Factory Functions
 
@@ -134,18 +145,30 @@ run_app () with {
 
 ### Override Semantics
 
-When multiple items handle the same effect, the last one wins. This enables
-layering -- start with a bundle, override specific operations:
+`with {a, b, c}` uses lexical order and nested semantics. The first item is the
+nearest handler, so it gets the first chance to handle an operation. If it does
+not handle that operation, it falls through to the next item, and so on.
+
+This means:
+
+- the first matching handler handles the operation
+- unhandled operations propagate outward
+- `return` clauses compose by nesting
+
+To override part of a broader environment, put the more specific handler first:
 
 ```
 run_app () with {
-  prod_env,                           # handles Log, Db, Http
-  log level msg = {                   # overrides just Log from prod_env
+  log level msg = {                   # handles just Log
     println ($"[{level}] {msg}")
     resume ()
   },
+  prod_env,                           # handles Log, Db, Http
 }
 ```
+
+Here the inline `log` arm handles `Log` first, while `Db` and `Http` still
+fall through to `prod_env`.
 
 ---
 

@@ -51,15 +51,24 @@ bundle { sentry_log, postgres_db }
 # : Handler (Log, Db)    needs {Http, Net}
 ```
 
-### Override semantics
+### Order semantics
 
-If two bundled handlers handle the same effect, the last one wins — same rule
-as `with` blocks:
+Bundle order should follow the same nested semantics as `with` blocks. If a
+future `bundle {a, b}` is installed, it should behave like installing `a`
+inside `b` in lexical order:
 
 ```
-bundle { full_env, custom_log }
-# custom_log overrides full_env's Log handler
+bundle { custom_log, full_env }
+# custom_log handles Log first; other effects fall through to full_env
 ```
+
+That keeps bundling aligned with:
+
+```dy
+expr with {custom_log, full_env}
+```
+
+rather than inventing a separate "last one wins" composition rule.
 
 ### Nesting
 
@@ -109,6 +118,7 @@ and leave inline arms to `with` blocks.
 
 ## Compilation
 
-A bundle compiles to the same tuple-of-lambdas representation as a handler
-binding. At `with` sites, the tuple is destructured to extract per-operation
-functions. Equivalent to manually listing the handlers in a `with` block.
+A bundle would compile to the same tuple-of-lambdas representation as a handler
+binding. At `with` sites, the tuple would be destructured to extract
+per-operation functions. Semantically it should be equivalent to manually
+writing the same ordered handlers in a `with` block.

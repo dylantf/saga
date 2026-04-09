@@ -268,6 +268,33 @@ main () = {
 }
 
 #[test]
+fn beam_ref_uses_native_backed_cps_handler_path() {
+    let src = r#"
+import Std.Ref (beam_ref)
+
+main () = {
+  let r = new! 41
+  get! r
+} with beam_ref
+"#;
+
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        out.contains("apply _Handle_Std_Ref_Ref_new("),
+        "beam_ref should install and apply a handler function for new!\n{out}"
+    );
+    assert!(
+        out.contains("apply _Handle_Std_Ref_Ref_get("),
+        "beam_ref should install and apply a handler function for get!\n{out}"
+    );
+    assert!(
+        out.contains("call 'erlang':'make_ref'"),
+        "beam_ref should still lower through native Erlang ref operations\n{out}"
+    );
+    assert_core_compiles(&out);
+}
+
+#[test]
 fn async_handler_with_beam_actor_lowers_without_scoped_binding_cycle() {
     let src = r#"
 import Std.Actor (beam_actor)

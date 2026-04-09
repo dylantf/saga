@@ -1257,7 +1257,8 @@ impl<'a> Lowerer<'a> {
     }
 
     fn use_direct_native_fast_path(&self, canonical: &str) -> bool {
-        canonical != "Std.Actor.beam_actor"
+        let _ = canonical;
+        false
     }
 }
 
