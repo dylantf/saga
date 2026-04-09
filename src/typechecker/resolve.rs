@@ -58,6 +58,9 @@ fn resolve_type_expr(texpr: &mut TypeExpr, scope: &ScopeMap) {
             resolve_type_expr(from, scope);
             resolve_type_expr(to, scope);
             for eff in effects {
+                if let Some(canonical) = scope.resolve_effect(&eff.name) {
+                    eff.name = canonical.to_string();
+                }
                 for arg in &mut eff.type_args {
                     resolve_type_expr(arg, scope);
                 }
@@ -185,6 +188,9 @@ fn resolve_decl(decl: &mut Decl, scope: &ScopeMap, local_funs: &HashSet<String>)
             }
             resolve_type_expr(return_type, scope);
             for eff in effects.iter_mut() {
+                if let Some(canonical) = scope.resolve_effect(&eff.name) {
+                    eff.name = canonical.to_string();
+                }
                 for arg in &mut eff.type_args {
                     resolve_type_expr(arg, scope);
                 }

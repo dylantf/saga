@@ -3405,6 +3405,33 @@ handle_msg () = receive {
 }
 
 #[test]
+fn imported_effect_resolves_in_nested_callback_annotation() {
+    check(
+        r#"
+import Std.Dynamic (Decode)
+
+@external("erlang", "repro", "raw")
+fun raw : (Unit -> String needs {Decode}) -> String
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn imported_effect_resolves_in_effect_op_callback_annotation() {
+    check(
+        r#"
+import Std.Dynamic (Decode)
+
+effect Pg {
+  fun query : (decode: Unit -> String needs {Decode}) -> String
+}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn conflicting_duplicate_effect_requirements_are_rejected() {
     let err = check(
         r#"

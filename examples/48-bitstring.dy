@@ -1,6 +1,4 @@
-module Main
-
-import Std.BitString as BitString
+import Std.BitString
 
 main () = {
   # Construction from stdlib functions

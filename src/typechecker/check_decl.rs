@@ -68,7 +68,7 @@ impl Checker {
         program: &mut [Decl],
     ) -> std::result::Result<(), Vec<Diagnostic>> {
         // Add local type names to scope_map BEFORE register_definitions, so that
-        // convert_type_expr can resolve local types during trait/effect registration.
+        // convert_type_expr can resolve local types during declaration registration.
         // Local types shadow imported types (use `insert`, not `or_insert`).
         for decl in program.iter() {
             let type_name = match decl {
@@ -83,8 +83,8 @@ impl Checker {
                 self.scope_map.types.insert(name.clone(), canonical);
             }
         }
-        self.register_definitions(program)?;
         self.process_imports(program)?;
+        self.register_definitions(program)?;
         super::resolve::resolve_names(program, &self.scope_map);
         self.register_externals(program)?;
         let (annotations, annotation_constraints) = self.collect_annotations(program)?;
