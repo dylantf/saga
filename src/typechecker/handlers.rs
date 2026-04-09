@@ -20,14 +20,14 @@ impl Checker {
         mut used_families: std::collections::HashSet<String>,
         handler: &ast::Handler,
     ) -> std::collections::HashSet<String> {
-        let ast::Handler::Inline { named, .. } = handler else {
+        let ast::Handler::Inline { .. } = handler else {
             return used_families;
         };
 
         loop {
             let mut changed = false;
-            for ann in named {
-                let Some(info) = self.handlers.get(&ann.node.name) else {
+            for named_ref in handler.named_refs() {
+                let Some(info) = self.handlers.get(&named_ref.name) else {
                     continue;
                 };
                 if info
@@ -104,12 +104,7 @@ impl Checker {
     ) -> Result<Type, Diagnostic> {
         // Check if this with-expression uses handlers that require runtime resource init.
         // Handler names are already canonical at this point (resolve pass ran first).
-        let handler_names: Vec<&str> = match handler {
-            ast::Handler::Named(name, _) => vec![name.as_str()],
-            ast::Handler::Inline { named, .. } => {
-                named.iter().map(|ann| ann.node.name.as_str()).collect()
-            }
-        };
+        let handler_names = handler.handler_names();
         for name in &handler_names {
             if beam_interop::handler_needs_ets_table(name) {
                 self.needs_ets_ref_table = true;
@@ -138,25 +133,30 @@ impl Checker {
                         })
                         .unwrap_or_default()
                 }
-                ast::Handler::Inline { named, arms, .. } => {
+                ast::Handler::Inline { items, .. } => {
                     let mut map = std::collections::HashMap::new();
-                    for ann in named {
-                        let n = &ann.node.name;
-                        if let Some(def_id) = self.env.def_id(n) {
-                            let usage_id = crate::ast::NodeId::fresh();
-                            self.record_reference(usage_id, _with_span, def_id);
+                    for ann in items {
+                        match &ann.node {
+                            ast::HandlerItem::Named(named_ref) => {
+                                let n = &named_ref.name;
+                                if let Some(def_id) = self.env.def_id(n) {
+                                    let usage_id = crate::ast::NodeId::fresh();
+                                    self.record_reference(usage_id, _with_span, def_id);
+                                }
+                                if let Some(h) = self.handlers.get(n) {
+                                    let src = h.source_module.clone();
+                                    map.extend(
+                                        h.arm_spans
+                                            .iter()
+                                            .map(|(op, &span)| (op.clone(), (span, src.clone()))),
+                                    );
+                                }
+                            }
+                            ast::HandlerItem::Arm(arm) => {
+                                map.insert(arm.op_name.clone(), (arm.span, None));
+                            }
+                            ast::HandlerItem::Return(_) => {}
                         }
-                        if let Some(h) = self.handlers.get(n) {
-                            let src = h.source_module.clone();
-                            map.extend(
-                                h.arm_spans
-                                    .iter()
-                                    .map(|(op, &span)| (op.clone(), (span, src.clone()))),
-                            );
-                        }
-                    }
-                    for arm in arms {
-                        map.insert(arm.node.op_name.clone(), (arm.node.span, None));
                     }
                     map
                 }
@@ -186,11 +186,11 @@ impl Checker {
                     self.record_reference(usage_id, *handler_span, def_id);
                 }
             }
-            ast::Handler::Inline { named, .. } => {
-                for ann in named {
-                    if let Some(def_id) = self.env.def_id(&ann.node.name) {
+            ast::Handler::Inline { .. } => {
+                for named_ref in handler.named_refs() {
+                    if let Some(def_id) = self.env.def_id(&named_ref.name) {
                         let usage_id = crate::ast::NodeId::fresh();
-                        self.record_reference(usage_id, ann.node.span, def_id);
+                        self.record_reference(usage_id, named_ref.span, def_id);
                     }
                 }
             }
@@ -318,18 +318,13 @@ impl Checker {
                     Ok(expr_ty)
                 }
             }
-            ast::Handler::Inline {
-                named,
-                arms,
-                return_clause,
-                ..
-            } => {
+            ast::Handler::Inline { .. } => {
                 let mut used_handled_families: std::collections::HashSet<String> =
                     handled_entries.iter().map(|e| e.name.clone()).collect();
                 let mut named_handler_entries = Vec::new();
-                for ann in named {
-                    let name = &ann.node.name;
-                    let name_span = ann.node.span;
+                for named_ref in handler.named_refs() {
+                    let name = &named_ref.name;
+                    let name_span = named_ref.span;
                     if !self.handlers.contains_key(name) && self.env.get(name).is_none() {
                         return Err(Diagnostic::error_at(
                             name_span,
@@ -369,8 +364,8 @@ impl Checker {
 
                 // Apply named handlers' return type transformations and merge their needs_effects
                 let mut named_needs = EffectRow::empty();
-                for ann in named {
-                    let name = &ann.node.name;
+                for named_ref in handler.named_refs() {
+                    let name = &named_ref.name;
                     if let Some(handler_info) = self.handlers.get(name).cloned() {
                         let mapping: std::collections::HashMap<u32, Type> = handler_info
                             .forall
@@ -440,7 +435,7 @@ impl Checker {
                     }
                 }
 
-                let answer_ty = if let Some(ret_arm) = return_clause {
+                let answer_ty = if let Some(ret_arm) = handler.return_clause() {
                     let saved_env = self.env.clone();
                     let saved_effs = self.save_effects();
                     if let Some(pat) = ret_arm.params.first() {
@@ -466,8 +461,7 @@ impl Checker {
                     answer_ty
                 };
 
-                for arm in arms {
-                    let arm = &arm.node;
+                for arm in handler.inline_arms() {
                     let op_sig = self
                         .lookup_effect_op(&arm.op_name, arm.qualifier.as_deref(), arm.span)
                         .ok();
@@ -564,13 +558,13 @@ impl Checker {
                     self.expand_used_handler_families_for_warning(used_handled_families, handler);
                 if !handled_families.is_empty() {
                     let mut unused = Vec::new();
-                    for ann in named {
+                    for named_ref in handler.named_refs() {
                         let handler_effects: Vec<String> = self
                             .handlers
-                            .get(&ann.node.name)
+                            .get(&named_ref.name)
                             .map(|h| h.effects.to_vec())
                             .or_else(|| {
-                                self.handler_effects_from_env(&ann.node.name)
+                                self.handler_effects_from_env(&named_ref.name)
                                     .map(|e| e.into_iter().collect())
                             })
                             .unwrap_or_default();
@@ -582,9 +576,9 @@ impl Checker {
                             unused.extend(handler_effects);
                         }
                     }
-                    for arm in arms {
+                    for arm in handler.inline_arms() {
                         if let Some(eff) =
-                            self.effect_for_op(&arm.node.op_name, arm.node.qualifier.as_deref())
+                            self.effect_for_op(&arm.op_name, arm.qualifier.as_deref())
                             && !used_handled_families.contains(&eff)
                         {
                             unused.push(eff);

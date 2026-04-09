@@ -241,17 +241,17 @@ impl Checker {
                     handled.extend(effects);
                 }
             }
-            ast::Handler::Inline { named, arms, .. } => {
-                for ann in named {
-                    if let Some(info) = self.handlers.get(&ann.node.name) {
+            ast::Handler::Inline { .. } => {
+                for named_ref in handler.named_refs() {
+                    if let Some(info) = self.handlers.get(&named_ref.name) {
                         handled.extend(info.effects.iter().cloned());
-                    } else if let Some(effects) = self.handler_effects_from_env(&ann.node.name) {
+                    } else if let Some(effects) = self.handler_effects_from_env(&named_ref.name) {
                         handled.extend(effects);
                     }
                 }
-                for arm in arms {
+                for arm in handler.inline_arms() {
                     if let Some(effect_name) =
-                        self.effect_for_op(&arm.node.op_name, arm.node.qualifier.as_deref())
+                        self.effect_for_op(&arm.op_name, arm.qualifier.as_deref())
                     {
                         handled.insert(effect_name);
                     }

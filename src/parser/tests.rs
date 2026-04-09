@@ -19,6 +19,11 @@ fn parse_expr(source: &str) -> Expr {
     Parser::new(tokens).parse_expr(0).unwrap()
 }
 
+fn parse_expr_error(source: &str) -> ParseError {
+    let tokens = Lexer::new(source).lex().unwrap();
+    Parser::new(tokens).parse_expr(0).unwrap_err()
+}
+
 fn parse_pattern(source: &str) -> Pat {
     let tokens = Lexer::new(source).lex().unwrap();
     Parser::new(tokens).parse_pattern().unwrap()
@@ -1975,17 +1980,14 @@ fn with_inline_handler() {
             kind: ExprKind::With { handler, .. },
             ..
         } => match handler.as_ref() {
-            Handler::Inline {
-                named,
-                arms,
-                return_clause,
-                ..
-            } => {
-                assert!(named.is_empty());
-                assert_eq!(arms.len(), 1);
-                assert_eq!(arms[0].node.op_name, "log");
-                let param_names: Vec<&str> = arms[0]
-                    .node
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 1);
+                let arm = match &items[0].node {
+                    HandlerItem::Arm(a) => a,
+                    _ => panic!("expected Arm item"),
+                };
+                assert_eq!(arm.op_name, "log");
+                let param_names: Vec<&str> = arm
                     .params
                     .iter()
                     .map(|p| match p {
@@ -1994,7 +1996,7 @@ fn with_inline_handler() {
                     })
                     .collect();
                 assert_eq!(param_names, vec!["level", "msg"]);
-                assert!(return_clause.is_none());
+                assert!(handler.return_clause().is_none());
             }
             _ => panic!("expected Inline handler, got {:?}", handler),
         },
@@ -2010,11 +2012,16 @@ fn with_mixed_handlers() {
             kind: ExprKind::With { handler, .. },
             ..
         } => match handler.as_ref() {
-            Handler::Inline { named, arms, .. } => {
-                let names: Vec<&str> = named.iter().map(|a| a.node.name.as_str()).collect();
-                assert_eq!(names, &["console_log"]);
-                assert_eq!(arms.len(), 1);
-                assert_eq!(arms[0].node.op_name, "get");
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 2);
+                match &items[0].node {
+                    HandlerItem::Named(r) => assert_eq!(r.name, "console_log"),
+                    _ => panic!("expected Named item"),
+                }
+                match &items[1].node {
+                    HandlerItem::Arm(a) => assert_eq!(a.op_name, "get"),
+                    _ => panic!("expected Arm item"),
+                }
             }
             _ => panic!("expected Inline handler, got {:?}", handler),
         },
@@ -2030,17 +2037,16 @@ fn with_inline_arms_single_line_comma_separated() {
             kind: ExprKind::With { handler, .. },
             ..
         } => match handler.as_ref() {
-            Handler::Inline {
-                named,
-                arms,
-                return_clause,
-                ..
-            } => {
-                assert!(named.is_empty());
-                assert_eq!(arms.len(), 1);
-                assert_eq!(arms[0].node.op_name, "fail");
-                assert!(return_clause.is_some());
-                assert_eq!(return_clause.as_ref().unwrap().op_name, "return");
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 2);
+                match &items[0].node {
+                    HandlerItem::Arm(a) => assert_eq!(a.op_name, "fail"),
+                    _ => panic!("expected Arm item"),
+                }
+                match &items[1].node {
+                    HandlerItem::Return(rc) => assert_eq!(rc.op_name, "return"),
+                    _ => panic!("expected Return item"),
+                }
             }
             _ => panic!("expected Inline handler, got {:?}", handler),
         },
@@ -2056,21 +2062,137 @@ fn with_inline_arms_multiline_no_commas() {
             kind: ExprKind::With { handler, .. },
             ..
         } => match handler.as_ref() {
-            Handler::Inline {
-                named,
-                arms,
-                return_clause,
-                ..
-            } => {
-                assert!(named.is_empty());
-                assert_eq!(arms.len(), 1);
-                assert_eq!(arms[0].node.op_name, "fail");
-                assert!(return_clause.is_some());
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 2);
+                match &items[0].node {
+                    HandlerItem::Arm(a) => assert_eq!(a.op_name, "fail"),
+                    _ => panic!("expected Arm item"),
+                }
+                assert!(matches!(items[1].node, HandlerItem::Return(_)));
             }
             _ => panic!("expected Inline handler, got {:?}", handler),
         },
         _ => panic!("expected With, got {:?}", expr),
     }
+}
+
+// --- Mixed-order handler items ---
+
+#[test]
+fn with_named_after_inline_arm() {
+    // Named ref after an inline arm: `with { op x = body, handler_name }`
+    let expr = parse_expr("run () with {\n  get url = resume \"ok\",\n  console_log\n}");
+    match &expr {
+        Expr {
+            kind: ExprKind::With { handler, .. },
+            ..
+        } => match handler.as_ref() {
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 2);
+                match &items[0].node {
+                    HandlerItem::Arm(a) => assert_eq!(a.op_name, "get"),
+                    _ => panic!("expected Arm item, got {:?}", items[0].node),
+                }
+                match &items[1].node {
+                    HandlerItem::Named(r) => assert_eq!(r.name, "console_log"),
+                    _ => panic!("expected Named item, got {:?}", items[1].node),
+                }
+            }
+            _ => panic!("expected Inline handler"),
+        },
+        _ => panic!("expected With"),
+    }
+}
+
+#[test]
+fn with_named_between_inline_arms() {
+    // Named ref sandwiched between inline arms
+    let expr =
+        parse_expr("run () with {\n  get url = resume \"ok\"\n  console_log,\n  fail msg = 0\n}");
+    match &expr {
+        Expr {
+            kind: ExprKind::With { handler, .. },
+            ..
+        } => match handler.as_ref() {
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 3);
+                assert!(matches!(&items[0].node, HandlerItem::Arm(a) if a.op_name == "get"));
+                assert!(
+                    matches!(&items[1].node, HandlerItem::Named(r) if r.name == "console_log")
+                );
+                assert!(matches!(&items[2].node, HandlerItem::Arm(a) if a.op_name == "fail"));
+            }
+            _ => panic!("expected Inline handler"),
+        },
+        _ => panic!("expected With"),
+    }
+}
+
+#[test]
+fn with_return_between_items() {
+    // Return clause between a named ref and an inline arm
+    let expr = parse_expr(
+        "run () with {\n  console_log,\n  return value = Ok value\n  fail msg = Err msg\n}",
+    );
+    match &expr {
+        Expr {
+            kind: ExprKind::With { handler, .. },
+            ..
+        } => match handler.as_ref() {
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 3);
+                assert!(
+                    matches!(&items[0].node, HandlerItem::Named(r) if r.name == "console_log")
+                );
+                assert!(matches!(&items[1].node, HandlerItem::Return(_)));
+                assert!(matches!(&items[2].node, HandlerItem::Arm(a) if a.op_name == "fail"));
+            }
+            _ => panic!("expected Inline handler"),
+        },
+        _ => panic!("expected With"),
+    }
+}
+
+#[test]
+fn with_rejects_multiple_return_clauses_in_same_inline_segment() {
+    let err = parse_expr_error("run () with {\n  return value = Ok value\n  fail msg = 0\n  return value = value\n}");
+    assert!(
+        err.message.contains("at most one return clause"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn with_allows_multiple_return_clauses_across_named_boundaries() {
+    let expr = parse_expr(
+        "run () with {\n  return value = Ok value\n  console_log,\n  return value = wrap value\n}",
+    );
+    match &expr {
+        Expr {
+            kind: ExprKind::With { handler, .. },
+            ..
+        } => match handler.as_ref() {
+            Handler::Inline { items, .. } => {
+                assert_eq!(items.len(), 3);
+                assert!(matches!(&items[0].node, HandlerItem::Return(_)));
+                assert!(matches!(&items[1].node, HandlerItem::Named(r) if r.name == "console_log"));
+                assert!(matches!(&items[2].node, HandlerItem::Return(_)));
+            }
+            _ => panic!("expected Inline handler"),
+        },
+        _ => panic!("expected With"),
+    }
+}
+
+#[test]
+fn with_rejects_empty_handler_block() {
+    let err = parse_expr_error("run () with {}");
+    assert!(
+        err.message.contains("expected identifier"),
+        "unexpected error: {}",
+        err.message
+    );
 }
 
 // --- Where clause on annotations ---

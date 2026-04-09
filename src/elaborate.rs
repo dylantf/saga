@@ -1400,19 +1400,12 @@ impl Elaborator {
     fn elaborate_handler(&mut self, handler: &Handler) -> Handler {
         match handler {
             Handler::Named(_, _) => handler.clone(),
-            Handler::Inline {
-                named,
-                arms,
-                return_clause,
-                ..
-            } => Handler::Inline {
+            Handler::Inline { items, .. } => Handler::Inline {
                 dangling_trivia: vec![],
-                named: named.clone(),
-                arms: arms
+                items: items
                     .iter()
                     .map(|ann| {
-                        let arm = &ann.node;
-                        Annotated::bare(HandlerArm {
+                        let mut elaborate_arm = |arm: &HandlerArm| HandlerArm {
                             op_name: arm.op_name.clone(),
                             qualifier: arm.qualifier.clone(),
                             params: arm.params.clone(),
@@ -1422,19 +1415,18 @@ impl Elaborator {
                                 .as_ref()
                                 .map(|fb| Box::new(self.elaborate_expr(fb))),
                             span: arm.span,
-                        })
+                        };
+                        match &ann.node {
+                            HandlerItem::Named(_) => ann.clone(),
+                            HandlerItem::Arm(arm) => {
+                                Annotated::bare(HandlerItem::Arm(elaborate_arm(arm)))
+                            }
+                            HandlerItem::Return(arm) => {
+                                Annotated::bare(HandlerItem::Return(elaborate_arm(arm)))
+                            }
+                        }
                     })
                     .collect(),
-                return_clause: return_clause.as_ref().map(|arm| {
-                    Box::new(HandlerArm {
-                        op_name: arm.op_name.clone(),
-                        qualifier: arm.qualifier.clone(),
-                        params: arm.params.clone(),
-                        body: Box::new(self.elaborate_expr(&arm.body)),
-                        finally_block: None,
-                        span: arm.span,
-                    })
-                }),
             },
         }
     }

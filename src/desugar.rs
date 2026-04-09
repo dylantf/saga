@@ -214,6 +214,16 @@ fn desugar_expr(expr: &mut Expr) {
         } => {
             desugar_expr(inner);
             desugar_handler(handler);
+            if let Handler::Inline { items, .. } = handler.as_ref()
+                && inline_handler_needs_layer_desugaring(items)
+            {
+                let inner_expr = std::mem::replace(
+                    inner,
+                    Box::new(Expr::synth(expr.span, ExprKind::Lit { value: Lit::Unit })),
+                );
+                let handler = std::mem::replace(handler, Box::new(Handler::Named(String::new(), expr.span)));
+                *expr = desugar_with_items(expr.id, expr.span, *inner_expr, *handler);
+            }
         }
         ExprKind::Resume { value } => desugar_expr(value),
         ExprKind::HandlerExpr { body } => {
@@ -540,6 +550,67 @@ fn desugar_expr(expr: &mut Expr) {
     }
 }
 
+fn inline_handler_needs_layer_desugaring(items: &[Annotated<HandlerItem>]) -> bool {
+    items.iter().any(|ann| matches!(ann.node, HandlerItem::Named(_)))
+}
+
+fn desugar_with_items(root_id: NodeId, span: Span, inner: Expr, handler: Handler) -> Expr {
+    let Handler::Inline { items, .. } = handler else {
+        return Expr {
+            id: root_id,
+            span,
+            kind: ExprKind::With {
+                expr: Box::new(inner),
+                handler: Box::new(handler),
+            },
+        };
+    };
+
+    let layers = handler_items_to_layers(items);
+    let mut acc = inner;
+    for layer in layers {
+        acc = Expr::synth(
+            span,
+            ExprKind::With {
+                expr: Box::new(acc),
+                handler: Box::new(layer),
+            },
+        );
+    }
+    acc.id = root_id;
+    acc.span = span;
+    acc
+}
+
+fn handler_items_to_layers(items: Vec<Annotated<HandlerItem>>) -> Vec<Handler> {
+    let mut layers = Vec::new();
+    let mut inline_items = Vec::new();
+
+    for item in items {
+        match item.node {
+            HandlerItem::Named(named_ref) => {
+                if !inline_items.is_empty() {
+                    layers.push(Handler::Inline {
+                        items: std::mem::take(&mut inline_items),
+                        dangling_trivia: vec![],
+                    });
+                }
+                layers.push(Handler::Named(named_ref.name, named_ref.span));
+            }
+            HandlerItem::Arm(_) | HandlerItem::Return(_) => inline_items.push(item),
+        }
+    }
+
+    if !inline_items.is_empty() {
+        layers.push(Handler::Inline {
+            items: inline_items,
+            dangling_trivia: vec![],
+        });
+    }
+
+    layers
+}
+
 fn desugar_stmt(stmt: &mut Stmt) {
     match stmt {
         Stmt::Let { pattern, value, .. } => {
@@ -692,21 +763,118 @@ fn desugar_pat(pat: &mut Pat) {
 fn desugar_handler(handler: &mut Handler) {
     match handler {
         Handler::Named(..) => {}
-        Handler::Inline {
-            arms,
-            return_clause,
-            ..
-        } => {
-            for ann_arm in arms {
-                desugar_expr(&mut ann_arm.node.body);
-                if let Some(fb) = &mut ann_arm.node.finally_block {
-                    desugar_expr(fb);
+        Handler::Inline { items, .. } => {
+            for ann_item in items {
+                match &mut ann_item.node {
+                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
+                        desugar_expr(&mut arm.body);
+                        if let Some(fb) = &mut arm.finally_block {
+                            desugar_expr(fb);
+                        }
+                    }
+                    HandlerItem::Named(_) => {}
                 }
             }
-            if let Some(rc) = return_clause {
-                desugar_expr(&mut rc.body);
-            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn parse_expr(source: &str) -> Expr {
+        let tokens = Lexer::new(source).lex().unwrap();
+        Parser::new(tokens).parse_expr(0).unwrap()
+    }
+
+    #[test]
+    fn desugars_multi_item_with_to_nested_withs_in_source_order() {
+        let mut expr =
+            parse_expr("run () with {console_log, fail msg = 0, return value = Ok value}");
+        desugar_expr(&mut expr);
+
+        let ExprKind::With { expr: outer_inner, handler: outer_handler } = &expr.kind else {
+            panic!("expected outer with");
+        };
+        assert!(matches!(
+            outer_handler.as_ref(),
+            Handler::Inline { items, .. }
+                if items.len() == 2
+                    && matches!(items[0].node, HandlerItem::Arm(ref arm) if arm.op_name == "fail")
+                    && matches!(items[1].node, HandlerItem::Return(_))
+        ));
+
+        let ExprKind::With { expr: inner_expr, handler: inner_handler } = &outer_inner.kind else {
+            panic!("expected inner with");
+        };
+        assert!(matches!(inner_handler.as_ref(), Handler::Named(name, _) if name == "console_log"));
+        assert!(matches!(inner_expr.kind, ExprKind::App { .. }));
+    }
+
+    #[test]
+    fn desugars_single_named_item_to_named_with() {
+        let mut expr = parse_expr("run () with {console_log}");
+        desugar_expr(&mut expr);
+
+        let ExprKind::With { handler, .. } = &expr.kind else {
+            panic!("expected with");
+        };
+        assert!(matches!(handler.as_ref(), Handler::Named(name, _) if name == "console_log"));
+    }
+
+    #[test]
+    fn leaves_single_inline_layer_as_inline_with() {
+        let mut expr = parse_expr("run () with {fail msg = 0, return value = Ok value}");
+        desugar_expr(&mut expr);
+
+        let ExprKind::With { expr: inner, handler } = &expr.kind else {
+            panic!("expected with");
+        };
+        assert!(matches!(inner.kind, ExprKind::App { .. }));
+        assert!(matches!(
+            handler.as_ref(),
+            Handler::Inline { items, .. }
+                if items.len() == 2
+                    && matches!(items[0].node, HandlerItem::Arm(ref arm) if arm.op_name == "fail")
+                    && matches!(items[1].node, HandlerItem::Return(_))
+        ));
+    }
+
+    #[test]
+    fn desugars_named_boundaries_between_inline_groups() {
+        let mut expr = parse_expr(
+            "run () with {fail msg = 0, return value = Ok value, console_log, log msg = resume ()}",
+        );
+        desugar_expr(&mut expr);
+
+        let ExprKind::With { expr: outer_inner, handler: outer_handler } = &expr.kind else {
+            panic!("expected outer with");
+        };
+        assert!(matches!(
+            outer_handler.as_ref(),
+            Handler::Inline { items, .. }
+                if items.len() == 1
+                    && matches!(items[0].node, HandlerItem::Arm(ref arm) if arm.op_name == "log")
+        ));
+
+        let ExprKind::With { expr: middle_inner, handler: middle_handler } = &outer_inner.kind else {
+            panic!("expected middle with");
+        };
+        assert!(matches!(middle_handler.as_ref(), Handler::Named(name, _) if name == "console_log"));
+
+        let ExprKind::With { handler: inner_handler, .. } = &middle_inner.kind else {
+            panic!("expected inner with");
+        };
+        assert!(matches!(
+            inner_handler.as_ref(),
+            Handler::Inline { items, .. }
+                if items.len() == 2
+                    && matches!(items[0].node, HandlerItem::Arm(ref arm) if arm.op_name == "fail")
+                    && matches!(items[1].node, HandlerItem::Return(_))
+        ));
     }
 }
 

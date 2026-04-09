@@ -748,26 +748,19 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
             resolve_expr(inner, scope, map);
             match handler.as_ref() {
                 ast::Handler::Named(_, _) => {}
-                ast::Handler::Inline {
-                    arms,
-                    return_clause,
-                    ..
-                } => {
-                    for arm in arms {
+                ast::Handler::Inline { items, .. } => {
+                    for ann in items {
+                        let arm = match &ann.node {
+                            ast::HandlerItem::Arm(arm) | ast::HandlerItem::Return(arm) => arm,
+                            ast::HandlerItem::Named(_) => continue,
+                        };
                         let param_names: HashSet<String> =
-                            arm.node.params.iter().flat_map(collect_pat_vars).collect();
+                            arm.params.iter().flat_map(collect_pat_vars).collect();
                         scope.push(param_names);
-                        resolve_expr(&arm.node.body, scope, map);
-                        if let Some(ref fb) = arm.node.finally_block {
+                        resolve_expr(&arm.body, scope, map);
+                        if let Some(ref fb) = arm.finally_block {
                             resolve_expr(fb, scope, map);
                         }
-                        scope.pop();
-                    }
-                    if let Some(rc) = return_clause {
-                        let param_names: HashSet<String> =
-                            rc.params.iter().flat_map(collect_pat_vars).collect();
-                        scope.push(param_names);
-                        resolve_expr(&rc.body, scope, map);
                         scope.pop();
                     }
                 }
