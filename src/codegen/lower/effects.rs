@@ -65,6 +65,16 @@ enum OpHandlerPlan {
     Passthrough,
 }
 
+enum WithHandlerLayer {
+    Named {
+        name: String,
+    },
+    Inline {
+        arms: Vec<HandlerArm>,
+        return_clause: Option<Box<HandlerArm>>,
+    },
+}
+
 impl<'a> Lowerer<'a> {
     fn lower_handler_owned_expr(&mut self, expr: &Expr) -> CExpr {
         // Handler-local computations produce the handled result itself, so they
@@ -74,7 +84,7 @@ impl<'a> Lowerer<'a> {
 
     fn lower_handled_expr_with_return_k(&mut self, expr: &Expr, return_k: Option<CExpr>) -> CExpr {
         let inner_ce = self.lower_expr_with_installed_return_k(expr, return_k.clone());
-        if matches!(expr.kind, ExprKind::Block { .. }) {
+        if matches!(expr.kind, ExprKind::Block { .. } | ExprKind::With { .. }) {
             inner_ce
         } else {
             self.apply_return_k_with(return_k, inner_ce)
@@ -344,46 +354,61 @@ impl<'a> Lowerer<'a> {
     /// Builds handler function(s) from the handler definition and passes them
     /// as extra parameters to the effectful computation.
     pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
-        let (named_refs, inline_arms, explicit_return_clause) = self.normalize_with_handler(handler);
-        self.pre_register_local_with_bindings(expr, &named_refs);
-        let named_items: Vec<NamedHandlerItem> = named_refs
-            .iter()
-            .map(|name| self.resolve_named_handler_item(name))
-            .collect();
+        self.lower_with_inherited_return_k(expr, handler, None)
+    }
 
-        let mut handled_effects = Vec::new();
-        let mut effect_owner: HashMap<String, usize> = HashMap::new();
+    pub(super) fn lower_with_inherited_return_k(
+        &mut self,
+        expr: &Expr,
+        handler: &Handler,
+        inherited_return_k: Option<CExpr>,
+    ) -> CExpr {
+        let normalized = self.normalize_with_handler(handler);
+        let (inline_arms, explicit_return_clause) = match &normalized {
+            WithHandlerLayer::Named { .. } => (Vec::new(), None),
+            WithHandlerLayer::Inline {
+                arms,
+                return_clause,
+            } => (arms.clone(), return_clause.clone()),
+        };
+
         let mut condition_bindings: Vec<(String, CExpr)> = Vec::new();
-        for (idx, item) in named_items.iter().enumerate() {
-            if let NamedHandlerItem::Conditional {
-                cond_var, cond_ce, ..
-            } = item
-                && !condition_bindings.iter().any(|(seen, _)| seen == cond_var)
-            {
-                condition_bindings.push((cond_var.clone(), cond_ce.clone()));
-            }
-            for effect in item.effects() {
-                if !handled_effects.contains(effect) {
-                    handled_effects.push(effect.clone());
+        let named_item = match &normalized {
+            WithHandlerLayer::Named { name } => {
+                self.pre_register_local_with_binding(expr, name);
+                let item = self.resolve_named_handler_item(name);
+                if let NamedHandlerItem::Conditional {
+                    cond_var, cond_ce, ..
+                } = &item
+                {
+                    condition_bindings.push((cond_var.clone(), cond_ce.clone()));
                 }
-                effect_owner.insert(effect.clone(), idx);
+                Some(item)
             }
-        }
+            WithHandlerLayer::Inline { .. } => None,
+        };
 
-        let mut inline_arms_by_op: HashMap<String, HandlerArm> = HashMap::new();
-        for arm in &inline_arms {
-            if let Some(effect) = self.effect_for_handler_arm(arm) {
-                if !handled_effects.contains(&effect) {
-                    handled_effects.push(effect.clone());
-                }
-                if let Some(ref q) = arm.qualifier {
-                    let canonical = self.canonicalize_effect(q);
-                    inline_arms_by_op.insert(format!("{}.{}", canonical, arm.op_name), arm.clone());
-                } else {
-                    inline_arms_by_op.insert(arm.op_name.clone(), arm.clone());
+        let (handled_effects, inline_arms_by_op) = if let Some(item) = &named_item {
+            (item.effects().to_vec(), HashMap::new())
+        } else {
+            let mut handled_effects = Vec::new();
+            let mut inline_arms_by_op: HashMap<String, HandlerArm> = HashMap::new();
+            for arm in &inline_arms {
+                if let Some(effect) = self.effect_for_handler_arm(arm) {
+                    if !handled_effects.contains(&effect) {
+                        handled_effects.push(effect.clone());
+                    }
+                    if let Some(ref q) = arm.qualifier {
+                        let canonical = self.canonicalize_effect(q);
+                        inline_arms_by_op
+                            .insert(format!("{}.{}", canonical, arm.op_name), arm.clone());
+                    } else {
+                        inline_arms_by_op.insert(arm.op_name.clone(), arm.clone());
+                    }
                 }
             }
-        }
+            (handled_effects, inline_arms_by_op)
+        };
 
         let handler_ops = self.effect_handler_ops(&handled_effects);
 
@@ -402,20 +427,18 @@ impl<'a> Lowerer<'a> {
             let key = format!("{}.{}", eff, op);
             self.current_handler_params
                 .insert(key.clone(), var_name.clone());
-            let plan = self.plan_op_handler(
-                eff,
-                op,
-                &inline_arms_by_op,
-                &effect_owner,
-                &named_items,
-            );
+            let plan = match &named_item {
+                Some(item) => self.plan_named_op_handler(eff, op, item),
+                None => self.plan_inline_op_handler(eff, op, &inline_arms_by_op),
+            };
             match &plan {
                 OpHandlerPlan::Inline { arm } if !arm.body.contains_resume() => {
                     self.no_resume_ops.insert(key.clone());
                 }
                 OpHandlerPlan::BeamNative { handler_canonical } => {
                     if self.use_direct_native_fast_path(handler_canonical) {
-                        self.direct_ops.insert(key.clone(), handler_canonical.clone());
+                        self.direct_ops
+                            .insert(key.clone(), handler_canonical.clone());
                     }
                 }
                 OpHandlerPlan::Static {
@@ -429,7 +452,8 @@ impl<'a> Lowerer<'a> {
                     if self.is_beam_native_handler_canonical(handler_canonical)
                         && self.use_direct_native_fast_path(handler_canonical)
                     {
-                        self.direct_ops.insert(key.clone(), handler_canonical.clone());
+                        self.direct_ops
+                            .insert(key.clone(), handler_canonical.clone());
                     }
                 }
                 _ => {}
@@ -438,13 +462,12 @@ impl<'a> Lowerer<'a> {
         }
 
         // Lower the inner expression once handler params are in scope.
-        let return_k_lambda = if let Some(ret) = &explicit_return_clause {
-            Some(self.build_return_lambda(ret, None))
-        } else {
-            self.first_named_return_lambda(&named_items)
+        let return_k_lambda = match (&explicit_return_clause, &named_item) {
+            (Some(ret), _) => Some(self.build_return_lambda(ret, None)),
+            (None, Some(item)) => self.named_return_lambda(item),
+            (None, None) => None,
         };
-        let saved_return_k = None;
-        let result = self.lower_handled_inner_expr(expr, return_k_lambda, saved_return_k);
+        let result = self.lower_handled_inner_expr(expr, return_k_lambda, inherited_return_k);
 
         // Pass 2: build ALL handler functions unconditionally.
         // We'll prune unreachable ones after lowering the body.
@@ -456,8 +479,7 @@ impl<'a> Lowerer<'a> {
             let binding = match plan {
                 OpHandlerPlan::Inline { arm } => self.build_op_handler_fun(arm, None),
                 OpHandlerPlan::Static {
-                    handler_canonical,
-                    ..
+                    handler_canonical, ..
                 } if self.is_beam_native_handler_canonical(handler_canonical) => {
                     self.build_beam_native_op_fun(op, handler_canonical)
                 }
@@ -684,43 +706,44 @@ impl<'a> Lowerer<'a> {
         Some(CExpr::Tuple(tuple_elements))
     }
 
-    fn normalize_with_handler(
-        &self,
-        handler: &Handler,
-    ) -> (Vec<String>, Vec<HandlerArm>, Option<Box<HandlerArm>>) {
+    fn normalize_with_handler(&self, handler: &Handler) -> WithHandlerLayer {
         match handler {
-            Handler::Named(name, _) => (vec![name.clone()], vec![], None),
+            Handler::Named(name, _) => WithHandlerLayer::Named { name: name.clone() },
             Handler::Inline { items, .. } => {
-                let mut named_refs = Vec::new();
                 let mut inline_arms = Vec::new();
                 let mut return_clause = None;
                 for ann in items {
                     match &ann.node {
-                        HandlerItem::Named(r) => named_refs.push(r.name.clone()),
+                        HandlerItem::Named(_) => panic!(
+                            "internal lowering error: named handler refs should have been desugared into nested `with` layers before lowering"
+                        ),
                         HandlerItem::Arm(a) => inline_arms.push(a.clone()),
                         HandlerItem::Return(rc) => {
+                            assert!(
+                                return_clause.is_none(),
+                                "internal lowering error: inline handler segment has multiple return clauses"
+                            );
                             return_clause = Some(Box::new(rc.clone()));
                         }
                     }
                 }
-                (named_refs, inline_arms, return_clause)
+                WithHandlerLayer::Inline {
+                    arms: inline_arms,
+                    return_clause,
+                }
             }
         }
     }
 
-    fn pre_register_local_with_bindings(&mut self, expr: &Expr, named_refs: &[String]) {
-        if named_refs.is_empty() {
-            return;
-        }
+    fn pre_register_local_with_binding(&mut self, expr: &Expr, named_ref: &str) {
         let ExprKind::Block { stmts, .. } = &expr.kind else {
             return;
         };
 
-        let wanted: HashSet<&str> = named_refs.iter().map(String::as_str).collect();
         for stmt in stmts {
             if let Stmt::Let { pattern, value, .. } = &stmt.node
                 && let Pat::Var { name, .. } = pattern
-                && wanted.contains(name.as_str())
+                && name == named_ref
                 && self.is_handler_value(value)
             {
                 self.lower_handle_binding(name, value);
@@ -729,7 +752,8 @@ impl<'a> Lowerer<'a> {
     }
 
     fn resolve_named_handler_item(&self, name: &str) -> NamedHandlerItem {
-        if let Some((tuple_var, effects, has_return)) = self.handle_dynamic_vars.get(name).cloned() {
+        if let Some((tuple_var, effects, has_return)) = self.handle_dynamic_vars.get(name).cloned()
+        {
             return NamedHandlerItem::Dynamic {
                 tuple_var,
                 effects,
@@ -739,18 +763,26 @@ impl<'a> Lowerer<'a> {
         if let Some((cond_var, cond_ce, then_canonical, else_canonical)) =
             self.handle_cond_vars.get(name).cloned()
         {
-            let then_info = self.handler_defs.get(&then_canonical).cloned().unwrap_or_else(|| {
-                panic!(
-                    "internal lowering error: unknown conditional handler branch '{}' for '{}'",
-                    then_canonical, name
-                )
-            });
-            let else_info = self.handler_defs.get(&else_canonical).cloned().unwrap_or_else(|| {
-                panic!(
-                    "internal lowering error: unknown conditional handler branch '{}' for '{}'",
-                    else_canonical, name
-                )
-            });
+            let then_info = self
+                .handler_defs
+                .get(&then_canonical)
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "internal lowering error: unknown conditional handler branch '{}' for '{}'",
+                        then_canonical, name
+                    )
+                });
+            let else_info = self
+                .handler_defs
+                .get(&else_canonical)
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "internal lowering error: unknown conditional handler branch '{}' for '{}'",
+                        else_canonical, name
+                    )
+                });
             return NamedHandlerItem::Conditional {
                 cond_var,
                 cond_ce,
@@ -759,12 +791,16 @@ impl<'a> Lowerer<'a> {
             };
         }
         let canonical = self.resolve_handler_name(name);
-        let info = self.handler_defs.get(&canonical).cloned().unwrap_or_else(|| {
-            panic!(
-                "internal lowering error: unknown handler item '{}' (canonical: {})",
-                name, canonical
-            )
-        });
+        let info = self
+            .handler_defs
+            .get(&canonical)
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "internal lowering error: unknown handler item '{}' (canonical: {})",
+                    name, canonical
+                )
+            });
         NamedHandlerItem::Static { canonical, info }
     }
 
@@ -822,27 +858,13 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-    fn plan_op_handler(
+    fn plan_named_op_handler(
         &self,
         eff: &str,
         op: &str,
-        inline_arms_by_op: &HashMap<String, HandlerArm>,
-        effect_owner: &HashMap<String, usize>,
-        named_items: &[NamedHandlerItem],
+        named_item: &NamedHandlerItem,
     ) -> OpHandlerPlan {
-        let qualified_key = format!("{}.{}", eff, op);
-        if let Some(arm) = inline_arms_by_op
-            .get(&qualified_key)
-            .or_else(|| inline_arms_by_op.get(op))
-        {
-            return OpHandlerPlan::Inline { arm: arm.clone() };
-        }
-
-        let Some(&owner_idx) = effect_owner.get(eff) else {
-            return OpHandlerPlan::Passthrough;
-        };
-
-        match &named_items[owner_idx] {
+        match named_item {
             NamedHandlerItem::Static { canonical, info } => {
                 if let Some((arm, source_module)) = self.static_arm_for_effect_op(info, eff, op) {
                     OpHandlerPlan::Static {
@@ -886,6 +908,22 @@ impl<'a> Lowerer<'a> {
                 element_expr: self.dynamic_tuple_element_expr(tuple_var, effects, eff, op),
             },
         }
+    }
+
+    fn plan_inline_op_handler(
+        &self,
+        eff: &str,
+        op: &str,
+        inline_arms_by_op: &HashMap<String, HandlerArm>,
+    ) -> OpHandlerPlan {
+        let qualified_key = format!("{}.{}", eff, op);
+        if let Some(arm) = inline_arms_by_op
+            .get(&qualified_key)
+            .or_else(|| inline_arms_by_op.get(op))
+        {
+            return OpHandlerPlan::Inline { arm: arm.clone() };
+        }
+        OpHandlerPlan::Passthrough
     }
 
     fn build_passthrough_handler_fun(&mut self) -> CExpr {
@@ -1140,77 +1178,75 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn first_named_return_lambda(&mut self, named_items: &[NamedHandlerItem]) -> Option<CExpr> {
-        for item in named_items {
-            match item {
-                NamedHandlerItem::Static { info, .. } => {
-                    if let Some(ret) = &info.return_clause {
-                        return Some(self.build_return_lambda(ret, info.source_module.as_deref()));
-                    }
+    fn named_return_lambda(&mut self, item: &NamedHandlerItem) -> Option<CExpr> {
+        match item {
+            NamedHandlerItem::Static { info, .. } => info
+                .return_clause
+                .as_ref()
+                .map(|ret| self.build_return_lambda(ret, info.source_module.as_deref())),
+            NamedHandlerItem::Conditional {
+                cond_var,
+                then_info,
+                else_info,
+                ..
+            } => {
+                if then_info.return_clause.is_some() || else_info.return_clause.is_some() {
+                    let then_fun = then_info
+                        .return_clause
+                        .as_ref()
+                        .map(|ret| {
+                            self.build_return_lambda(ret, then_info.source_module.as_deref())
+                        })
+                        .unwrap_or_else(|| self.identity_return_lambda());
+                    let else_fun = else_info
+                        .return_clause
+                        .as_ref()
+                        .map(|ret| {
+                            self.build_return_lambda(ret, else_info.source_module.as_deref())
+                        })
+                        .unwrap_or_else(|| self.identity_return_lambda());
+                    let param = self.fresh();
+                    let then_call =
+                        CExpr::Apply(Box::new(then_fun), vec![CExpr::Var(param.clone())]);
+                    let else_call =
+                        CExpr::Apply(Box::new(else_fun), vec![CExpr::Var(param.clone())]);
+                    let body = CExpr::Case(
+                        Box::new(CExpr::Var(cond_var.clone())),
+                        vec![
+                            CArm {
+                                pat: CPat::Lit(CLit::Atom("true".to_string())),
+                                guard: None,
+                                body: then_call,
+                            },
+                            CArm {
+                                pat: CPat::Var("_".to_string()),
+                                guard: None,
+                                body: else_call,
+                            },
+                        ],
+                    );
+                    Some(CExpr::Fun(vec![param], Box::new(body)))
+                } else {
+                    None
                 }
-                NamedHandlerItem::Conditional {
-                    cond_var,
-                    then_info,
-                    else_info,
-                    ..
-                } => {
-                    if then_info.return_clause.is_some() || else_info.return_clause.is_some() {
-                        let then_fun = then_info
-                            .return_clause
-                            .as_ref()
-                            .map(|ret| {
-                                self.build_return_lambda(ret, then_info.source_module.as_deref())
-                            })
-                            .unwrap_or_else(|| self.identity_return_lambda());
-                        let else_fun = else_info
-                            .return_clause
-                            .as_ref()
-                            .map(|ret| {
-                                self.build_return_lambda(ret, else_info.source_module.as_deref())
-                            })
-                            .unwrap_or_else(|| self.identity_return_lambda());
-                        let param = self.fresh();
-                        let then_call = CExpr::Apply(
-                            Box::new(then_fun),
-                            vec![CExpr::Var(param.clone())],
-                        );
-                        let else_call = CExpr::Apply(
-                            Box::new(else_fun),
-                            vec![CExpr::Var(param.clone())],
-                        );
-                        let body = CExpr::Case(
-                            Box::new(CExpr::Var(cond_var.clone())),
-                            vec![
-                                CArm {
-                                    pat: CPat::Lit(CLit::Atom("true".to_string())),
-                                    guard: None,
-                                    body: then_call,
-                                },
-                                CArm {
-                                    pat: CPat::Var("_".to_string()),
-                                    guard: None,
-                                    body: else_call,
-                                },
-                            ],
-                        );
-                        return Some(CExpr::Fun(vec![param], Box::new(body)));
-                    }
-                }
-                NamedHandlerItem::Dynamic {
-                    tuple_var,
-                    effects,
-                    has_return,
-                } => {
-                    if *has_return {
-                        return Some(self.dynamic_return_lambda(
+            }
+            NamedHandlerItem::Dynamic {
+                tuple_var,
+                effects,
+                has_return,
+            } => {
+                if *has_return {
+                    Some(
+                        self.dynamic_return_lambda(
                             tuple_var,
                             self.effect_handler_ops(effects).len(),
-                        ));
-                    }
+                        ),
+                    )
+                } else {
+                    None
                 }
             }
         }
-        None
     }
 
     fn is_beam_native_handler_canonical(&self, canonical: &str) -> bool {

@@ -266,12 +266,16 @@ main () = {
 }
 "#;
 
-    let named_out = with_temp_project_files(&[("lib/Db.dy", db_module)], named_src, |checker, program| {
-        emit_from_program(program, "main", checker)
-    });
-    let inline_out = with_temp_project_files(&[("lib/Db.dy", db_module)], inline_src, |checker, program| {
-        emit_from_program(program, "main", checker)
-    });
+    let named_out = with_temp_project_files(
+        &[("lib/Db.dy", db_module)],
+        named_src,
+        |checker, program| emit_from_program(program, "main", checker),
+    );
+    let inline_out = with_temp_project_files(
+        &[("lib/Db.dy", db_module)],
+        inline_src,
+        |checker, program| emit_from_program(program, "main", checker),
+    );
 
     assert_eq!(
         named_out, inline_out,

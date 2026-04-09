@@ -288,37 +288,6 @@ impl Checker {
         None
     }
 
-    /// Extract exact handled effect entries from a `Handler(...)` type in the env.
-    /// Used for same-block sibling subtraction in inline handlers.
-    pub(crate) fn handler_effect_entries_from_env(
-        &mut self,
-        name: &str,
-    ) -> Option<Vec<super::EffectEntry>> {
-        let scheme = self.env.get(name)?;
-        let ty = self.sub.apply(&scheme.ty);
-        if let Type::Con(ref con_name, ref args) = ty
-            && con_name == super::canonicalize_type_name("Handler")
-        {
-            let entries: Vec<super::EffectEntry> = args
-                .iter()
-                .filter_map(|arg| {
-                    let resolved = self.sub.apply(arg);
-                    if let Type::Con(eff_name, eff_args) = resolved {
-                        let canonical = self.normalize_handler_effect_name(eff_name);
-                        Some(super::EffectEntry::unnamed(canonical, eff_args))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if entries.is_empty() {
-                return None;
-            }
-            return Some(entries);
-        }
-        None
-    }
-
     /// Instantiate an effect op signature, reusing cached type param vars for the same effect
     /// within the current function scope. This ensures `get` and `put` from `State s` share `s`.
     pub(crate) fn instantiate_effect_op(

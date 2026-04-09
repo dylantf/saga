@@ -576,9 +576,9 @@ impl Parser {
     /// Parses the handler reference after `with`:
     /// - `with console_log` -> Handler::Named
     /// - `with { h1, h2, op args -> body }` -> Handler::Inline
-    /// Check if the current position is a named handler ref: a (possibly
-    /// module-qualified) dotted path ending in a lowercase ident, followed
-    /// by `,` or `}`. e.g. `console`, `foo.bar`, `DateTime.system_clock`.
+    ///   Check if the current position is a named handler ref: a (possibly
+    ///   module-qualified) dotted path ending in a lowercase ident, followed
+    ///   by `,` or `}`. e.g. `console`, `foo.bar`, `DateTime.system_clock`.
     fn is_named_handler_ref(&self) -> bool {
         let mut i = 0;
         while matches!(self.peek_at(i), Token::UpperIdent(_) | Token::Ident(_))
@@ -649,9 +649,7 @@ impl Parser {
         let mut params = Vec::new();
         while !matches!(self.peek(), Token::Eq | Token::Eof) {
             // Skip `()` unit params (zero-param effect ops)
-            if matches!(self.peek(), Token::LParen)
-                && matches!(self.peek_at(1), Token::RParen)
-            {
+            if matches!(self.peek(), Token::LParen) && matches!(self.peek_at(1), Token::RParen) {
                 self.advance(); // consume '('
                 self.advance(); // consume ')'
                 continue;
@@ -714,9 +712,11 @@ impl Parser {
     }
 
     fn current_inline_segment_has_return(items: &[Annotated<HandlerItem>]) -> bool {
-        items.iter().rev().take_while(|ann| !matches!(ann.node, HandlerItem::Named(_))).any(
-            |ann| matches!(ann.node, HandlerItem::Return(_)),
-        )
+        items
+            .iter()
+            .rev()
+            .take_while(|ann| !matches!(ann.node, HandlerItem::Named(_)))
+            .any(|ann| matches!(ann.node, HandlerItem::Return(_)))
     }
 
     /// Parses the handler reference after `with`:
@@ -741,9 +741,8 @@ impl Parser {
                 if matches!(self.peek(), Token::Return) {
                     if Self::current_inline_segment_has_return(&items) {
                         return Err(ParseError {
-                            message:
-                                "inline handler segment may contain at most one return clause"
-                                    .to_string(),
+                            message: "inline handler segment may contain at most one return clause"
+                                .to_string(),
                             span: self.tokens[self.pos].span,
                         });
                     }

@@ -713,9 +713,7 @@ fn normalize_handler(h: &mut Handler) {
             for ann in items.iter_mut() {
                 normalize_annotated(ann, |item| match item {
                     HandlerItem::Named(r) => r.span = S,
-                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
-                        normalize_handler_arm(arm)
-                    }
+                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => normalize_handler_arm(arm),
                 });
             }
             dangling_trivia.clear();

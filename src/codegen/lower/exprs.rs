@@ -129,6 +129,9 @@ impl<'a> Lowerer<'a> {
                 let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
                 self.lower_block_with_return_k(&stmts, return_k)
             }
+            ExprKind::With { expr, handler, .. } if return_k.is_some() => {
+                self.lower_with_inherited_return_k(expr, handler, return_k)
+            }
             _ => {
                 if return_k.is_some() {
                     self.lower_terminal_effectful_expr_with_return_k(expr, return_k)
@@ -936,6 +939,9 @@ impl<'a> Lowerer<'a> {
                 let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
                 self.lower_block_in(&stmts, LowerMode::Tail(CExpr::Var(k_var.to_string())))
             }
+            ExprKind::With { expr, handler, .. } => {
+                self.lower_with_inherited_return_k(expr, handler, Some(CExpr::Var(k_var.to_string())))
+            }
             _ => self.lower_value_to_k(expr, k_var),
         }
     }
@@ -1132,8 +1138,7 @@ impl<'a> Lowerer<'a> {
     /// handle binding stores a flag variable; handler dispatch uses both handlers'
     /// arms wrapped in a conditional at runtime.
     pub(super) fn lower_handle_binding(&mut self, name: &str, value: &Expr) {
-        if self.handle_dynamic_vars.contains_key(name) || self.handle_cond_vars.contains_key(name)
-        {
+        if self.handle_dynamic_vars.contains_key(name) || self.handle_cond_vars.contains_key(name) {
             return;
         }
 
