@@ -88,6 +88,10 @@ describe "basics" {
       assert_eq [1, 2, 3] [1, 2, 3]
     }
 
+    test "concatenation" {
+      assert_eq ([1, 2] <> [3, 4]) [1, 2, 3, 4]
+    }
+
     test "cons" {
       assert_eq (1 :: 2 :: 3 :: []) [1, 2, 3]
     }

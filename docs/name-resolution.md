@@ -100,7 +100,7 @@ Some name categories have their own resolution beyond the general scope_map:
 
 **Effects** (`resolve_effect` in `effects.rs`): Tries scope_map resolution, then local module prefix, then auto-import for fully-qualified Std names. Effect ops in qualified calls (`File.write!`) are resolved through scope_map in `lookup_effect_op`.
 
-**Traits** (`resolve_trait_name` in `check_traits.rs`): Tries exact match in `trait_state.traits`, then scope_map, then local module prefix. Used for where clauses, impl declarations, and constraint checking. Builtin traits (Num, Eq, Semigroup) stay bare since they have no module.
+**Traits** (`resolve_trait_name` in `check_traits.rs`): Tries exact match in `trait_state.traits`, then scope_map, then local module prefix. Used for where clauses, impl declarations, and constraint checking. Builtin traits `Num` and `Eq` stay bare since they have no module; `Semigroup` resolves through `Std.Base`.
 
 ## Storage: Single-Registration Principle
 
@@ -149,7 +149,7 @@ Trait names follow the same canonical pattern as effects:
 - `impl Show for Int` resolves the trait name before looking up the trait definition
 - Scheme constraints carry canonical trait names (e.g. `("Std.Base.Show", var_id, [])`)
 - Evidence (`TraitEvidence.trait_name`) uses canonical names
-- Builtin traits (Num, Eq, Semigroup) have no module and keep bare names
+- Builtin traits `Num` and `Eq` have no module and keep bare names
 
 **Dict naming**: Dict constructor names use canonical trait and type names with dots mangled to underscores (e.g. `__dict_Std_Base_Show_std_int_Std_Int_Int`), built via `typechecker::make_dict_name`. Dict parameter names (for where-clause type variables) use bare trait names since they're local variables: `__dict_Show_a`, not `__dict_Std_Base_Show_a`.
 

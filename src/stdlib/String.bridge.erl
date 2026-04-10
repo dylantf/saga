@@ -1,6 +1,9 @@
 -module(std_string_bridge).
--export([find/2, strip_prefix/2, contains/2, starts_with/2, ends_with/2, split/2, replace/3, replace_all/3, join/2, graphemes/1, slice/3,
+-export([append/2, find/2, strip_prefix/2, contains/2, starts_with/2, ends_with/2, split/2, replace/3, replace_all/3, join/2, graphemes/1, slice/3,
          is_alpha/1, is_digit/1, is_alphanumeric/1, is_upper/1, is_lower/1, is_whitespace/1, reverse/1]).
+
+append(A, B) ->
+    <<A/binary, B/binary>>.
 
 find(Sub, S) ->
     case string:find(S, Sub) of

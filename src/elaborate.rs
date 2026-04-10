@@ -17,6 +17,7 @@ use crate::typechecker::{CheckResult, TraitEvidence, TraitInfo, Type};
 const SHOW: &str = "Std.Base.Show";
 const DEBUG: &str = "Std.Base.Debug";
 const ORD: &str = "Std.Base.Ord";
+const SEMIGROUP: &str = "Std.Base.Semigroup";
 
 /// Impl key: (trait_name, trait_type_args, target_type).
 /// e.g. ("ConvertTo", ["NOK"], "USD") or ("Show", [], "Int").
@@ -80,8 +81,7 @@ impl Elaborator {
         // explicit where clauses that still have inferred trait constraints).
         // Traits that use operator dispatch, not dictionary dispatch.
         // These should not generate dict params.
-        let operator_traits: std::collections::HashSet<&str> =
-            ["Num", "Semigroup", "Eq"].into_iter().collect();
+        let operator_traits: std::collections::HashSet<&str> = ["Num", "Eq"].into_iter().collect();
 
         let mut inferred_dict_params: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (name, scheme) in result.env.iter() {
@@ -161,16 +161,14 @@ impl Elaborator {
                     ),
                     d.dict_name.clone(),
                 );
-                if !d.param_constraints.is_empty() {
-                    impl_dict_params_from_imports.insert(
-                        (
-                            d.trait_name.clone(),
-                            d.trait_type_args.clone(),
-                            d.target_type.clone(),
-                        ),
-                        d.param_constraints.clone(),
-                    );
-                }
+                impl_dict_params_from_imports.insert(
+                    (
+                        d.trait_name.clone(),
+                        d.trait_type_args.clone(),
+                        d.target_type.clone(),
+                    ),
+                    d.param_constraints.clone(),
+                );
             }
         }
 
@@ -196,7 +194,7 @@ impl Elaborator {
     }
 
     /// Extract dict param info from a where clause: [(trait_name, type_var_name)]
-    /// for traits that use dictionary dispatch (excludes Eq which uses BIFs).
+    /// for traits that use dictionary dispatch (excludes Num/Eq which use BIFs).
     ///
     /// Note: trait type args (the `_` in the destructure) are intentionally not used here.
     /// Dict params are keyed by (trait_name, self_type_var) - one dict per constraint.
@@ -206,7 +204,7 @@ impl Elaborator {
         let mut dict_params = Vec::new();
         for bound in where_clause {
             for (trait_name, _, _) in &bound.traits {
-                if trait_name != "Num" && trait_name != "Semigroup" && trait_name != "Eq" {
+                if trait_name != "Num" && trait_name != "Eq" {
                     let resolved = self
                         .scope_map_traits
                         .get(trait_name)
@@ -830,6 +828,13 @@ impl Elaborator {
             ExprKind::Lit { .. } | ExprKind::Constructor { .. } => expr.clone(),
 
             ExprKind::BinOp { op, left, right } => {
+                if matches!(op, BinOp::Concat)
+                    && let Some(combine_expr) =
+                        self.desugar_semigroup_concat(left, right, node_id, span)
+                {
+                    return combine_expr;
+                }
+
                 // Rewrite comparison operators to `compare` calls for non-primitive types.
                 // Primitives (Int, Float, String) keep using BEAM BIFs directly.
                 if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq) {
@@ -1513,6 +1518,40 @@ impl Elaborator {
         ))
     }
 
+    /// Rewrite `a <> b` into `combine a b` using the Semigroup dict.
+    fn desugar_semigroup_concat(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        node_id: crate::ast::NodeId,
+        span: Span,
+    ) -> Option<Expr> {
+        let dict_expr = self.resolve_dict(SEMIGROUP, node_id, span)?;
+        let combine_fn = Expr::synth(
+            span,
+            ExprKind::DictMethodAccess {
+                dict: Box::new(dict_expr),
+                method_index: 0,
+            },
+        );
+        let elab_left = self.elaborate_expr(left);
+        let elab_right = self.elaborate_expr(right);
+
+        Some(Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(Expr::synth(
+                    span,
+                    ExprKind::App {
+                        func: Box::new(combine_fn),
+                        arg: Box::new(elab_left),
+                    },
+                )),
+                arg: Box::new(elab_right),
+            },
+        ))
+    }
+
     /// Resolve which dictionary to use for a given trait at a given node.
     /// Returns a DictRef expression or None if no evidence found.
     fn resolve_dict(
@@ -1588,7 +1627,7 @@ impl Elaborator {
         }
 
         // No matching evidence for this trait. Might be a built-in trait
-        // (Num, Semigroup, Eq) that uses direct BEAM BIF dispatch rather than dictionary dispatch.
+        // (Num, Eq) that uses direct BEAM BIF dispatch rather than dictionary dispatch.
         None
     }
 

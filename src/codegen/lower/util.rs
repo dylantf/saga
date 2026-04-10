@@ -289,13 +289,11 @@ pub(super) fn module_name_to_erlang(path: &[String]) -> String {
 }
 
 /// Count dictionary parameters from trait constraints.
-/// Excludes operator-dispatched traits (Num, Semigroup, Eq) which use BIF dispatch instead.
+/// Excludes operator-dispatched traits (Num, Eq) which use BIF dispatch instead.
 pub fn dict_param_count(constraints: &[(String, u32, Vec<crate::typechecker::Type>)]) -> usize {
     constraints
         .iter()
-        .filter(|(trait_name, _, _)| {
-            trait_name != "Num" && trait_name != "Semigroup" && trait_name != "Eq"
-        })
+        .filter(|(trait_name, _, _)| trait_name != "Num" && trait_name != "Eq")
         .count()
 }
 

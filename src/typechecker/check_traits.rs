@@ -95,7 +95,7 @@ impl Checker {
                 return Some(canonical);
             }
         }
-        // Builtin traits (Num, Semigroup, Eq) are registered under bare names
+        // Builtin traits (Num, Eq) are registered under bare names
         None
     }
 
