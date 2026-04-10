@@ -896,3 +896,36 @@ f (-5)    # fine
 f -5      # parse error: binary minus with missing right operand
 -x        # fine: unary negation in expression position
 ```
+
+15. **Libraries return `Result`, applications use `Fail`** - fallible operations
+    in libraries (stdlib and third-party) should return `Result`, not impose the
+    `Fail` effect on callers. Effects propagate virally through `needs` clauses,
+    so a library that uses `Fail QueryError` (or any specific Fail instance)
+    forces every transitive caller to declare the same `needs` or attach a
+    handler. Different applications have different error policies — fail-fast
+    in dev, retry in prod, structured errors over HTTP. Libraries don't know
+    their caller's policy and shouldn't pre-commit to one.
+
+    `Result` is the neutral primitive; `Fail` is application-level sugar built
+    on top of it. Going from `Result` to `Fail` is a one-line wrapper; going
+    the other way requires `to_result` and an extra layer of indirection. The
+    `Result`-returning library preserves both options without losing
+    information.
+
+    ```
+    # Library: returns Result
+    pub fun execute : String -> List Value -> Result (Returned Dynamic) QueryError
+      needs {Postgres}
+
+    # Application: lifts to Fail when convenient
+    fun execute_or_fail : String -> List Value -> Returned Dynamic
+      needs {Postgres, Fail QueryError}
+    execute_or_fail sql params = case execute sql params {
+      Ok(r) -> r
+      Err(e) -> fail! e
+    }
+    ```
+
+    Inside a library, `Fail` is fine as an internal implementation detail
+    handled before the function returns. The rule is about public signatures,
+    not internal mechanics.
