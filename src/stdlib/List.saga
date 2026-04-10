@@ -225,7 +225,7 @@ scan f acc xs = case xs {
 
 #@ Splits a list into chunks of the given size. The last chunk may be smaller.
 # NOTE: parameter named `n` to avoid name resolution bug where `size`
-# resolves to maps:size (see examples/scratch.dy for repro)
+# resolves to maps:size (see examples/scratch.saga for repro)
 pub fun chunks : (n: Int) -> (xs: List a) -> List (List a)
 chunks n xs = case xs {
   [] -> []

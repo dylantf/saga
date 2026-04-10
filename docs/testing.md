@@ -1,12 +1,12 @@
 # Testing Framework
 
-Spec for dylang's built-in testing support.
+Spec for saga's built-in testing support.
 
 ---
 
 ## Overview
 
-Tests are written in separate `*_test.dy` files that import the modules they test. They only
+Tests are written in separate `*_test.saga` files that import the modules they test. They only
 have access to `pub` items from those modules. Assertions use the effect system: a single
 `Test` effect with an `assert` operation, handled by the test runner. This means the runner
 controls behavior (fail-fast vs collect-all) without any changes to test code.
@@ -20,12 +20,12 @@ Tests live in a `tests/` directory at the project root (next to `project.toml`) 
 ```
 my_project/
   project.toml
-  Main.dy
-  Math.dy
-  User.dy
+  Main.saga
+  Math.saga
+  User.saga
   tests/
-    math_test.dy
-    user_test.dy
+    math_test.saga
+    user_test.saga
 ```
 
 The test directory is configurable via `project.toml`:
@@ -42,13 +42,13 @@ This lets projects that keep source under `src/` colocate their tests:
 my_project/
   project.toml
   src/
-    Main.dy
-    Math.dy
+    Main.saga
+    Math.saga
     tests/
-      math_test.dy
+      math_test.saga
 ```
 
-`dylang test` discovers all `*.dy` files under the configured test directory. No
+`saga test` discovers all `*.saga` files under the configured test directory. No
 registration needed.
 
 ### Visibility
@@ -112,7 +112,7 @@ describe "Math" {
 `test` can appear at the top level of a test file without a surrounding `describe`:
 
 ```
-# tests/math_test.dy
+# tests/math_test.saga
 import Math
 
 test "add works" {
@@ -208,8 +208,8 @@ call `assert!` with a bool and a message.
 ### Command
 
 ```
-dylang test              # run all tests in tests/
-dylang test math         # filter: only tests whose path or describe/test name contains "math"
+saga test              # run all tests in tests/
+saga test math         # filter: only tests whose path or describe/test name contains "math"
 ```
 
 ### Execution model
@@ -268,7 +268,7 @@ mark, failing tests get an X followed by the failure message.
 
 ### Exit code
 
-`dylang test` exits with code 0 if all tests pass, 1 if any test fails. This makes it
+`saga test` exits with code 0 if all tests pass, 1 if any test fails. This makes it
 usable in CI pipelines.
 
 ---
@@ -358,11 +358,11 @@ as usual.
 1. **Keywords and parsing** - Add `test` and `describe` tokens, parse the new declaration
    forms, add AST variants.
 2. **Std.Test module** - Define the `Test` effect and assertion helpers in
-   `src/stdlib/Test.dy`.
+   `src/stdlib/Test.saga`.
 3. **Type checking** - Handle `Decl::Test` and `Decl::Describe` in the type checker.
    Inject `Test` into the effect context for test bodies.
 4. **Backend lowering** - Lower test declarations to BEAM functions. Each test becomes a
    zero-arg function. Describe groups become a data structure the runner can walk.
-5. **Test runner** - Add `dylang test` subcommand. Discover test files, compile them,
+5. **Test runner** - Add `saga test` subcommand. Discover test files, compile them,
    invoke the generated test functions, collect results, print the report.
-6. **Filter flag** - Support `dylang test <pattern>` to filter by name.
+6. **Filter flag** - Support `saga test <pattern>` to filter by name.

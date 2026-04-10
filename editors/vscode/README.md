@@ -1,13 +1,13 @@
-# dylang VS Code Extension
+# saga VS Code Extension
 
-Syntax highlighting for `.dy` files.
+Syntax highlighting for `.saga` files.
 
 ## Installation
 
 Symlink this directory into your VS Code extensions folder:
 
 ```
-ln -s /path/to/dylang/editors/vscode ~/.vscode/extensions/dylang
+ln -s /path/to/saga/editors/vscode ~/.vscode/extensions/saga
 ```
 
 Then reload VS Code (Ctrl+Shift+P -> "Developer: Reload Window").

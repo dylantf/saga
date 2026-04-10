@@ -1,6 +1,6 @@
 # FFI
 
-dylang calls Erlang/OTP code through `@external` annotations. The compiler trusts the type signature and emits a direct foreign call — no runtime validation or marshalling.
+saga calls Erlang/OTP code through `@external` annotations. The compiler trusts the type signature and emits a direct foreign call — no runtime validation or marshalling.
 
 ## Syntax
 
@@ -13,7 +13,7 @@ The three string arguments are: target (always `"erlang"` for now), module, func
 
 ## Direct FFI
 
-When the Erlang function's argument and return types already match dylang's BEAM representations, no bridge is needed:
+When the Erlang function's argument and return types already match saga's BEAM representations, no bridge is needed:
 
 ```
 @external("erlang", "erlang", "length")
@@ -27,14 +27,14 @@ This works for functions returning plain values (ints, floats, binaries, lists, 
 
 ## Bridge files
 
-When an Erlang function's return convention doesn't match dylang's type representations, you write a **bridge file** — a `.erl` file that adapts between conventions.
+When an Erlang function's return convention doesn't match saga's type representations, you write a **bridge file** — a `.erl` file that adapts between conventions.
 
 ### Example: wrapping `Maybe` returns
 
-Erlang idiomatically returns `Value | undefined` for optional values, but dylang represents `Maybe` as tagged tuples: `{just, V}` / `{nothing}`. A bridge converts between these:
+Erlang idiomatically returns `Value | undefined` for optional values, but saga represents `Maybe` as tagged tuples: `{just, V}` / `{nothing}`. A bridge converts between these:
 
 ```
--- Int.dy
+-- Int.saga
 @external("erlang", "std_int_bridge", "parse")
 pub fun parse : (s: String) -> Maybe Int
 ```
@@ -54,7 +54,7 @@ parse(S) ->
 ### Example: wrapping error types
 
 ```
--- File.dy
+-- File.saga
 @external("erlang", "std_file_bridge", "read_file")
 fun read_file : (path: String) -> Result String FileError
 ```

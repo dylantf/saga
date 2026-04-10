@@ -1,4 +1,4 @@
-use dylang::{codegen, elaborate, project_config, project_config::ProjectConfig};
+use saga::{codegen, elaborate, project_config, project_config::ProjectConfig};
 
 use std::fs;
 use std::path::PathBuf;
@@ -29,9 +29,7 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
             });
             let config = ProjectConfig::load(&project_root);
             if !config.is_bin() {
-                eprintln!(
-                    "This project is a library and cannot be run. Use `dylang build` instead."
-                );
+                eprintln!("This project is a library and cannot be run. Use `saga build` instead.");
                 std::process::exit(1);
             }
             let extra_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
@@ -54,9 +52,7 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
             });
             let config = ProjectConfig::load(&project_root);
             if !config.is_bin() {
-                eprintln!(
-                    "This project is a library and cannot be run. Use `dylang build` instead."
-                );
+                eprintln!("This project is a library and cannot be run. Use `saga build` instead.");
                 std::process::exit(1);
             }
             let pb = build_project("dev");
@@ -107,7 +103,7 @@ pub fn cmd_check(file: Option<&str>) {
             let mut checker = make_checker(Some(project_root.clone()));
             if let Some(deps) = &config.deps
                 && let Err(e) =
-                    dylang::project_config::resolve_deps(&mut checker, &project_root, deps)
+                    saga::project_config::resolve_deps(&mut checker, &project_root, deps)
             {
                 eprintln!("Error resolving dependencies: {}", e);
                 std::process::exit(1);
@@ -179,7 +175,7 @@ module = "{module_name}"
 expose = []
 
 # [bin]
-# main = "Main.dy"
+# main = "Main.saga"
 
 # [deps]
 # some-lib = {{ path = "../some-lib" }}
@@ -187,7 +183,7 @@ expose = []
         );
         fs::write(dir.join("project.toml"), project_toml).unwrap();
         fs::write(
-            dir.join(format!("{module_name}.dy")),
+            dir.join(format!("{module_name}.saga")),
             format!("module {module_name}\n"),
         )
         .unwrap();
@@ -197,7 +193,7 @@ expose = []
 name = "{name}"
 
 [bin]
-main = "Main.dy"
+main = "Main.saga"
 
 # [library]
 # module = "{module_name}"
@@ -209,7 +205,7 @@ main = "Main.dy"
         );
         fs::write(dir.join("project.toml"), project_toml).unwrap();
         fs::write(
-            dir.join("Main.dy"),
+            dir.join("Main.saga"),
             "module Main\n\nimport Std.IO (console)\n\n\nmain () = {\n  println \"hello!\"\n} with console\n",
         )
         .unwrap();
@@ -237,7 +233,7 @@ pub fn cmd_install() {
         std::process::exit(1);
     });
 
-    if let Err(e) = dylang::project_config::install_deps(&project_root) {
+    if let Err(e) = saga::project_config::install_deps(&project_root) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
@@ -291,20 +287,18 @@ pub fn cmd_fmt(file: &str, write_mode: bool, debug_mode: bool, cli_width: Option
     let width = cli_width.unwrap_or_else(|| {
         super::find_project_root()
             .map(|root| ProjectConfig::load(&root).formatter.width)
-            .unwrap_or(dylang::formatter::DEFAULT_WIDTH)
+            .unwrap_or(saga::formatter::DEFAULT_WIDTH)
     });
 
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let tokens = dylang::lexer::Lexer::new(&source)
-        .lex()
-        .unwrap_or_else(|e| {
-            eprintln!("Lex error in {}: {:?}", file, e);
-            std::process::exit(1);
-        });
-    let mut parser = dylang::parser::Parser::new(tokens);
+    let tokens = saga::lexer::Lexer::new(&source).lex().unwrap_or_else(|e| {
+        eprintln!("Lex error in {}: {:?}", file, e);
+        std::process::exit(1);
+    });
+    let mut parser = saga::parser::Parser::new(tokens);
     let program = parser.parse_program_annotated().unwrap_or_else(|e| {
         eprintln!("Parse error in {}: {} at {:?}", file, e.message, e.span);
         std::process::exit(1);
@@ -315,7 +309,7 @@ pub fn cmd_fmt(file: &str, write_mode: bool, debug_mode: bool, cli_width: Option
         return;
     }
 
-    let formatted = dylang::formatter::format(&program, width);
+    let formatted = saga::formatter::format(&program, width);
 
     if write_mode {
         fs::write(file, &formatted).unwrap_or_else(|e| {
@@ -456,7 +450,7 @@ fn discover_test_files(dir: &std::path::Path) -> Vec<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 files.extend(discover_test_files(&path));
-            } else if path.extension().is_some_and(|ext| ext == "dy") {
+            } else if path.extension().is_some_and(|ext| ext == "saga") {
                 files.push(path);
             }
         }

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use dylang::ast::{Decl, Expr, ExprKind, Pat, Stmt};
-use dylang::token::Span;
-use dylang::typechecker::CheckResult;
+use saga::ast::{Decl, Expr, ExprKind, Pat, Stmt};
+use saga::token::Span;
+use saga::typechecker::CheckResult;
 
 pub struct DefinitionResult {
     pub span: Span,

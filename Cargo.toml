@@ -1,15 +1,15 @@
 [package]
-name = "dylang"
+name = "saga"
 version = "0.1.0"
 edition = "2024"
 
 
 [[bin]]
-name = "dylang"
+name = "saga"
 path = "src/main.rs"
 
 [[bin]]
-name = "dylang-lsp"
+name = "saga-lsp"
 path = "src/lsp/main.rs"
 
 [dependencies]

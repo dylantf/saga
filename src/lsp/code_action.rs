@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use tower_lsp::lsp_types::*;
 
-use dylang::ast::Decl;
-use dylang::typechecker::{CheckResult, ModuleExports};
+use saga::ast::Decl;
+use saga::typechecker::{CheckResult, ModuleExports};
 
 use crate::line_index::LineIndex;
 
@@ -159,7 +159,7 @@ fn collect_missing_handler_arms(
 
 /// Format a handler arm from an effect op signature.
 /// Produces: `op_name arg1 arg2 = todo`
-fn format_arm(op: &dylang::typechecker::EffectOpSig) -> String {
+fn format_arm(op: &saga::typechecker::EffectOpSig) -> String {
     if op.params.is_empty() {
         format!("{} () = todo", op.name)
     } else {
@@ -277,7 +277,7 @@ fn build_symbol_index(
 /// Combines the module map (all discoverable modules) with already-cached exports.
 fn build_module_prefix_index(
     module_exports: &HashMap<String, ModuleExports>,
-    module_map: Option<&dylang::typechecker::ModuleMap>,
+    module_map: Option<&saga::typechecker::ModuleMap>,
 ) -> HashMap<String, Vec<String>> {
     let mut index: HashMap<String, Vec<String>> = HashMap::new();
     let mut add = |module_name: &str| {
@@ -297,7 +297,7 @@ fn build_module_prefix_index(
         }
     }
     // Include all builtin stdlib modules (may not be in exports cache or module map)
-    for &(module_name, _) in dylang::typechecker::BUILTIN_MODULES {
+    for &(module_name, _) in saga::typechecker::BUILTIN_MODULES {
         add(module_name);
     }
     index
@@ -675,7 +675,7 @@ fn add_expose_to_existing_action(
 fn qualify_name_action(
     name: &str,
     prefix: &str,
-    span: dylang::token::Span,
+    span: saga::token::Span,
     source: &str,
     line_index: &LineIndex,
     uri: &Url,

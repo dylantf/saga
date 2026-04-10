@@ -1,7 +1,7 @@
 {
-  "name": "dylang",
-  "displayName": "dylang",
-  "description": "Language support for the dylang programming language",
+  "name": "saga",
+  "displayName": "saga",
+  "description": "Language support for the saga programming language",
   "version": "0.2.0",
   "engines": {
     "vscode": "^1.75.0"
@@ -13,27 +13,27 @@
   "contributes": {
     "languages": [
       {
-        "id": "dylang",
+        "id": "saga",
         "aliases": [
-          "dylang"
+          "saga"
         ],
         "extensions": [
-          ".dy"
+          ".saga"
         ],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
-        "language": "dylang",
-        "scopeName": "source.dylang",
-        "path": "./syntaxes/dylang.tmLanguage.json"
+        "language": "saga",
+        "scopeName": "source.saga",
+        "path": "./syntaxes/saga.tmLanguage.json"
       }
     ],
     "commands": [
       {
-        "command": "dylang.restartServer",
-        "title": "dylang: Restart Language Server"
+        "command": "saga.restartServer",
+        "title": "saga: Restart Language Server"
       }
     ]
   },

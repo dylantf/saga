@@ -1,4 +1,4 @@
-# dylang - Language Design
+# saga - Language Design
 
 ---
 
@@ -405,7 +405,7 @@ main () = {
 
 ```
 # Explicit module naming - file path doesn't matter
-# File: foo/bar/some_module.dy
+# File: foo/bar/some_module.saga
 
 module Foo.Bar.SomeModule
 
@@ -673,7 +673,7 @@ skip "not implemented yet" {
 ```
 
 Test files live in a `tests/` directory (configurable via `project.toml`).
-Running `dylang test` discovers all `.dy` files in that directory. If a test
+Running `saga test` discovers all `.saga` files in that directory. If a test
 file has no explicit `main` function, the runner wraps its body in
 `main () = run (fun () -> { ... })`, which attaches the default
 `test_handler` and prints a summary.
@@ -688,7 +688,7 @@ Under the hood:
   state through the computation, prints the summary, and calls `Process.exit 1`
   if any test failed
 
-The exit code behavior means `dylang test` works directly in CI pipelines.
+The exit code behavior means `saga test` works directly in CI pipelines.
 
 ---
 

@@ -1,9 +1,9 @@
-/// BEAM-native interop: the single source of truth for how dylang types and
+/// BEAM-native interop: the single source of truth for how saga types and
 /// effect operations map to Erlang runtime representations.
 ///
 /// This module defines:
 /// - Op->BIF mappings for BEAM-native effect operations (spawn, send, exit, etc.)
-/// - Bidirectional ExitReason conversion (dylang ADT <-> raw Erlang atoms)
+/// - Bidirectional ExitReason conversion (saga ADT <-> raw Erlang atoms)
 /// - SystemMsg pattern shapes (Down/Exit <-> Erlang tuple layouts)
 /// - BEAM-native handler identification
 use std::collections::HashMap;
@@ -77,7 +77,7 @@ pub fn handler_needs_vec_table(canonical_name: &str) -> bool {
 // BEAM-native operation table
 // ---------------------------------------------------------------------------
 
-/// How to transform dylang-side arguments into BEAM call arguments.
+/// How to transform saga-side arguments into BEAM call arguments.
 enum ArgTransform {
     /// Pass args through in order.
     Identity,
@@ -95,7 +95,7 @@ enum ArgTransform {
 struct BeamNativeOp {
     module: &'static str,
     func: &'static str,
-    /// Number of dylang-side parameters (before transform).
+    /// Number of saga-side parameters (before transform).
     param_count: usize,
     arg_transform: ArgTransform,
     /// If Some(index), that argument is an ExitReason ADT that must be
@@ -526,9 +526,9 @@ fn build_ref_procdict(
     }
 }
 
-/// ETS-backed Ref ops. Uses a well-known named table `dylang_ref_store`.
+/// ETS-backed Ref ops. Uses a well-known named table `saga_ref_store`.
 fn build_ref_ets(op_name: &str, param_vars: &[String], fresh: &mut dyn FnMut() -> String) -> CExpr {
-    let table = CExpr::Lit(CLit::Atom("dylang_ref_store".into()));
+    let table = CExpr::Lit(CLit::Atom("saga_ref_store".into()));
 
     match op_name {
         // new(val) -> let Key = erlang:make_ref() in let _ = ets:insert(Table, {Key, Val}) in Key
@@ -670,7 +670,7 @@ pub fn build_vec_native_call(
     build_vec_ets(op_name, param_vars, fresh)
 }
 
-/// ETS-backed Vec ops. Uses a dedicated named table `dylang_vec_store`.
+/// ETS-backed Vec ops. Uses a dedicated named table `saga_vec_store`.
 ///
 /// Storage layout:
 /// - `{VecId, 'length'}` -> current length (Int)
@@ -678,7 +678,7 @@ pub fn build_vec_native_call(
 /// - `{VecId, 1}` -> element at index 1
 /// - etc.
 fn build_vec_ets(op_name: &str, param_vars: &[String], fresh: &mut dyn FnMut() -> String) -> CExpr {
-    let table = CExpr::Lit(CLit::Atom("dylang_vec_store".into()));
+    let table = CExpr::Lit(CLit::Atom("saga_vec_store".into()));
     let length_atom = CExpr::Lit(CLit::Atom("length".into()));
 
     match op_name {
@@ -971,7 +971,7 @@ fn build_vec_ets(op_name: &str, param_vars: &[String], fresh: &mut dyn FnMut() -
         }
 
         // freeze(vec) -> build list from elements 0..len-1
-        // Emits a call to a helper: dylang_vec_freeze(Table, VecId, Len, Acc)
+        // Emits a call to a helper: saga_vec_freeze(Table, VecId, Len, Acc)
         // Since we can't emit recursive functions inline, we use lists:reverse
         // on a fold built from ets:lookup calls. We emit an Erlang sequence
         // that iterates via erlang:seq + lists:map + lists:reverse.
@@ -1211,7 +1211,7 @@ pub fn exit_reason_bare_atom(ctor_name: &str) -> Option<&'static str> {
         .map(|(_, atom)| *atom)
 }
 
-/// Build a `CExpr` that converts a dylang ExitReason ADT value to the raw
+/// Build a `CExpr` that converts a saga ExitReason ADT value to the raw
 /// Erlang term that `erlang:exit/2` expects.
 ///
 /// Nullary variants (Normal, Shutdown, etc.) are already bare atoms from
@@ -1270,7 +1270,7 @@ pub fn build_exit_reason_to_erlang(
 }
 
 /// Build a `CExpr` that converts a raw Erlang exit reason (from a monitor DOWN
-/// or linked EXIT message) into a dylang ExitReason ADT value.
+/// or linked EXIT message) into a saga ExitReason ADT value.
 pub fn build_exit_reason_from_erlang(
     raw_var: &str,
     constructor_atoms: &HashMap<String, String>,
@@ -1325,11 +1325,11 @@ pub fn build_exit_reason_from_erlang(
             guard: None,
             body: CExpr::Lit(CLit::Atom(noproc)),
         },
-        // {{dylang_error, _Kind, Msg, ...}, _Stacktrace} -> Error(Msg)
+        // {{saga_error, _Kind, Msg, ...}, _Stacktrace} -> Error(Msg)
         CArm {
             pat: CPat::Tuple(vec![
                 CPat::Tuple(vec![
-                    CPat::Lit(CLit::Atom("dylang_error".into())),
+                    CPat::Lit(CLit::Atom("saga_error".into())),
                     CPat::Wildcard, // kind
                     CPat::Var(error_msg_var.clone()),
                     CPat::Wildcard, // module

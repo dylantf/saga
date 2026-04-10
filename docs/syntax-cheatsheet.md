@@ -1,4 +1,4 @@
-# dylang Syntax Cheatsheet
+# saga Syntax Cheatsheet
 
 Quick reference for all language syntax. See `language-design.md` for rationale and `effects-guide.md` for effects deep-dive.
 
@@ -621,7 +621,7 @@ describe "Math" {
   }
 }
 
-# Run with: dylang test
+# Run with: saga test
 # Exit code 1 on any failure (CI-friendly)
 ```
 

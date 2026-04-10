@@ -64,7 +64,7 @@ Introduce an explicit origin-aware lowering context.
 For example:
 
 - `current_emit_module`: the Erlang module being generated
-- `current_origin_module`: the Dylang module this AST fragment belongs to
+- `current_origin_module`: the Saga module this AST fragment belongs to
 
 Then route all module-sensitive lowering decisions through that context.
 
@@ -99,7 +99,7 @@ Something like:
 
 ```rust
 struct OriginContext {
-    dylang_module: String,
+    saga_module: String,
 }
 ```
 

@@ -54,8 +54,8 @@ describe "basics" {
     }
 
     test "interpolation" {
-      let name = "dylang"
-      assert_eq ($"hello {name}") "hello dylang"
+      let name = "saga"
+      assert_eq $"hello {name}" "hello saga"
     }
   }
 
@@ -78,7 +78,7 @@ describe "basics" {
     }
 
     test "pipe" {
-      let result = 5 |> (fun x -> x * 2) |> (fun x -> x + 1)
+      let result = 5 |> fun x -> x * 2 |> fun x -> x + 1
       assert_eq result 11
     }
   }
@@ -97,11 +97,11 @@ describe "basics" {
     }
 
     test "comprehension" {
-      assert_eq [x * 2 | x <- [1, 2, 3]] [2, 4, 6]
+      assert_eq ([x * 2 | x <- [1, 2, 3]]) [2, 4, 6]
     }
 
     test "comprehension with filter" {
-      assert_eq [x | x <- [1, 2, 3, 4, 5], x > 3] [4, 5]
+      assert_eq ([x | x <- [1, 2, 3, 4, 5], x > 3]) [4, 5]
     }
   }
 

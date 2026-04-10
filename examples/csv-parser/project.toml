@@ -2,7 +2,7 @@
 name = "csv-parser"
 
 [bin]
-main = "src/Main.dy"
+main = "src/Main.saga"
 
 [deps]
 saga_csv = { git = "https://github.com/dylantf/saga_csv" }

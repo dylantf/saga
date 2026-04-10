@@ -1,7 +1,7 @@
-use dylang::{
+use project_config::ProjectConfig;
+use saga::{
     ast, codegen, derive, desugar, elaborate, lexer, parser, project_config, token, typechecker,
 };
-use project_config::ProjectConfig;
 
 use std::collections::HashMap;
 use std::fs;
@@ -167,7 +167,7 @@ pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<(PathBu
         return None;
     }
 
-    // Check if any .dy file or project.toml has been modified
+    // Check if any .saga file or project.toml has been modified
     let current_mtime = max_project_mtime(project_root);
     if manifest.source_mtime != current_mtime {
         return None;
@@ -186,7 +186,7 @@ pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<(PathBu
     Some((build_dir, stdlib_dir))
 }
 
-/// Find the maximum mtime across all .dy files and project.toml in a project.
+/// Find the maximum mtime across all .saga files and project.toml in a project.
 fn max_project_mtime(root: &Path) -> u64 {
     let mut max = file_mtime(&root.join("project.toml"));
     collect_dy_mtimes(root, &mut max);
@@ -207,7 +207,7 @@ fn collect_dy_mtimes(dir: &Path, max: &mut u64) {
                 continue;
             }
             collect_dy_mtimes(&path, max);
-        } else if path.extension().is_some_and(|ext| ext == "dy") {
+        } else if path.extension().is_some_and(|ext| ext == "saga") {
             let mtime = file_mtime(&path);
             if mtime > *max {
                 *max = mtime;
@@ -375,7 +375,7 @@ fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
             "std_set_bridge.erl",
             include_str!("../stdlib/Set.bridge.erl"),
         ),
-        ("dylang_runtime.erl", include_str!("../stdlib/runtime.erl")),
+        ("saga_runtime.erl", include_str!("../stdlib/runtime.erl")),
         (
             "std_time_bridge.erl",
             include_str!("../stdlib/Time.bridge.erl"),
@@ -702,7 +702,7 @@ pub fn exec_erl_with_timeout(
     timeout: Option<std::time::Duration>,
 ) {
     let eval = format!(
-        "try '{}':main(unit) of _ -> init:stop() catch C:R:S -> dylang_runtime:format_crash(C, R, S), init:stop(1) end",
+        "try '{}':main(unit) of _ -> init:stop() catch C:R:S -> saga_runtime:format_crash(C, R, S), init:stop(1) end",
         entry_module
     );
     let mut cmd = std::process::Command::new("erl");
@@ -767,7 +767,7 @@ pub struct ProjectBuild {
 pub fn build_project(profile: &str) -> ProjectBuild {
     let build_start = Instant::now();
     let project_root = super::find_project_root().unwrap_or_else(|| {
-        eprintln!("No project.toml found. Use `dylang build <file.dy>` for single files.");
+        eprintln!("No project.toml found. Use `saga build <file.saga>` for single files.");
         std::process::exit(1);
     });
 

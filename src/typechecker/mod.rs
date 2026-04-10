@@ -188,7 +188,7 @@ pub const BUILTIN_TYPE_CANONICAL: &[(&str, &str)] = &[
     ("BitString", "Std.BitString.BitString"),
     ("Tuple", "Std.Base.Tuple"),
     ("Handler", "Std.Base.Handler"),
-    // Types defined in stdlib .dy files but referenced in the typechecker
+    // Types defined in stdlib .saga files but referenced in the typechecker
     ("Maybe", "Std.Maybe.Maybe"),
     ("Result", "Std.Result.Result"),
     ("Ordering", "Std.Base.Ordering"),
@@ -932,10 +932,10 @@ pub struct Checker {
     /// Import declarations from the prelude (passed through to lowerer).
     pub prelude_imports: Vec<crate::ast::Decl>,
     /// Set to true when a `with ets_ref` handler is encountered, signalling
-    /// that the `dylang_ref_store` ETS table must be created at startup.
+    /// that the `saga_ref_store` ETS table must be created at startup.
     pub(crate) needs_ets_ref_table: bool,
     /// Set to true when a `with beam_vec` handler is encountered, signalling
-    /// that the `dylang_vec_store` ETS table must be created at startup.
+    /// that the `saga_vec_store` ETS table must be created at startup.
     pub(crate) needs_vec_table: bool,
 }
 
@@ -1162,7 +1162,7 @@ pub struct ModuleContext {
     pub check_results: HashMap<String, CheckResult>,
     /// Cached checker state after prelude has been loaded.
     pub(crate) prelude_snapshot: Option<Box<Checker>>,
-    /// Trait impls from Std.dy (base layer). Shared with builtin module checkers
+    /// Trait impls from Std.saga (base layer). Shared with builtin module checkers
     /// so they can resolve constraints on primitives (e.g. Ord for Int).
     pub(crate) base_trait_impls: HashMap<(String, Vec<String>, String), ImplInfo>,
     /// Modules currently being typechecked (cycle detection).
@@ -1237,8 +1237,8 @@ impl Checker {
         checker
     }
 
-    /// Snapshot current trait impls as the base layer (from Std.dy).
-    /// Called after loading Std.dy so builtin module checkers inherit these impls.
+    /// Snapshot current trait impls as the base layer (from Std.saga).
+    /// Called after loading Std.saga so builtin module checkers inherit these impls.
     pub fn snapshot_base_trait_impls(&mut self) {
         self.modules.base_trait_impls = self.trait_state.impls.clone();
     }
@@ -1261,9 +1261,9 @@ impl Checker {
         }
 
         // Load prelude (which imports Std first, then stdlib modules).
-        // Std.dy defines base traits (Show, Ord) and is loaded as a real module
+        // Std.saga defines base traits (Show, Ord) and is loaded as a real module
         // via `import Std` in the prelude.
-        let prelude_src = include_str!("../stdlib/prelude.dy");
+        let prelude_src = include_str!("../stdlib/prelude.saga");
         let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
             .lex()
             .expect("prelude lex");
@@ -1451,7 +1451,7 @@ impl Checker {
     }
 
     /// Typecheck a module by name, triggering the full dependency walk.
-    /// Used for library builds where there is no Main.dy entry point.
+    /// Used for library builds where there is no Main.saga entry point.
     pub fn typecheck_import_by_name(&mut self, module_name: &str) {
         let parts: Vec<String> = module_name.split('.').map(|s| s.to_string()).collect();
         let span = crate::token::Span { start: 0, end: 0 };

@@ -2,7 +2,7 @@ import Std.Time (monotonic_ms)
 # Mutable vectors with the Vec effect
 #
 # MutVec provides O(1) indexed access and mutation backed by ETS composite
-# keys. This example rewrites the sorting algorithms from 09-sorting.dy
+# keys. This example rewrites the sorting algorithms from 09-sorting.saga
 # using in-place mutation via thaw/freeze.
 
 

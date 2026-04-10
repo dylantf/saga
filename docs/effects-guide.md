@@ -1,6 +1,6 @@
-# dylang Effects Guide
+# saga Effects Guide
 
-Effects are dylang's core abstraction for anything that interacts with the
+Effects are saga's core abstraction for anything that interacts with the
 outside world - I/O, state, errors, concurrency. Instead of baking these into
 the language as special constructs, they're user-defined and handler-provided.
 

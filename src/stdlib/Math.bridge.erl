@@ -1,7 +1,14 @@
 -module(std_math_bridge).
--export([sqrt/1, log/1, log2/1, log10/1,
-         asin/1, acos/1,
-         pow/2, atan2/2]).
+-export([
+    sqrt/1,
+    log/1,
+    log2/1,
+    log10/1,
+    asin/1,
+    acos/1,
+    pow/2,
+    atan2/2
+]).
 
 sqrt(X) when is_number(X), X >= 0 -> math:sqrt(X);
 sqrt(X) -> panic(<<"Math.sqrt: argument must be non-negative (got ", (format_num(X))/binary, ")">>).
@@ -23,20 +30,30 @@ acos(X) -> panic(<<"Math.acos: argument must be in [-1, 1] (got ", (format_num(X
 
 pow(Base, Exp) ->
     case catch math:pow(Base, Exp) of
-        {'EXIT', _} -> panic(<<"Math.pow: invalid arguments (", (format_num(Base))/binary, ", ", (format_num(Exp))/binary, ")">>);
-        Result -> Result
+        {'EXIT', _} ->
+            panic(
+                <<"Math.pow: invalid arguments (", (format_num(Base))/binary, ", ",
+                    (format_num(Exp))/binary, ")">>
+            );
+        Result ->
+            Result
     end.
 
 atan2(Y, X) ->
     case catch math:atan2(Y, X) of
-        {'EXIT', _} -> panic(<<"Math.atan2: invalid arguments (", (format_num(Y))/binary, ", ", (format_num(X))/binary, ")">>);
-        Result -> Result
+        {'EXIT', _} ->
+            panic(
+                <<"Math.atan2: invalid arguments (", (format_num(Y))/binary, ", ",
+                    (format_num(X))/binary, ")">>
+            );
+        Result ->
+            Result
     end.
 
 %% Internal helpers
 
 panic(Msg) ->
-    erlang:error({dylang_panic, <<"panic: ", Msg/binary>>}).
+    erlang:error({saga_panic, <<"panic: ", Msg/binary>>}).
 
 format_num(X) when is_float(X) -> float_to_binary(X, [short]);
 format_num(X) when is_integer(X) -> integer_to_binary(X);

@@ -7,7 +7,7 @@ let client;
 function createClient() {
   const serverCommand =
     process.env.DYLANG_LSP_PATH ||
-    path.join(__dirname, "..", "..", "target", "debug", "dylang-lsp");
+    path.join(__dirname, "..", "..", "target", "debug", "saga-lsp");
 
   const serverOptions = {
     command: serverCommand,
@@ -15,12 +15,12 @@ function createClient() {
   };
 
   const clientOptions = {
-    documentSelector: [{ scheme: "file", language: "dylang" }],
+    documentSelector: [{ scheme: "file", language: "saga" }],
   };
 
   return new LanguageClient(
-    "dylang-lsp",
-    "dylang Language Server",
+    "saga-lsp",
+    "saga Language Server",
     serverOptions,
     clientOptions,
   );
@@ -31,7 +31,7 @@ function activate(context) {
   client.start();
 
   const restartCommand = vscode.commands.registerCommand(
-    "dylang.restartServer",
+    "saga.restartServer",
     async () => {
       if (client) {
         await client.stop();

@@ -12,18 +12,18 @@ A functional programming language (ML/Elm-inspired) with algebraic effects and h
 cargo build                    # Build compiler
 cargo build-lsp                # Build LSP server (alias in .cargo/config.toml)
 cargo test                     # Run all Rust tests
-cargo test -p dylang parser    # Run parser tests
-cargo test -p dylang typechecker  # Run typechecker tests
-cargo test -p dylang codegen   # Run codegen tests
+cargo test -p saga parser    # Run parser tests
+cargo test -p saga typechecker  # Run typechecker tests
+cargo test -p saga codegen   # Run codegen tests
 cargo test --test codegen_integration  # Integration tests
 cargo clippy                   # Lint
 
-cargo run --bin dylang -- run file.dy       # Compile and run a .dy file on BEAM
-cargo run --bin dylang -- build file.dy     # Compile without running
-cargo run --bin dylang -- check file.dy     # Type check only
-cargo run --bin dylang -- emit file.dy      # Print Core Erlang to stdout
-cargo run --bin dylang -- test              # Run project test suite (tests/*.dy)
-cargo run --bin dylang -- install           # Fetch and compile Hex/git dependencies
+cargo run --bin saga -- run file.saga       # Compile and run a .saga file on BEAM
+cargo run --bin saga -- build file.saga     # Compile without running
+cargo run --bin saga -- check file.saga     # Type check only
+cargo run --bin saga -- emit file.saga      # Print Core Erlang to stdout
+cargo run --bin saga -- test              # Run project test suite (tests/*.saga)
+cargo run --bin saga -- install           # Fetch and compile Hex/git dependencies
 ```
 
 Requires `erlc` and `erl` on PATH (Erlang/OTP) for `run`/`build`/`test` commands. Hex packages with NIFs require `rebar3` on PATH.
@@ -33,7 +33,7 @@ Requires `erlc` and `erl` on PATH (Erlang/OTP) for `run`/`build`/`test` commands
 ### Compiler Pipeline
 
 ```
-Source (.dy) -> Lexer -> Parser -> AST -> Derive Expansion -> Typechecker -> Elaboration -> Normalization -> Lowering -> Core Erlang (.core) -> erlc -> BEAM (.beam) -> erl
+Source (.saga) -> Lexer -> Parser -> AST -> Derive Expansion -> Typechecker -> Elaboration -> Normalization -> Lowering -> Core Erlang (.core) -> erlc -> BEAM (.beam) -> erl
 ```
 
 Key phases:
@@ -76,12 +76,12 @@ Key phases:
   - `build.rs` - Build pipeline (parse+typecheck, elaborate, emit, erlc/erl invocation)
   - `commands.rs` - Command implementations (run, build, check, emit, test)
 - `src/lsp/` - Language server (hover, completion, diagnostics, go-to-def, etc.)
-- `src/stdlib/` - Standard library (.dy files); `prelude.dy` is auto-loaded
+- `src/stdlib/` - Standard library (.saga files); `prelude.saga` is auto-loaded
 - `examples/` - Example programs, sort of doubles as E2E testing but purpose is for structured examples of features
 
 ### Module System
 
-Files declare `module Foo.Bar` and are imported with `import Foo.Bar`. Projects use `project.toml` to mark root. The compiler scans all `.dy` files to build a module map, then resolves imports by declared module name (not file path).
+Files declare `module Foo.Bar` and are imported with `import Foo.Bar`. Projects use `project.toml` to mark root. The compiler scans all `.saga` files to build a module map, then resolves imports by declared module name (not file path).
 
 ### Testing Patterns
 
@@ -92,7 +92,7 @@ Typechecker tests use `check(src)` which loads the prelude then checks the sourc
 - `_build/{dev,release}/` — compiled project beams
 - `_build/.stdlib/{fingerprint}/` — precompiled stdlib beams (per-project, keyed by compiler build + embedded stdlib contents)
 - `deps/{name}/` — installed dependencies (Hex and git), with `ebin/` and `priv/`
-- `~/.dylang/cache/` — global download cache (Hex tarballs, git bare clones)
+- `~/.saga/cache/` — global download cache (Hex tarballs, git bare clones)
 
 ## Language Design Notes
 

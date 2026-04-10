@@ -77,7 +77,7 @@ pub fn emit_module(module_name: &str, program: &ast::Program) -> String {
 
 /// Source file path and source text for error location tracking.
 pub struct SourceFile {
-    /// Relative path to the source file (e.g. "src/server.dy").
+    /// Relative path to the source file (e.g. "src/server.saga").
     pub path: String,
     /// Full source text (used to compute line numbers).
     pub source: String,

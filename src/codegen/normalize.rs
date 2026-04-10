@@ -5,7 +5,7 @@
 //! call is nested inside another expression (e.g. `1 + ask!()`), this pass
 //! lifts it into its own `let` binding and replaces it with the bound variable.
 //!
-//! This runs on the dylang AST before lowering. The interpreter is unaffected.
+//! This runs on the saga AST before lowering. The interpreter is unaffected.
 //!
 //! Subexpressions containing effect calls are evaluated left-to-right.
 

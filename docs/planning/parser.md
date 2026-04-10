@@ -4,7 +4,7 @@ Status: **planning**. No code yet. This document captures the full design discus
 
 ## Problem
 
-dylang needs a JSON parser. JSON is ubiquitous — almost every real application deals with it at some boundary (HTTP APIs, config files, messages, etc.). The questions this document addresses:
+saga needs a JSON parser. JSON is ubiquitous — almost every real application deals with it at some boundary (HTTP APIs, config files, messages, etc.). The questions this document addresses:
 
 1. Where should the library live (stdlib vs package)?
 2. What types does it expose?
@@ -19,7 +19,7 @@ Two distinct audiences matter here:
 - **Library authors** — people writing FFI wrappers around Erlang packages. They use `Std.Dynamic` and work with raw BEAM terms.
 - **Application developers** — people decoding JSON into their domain types. They should never touch `Std.Dynamic`; they should use a typed parser library.
 
-The JSON library is a *library author's product* that becomes the *application developer's tool*. It sits between `Std.Dynamic` and application code.
+The JSON library is a _library author's product_ that becomes the _application developer's tool_. It sits between `Std.Dynamic` and application code.
 
 ### The four-layer architecture
 
@@ -49,7 +49,7 @@ This is a layering discipline, not a language-enforced rule. It should be docume
 
 ## Why a Package, Not stdlib
 
-The JSON library should be a **separate package**, installed alongside dylang like saga_pgo, not shipped in `Std.Json`.
+The JSON library should be a **separate package**, installed alongside saga like saga_pgo, not shipped in `Std.Json`.
 
 **Reasons:**
 
@@ -61,9 +61,9 @@ The JSON library should be a **separate package**, installed alongside dylang li
 
 4. **Multiple implementations are healthy.** With JSON as a package, someone can build `json_fast`, `json_streaming`, `json_strict`, etc. They coexist. Applications pick. If JSON is in stdlib, the stdlib version wins by inertia.
 
-5. **JSON is not part of the language.** It's a 1999 serialization format unrelated to dylang's type system, effect system, or runtime model. Languages with small stdlibs (Rust, OCaml, Zig) don't ship JSON parsers. Languages with big stdlibs (Python, Go) do. dylang's stdlib leans toward the smaller side, and this is the natural place to draw the line.
+5. **JSON is not part of the language.** It's a 1999 serialization format unrelated to saga's type system, effect system, or runtime model. Languages with small stdlibs (Rust, OCaml, Zig) don't ship JSON parsers. Languages with big stdlibs (Python, Go) do. saga's stdlib leans toward the smaller side, and this is the natural place to draw the line.
 
-6. **Package management already exists.** saga_pgo demonstrates the infrastructure (`project.toml`, `deps/`, `dylang.lock`, Hex integration) is in place. No barrier to treating JSON the same way.
+6. **Package management already exists.** saga_pgo demonstrates the infrastructure (`project.toml`, `deps/`, `saga.lock`, Hex integration) is in place. No barrier to treating JSON the same way.
 
 ## Core Types
 
@@ -88,6 +88,7 @@ pub type Parser a = Parser (Value -> Result a (List ParseError))
 A `Parser a` is a wrapped function from `Value` to either a typed value or a list of errors. The list-of-errors shape is what enables accumulation — multiple independent failures can be collected.
 
 Key properties:
+
 - **Pure.** A parser is a deterministic function. Same input always produces the same result.
 - **Composable.** Parsers combine via `merge`, `map`, `and_then`, `field`, etc.
 - **No placeholder values.** Because accumulation happens at the `merge` level (tuple-of-Results into Result-of-tuple), there's never a need for per-decoder default values.
@@ -203,7 +204,7 @@ pub fun or_default : a -> Parser (Maybe a) -> Parser a
 or_default d p = map (Maybe.unwrap_or d) p
 ```
 
-Convenience for "this field is optional, use this default if missing." Note: the default is a *user-provided value for missing optional fields*, not a placeholder for failed decoding. Completely different concept from the deleted `Decoder a` default.
+Convenience for "this field is optional, use this default if missing." Note: the default is a _user-provided value for missing optional fields_, not a placeholder for failed decoding. Completely different concept from the deleted `Decoder a` default.
 
 ## The Merge / Map Pattern
 
@@ -559,22 +560,22 @@ dy_json/  (or whatever the package name ends up being)
 ├── project.toml
 ├── dy_json_bridge.erl        # FFI bridge to OTP json module
 ├── lib/
-│   └── Json.dy               # main module: Value, Parser, combinators, entry points
+│   └── Json.saga               # main module: Value, Parser, combinators, entry points
 ├── tests/
-│   └── json_test.dy          # unit tests for primitives, combinators, error cases
+│   └── json_test.saga          # unit tests for primitives, combinators, error cases
 └── examples/
-    └── nested_decode.dy      # demo: nested record decode, success + failure paths
+    └── nested_decode.saga      # demo: nested record decode, success + failure paths
 ```
 
 Single-file library to start. If it grows past ~500 lines, consider splitting:
 
 ```
 lib/
-├── Json.dy                   # re-exports Value, Parser, parse, run
+├── Json.saga                   # re-exports Value, Parser, parse, run
 ├── Json/
-│   ├── Parser.dy             # primitives and combinators
-│   ├── Refinements.dy        # min_length, matches, transform, etc.
-│   └── Error.dy              # ParseError, JsonError, path helpers
+│   ├── Parser.saga             # primitives and combinators
+│   ├── Refinements.saga        # min_length, matches, transform, etc.
+│   └── Error.saga              # ParseError, JsonError, path helpers
 ```
 
 ### The Erlang bridge
@@ -620,7 +621,7 @@ Ordered for incremental value. Each step is shippable on its own.
 
 - New project directory (`dy_json/` or whatever naming convention)
 - `project.toml`, `dy_json_bridge.erl` with stub `parse_string`
-- `lib/Json.dy` with just `opaque type Value = Value Dynamic` and `parse_string : String -> Result Value JsonError`
+- `lib/Json.saga` with just `opaque type Value = Value Dynamic` and `parse_string : String -> Result Value JsonError`
 - Verify it builds and can be imported from a test project
 - **~100 lines + project setup. ~30 minutes.**
 
@@ -649,7 +650,7 @@ Ordered for incremental value. Each step is shippable on its own.
 
 ### Step 7: Demo example
 
-- `examples/nested_decode.dy` showing a realistic nested record decode
+- `examples/nested_decode.saga` showing a realistic nested record decode
 - Both success and failure cases
 - Documents the manual `merge` chain form (pre-syntax)
 - **~80 lines. ~30 minutes.**
@@ -669,7 +670,7 @@ Steps 1-7 are package-level work. Step 8 is a language change. Steps 1-7 are eno
 
 ## Open Questions
 
-1. **Package name.** `dy_json`, `dylang_json`, just `json`? Matches whatever convention has been established.
+1. **Package name.** `dy_json`, `saga_json`, just `json`? Matches whatever convention has been established.
 
 2. **Bridge library.** OTP 27+ built-in vs `jiffy`/`thoas`/`jsone`? OTP 27 is simplest (no dependency) but excludes users on older OTP. Probably start with OTP 27 built-in and add fallbacks later if requested.
 
@@ -679,9 +680,9 @@ Steps 1-7 are package-level work. Step 8 is a language change. Steps 1-7 are eno
 
 5. **Streaming support.** Does v1 need to handle huge JSON documents that don't fit in memory? Almost certainly not — keep it simple, add streaming in a v2 if anyone asks.
 
-6. **Schema introspection.** Zod-style `Schema` type that carries both a parse function *and* an introspectable shape ADT (for generating JSON Schema, OpenAPI specs, forms, etc.). Powerful but bigger commitment. **Not in scope for v1.** Can be added later as either a new type (`Json.Schema a`) or an evolution of `Parser a` without breaking existing code.
+6. **Schema introspection.** Zod-style `Schema` type that carries both a parse function _and_ an introspectable shape ADT (for generating JSON Schema, OpenAPI specs, forms, etc.). Powerful but bigger commitment. **Not in scope for v1.** Can be added later as either a new type (`Json.Schema a`) or an evolution of `Parser a` without breaking existing code.
 
-7. **Mutually recursive parsers.** How does a recursive type (like a JSON tree where each node contains a list of children) define its decoder? Since dylang `val` is eager, you can't write `let tree_parser = Parser (fun v -> ... tree_parser ...)` directly. Workaround: define as a `fun` taking `Unit`, call `tree_parser ()` at the recursion point. Document this in the README.
+7. **Mutually recursive parsers.** How does a recursive type (like a JSON tree where each node contains a list of children) define its decoder? Since saga `val` is eager, you can't write `let tree_parser = Parser (fun v -> ... tree_parser ...)` directly. Workaround: define as a `fun` taking `Unit`, call `tree_parser ()` at the recursion point. Document this in the README.
 
 8. **Cross-field validation ergonomics.** The `and_then` post-process pattern works but is somewhat awkward. Is there a better idiom? Probably fine for v1 — most cross-field validation is rare enough.
 
@@ -706,13 +707,13 @@ Steps 1-7 are package-level work. Step 8 is a language change. Steps 1-7 are eno
 - **F# `let! ... and! ... return ...`** — the applicative computation expression that inspired the `<-` syntax. Same desugaring shape (two builder methods, chained `MergeSources` + final `BindReturn`).
 - **Haskell `Validation` applicative** — same accumulation semantics via `Semigroup e`.
 - **Elm `Json.Decode.Pipeline`** — `|> required "name" string |> required "age" int` style. Less ergonomic than our target because Elm doesn't have record-literal sugar.
-- **Zod (TypeScript)** — schema-as-data with introspection. Our `Parser a` is intentionally *simpler* (pure function, no introspection) for v1. Zod-style introspection is a possible v2 extension.
+- **Zod (TypeScript)** — schema-as-data with introspection. Our `Parser a` is intentionally _simpler_ (pure function, no introspection) for v1. Zod-style introspection is a possible v2 extension.
 - **Gleam `gleam_stdlib/dynamic`** — closest in spirit. Uses opaque `Decoder(t)` with CPS-style combinators. Our design differs in using `merge`/`map` instead of their `use` syntax.
 
 ## References
 
 - `docs/dynamic-type.md` — the `Std.Dynamic` redesign that made this all possible
 - `docs/language-design.md` section 15 — settled decisions and design rules
-- `examples/20-validation-applicative.dy` — the `Validate` effect pattern, which is the closest existing dylang code to applicative validation
-- `src/stdlib/Dynamic.dy` — the stdlib module this library builds on
+- `examples/20-validation-applicative.saga` — the `Validate` effect pattern, which is the closest existing saga code to applicative validation
+- `src/stdlib/Dynamic.saga` — the stdlib module this library builds on
 - saga_pgo project layout — the reference for how a layer-3 package is structured

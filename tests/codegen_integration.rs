@@ -1,9 +1,9 @@
-use dylang::{codegen, desugar, elaborate, lexer, parser, typechecker};
+use saga::{codegen, desugar, elaborate, lexer, parser, typechecker};
 
 /// Load prelude (which imports Std + stdlib) into a checker.
 fn bootstrap() -> typechecker::Checker {
     let mut checker = typechecker::Checker::new();
-    let prelude_src = include_str!("../src/stdlib/prelude.dy");
+    let prelude_src = include_str!("../src/stdlib/prelude.saga");
     let prelude_tokens = lexer::Lexer::new(prelude_src)
         .lex()
         .expect("prelude lex error");
@@ -117,7 +117,7 @@ fn assert_core_compiles(out: &str) {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("dylang_test_{}_{id}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("saga_test_{}_{id}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let core_path = dir.join("_script.core");
     std::fs::write(&core_path, out).unwrap();
@@ -143,7 +143,7 @@ fn assert_core_compiles(out: &str) {
 
 //     let out = emit_elaborated_with_std(src);
 //     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-//     let dir = std::env::temp_dir().join(format!("dylang_run_test_{}_{id}", std::process::id()));
+//     let dir = std::env::temp_dir().join(format!("saga_run_test_{}_{id}", std::process::id()));
 //     std::fs::create_dir_all(&dir).unwrap();
 //     let core_path = dir.join("_script.core");
 //     std::fs::write(&core_path, &out).unwrap();
@@ -2335,8 +2335,8 @@ fn imported_named_handler_calls_private_external_helper_via_bridge() {
 import Std.File (File, fs)
 
 main () = {
-  let _ = File.write! "/tmp/dylang-file-io-test.txt" "hello"
-  File.exists! "/tmp/dylang-file-io-test.txt"
+  let _ = File.write! "/tmp/saga-file-io-test.txt" "hello"
+  File.exists! "/tmp/saga-file-io-test.txt"
 } with fs
 "#;
     let out = emit_elaborated_with_std(src);

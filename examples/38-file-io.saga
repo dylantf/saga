@@ -2,7 +2,7 @@ import Std.File (File, FileError, fs)
 
 fun process : Unit -> Unit needs {File}
 process () = {
-  let result = File.write! "test_output.txt" "hello from dylang!"
+  let result = File.write! "test_output.txt" "hello from saga!"
   case result {
     Ok () -> ()
     Err _ -> dbg "write failed"
@@ -25,7 +25,7 @@ process () = {
   let missing = File.read! "nonexistent.txt"
   case missing {
     Ok _ -> dbg "unexpected"
-    Err(File.NotFound) -> dbg "correctly got NotFound"
+    Err File.NotFound -> dbg "correctly got NotFound"
     Err e -> dbg $"wrong error {debug e}"
   }
 }

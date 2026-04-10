@@ -1,2 +1,2 @@
 [alias]
-build-lsp = "build --bin dylang-lsp"
+build-lsp = "build --bin saga-lsp"

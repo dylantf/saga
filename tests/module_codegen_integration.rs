@@ -1,4 +1,4 @@
-use dylang::{codegen, elaborate, lexer, parser, typechecker};
+use saga::{codegen, elaborate, lexer, parser, typechecker};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,20 +13,20 @@ fn emit_project_module(source: &str, module_name: &str, checker: &typechecker::C
     let mut program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
-    dylang::desugar::desugar_program(&mut program);
+    saga::desugar::desugar_program(&mut program);
     emit_from_program(&program, module_name, checker)
 }
 
 /// Elaborate and emit Core Erlang from an already-parsed program.
 fn emit_from_program(
-    program: &Vec<dylang::ast::Decl>,
+    program: &Vec<saga::ast::Decl>,
     module_name: &str,
     checker: &typechecker::Checker,
 ) -> String {
     let original_module_name = program
         .iter()
         .find_map(|d| {
-            if let dylang::ast::Decl::ModuleDecl { path, .. } = d {
+            if let saga::ast::Decl::ModuleDecl { path, .. } = d {
                 Some(path.join("."))
             } else {
                 None
@@ -69,15 +69,15 @@ fn emit_from_program(
 /// Parse and typecheck a source file with the given checker (project mode).
 /// Returns the parsed program so it can be reused for elaboration/codegen
 /// without re-parsing (which would assign different NodeIds).
-fn typecheck_source(source: &str, checker: &mut typechecker::Checker) -> Vec<dylang::ast::Decl> {
+fn typecheck_source(source: &str, checker: &mut typechecker::Checker) -> Vec<saga::ast::Decl> {
     let tokens = lexer::Lexer::new(source).lex().expect("lex error");
     let mut program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
-    dylang::desugar::desugar_program(&mut program);
+    saga::desugar::desugar_program(&mut program);
     // Set current_module from the module declaration, matching the real pipeline
     if let Some(module_name) = program.iter().find_map(|d| {
-        if let dylang::ast::Decl::ModuleDecl { path, .. } = d {
+        if let saga::ast::Decl::ModuleDecl { path, .. } = d {
             Some(path.join("."))
         } else {
             None
@@ -105,18 +105,18 @@ fn make_project_checker_for_root(root: PathBuf) -> typechecker::Checker {
     let mut checker = typechecker::Checker::with_project_root(root);
     checker.set_module_map(module_map);
     // Load prelude (which imports Std first, then stdlib modules)
-    let prelude_src = include_str!("../src/stdlib/prelude.dy");
+    let prelude_src = include_str!("../src/stdlib/prelude.saga");
     let prelude_tokens = lexer::Lexer::new(prelude_src)
         .lex()
         .expect("prelude lex error");
     let mut prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
-    dylang::derive::expand_derives(&mut prelude_program);
-    dylang::desugar::desugar_program(&mut prelude_program);
+    saga::derive::expand_derives(&mut prelude_program);
+    saga::desugar::desugar_program(&mut prelude_program);
     checker.prelude_imports = prelude_program
         .iter()
-        .filter(|d| matches!(d, dylang::ast::Decl::Import { .. }))
+        .filter(|d| matches!(d, saga::ast::Decl::Import { .. }))
         .cloned()
         .collect();
     let result = checker.check_program(&mut prelude_program);
@@ -131,14 +131,14 @@ fn make_project_checker_for_root(root: PathBuf) -> typechecker::Checker {
 fn with_temp_project_files<T>(
     files: &[(&str, &str)],
     main_src: &str,
-    f: impl FnOnce(&typechecker::Checker, &Vec<dylang::ast::Decl>) -> T,
+    f: impl FnOnce(&typechecker::Checker, &Vec<saga::ast::Decl>) -> T,
 ) -> T {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock before epoch")
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "dylang-module-codegen-{}-{unique}",
+        "saga-module-codegen-{}-{unique}",
         std::process::id()
     ));
 
@@ -167,7 +167,7 @@ fn assert_erlc_compiles(core_src: &str, module_name: &str) -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("dylang_modtest_{}_{id}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("saga_modtest_{}_{id}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let core_path = dir.join(format!("{module_name}.core"));
     std::fs::write(&core_path, core_src).unwrap();
@@ -220,11 +220,15 @@ main () = {
 }
 "#;
 
-    with_temp_project_files(&[("lib/Db.dy", db_module)], main_src, |checker, program| {
-        let out = emit_from_program(program, "main", checker);
-        assert_contains(&out, "call 'erlang':'element'");
-        assert_erlc_compiles(&out, "main");
-    });
+    with_temp_project_files(
+        &[("lib/Db.saga", db_module)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'erlang':'element'");
+            assert_erlc_compiles(&out, "main");
+        },
+    );
 }
 
 #[test]
@@ -255,32 +259,36 @@ main () = {
 }
 "#;
 
-    with_temp_project_files(&[("lib/Db.dy", db_module)], main_src, |checker, program| {
-        let out = emit_from_program(program, "main", checker);
-        assert_contains(&out, "_Handle_Db_Postgres_ping");
-        assert_contains(&out, "call 'db':'run'");
-        // The handler must be threaded into the imported effectful call as the
-        // middle argument of the (arg, handler, continuation) triple.
-        let call_idx = out
-            .find("call 'db':'run'")
-            .expect("expected call to db:run");
-        let after_call = &out[call_idx..];
-        let args_start = after_call.find('(').expect("expected args after call");
-        let args_end = after_call.find(')').expect("expected closing paren");
-        let args = &after_call[args_start + 1..args_end];
-        let parts: Vec<&str> = args.split(',').map(str::trim).collect();
-        assert_eq!(
-            parts.len(),
-            3,
-            "expected (arg, handler, continuation), got: {args}"
-        );
-        assert!(
-            parts[1].starts_with("_Handle_Db_Postgres_ping"),
-            "expected handler in middle position, got: {}",
-            parts[1]
-        );
-        assert_erlc_compiles(&out, "main");
-    });
+    with_temp_project_files(
+        &[("lib/Db.saga", db_module)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "_Handle_Db_Postgres_ping");
+            assert_contains(&out, "call 'db':'run'");
+            // The handler must be threaded into the imported effectful call as the
+            // middle argument of the (arg, handler, continuation) triple.
+            let call_idx = out
+                .find("call 'db':'run'")
+                .expect("expected call to db:run");
+            let after_call = &out[call_idx..];
+            let args_start = after_call.find('(').expect("expected args after call");
+            let args_end = after_call.find(')').expect("expected closing paren");
+            let args = &after_call[args_start + 1..args_end];
+            let parts: Vec<&str> = args.split(',').map(str::trim).collect();
+            assert_eq!(
+                parts.len(),
+                3,
+                "expected (arg, handler, continuation), got: {args}"
+            );
+            assert!(
+                parts[1].starts_with("_Handle_Db_Postgres_ping"),
+                "expected handler in middle position, got: {}",
+                parts[1]
+            );
+            assert_erlc_compiles(&out, "main");
+        },
+    );
 }
 
 #[test]
@@ -323,12 +331,12 @@ main () = {
 "#;
 
     let named_out = with_temp_project_files(
-        &[("lib/Db.dy", db_module)],
+        &[("lib/Db.saga", db_module)],
         named_src,
         |checker, program| emit_from_program(program, "main", checker),
     );
     let inline_out = with_temp_project_files(
-        &[("lib/Db.dy", db_module)],
+        &[("lib/Db.saga", db_module)],
         inline_src,
         |checker, program| emit_from_program(program, "main", checker),
     );
@@ -370,12 +378,16 @@ main () = {
 } with {db, console}
 "#;
 
-    with_temp_project_files(&[("lib/Db.dy", db_module)], main_src, |checker, program| {
-        let out = emit_from_program(program, "main", checker);
-        assert_contains(&out, "call 'erlang':'element'");
-        assert_contains(&out, "call 'io':'format'");
-        assert_erlc_compiles(&out, "main");
-    });
+    with_temp_project_files(
+        &[("lib/Db.saga", db_module)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'erlang':'element'");
+            assert_contains(&out, "call 'io':'format'");
+            assert_erlc_compiles(&out, "main");
+        },
+    );
 }
 
 #[test]
@@ -523,7 +535,7 @@ main () = add 1 (Math.double 3)
 
 #[test]
 fn pub_functions_exported() {
-    let math_src = std::fs::read_to_string(fixtures_root().join("Math.dy")).unwrap();
+    let math_src = std::fs::read_to_string(fixtures_root().join("Math.saga")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&math_src, &mut checker);
     let out = emit_from_program(&program, "math", &checker);
@@ -535,7 +547,7 @@ fn pub_functions_exported() {
 
 #[test]
 fn private_functions_not_exported() {
-    let math_src = std::fs::read_to_string(fixtures_root().join("Math.dy")).unwrap();
+    let math_src = std::fs::read_to_string(fixtures_root().join("Math.saga")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&math_src, &mut checker);
     let out = emit_from_program(&program, "math", &checker);
@@ -561,7 +573,7 @@ main () = add 1 2
 ";
     let tokens = lexer::Lexer::new(src).lex().unwrap();
     let mut program = parser::Parser::new(tokens).parse_program().unwrap();
-    dylang::desugar::desugar_program(&mut program);
+    saga::desugar::desugar_program(&mut program);
     let out = codegen::emit_module("test", &program);
 
     let export_line = out.lines().next().unwrap();
@@ -602,7 +614,7 @@ add a b = a + b
 
 #[test]
 fn two_module_qualified_call_compiles() {
-    let math_src = std::fs::read_to_string(fixtures_root().join("Math.dy")).unwrap();
+    let math_src = std::fs::read_to_string(fixtures_root().join("Math.saga")).unwrap();
     let main_src = "
 module Main
 import Math
@@ -638,7 +650,7 @@ main () = Math.add 10 20
 
 #[test]
 fn two_module_exposed_import_compiles() {
-    let math_src = std::fs::read_to_string(fixtures_root().join("Math.dy")).unwrap();
+    let math_src = std::fs::read_to_string(fixtures_root().join("Math.saga")).unwrap();
     let main_src = "
 module Main
 import Math (add, double)
@@ -719,7 +731,7 @@ main () = {
 #[test]
 fn imported_function_calling_local() {
     // Math.double internally calls Math.add -- verify this still works
-    let math_src = std::fs::read_to_string(fixtures_root().join("Math.dy")).unwrap();
+    let math_src = std::fs::read_to_string(fixtures_root().join("Math.saga")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&math_src, &mut checker);
     let out = emit_from_program(&program, "math", &checker);
@@ -817,7 +829,7 @@ main () = greet \"world\" with {
 #[test]
 fn cross_module_effectful_export_arity() {
     // Logger.greet should be exported with expanded arity (1 + 1 handler + 1 ReturnK = 3)
-    let logger_src = std::fs::read_to_string(fixtures_root().join("Logger.dy")).unwrap();
+    let logger_src = std::fs::read_to_string(fixtures_root().join("Logger.saga")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&logger_src, &mut checker);
     let out = emit_from_program(&program, "logger", &checker);
@@ -828,7 +840,7 @@ fn cross_module_effectful_export_arity() {
 
 #[test]
 fn cross_module_effectful_compiles_with_erlc() {
-    let logger_src = std::fs::read_to_string(fixtures_root().join("Logger.dy")).unwrap();
+    let logger_src = std::fs::read_to_string(fixtures_root().join("Logger.saga")).unwrap();
     let main_src = "
 module Main
 import Logger
@@ -869,7 +881,7 @@ main () = Logger.greet \"world\" with {
 
 #[test]
 fn cross_module_trait_dict_show_animal() {
-    // Animals.dy defines `impl Show for Animal`.
+    // Animals.saga defines `impl Show for Animal`.
     // Importing Animals should make the Show dict available for Animal.
     let main_src = "
 module Main
@@ -926,9 +938,9 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
 
 #[test]
 fn local_dict_names_are_module_qualified() {
-    // When Animals.dy defines impl Show for Animal, the dict should be
+    // When Animals.saga defines impl Show for Animal, the dict should be
     // named with canonical trait + module-qualified type (not bare __dict_Show_Animal)
-    let animals_src = std::fs::read_to_string(fixtures_root().join("Animals.dy")).unwrap();
+    let animals_src = std::fs::read_to_string(fixtures_root().join("Animals.saga")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&animals_src, &mut checker);
     let out = emit_from_program(&program, "animals", &checker);
@@ -945,7 +957,7 @@ fn local_dict_names_are_module_qualified() {
 
 #[test]
 fn local_adt_constructors_mangled_with_module_name() {
-    let shapes_src = std::fs::read_to_string(fixtures_root().join("Shapes.dy")).unwrap();
+    let shapes_src = std::fs::read_to_string(fixtures_root().join("Shapes.saga")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&shapes_src, &mut checker);
     let out = emit_from_program(&program, "shapes", &checker);
@@ -1026,7 +1038,7 @@ main () = case Just(42) {
 #[test]
 fn cross_module_constructor_consistency() {
     // Constructor atoms must match between the defining module and the importing module
-    let shapes_src = std::fs::read_to_string(fixtures_root().join("Shapes.dy")).unwrap();
+    let shapes_src = std::fs::read_to_string(fixtures_root().join("Shapes.saga")).unwrap();
     let main_src = "
 module Main
 import Shapes (Circle, area)
@@ -1046,7 +1058,7 @@ main () = area (Circle 5.0)
 
 #[test]
 fn mangled_constructors_compile_with_erlc() {
-    let shapes_src = std::fs::read_to_string(fixtures_root().join("Shapes.dy")).unwrap();
+    let shapes_src = std::fs::read_to_string(fixtures_root().join("Shapes.saga")).unwrap();
     let main_src = "
 module Main
 import Shapes (Circle, Rect, area)
@@ -1112,7 +1124,7 @@ import OpaqueLib (Token, make_token)
 
 main () = make_token \"abc\"
 ";
-    let lib_path = fixtures_root().join("OpaqueLib.dy");
+    let lib_path = fixtures_root().join("OpaqueLib.saga");
     std::fs::write(&lib_path, lib_src).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(main_src, &mut checker);
@@ -1134,7 +1146,7 @@ import OpaqueLib2 (Token, Secret)
 
 main () = Secret \"abc\"
 ";
-    let lib_path = fixtures_root().join("OpaqueLib2.dy");
+    let lib_path = fixtures_root().join("OpaqueLib2.saga");
     std::fs::write(&lib_path, lib_src).unwrap();
     let mut checker = make_project_checker();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1162,7 +1174,7 @@ import OpaqueLib3 (Token, make_token, reveal)
 pub fun run : Unit -> String
 run () = reveal (make_token \"hello\")
 ";
-    let lib_path = fixtures_root().join("OpaqueLib3.dy");
+    let lib_path = fixtures_root().join("OpaqueLib3.saga");
     std::fs::write(&lib_path, lib_src).unwrap();
     let mut checker = make_project_checker();
     let main_program = typecheck_source(main_src, &mut checker);
@@ -1216,7 +1228,7 @@ run () = reveal (make_token \"hello\")
 //     let mut program = parser::Parser::new(tokens)
 //         .parse_program()
 //         .expect("parse error");
-//     dylang::desugar::desugar_program(&mut program);
+//     saga::desugar::desugar_program(&mut program);
 //     let result = checker.check_program(&mut program);
 //     result.errors().iter().map(|d| d.message.clone()).collect()
 // }
@@ -1255,7 +1267,7 @@ wrapper name = Logger.greet name
 #[test]
 fn handler_not_exposed_requires_qualified_with() {
     // import Logger without exposing console_log: bare `with console_log` should fail.
-    // Logger.dy doesn't define a named handler, so let's test with a module that does.
+    // Logger.saga doesn't define a named handler, so let's test with a module that does.
     // For now, just verify the qualified handler lookup works.
     let src = "
 module Main

@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use tower_lsp::lsp_types::*;
 
-use dylang::ast::Decl;
-use dylang::typechecker::{CheckResult, Type};
+use saga::ast::Decl;
+use saga::typechecker::{CheckResult, Type};
 
 /// Extract the identifier prefix at the cursor position by scanning backwards.
 pub fn extract_prefix(source: &str, offset: usize) -> &str {
