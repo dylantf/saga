@@ -59,7 +59,7 @@ The `type_var_name` field is critical for disambiguation. When multiple where-cl
 
 ### Operator Traits
 
-`Num`, `Semigroup`, and `Eq` use BEAM BIFs directly (e.g., `erlang:'+'`) rather than dictionary passing. They never produce dictionary parameters or evidence for the elaborator.
+`Num` and `Eq` use BEAM BIFs directly (e.g., `erlang:'+'`) rather than dictionary passing. `Semigroup` now lowers through regular trait dictionaries, so `<>` elaborates to a `combine` dictionary method call.
 
 ---
 

@@ -1455,6 +1455,18 @@ main () = add \"hello\" \"world\""
     );
 }
 
+#[test]
+fn semigroup_where_clause_supports_concat() {
+    assert!(
+        check(
+            "fun combine_all : a -> a -> a where {a: Semigroup}
+combine_all a b = a <> b
+main () = combine_all [\"hello\"] [\"world\"]"
+        )
+        .is_ok()
+    );
+}
+
 // --- Eq constraint tests ---
 
 #[test]

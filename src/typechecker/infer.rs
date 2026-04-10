@@ -275,8 +275,11 @@ impl Checker {
                     }
                     BinOp::Concat => {
                         self.unify_at(&left_ty, &right_ty, span)?;
+                        let semigroup_name = self
+                            .resolve_trait_name("Semigroup")
+                            .unwrap_or_else(|| "Semigroup".into());
                         self.trait_state.pending_constraints.push((
-                            "Semigroup".into(),
+                            semigroup_name,
                             vec![],
                             left_ty.clone(),
                             span,
@@ -1099,8 +1102,7 @@ impl Checker {
             },
         );
 
-        let operator_traits: std::collections::HashSet<&str> =
-            ["Num", "Semigroup", "Eq"].into_iter().collect();
+        let operator_traits: std::collections::HashSet<&str> = ["Num", "Eq"].into_iter().collect();
         let dict_params: Vec<(String, String)> = scheme
             .constraints
             .iter()

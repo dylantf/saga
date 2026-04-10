@@ -11,6 +11,31 @@ pub trait Debug a {
   fun debug : a -> String
 }
 
+pub trait Semigroup a {
+  fun combine : a -> a -> a
+}
+
+@external("erlang", "std_string_bridge", "append")
+fun semigroup_string_combine : String -> String -> String
+
+@external("erlang", "lists", "append")
+fun semigroup_list_combine : (xs: List a) -> (ys: List a) -> List a
+
+@external("erlang", "std_bitstring_bridge", "append")
+fun semigroup_bitstring_combine : BitString -> BitString -> BitString
+
+impl Semigroup for String {
+  combine x y = semigroup_string_combine x y
+}
+
+impl Semigroup for List a {
+  combine xs ys = semigroup_list_combine xs ys
+}
+
+impl Semigroup for BitString {
+  combine a b = semigroup_bitstring_combine a b
+}
+
 pub type Ordering = Lt | Eq | Gt deriving (Show, Debug, Eq)
 
 pub trait Ord a where {a: Eq} {
