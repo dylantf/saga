@@ -1,5 +1,5 @@
-import Std.Test (describe, test, assert_eq, assert_true, assert_false)
 import Std.BitString as BitString
+import Std.Test (describe, test, assert_eq, assert_true, assert_false)
 
 # --- Types for deriving tests ---
 
@@ -288,11 +288,42 @@ describe "bitstrings" {
   test "pattern matching on bitstring" {
     let packet = <<1:8, 256:16/big, "hello">>
     case packet {
-      <<tag:8, len:16/big, rest/binary>> -> {
+      <<tag:8, len:16/big, _rest/binary>> -> {
         assert_eq tag 1
         assert_eq len 256
       }
       _ -> assert_true False
+    }
+  }
+}
+
+describe "partial application" {
+
+  # Regression: under-applying a qualified imported function (e.g.
+  # `String.replace "m" ""`) used to lower to a direct call at the
+  # supplied arity (`std_string:replace/2`), which doesn't exist.
+  # The codegen now wraps it in a closure that captures the supplied
+  # args and takes the rest as fresh parameters.
+  describe "qualified imports inside HOFs" {
+    test "String.replace partial app inside List.map" {
+      let cleaned = ["12m", "15m", "20m"] |> List.map (String.replace "m" "")
+      assert_eq cleaned ["12", "15", "20"]
+    }
+
+    test "String.replace_all partial app inside List.map" {
+      let cleaned = ["a-b-c", "x-y-z"] |> List.map (String.replace_all "-" ".")
+      assert_eq cleaned ["a.b.c", "x.y.z"]
+    }
+
+    test "two-arg curried qualified function partial app" {
+      # String.repeat takes (n, s); partially applying n and mapping over strings
+      let tripled = ["hi", "yo"] |> List.map (String.repeat 3)
+      assert_eq tripled ["hihihi", "yoyoyo"]
+    }
+
+    test "qualified partial app stored in let then mapped" {
+      let strip_m = String.replace "m" ""
+      assert_eq (["7m", "9m"] |> List.map strip_m) ["7", "9"]
     }
   }
 }

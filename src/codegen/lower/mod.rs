@@ -2215,6 +2215,57 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_default();
 
         let callee_param_effs = self.param_absorbed_effects(&qualified).cloned();
+
+        use super::resolve::ResolvedName;
+
+        // Detect partial application: if the call site supplies fewer user args
+        // than the declared arity, emit a closure that captures the supplied
+        // args and takes the remaining ones as fresh parameters. Without this,
+        // an under-applied qualified call like `String.replace "m" ""` would
+        // lower to `call std_string:replace/2`, which doesn't exist.
+        let total_arity = self.resolved.get(&head.id).map(|r| match r {
+            ResolvedName::ImportedFun { arity, .. } | ResolvedName::LocalFun { arity, .. } => {
+                *arity
+            }
+        });
+        let effect_count = callee_ops.len();
+        let return_k_count = if effect_count > 0 { 1 } else { 0 };
+        if let Some(arity) = total_arity {
+            let user_slots = arity.saturating_sub(effect_count + return_k_count);
+            if args.len() < user_slots {
+                let remaining_user = user_slots - args.len();
+                let (supplied_arg_vars, supplied_bindings) = self.lower_call_args(args, None);
+                let mut closure_params: Vec<String> = Vec::new();
+                for _ in 0..remaining_user {
+                    closure_params.push(self.fresh());
+                }
+                let mut all_args: Vec<CExpr> = supplied_arg_vars
+                    .iter()
+                    .map(|v| CExpr::Var(v.clone()))
+                    .collect();
+                all_args.extend(closure_params.iter().map(|p| CExpr::Var(p.clone())));
+                if !callee_ops.is_empty() {
+                    for (eff, op) in &callee_ops {
+                        let p = Self::handler_param_name(eff, op);
+                        closure_params.push(p.clone());
+                        all_args.push(CExpr::Var(p));
+                    }
+                    let rk = "_ReturnK".to_string();
+                    closure_params.push(rk.clone());
+                    all_args.push(CExpr::Var(rk));
+                }
+                let call = match self.resolved.get(&head.id) {
+                    Some(ResolvedName::ImportedFun {
+                        erlang_mod, name, ..
+                    }) => CExpr::Call(erlang_mod.clone(), name.clone(), all_args),
+                    _ => CExpr::Call(erlang_module.clone(), func_name.to_string(), all_args),
+                };
+                let call = self.annotate(call, call_span);
+                let lambda = CExpr::Fun(closure_params, Box::new(call));
+                return self.wrap_let_bindings(supplied_bindings, lambda);
+            }
+        }
+
         let (mut arg_vars, mut bindings) = self.lower_call_args(args, callee_param_effs.as_ref());
 
         // Append per-op handler params for effectful callees
@@ -2231,7 +2282,6 @@ impl<'a> Lowerer<'a> {
         }
 
         let call_args: Vec<CExpr> = arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-        use super::resolve::ResolvedName;
         let call = match self.resolved.get(&head.id) {
             Some(ResolvedName::ImportedFun {
                 erlang_mod, name, ..

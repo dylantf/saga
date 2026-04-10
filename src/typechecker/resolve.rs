@@ -212,7 +212,7 @@ fn resolve_decl(decl: &mut Decl, scope: &ScopeMap, local_funs: &HashSet<String>)
                 resolve_expr(g, scope, &locals);
             }
         }
-        Decl::Val { value, .. } => {
+        Decl::Val { value, .. } | Decl::Let { value, .. } => {
             resolve_expr(value, scope, local_funs);
         }
         Decl::TypeDef { variants, .. } => {

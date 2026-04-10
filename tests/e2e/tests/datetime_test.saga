@@ -1,4 +1,4 @@
-import Std.DateTime (ParseError)
+import Std.DateTime (ParseError, NaiveDateTime)
 import Std.Test (describe, test, assert_eq, assert_true)
 
 describe "DateTime" {
@@ -268,6 +268,42 @@ describe "DateTime" {
       assert_eq (DateTime.parse "%Y-%m-%d" "2026-12-25") (Ok expected)
     }
 
+    test "accepts unpadded month and day" {
+      let expected = DateTime.new 2026 4 8 0 0 0
+      assert_eq (DateTime.parse "%Y-%m-%d" "2026-4-8") (Ok expected)
+    }
+
+    test "accepts unpadded time fields" {
+      let expected = DateTime.new 2026 4 8 9 5 3
+      assert_eq (DateTime.parse "%Y-%m-%d %H:%M:%S" "2026-4-8 9:5:3") (Ok expected)
+    }
+
+    test "parses microseconds (right-padded)" {
+      let expected = NaiveDateTime {
+        year: 2026,
+        month: 4,
+        day: 8,
+        hour: 12,
+        minute: 30,
+        second: 45,
+        microsecond: 500000,
+      }
+      assert_eq (DateTime.parse "%Y-%m-%d %H:%M:%S.%f" "2026-04-08 12:30:45.5") (Ok expected)
+    }
+
+    test "parses full 6-digit microseconds" {
+      let expected = NaiveDateTime {
+        year: 2026,
+        month: 4,
+        day: 8,
+        hour: 12,
+        minute: 30,
+        second: 45,
+        microsecond: 123456,
+      }
+      assert_eq (DateTime.parse "%Y-%m-%d %H:%M:%S.%f" "2026-04-08 12:30:45.123456") (Ok expected)
+    }
+
     test "time only fails without date fields" {
       assert_eq (DateTime.parse "%H:%M:%S" "14:30:45") (Err (MissingField "year"))
     }
@@ -277,7 +313,10 @@ describe "DateTime" {
     }
 
     test "rejects wrong literal" {
-      assert_eq (DateTime.parse "%Y-%m-%d" "2026/04/08") (Err (UnexpectedChar("-", "/")))
+      assert_eq (DateTime.parse "%Y-%m-%d" "2026/04/08") (Err (UnexpectedChar (
+        "-",
+        "/",
+      )))
     }
 
     test "ignores trailing input" {
