@@ -855,8 +855,12 @@ pub fn build_project(profile: &str) -> ProjectBuild {
             })
             .clone();
 
-        let mut program = if let Some(cached) = result.programs().get(module_name) {
-            cached.clone()
+        // Cached programs were already expanded and desugared during Phase 1
+        // (inside typecheck_import). Re-running expand_derives on them would
+        // append a second copy of each synthetic ImplDef and then the module
+        // re-check below would report a spurious "duplicate impl" error.
+        let (mut program, from_cache) = if let Some(cached) = result.programs().get(module_name) {
+            (cached.clone(), true)
         } else {
             let source = fs::read_to_string(&file_path).unwrap_or_else(|e| {
                 eprintln!("Error reading {}: {}", file_path.display(), e);
@@ -866,12 +870,13 @@ pub fn build_project(profile: &str) -> ProjectBuild {
                 eprintln!("Lex error in module {}: {:?}", module_name, e);
                 std::process::exit(1);
             });
-            parser::Parser::new(tokens)
+            let program = parser::Parser::new(tokens)
                 .parse_program()
                 .unwrap_or_else(|e| {
                     eprintln!("Parse error in module {}: {:?}", module_name, e);
                     std::process::exit(1);
-                })
+                });
+            (program, false)
         };
 
         // Read source for error location tracking
@@ -888,11 +893,13 @@ pub fn build_project(profile: &str) -> ProjectBuild {
                 source: source_text,
             },
         );
-        let derive_errors = derive::expand_derives(&mut program);
-        desugar::desugar_program(&mut program);
+        if !from_cache {
+            let derive_errors = derive::expand_derives(&mut program);
+            desugar::desugar_program(&mut program);
 
-        for d in &derive_errors {
-            eprintln!("Error in module {}: {}", module_name, d.message);
+            for d in &derive_errors {
+                eprintln!("Error in module {}: {}", module_name, d.message);
+            }
         }
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
         let mod_result = mod_checker.check_program(&mut program);
