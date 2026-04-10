@@ -117,9 +117,19 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 let before = &args[..lambda_idx];
                 let after = &args[lambda_idx + 1..];
 
+                // `before` args are rendered flat: the trailing lambda body
+                // sits on the same line, so when fit-measuring any group inside
+                // a before-arg (e.g. a list literal), `fits` would walk past
+                // the group into the body's flat form and break the arg even
+                // though it's short. Flattening the arg structurally pins it
+                // to one line; if the arg itself is huge it overflows, which
+                // matches how non-trailing-lambda applications already behave
+                // (applications never break across lines).
                 let mut prefix = func_doc;
                 for a in before {
-                    prefix = prefix.append(Doc::text(" ")).append(format_expr_atom(a));
+                    prefix = prefix
+                        .append(Doc::text(" "))
+                        .append(Doc::flat(format_expr_atom(a)));
                 }
                 let mut lhs = Doc::text("(fun ");
                 for (i, p) in params.iter().enumerate() {

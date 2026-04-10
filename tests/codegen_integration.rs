@@ -279,12 +279,15 @@ main () = {
 "#;
 
     let out = emit_elaborated_with_std(src);
+    // The handler functions are bound locally at the `with beam_ref` site
+    // with freshly-numbered suffixes (e.g. `_Handle_Std_Ref_Ref_new__2`),
+    // so match the prefix with the `__` separator rather than a bare `(`.
     assert!(
-        out.contains("apply _Handle_Std_Ref_Ref_new("),
+        out.contains("apply _Handle_Std_Ref_Ref_new__"),
         "beam_ref should install and apply a handler function for new!\n{out}"
     );
     assert!(
-        out.contains("apply _Handle_Std_Ref_Ref_get("),
+        out.contains("apply _Handle_Std_Ref_Ref_get__"),
         "beam_ref should install and apply a handler function for get!\n{out}"
     );
     assert!(

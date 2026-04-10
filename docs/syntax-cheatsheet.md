@@ -685,7 +685,7 @@ fun run_logged : (f: Unit -> Unit needs {Log, ..e}) -> Unit needs {..e}
 fun apply : (f: Unit -> a needs {..e}) -> a needs {..e}
 
 # Unit param
-fun main : Unit -> Unit
+fun foo : Unit -> Unit
 
 # Needs and where together
 fun f : a -> b needs {Log} where {a: Show}

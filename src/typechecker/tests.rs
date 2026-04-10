@@ -3021,7 +3021,6 @@ use_string () = {
   put! (s <> \"!\")
 }
 
-fun main : Unit -> Unit
 main () = {
   use_int () with int_state
   use_string () with string_state
@@ -3246,6 +3245,7 @@ fn main_cannot_have_effects() {
   fun log : (msg: String) -> Unit
 }
 
+# NB: main should not be annotated at all anyway
 fun main : Unit -> Unit needs {Log}
 main () = log! \"hello\"",
     );

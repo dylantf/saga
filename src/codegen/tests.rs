@@ -804,8 +804,7 @@ fn dict_empty() {
 
 #[test]
 fn dict_get() {
-    let src =
-        "import Std.Dict\nfun main : Unit -> Maybe Int\nmain () = Dict.get \"a\" (Dict.new ())";
+    let src = "import Std.Dict\nmain () = Dict.get \"a\" (Dict.new ())";
     let out = emit_full(src);
     assert!(
         out.contains("call 'std_dict':'get'"),

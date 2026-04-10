@@ -1497,6 +1497,40 @@ fn trailing_lambda_with_block_body() {
     assert!(result.contains("})"), "result: {}", result);
 }
 
+/// A list literal before a trailing lambda should stay on one line even when
+/// the lambda body is wide enough to force its own multi-line layout. The
+/// list's group otherwise gets broken because fit-measurement walks past the
+/// group into the lambda body's flat form.
+#[test]
+fn trailing_lambda_keeps_before_args_flat() {
+    let src = "\
+f x = execute sql [text \"Alice\"] (fun () -> User {
+  id: column_uuid,
+  name: column_string,
+  age: column_int,
+  created_at: column_naive_datetime,
+})";
+    let result = fmt80(src);
+    assert!(
+        result.contains("execute sql [text \"Alice\"] (fun () -> User {"),
+        "list should stay inline: {}",
+        result
+    );
+}
+
+/// A small record body in a trailing lambda should still be allowed to stay
+/// flat — we do not unconditionally break record bodies.
+#[test]
+fn trailing_lambda_small_record_body_stays_flat() {
+    let src = "f x = g [x] (fun () -> User { name: \"foo\", age: 1 })";
+    let result = fmt80(src);
+    assert!(
+        result.contains("User { name: \"foo\", age: 1 }"),
+        "small record should stay flat: {}",
+        result
+    );
+}
+
 // --- Handler arms ---
 
 #[test]
