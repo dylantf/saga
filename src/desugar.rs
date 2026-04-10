@@ -641,6 +641,12 @@ fn desugar_stmt(stmt: &mut Stmt) {
 
 /// Expand or-patterns in a list of case arms.
 /// `A | B when g -> body` becomes `A when g -> body`, `B when g -> body`.
+///
+/// Because `arm.node.guard` and `arm.node.body` are cloned per disjunct, their
+/// NodeIds would otherwise collide between arms — resolve would then overwrite
+/// the reference map for each shared usage id, so only the *last* arm's
+/// pattern bindings would look "used". We freshen NodeIds in the cloned
+/// guard/body so each expanded arm is an independent AST.
 fn expand_or_patterns(arms: &mut Vec<Annotated<CaseArm>>) {
     let mut i = 0;
     while i < arms.len() {
@@ -651,12 +657,320 @@ fn expand_or_patterns(arms: &mut Vec<Annotated<CaseArm>>) {
             for (j, pat) in patterns.into_iter().enumerate() {
                 let mut arm = original.clone();
                 arm.node.pattern = pat;
+                if j > 0 {
+                    // First arm keeps the original ids; subsequent clones get
+                    // fresh ones so usages in their bodies don't collide.
+                    if let Some(g) = &mut arm.node.guard {
+                        freshen_expr_ids(g);
+                    }
+                    freshen_expr_ids(&mut arm.node.body);
+                }
                 arms.insert(i + j, arm);
             }
             i += count;
         } else {
             i += 1;
         }
+    }
+}
+
+/// Assign fresh `NodeId`s to every node in an expression subtree.
+///
+/// Used by [`expand_or_patterns`] so that cloned arms don't share NodeIds —
+/// without this, resolve's `references` map (`usage_id -> def_id`) would
+/// have entries overwritten across arms, making earlier arms' pattern bindings
+/// appear unused.
+fn freshen_expr_ids(expr: &mut Expr) {
+    expr.id = NodeId::fresh();
+    match &mut expr.kind {
+        ExprKind::Lit { .. }
+        | ExprKind::Var { .. }
+        | ExprKind::Constructor { .. }
+        | ExprKind::QualifiedName { .. }
+        | ExprKind::DictMethodAccess { .. }
+        | ExprKind::DictRef { .. } => {}
+
+        ExprKind::App { func, arg } => {
+            freshen_expr_ids(func);
+            freshen_expr_ids(arg);
+        }
+        ExprKind::BinOp { left, right, .. } => {
+            freshen_expr_ids(left);
+            freshen_expr_ids(right);
+        }
+        ExprKind::UnaryMinus { expr: inner } => freshen_expr_ids(inner),
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            freshen_expr_ids(cond);
+            freshen_expr_ids(then_branch);
+            freshen_expr_ids(else_branch);
+        }
+        ExprKind::Case {
+            scrutinee, arms, ..
+        } => {
+            freshen_expr_ids(scrutinee);
+            for ann_arm in arms {
+                freshen_pat_ids(&mut ann_arm.node.pattern);
+                if let Some(g) = &mut ann_arm.node.guard {
+                    freshen_expr_ids(g);
+                }
+                freshen_expr_ids(&mut ann_arm.node.body);
+            }
+        }
+        ExprKind::Block { stmts, .. } => {
+            for ann_stmt in stmts {
+                freshen_stmt_ids(&mut ann_stmt.node);
+            }
+        }
+        ExprKind::Lambda { params, body } => {
+            for p in params {
+                freshen_pat_ids(p);
+            }
+            freshen_expr_ids(body);
+        }
+        ExprKind::FieldAccess { expr: inner, .. } => freshen_expr_ids(inner),
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+            for (_, _, val) in fields {
+                freshen_expr_ids(val);
+            }
+        }
+        ExprKind::RecordUpdate { record, fields, .. } => {
+            freshen_expr_ids(record);
+            for (_, _, val) in fields {
+                freshen_expr_ids(val);
+            }
+        }
+        ExprKind::EffectCall { args, .. } => {
+            for arg in args {
+                freshen_expr_ids(arg);
+            }
+        }
+        ExprKind::With {
+            expr: inner,
+            handler,
+        } => {
+            freshen_expr_ids(inner);
+            freshen_handler_ids(handler);
+        }
+        ExprKind::Resume { value } => freshen_expr_ids(value),
+        ExprKind::HandlerExpr { body } => {
+            freshen_handler_body_ids(body);
+        }
+        ExprKind::Tuple { elements } => {
+            for e in elements {
+                freshen_expr_ids(e);
+            }
+        }
+        ExprKind::Do {
+            bindings,
+            success,
+            else_arms,
+            ..
+        } => {
+            for (p, e) in bindings {
+                freshen_pat_ids(p);
+                freshen_expr_ids(e);
+            }
+            freshen_expr_ids(success);
+            for ann_arm in else_arms {
+                freshen_pat_ids(&mut ann_arm.node.pattern);
+                if let Some(g) = &mut ann_arm.node.guard {
+                    freshen_expr_ids(g);
+                }
+                freshen_expr_ids(&mut ann_arm.node.body);
+            }
+        }
+        ExprKind::Receive {
+            arms, after_clause, ..
+        } => {
+            for ann_arm in arms {
+                freshen_pat_ids(&mut ann_arm.node.pattern);
+                if let Some(g) = &mut ann_arm.node.guard {
+                    freshen_expr_ids(g);
+                }
+                freshen_expr_ids(&mut ann_arm.node.body);
+            }
+            if let Some((timeout, body)) = after_clause {
+                freshen_expr_ids(timeout);
+                freshen_expr_ids(body);
+            }
+        }
+        ExprKind::Ascription { expr: inner, .. } => freshen_expr_ids(inner),
+        ExprKind::BitString { segments } => {
+            for seg in segments {
+                freshen_expr_ids(&mut seg.value);
+                if let Some(size) = &mut seg.size {
+                    freshen_expr_ids(size);
+                }
+            }
+        }
+        ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {
+            for seg in segments {
+                freshen_expr_ids(&mut seg.node);
+            }
+        }
+        ExprKind::PipeBack { segments } | ExprKind::ComposeForward { segments } => {
+            for seg in segments {
+                freshen_expr_ids(&mut seg.node);
+            }
+        }
+        ExprKind::Cons { head, tail } => {
+            freshen_expr_ids(head);
+            freshen_expr_ids(tail);
+        }
+        ExprKind::ListLit { elements } => {
+            for e in elements {
+                freshen_expr_ids(e);
+            }
+        }
+        ExprKind::StringInterp { parts, .. } => {
+            for part in parts {
+                if let StringPart::Expr(e) = part {
+                    freshen_expr_ids(e);
+                }
+            }
+        }
+        ExprKind::ListComprehension { body, qualifiers } => {
+            freshen_expr_ids(body);
+            for q in qualifiers {
+                match q {
+                    ComprehensionQualifier::Generator(p, e) => {
+                        freshen_pat_ids(p);
+                        freshen_expr_ids(e);
+                    }
+                    ComprehensionQualifier::Let(p, e) => {
+                        freshen_pat_ids(p);
+                        freshen_expr_ids(e);
+                    }
+                    ComprehensionQualifier::Guard(e) => freshen_expr_ids(e),
+                }
+            }
+        }
+        ExprKind::ForeignCall { args, .. } => {
+            for arg in args {
+                freshen_expr_ids(arg);
+            }
+        }
+    }
+}
+
+fn freshen_stmt_ids(stmt: &mut Stmt) {
+    match stmt {
+        Stmt::Let { pattern, value, .. } => {
+            freshen_pat_ids(pattern);
+            freshen_expr_ids(value);
+        }
+        Stmt::LetFun {
+            id,
+            params,
+            guard,
+            body,
+            ..
+        } => {
+            *id = NodeId::fresh();
+            for p in params {
+                freshen_pat_ids(p);
+            }
+            if let Some(g) = guard {
+                freshen_expr_ids(g);
+            }
+            freshen_expr_ids(body);
+        }
+        Stmt::Expr(e) => freshen_expr_ids(e),
+    }
+}
+
+fn freshen_pat_ids(pat: &mut Pat) {
+    match pat {
+        Pat::Wildcard { id, .. } | Pat::Lit { id, .. } | Pat::Var { id, .. } => {
+            *id = NodeId::fresh();
+        }
+        Pat::Constructor { id, args, .. } => {
+            *id = NodeId::fresh();
+            for a in args {
+                freshen_pat_ids(a);
+            }
+        }
+        Pat::Record { id, fields, .. } | Pat::AnonRecord { id, fields, .. } => {
+            *id = NodeId::fresh();
+            for (_, alias) in fields {
+                if let Some(p) = alias {
+                    freshen_pat_ids(p);
+                }
+            }
+        }
+        Pat::Tuple { id, elements, .. } => {
+            *id = NodeId::fresh();
+            for e in elements {
+                freshen_pat_ids(e);
+            }
+        }
+        Pat::StringPrefix { id, rest, .. } => {
+            *id = NodeId::fresh();
+            freshen_pat_ids(rest);
+        }
+        Pat::BitStringPat { id, segments, .. } => {
+            *id = NodeId::fresh();
+            for seg in segments {
+                freshen_pat_ids(&mut seg.value);
+            }
+        }
+        Pat::ListPat { id, elements, .. } => {
+            *id = NodeId::fresh();
+            for e in elements {
+                freshen_pat_ids(e);
+            }
+        }
+        Pat::ConsPat { id, head, tail, .. } => {
+            *id = NodeId::fresh();
+            freshen_pat_ids(head);
+            freshen_pat_ids(tail);
+        }
+        Pat::Or { id, patterns, .. } => {
+            *id = NodeId::fresh();
+            for p in patterns {
+                freshen_pat_ids(p);
+            }
+        }
+    }
+}
+
+fn freshen_handler_ids(handler: &mut Handler) {
+    match handler {
+        Handler::Named(_, _) => {}
+        Handler::Inline { items, .. } => {
+            for item in items {
+                match &mut item.node {
+                    HandlerItem::Named(_) => {}
+                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
+                        freshen_handler_arm_ids(arm);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn freshen_handler_arm_ids(arm: &mut HandlerArm) {
+    for p in &mut arm.params {
+        freshen_pat_ids(p);
+    }
+    freshen_expr_ids(&mut arm.body);
+    if let Some(fb) = &mut arm.finally_block {
+        freshen_expr_ids(fb);
+    }
+}
+
+fn freshen_handler_body_ids(body: &mut HandlerBody) {
+    for arm in &mut body.arms {
+        freshen_handler_arm_ids(&mut arm.node);
+    }
+    if let Some(rc) = &mut body.return_clause {
+        freshen_handler_arm_ids(rc);
     }
 }
 

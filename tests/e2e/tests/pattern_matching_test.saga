@@ -69,6 +69,17 @@ is_shape_fun shape = case shape {
   Triangle _ _ _ -> False
 }
 
+# Regression: or-pattern arms share a cloned body after desugaring. Before
+# NodeIds were freshened on clone, resolve would overwrite the body's
+# `n` -> def mapping for each arm and earlier pattern bindings would be
+# reported as "unused". Also verifies that `n` resolves correctly at runtime
+# regardless of which branch matched.
+fun first_or_only : (Int, Maybe Int) -> Int
+first_or_only pair = case pair {
+  (1, Just n) | (2, Just n) -> n * 10
+  _ -> 0
+}
+
 fun fizzbuzz : Int -> String
 fizzbuzz n when n % 15 == 0 = "FizzBuzz"
 fizzbuzz n when n % 3 == 0 = "Fizz"
@@ -267,6 +278,22 @@ describe "pattern matching" {
 
     test "triangle is not fun" {
       assert_false (is_shape_fun (Triangle 1.0 2.0 3.0))
+    }
+
+    # Regression: or-pattern arms that bind a variable used to trigger a
+    # spurious "unused variable" warning on the first disjunct because the
+    # cloned arm bodies shared NodeIds, so resolve's usage→def map would
+    # overwrite the first arm's binding.
+    test "or-pattern binding resolves in first arm" {
+      assert_eq (first_or_only (1, Just 7)) 70
+    }
+
+    test "or-pattern binding resolves in second arm" {
+      assert_eq (first_or_only (2, Just 9)) 90
+    }
+
+    test "or-pattern fallthrough when no arm matches" {
+      assert_eq (first_or_only (3, Just 5)) 0
     }
   }
 
