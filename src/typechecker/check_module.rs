@@ -330,7 +330,7 @@ pub struct ModuleCodegenInfo {
     pub type_constructors: Vec<(String, Vec<String>)>,
     /// Trait impl dicts exported by this module.
     pub trait_impl_dicts: Vec<TraitImplDict>,
-    /// External function mappings: (dylang_name, erlang_module, erlang_func, arity).
+    /// External function mappings: (saga_name, erlang_module, erlang_func, arity).
     /// Includes both public and private externals (private ones are needed for handler inlining).
     pub external_funs: Vec<(String, String, String, usize)>,
 }
@@ -346,7 +346,7 @@ fn ctor_arity(ty: &Type) -> usize {
 /// Map from module name (e.g. "Foo.Bar.Baz") to the file path that declares it.
 pub type ModuleMap = HashMap<String, PathBuf>;
 
-/// Scan all .dy files under `root`, extract their `module` declarations,
+/// Scan all .saga files under `root`, extract their `module` declarations,
 /// and build a map from declared module name to file path.
 pub fn scan_project_modules(root: &Path) -> Result<ModuleMap, String> {
     let mut map = ModuleMap::new();
@@ -369,7 +369,7 @@ fn scan_dir(dir: &Path, root: &Path, map: &mut ModuleMap) -> Result<(), String> 
                 continue;
             }
             scan_dir(&path, root, map)?;
-        } else if path.extension().is_some_and(|ext| ext == "dy") {
+        } else if path.extension().is_some_and(|ext| ext == "saga") {
             match extract_module_name(&path) {
                 Ok(Some(module_name)) => {
                     if module_name.starts_with("Std.") || module_name == "Std" {
@@ -407,7 +407,7 @@ fn scan_dir(dir: &Path, root: &Path, map: &mut ModuleMap) -> Result<(), String> 
     Ok(())
 }
 
-/// Extract the module name from a .dy file by lexing and scanning for the
+/// Extract the module name from a .saga file by lexing and scanning for the
 /// first `module` declaration. Returns None if no module declaration is found.
 fn extract_module_name(path: &Path) -> Result<Option<String>, String> {
     let source = std::fs::read_to_string(path)
@@ -454,36 +454,36 @@ fn extract_module_name(path: &Path) -> Result<Option<String>, String> {
 /// Returns the embedded source for a builtin stdlib module, if it exists.
 /// All builtin stdlib modules: (module name, source).
 pub const BUILTIN_MODULES: &[(&str, &str)] = &[
-    ("Std.Base", include_str!("../stdlib/Base.dy")),
-    ("Std.Maybe", include_str!("../stdlib/Maybe.dy")),
-    ("Std.Result", include_str!("../stdlib/Result.dy")),
-    ("Std.List", include_str!("../stdlib/List.dy")),
-    ("Std.Bool", include_str!("../stdlib/Bool.dy")),
-    ("Std.Dict", include_str!("../stdlib/Dict.dy")),
-    ("Std.Int", include_str!("../stdlib/Int.dy")),
-    ("Std.Float", include_str!("../stdlib/Float.dy")),
-    ("Std.String", include_str!("../stdlib/String.dy")),
-    ("Std.Regex", include_str!("../stdlib/Regex.dy")),
-    ("Std.Tuple", include_str!("../stdlib/Tuple.dy")),
-    ("Std.Actor", include_str!("../stdlib/Actor.dy")),
-    ("Std.Fail", include_str!("../stdlib/Fail.dy")),
-    ("Std.Supervisor", include_str!("../stdlib/Supervisor.dy")),
-    ("Std.Async", include_str!("../stdlib/Async.dy")),
-    ("Std.IO.Unsafe", include_str!("../stdlib/IO.Unsafe.dy")),
-    ("Std.IO", include_str!("../stdlib/IO.dy")),
-    ("Std.Math", include_str!("../stdlib/Math.dy")),
-    ("Std.Test", include_str!("../stdlib/Test.dy")),
-    ("Std.Process", include_str!("../stdlib/Process.dy")),
-    ("Std.File", include_str!("../stdlib/File.dy")),
-    ("Std.Set", include_str!("../stdlib/Set.dy")),
-    ("Std.Time", include_str!("../stdlib/Time.dy")),
-    ("Std.DateTime", include_str!("../stdlib/DateTime.dy")),
-    ("Std.BitString", include_str!("../stdlib/BitString.dy")),
-    ("Std.Dynamic", include_str!("../stdlib/Dynamic.dy")),
-    ("Std.Ref", include_str!("../stdlib/Ref.dy")),
-    ("Std.AtomicRef", include_str!("../stdlib/AtomicRef.dy")),
-    ("Std.Vec", include_str!("../stdlib/Vec.dy")),
-    ("Std.Array", include_str!("../stdlib/Array.dy")),
+    ("Std.Base", include_str!("../stdlib/Base.saga")),
+    ("Std.Maybe", include_str!("../stdlib/Maybe.saga")),
+    ("Std.Result", include_str!("../stdlib/Result.saga")),
+    ("Std.List", include_str!("../stdlib/List.saga")),
+    ("Std.Bool", include_str!("../stdlib/Bool.saga")),
+    ("Std.Dict", include_str!("../stdlib/Dict.saga")),
+    ("Std.Int", include_str!("../stdlib/Int.saga")),
+    ("Std.Float", include_str!("../stdlib/Float.saga")),
+    ("Std.String", include_str!("../stdlib/String.saga")),
+    ("Std.Regex", include_str!("../stdlib/Regex.saga")),
+    ("Std.Tuple", include_str!("../stdlib/Tuple.saga")),
+    ("Std.Actor", include_str!("../stdlib/Actor.saga")),
+    ("Std.Fail", include_str!("../stdlib/Fail.saga")),
+    ("Std.Supervisor", include_str!("../stdlib/Supervisor.saga")),
+    ("Std.Async", include_str!("../stdlib/Async.saga")),
+    ("Std.IO.Unsafe", include_str!("../stdlib/IO.Unsafe.saga")),
+    ("Std.IO", include_str!("../stdlib/IO.saga")),
+    ("Std.Math", include_str!("../stdlib/Math.saga")),
+    ("Std.Test", include_str!("../stdlib/Test.saga")),
+    ("Std.Process", include_str!("../stdlib/Process.saga")),
+    ("Std.File", include_str!("../stdlib/File.saga")),
+    ("Std.Set", include_str!("../stdlib/Set.saga")),
+    ("Std.Time", include_str!("../stdlib/Time.saga")),
+    ("Std.DateTime", include_str!("../stdlib/DateTime.saga")),
+    ("Std.BitString", include_str!("../stdlib/BitString.saga")),
+    ("Std.Dynamic", include_str!("../stdlib/Dynamic.saga")),
+    ("Std.Ref", include_str!("../stdlib/Ref.saga")),
+    ("Std.AtomicRef", include_str!("../stdlib/AtomicRef.saga")),
+    ("Std.Vec", include_str!("../stdlib/Vec.saga")),
+    ("Std.Array", include_str!("../stdlib/Array.saga")),
 ];
 
 pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
@@ -592,7 +592,7 @@ impl Checker {
                 };
                 snapshot.modules.map = self.modules.map.clone();
                 // Load prelude (which imports Std first, then stdlib modules)
-                let prelude_src = include_str!("../stdlib/prelude.dy");
+                let prelude_src = include_str!("../stdlib/prelude.saga");
                 let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
                     .lex()
                     .expect("prelude lex error");

@@ -27,7 +27,8 @@ pub fun get : (key: k) -> (dict: Dict k v) -> Maybe v where {k: Eq}
 
 #@ Inserts or replaces a key-value pair.
 @external("erlang", "maps", "put")
-pub fun put : (key: k) -> (value: v) -> (dict: Dict k v) -> Dict k v where {k: Eq}
+pub fun put : (key: k) -> (value: v) -> (dict: Dict k v) -> Dict k v
+  where {k: Eq}
 
 #@ Removes a key from the dictionary. Returns the dict unchanged if key is not present.
 @external("erlang", "maps", "remove")
@@ -71,13 +72,14 @@ pub fun fold : (f: a -> k -> v -> a) -> (init: a) -> (dict: Dict k v) -> a
 
 #@ Merges two dictionaries. Values from the overrides dict win on key conflicts.
 @external("erlang", "maps", "merge")
-pub fun merge : (base: Dict k v) -> (overrides: Dict k v) -> Dict k v where {k: Eq}
+pub fun merge : (base: Dict k v) -> (overrides: Dict k v) -> Dict k v
+  where {k: Eq}
 
 #@ Updates the value at a key by applying a function. No-op if key is not present.
 @external("erlang", "std_dict_bridge", "update")
-pub fun update : (key: k) -> (f: v -> v) -> (dict: Dict k v) -> Dict k v where {k: Eq}
-
+pub fun update : (key: k) -> (f: v -> v) -> (dict: Dict k v) -> Dict k v
+  where {k: Eq}
 
 # NOTE: group_by is blocked on a name resolution bug where unqualified
 # function names inside lambdas resolve to wrong externals.
-# See examples/scratch.dy for repro.
+# See examples/scratch.saga for repro.

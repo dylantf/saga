@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
-  "name": "dylang",
-  "scopeName": "source.dylang",
+  "name": "saga",
+  "scopeName": "source.saga",
   "patterns": [
     { "include": "#comment" },
     { "include": "#string-raw" },
@@ -20,182 +20,182 @@
     "comment": {
       "patterns": [
         {
-          "name": "comment.line.documentation.dylang",
+          "name": "comment.line.documentation.saga",
           "match": "#@.*$"
         },
         {
-          "name": "comment.line.number-sign.dylang",
+          "name": "comment.line.number-sign.saga",
           "match": "#.*$"
         }
       ]
     },
     "string-raw": {
-      "name": "string.quoted.double.raw.dylang",
+      "name": "string.quoted.double.raw.saga",
       "begin": "@\"",
       "end": "\"",
       "beginCaptures": {
-        "0": { "name": "punctuation.definition.string.raw.begin.dylang" }
+        "0": { "name": "punctuation.definition.string.raw.begin.saga" }
       },
       "endCaptures": {
-        "0": { "name": "punctuation.definition.string.end.dylang" }
+        "0": { "name": "punctuation.definition.string.end.saga" }
       }
     },
     "string": {
-      "name": "string.quoted.double.dylang",
+      "name": "string.quoted.double.saga",
       "begin": "\"",
       "end": "\"",
       "patterns": [
         {
-          "name": "constant.character.escape.dylang",
+          "name": "constant.character.escape.saga",
           "match": "\\\\[ntr\\\\\"']"
         }
       ]
     },
     "string-interp": {
-      "name": "string.quoted.double.interpolated.dylang",
+      "name": "string.quoted.double.interpolated.saga",
       "begin": "\\$\"",
       "end": "\"",
       "beginCaptures": {
-        "0": { "name": "punctuation.definition.string.interpolated.begin.dylang" }
+        "0": { "name": "punctuation.definition.string.interpolated.begin.saga" }
       },
       "endCaptures": {
-        "0": { "name": "punctuation.definition.string.end.dylang" }
+        "0": { "name": "punctuation.definition.string.end.saga" }
       },
       "patterns": [
         {
-          "name": "constant.character.escape.dylang",
+          "name": "constant.character.escape.saga",
           "match": "\\\\[ntr\\\\\"'\\{]"
         },
         {
-          "name": "meta.embedded.expression.dylang",
+          "name": "meta.embedded.expression.saga",
           "begin": "\\{",
           "end": "\\}",
           "beginCaptures": {
-            "0": { "name": "punctuation.definition.interpolation.begin.dylang" }
+            "0": { "name": "punctuation.definition.interpolation.begin.saga" }
           },
           "endCaptures": {
-            "0": { "name": "punctuation.definition.interpolation.end.dylang" }
+            "0": { "name": "punctuation.definition.interpolation.end.saga" }
           },
-          "patterns": [{ "include": "source.dylang" }]
+          "patterns": [{ "include": "source.saga" }]
         }
       ]
     },
     "number": {
       "patterns": [
         {
-          "name": "constant.numeric.float.dylang",
+          "name": "constant.numeric.float.saga",
           "match": "\\b\\d+\\.\\d+\\b"
         },
         {
-          "name": "constant.numeric.integer.dylang",
+          "name": "constant.numeric.integer.saga",
           "match": "\\b\\d+\\b"
         }
       ]
     },
     "effect-call": {
-      "name": "entity.name.function.effect-call.dylang",
+      "name": "entity.name.function.effect-call.saga",
       "match": "\\b[a-z_][a-zA-Z0-9_']*!"
     },
     "keyword": {
       "patterns": [
         {
-          "name": "keyword.control.dylang",
+          "name": "keyword.control.saga",
           "match": "\\b(if|then|else|case|when|with|return)\\b"
         },
         {
-          "name": "keyword.declaration.dylang",
+          "name": "keyword.declaration.saga",
           "match": "\\b(let|val|fun|pub|type|record|effect|handler|trait|impl|module|import|needs|where|resume)\\b"
         },
         {
-          "name": "keyword.other.dylang",
+          "name": "keyword.other.saga",
           "match": "\\b(as|for)\\b"
         }
       ]
     },
     "boolean": {
-      "name": "constant.language.boolean.dylang",
+      "name": "constant.language.boolean.saga",
       "match": "\\b(True|False)\\b"
     },
     "operator": {
       "patterns": [
         {
-          "name": "keyword.operator.arrow.dylang",
+          "name": "keyword.operator.arrow.saga",
           "match": "->"
         },
         {
-          "name": "keyword.operator.pipe.dylang",
+          "name": "keyword.operator.pipe.saga",
           "match": "\\|>|<\\|"
         },
         {
-          "name": "keyword.operator.compose.dylang",
+          "name": "keyword.operator.compose.saga",
           "match": ">>|<<"
         },
         {
-          "name": "keyword.operator.comparison.dylang",
+          "name": "keyword.operator.comparison.saga",
           "match": "==|!=|<=|>=|<(?![|>])|>(?![>])"
         },
         {
-          "name": "keyword.operator.logical.dylang",
+          "name": "keyword.operator.logical.saga",
           "match": "&&|\\|\\|"
         },
         {
-          "name": "keyword.operator.cons.dylang",
+          "name": "keyword.operator.cons.saga",
           "match": "::"
         },
         {
-          "name": "keyword.operator.concat.dylang",
+          "name": "keyword.operator.concat.saga",
           "match": "<>"
         },
         {
-          "name": "keyword.operator.range.dylang",
+          "name": "keyword.operator.range.saga",
           "match": "\\.\\."
         },
         {
-          "name": "keyword.operator.arithmetic.dylang",
+          "name": "keyword.operator.arithmetic.saga",
           "match": "[+\\-*/%]"
         },
         {
-          "name": "keyword.operator.assignment.dylang",
+          "name": "keyword.operator.assignment.saga",
           "match": "="
         }
       ]
     },
     "type-name": {
-      "name": "entity.name.type.dylang",
+      "name": "entity.name.type.saga",
       "match": "\\b[A-Z][a-zA-Z0-9_']*\\b"
     },
     "identifier": {
-      "name": "variable.other.dylang",
+      "name": "variable.other.saga",
       "match": "\\b[a-z_][a-zA-Z0-9_']*\\b"
     },
     "punctuation": {
       "patterns": [
         {
-          "name": "punctuation.separator.comma.dylang",
+          "name": "punctuation.separator.comma.saga",
           "match": ","
         },
         {
-          "name": "punctuation.separator.colon.dylang",
+          "name": "punctuation.separator.colon.saga",
           "match": ":"
         },
         {
-          "name": "punctuation.separator.dot.dylang",
+          "name": "punctuation.separator.dot.saga",
           "match": "\\."
         },
         {
-          "name": "punctuation.separator.pipe.dylang",
+          "name": "punctuation.separator.pipe.saga",
           "match": "\\|"
         },
         {
-          "name": "punctuation.bracket.round.dylang",
+          "name": "punctuation.bracket.round.saga",
           "match": "[()]"
         },
         {
-          "name": "punctuation.bracket.square.dylang",
+          "name": "punctuation.bracket.square.saga",
           "match": "[\\[\\]]"
         },
         {
-          "name": "punctuation.bracket.curly.dylang",
+          "name": "punctuation.bracket.curly.saga",
           "match": "[{}]"
         }
       ]

@@ -1,10 +1,10 @@
 use tower_lsp::lsp_types::*;
 
-use dylang::ast::Decl;
+use saga::ast::Decl;
 
 use super::line_index::LineIndex;
 
-fn span_to_range(span: &dylang::token::Span, li: &LineIndex, source: &str) -> Range {
+fn span_to_range(span: &saga::token::Span, li: &LineIndex, source: &str) -> Range {
     let (sl, sc) = li.offset_to_line_col(span.start, source);
     let (el, ec) = li.offset_to_line_col(span.end, source);
     Range {

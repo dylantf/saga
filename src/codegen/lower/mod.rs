@@ -106,7 +106,7 @@ pub struct Lowerer<'a> {
     source_info: Option<SourceInfo>,
     /// Current Erlang module name being emitted (e.g. "my_app_server").
     current_module: String,
-    /// Current Dylang source module name (e.g. "MyApp.Server").
+    /// Current Saga source module name (e.g. "MyApp.Server").
     current_source_module: String,
     /// Current function being lowered (e.g. "handle_request"). Set per function.
     current_function: String,
@@ -415,7 +415,7 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Build a structured error term and wrap it in `erlang:error(Term)`.
-    /// Falls back to the old `{dylang_panic, Msg}` tuple when no source info is available.
+    /// Falls back to the old `{saga_panic, Msg}` tuple when no source info is available.
     pub(super) fn make_error(
         &self,
         kind: ErrorKind,
@@ -436,7 +436,7 @@ impl<'a> Lowerer<'a> {
         } else {
             // Stdlib modules don't have source info — use the old format
             CExpr::Tuple(vec![
-                CExpr::Lit(CLit::Atom("dylang_error".into())),
+                CExpr::Lit(CLit::Atom("saga_error".into())),
                 CExpr::Lit(CLit::Atom(kind.as_atom().into())),
                 message,
                 lower_string_to_binary(&self.current_source_module),
@@ -1069,7 +1069,7 @@ impl<'a> Lowerer<'a> {
             main_def.body = Self::wrap_with_ets_init(main_def.body.clone());
         }
 
-        // If the program uses beam_vec, prepend ETS table creation for dylang_vec_store.
+        // If the program uses beam_vec, prepend ETS table creation for saga_vec_store.
         if self
             .check_result
             .as_ref()
@@ -1086,8 +1086,8 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Wraps a function body with ETS table creation for `dylang_ref_store`.
-    /// Emits: `fun(Args...) -> let _ = ets:new(dylang_ref_store, [set, public, named_table]) in <original body>`
+    /// Wraps a function body with ETS table creation for `saga_ref_store`.
+    /// Emits: `fun(Args...) -> let _ = ets:new(saga_ref_store, [set, public, named_table]) in <original body>`
     fn wrap_with_ets_init(body: CExpr) -> CExpr {
         // Unwrap the outer Fun to inject the let-binding inside
         match body {
@@ -1096,7 +1096,7 @@ impl<'a> Lowerer<'a> {
                     "ets".to_string(),
                     "new".to_string(),
                     vec![
-                        CExpr::Lit(CLit::Atom("dylang_ref_store".into())),
+                        CExpr::Lit(CLit::Atom("saga_ref_store".into())),
                         CExpr::Cons(
                             Box::new(CExpr::Lit(CLit::Atom("set".into()))),
                             Box::new(CExpr::Cons(
@@ -1122,7 +1122,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Wraps a function body with ETS table creation for `dylang_vec_store`.
+    /// Wraps a function body with ETS table creation for `saga_vec_store`.
     fn wrap_with_vec_init(body: CExpr) -> CExpr {
         match body {
             CExpr::Fun(params, inner_body) => {
@@ -1130,7 +1130,7 @@ impl<'a> Lowerer<'a> {
                     "ets".to_string(),
                     "new".to_string(),
                     vec![
-                        CExpr::Lit(CLit::Atom("dylang_vec_store".into())),
+                        CExpr::Lit(CLit::Atom("saga_vec_store".into())),
                         CExpr::Cons(
                             Box::new(CExpr::Lit(CLit::Atom("set".into()))),
                             Box::new(CExpr::Cons(

@@ -72,7 +72,7 @@ pub(super) fn process_string_escapes(s: &str) -> String {
     out
 }
 
-/// Mangle a dylang variable name to a valid Core Erlang variable (uppercase start).
+/// Mangle a saga variable name to a valid Core Erlang variable (uppercase start).
 pub(super) fn core_var(name: &str) -> String {
     let mut chars = name.chars();
     match chars.next() {
@@ -95,7 +95,7 @@ pub(super) fn cerl_call(module: &str, func: &str, args: Vec<CExpr>) -> CExpr {
     CExpr::Call(module.to_string(), func.to_string(), args)
 }
 
-/// Map a dylang BinOp + two already-bound var names to a CExpr.
+/// Map a saga BinOp + two already-bound var names to a CExpr.
 pub(super) fn binop_call(op: &BinOp, left: &str, right: &str) -> CExpr {
     let l = CExpr::Var(left.to_string());
     let r = CExpr::Var(right.to_string());

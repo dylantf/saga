@@ -79,10 +79,10 @@ pub struct CheckResult {
     /// Name resolution map: user-visible names -> canonical names.
     pub scope_map: super::ScopeMap,
     /// Whether any `with ets_ref` appears in the program, requiring the
-    /// `dylang_ref_store` ETS table to be created at VM startup.
+    /// `saga_ref_store` ETS table to be created at VM startup.
     pub needs_ets_ref_table: bool,
     /// Whether any `with beam_vec` appears in the program, requiring the
-    /// `dylang_vec_store` ETS table to be created at VM startup.
+    /// `saga_vec_store` ETS table to be created at VM startup.
     pub needs_vec_table: bool,
 }
 

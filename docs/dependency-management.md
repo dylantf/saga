@@ -1,6 +1,6 @@
 # Dependency Management
 
-This document covers how dylang projects consume dependencies: library configuration, dependency sources (path, git, Hex), resolution, and the lockfile.
+This document covers how saga projects consume dependencies: library configuration, dependency sources (path, git, Hex), resolution, and the lockfile.
 
 ---
 
@@ -17,7 +17,7 @@ expose = ["Math", "Math.Vector", "Math.Matrix"]    # public modules, required
 
 # Optional: declares this project as a runnable binary
 [bin]
-main = "Main.dy"   # entry point, defaults to Main.dy
+main = "Main.saga"   # entry point, defaults to Main.saga
 
 # Optional: dependencies
 [deps]
@@ -29,7 +29,7 @@ base64url = { version = "1.0.1" }                                   # hex packag
 - A project can have `[library]`, `[bin]`, or both.
 - `[library].module` is the root namespace. All modules in `expose` must be prefixed by it.
 - `[library].expose` is required when `[library]` is present. Only listed modules are importable by consumers. Unlisted modules are compiled (needed at runtime) but invisible to the type system.
-- `[bin].main` defaults to `Main.dy`. The main file must define a `main` function.
+- `[bin].main` defaults to `Main.saga`. The main file must define a `main` function.
 
 ---
 
@@ -49,7 +49,7 @@ http = { path = "deps/http", as = "Net" }   # alias remaps the module prefix
 
 ### Git Dependencies
 
-Clone from a git repository. Requires `dylang install` to fetch.
+Clone from a git repository. Requires `saga install` to fetch.
 
 ```toml
 [deps]
@@ -60,11 +60,11 @@ http = { git = "https://github.com/someone/http", rev = "abc123f" }
 
 Specify exactly one of `tag`, `branch`, or `rev`. If none is given, defaults to `HEAD`.
 
-Git repo source is cached globally in `~/.dylang/cache/git/` (bare clones, shared across projects). Compiled output goes to the project's `_build/deps/{name}/`.
+Git repo source is cached globally in `~/.saga/cache/git/` (bare clones, shared across projects). Compiled output goes to the project's `_build/deps/{name}/`.
 
 ### Hex Dependencies (Erlang packages)
 
-Dependencies from the [Hex package registry](https://hex.pm). These are Erlang (BEAM) packages — they're compiled and made available on the code path, but not typechecked by dylang.
+Dependencies from the [Hex package registry](https://hex.pm). These are Erlang (BEAM) packages — they're compiled and made available on the code path, but not typechecked by saga.
 
 ```toml
 [deps]
@@ -74,7 +74,7 @@ argon2 = { version = "1.2.0" }
 
 Hex is the default source: if a dep has no `path` or `git`, it's treated as a Hex package. The dep key is the Hex package name.
 
-`dylang install` fetches the tarball from `repo.hex.pm`, extracts it, compiles it, and installs into the project's `deps/` directory. Tarballs are cached globally in `~/.dylang/cache/hex/` to avoid re-downloading. Transitive Hex dependencies are resolved and installed automatically.
+`saga install` fetches the tarball from `repo.hex.pm`, extracts it, compiles it, and installs into the project's `deps/` directory. Tarballs are cached globally in `~/.saga/cache/hex/` to avoid re-downloading. Transitive Hex dependencies are resolved and installed automatically.
 
 #### Compilation
 
@@ -85,7 +85,7 @@ Hex packages are compiled with one of two strategies:
 
 #### Wrapping Hex packages
 
-Hex deps are opaque to the type system. To use them from dylang, wrap the Erlang functions with `@external` annotations (see `docs/ffi-design.md`):
+Hex deps are opaque to the type system. To use them from saga, wrap the Erlang functions with `@external` annotations (see `docs/ffi-design.md`):
 
 ```
 # Direct FFI — types map cleanly
@@ -116,17 +116,18 @@ For now, Hex deps use exact versions. Transitive dependencies from Hex packages 
 
 #### Install location
 
-Hex and git dependencies are installed into the project's `deps/` directory (e.g., `deps/base64url/ebin/`). This keeps builds isolated per project. To reinstall all deps, delete `deps/` and run `dylang install` again.
+Hex and git dependencies are installed into the project's `deps/` directory (e.g., `deps/base64url/ebin/`). This keeps builds isolated per project. To reinstall all deps, delete `deps/` and run `saga install` again.
 
 Source downloads are cached globally to avoid re-downloading:
-- Hex tarballs: `~/.dylang/cache/hex/`
-- Git repos: `~/.dylang/cache/git/` (bare clones)
+
+- Hex tarballs: `~/.saga/cache/hex/`
+- Git repos: `~/.saga/cache/git/` (bare clones)
 
 ---
 
 ## Dependency Resolution
 
-### dylang dependencies (path, git)
+### saga dependencies (path, git)
 
 When the compiler encounters `[deps]`:
 
@@ -141,7 +142,7 @@ When the compiler encounters `[deps]`:
 
 If dep A depends on dep B, the compiler recursively resolves B first. The parent project does not automatically get access to B's modules (they'd need to be in A's `expose` list, or the parent must depend on B directly). This prevents leaking transitive implementation details.
 
-Transitive Hex dependencies are handled automatically — if a Hex package lists requirements, they are fetched and compiled during `dylang install`.
+Transitive Hex dependencies are handled automatically — if a Hex package lists requirements, they are fetched and compiled during `saga install`.
 
 ### Collision Detection
 
@@ -151,10 +152,10 @@ If two deps expose the same module name (after aliasing), it's a compile error t
 
 ## Lockfile
 
-`dylang.lock` pins each dependency to an exact resolved state, ensuring reproducible builds.
+`saga.lock` pins each dependency to an exact resolved state, ensuring reproducible builds.
 
 ```toml
-# dylang.lock (auto-generated, do not edit)
+# saga.lock (auto-generated, do not edit)
 
 [deps.math]
 git = "https://github.com/someone/math-lib"
@@ -169,16 +170,16 @@ checksum = "f9b3add4731a02a9..."
 
 Workflow:
 
-- `dylang install`: resolve all deps, write `dylang.lock`
+- `saga install`: resolve all deps, write `saga.lock`
 - Subsequent builds: use pinned versions, skip resolution
-- `dylang update`: re-resolve refs, write new lockfile
+- `saga update`: re-resolve refs, write new lockfile
 - The lockfile should be committed to version control
 
 ---
 
 ## Library Build
 
-`dylang build` on a library project (no `[bin]`) compiles all modules to BEAM files in `_build/` but does not look for a `main` function or invoke `erl`. The output is a directory of `.beam` files ready to be consumed as a dep.
+`saga build` on a library project (no `[bin]`) compiles all modules to BEAM files in `_build/` but does not look for a `main` function or invoke `erl`. The output is a directory of `.beam` files ready to be consumed as a dep.
 
 ---
 
@@ -197,13 +198,13 @@ Workflow:
 
 A mechanism for a module to surface imported names as part of its own public API without wrapper functions. Deferred until the pain point is hit in practice.
 
-### Version Constraints for dylang deps
+### Version Constraints for saga deps
 
 Semver-based version constraints for git dependencies, similar to what Hex deps use.
 
 ### Publishing to Hex
 
-Publishing dylang packages to Hex. Would allow `version` deps to resolve dylang libraries, not just Erlang packages.
+Publishing saga packages to Hex. Would allow `version` deps to resolve saga libraries, not just Erlang packages.
 
 ### Elixir Hex Packages
 

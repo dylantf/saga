@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use dylang::project_config::{self, ProjectConfig};
-use dylang::typechecker;
+use saga::project_config::{self, ProjectConfig};
+use saga::typechecker;
 
 /// Walk up from `start` looking for a directory containing `project.toml`.
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {

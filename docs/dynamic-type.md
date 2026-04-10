@@ -3,7 +3,7 @@
 ## Problem
 
 Data from outside the type system arrives as untyped Erlang terms: FFI calls,
-ETS lookups, messages from non-dylang processes, database drivers, decoded
+ETS lookups, messages from non-saga processes, database drivers, decoded
 binary protocols. Without a safe bridge, you either trust the data blindly or
 can't interop with the Erlang ecosystem.
 
@@ -67,7 +67,7 @@ pub type Decoder a =
 There is intentionally no fallback/default value carried with the decoder.
 Decoding is fail-fast at the call site; for accumulating multi-field
 validation, use the `Validate` effect pattern (see
-`examples/20-validation-applicative.dy`) on top of already-decoded values.
+`examples/20-validation-applicative.saga`) on top of already-decoded values.
 
 ### Primitive decoders
 
@@ -227,7 +227,7 @@ implementation. The reasoning:
 When accumulation **is** the right shape — typically form validation or
 multi-field business-rule checking on data that has already been decoded into
 typed values — the `Validate` effect pattern from
-`examples/20-validation-applicative.dy` handles it cleanly without needing
+`examples/20-validation-applicative.saga` handles it cleanly without needing
 placeholder defaults. The trick there is that validators take typed values as
 arguments and return `Unit`, so there's never a continuation that needs a
 value of an arbitrary type. Two-phase: decode fail-fast first, then validate
@@ -265,7 +265,7 @@ The Gleam comparison: Gleam uses an opaque `Decoder(t)` type with
 continuation-passing combinators (`use name <- decode.field("name",
 decode.string)`). That works fine but requires the `(value, errors)` tuple
 to be baked into every decoder, which is essentially the same trade-off we
-declined here. dylang's `Decoder` is just `Dynamic -> Result a DecodeError`,
+declined here. saga's `Decoder` is just `Dynamic -> Result a DecodeError`,
 and chaining is whatever Result-combinator pattern the user prefers.
 
 ## Implementation
@@ -294,6 +294,6 @@ ADTs all worked with existing infrastructure.
 
 - **Erlang/Elixir library interop**: return values from FFI calls
 - **ETS**: untyped term storage
-- **Process messages from non-dylang processes**: unknown message shapes
+- **Process messages from non-saga processes**: unknown message shapes
 - **Database drivers**: rows as Erlang tuples/lists
 - **JSON/msgpack/ETF**: after initial parse, walk the resulting BEAM terms

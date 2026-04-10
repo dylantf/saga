@@ -14,7 +14,7 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
     crate::desugar::desugar_program(&mut program);
     let mut checker = Checker::new();
     // Load prelude (which imports Std first, then stdlib modules)
-    let prelude_src = include_str!("../stdlib/prelude.dy");
+    let prelude_src = include_str!("../stdlib/prelude.saga");
     let prelude_tokens = Lexer::new(prelude_src).lex().expect("prelude lex error");
     let mut prelude_program = Parser::new(prelude_tokens)
         .parse_program()
@@ -44,7 +44,7 @@ fn check_with_project_files(files: &[(&str, &str)], main_src: &str) -> Result<Ch
         .expect("clock before epoch")
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "dylang-typechecker-{}-{}",
+        "saga-typechecker-{}-{}",
         std::process::id(),
         unique
     ));
@@ -67,7 +67,7 @@ fn check_with_project_files(files: &[(&str, &str)], main_src: &str) -> Result<Ch
         let module_map = crate::typechecker::scan_project_modules(&root).expect("scan modules");
         checker.set_module_map(module_map);
 
-        let prelude_src = include_str!("../stdlib/prelude.dy");
+        let prelude_src = include_str!("../stdlib/prelude.saga");
         let prelude_tokens = Lexer::new(prelude_src).lex().expect("prelude lex error");
         let mut prelude_program = Parser::new(prelude_tokens)
             .parse_program()
@@ -2600,7 +2600,7 @@ fn dict_new_typechecks() {
 }
 
 // Dict.put, Dict.keys, Dict.values, Dict.size, Dict.from_list, Dict.to_list,
-// Dict.member are now defined in Std/Dict.dy via @external declarations.
+// Dict.member are now defined in Std/Dict.saga via @external declarations.
 // Their type checking is covered by module integration tests.
 
 #[test]
@@ -4200,7 +4200,7 @@ main () = {
 }
 "#;
 
-    check_with_project_files(&[("lib/Db.dy", db_module)], main_src).unwrap();
+    check_with_project_files(&[("lib/Db.saga", db_module)], main_src).unwrap();
 }
 
 #[test]
@@ -4232,7 +4232,7 @@ main () = {
 } with {db, console}
 "#;
 
-    let checker = check_with_project_files(&[("lib/Db.dy", db_module)], main_src).unwrap();
+    let checker = check_with_project_files(&[("lib/Db.saga", db_module)], main_src).unwrap();
     assert!(
         !checker
             .collected_diagnostics

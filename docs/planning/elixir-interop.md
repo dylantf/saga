@@ -14,7 +14,7 @@ Enabling Hex packages built with Mix (Elixir) alongside the existing rebar3/erlc
 The `build_tools` field in the Hex tarball's `metadata.config` indicates the build system:
 
 | Value      | Language | Current support |
-|------------|----------|-----------------|
+| ---------- | -------- | --------------- |
 | `"rebar3"` | Erlang   | Yes             |
 | `"rebar"`  | Erlang   | Yes             |
 | `"mix"`    | Elixir   | No (proposed)   |
@@ -34,12 +34,12 @@ elixir -S mix compile --no-deps-check --no-load-deps --no-protocol-consolidation
 
 Environment variables:
 
-| Variable         | Value                          | Purpose                                    |
-|------------------|--------------------------------|--------------------------------------------|
-| `MIX_BUILD_PATH` | `_build/deps/{name}`           | Direct output to our build dir             |
-| `MIX_ENV`        | `"prod"`                       | Standard production compilation            |
-| `MIX_QUIET`      | `"1"`                          | Suppress noisy Mix output                  |
-| `TERM`           | `"dumb"`                       | Prevent ANSI escape codes in error output  |
+| Variable         | Value                | Purpose                                   |
+| ---------------- | -------------------- | ----------------------------------------- |
+| `MIX_BUILD_PATH` | `_build/deps/{name}` | Direct output to our build dir            |
+| `MIX_ENV`        | `"prod"`             | Standard production compilation           |
+| `MIX_QUIET`      | `"1"`                | Suppress noisy Mix output                 |
+| `TERM`           | `"dumb"`             | Prevent ANSI escape codes in error output |
 
 ### Key flags
 
@@ -109,7 +109,7 @@ Elixir structs (like `Plug.Conn`) are maps with a `__struct__` key at the BEAM l
 
 - Elixir path/git dependencies (just Hex)
 - Protocol consolidation
-- Publishing dylang packages as Elixir-compatible
+- Publishing saga packages as Elixir-compatible
 - Any special type system support for Elixir types
 
 ## Reference: Gleam's Approach

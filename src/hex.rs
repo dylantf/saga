@@ -20,10 +20,7 @@ pub fn is_compiled(project_root: &Path, name: &str) -> bool {
 /// Global cache directory for Hex tarball downloads.
 fn hex_tarball_cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".dylang")
-        .join("cache")
-        .join("hex")
+    PathBuf::from(home).join(".saga").join("cache").join("hex")
 }
 
 // --- Hex API types ---
@@ -64,7 +61,7 @@ pub struct HexPackageRelease {
 
 fn hex_client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
-        .user_agent("dylang")
+        .user_agent("saga")
         .build()
         .expect("failed to create HTTP client")
 }

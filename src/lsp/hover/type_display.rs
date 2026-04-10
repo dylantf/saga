@@ -1,7 +1,7 @@
-use dylang::ast::NodeId;
-use dylang::ast::{Decl, TypeExpr};
-use dylang::token::Span;
-use dylang::typechecker::CheckResult;
+use saga::ast::NodeId;
+use saga::ast::{Decl, TypeExpr};
+use saga::token::Span;
+use saga::typechecker::CheckResult;
 
 /// Look up the type of a name in the checker's environment.
 /// At usage sites (node_id present), prefer the resolved/instantiated type.
@@ -422,7 +422,7 @@ fn join_signature(name: &str, params: &[String], ret: &str) -> String {
 }
 
 /// Format an EffectRef for display.
-fn format_effect_ref(e: &dylang::ast::EffectRef) -> String {
+fn format_effect_ref(e: &saga::ast::EffectRef) -> String {
     if e.type_args.is_empty() {
         e.name.clone()
     } else {

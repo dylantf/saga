@@ -277,7 +277,7 @@ fn if_else_arms() {
 
 #[test]
 fn fun_arity_zero_for_unit_param() {
-    // `main ()` keeps its Unit parameter at the Dylang lowering level.
+    // `main ()` keeps its Unit parameter at the Saga lowering level.
     assert_contains("main () = 42", "'main'/1");
 }
 
@@ -764,7 +764,7 @@ main () = {
 
 // --- Conversion builtins ---
 
-// Int.to_float, Float.trunc/round/floor/ceil are now @external in Std/Int.dy and Std/Float.dy.
+// Int.to_float, Float.trunc/round/floor/ceil are now @external in Std/Int.saga and Std/Float.saga.
 // Their codegen is covered by module integration tests.
 
 #[test]
@@ -800,7 +800,7 @@ fn dict_empty() {
 }
 
 // Dict.put, Dict.remove, Dict.keys, Dict.values, Dict.size, Dict.from_list,
-// Dict.to_list, Dict.member are now @external in Std/Dict.dy.
+// Dict.to_list, Dict.member are now @external in Std/Dict.saga.
 
 #[test]
 fn dict_get() {
@@ -813,7 +813,7 @@ fn dict_get() {
 }
 
 // List.head, List.tail, List.length, List.map, List.filter, List.foldl, List.foldr,
-// List.reverse, List.append, List.flat_map are now defined in Std/List.dy.
+// List.reverse, List.append, List.flat_map are now defined in Std/List.saga.
 
 // --- @external ---
 
@@ -959,8 +959,8 @@ main () = case read_file "/etc/hostname" {
 fn panic_emits_structured_error_term() {
     let out = emit_full(r#"main () = panic "boom""#);
     assert!(
-        out.contains("'dylang_error'"),
-        "Expected dylang_error atom in:\n{out}"
+        out.contains("'saga_error'"),
+        "Expected saga_error atom in:\n{out}"
     );
     assert!(
         out.contains("'panic'"),
@@ -972,8 +972,8 @@ fn panic_emits_structured_error_term() {
 fn todo_emits_structured_error_term() {
     let out = emit_full("main () = todo ()");
     assert!(
-        out.contains("'dylang_error'"),
-        "Expected dylang_error atom in:\n{out}"
+        out.contains("'saga_error'"),
+        "Expected saga_error atom in:\n{out}"
     );
     assert!(out.contains("'todo'"), "Expected todo kind atom in:\n{out}");
 }
@@ -982,8 +982,8 @@ fn todo_emits_structured_error_term() {
 fn let_assert_emits_structured_error_term() {
     let out = emit_full("main () = {\n  let assert 1 = 2\n  1\n}");
     assert!(
-        out.contains("'dylang_error'"),
-        "Expected dylang_error atom in:\n{out}"
+        out.contains("'saga_error'"),
+        "Expected saga_error atom in:\n{out}"
     );
     assert!(
         out.contains("'assert_fail'"),
@@ -995,13 +995,13 @@ fn let_assert_emits_structured_error_term() {
 fn source_annotations_emitted_with_source_info() {
     let src = "fun add : Int -> Int -> Int\nadd x y = x + y\n\nmain () = add 1 2";
     let sf = super::SourceFile {
-        path: "test.dy".to_string(),
+        path: "test.saga".to_string(),
         source: src.to_string(),
     };
     let out = emit_full_with_source(src, Some(&sf));
     // The add call on line 4 should have an annotation
     assert!(
-        out.contains("-| [4, {'file', \"test.dy\"}]"),
+        out.contains("-| [4, {'file', \"test.saga\"}]"),
         "Expected line annotation for add call in:\n{out}"
     );
 }
@@ -1010,13 +1010,13 @@ fn source_annotations_emitted_with_source_info() {
 fn binop_annotation_on_inner_call() {
     let src = "main () = 1 + 2";
     let sf = super::SourceFile {
-        path: "test.dy".to_string(),
+        path: "test.saga".to_string(),
         source: src.to_string(),
     };
     let out = emit_full_with_source(src, Some(&sf));
     // The + operation should produce an annotated erlang:'+' call
     assert!(
-        out.contains("-| [1, {'file', \"test.dy\"}]"),
+        out.contains("-| [1, {'file', \"test.saga\"}]"),
         "Expected line annotation on binop call in:\n{out}"
     );
 }

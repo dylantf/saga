@@ -1,8 +1,8 @@
-use dylang::ast::{
+use saga::ast::{
     self, Annotated, CaseArm, Decl, EffectRef, Expr, ExprKind, NodeId, Pat, Stmt, TraitBound,
     TypeExpr,
 };
-use dylang::token::Span;
+use saga::token::Span;
 
 type Found = Option<(String, Span, Option<NodeId>)>;
 
@@ -397,16 +397,16 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
         ExprKind::FieldAccess { expr, .. } => find_in_expr(expr, offset),
         ExprKind::With { expr, handler, .. } => {
             match handler.as_ref() {
-                dylang::ast::Handler::Named(name, span) if contains(span, offset) => {
+                saga::ast::Handler::Named(name, span) if contains(span, offset) => {
                     return Some((name.clone(), *span, None));
                 }
-                dylang::ast::Handler::Inline { items, .. } => {
-                    let all_arms: Vec<&dylang::ast::HandlerArm> = items
+                saga::ast::Handler::Inline { items, .. } => {
+                    let all_arms: Vec<&saga::ast::HandlerArm> = items
                         .iter()
                         .filter_map(|a| match &a.node {
-                            dylang::ast::HandlerItem::Arm(arm)
-                            | dylang::ast::HandlerItem::Return(arm) => Some(arm),
-                            dylang::ast::HandlerItem::Named(_) => None,
+                            saga::ast::HandlerItem::Arm(arm)
+                            | saga::ast::HandlerItem::Return(arm) => Some(arm),
+                            saga::ast::HandlerItem::Named(_) => None,
                         })
                         .collect();
                     for arm in &all_arms {

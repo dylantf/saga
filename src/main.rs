@@ -3,7 +3,7 @@ mod cli;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "dylang", about = "The dylang compiler")]
+#[command(name = "saga", about = "The saga compiler")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -13,7 +13,7 @@ struct Cli {
 enum Command {
     /// Build and run a project or single file
     Run {
-        /// A .dy source file (omit for project mode)
+        /// A .saga source file (omit for project mode)
         file: Option<String>,
         /// Use release profile
         #[arg(long)]
@@ -24,7 +24,7 @@ enum Command {
     },
     /// Build a project or single file
     Build {
-        /// A .dy source file (omit for project mode)
+        /// A .saga source file (omit for project mode)
         file: Option<String>,
         /// Use release profile
         #[arg(long)]
@@ -35,12 +35,12 @@ enum Command {
     },
     /// Typecheck without building
     Check {
-        /// A .dy source file (omit for project mode)
+        /// A .saga source file (omit for project mode)
         file: Option<String>,
     },
     /// Print generated Core Erlang to stdout
     Emit {
-        /// The .dy source file
+        /// The .saga source file
         file: String,
     },
     /// Run tests
@@ -63,7 +63,7 @@ enum Command {
     Install,
     /// Format a source file
     Fmt {
-        /// The .dy source file to format
+        /// The .saga source file to format
         file: String,
         /// Format file in place instead of printing to stdout
         #[arg(long)]

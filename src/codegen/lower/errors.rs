@@ -48,7 +48,7 @@ impl ErrorKind {
 
 /// Source location info threaded into the lowerer.
 pub struct SourceInfo {
-    /// Relative path to the source file (e.g. "src/server.dy").
+    /// Relative path to the source file (e.g. "src/server.saga").
     pub file: String,
     /// Source text, kept for line number conversion.
     pub line_numbers: LineNumbers,
@@ -67,9 +67,9 @@ impl SourceInfo {
     }
 }
 
-/// Structured error term for dylang runtime errors.
+/// Structured error term for saga runtime errors.
 ///
-/// Lowered to: `{dylang_error, Kind, Message, Module, Function, File, Line}`
+/// Lowered to: `{saga_error, Kind, Message, Module, Function, File, Line}`
 ///
 /// All fields are atoms/binaries/integers so the runtime can pattern-match
 /// without needing Erlang map support in Core Erlang.
@@ -81,17 +81,17 @@ pub struct ErrorInfo {
     pub module: String,
     /// Source function name (e.g. "handle_request").
     pub function: String,
-    /// Source file path (e.g. "src/server.dy").
+    /// Source file path (e.g. "src/server.saga").
     pub file: String,
     /// 1-based source line number.
     pub line: usize,
 }
 
 impl ErrorInfo {
-    /// Build the Core Erlang tuple: `{dylang_error, Kind, Msg, Module, Fun, File, Line}`
+    /// Build the Core Erlang tuple: `{saga_error, Kind, Msg, Module, Fun, File, Line}`
     pub fn to_cexpr(&self) -> CExpr {
         CExpr::Tuple(vec![
-            CExpr::Lit(CLit::Atom("dylang_error".into())),
+            CExpr::Lit(CLit::Atom("saga_error".into())),
             CExpr::Lit(CLit::Atom(self.kind.as_atom().into())),
             self.message.clone(),
             lower_string_to_binary(&self.module),

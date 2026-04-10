@@ -2,7 +2,7 @@
 
 ## Architecture
 
-`dylang-lsp` binary speaks JSON-RPC over stdin/stdout. VSCode extension in `editors/vscode/`
+`saga-lsp` binary speaks JSON-RPC over stdin/stdout. VSCode extension in `editors/vscode/`
 launches it. Built on `tower-lsp`. Per-project checker caching, `snapshot()` pattern for
 lock-free hover/goto/completion.
 

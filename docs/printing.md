@@ -1,6 +1,6 @@
 # Printing, Show, and Debug
 
-Design document for the printing/stringification story in dylang.
+Design document for the printing/stringification story in saga.
 
 ---
 

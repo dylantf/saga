@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use tower_lsp::lsp_types::{Position, Range, Url};
 
-use dylang::ast::{Decl, NodeId};
-use dylang::token::Span;
-use dylang::typechecker::CheckResult;
+use saga::ast::{Decl, NodeId};
+use saga::token::Span;
+use saga::typechecker::CheckResult;
 
 use crate::line_index::LineIndex;
 

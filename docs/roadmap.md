@@ -85,12 +85,12 @@ Checkbox = implemented and working. Unchecked = not yet done.
 ## Module System
 
 - [x] `module Foo` declarations
-- [x] Module map: scan all `.dy` files at startup, resolve imports by declared module name (not file path)
+- [x] Module map: scan all `.saga` files at startup, resolve imports by declared module name (not file path)
 - [x] `import Foo`, `import Foo as F`, `import Foo (a, b)`
 - [x] Qualified names (`Math.abs`)
 - [x] `pub` exports
 - [x] Cycle detection
-- [x] `project.toml` root marker, `Main.dy` entry point
+- [x] `project.toml` root marker, `Main.saga` entry point
 - [x] Typechecker: per-module checker, shared cache, qualified name injection
 - [x] Effect and handler export/import (effects and handlers from imported modules are injected into the parent checker)
 - [x] Unify module exports into a single `ModuleExports` struct. Currently each exportable concept
@@ -129,9 +129,9 @@ Checkbox = implemented and working. Unchecked = not yet done.
 ### Infrastructure
 
 - [x] Core Erlang IR (`CExpr`, `CPat`, `CLit`, `CModule`) + pretty-printer
-- [x] Lowering pass (dylang AST -> CErl IR)
+- [x] Lowering pass (saga AST -> CErl IR)
 - [x] `erlc` invocation, `_build/` output directory
-- [x] `dylang build <file>` command
+- [x] `saga build <file>` command
 
 ### Expression lowering
 
@@ -270,16 +270,16 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Colored CLI output (errors red, warnings yellow, build progress dim, success green)
 - [x] Runtime stack traces with source locations (see `docs/cli-improvements.md`)
 - [ ] REPL (interactive expression evaluation, type display, effect handling)
-- [x] Library compilation mode (`dylang build --lib`): compile modules to `.beam` without
+- [x] Library compilation mode (`saga build --lib`): compile modules to `.beam` without
       an entry point, serialize type info (types, effects, handlers, trait impls) alongside
       `.beam` files so downstream projects can typecheck against the library
 - [x] Dependency management (`project.toml` dependencies, path, git, Hex)
-- [x] Hex package integration: fetch from hex.pm, compile with erlc, cache in `~/.dylang/cache/hex/`
-- [ ] Hex publishing: publish dylang packages to Hex with type info sidecar
+- [x] Hex package integration: fetch from hex.pm, compile with erlc, cache in `~/.saga/cache/hex/`
+- [ ] Hex publishing: publish saga packages to Hex with type info sidecar
 - [x] LSP (go-to-definition, hover types, error squiggles, autocomplete for constructors/effects). See separate LSP roadmap
 - [x] Testing framework (assert_eq, test runner, test discovery, skip, nested describe)
   - [x] Exit code 1 on test failure (for CI)
-  - [x] Test filtering (`dylang test --filter "name"`)
+  - [x] Test filtering (`saga test --filter "name"`)
   - [x] `only` (run a single test, ignore others)
   - [x] `assert_panics` (test that a panic is raised, via `catch_panic` builtin)
   - [x] Test timing (per-test and suite duration via `Std.Time.monotonic_ms`)

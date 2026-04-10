@@ -1,11 +1,11 @@
-/// Integration test that runs the e2e feature tests via `dylang test`.
+/// Integration test that runs the e2e feature tests via `saga test`.
 /// These tests exercise core language features end-to-end (parse -> typecheck
 /// -> elaborate -> lower -> BEAM), catching regressions that unit tests miss.
 #[test]
 fn e2e_test_suite() {
     use std::io::Read;
 
-    let binary = env!("CARGO_BIN_EXE_dylang");
+    let binary = env!("CARGO_BIN_EXE_saga");
     let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/e2e");
     let timeout = std::time::Duration::from_secs(45);
 
@@ -15,13 +15,13 @@ fn e2e_test_suite() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("failed to run dylang test");
+        .expect("failed to run saga test");
 
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child
             .try_wait()
-            .expect("failed while waiting for dylang test")
+            .expect("failed while waiting for saga test")
         {
             break status;
         }
@@ -38,15 +38,15 @@ fn e2e_test_suite() {
     child
         .stdout
         .take()
-        .expect("missing dylang test stdout")
+        .expect("missing saga test stdout")
         .read_to_end(&mut stdout)
-        .expect("failed reading dylang test stdout");
+        .expect("failed reading saga test stdout");
     child
         .stderr
         .take()
-        .expect("missing dylang test stderr")
+        .expect("missing saga test stderr")
         .read_to_end(&mut stderr)
-        .expect("failed reading dylang test stderr");
+        .expect("failed reading saga test stderr");
 
     let stdout = String::from_utf8_lossy(&stdout);
     let stderr = String::from_utf8_lossy(&stderr);

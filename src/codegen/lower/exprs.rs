@@ -1064,9 +1064,9 @@ impl<'a> Lowerer<'a> {
                 body: inner,
             };
             let mut else_with_fallthrough: Vec<CArm> = else_arms_ce.clone();
-            let has_catchall = else_with_fallthrough.iter().any(|arm| {
-                arm.guard.is_none() && matches!(arm.pat, CPat::Var(_) | CPat::Wildcard)
-            });
+            let has_catchall = else_with_fallthrough
+                .iter()
+                .any(|arm| arm.guard.is_none() && matches!(arm.pat, CPat::Var(_) | CPat::Wildcard));
             if !has_catchall {
                 else_with_fallthrough.push(CArm {
                     pat: CPat::Var(fail_var.clone()),

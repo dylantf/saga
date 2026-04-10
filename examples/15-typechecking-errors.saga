@@ -4,7 +4,7 @@
 # working on valid code. Uncomment any line at the bottom to see
 # an error with file:line:col location, e.g.:
 #
-#   Type error at examples/15-typechecking-errors.dy:70:13: type mismatch: expected Int, got String
+#   Type error at examples/15-typechecking-errors.saga:70:13: type mismatch: expected Int, got String
 
 # Polymorphic functions inferred correctly
 id x = x

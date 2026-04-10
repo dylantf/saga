@@ -1,7 +1,7 @@
 use tower_lsp::lsp_types::*;
 
-use dylang::ast::{self, Decl, Expr, ExprKind, Pat, Stmt};
-use dylang::typechecker::CheckResult;
+use saga::ast::{self, Decl, Expr, ExprKind, Pat, Stmt};
+use saga::typechecker::CheckResult;
 
 use super::hover::format_type_expr;
 
@@ -63,7 +63,7 @@ pub fn find_active_call(program: &[Decl], offset: usize) -> Option<(String, usiz
     None
 }
 
-fn contains(span: &dylang::token::Span, offset: usize) -> bool {
+fn contains(span: &saga::token::Span, offset: usize) -> bool {
     // End-inclusive: cursor right after the last char of an expression
     // is still "in" that call context (user may still be typing the arg).
     offset >= span.start && offset <= span.end

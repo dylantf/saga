@@ -1238,7 +1238,7 @@ fn single_blank_line_preserved() {
 
 #[test]
 fn idempotent_scratch_file() {
-    let source = std::fs::read_to_string("examples/scratch.dy").unwrap();
+    let source = std::fs::read_to_string("examples/scratch.saga").unwrap();
     let first = fmt80(&source);
     let second = fmt80(&first);
     assert_eq!(first, second, "Formatter is not idempotent");
@@ -1747,7 +1747,7 @@ fn list_comprehension_with_let() {
     );
 }
 
-// --- Round-trip: stdlib .dy files format cleanly, idempotently, and preserve AST ---
+// --- Round-trip: stdlib .saga files format cleanly, idempotently, and preserve AST ---
 
 fn collect_dy_files() -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
@@ -1755,7 +1755,7 @@ fn collect_dy_files() -> Vec<std::path::PathBuf> {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|e| e == "dy") {
+                if path.extension().is_some_and(|e| e == "saga") {
                     files.push(path);
                 }
             }

@@ -4,7 +4,7 @@
 val pi = 3.14159
 
 @inline
-val app_name = "dylang"
+val app_name = "saga"
 
 @inline
 val numbers = [1, 2, 3]

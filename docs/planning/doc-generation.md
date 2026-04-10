@@ -1,6 +1,6 @@
 # Doc Generation
 
-Plan for `dylang docs` CLI command and Hex publishing integration.
+Plan for `saga docs` CLI command and Hex publishing integration.
 
 ## Doc Comment Syntax
 
@@ -25,13 +25,13 @@ Doc content is Markdown, top to bottom. Conventions:
 - `## Examples` section with code blocks
 - No `@param`/`@return` tags — the type signature covers that
 
-## `dylang docs` Command
+## `saga docs` Command
 
-Generates a static HTML site from a project's `.dy` source files.
+Generates a static HTML site from a project's `.saga` source files.
 
 ### Pipeline
 
-1. Parse all `.dy` files in the project (reuse existing parser)
+1. Parse all `.saga` files in the project (reuse existing parser)
 2. Extract `#@` comments + type signatures + pub declarations from the AST
 3. Render Markdown content to HTML (`pulldown-cmark` or similar Rust crate)
 4. Syntax-highlight code blocks using the existing TextMate grammar (via `syntect`, which reads `.tmLanguage.json` natively in Rust)
@@ -72,22 +72,22 @@ Post-process `.beam` files after `erlc`. Add an `erl -noshell` step that reads t
 .core -> erlc -> .beam -> erl (inject Docs chunk) -> .beam with docs
 ```
 
-This is independent of HTML doc generation — do it even if `dylang docs` isn't being run, so all published `.beam` files have docs embedded.
+This is independent of HTML doc generation — do it even if `saga docs` isn't being run, so all published `.beam` files have docs embedded.
 
 ## Hex Publishing
 
 ### Package Publishing
 
-`dylang publish` command that:
+`saga publish` command that:
 
 1. Builds the project
-2. Runs `dylang docs` to generate HTML into `doc/`
+2. Runs `saga docs` to generate HTML into `doc/`
 3. Packages a Hex tarball (metadata + source + docs)
 4. Pushes to hex.pm
 
 ### HexDocs Integration
 
-HexDocs hosts arbitrary static HTML — only requirement is `doc/` with an `index.html`. Register `"build_tool": "dylang"` in package metadata so Hex calls `dylang docs` for doc builds. This is how Gleam does it.
+HexDocs hosts arbitrary static HTML — only requirement is `doc/` with an `index.html`. Register `"build_tool": "saga"` in package metadata so Hex calls `saga docs` for doc builds. This is how Gleam does it.
 
 The HTML output is entirely ours — full control over styling, layout, and highlighting. No dependency on ExDoc or Makeup.
 
@@ -102,7 +102,7 @@ For the language website (course, language tour), use Shiki (JS) which also cons
 Suggested implementation order:
 
 1. **Module doc syntax** — `#@` before `module` declaration
-2. **`dylang docs` command** — basic HTML generation (modules, functions, types)
+2. **`saga docs` command** — basic HTML generation (modules, functions, types)
 3. **EEP-48 chunks** — inject into `.beam` files during build
-4. **`dylang publish`** — Hex integration
+4. **`saga publish`** — Hex integration
 5. **Polish** — search, cross-linking, effects/handlers in docs

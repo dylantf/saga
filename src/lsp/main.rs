@@ -3,7 +3,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use dylang::{formatter, lexer, parser, typechecker};
+use saga::{formatter, lexer, parser, typechecker};
 
 mod checker;
 mod code_action;
@@ -109,7 +109,7 @@ impl Backend {
         uri: &Url,
         snap: &CheckSnapshot,
         name: &str,
-        node_id: Option<dylang::ast::NodeId>,
+        node_id: Option<saga::ast::NodeId>,
         include_definition: bool,
     ) -> Vec<Location> {
         let tc_result = &snap.tc_result;
@@ -172,7 +172,7 @@ impl Backend {
             origin.to_string()
         } else {
             let local_module = program.iter().find_map(|decl| {
-                if let dylang::ast::Decl::ModuleDecl { path, .. } = decl {
+                if let saga::ast::Decl::ModuleDecl { path, .. } = decl {
                     Some(path.join("."))
                 } else {
                     None
@@ -303,11 +303,11 @@ impl Backend {
 /// Find an effect op signature from the AST (preserves original type param names).
 /// Returns (signature, doc_comments) for an effect operation.
 fn find_effect_op_signature(
-    program: &[dylang::ast::Decl],
+    program: &[saga::ast::Decl],
     op_name: &str,
 ) -> Option<(String, Vec<String>)> {
     for decl in program {
-        if let dylang::ast::Decl::EffectDef {
+        if let saga::ast::Decl::EffectDef {
             name: effect_name,
             operations,
             ..
@@ -327,7 +327,7 @@ fn find_effect_op_signature(
 
 /// Find an effect op signature from CheckResult (for imported effects not in local AST).
 fn find_effect_op_signature_from_result(
-    tc_result: &dylang::typechecker::CheckResult,
+    tc_result: &saga::typechecker::CheckResult,
     op_name: &str,
 ) -> Option<String> {
     for (effect_name, info) in &tc_result.effects {
@@ -372,7 +372,7 @@ fn resolve_span_location(
     current_li: &line_index::LineIndex,
     current_source: &str,
     module_name: Option<&str>,
-    tc_result: &dylang::typechecker::CheckResult,
+    tc_result: &saga::typechecker::CheckResult,
 ) -> tower_lsp::jsonrpc::Result<(Url, line_index::LineIndex, String)> {
     if let Some(module) = module_name
         && let Some(file_path) = tc_result.module_map().and_then(|m| m.get(module))
@@ -426,7 +426,7 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "dylang LSP initialized")
+            .log_message(MessageType::INFO, "saga LSP initialized")
             .await;
     }
 
@@ -499,8 +499,8 @@ impl LanguageServer for Backend {
             let effects = handler_info.effects.join(", ");
             let code = format!("handler {} for {}", name, effects);
             let value = match hover::doc_for_name(program, &name, tc_result) {
-                Some(doc) => format!("{}\n\n---\n\n```dylang\n{}\n```", doc, code),
-                None => format!("```dylang\n{}\n```", code),
+                Some(doc) => format!("{}\n\n---\n\n```saga\n{}\n```", doc, code),
+                None => format!("```saga\n{}\n```", code),
             };
             return Ok(Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
@@ -515,9 +515,9 @@ impl LanguageServer for Backend {
         // Prefer AST (has original type param names) over CheckResult (may have raw var IDs).
         if let Some((sig, doc)) = find_effect_op_signature(program, &name) {
             let value = if doc.is_empty() {
-                format!("```dylang\n{}\n```", sig)
+                format!("```saga\n{}\n```", sig)
             } else {
-                format!("{}\n\n---\n\n```dylang\n{}\n```", doc.join("\n"), sig)
+                format!("{}\n\n---\n\n```saga\n{}\n```", doc.join("\n"), sig)
             };
             return Ok(Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
@@ -531,7 +531,7 @@ impl LanguageServer for Backend {
             return Ok(Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
-                    value: format!("```dylang\n{}\n```", sig),
+                    value: format!("```saga\n{}\n```", sig),
                 }),
                 range: None,
             }));
@@ -569,8 +569,8 @@ impl LanguageServer for Backend {
             };
             let code = format!("{}: {}", display_name, type_str);
             let value = match hover::doc_for_name(program, &name, tc_result) {
-                Some(doc) => format!("{}\n\n---\n\n```dylang\n{}\n```", doc, code),
-                None => format!("```dylang\n{}\n```", code),
+                Some(doc) => format!("{}\n\n---\n\n```saga\n{}\n```", doc, code),
+                None => format!("```saga\n{}\n```", code),
             };
             return Ok(Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
@@ -1041,7 +1041,7 @@ impl LanguageServer for Backend {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .and_then(|d| checker::find_project_root(&d))
             .map(|root| {
-                dylang::project_config::ProjectConfig::load(&root)
+                saga::project_config::ProjectConfig::load(&root)
                     .formatter
                     .width
             })
