@@ -537,6 +537,19 @@ impl Checker {
                     let arm_saved = self.env.clone();
                     let scrutinee_ty = self.fresh_var();
                     self.bind_pattern(&arm.pattern, &scrutinee_ty)?;
+                    // Constrain the scrutinee to one of the binding types so that
+                    // payload type variables in the pattern (e.g. `e` in `Err(e)`)
+                    // get pinned to the binding's actual error type. Try each
+                    // binding type in order; the first that unifies wins. Mixed
+                    // bail types are supported because each arm pattern usually
+                    // matches exactly one binding's ADT.
+                    for binding_ty in &binding_types {
+                        let saved_sub = self.sub.clone();
+                        if self.unify(&scrutinee_ty, binding_ty).is_ok() {
+                            break;
+                        }
+                        self.sub = saved_sub;
+                    }
                     let body_ty = self.infer_expr(&arm.body)?;
                     self.unify_at(&result_ty, &body_ty, arm.body.span)?;
                     self.env = arm_saved;

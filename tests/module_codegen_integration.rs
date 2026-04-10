@@ -259,7 +259,26 @@ main () = {
         let out = emit_from_program(program, "main", checker);
         assert_contains(&out, "_Handle_Db_Postgres_ping");
         assert_contains(&out, "call 'db':'run'");
-        assert_contains(&out, "(_Cor2, _Handle_Db_Postgres_ping, _Cor3)");
+        // The handler must be threaded into the imported effectful call as the
+        // middle argument of the (arg, handler, continuation) triple.
+        let call_idx = out
+            .find("call 'db':'run'")
+            .expect("expected call to db:run");
+        let after_call = &out[call_idx..];
+        let args_start = after_call.find('(').expect("expected args after call");
+        let args_end = after_call.find(')').expect("expected closing paren");
+        let args = &after_call[args_start + 1..args_end];
+        let parts: Vec<&str> = args.split(',').map(str::trim).collect();
+        assert_eq!(
+            parts.len(),
+            3,
+            "expected (arg, handler, continuation), got: {args}"
+        );
+        assert!(
+            parts[1].starts_with("_Handle_Db_Postgres_ping"),
+            "expected handler in middle position, got: {}",
+            parts[1]
+        );
         assert_erlc_compiles(&out, "main");
     });
 }

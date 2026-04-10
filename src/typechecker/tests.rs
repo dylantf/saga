@@ -2016,6 +2016,38 @@ let x = do {
     .unwrap();
 }
 
+#[test]
+fn do_else_propagates_payload_type_to_else_arm() {
+    // Regression: the else-arm pattern's payload type variable must be
+    // unified with the binding's actual type, otherwise patterns like
+    // `Err(e) -> Err(e)` leave `e` as a free variable and the do-block's
+    // result type is ambiguous (Result _ a instead of Result _ DecodeError).
+    //
+    // This test deliberately omits an outer function signature so the
+    // do-block must infer its own type purely from the bindings. With
+    // the bug, the result type ends up as Result _ a where `a` is free,
+    // and using the result with a trait-requiring function (Debug here)
+    // produces an "ambiguous type variable requires Debug" error.
+    check(
+        "type DecodeError = DecodeError String deriving (Debug)
+fun step1 : Unit -> Result Int DecodeError
+step1 () = Ok(1)
+fun step2 : Unit -> Result String DecodeError
+step2 () = Ok(\"two\")
+let _ = {
+  let result = do {
+    Ok(n) <- step1 ()
+    Ok(s) <- step2 ()
+    Ok((n, s))
+  } else {
+    Err(e) -> Err(e)
+  }
+  dbg result
+}",
+    )
+    .unwrap();
+}
+
 // --- Unreachable arm detection ---
 
 #[test]
@@ -3490,10 +3522,10 @@ handle_msg () = receive {
 fn imported_effect_resolves_in_nested_callback_annotation() {
     check(
         r#"
-import Std.Dynamic (Decode)
+import Std.IO (Stdio)
 
 @external("erlang", "repro", "raw")
-fun raw : (Unit -> String needs {Decode}) -> String
+fun raw : (Unit -> String needs {Stdio}) -> String
 "#,
     )
     .unwrap();
@@ -3503,10 +3535,10 @@ fun raw : (Unit -> String needs {Decode}) -> String
 fn imported_effect_resolves_in_effect_op_callback_annotation() {
     check(
         r#"
-import Std.Dynamic (Decode)
+import Std.IO (Stdio)
 
 effect Pg {
-  fun query : (decode: Unit -> String needs {Decode}) -> String
+  fun query : (decode: Unit -> String needs {Stdio}) -> String
 }
 "#,
     )

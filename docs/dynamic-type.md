@@ -56,84 +56,64 @@ pub type DecodeError =
 
 ### Decoder type
 
-A simple ADT pairing a decode function with a placeholder/default value. The
-placeholder is used during error accumulation — when a field fails to decode,
-the handler resumes with the default so subsequent decoders can keep running.
+A simple ADT wrapping a decode function. Decoders are pure values — same input
+always produces the same output, no side effects.
 
 ```
 pub type Decoder a =
-  | Decoder (Dynamic -> Result a DecodeError) a
+  | Decoder (Dynamic -> Result a DecodeError)
 ```
+
+There is intentionally no fallback/default value carried with the decoder.
+Decoding is fail-fast at the call site; for accumulating multi-field
+validation, use the `Validate` effect pattern (see
+`examples/20-validation-applicative.dy`) on top of already-decoded values.
 
 ### Primitive decoders
 
 Exposed as `val` bindings (not functions — `Decoder` is data, not a computation):
 
 ```
-pub val string = Decoder decode_string_raw ""
-pub val int = Decoder decode_int_raw 0
-pub val float = Decoder decode_float_raw 0.0
-pub val bool = Decoder decode_bool_raw False
+pub val string = Decoder decode_string_raw
+pub val int = Decoder decode_int_raw
+pub val float = Decoder decode_float_raw
+pub val bool = Decoder decode_bool_raw
 ```
 
 Each `decode_*_raw` function is an `@external` backed by a 2-line Erlang guard
 check in the bridge file.
 
-### Decode effect
+### Applying a decoder
 
-Decoding uses the effect system for composition and error accumulation. The
-`Decode` effect has two polymorphic operations:
+Three pure functions cover the common shapes. None of them are effects —
+decoding the same `Dynamic` always yields the same `Result`, so there's
+nothing for the effect system to track.
 
 ```
-pub effect Decode {
-  fun decode_field : String -> Decoder a -> a
-  fun decode_element : Int -> Decoder a -> a
+pub fun decode : Decoder a -> Dynamic -> Result a DecodeError
+pub fun decode_field : String -> Decoder a -> Dynamic -> Result a DecodeError
+pub fun decode_element : Int -> Decoder a -> Dynamic -> Result a DecodeError
+```
+
+`decode` runs a decoder against a `Dynamic` directly. `decode_field` looks up
+a key in a map-like Dynamic and decodes its value. `decode_element` does the
+same for tuple/list elements by index.
+
+For chaining multiple decode operations together, use `do...else`:
+
+```
+let result = do {
+  Ok(name) <- decode_field "name" string data
+  Ok(age)  <- decode_field "age" int data
+  Ok(User { name, age })
+} else {
+  Err(e) -> Err(e)
 }
 ```
 
-The `a` is a free type variable, freshened per call site — so each `decode_field!`
-can decode a different type. Same pattern as `Fail`'s `fun fail : e -> a`.
-
-### Error accumulation via handler
-
-`Dynamic.run` provides the handler. It uses the same continuation trick as
-`run_body` in `Std.Test` and the `collecting` handler in
-`examples/20-validation-applicative.dy`:
-
-```
-pub fun run : Dynamic -> (Unit -> a needs {Decode}) -> Result a (List DecodeError)
-run data f = {
-  let (value, errors) = f () with {
-    decode_field name dec = {
-      let result = case raw_field_lookup name data {
-        Ok dyn -> run_decoder dec dyn
-        Err e -> Err e
-      }
-      case result {
-        Ok decoded -> {
-          let (v, errs) = resume decoded
-          (v, errs)
-        }
-        Err e -> {
-          let (v, errs) = resume (decoder_default dec)
-          (v, e :: errs)
-        }
-      }
-    }
-    # decode_element is identical but uses element_lookup instead
-    return v = (v, [])
-  }
-  case errors {
-    [] -> Ok value
-    _ -> Err errors
-  }
-}
-```
-
-On success: resume with the decoded value, thread through accumulated errors.
-On failure: resume with the placeholder, prepend the error. Every field runs
-regardless of earlier failures. At the end, empty errors -> `Ok`, otherwise
-`Err` with all collected errors.
+The first failing field aborts the chain and returns its `DecodeError`. This
+is fail-fast by design — see "Fail-fast vs. accumulation" below for the
+rationale.
 
 ### Combinators
 
@@ -154,8 +134,7 @@ pub fun classify : Dynamic -> String  # human-readable type name for errors
 ### Library author wrapping an Erlang package
 
 ```
-import Std.Dynamic as Dynamic
-import Std.Dynamic (Dynamic, Decode, from_erlang, string, int)
+import Std.Dynamic (Dynamic, decode_field, from_erlang, string, int)
 
 @external("erlang", "pgo", "query")
 fun raw_query : String -> List Dynamic -> Dynamic
@@ -163,58 +142,131 @@ fun raw_query : String -> List Dynamic -> Dynamic
 pub fun get_user : Int -> Result User DbError
 get_user id = {
   let raw = raw_query "SELECT name, age FROM users WHERE id = $1" [from_erlang id]
-  Dynamic.run raw (fun () -> {
-    let name = Decode.decode_field! "name" string
-    let age = Decode.decode_field! "age" int
-    User { name, age }
-  })
-  |> Result.map_err to_db_error
+  do {
+    Ok(name) <- decode_field "name" string raw
+    Ok(age)  <- decode_field "age" int raw
+    Ok(User { name, age })
+  } else {
+    Err(e) -> Err(to_db_error e)
+  }
 }
 ```
 
 The application developer just calls `get_user` — no Dynamic, no decoders.
 
-### Error accumulation
-
-If both fields have wrong types, you get both errors back:
-
-```
-let result = Dynamic.run bad_data (fun () -> {
-  let name = Decode.decode_field! "name" string
-  let age = Decode.decode_field! "age" int
-  (name, age)
-})
-# Err([DecodeError("String", "Int", []), DecodeError("Int", "String", [])])
-```
-
 ### Tuple/positional decoding (e.g. database rows)
 
+For positional decoding where the cursor needs to advance per call (database
+rows are the canonical case), wrap `decode_element` in a small effect at the
+library boundary so callers don't write indices manually. See the saga_pgo
+`PgRow` effect for a working example. The pattern is a state-passing handler
+that threads the cursor through `resume`:
+
 ```
-let result = Dynamic.run row (fun () -> {
-  let name = Decode.decode_element! 0 string
-  let age = Decode.decode_element! 1 int
-  User { name, age }
-})
+pub effect PgRow {
+  fun column : Decoder a -> a
+}
+
+# Library-internal: handle PgRow against a row Dynamic by threading
+# a cursor and calling decode_element directly.
+fun run_row : Dynamic -> (Unit -> a needs {PgRow}) -> Result a DecodeError
+run_row row body = {
+  let cursored = body () with {
+    column dec = fun cursor -> {
+      case decode_element cursor dec row {
+        Ok(v) -> (resume v) (cursor + 1)
+        Err(e) -> Err(e)
+      }
+    }
+    return value = fun _ -> Ok(value)
+  }
+  cursored 0
+}
 ```
 
-## Why an effect, not an opaque Decoder type
+User code then writes:
 
-Gleam uses an opaque `Decoder(t)` type with continuation-passing combinators
-(`use name <- decode.field("name", decode.string)`). We considered this but
-chose an effect-based approach because:
+```
+fun () -> User {
+  id: PgRow.column! uuid,
+  name: PgRow.column! string,
+  age: PgRow.column! int,
+}
+```
 
-1. **Flat syntax** — `let name = decode_field! "name" string` is a normal `let`
-   binding with `!`. No nesting, no `use` syntax, no `mapN` combinators.
-2. **Error accumulation via existing machinery** — the handler continuation trick
-   (`resume` with a placeholder, collect errors) is the same pattern already used
-   in `Std.Test` and the validation example. No new abstraction needed.
-3. **Idiomatic to the language** — effects are dylang's mechanism for this kind
-   of contextual computation. Using them here means library authors already know
-   how it works.
+with no indices and direct record construction. This pattern is **library
+machinery**, not something `Std.Dynamic` provides — different positional
+sources (SQL rows, binary protocols, etc.) want different cursor semantics.
 
-The Gleam approach bakes error accumulation into the `Decoder` type itself
-(always returns `(value, errors)` tuple). Our approach keeps `Decoder` simple
-(just a function + default) and lets the effect handler manage accumulation.
+## Fail-fast vs. accumulation
+
+`Std.Dynamic` is intentionally fail-fast: the first decode error aborts the
+chain. This is a deliberate design choice, not a limitation of the
+implementation. The reasoning:
+
+1. **Decode errors are usually programmer errors, not user input errors.** A
+   wrong-type column or a missing field means the schema and the code are out
+   of sync. Knowing that "and the next three fields were also wrong" doesn't
+   help you fix it any faster — you fix the schema once and all the errors
+   disappear together.
+
+2. **Accumulation requires placeholder values.** To resume past a failed
+   decode and keep going, the continuation needs a value of the right type.
+   The only sources of one are (a) per-type defaults baked into the decoder
+   (which forces every type to have an arbitrary "zero", surfacing as
+   user-visible API noise like `uuid`'s default of all-zeros) or (b) unsafe
+   sentinels that can crash if observed by intervening pure code. Neither is
+   acceptable for the common case.
+
+3. **Pure functions compose better.** With `decode`/`decode_field`/
+   `decode_element` as plain functions returning `Result`, users can chain
+   them with `do...else`, `Result.and_then`, `Result.map`, or whatever else
+   they already know. No special handlers, no CPS, no continuation reshape
+   gotchas.
+
+When accumulation **is** the right shape — typically form validation or
+multi-field business-rule checking on data that has already been decoded into
+typed values — the `Validate` effect pattern from
+`examples/20-validation-applicative.dy` handles it cleanly without needing
+placeholder defaults. The trick there is that validators take typed values as
+arguments and return `Unit`, so there's never a continuation that needs a
+value of an arbitrary type. Two-phase: decode fail-fast first, then validate
+accumulating second.
+
+## Why pure functions, not an effect
+
+An earlier iteration used a `Decode` effect with `Dynamic.run` as the runner.
+This was removed because:
+
+1. **Decoding is deterministic.** `decode dec dyn` produces the same `Result`
+   every time it's called with the same arguments — there's no clock, no
+   randomness, no I/O, no observable side effect. The Erlang term may have
+   come from an effectful operation originally (a query, a parse), but
+   inspecting it after the fact is pure. Effects exist to track operations
+   whose semantics depend on context the caller can't see; decoding has no
+   such context.
+
+2. **The accumulation use case didn't justify the cost.** The original
+   motivation for the effect was error accumulation (many fields, one report
+   of all the failures). But accumulation requires placeholder defaults
+   (point 2 above), and the placeholders force every decoder type to carry an
+   arbitrary "zero" value. Once we accepted fail-fast as the right default,
+   the effect added CPS overhead and a handler for no benefit.
+
+3. **Stacking handlers is fragile.** The previous design also exposed a sharp
+   edge: a library handler that wrapped `Dynamic.run`'s computation with its
+   own state-passing transform (e.g. a row-cursor handler) would silently
+   mismatch continuation reshape types at runtime. The handler stack
+   typechecked but the continuations had incompatible wrapper types and
+   crashed with `function_clause` errors. Removing the effect removes the
+   surface area for this class of bug.
+
+The Gleam comparison: Gleam uses an opaque `Decoder(t)` type with
+continuation-passing combinators (`use name <- decode.field("name",
+decode.string)`). That works fine but requires the `(value, errors)` tuple
+to be baked into every decoder, which is essentially the same trade-off we
+declined here. dylang's `Decoder` is just `Dynamic -> Result a DecodeError`,
+and chaining is whatever Result-combinator pattern the user prefers.
 
 ## Implementation
 
@@ -235,17 +287,8 @@ The Gleam approach bakes error accumulation into the `Decoder` type itself
 - `Std.Dynamic` added to `BUILTIN_MODULES` in `check_module.rs`
 - `std_dynamic_bridge.erl` added to `stdlib_bridge_files()` in `build.rs`
 
-No compiler changes were needed for the types or effects — opaque types,
-polymorphic effect operations, and inline handlers all worked with existing
-infrastructure.
-
-### Bug fix: qualified calls with effectful callbacks
-
-During implementation we discovered that `lower_qualified_call` in
-`src/codegen/lower/mod.rs` did not handle `param_absorbed_effects` — so calling
-`Dynamic.run` (or any cross-module function taking an effectful callback) via
-qualified syntax would panic. Fixed by adding the same `lambda_effect_context`
-setup that the unqualified call path already had.
+No compiler changes were needed for the types -- opaque types and parametric
+ADTs all worked with existing infrastructure.
 
 ## Use cases
 
