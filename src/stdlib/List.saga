@@ -78,6 +78,15 @@ pub fun append : (xs: List a) -> (ys: List a) -> List a
 @external("erlang", "lists", "flatmap")
 pub fun flat_map : (f: a -> List b) -> (xs: List a) -> List b
 
+pub fun filter_map : (f: a -> Maybe b) -> (xs: List a) -> List b
+filter_map f xs = case xs {
+  [] -> []
+  h :: t -> case f h {
+    Just v -> v :: filter_map f t
+    Nothing -> filter_map f t
+  }
+}
+
 #@ Returns the first n elements of a list.
 pub fun take : (n: Int) -> (xs: List a) -> List a
 take n xs =

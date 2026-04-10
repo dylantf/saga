@@ -311,6 +311,28 @@ describe "pattern matching" {
       assert_false (bst_contains tree 9)
     }
   }
+
+  # Regression: the case scrutinee used to greedily parse `Ctor { ... }` as a
+  # record create even under `no_brace_app`, so `case f x Nothing { ... }`
+  # would swallow the case arms into a bogus `Nothing { ... }` record literal.
+  describe "case scrutinee ending in a bare constructor" {
+    test "application ending in Nothing" {
+      let r = case Maybe.or_else Nothing (Just 5) {
+        Just n -> n
+        Nothing -> 0
+      }
+      assert_eq r 5
+    }
+
+    test "application with trailing bare constructor arg" {
+      # Simulates `case derive sesh.date Nothing { ... }` shape
+      let pair = (True, Nothing)
+      let r = case Maybe.unwrap_or 99 (snd pair) {
+        n -> n
+      }
+      assert_eq r 99
+    }
+  }
 }
 
 describe "destructuring" {

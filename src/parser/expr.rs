@@ -447,7 +447,10 @@ impl Parser {
 
                 // Qualified record create: `A.Animal { field: val }`
                 // Uses unqualified type name, consistent with how `A.Circle(5)` -> Constructor("Circle").
+                // Guarded by `no_brace_app` so `case A.Foo { ... }` parses as
+                // case-over-qualified-name, not case over a record literal.
                 if name.chars().next().is_some_and(|c| c.is_uppercase())
+                    && !self.no_brace_app
                     && matches!(self.peek(), Token::LBrace)
                 {
                     self.advance(); // consume '{'
@@ -517,8 +520,10 @@ impl Parser {
                     end: end.end,
                 };
 
-                // Qualified record create with multi-level module path
+                // Qualified record create with multi-level module path.
+                // See `no_brace_app` comment above for why this is gated.
                 if name.chars().next().is_some_and(|c| c.is_uppercase())
+                    && !self.no_brace_app
                     && matches!(self.peek(), Token::LBrace)
                 {
                     self.advance(); // consume '{'
@@ -917,7 +922,10 @@ impl Parser {
                 kind: ExprKind::Var { name: i },
             }),
             Token::UpperIdent(i) => {
-                if matches!(self.peek(), Token::LBrace) {
+                // `no_brace_app` suppresses `{`-as-record-create so that
+                // `case Foo { ... }` parses `Foo` as a bare constructor and
+                // leaves the `{` for the case arms (likewise inside `if`/`with`).
+                if !self.no_brace_app && matches!(self.peek(), Token::LBrace) {
                     // Record create: User { name: "Dylan", age: 30 }
                     self.advance(); // consume '{'
                     let fields = self.parse_record_fields()?;
