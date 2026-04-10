@@ -1697,11 +1697,10 @@ impl<'a> Lowerer<'a> {
                 let scrut_var = self.fresh();
                 let scrut_ce = self.lower_expr_value(scrutinee);
                 let arms: Vec<_> = arms.iter().map(|a| a.node.clone()).collect();
-                let arms_ce = self.lower_case_arms(&scrut_var, &arms);
                 CExpr::Let(
                     scrut_var.clone(),
                     Box::new(scrut_ce),
-                    Box::new(CExpr::Case(Box::new(CExpr::Var(scrut_var)), arms_ce)),
+                    Box::new(self.lower_case_expr(&scrut_var, &arms)),
                 )
             }
 

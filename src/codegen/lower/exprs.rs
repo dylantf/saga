@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use super::pats::{self, lower_pat};
 use super::util::{
     arity_and_effects_from_type, binop_call, collect_effect_call, collect_fun_call,
-    has_nested_effect_call, lower_string_to_binary, mangle_ctor_atom,
+    core_var, has_nested_effect_call, lower_string_to_binary, mangle_ctor_atom,
     param_absorbed_effects_from_type, pat_binding_var,
 };
 use super::{FunInfo, LowerMode, Lowerer};
@@ -283,23 +283,30 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Lower a list of case arms, handling complex guards by desugaring them
-    /// into conditional expressions inside the arm body.
+    /// Lower a `case` expression over an already-bound scrutinee variable.
     ///
-    /// A "complex" guard (one containing a function call) can't be emitted
-    /// directly in Core Erlang. Instead we transform:
-    ///   `Pat if complex_guard -> body`
-    /// into:
-    ///   `Pat -> if complex_guard then body else case scrut_var of <remaining arms>`
-    pub(super) fn lower_case_arms(&mut self, scrut_var: &str, arms: &[CaseArm]) -> Vec<CArm> {
+    /// Complex guards cannot be emitted directly in Core Erlang. When any arm
+    /// contains one, we build a right-associated chain of one-arm cases so the
+    /// fallthrough for each suffix is lowered exactly once.
+    pub(super) fn lower_case_expr(&mut self, scrut_var: &str, arms: &[CaseArm]) -> CExpr {
         let arms_ref: Vec<&CaseArm> = arms.iter().collect();
-        self.lower_case_arms_inner(scrut_var, &arms_ref)
+        if arms_ref
+            .iter()
+            .all(|arm| arm.guard.as_ref().is_none_or(is_guard_safe))
+        {
+            return CExpr::Case(
+                Box::new(CExpr::Var(scrut_var.to_string())),
+                self.lower_case_arms_inner(scrut_var, &arms_ref),
+            );
+        }
+
+        self.lower_case_expr_chain(scrut_var, &arms_ref)
     }
 
-    fn lower_case_arms_inner(&mut self, scrut_var: &str, arms: &[&CaseArm]) -> Vec<CArm> {
+    fn lower_case_arms_inner(&mut self, _scrut_var: &str, arms: &[&CaseArm]) -> Vec<CArm> {
         let mut result = Vec::new();
 
-        for (i, arm) in arms.iter().enumerate() {
+        for arm in arms {
             let pat = lower_pat(&arm.pattern, &self.record_fields, &self.constructor_atoms);
 
             match &arm.guard {
@@ -317,30 +324,66 @@ impl<'a> Lowerer<'a> {
                         body: self.lower_expr(&arm.body),
                     });
                 }
-                Some(guard) => {
-                    // Complex guard: desugar into the arm body.
-                    // Remaining arms become the fallthrough when the pattern
-                    // matches but the guard evaluates to false. We still keep
-                    // the remaining arms in the outer case so pattern
-                    // mismatches continue trying later arms normally.
-                    let remaining = &arms[i + 1..];
-                    let fallthrough = if remaining.is_empty() {
-                        CExpr::Call(
-                            "erlang".to_string(),
-                            "error".to_string(),
-                            vec![CExpr::Lit(CLit::Atom("case_clause".to_string()))],
-                        )
+                Some(_guard) => {
+                    unreachable!(
+                        "complex guards should be handled by lower_case_expr_chain"
+                    );
+                }
+            }
+        }
+
+        result
+    }
+
+    fn lower_case_expr_chain(&mut self, scrut_var: &str, arms: &[&CaseArm]) -> CExpr {
+        let mut rest = self.case_clause_error_expr();
+
+        for arm in arms.iter().rev() {
+            let rest_var = self.fresh();
+            let rest_ref = CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
+            let pat = lower_pat(&arm.pattern, &self.record_fields, &self.constructor_atoms);
+            let body_ce = self.lower_expr(&arm.body);
+
+            let current = match &arm.guard {
+                None => {
+                    if Self::is_catchall_pat(&arm.pattern) {
+                        self.bind_catchall_pattern(scrut_var, &arm.pattern, body_ce)
                     } else {
                         CExpr::Case(
                             Box::new(CExpr::Var(scrut_var.to_string())),
-                            self.lower_case_arms_inner(scrut_var, remaining),
+                            vec![
+                                CArm {
+                                    pat,
+                                    guard: None,
+                                    body: body_ce,
+                                },
+                                CArm {
+                                    pat: CPat::Wildcard,
+                                    guard: None,
+                                    body: rest_ref,
+                                },
+                            ],
                         )
-                    };
-
-                    let guard_ce = self.lower_expr(guard);
-                    let body_ce = self.lower_expr(&arm.body);
-                    let complex_body = CExpr::Case(
-                        Box::new(guard_ce),
+                    }
+                }
+                Some(guard) if is_guard_safe(guard) => CExpr::Case(
+                    Box::new(CExpr::Var(scrut_var.to_string())),
+                    vec![
+                        CArm {
+                            pat,
+                            guard: Some(self.lower_expr(guard)),
+                            body: body_ce,
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: rest_ref,
+                        },
+                    ],
+                ),
+                Some(guard) => {
+                    let guarded_body = CExpr::Case(
+                        Box::new(self.lower_expr(guard)),
                         vec![
                             CArm {
                                 pat: CPat::Lit(CLit::Atom("true".to_string())),
@@ -350,20 +393,65 @@ impl<'a> Lowerer<'a> {
                             CArm {
                                 pat: CPat::Wildcard,
                                 guard: None,
-                                body: fallthrough,
+                                body: rest_ref.clone(),
                             },
                         ],
                     );
-                    result.push(CArm {
-                        pat,
-                        guard: None,
-                        body: complex_body,
-                    });
+
+                    if Self::is_catchall_pat(&arm.pattern) {
+                        self.bind_catchall_pattern(scrut_var, &arm.pattern, guarded_body)
+                    } else {
+                        CExpr::Case(
+                            Box::new(CExpr::Var(scrut_var.to_string())),
+                            vec![
+                                CArm {
+                                    pat,
+                                    guard: None,
+                                    body: guarded_body,
+                                },
+                                CArm {
+                                    pat: CPat::Wildcard,
+                                    guard: None,
+                                    body: rest_ref,
+                                },
+                            ],
+                        )
+                    }
                 }
-            }
+            };
+
+            rest = CExpr::Let(
+                rest_var,
+                Box::new(CExpr::Fun(vec![], Box::new(rest))),
+                Box::new(current),
+            );
         }
 
-        result
+        rest
+    }
+
+    fn case_clause_error_expr(&self) -> CExpr {
+        CExpr::Call(
+            "erlang".to_string(),
+            "error".to_string(),
+            vec![CExpr::Lit(CLit::Atom("case_clause".to_string()))],
+        )
+    }
+
+    fn is_catchall_pat(pat: &Pat) -> bool {
+        matches!(pat, Pat::Wildcard { .. } | Pat::Var { .. })
+    }
+
+    fn bind_catchall_pattern(&self, scrut_var: &str, pat: &Pat, body: CExpr) -> CExpr {
+        match pat {
+            Pat::Wildcard { .. } => body,
+            Pat::Var { name, .. } => CExpr::Let(
+                core_var(name),
+                Box::new(CExpr::Var(scrut_var.to_string())),
+                Box::new(body),
+            ),
+            _ => unreachable!("only catchall patterns should be rebound directly"),
+        }
     }
 
     /// Lower a saturated constructor call to the appropriate Core Erlang form.

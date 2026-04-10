@@ -137,51 +137,52 @@ fn assert_core_compiles(out: &str) {
     );
 }
 
-// fn assert_runs_and_stdout_contains(src: &str, needles: &[&str]) {
-//     use std::sync::atomic::{AtomicUsize, Ordering};
-//     static COUNTER: AtomicUsize = AtomicUsize::new(0);
+fn assert_runs_and_stdout_contains(src: &str, needles: &[&str]) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-//     let out = emit_elaborated_with_std(src);
-//     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-//     let dir = std::env::temp_dir().join(format!("saga_run_test_{}_{id}", std::process::id()));
-//     std::fs::create_dir_all(&dir).unwrap();
-//     let core_path = dir.join("_script.core");
-//     std::fs::write(&core_path, &out).unwrap();
-//     let status = std::process::Command::new("erlc")
-//         .arg("-o")
-//         .arg(&dir)
-//         .arg(&core_path)
-//         .output()
-//         .expect("failed to run erlc");
-//     assert!(
-//         status.status.success(),
-//         "erlc failed to compile:\n{}\nstderr: {}",
-//         out,
-//         String::from_utf8_lossy(&status.stderr)
-//     );
+    let out = emit_elaborated(src);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("saga_run_test_{}_{id}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let core_path = dir.join("_script.core");
+    std::fs::write(&core_path, &out).unwrap();
+    let status = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        status.status.success(),
+        "erlc failed to compile:\n{}\nstderr: {}",
+        out,
+        String::from_utf8_lossy(&status.stderr)
+    );
 
-//     let run_output = std::process::Command::new("erl")
-//         .arg("-noshell")
-//         .arg("-pa")
-//         .arg(&dir)
-//         .arg("-eval")
-//         .arg("'_script':main(), init:stop().")
-//         .output()
-//         .expect("failed to run erl");
-//     let _ = std::fs::remove_dir_all(&dir);
-//     assert!(
-//         run_output.status.success(),
-//         "erl failed:\nstderr: {}",
-//         String::from_utf8_lossy(&run_output.stderr)
-//     );
-//     let stdout = String::from_utf8_lossy(&run_output.stdout);
-//     for needle in needles {
-//         assert!(
-//             stdout.contains(needle),
-//             "expected '{needle}' in output, got: {stdout}"
-//         );
-//     }
-// }
+    let run_output = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("io:format(\"~p~n\", ['_script':main()]), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run_output.status.success(),
+        "erl failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run_output.stdout),
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run_output.stdout);
+    for needle in needles {
+        assert!(
+            stdout.contains(needle),
+            "expected '{needle}' in output, got: {stdout}"
+        );
+    }
+}
 
 fn assert_contains(out: &str, needle: &str) {
     assert!(
@@ -219,6 +220,24 @@ main () = {
         "inner dynamic handler should remain when nested inside an outer static handler\n{out}"
     );
     assert_core_compiles(&out);
+}
+
+#[test]
+fn complex_guard_case_runs_without_eager_fallthrough() {
+    let src = r#"
+g1 x = x == 0
+g2 x = x == 1
+g3 x = x == 2
+
+main () = case 0 {
+  0 when g1 0 -> 10
+  1 when g2 1 -> 20
+  2 when g3 2 -> 30
+  _ -> 40
+}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["10"]);
 }
 
 #[test]

@@ -514,6 +514,31 @@ filter_pos n = case n {
     );
 }
 
+#[test]
+fn complex_guard_suffix_lowered_once_per_arm() {
+    let src = r#"
+g1 x = x > 0
+g2 x = x > 1
+g3 x = x > 2
+
+main n = case n {
+  0 when g1 n -> 10
+  1 when g2 n -> 20
+  2 when g3 n -> 30
+  _ -> 40
+}
+"#;
+    let out = emit_full(src);
+    for guard_fn in ["g1", "g2", "g3"] {
+        let needle = format!("apply '{guard_fn}'/1(");
+        let count = out.matches(&needle).count();
+        assert_eq!(
+            count, 1,
+            "expected exactly one lowered call for {guard_fn}, got {count}\n{out}"
+        );
+    }
+}
+
 // --- Nested effect calls in branches (CPS outer-K threading) ---
 
 #[test]
