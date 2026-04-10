@@ -1,24 +1,5 @@
-effect Counter {
-  fun get : Unit -> Int
-}
-
-handler add_one for Counter {
-  get () = resume 10
-  return value = value + 1
-}
-
-handler times_two for Counter {
-  get () = resume 20
-  return value = value * 2
-}
-
-fun first_named_return_wins : Unit -> Int
-first_named_return_wins () = get! () with {add_one, times_two}
-
-fun reversed_order : Unit -> Int
-reversed_order () = get! () with {times_two, add_one}
-
 main () = {
-  dbg (first_named_return_wins ())
-  dbg (reversed_order ())
+  let a = ["foo"]
+  let b = ["bar"]
+  dbg (a <> b) # fails, semigroup is only a marker trait and this isnt lowered right :(
 }
