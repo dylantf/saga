@@ -947,37 +947,46 @@ impl Parser {
             }
 
             Token::LParen => {
-                if matches!(self.peek(), Token::RParen) {
-                    self.advance(); // consume ')'
-                    Ok(Expr {
-                        id: self.next_id(),
-                        span,
-                        kind: ExprKind::Lit { value: Lit::Unit },
-                    })
-                } else {
-                    let first = self.parse_expr(0)?;
-                    if matches!(self.peek(), Token::Comma) {
-                        // Tuple: (a, b, ...)
-                        let mut elements = vec![first];
-                        while matches!(self.peek(), Token::Comma) {
-                            self.advance();
-                            if matches!(self.peek(), Token::RParen) {
-                                break; // trailing comma
-                            }
-                            elements.push(self.parse_expr(0)?);
-                        }
-                        let end = self.tokens[self.pos].span;
-                        self.expect(Token::RParen)?;
+                // Inside a delimited sub-expression, reset `no_brace_app` so a
+                // `Foo { ... }` record literal within the parens is not
+                // misparsed as a bare constructor leaving `{` for the outer
+                // case arms. Restored after this branch completes.
+                let saved_nba = std::mem::replace(&mut self.no_brace_app, false);
+                let result: Result<Expr, ParseError> = (|| {
+                    if matches!(self.peek(), Token::RParen) {
+                        self.advance(); // consume ')'
                         Ok(Expr {
                             id: self.next_id(),
-                            span: span.to(end),
-                            kind: ExprKind::Tuple { elements },
+                            span,
+                            kind: ExprKind::Lit { value: Lit::Unit },
                         })
                     } else {
-                        self.expect(Token::RParen)?;
-                        Ok(first)
+                        let first = self.parse_expr(0)?;
+                        if matches!(self.peek(), Token::Comma) {
+                            // Tuple: (a, b, ...)
+                            let mut elements = vec![first];
+                            while matches!(self.peek(), Token::Comma) {
+                                self.advance();
+                                if matches!(self.peek(), Token::RParen) {
+                                    break; // trailing comma
+                                }
+                                elements.push(self.parse_expr(0)?);
+                            }
+                            let end = self.tokens[self.pos].span;
+                            self.expect(Token::RParen)?;
+                            Ok(Expr {
+                                id: self.next_id(),
+                                span: span.to(end),
+                                kind: ExprKind::Tuple { elements },
+                            })
+                        } else {
+                            self.expect(Token::RParen)?;
+                            Ok(first)
+                        }
                     }
-                }
+                })();
+                self.no_brace_app = saved_nba;
+                result
             }
 
             // List literal: [e1, e2, e3]
@@ -990,51 +999,58 @@ impl Parser {
             //   [e | let p = v, Q] ==> { let p = v; [e | Q] }
             //   [e | ]           ==> [e]
             Token::LBracket => {
-                // Empty list
-                if matches!(self.peek(), Token::RBracket) {
-                    let end = self.tokens[self.pos].span;
-                    self.advance();
-                    return Ok(Expr {
-                        id: self.next_id(),
-                        span: span.to(end),
-                        kind: ExprKind::ListLit { elements: vec![] },
-                    });
-                }
+                // See LParen branch: reset `no_brace_app` inside the delimited
+                // sub-expression so record literals can be parsed normally.
+                let saved_nba = std::mem::replace(&mut self.no_brace_app, false);
+                let result: Result<Expr, ParseError> = (|| {
+                    // Empty list
+                    if matches!(self.peek(), Token::RBracket) {
+                        let end = self.tokens[self.pos].span;
+                        self.advance();
+                        return Ok(Expr {
+                            id: self.next_id(),
+                            span: span.to(end),
+                            kind: ExprKind::ListLit { elements: vec![] },
+                        });
+                    }
 
-                let first = self.parse_expr(0)?;
+                    let first = self.parse_expr(0)?;
 
-                if matches!(self.peek(), Token::Bar) {
-                    // List comprehension: [expr | qualifiers]
-                    self.advance(); // consume |
-                    let qualifiers = self.parse_comprehension_qualifiers()?;
+                    if matches!(self.peek(), Token::Bar) {
+                        // List comprehension: [expr | qualifiers]
+                        self.advance(); // consume |
+                        let qualifiers = self.parse_comprehension_qualifiers()?;
+                        let end = self.tokens[self.pos].span;
+                        self.expect(Token::RBracket)?;
+                        return Ok(Expr {
+                            id: self.next_id(),
+                            span: span.to(end),
+                            kind: ExprKind::ListComprehension {
+                                body: Box::new(first),
+                                qualifiers,
+                            },
+                        });
+                    }
+
+                    // Normal list literal
+                    let mut elements = vec![first];
+                    while matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                        if matches!(self.peek(), Token::RBracket) {
+                            break; // trailing comma
+                        }
+                        elements.push(self.parse_expr(0)?);
+                    }
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RBracket)?;
-                    return Ok(Expr {
+                    Ok(Expr {
                         id: self.next_id(),
                         span: span.to(end),
-                        kind: ExprKind::ListComprehension {
-                            body: Box::new(first),
-                            qualifiers,
-                        },
-                    });
-                }
-
-                // Normal list literal
-                let mut elements = vec![first];
-                while matches!(self.peek(), Token::Comma) {
-                    self.advance();
-                    if matches!(self.peek(), Token::RBracket) {
-                        break; // trailing comma
-                    }
-                    elements.push(self.parse_expr(0)?);
-                }
-                let end = self.tokens[self.pos].span;
-                self.expect(Token::RBracket)?;
-                Ok(Expr {
-                    id: self.next_id(),
-                    span: span.to(end),
-                    kind: ExprKind::ListLit { elements },
-                })
+                        kind: ExprKind::ListLit { elements },
+                    })
+                })();
+                self.no_brace_app = saved_nba;
+                result
             }
 
             Token::Fun => {
@@ -1376,77 +1392,85 @@ impl Parser {
 
             // do...else block: `do { Pat <- expr ... SuccessExpr } else { Pat -> expr ... }`
             Token::Do => {
-                self.expect(Token::LBrace)?;
+                // See LParen branch: inside the do/else braces, reset
+                // `no_brace_app` so inner expressions can use record literals.
+                let saved_nba = std::mem::replace(&mut self.no_brace_app, false);
+                let result: Result<Expr, ParseError> = (|| {
+                    self.expect(Token::LBrace)?;
 
-                let mut bindings = Vec::new();
-                // Parse bindings (`Pat <- expr`) until we find the success expression
-                // (a line without `<-`). Distinguish by trying to parse a pattern and
-                // checking whether `<-` follows; backtrack if not.
-                let success = loop {
-                    if matches!(self.peek(), Token::RBrace | Token::Eof) {
-                        return Err(ParseError {
-                            message: "do block missing success expression before '}'".to_string(),
-                            span: self.tokens[self.pos].span,
+                    let mut bindings = Vec::new();
+                    // Parse bindings (`Pat <- expr`) until we find the success expression
+                    // (a line without `<-`). Distinguish by trying to parse a pattern and
+                    // checking whether `<-` follows; backtrack if not.
+                    let success = loop {
+                        if matches!(self.peek(), Token::RBrace | Token::Eof) {
+                            return Err(ParseError {
+                                message: "do block missing success expression before '}'"
+                                    .to_string(),
+                                span: self.tokens[self.pos].span,
+                            });
+                        }
+                        let saved_pos = self.pos;
+                        match self.parse_pattern() {
+                            Ok(pat) if matches!(self.peek(), Token::LeftArrow) => {
+                                self.advance(); // consume `<-`
+                                let expr = self.parse_expr(0)?;
+                                bindings.push((pat, expr));
+                            }
+                            _ => {
+                                // Not a binding -- restore and parse as success expression
+                                self.pos = saved_pos;
+                                let success = self.parse_expr(0)?;
+                                break success;
+                            }
+                        }
+                    };
+                    self.expect(Token::RBrace)?;
+
+                    self.expect(Token::Else)?;
+                    self.expect(Token::LBrace)?;
+
+                    let mut else_arms = Vec::new();
+                    while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                        let start = self.pos;
+                        let arm_start = self.tokens[self.pos].span;
+                        let pattern = self.parse_pattern()?;
+                        self.expect(Token::Arrow)?;
+                        let body = self.parse_expr(0)?;
+                        let end_span = body.span.end;
+                        let trailing_comment = self.take_trailing_comment(self.pos - 1);
+                        else_arms.push(Annotated {
+                            node: CaseArm {
+                                pattern,
+                                guard: None,
+                                body,
+                                span: Span {
+                                    start: arm_start.start,
+                                    end: end_span,
+                                },
+                            },
+                            leading_trivia: self.take_leading_trivia(start),
+                            trailing_comment,
+                            trailing_trivia: vec![],
                         });
                     }
-                    let saved_pos = self.pos;
-                    match self.parse_pattern() {
-                        Ok(pat) if matches!(self.peek(), Token::LeftArrow) => {
-                            self.advance(); // consume `<-`
-                            let expr = self.parse_expr(0)?;
-                            bindings.push((pat, expr));
-                        }
-                        _ => {
-                            // Not a binding -- restore and parse as success expression
-                            self.pos = saved_pos;
-                            let success = self.parse_expr(0)?;
-                            break success;
-                        }
-                    }
-                };
-                self.expect(Token::RBrace)?;
+                    let dangling_trivia = self.take_leading_trivia(self.pos);
+                    let end = self.tokens[self.pos].span;
+                    self.expect(Token::RBrace)?;
 
-                self.expect(Token::Else)?;
-                self.expect(Token::LBrace)?;
-
-                let mut else_arms = Vec::new();
-                while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                    let start = self.pos;
-                    let arm_start = self.tokens[self.pos].span;
-                    let pattern = self.parse_pattern()?;
-                    self.expect(Token::Arrow)?;
-                    let body = self.parse_expr(0)?;
-                    let end_span = body.span.end;
-                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
-                    else_arms.push(Annotated {
-                        node: CaseArm {
-                            pattern,
-                            guard: None,
-                            body,
-                            span: Span {
-                                start: arm_start.start,
-                                end: end_span,
-                            },
+                    Ok(Expr {
+                        id: self.next_id(),
+                        span: span.to(end),
+                        kind: ExprKind::Do {
+                            bindings,
+                            success: Box::new(success),
+                            else_arms,
+                            dangling_trivia,
                         },
-                        leading_trivia: self.take_leading_trivia(start),
-                        trailing_comment,
-                        trailing_trivia: vec![],
-                    });
-                }
-                let dangling_trivia = self.take_leading_trivia(self.pos);
-                let end = self.tokens[self.pos].span;
-                self.expect(Token::RBrace)?;
-
-                Ok(Expr {
-                    id: self.next_id(),
-                    span: span.to(end),
-                    kind: ExprKind::Do {
-                        bindings,
-                        success: Box::new(success),
-                        else_arms,
-                        dangling_trivia,
-                    },
-                })
+                    })
+                })();
+                self.no_brace_app = saved_nba;
+                result
             }
 
             Token::Handler => {

@@ -160,12 +160,18 @@ fn assert_runs_and_stdout_contains(src: &str, needles: &[&str]) {
         String::from_utf8_lossy(&status.stderr)
     );
 
+    let eval = if out.contains("'main'/1") {
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop()."
+    } else {
+        "io:format(\"~p~n\", ['_script':main()]), init:stop()."
+    };
+
     let run_output = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~p~n\", ['_script':main()]), init:stop().")
+        .arg(eval)
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
