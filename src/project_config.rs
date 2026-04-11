@@ -370,7 +370,23 @@ fn resolve_ref(bare_repo: &Path, dep: &DepEntry) -> Result<String, String> {
 /// Clone from the bare cache into the target directory at a specific commit.
 fn ensure_checkout(bare_repo: &Path, commit: &str, target_dir: &Path) -> Result<PathBuf, String> {
     if target_dir.exists() {
-        return Ok(target_dir.to_path_buf());
+        // Check whether the existing checkout is already at the requested commit.
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(target_dir)
+            .output()
+            .map_err(|e| format!("failed to run git rev-parse: {}", e))?;
+        if output.status.success() {
+            let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if current == commit {
+                return Ok(target_dir.to_path_buf());
+            }
+        }
+
+        // Stale checkout (different commit, or not a git dir). Wipe and re-clone
+        // so any compiled artifacts (ebin/, priv/) are regenerated as well.
+        std::fs::remove_dir_all(target_dir)
+            .map_err(|e| format!("failed to remove stale checkout: {}", e))?;
     }
 
     std::fs::create_dir_all(target_dir)
