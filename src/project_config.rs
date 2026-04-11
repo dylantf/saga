@@ -597,13 +597,7 @@ fn install_deps_recursive(
 
             let short_commit = &commit[..commit.len().min(12)];
             let label = if reused { "Up to date" } else { "Resolved" };
-            eprintln!(
-                "{}{} {} -> {}",
-                indent,
-                cyan(label),
-                dep_name,
-                short_commit
-            );
+            eprintln!("{}{} {} -> {}", indent, cyan(label), dep_name, short_commit);
 
             lockfile.deps.insert(
                 dep_name.clone(),
@@ -633,12 +627,7 @@ fn install_deps_recursive(
         // live there.
         let already_built = reused && crate::hex::is_compiled(top_project_root, dep_name);
         if already_built {
-            eprintln!(
-                "{}{} {} (already built)",
-                indent,
-                dim("Skipping"),
-                dep_name
-            );
+            eprintln!("{}{} {} (already built)", indent, dim("Skipping"), dep_name);
         } else if dep_path.join("rebar.config").exists() {
             eprintln!("{}{} {} (rebar3)...", indent, dim("Compiling"), dep_name);
             crate::hex::compile_with_rebar3(&dep_path, dep_name, top_project_root)?;

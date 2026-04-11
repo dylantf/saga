@@ -118,7 +118,20 @@ impl Checker {
 
             ExprKind::App { func, arg, .. } => {
                 let func_ty = self.infer_expr(func)?;
-                let arg_ty = self.infer_expr(arg)?;
+                let arg_ty = match &arg.kind {
+                    ExprKind::Lambda { params, body } => {
+                        let resolved_func = self.sub.apply(&func_ty);
+                        if let Type::Fun(expected_param, _, _) = &resolved_func {
+                            match self.infer_lambda_against(params, body, expected_param)? {
+                                Some(ty) => ty,
+                                None => self.infer_expr(arg)?,
+                            }
+                        } else {
+                            self.infer_expr(arg)?
+                        }
+                    }
+                    _ => self.infer_expr(arg)?,
+                };
                 let arg_ty_pre = arg_ty.clone();
                 let ret_ty = self.fresh_var();
                 let eff_row_var = self.fresh_var();
@@ -138,6 +151,15 @@ impl Checker {
                     .is_err()
                 {
                     let resolved = self.sub.apply(&func_ty);
+                    if let Type::Fun(param_ty, _, _) = &resolved {
+                        let expected = self.prettify_type(param_ty);
+                        let actual = self.prettify_type(&arg_ty_pre);
+                        return Err(Diagnostic::error_at(
+                            arg.span,
+                            format!("type mismatch: expected {}, got {}", expected, actual),
+                        ));
+                    }
+
                     let display = self.prettify_type(&resolved);
                     return Err(Diagnostic::error_at(
                         func.span,
@@ -706,6 +728,56 @@ impl Checker {
         // Lambda effects propagate to enclosing scope
         self.emit_effects(&body_effs);
         Ok(ty)
+    }
+
+    fn infer_lambda_against(
+        &mut self,
+        params: &[Pat],
+        body: &Expr,
+        expected_ty: &Type,
+    ) -> Result<Option<Type>, Diagnostic> {
+        let mut current = self.sub.apply(expected_ty);
+        let mut param_types = Vec::with_capacity(params.len());
+
+        for _ in params {
+            match current {
+                Type::Fun(param_ty, ret_ty, _) => {
+                    param_types.push(*param_ty);
+                    current = *ret_ty;
+                }
+                _ => return Ok(None),
+            }
+        }
+
+        let expected_body_ty = current;
+        let saved_env = self.env.clone();
+        let saved_cache = self.effect_meta.type_param_cache.clone();
+        self.effect_meta.type_param_cache = saved_cache.clone();
+
+        for (pat, param_ty) in params.iter().zip(param_types.iter()) {
+            self.bind_pattern(pat, param_ty)?;
+        }
+
+        let saved_effs = self.save_effects();
+        let body_ty = self.infer_expr(body)?;
+        let body_effs = self.restore_effects(saved_effs);
+        self.unify_at(&body_ty, &expected_body_ty, body.span)?;
+        self.env = saved_env;
+        self.effect_meta.type_param_cache = saved_cache;
+
+        let mut ty = body_ty;
+        for param_ty in param_types.into_iter().rev() {
+            ty = Type::arrow(param_ty, ty);
+        }
+
+        if !body_effs.effects.is_empty()
+            && let Type::Fun(a, b, _) = ty
+        {
+            ty = Type::Fun(a, b, body_effs.clone());
+        }
+
+        self.emit_effects(&body_effs);
+        Ok(Some(ty))
     }
 
     fn infer_receive(

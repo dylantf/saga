@@ -753,6 +753,51 @@ fn lambda_effects_absorbed_by_hof_annotation() {
 }
 
 #[test]
+fn tuple_pattern_lambda_argument_uses_expected_callback_type_for_fields() {
+    check(
+        "record WindDetails { wind_avg: Int, wind_gust: Int }\n\
+         record Normalized { wind_avg: Maybe Int, wind_gust: Maybe Int }\n\
+         fun map_rows : (rows: List a) -> (f: a -> b) -> List b\n\
+         map_rows rows f = List.map f rows\n\
+         val rows = [(1, WindDetails { wind_avg: 10, wind_gust: 20 })]\n\
+         main () = map_rows rows (fun (sesh_id, wd) -> wd.wind_avg + sesh_id)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn named_binder_lambda_argument_still_typechecks() {
+    check(
+        "record Row { sesh_id: Int, wind_avg: Int }\n\
+         fun push_values : (rows: List a) -> (bind_row: a -> List Int) -> List Int\n\
+         push_values rows bind_row = List.flat_map bind_row rows\n\
+         val rows = [Row { sesh_id: 1, wind_avg: 10 }]\n\
+         main () = push_values rows (fun row -> [row.sesh_id, row.wind_avg])",
+    )
+    .unwrap();
+}
+
+#[test]
+fn non_lambda_callback_argument_still_needs_annotation_for_ambiguous_fields() {
+    let result = check(
+        "record WindDetails { wind_avg: Int }\n\
+         record Normalized { wind_avg: Maybe Int }\n\
+         bind_row pair = case pair {\n\
+           (_, wd) -> wd.wind_avg\n\
+         }\n\
+         val rows = [(1, WindDetails { wind_avg: 10 })]\n\
+         main () = List.map bind_row rows",
+    );
+    assert!(result.is_err(), "expected ambiguous field error");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("ambiguous field") && err.message.contains("wind_avg"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
 fn multiple_effects_needs_all() {
     let result = check(
         "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun foo : (x: Int) -> Int needs {Fail}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n}",
@@ -1353,6 +1398,41 @@ main () = display (Foo { x: 1 })",
     let err = result.err().unwrap();
     assert!(
         err.message.contains("no impl of Show for Foo"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn effectful_function_application_reports_argument_mismatch() {
+    let result = check(
+        "import Std.IO (console, println)
+main () = {
+  println (dbg 1)
+} with {console}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("type mismatch: expected String, got Unit"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn lambda_body_effectful_function_application_reports_argument_mismatch() {
+    let result = check(
+        "import Std.IO (console, println)
+main () = {
+  let f = fun user -> println (dbg user)
+  f \"hi\"
+} with {console}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("type mismatch: expected String, got Unit"),
         "got: {}",
         err.message
     );
@@ -4245,6 +4325,55 @@ main () = {
             .map(|d| d.message.clone())
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn imported_record_tuple_pattern_lambda_argument_typechecks_through_push_values_shape() {
+    let db_module = r#"module Db
+
+pub record WindDetails {
+  wind_avg: Int,
+  wind_gust: Int,
+  sesh_type: String,
+}
+
+pub fun make_wind : Int -> Int -> String -> WindDetails
+make_wind wind_avg wind_gust sesh_type =
+  WindDetails { wind_avg: wind_avg, wind_gust: wind_gust, sesh_type: sesh_type }
+
+pub fun push_values : (rows: List a) -> (bind_row: a -> List Int) -> List Int
+push_values rows bind_row = List.flat_map bind_row rows
+"#;
+
+    let input_module = r#"module Input
+
+pub record Normalized {
+  wind_avg: Maybe Int,
+  wind_gust: Maybe Int,
+  sesh_type: Maybe String,
+}
+"#;
+
+    let main_src = r#"import Db (make_wind, push_values)
+import Input (Normalized)
+
+val rows = [
+  (1, make_wind 10 20 "spot"),
+]
+
+main () =
+  push_values rows (fun (sesh_id, wd) -> [
+    sesh_id,
+    wd.wind_avg,
+    wd.wind_gust,
+  ])
+"#;
+
+    check_with_project_files(
+        &[("lib/Db.saga", db_module), ("lib/Input.saga", input_module)],
+        main_src,
+    )
+    .unwrap();
 }
 
 #[test]

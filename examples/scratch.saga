@@ -1,3 +1,20 @@
-main () = {
-  println "hello world" with console
+record User {
+  name: String,
+  age: Int,
+} deriving (Debug)
+
+val sample_users = [
+  User { name: "Dylan", age: 30 },
+  User { name: "Alice", age: 27 },
+]
+
+fun keyed_users : Unit -> List (Int, User)
+keyed_users () = {
+  List.enumerate sample_users
 }
+
+main () = {
+  let items = keyed_users ()
+  List.iter (fun (idx, user) -> println (debug user)) items
+  List.iter (fun user -> println (debug user)) sample_users
+} with {console}
