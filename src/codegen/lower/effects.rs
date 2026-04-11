@@ -197,9 +197,6 @@ impl<'a> Lowerer<'a> {
                 .clone()
         };
         let effect_key = format!("{}.{}", effect_name, op_name);
-        let param_effects = self
-            .op_param_absorbed_effects(&effect_name, op_name)
-            .cloned();
 
         // Lower args (shared between direct and CPS paths).
         let runtime_param_count = self
@@ -211,7 +208,7 @@ impl<'a> Lowerer<'a> {
         let mut unit_args_to_erase = args.len().saturating_sub(runtime_param_count);
         let mut param_vars = Vec::new();
         let mut bindings = Vec::new();
-        for (arg_index, arg) in args.iter().enumerate() {
+        for arg in args {
             let is_unit_literal = matches!(
                 arg.kind,
                 ExprKind::Lit {
@@ -224,12 +221,13 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let v = self.fresh();
+            // Effect call args are not CPS-expanded: BEAM-native ops (e.g.
+            // spawn) wrap their callback as a value-shape thunk and can't
+            // supply CPS handlers, and user-defined op handlers receive the
+            // callback as a captured-handler closure too. So clear any
+            // ambient lambda_effect_context here — it only applies to
+            // ordinary (App) HOF parameters.
             let saved_ctx = self.lambda_effect_context.take();
-            if let Some(pe) = &param_effects
-                && let Some(effs) = pe.get(&arg_index)
-            {
-                self.lambda_effect_context = Some(effs.clone());
-            }
             let ce = self
                 .lower_eta_reduced_effect_expr(arg)
                 .unwrap_or_else(|| self.lower_expr_value(arg));

@@ -540,8 +540,18 @@ impl Normalizer {
 /// Bare effect op references like `ping!` are values, not calls.
 fn is_effect_call(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::EffectCall { .. } => false,
-        ExprKind::App { func, .. } => is_effect_call(func),
+        ExprKind::App { func, .. } => is_effect_call_head(func),
+        _ => false,
+    }
+}
+
+/// Check if the head of an App chain is an `EffectCall` node.
+/// Used by `is_effect_call` after we've already seen at least one App wrapper,
+/// so an `EffectCall` here represents an applied op rather than a bare value.
+fn is_effect_call_head(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::EffectCall { .. } => true,
+        ExprKind::App { func, .. } => is_effect_call_head(func),
         _ => false,
     }
 }
