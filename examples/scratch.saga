@@ -1,34 +1,6 @@
-module Main
-
-import Std.IO (Stdio, console)
-
-effect Inner {
-  fun ping : Unit -> Unit
-}
-
-effect Outer {
-  fun wrap : (Unit -> Unit needs {Inner}) -> Unit
-}
-
-handler stdout_inner for Inner needs {Stdio} {
-  ping () = {
-    println "ping"
-    resume ()
-  }
-}
-
-handler my_wrap for Outer needs {Inner} {
-  wrap f = {
-    let _ = f ()
-    resume ()
-  }
-}
-
-# Wrapper function around the effect operation. Without this indirection
-# the bug does NOT reproduce - `wrap!` called directly works fine.
-fun call_wrap : (Unit -> Unit needs {Inner}) -> Unit needs {Outer}
-call_wrap f = wrap! f
+fun decode_id : (row: Std.Dynamic.Dynamic) -> Result Int Std.Dynamic.DecodeError
+decode_id row = decode_element 0 int row
 
 main () = {
-  call_wrap (ping!)
-} with {my_wrap, stdout_inner, console}
+  println "hello world" with console
+}

@@ -300,6 +300,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [ ] Builtin resolution via ResolutionMap: builtins (panic, todo, print, catch_panic, etc.) are currently matched by string name in the lowerer, with separate checks for qualified and unqualified calls. The resolution map should tag these so the lowerer can check a single `Builtin { name, .. }` variant instead of string matching in multiple places.
 - [ ] Parser/Formatter: program-level `split_inter_decl_trivia` - may be redundant now that expression parsers steal their own trailing trivia via `steal_trailing_trivia`
 - [ ] Structured error types: replace `Diagnostic { message: String }` with an enum of typed error variants (e.g. `TypeError::Mismatch { expected, actual }`, `TypeError::UnboundVar { name }`) and a separate rendering pass. Enables error codes, "did you mean?" suggestions, LSP quick-fix code actions, and testable error assertions without string matching. Currently ~100+ `Diagnostic::error_at(span, format!(...))` call sites across the typechecker.
+- [ ] Change project.toml to saga.toml
 
 ## Out of Scope (?)
 

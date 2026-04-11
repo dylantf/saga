@@ -1173,21 +1173,21 @@ impl Parser {
         let start = self.tokens[self.pos].span;
         match self.advance() {
             Token::UpperIdent(s) => {
-                // Support qualified type names: `Module.Type`
-                if matches!(self.peek(), Token::Dot) {
+                // Support multi-level qualified type names: `Module.Type`, `Std.Dynamic.Dynamic`
+                let mut name = s;
+                let mut end = start;
+                while matches!(self.peek(), Token::Dot)
+                    && matches!(self.peek_at(1), Token::UpperIdent(_))
+                {
                     self.advance(); // consume '.'
-                    let end = self.tokens[self.pos].span;
-                    let name = self.expect_upper_ident()?;
-                    Ok(TypeExpr::Named {
-                        name: format!("{}.{}", s, name),
-                        span: start.to(end),
-                    })
-                } else {
-                    Ok(TypeExpr::Named {
-                        name: s,
-                        span: start,
-                    })
+                    end = self.tokens[self.pos].span;
+                    let segment = self.expect_upper_ident()?;
+                    name = format!("{}.{}", name, segment);
                 }
+                Ok(TypeExpr::Named {
+                    name,
+                    span: start.to(end),
+                })
             }
             Token::Ident(s) => Ok(TypeExpr::Var {
                 name: s,
