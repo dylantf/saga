@@ -1040,83 +1040,199 @@ impl<'a> Lowerer<'a> {
     }
 
     fn collect_var_refs(expr: &CExpr, out: &mut HashSet<String>) {
+        let mut bound = HashSet::new();
+        Self::collect_free_var_refs(expr, &mut bound, out);
+    }
+
+    /// Scope-aware free-variable collector. Tracks which names are locally
+    /// bound by `Let`/`Fun`/`LetRec`/`Case` patterns and only records vars
+    /// that escape those bindings. Without this, naive walking treats inner
+    /// shadowing names (e.g. a handler lambda that rebinds `Conn = _HArg0`)
+    /// as references to the outer name, producing spurious dependencies.
+    fn collect_free_var_refs(
+        expr: &CExpr,
+        bound: &mut HashSet<String>,
+        out: &mut HashSet<String>,
+    ) {
         match expr {
             CExpr::Var(v) => {
-                out.insert(v.clone());
+                if !bound.contains(v) {
+                    out.insert(v.clone());
+                }
             }
             CExpr::Lit(_) | CExpr::Nil | CExpr::FunRef(_, _) => {}
-            CExpr::Fun(_, body) => Self::collect_var_refs(body, out),
-            CExpr::Let(_, val, body) => {
-                Self::collect_var_refs(val, out);
-                Self::collect_var_refs(body, out);
+            CExpr::Fun(params, body) => {
+                let added: Vec<String> = params
+                    .iter()
+                    .filter(|p| bound.insert((*p).clone()))
+                    .cloned()
+                    .collect();
+                Self::collect_free_var_refs(body, bound, out);
+                for p in &added {
+                    bound.remove(p);
+                }
+            }
+            CExpr::Let(var, val, body) => {
+                Self::collect_free_var_refs(val, bound, out);
+                let added = bound.insert(var.clone());
+                Self::collect_free_var_refs(body, bound, out);
+                if added {
+                    bound.remove(var);
+                }
             }
             CExpr::Apply(func, args) => {
-                Self::collect_var_refs(func, out);
+                Self::collect_free_var_refs(func, bound, out);
                 for arg in args {
-                    Self::collect_var_refs(arg, out);
+                    Self::collect_free_var_refs(arg, bound, out);
                 }
             }
             CExpr::Call(_, _, args) | CExpr::Tuple(args) | CExpr::Values(args) => {
                 for arg in args {
-                    Self::collect_var_refs(arg, out);
+                    Self::collect_free_var_refs(arg, bound, out);
                 }
             }
             CExpr::Case(scrutinee, arms) => {
-                Self::collect_var_refs(scrutinee, out);
+                Self::collect_free_var_refs(scrutinee, bound, out);
                 for arm in arms {
+                    let mut pat_vars = Vec::new();
+                    Self::collect_pat_vars(&arm.pat, &mut pat_vars);
+                    let added: Vec<String> = pat_vars
+                        .into_iter()
+                        .filter(|v| bound.insert(v.clone()))
+                        .collect();
                     if let Some(guard) = &arm.guard {
-                        Self::collect_var_refs(guard, out);
+                        Self::collect_free_var_refs(guard, bound, out);
                     }
-                    Self::collect_var_refs(&arm.body, out);
+                    Self::collect_free_var_refs(&arm.body, bound, out);
+                    for v in &added {
+                        bound.remove(v);
+                    }
                 }
             }
             CExpr::Cons(head, tail) => {
-                Self::collect_var_refs(head, out);
-                Self::collect_var_refs(tail, out);
+                Self::collect_free_var_refs(head, bound, out);
+                Self::collect_free_var_refs(tail, bound, out);
             }
             CExpr::LetRec(defs, body) => {
+                // letrec: all defined names are in scope inside every def and the body
+                let added: Vec<String> = defs
+                    .iter()
+                    .filter_map(|(name, _, _)| {
+                        if bound.insert(name.clone()) {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 for (_, _, def) in defs {
-                    Self::collect_var_refs(def, out);
+                    Self::collect_free_var_refs(def, bound, out);
                 }
-                Self::collect_var_refs(body, out);
+                Self::collect_free_var_refs(body, bound, out);
+                for v in &added {
+                    bound.remove(v);
+                }
             }
             CExpr::Receive(arms, timeout, timeout_body) => {
                 for arm in arms {
+                    let mut pat_vars = Vec::new();
+                    Self::collect_pat_vars(&arm.pat, &mut pat_vars);
+                    let added: Vec<String> = pat_vars
+                        .into_iter()
+                        .filter(|v| bound.insert(v.clone()))
+                        .collect();
                     if let Some(guard) = &arm.guard {
-                        Self::collect_var_refs(guard, out);
+                        Self::collect_free_var_refs(guard, bound, out);
                     }
-                    Self::collect_var_refs(&arm.body, out);
+                    Self::collect_free_var_refs(&arm.body, bound, out);
+                    for v in &added {
+                        bound.remove(v);
+                    }
                 }
-                Self::collect_var_refs(timeout, out);
-                Self::collect_var_refs(timeout_body, out);
+                Self::collect_free_var_refs(timeout, bound, out);
+                Self::collect_free_var_refs(timeout_body, bound, out);
             }
             CExpr::Try {
                 expr,
+                ok_var,
                 ok_body,
+                catch_vars,
                 catch_body,
-                ..
             } => {
-                Self::collect_var_refs(expr, out);
-                Self::collect_var_refs(ok_body, out);
-                Self::collect_var_refs(catch_body, out);
+                Self::collect_free_var_refs(expr, bound, out);
+                let ok_added = bound.insert(ok_var.clone());
+                Self::collect_free_var_refs(ok_body, bound, out);
+                if ok_added {
+                    bound.remove(ok_var);
+                }
+                let catch_added: Vec<String> = [&catch_vars.0, &catch_vars.1, &catch_vars.2]
+                    .iter()
+                    .filter_map(|v| {
+                        if bound.insert((*v).clone()) {
+                            Some((*v).clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                Self::collect_free_var_refs(catch_body, bound, out);
+                for v in &catch_added {
+                    bound.remove(v);
+                }
             }
             CExpr::Binary(segs) => {
                 for seg in segs {
                     match seg {
                         crate::codegen::cerl::CBinSeg::BinaryAll(expr) => {
-                            Self::collect_var_refs(expr, out);
+                            Self::collect_free_var_refs(expr, bound, out);
                         }
                         crate::codegen::cerl::CBinSeg::Segment { value, size, .. } => {
-                            Self::collect_var_refs(value, out);
+                            Self::collect_free_var_refs(value, bound, out);
                             if let crate::codegen::cerl::BinSegSize::Expr(size_expr) = size {
-                                Self::collect_var_refs(size_expr, out);
+                                Self::collect_free_var_refs(size_expr, bound, out);
                             }
                         }
                         crate::codegen::cerl::CBinSeg::Byte(_) => {}
                     }
                 }
             }
-            CExpr::Annotated { expr, .. } => Self::collect_var_refs(expr, out),
+            CExpr::Annotated { expr, .. } => Self::collect_free_var_refs(expr, bound, out),
+        }
+    }
+
+    fn collect_pat_vars(pat: &CPat, out: &mut Vec<String>) {
+        match pat {
+            CPat::Var(v) => out.push(v.clone()),
+            CPat::Lit(_) | CPat::Wildcard | CPat::Nil => {}
+            CPat::Tuple(ps) | CPat::Values(ps) => {
+                for p in ps {
+                    Self::collect_pat_vars(p, out);
+                }
+            }
+            CPat::Cons(head, tail) => {
+                Self::collect_pat_vars(head, out);
+                Self::collect_pat_vars(tail, out);
+            }
+            CPat::Alias(name, inner) => {
+                out.push(name.clone());
+                Self::collect_pat_vars(inner, out);
+            }
+            CPat::Binary(segs) => {
+                for seg in segs {
+                    match seg {
+                        crate::codegen::cerl::CBinSeg::BinaryAll(p) => {
+                            Self::collect_pat_vars(p, out);
+                        }
+                        crate::codegen::cerl::CBinSeg::Segment { value, size, .. } => {
+                            Self::collect_pat_vars(value, out);
+                            if let crate::codegen::cerl::BinSegSize::Expr(_) = size {
+                                // size expr is not a binding site
+                            }
+                        }
+                        crate::codegen::cerl::CBinSeg::Byte(_) => {}
+                    }
+                }
+            }
         }
     }
 
