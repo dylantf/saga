@@ -3,6 +3,22 @@ use crate::ast::{Annotated, BinOp, CaseArm, Decl, Expr, ExprKind, Lit, NodeId, P
 use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
 use crate::token::Span;
 
+fn collect_app_spine<'a>(
+    expr: &'a Expr,
+    args: &mut Vec<&'a Expr>,
+    apps: &mut Vec<&'a Expr>,
+) -> &'a Expr {
+    match &expr.kind {
+        ExprKind::App { func, arg } => {
+            let head = collect_app_spine(func, args, apps);
+            args.push(arg);
+            apps.push(expr);
+            head
+        }
+        _ => expr,
+    }
+}
+
 impl Checker {
     // --- Expression inference ---
     //
@@ -116,131 +132,7 @@ impl Checker {
                 }
             }
 
-            ExprKind::App { func, arg, .. } => {
-                let func_ty = self.infer_expr(func)?;
-                let arg_ty = match &arg.kind {
-                    ExprKind::Lambda { params, body } => {
-                        let resolved_func = self.sub.apply(&func_ty);
-                        if let Type::Fun(expected_param, _, _) = &resolved_func {
-                            match self.infer_lambda_against(params, body, expected_param)? {
-                                Some(ty) => ty,
-                                None => self.infer_expr(arg)?,
-                            }
-                        } else {
-                            self.infer_expr(arg)?
-                        }
-                    }
-                    _ => self.infer_expr(arg)?,
-                };
-                let arg_ty_pre = arg_ty.clone();
-                let ret_ty = self.fresh_var();
-                let eff_row_var = self.fresh_var();
-                if self
-                    .unify_at(
-                        &func_ty,
-                        &Type::Fun(
-                            Box::new(arg_ty),
-                            Box::new(ret_ty.clone()),
-                            EffectRow {
-                                effects: vec![],
-                                tail: Some(Box::new(eff_row_var)),
-                            },
-                        ),
-                        span,
-                    )
-                    .is_err()
-                {
-                    let resolved = self.sub.apply(&func_ty);
-                    if let Type::Fun(param_ty, _, _) = &resolved {
-                        let expected = self.prettify_type(param_ty);
-                        let actual = self.prettify_type(&arg_ty_pre);
-                        return Err(Diagnostic::error_at(
-                            arg.span,
-                            format!("type mismatch: expected {}, got {}", expected, actual),
-                        ));
-                    }
-
-                    let display = self.prettify_type(&resolved);
-                    return Err(Diagnostic::error_at(
-                        func.span,
-                        format!("{} is not a function", display),
-                    ));
-                }
-
-                // Effect subtyping check
-                {
-                    let resolved_func = self.sub.apply(&func_ty);
-                    if let Type::Fun(param, _, _) = &resolved_func {
-                        self.check_callback_effect_subtype(&arg_ty_pre, param, arg.span)?;
-                    }
-                }
-
-                let resolved_ret = self.sub.apply(&ret_ty);
-                self.record_type(node_id, &ret_ty);
-
-                let mut absorbed_entries = Vec::new();
-
-                // Absorption (call-site half): when passing a callback to a HOF,
-                // the lambda's effects propagate immediately during lambda inference.
-                // We subtract the HOF parameter's declared effects here because this
-                // is the only point where we know "this callback was passed to a
-                // function that handles these effects."
-                //
-                // There is a second absorption site in check_fun_clauses (boundary
-                // half) that handles the inverse case: directly calling a callback
-                // parameter like `f ()` inside `run_state`. Both are needed -- see
-                // check_decl.rs for the rationale.
-                let func_shallow = self.sub.resolve_var(&func_ty);
-                if let Type::Fun(p, _, _) = func_shallow {
-                    let param_shallow = self.sub.resolve_var(p);
-                    if let Type::Fun(_, _, _) = param_shallow {
-                        fn collect_declared_entries_applied(
-                            checker: &Checker,
-                            ty: &Type,
-                            out: &mut Vec<super::EffectEntry>,
-                        ) {
-                            if let Type::Fun(_, ret, row) = ty {
-                                for entry in &row.effects {
-                                    let applied = super::EffectEntry {
-                                        name: entry.name.clone(),
-                                        args: entry
-                                            .args
-                                            .iter()
-                                            .map(|arg| checker.sub.apply(arg))
-                                            .collect(),
-                                    };
-                                    if !out.iter().any(|seen| seen.same_instantiation(&applied)) {
-                                        out.push(applied);
-                                    }
-                                }
-                                collect_declared_entries_applied(checker, ret, out);
-                            }
-                        }
-                        collect_declared_entries_applied(
-                            self,
-                            param_shallow,
-                            &mut absorbed_entries,
-                        );
-                        for entry in &absorbed_entries {
-                            self.call_site_absorbed.insert(entry.name.clone());
-                        }
-                        let normalized_effect_row = self.sub.apply_effect_row(&self.effect_row);
-                        self.effect_row = normalized_effect_row.subtract_entries(&absorbed_entries);
-                    }
-                }
-
-                // Saturated call: emit the callee's effect row
-                if !matches!(resolved_ret, Type::Fun(_, _, _)) {
-                    let resolved_func = self.sub.apply(&func_ty);
-                    if let Type::Fun(_, _, row) = &resolved_func {
-                        let applied_row = self.sub.apply_effect_row(row);
-                        let emitted_row = applied_row.subtract_entries(&absorbed_entries);
-                        self.emit_effects(&emitted_row);
-                    }
-                }
-
-                Ok(ret_ty)
-            }
+            ExprKind::App { .. } => self.infer_app_chain_with_expected(expr, None),
 
             ExprKind::BinOp {
                 op, left, right, ..
@@ -778,6 +670,266 @@ impl Checker {
 
         self.emit_effects(&body_effs);
         Ok(Some(ty))
+    }
+
+    fn infer_app_chain_with_expected(
+        &mut self,
+        expr: &Expr,
+        expected_result: Option<&Type>,
+    ) -> Result<Type, Diagnostic> {
+        #[derive(Clone)]
+        struct DeferredLambda<'a> {
+            arg_expr: &'a Expr,
+            params: &'a [Pat],
+            body: &'a Expr,
+            param_ty: Type,
+            callee_ty: Type,
+            ret_ty: Type,
+            is_last: bool,
+        }
+
+        let mut args = Vec::new();
+        let mut apps = Vec::new();
+        let head = collect_app_spine(expr, &mut args, &mut apps);
+        let mut current_ty = self.infer_expr(head)?;
+        let mut deferred = Vec::<DeferredLambda<'_>>::new();
+
+        for (idx, (arg, app_expr)) in args.iter().zip(apps.iter()).enumerate() {
+            let callee_ty = current_ty.clone();
+            let (param_ty, ret_ty) =
+                self.expect_function_type_for_app(&callee_ty, app_expr.span, app_expr)?;
+            let resolved_param = self.sub.apply(&param_ty);
+            let is_last = idx + 1 == args.len();
+
+            if let ExprKind::Lambda { params, body } = &arg.kind
+                && matches!(resolved_param, Type::Fun(_, _, _))
+            {
+                deferred.push(DeferredLambda {
+                    arg_expr: arg,
+                    params,
+                    body,
+                    param_ty: param_ty.clone(),
+                    callee_ty: callee_ty.clone(),
+                    ret_ty: ret_ty.clone(),
+                    is_last,
+                });
+                self.record_type(app_expr.id, &ret_ty);
+                current_ty = ret_ty;
+                continue;
+            }
+
+            let arg_ty = self.infer_arg_against(arg, &param_ty)?;
+            let arg_ty_pre = arg_ty.clone();
+            self.unify_arg_with_param(&arg_ty, &arg_ty_pre, &param_ty, arg.span)?;
+            let absorbed_entries =
+                self.apply_callback_argument_effects(&arg_ty_pre, &param_ty, arg.span)?;
+            self.record_type(app_expr.id, &ret_ty);
+            current_ty = ret_ty.clone();
+
+            if is_last && !matches!(self.sub.apply(&ret_ty), Type::Fun(_, _, _)) {
+                self.emit_saturated_call_effects(&callee_ty, &absorbed_entries);
+            }
+        }
+
+        if let Some(expected_result) = expected_result {
+            self.unify_at(&current_ty, expected_result, expr.span)?;
+        }
+
+        for deferred_lambda in deferred {
+            let expected_param = self.sub.apply(&deferred_lambda.param_ty);
+            let arg_ty = match self.infer_lambda_against(
+                deferred_lambda.params,
+                deferred_lambda.body,
+                &expected_param,
+            )? {
+                Some(ty) => ty,
+                None => self.infer_expr(deferred_lambda.arg_expr)?,
+            };
+            let arg_ty_pre = arg_ty.clone();
+            self.unify_arg_with_param(
+                &arg_ty,
+                &arg_ty_pre,
+                &deferred_lambda.param_ty,
+                deferred_lambda.arg_expr.span,
+            )?;
+            let absorbed_entries = self.apply_callback_argument_effects(
+                &arg_ty_pre,
+                &deferred_lambda.param_ty,
+                deferred_lambda.arg_expr.span,
+            )?;
+            if deferred_lambda.is_last
+                && !matches!(self.sub.apply(&deferred_lambda.ret_ty), Type::Fun(_, _, _))
+            {
+                self.emit_saturated_call_effects(&deferred_lambda.callee_ty, &absorbed_entries);
+            }
+        }
+
+        Ok(current_ty)
+    }
+
+    pub(crate) fn infer_expr_against(
+        &mut self,
+        expr: &Expr,
+        expected: &Type,
+    ) -> Result<Type, Diagnostic> {
+        match &expr.kind {
+            ExprKind::App { .. } => self.infer_app_chain_with_expected(expr, Some(expected)),
+            ExprKind::Lambda { params, body } => {
+                let resolved_expected = self.sub.apply(expected);
+                if matches!(resolved_expected, Type::Fun(_, _, _)) {
+                    if let Some(ty) = self.infer_lambda_against(params, body, &resolved_expected)? {
+                        return Ok(ty);
+                    }
+                }
+                let ty = self.infer_expr(expr)?;
+                self.unify_at(&ty, expected, expr.span)?;
+                Ok(ty)
+            }
+            _ => {
+                let ty = self.infer_expr(expr)?;
+                self.unify_at(&ty, expected, expr.span)?;
+                Ok(ty)
+            }
+        }
+    }
+
+    fn infer_arg_against(&mut self, arg: &Expr, expected_param: &Type) -> Result<Type, Diagnostic> {
+        match &arg.kind {
+            ExprKind::Lambda { params, body } => {
+                let resolved_param = self.sub.apply(expected_param);
+                if matches!(resolved_param, Type::Fun(_, _, _)) {
+                    match self.infer_lambda_against(params, body, &resolved_param)? {
+                        Some(ty) => Ok(ty),
+                        None => self.infer_expr(arg),
+                    }
+                } else {
+                    self.infer_expr(arg)
+                }
+            }
+            _ => self.infer_expr(arg),
+        }
+    }
+
+    fn expect_function_type_for_app(
+        &mut self,
+        callee_ty: &Type,
+        span: Span,
+        app_expr: &Expr,
+    ) -> Result<(Type, Type), Diagnostic> {
+        let resolved = self.sub.apply(callee_ty);
+        match resolved {
+            Type::Fun(param_ty, ret_ty, _) => Ok((*param_ty, *ret_ty)),
+            _ => {
+                let param_ty = self.fresh_var();
+                let ret_ty = self.fresh_var();
+                let eff_row_var = self.fresh_var();
+                if self
+                    .unify_at(
+                        callee_ty,
+                        &Type::Fun(
+                            Box::new(param_ty.clone()),
+                            Box::new(ret_ty.clone()),
+                            EffectRow {
+                                effects: vec![],
+                                tail: Some(Box::new(eff_row_var)),
+                            },
+                        ),
+                        span,
+                    )
+                    .is_err()
+                {
+                    let resolved = self.sub.apply(callee_ty);
+                    let display = self.prettify_type(&resolved);
+                    let func_span = match &app_expr.kind {
+                        ExprKind::App { func, .. } => func.span,
+                        _ => span,
+                    };
+                    return Err(Diagnostic::error_at(
+                        func_span,
+                        format!("{} is not a function", display),
+                    ));
+                }
+                Ok((param_ty, ret_ty))
+            }
+        }
+    }
+
+    fn unify_arg_with_param(
+        &mut self,
+        arg_ty: &Type,
+        arg_ty_pre: &Type,
+        param_ty: &Type,
+        arg_span: Span,
+    ) -> Result<(), Diagnostic> {
+        if self.unify_at(arg_ty, param_ty, arg_span).is_err() {
+            let expected = self.prettify_type(&self.sub.apply(param_ty));
+            let actual = self.prettify_type(arg_ty_pre);
+            return Err(Diagnostic::error_at(
+                arg_span,
+                format!("type mismatch: expected {}, got {}", expected, actual),
+            ));
+        }
+        Ok(())
+    }
+
+    fn apply_callback_argument_effects(
+        &mut self,
+        actual_arg: &Type,
+        expected_param: &Type,
+        arg_span: Span,
+    ) -> Result<Vec<super::EffectEntry>, Diagnostic> {
+        let resolved_param = self.sub.apply(expected_param);
+        if let Type::Fun(_, _, _) = &resolved_param {
+            self.check_callback_effect_subtype(actual_arg, &resolved_param, arg_span)?;
+        }
+
+        let mut absorbed_entries = Vec::new();
+        let param_shallow = self.sub.resolve_var(expected_param);
+        if let Type::Fun(_, _, _) = param_shallow {
+            fn collect_declared_entries_applied(
+                checker: &Checker,
+                ty: &Type,
+                out: &mut Vec<super::EffectEntry>,
+            ) {
+                if let Type::Fun(_, ret, row) = ty {
+                    for entry in &row.effects {
+                        let applied = super::EffectEntry {
+                            name: entry.name.clone(),
+                            args: entry
+                                .args
+                                .iter()
+                                .map(|arg| checker.sub.apply(arg))
+                                .collect(),
+                        };
+                        if !out.iter().any(|seen| seen.same_instantiation(&applied)) {
+                            out.push(applied);
+                        }
+                    }
+                    collect_declared_entries_applied(checker, ret, out);
+                }
+            }
+            collect_declared_entries_applied(self, &param_shallow, &mut absorbed_entries);
+            for entry in &absorbed_entries {
+                self.call_site_absorbed.insert(entry.name.clone());
+            }
+            let normalized_effect_row = self.sub.apply_effect_row(&self.effect_row);
+            self.effect_row = normalized_effect_row.subtract_entries(&absorbed_entries);
+        }
+
+        Ok(absorbed_entries)
+    }
+
+    fn emit_saturated_call_effects(
+        &mut self,
+        callee_ty: &Type,
+        absorbed_entries: &[super::EffectEntry],
+    ) {
+        let resolved_func = self.sub.apply(callee_ty);
+        if let Type::Fun(_, _, row) = &resolved_func {
+            let applied_row = self.sub.apply_effect_row(row);
+            let emitted_row = applied_row.subtract_entries(absorbed_entries);
+            self.emit_effects(&emitted_row);
+        }
     }
 
     fn infer_receive(

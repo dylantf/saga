@@ -766,6 +766,32 @@ fn tuple_pattern_lambda_argument_uses_expected_callback_type_for_fields() {
 }
 
 #[test]
+fn first_argument_lambda_can_use_later_argument_constraints_for_tuple_pattern() {
+    check(
+        "record WindDetails { wind_avg: Int, wind_gust: Int }\n\
+         record Normalized { wind_avg: Maybe Int, wind_gust: Maybe Int }\n\
+         val rows = [(1, WindDetails { wind_avg: 10, wind_gust: 20 })]\n\
+         main () = List.filter_map (fun pair -> case pair {\n\
+           (sesh_id, wd) -> Just (wd.wind_avg + sesh_id)\n\
+         }) rows",
+    )
+    .unwrap();
+}
+
+#[test]
+fn annotated_eta_reduced_hof_can_constrain_first_argument_lambda() {
+    check(
+        "record WindDetails { wind_avg: Int, wind_gust: Int }\n\
+         record Normalized { wind_avg: Maybe Int, wind_gust: Maybe Int }\n\
+         fun wind_rows : List (Int, WindDetails) -> List Int\n\
+         wind_rows = List.filter_map (fun pair -> case pair {\n\
+           (sesh_id, wd) -> Just (wd.wind_avg + sesh_id)\n\
+         })",
+    )
+    .unwrap();
+}
+
+#[test]
 fn named_binder_lambda_argument_still_typechecks() {
     check(
         "record Row { sesh_id: Int, wind_avg: Int }\n\
@@ -4367,6 +4393,48 @@ main () =
     wd.wind_avg,
     wd.wind_gust,
   ])
+"#;
+
+    check_with_project_files(
+        &[("lib/Db.saga", db_module), ("lib/Input.saga", input_module)],
+        main_src,
+    )
+    .unwrap();
+}
+
+#[test]
+fn imported_record_first_argument_lambda_typechecks_through_filter_map_shape() {
+    let db_module = r#"module Db
+
+pub record WindDetails {
+  wind_avg: Int,
+  wind_gust: Int,
+}
+
+pub fun make_wind : Int -> Int -> WindDetails
+make_wind wind_avg wind_gust =
+  WindDetails { wind_avg: wind_avg, wind_gust: wind_gust }
+"#;
+
+    let input_module = r#"module Input
+
+pub record Normalized {
+  wind_avg: Maybe Int,
+  wind_gust: Maybe Int,
+}
+"#;
+
+    let main_src = r#"import Db (make_wind)
+import Input (Normalized)
+
+val rows = [
+  (1, make_wind 10 20),
+]
+
+main () =
+  List.filter_map (fun pair -> case pair {
+    (sesh_id, wd) -> Just (wd.wind_avg + sesh_id)
+  }) rows
 "#;
 
     check_with_project_files(

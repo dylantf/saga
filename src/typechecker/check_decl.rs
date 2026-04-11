@@ -1001,7 +1001,11 @@ impl Checker {
                 self.unify_at(&guard_ty, &Type::bool(), guard.span)?;
             }
 
-            let body_ty = self.infer_expr(body)?;
+            let body_ty = if annotation.is_some() {
+                self.infer_expr_against(body, &result_ty)?
+            } else {
+                self.infer_expr(body)?
+            };
             if returned_handler_info.is_none() {
                 returned_handler_info = self.extract_handler_info(body);
             }
