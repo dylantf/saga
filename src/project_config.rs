@@ -313,6 +313,19 @@ fn ensure_bare_clone(url: &str, needed_commit: Option<&str>) -> Result<PathBuf, 
             }
         }
 
+        // Older versions of saga used `git clone --bare` (without --mirror), which
+        // doesn't configure a fetch refspec. In that case `git fetch` is a no-op
+        // and the bare cache stays frozen at clone time. Repair such caches by
+        // setting the mirror refspec before fetching.
+        let _ = std::process::Command::new("git")
+            .args([
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/heads/*",
+            ])
+            .current_dir(&repo_dir)
+            .status();
+
         let status = std::process::Command::new("git")
             .args(["fetch", "--all", "--tags", "--quiet"])
             .current_dir(&repo_dir)
@@ -323,8 +336,11 @@ fn ensure_bare_clone(url: &str, needed_commit: Option<&str>) -> Result<PathBuf, 
         }
     } else {
         std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create cache dir: {}", e))?;
+        // Use --mirror so the cache stays in sync with the remote on subsequent
+        // fetches. (`--bare` alone doesn't set up a fetch refspec, so `git fetch`
+        // would never update refs/heads/*.)
         let status = std::process::Command::new("git")
-            .args(["clone", "--bare", "--quiet", url])
+            .args(["clone", "--mirror", "--quiet", url])
             .arg(&repo_dir)
             .status()
             .map_err(|e| format!("failed to run git clone: {}", e))?;
@@ -366,9 +382,14 @@ fn resolve_ref(bare_repo: &Path, dep: &DepEntry) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Ensure a working copy at a specific commit exists. Returns the path to the checkout.
-/// Clone from the bare cache into the target directory at a specific commit.
-fn ensure_checkout(bare_repo: &Path, commit: &str, target_dir: &Path) -> Result<PathBuf, String> {
+/// Ensure a working copy at a specific commit exists. Returns the checkout path
+/// and whether an existing checkout was reused as-is (true means we did nothing
+/// — caller can skip recompilation).
+fn ensure_checkout(
+    bare_repo: &Path,
+    commit: &str,
+    target_dir: &Path,
+) -> Result<(PathBuf, bool), String> {
     if target_dir.exists() {
         // Check whether the existing checkout is already at the requested commit.
         let output = std::process::Command::new("git")
@@ -379,7 +400,7 @@ fn ensure_checkout(bare_repo: &Path, commit: &str, target_dir: &Path) -> Result<
         if output.status.success() {
             let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if current == commit {
-                return Ok(target_dir.to_path_buf());
+                return Ok((target_dir.to_path_buf(), true));
             }
         }
 
@@ -413,17 +434,18 @@ fn ensure_checkout(bare_repo: &Path, commit: &str, target_dir: &Path) -> Result<
         return Err(format!("git checkout failed for commit {}", commit));
     }
 
-    Ok(target_dir.to_path_buf())
+    Ok((target_dir.to_path_buf(), false))
 }
 
 /// Resolve a git dependency: fetch into global bare cache, checkout into project-local _build/deps/.
-/// Returns (checkout_path, resolved_commit).
+/// Returns (checkout_path, resolved_commit, reused) where `reused` is true if the
+/// existing checkout was already at the requested commit.
 pub fn resolve_git_dep(
     dep_name: &str,
     dep: &DepEntry,
     locked_commit: Option<&str>,
     target_dir: &Path,
-) -> Result<(PathBuf, String), String> {
+) -> Result<(PathBuf, String, bool), String> {
     let url = dep
         .git
         .as_ref()
@@ -437,9 +459,9 @@ pub fn resolve_git_dep(
         resolve_ref(&bare_repo, dep)?
     };
 
-    let checkout = ensure_checkout(&bare_repo, &commit, target_dir)?;
+    let (checkout, reused) = ensure_checkout(&bare_repo, &commit, target_dir)?;
 
-    Ok((checkout, commit))
+    Ok((checkout, commit, reused))
 }
 
 // --- Resolve a dep entry to a local directory path ---
@@ -535,7 +557,7 @@ fn install_deps_recursive(
             ));
         }
 
-        let dep_path = if let Some(url) = &dep_entry.git {
+        let (dep_path, reused) = if let Some(url) = &dep_entry.git {
             let ref_label = dep_entry
                 .tag
                 .as_deref()
@@ -553,7 +575,8 @@ fn install_deps_recursive(
             );
 
             let target_dir = crate::hex::package_dir(project_root, dep_name);
-            let (checkout_path, commit) = resolve_git_dep(dep_name, dep_entry, None, &target_dir)?;
+            let (checkout_path, commit, reused) =
+                resolve_git_dep(dep_name, dep_entry, None, &target_dir)?;
 
             let dep_config = ProjectConfig::load(&checkout_path);
             if dep_config.library.is_none() {
@@ -564,10 +587,11 @@ fn install_deps_recursive(
             }
 
             let short_commit = &commit[..commit.len().min(12)];
+            let label = if reused { "Up to date" } else { "Resolved" };
             eprintln!(
                 "{}{} {} -> {}",
                 indent,
-                cyan("Resolved"),
+                cyan(label),
                 dep_name,
                 short_commit
             );
@@ -581,17 +605,29 @@ fn install_deps_recursive(
                 ),
             );
 
-            checkout_path
+            (checkout_path, reused)
         } else if let Some(path) = &dep_entry.path {
             let p = project_root.join(path);
-            p.canonicalize()
-                .map_err(|e| format!("dependency '{}' path '{}': {}", dep_name, path, e))?
+            let canonical = p
+                .canonicalize()
+                .map_err(|e| format!("dependency '{}' path '{}': {}", dep_name, path, e))?;
+            // Path deps are user-editable — never assume they're unchanged.
+            (canonical, false)
         } else {
             continue;
         };
 
-        // Compile Erlang sources: rebar3 if rebar.config present, erlc otherwise
-        if dep_path.join("rebar.config").exists() {
+        // Compile Erlang sources, unless the checkout is unchanged AND already
+        // built. rebar3 if rebar.config present, erlc otherwise.
+        let already_built = reused && crate::hex::is_compiled(project_root, dep_name);
+        if already_built {
+            eprintln!(
+                "{}{} {} (already built)",
+                indent,
+                dim("Skipping"),
+                dep_name
+            );
+        } else if dep_path.join("rebar.config").exists() {
             eprintln!("{}{} {} (rebar3)...", indent, dim("Compiling"), dep_name);
             crate::hex::compile_with_rebar3(&dep_path, dep_name, project_root)?;
         } else if dep_path.join("src").exists()
