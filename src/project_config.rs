@@ -467,16 +467,19 @@ pub fn resolve_git_dep(
 // --- Resolve a dep entry to a local directory path ---
 
 /// Resolve a single dependency to a local filesystem path.
-/// For path deps, joins with the parent directory.
-/// For git deps, returns _build/deps/{name} (must be installed first).
+/// - Path deps: joined with `config_dir` (the directory of the project.toml
+///   that declared the dep — path deps are relative to that file).
+/// - Git deps: always live flat under `top_project_root/deps/{name}`,
+///   regardless of which transitive config declared them.
 fn resolve_dep_to_path(
     dep_name: &str,
     dep_entry: &DepEntry,
-    parent_dir: &Path,
+    config_dir: &Path,
+    top_project_root: &Path,
     lockfile: Option<&Lockfile>,
 ) -> Result<PathBuf, String> {
     if let Some(path) = &dep_entry.path {
-        let p = parent_dir.join(path);
+        let p = config_dir.join(path);
         p.canonicalize()
             .map_err(|e| format!("dependency '{}' path '{}': {}", dep_name, path, e))
     } else if dep_entry.git.is_some() {
@@ -491,8 +494,8 @@ fn resolve_dep_to_path(
             ));
         }
 
-        // Git deps are checked out into deps/{name}
-        let target = crate::hex::package_dir(parent_dir, dep_name);
+        // Git deps are checked out into <top_project_root>/deps/{name}
+        let target = crate::hex::package_dir(top_project_root, dep_name);
         if !target.exists() {
             return Err(format!(
                 "git dependency '{}' is not installed. Run `saga install` first.",
@@ -508,13 +511,19 @@ fn resolve_dep_to_path(
 // --- Install (fetch + lockfile) ---
 
 /// Recursively fetch all deps (git and Hex) and collect lock entries.
+///
+/// All deps (direct + transitive) are installed flat under
+/// `top_project_root/deps/`. `config_dir` is the directory of the current
+/// project.toml being processed — it differs from `top_project_root` once we
+/// recurse into a transitive dep's own project.toml.
 fn install_deps_recursive(
-    project_root: &Path,
+    top_project_root: &Path,
+    config_dir: &Path,
     lockfile: &mut Lockfile,
     installing: &mut HashSet<String>,
     depth: usize,
 ) -> Result<(), String> {
-    let config = ProjectConfig::load(project_root);
+    let config = ProjectConfig::load(config_dir);
 
     let deps = match &config.deps {
         Some(deps) => deps.clone(),
@@ -526,7 +535,7 @@ fn install_deps_recursive(
     for (dep_name, dep_entry) in &deps {
         if dep_entry.is_hex() {
             install_hex_dep_recursive(
-                project_root,
+                top_project_root,
                 dep_name,
                 dep_entry,
                 lockfile,
@@ -541,7 +550,7 @@ fn install_deps_recursive(
         let dep_key = if let Some(url) = &dep_entry.git {
             url.clone()
         } else if let Some(path) = &dep_entry.path {
-            project_root
+            config_dir
                 .join(path)
                 .canonicalize()
                 .map(|p| p.to_string_lossy().to_string())
@@ -574,7 +583,7 @@ fn install_deps_recursive(
                 ref_label
             );
 
-            let target_dir = crate::hex::package_dir(project_root, dep_name);
+            let target_dir = crate::hex::package_dir(top_project_root, dep_name);
             let (checkout_path, commit, reused) =
                 resolve_git_dep(dep_name, dep_entry, None, &target_dir)?;
 
@@ -607,7 +616,8 @@ fn install_deps_recursive(
 
             (checkout_path, reused)
         } else if let Some(path) = &dep_entry.path {
-            let p = project_root.join(path);
+            // Path deps are relative to the config file that declared them.
+            let p = config_dir.join(path);
             let canonical = p
                 .canonicalize()
                 .map_err(|e| format!("dependency '{}' path '{}': {}", dep_name, path, e))?;
@@ -618,8 +628,10 @@ fn install_deps_recursive(
         };
 
         // Compile Erlang sources, unless the checkout is unchanged AND already
-        // built. rebar3 if rebar.config present, erlc otherwise.
-        let already_built = reused && crate::hex::is_compiled(project_root, dep_name);
+        // built. rebar3 if rebar.config present, erlc otherwise. Compile -pa
+        // flags are computed from top_project_root/deps/ since all siblings
+        // live there.
+        let already_built = reused && crate::hex::is_compiled(top_project_root, dep_name);
         if already_built {
             eprintln!(
                 "{}{} {} (already built)",
@@ -629,7 +641,7 @@ fn install_deps_recursive(
             );
         } else if dep_path.join("rebar.config").exists() {
             eprintln!("{}{} {} (rebar3)...", indent, dim("Compiling"), dep_name);
-            crate::hex::compile_with_rebar3(&dep_path, dep_name, project_root)?;
+            crate::hex::compile_with_rebar3(&dep_path, dep_name, top_project_root)?;
         } else if dep_path.join("src").exists()
             && std::fs::read_dir(dep_path.join("src"))
                 .map(|entries| {
@@ -643,12 +655,13 @@ fn install_deps_recursive(
             let ebin_dir = dep_path.join("ebin");
             if !ebin_dir.exists() {
                 eprintln!("{}{} {} (erlang)...", indent, dim("Compiling"), dep_name);
-                crate::hex::compile_erlang(&dep_path, dep_name, project_root)?;
+                crate::hex::compile_erlang(&dep_path, dep_name, top_project_root)?;
             }
         }
 
-        // Recurse into the dep's own dependencies
-        install_deps_recursive(&dep_path, lockfile, installing, depth + 1)?;
+        // Recurse into the dep's own dependencies. top_project_root is
+        // unchanged — transitive deps still install flat at the top level.
+        install_deps_recursive(top_project_root, &dep_path, lockfile, installing, depth + 1)?;
 
         installing.remove(&dep_key);
     }
@@ -904,7 +917,13 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
     let mut lockfile = Lockfile::default();
     let mut installing = HashSet::new();
 
-    install_deps_recursive(project_root, &mut lockfile, &mut installing, 0)?;
+    install_deps_recursive(
+        project_root,
+        project_root,
+        &mut lockfile,
+        &mut installing,
+        0,
+    )?;
 
     // Report updates compared to previous lockfile
     if let Some(existing) = &existing_lock {
@@ -949,8 +968,13 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
 // --- Resolve deps into the checker's module map ---
 
 /// Recursively resolve dependencies and collect their exposed modules.
+///
+/// Git deps are resolved flat under `top_project_root/deps/`. `config_dir` is
+/// the directory of the current project.toml being walked — used to resolve
+/// path deps relative to the file that declared them.
 fn resolve_deps_recursive(
-    parent_dir: &Path,
+    top_project_root: &Path,
+    config_dir: &Path,
     deps: &HashMap<String, DepEntry>,
     lockfile: Option<&Lockfile>,
     dep_modules: &mut typechecker::ModuleMap,
@@ -965,7 +989,8 @@ fn resolve_deps_recursive(
             continue;
         }
 
-        let dep_path = resolve_dep_to_path(dep_name, dep_entry, parent_dir, lockfile)?;
+        let dep_path =
+            resolve_dep_to_path(dep_name, dep_entry, config_dir, top_project_root, lockfile)?;
 
         // Cycle detection
         let dep_key = dep_path.to_string_lossy().to_string();
@@ -996,6 +1021,7 @@ fn resolve_deps_recursive(
         // Recurse into this dep's own dependencies first
         if let Some(transitive_deps) = &dep_config.deps {
             resolve_deps_recursive(
+                top_project_root,
                 &dep_path,
                 transitive_deps,
                 lockfile,
@@ -1066,6 +1092,7 @@ pub fn resolve_deps(
 
     resolve_deps_recursive(
         project_root,
+        project_root,
         deps,
         lockfile.as_ref(),
         &mut dep_modules,
@@ -1107,8 +1134,13 @@ pub fn dep_root_paths(project_root: &Path, deps: &HashMap<String, DepEntry>) -> 
         if dep_entry.is_hex() {
             continue;
         }
-        if let Ok(path) = resolve_dep_to_path(dep_name, dep_entry, project_root, lockfile.as_ref())
-        {
+        if let Ok(path) = resolve_dep_to_path(
+            dep_name,
+            dep_entry,
+            project_root,
+            project_root,
+            lockfile.as_ref(),
+        ) {
             roots.push(path);
         }
     }
@@ -1116,14 +1148,15 @@ pub fn dep_root_paths(project_root: &Path, deps: &HashMap<String, DepEntry>) -> 
 }
 
 /// Collect ebin directories for all dependencies.
-/// Scans deps/ for Hex packages, and resolves git/path deps from lockfile.
+/// Scans deps/ for Hex packages and git deps (installed flat under deps/), and
+/// resolves direct path deps separately (they live outside deps/).
 pub fn extra_ebin_dirs(
     project_root: &Path,
     deps: Option<&HashMap<String, DepEntry>>,
 ) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    // Scan deps/ directory (Hex + git deps)
+    // Scan deps/ — every hex and git dep (direct or transitive) lives here.
     let deps_dir = project_root.join("deps");
     if deps_dir.exists()
         && let Ok(entries) = std::fs::read_dir(&deps_dir)
@@ -1136,16 +1169,22 @@ pub fn extra_ebin_dirs(
         }
     }
 
-    // Path deps: check for ebin/ in their source directories
+    // Path deps: sources live wherever the user pointed, so resolve them
+    // relative to the top-level project_root. Only direct path deps are
+    // handled — transitive path deps aren't currently supported.
     if let Some(deps) = deps {
         let lockfile = Lockfile::load(project_root);
         for (dep_name, dep_entry) in deps {
             if dep_entry.is_hex() || dep_entry.git.is_some() {
                 continue; // already in deps/
             }
-            if let Ok(dep_path) =
-                resolve_dep_to_path(dep_name, dep_entry, project_root, lockfile.as_ref())
-            {
+            if let Ok(dep_path) = resolve_dep_to_path(
+                dep_name,
+                dep_entry,
+                project_root,
+                project_root,
+                lockfile.as_ref(),
+            ) {
                 let ebin = dep_path.join("ebin");
                 if ebin.exists() {
                     dirs.push(ebin);
