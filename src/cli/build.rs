@@ -980,11 +980,15 @@ pub fn build_project(profile: &str) -> ProjectBuild {
             module_name.to_lowercase().replace('.', "_")
         };
         let sf = source_files.get(*module_name);
-        let check_result = if *module_name == "Main" {
-            Some(&result)
-        } else {
-            result.module_check_results().get(*module_name)
-        };
+        let check_result =
+            result
+                .module_check_results()
+                .get(*module_name)
+                .or(if *module_name == "Main" {
+                    Some(&result)
+                } else {
+                    None
+                });
         emit_module(
             &erlang_name,
             &compiled.elaborated,

@@ -1,5 +1,34 @@
-main () = {
-  let a = ["foo"]
-  let b = ["bar"]
-  dbg (a <> b) # fails, semigroup is only a marker trait and this isnt lowered right :(
+module Main
+
+import Std.IO (Stdio, console)
+
+effect Inner {
+  fun ping : Unit -> Unit
 }
+
+effect Outer {
+  fun wrap : (Unit -> Unit needs {Inner}) -> Unit
+}
+
+handler stdout_inner for Inner needs {Stdio} {
+  ping () = {
+    println "ping"
+    resume ()
+  }
+}
+
+handler my_wrap for Outer needs {Inner} {
+  wrap f = {
+    let _ = f ()
+    resume ()
+  }
+}
+
+# Wrapper function around the effect operation. Without this indirection
+# the bug does NOT reproduce - `wrap!` called directly works fine.
+fun call_wrap : (Unit -> Unit needs {Inner}) -> Unit needs {Outer}
+call_wrap f = wrap! f
+
+main () = {
+  call_wrap (ping!)
+} with {my_wrap, stdout_inner, console}

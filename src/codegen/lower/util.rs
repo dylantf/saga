@@ -208,6 +208,9 @@ pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Ve
                     "EffectCall.args should be empty (args are wrapped via App nodes)"
                 );
                 args.reverse();
+                if args.is_empty() {
+                    return None;
+                }
                 return Some((name.as_str(), qualifier.as_deref(), args));
             }
             _ => return None,

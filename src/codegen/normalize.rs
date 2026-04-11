@@ -319,8 +319,8 @@ impl Normalizer {
                 record_name,
             } => {
                 let new_inner = self.normalize_and_lift(inner, lifted);
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::FieldAccess {
                         expr: Box::new(new_inner),
                         field: field.clone(),
@@ -364,8 +364,8 @@ impl Normalizer {
                     .iter()
                     .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
                     .collect();
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::RecordUpdate {
                         record: Box::new(new_record),
                         fields: new_fields,
@@ -433,8 +433,19 @@ impl Normalizer {
                 )
             }
 
-            // Effect calls should not reach here (handled by caller), but be safe.
-            ExprKind::EffectCall { .. } => unreachable!("effect call should be handled by caller"),
+            // Bare effect op references are values. Leave them in place.
+            ExprKind::EffectCall {
+                name,
+                qualifier,
+                args,
+            } => Expr::synth(
+                span,
+                ExprKind::EffectCall {
+                    name: name.clone(),
+                    qualifier: qualifier.clone(),
+                    args: args.clone(),
+                },
+            ),
 
             ExprKind::Receive {
                 arms, after_clause, ..
@@ -525,10 +536,11 @@ impl Normalizer {
     }
 }
 
-/// Check if an expression is an effect call (bare or wrapped in App nodes).
+/// Check if an expression is an applied effect call.
+/// Bare effect op references like `ping!` are values, not calls.
 fn is_effect_call(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::EffectCall { .. } => true,
+        ExprKind::EffectCall { .. } => false,
         ExprKind::App { func, .. } => is_effect_call(func),
         _ => false,
     }

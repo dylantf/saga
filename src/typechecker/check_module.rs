@@ -284,8 +284,14 @@ impl ModuleExports {
 #[derive(Debug, Clone)]
 pub struct EffectOpDef {
     pub name: String,
+    /// Source-level parameter count before erasing `Unit` placeholders.
+    pub source_param_count: usize,
     /// Runtime handler arity after erasing `Unit` placeholder parameters.
     pub runtime_param_count: usize,
+    /// Indices of source params that survive runtime erasure.
+    pub runtime_param_positions: Vec<usize>,
+    /// For callback parameters, the effects absorbed by that parameter.
+    pub param_absorbed_effects: HashMap<usize, Vec<String>>,
 }
 
 /// An effect definition for codegen: effect name, its operations, and type parameter count.
@@ -333,6 +339,29 @@ pub struct ModuleCodegenInfo {
     /// External function mappings: (saga_name, erlang_module, erlang_func, arity).
     /// Includes both public and private externals (private ones are needed for handler inlining).
     pub external_funs: Vec<(String, String, String, usize)>,
+}
+
+fn collect_effects_from_fun_type(ty: &Type) -> Vec<String> {
+    let mut effects = std::collections::BTreeSet::new();
+    let mut current = ty;
+    while let Type::Fun(_, ret, row) = current {
+        for entry in &row.effects {
+            effects.insert(entry.name.clone());
+        }
+        current = ret;
+    }
+    effects.into_iter().collect()
+}
+
+fn effect_param_absorbed_effects(op: &super::EffectOpSig) -> HashMap<usize, Vec<String>> {
+    op.params
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (_, ty))| {
+            let effs = collect_effects_from_fun_type(ty);
+            (!effs.is_empty()).then_some((idx, effs))
+        })
+        .collect()
 }
 
 /// Count the arity of a constructor from its type (number of Fun levels).
@@ -1279,10 +1308,28 @@ fn collect_codegen_info(
                 ..
             } => {
                 let canonical_effect = format!("{}.{}", module_name, name);
+                let effect_info = effects_map
+                    .get(&canonical_effect)
+                    .unwrap_or_else(|| panic!("missing effect info for {canonical_effect}"));
                 let ops = operations
                     .iter()
                     .map(|op| EffectOpDef {
                         name: op.node.name.clone(),
+                        source_param_count: op.node.params.len(),
+                        runtime_param_positions: op
+                            .node
+                            .params
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(idx, (_, ty))| {
+                                (!matches!(
+                                    ty,
+                                    crate::ast::TypeExpr::Named { name, .. }
+                                        if name == super::canonicalize_type_name("Unit")
+                                ))
+                                .then_some(idx)
+                            })
+                            .collect(),
                         runtime_param_count: op
                             .node
                             .params
@@ -1294,6 +1341,12 @@ fn collect_codegen_info(
                                 )
                             })
                             .count(),
+                        param_absorbed_effects: effect_info
+                            .ops
+                            .iter()
+                            .find(|sig| sig.name == op.node.name)
+                            .map(effect_param_absorbed_effects)
+                            .unwrap_or_default(),
                     })
                     .collect();
                 // Codegen metadata is internal compiler state, so keep effect

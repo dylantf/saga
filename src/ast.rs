@@ -362,6 +362,18 @@ impl Expr {
             kind,
         }
     }
+
+    /// Rebuild an existing expression while preserving its identity.
+    /// Use this when a compiler pass is refining metadata or rebuilding
+    /// children for the same source expression rather than introducing a
+    /// genuinely synthetic node.
+    pub fn rebuild_like(expr: &Expr, kind: ExprKind) -> Self {
+        Expr {
+            id: expr.id,
+            span: expr.span,
+            kind,
+        }
+    }
 }
 
 /// PartialEq compares kind only. Span is source metadata, NodeId is

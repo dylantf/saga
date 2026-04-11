@@ -1107,8 +1107,8 @@ impl Elaborator {
 
             ExprKind::FieldAccess { expr: e, field, .. } => {
                 let record_name = self.resolve_record_name(e.id);
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::FieldAccess {
                         expr: Box::new(self.elaborate_expr(e)),
                         field: field.clone(),
@@ -1140,8 +1140,8 @@ impl Elaborator {
 
             ExprKind::RecordUpdate { record, fields, .. } => {
                 let record_name = self.resolve_record_name(record.id);
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::RecordUpdate {
                         record: Box::new(self.elaborate_expr(record)),
                         fields: fields

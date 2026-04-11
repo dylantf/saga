@@ -229,6 +229,76 @@ main () = {
 }
 
 #[test]
+fn effectful_callback_forwarded_through_wrapper_runs() {
+    let src = r#"
+effect Inner {
+  fun ping : Unit -> Int
+}
+
+effect Outer {
+  fun wrap : (Unit -> Int needs {Inner}) -> Int
+}
+
+handler answer_inner for Inner {
+  ping () = {
+    resume 41
+  }
+}
+
+handler my_wrap for Outer needs {Inner} {
+  wrap f = {
+    let value = f ()
+    resume (value + 1)
+  }
+}
+
+fun call_wrap : (Unit -> Int needs {Inner}) -> Int needs {Outer}
+call_wrap f = wrap! f
+
+main () = {
+  call_wrap (fun () -> ping! ())
+} with {my_wrap, answer_inner}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
+fn eta_reduced_effect_op_callback_forwarded_through_wrapper_runs() {
+    let src = r#"
+effect Inner {
+  fun ping : Unit -> Int
+}
+
+effect Outer {
+  fun wrap : (Unit -> Int needs {Inner}) -> Int
+}
+
+handler answer_inner for Inner {
+  ping () = {
+    resume 41
+  }
+}
+
+handler my_wrap for Outer needs {Inner} {
+  wrap f = {
+    let value = f ()
+    resume (value + 1)
+  }
+}
+
+fun call_wrap : (Unit -> Int needs {Inner}) -> Int needs {Outer}
+call_wrap f = wrap! f
+
+main () = {
+  call_wrap (ping!)
+} with {my_wrap, answer_inner}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
 fn complex_guard_case_runs_without_eager_fallthrough() {
     let src = r#"
 g1 x = x == 0
@@ -1610,6 +1680,46 @@ make_pair () = {
 
 main () = make_pair () with answer_42
 "#;
+    assert_compiles(src);
+}
+
+#[test]
+fn handler_bindings_from_record_fields_compile() {
+    let src = r#"
+effect One {
+  fun one : Unit -> Int
+}
+
+effect Two {
+  fun two : Unit -> Int
+}
+
+fun run : Unit -> Int needs {One, Two}
+run () = one! () + two! ()
+
+fun connect : Unit -> { one_handler: Handler One, two_handler: Handler Two }
+connect () = {
+  {
+    one_handler: handler for One {
+      one () = resume 1
+    },
+    two_handler: handler for Two {
+      two () = resume 2
+    },
+  }
+}
+
+main () = {
+  let handlers = connect ()
+  let one_handler = handlers.one_handler
+  let two_handler = handlers.two_handler
+  dbg (run () with {one_handler, two_handler})
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "call 'erlang':'element'");
+    assert_contains(&out, "_Handle__script_One_one");
+    assert_contains(&out, "_Handle__script_Two_two");
     assert_compiles(src);
 }
 

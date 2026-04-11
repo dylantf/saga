@@ -65,11 +65,22 @@ struct HandlerInfo {
     source_module: Option<String>,
 }
 
-/// Stored effect definition: maps op_name -> number of parameters.
+/// Stored effect definition: maps op_name -> lowering metadata.
 #[allow(dead_code)]
 struct EffectInfo {
-    /// op_name -> runtime parameter count after erasing `Unit` placeholders
-    ops: HashMap<String, usize>,
+    ops: HashMap<String, EffectOpInfo>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EffectOpInfo {
+    /// Source-level parameter count before erasing `Unit` placeholders.
+    source_param_count: usize,
+    /// Runtime parameter count after erasing `Unit` placeholders.
+    runtime_param_count: usize,
+    /// Indices of source params that survive runtime erasure.
+    runtime_param_positions: Vec<usize>,
+    /// For callback parameters, the effects absorbed by that parameter.
+    param_absorbed_effects: HashMap<usize, Vec<String>>,
 }
 
 /// All information about a top-level function needed by the lowerer.
@@ -592,6 +603,95 @@ impl<'a> Lowerer<'a> {
         Some(CExpr::Fun(params, Box::new(make_call(call_args))))
     }
 
+    fn lower_eta_reduced_effect_op_ref(
+        &mut self,
+        op_name: &str,
+        qualifier: Option<&str>,
+    ) -> Option<CExpr> {
+        let effect_name = if let Some(q) = qualifier {
+            self.canonicalize_effect(q)
+        } else {
+            self.op_to_effect.get(op_name)?.clone()
+        };
+        let key = format!("{}.{}", effect_name, op_name);
+        let op_info = self
+            .effect_defs
+            .get(&effect_name)?
+            .ops
+            .get(op_name)?
+            .clone();
+
+        let mut params = Vec::new();
+        let mut runtime_args = Vec::new();
+        for idx in 0..op_info.source_param_count {
+            let param = self.fresh();
+            if op_info.runtime_param_positions.contains(&idx) {
+                runtime_args.push(CExpr::Var(param.clone()));
+            }
+            params.push(param);
+        }
+
+        if self.lambda_effect_context.is_some() {
+            // Raw CPS shape: the caller expects to pass the handler and a
+            // return continuation as extra arguments.
+            let handler_param = Self::handler_param_name(&effect_name, op_name);
+            let return_k = "_ReturnK".to_string();
+            runtime_args.push(CExpr::Var(return_k.clone()));
+            params.push(handler_param.clone());
+            params.push(return_k);
+            Some(CExpr::Fun(
+                params,
+                Box::new(CExpr::Apply(
+                    Box::new(CExpr::Var(handler_param)),
+                    runtime_args,
+                )),
+            ))
+        } else {
+            // Value-closure shape: capture the in-scope handler and provide an
+            // identity continuation. Used when the resulting lambda is not
+            // passed to an effectful HOF parameter (e.g., it's stored in a
+            // local binding or passed to a pure-shaped callback slot).
+            let handler_param = self.current_handler_params.get(&key)?.clone();
+            let return_value = self.fresh();
+            runtime_args.push(CExpr::Fun(
+                vec![return_value.clone()],
+                Box::new(CExpr::Var(return_value)),
+            ));
+            Some(CExpr::Fun(
+                params,
+                Box::new(CExpr::Apply(
+                    Box::new(CExpr::Var(handler_param)),
+                    runtime_args,
+                )),
+            ))
+        }
+    }
+
+    fn lower_eta_reduced_effect_expr(&mut self, expr: &Expr) -> Option<CExpr> {
+        let mut args = Vec::new();
+        let mut current = expr;
+        let (op_name, qualifier) = loop {
+            match &current.kind {
+                ExprKind::App { func, arg, .. } => {
+                    args.push(arg.as_ref());
+                    current = func.as_ref();
+                }
+                ExprKind::EffectCall {
+                    name, qualifier, ..
+                } => {
+                    args.reverse();
+                    break (name.as_str(), qualifier.as_deref());
+                }
+                _ => return None,
+            }
+        };
+
+        if !args.is_empty() {
+            return None;
+        }
+        self.lower_eta_reduced_effect_op_ref(op_name, qualifier)
+    }
+
     /// Check if an expression contains effectful calls nested inside if/case/block
     /// branches. Like `has_nested_effect_call` but also detects effectful function
     /// calls (e.g. `assert_eq 1 1`) that the static utility misses because it has
@@ -709,6 +809,18 @@ impl<'a> Lowerer<'a> {
         self.fun_info
             .get(name)
             .map(|f| &f.param_absorbed_effects)
+            .filter(|m| !m.is_empty())
+    }
+
+    fn op_param_absorbed_effects(
+        &self,
+        effect_name: &str,
+        op_name: &str,
+    ) -> Option<&HashMap<usize, Vec<String>>> {
+        self.effect_defs
+            .get(effect_name)
+            .and_then(|effect| effect.ops.get(op_name))
+            .map(|op| &op.param_absorbed_effects)
             .filter(|m| !m.is_empty())
     }
 
@@ -1186,7 +1298,9 @@ impl<'a> Lowerer<'a> {
             {
                 self.lambda_effect_context = Some(effs.clone());
             }
-            let ce = self.lower_expr_value(arg);
+            let ce = self
+                .lower_eta_reduced_effect_expr(arg)
+                .unwrap_or_else(|| self.lower_expr_value(arg));
             self.lambda_effect_context = saved_ctx;
             arg_vars.push(v.clone());
             bindings.push((v, ce));
@@ -1642,7 +1756,7 @@ impl<'a> Lowerer<'a> {
                         let key = format!("{}.{}", eff, op);
                         self.current_handler_params.insert(key, handler_var);
                     }
-                    // Add _ReturnK parameter for effectful lambdas
+                    // Add _ReturnK parameter for effectful lambdas.
                     param_vars.push("_ReturnK".to_string());
                     is_effectful_lambda = true;
                 } else {
@@ -2103,7 +2217,9 @@ impl<'a> Lowerer<'a> {
                 qualifier,
                 args,
                 ..
-            } => self.lower_effect_call(name, qualifier.as_deref(), args, None),
+            } => self
+                .lower_eta_reduced_effect_op_ref(name, qualifier.as_deref())
+                .unwrap_or_else(|| self.lower_effect_call(name, qualifier.as_deref(), args, None)),
 
             // `expr with handler` -- attaches handler(s) to a computation
             ExprKind::With { expr, handler, .. } => self.lower_with(expr, handler),

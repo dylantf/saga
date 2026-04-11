@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 use super::pats::{self, lower_pat};
 use super::util::{
-    arity_and_effects_from_type, binop_call, collect_effect_call, collect_fun_call,
-    core_var, has_nested_effect_call, lower_string_to_binary, mangle_ctor_atom,
+    arity_and_effects_from_type, binop_call, collect_effect_call, collect_fun_call, core_var,
+    has_nested_effect_call, lower_string_to_binary, mangle_ctor_atom,
     param_absorbed_effects_from_type, pat_binding_var,
 };
 use super::{FunInfo, LowerMode, Lowerer};
@@ -325,9 +325,7 @@ impl<'a> Lowerer<'a> {
                     });
                 }
                 Some(_guard) => {
-                    unreachable!(
-                        "complex guards should be handled by lower_case_expr_chain"
-                    );
+                    unreachable!("complex guards should be handled by lower_case_expr_chain");
                 }
             }
         }
@@ -1198,18 +1196,17 @@ impl<'a> Lowerer<'a> {
             ExprKind::HandlerExpr { .. } => true,
             ExprKind::Var { name } => {
                 self.resolve_handler_name_opt(name).is_some()
-                    || self.check_result.as_ref().is_some_and(|cr| {
-                        cr.handlers.contains_key(name)
-                            || self.dynamic_handler_info_from_expr(expr).is_some()
-                    })
+                    || self
+                        .check_result
+                        .as_ref()
+                        .is_some_and(|cr| cr.handlers.contains_key(name))
             }
             ExprKind::If {
                 then_branch,
                 else_branch,
                 ..
             } => self.is_handler_value(then_branch) || self.is_handler_value(else_branch),
-            ExprKind::App { .. } => self.dynamic_handler_info_from_expr(expr).is_some(),
-            _ => false,
+            _ => self.dynamic_handler_info_from_expr(expr).is_some(),
         }
     }
 

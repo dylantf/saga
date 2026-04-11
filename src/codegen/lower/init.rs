@@ -168,6 +168,13 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
+        if let Some(cr) = &self.check_result {
+            for (user_visible, canonical) in &cr.scope_map.effects {
+                effect_canonical
+                    .entry(user_visible.clone())
+                    .or_insert_with(|| canonical.clone());
+            }
+        }
         // Also build bare->canonical for handler names.
         let mut handler_canonical: HashMap<String, String> = HashMap::new();
         for decl in program {
@@ -183,6 +190,13 @@ impl<'a> Lowerer<'a> {
                         .entry(bare.to_string())
                         .or_insert_with(|| handler_name.clone());
                 }
+            }
+        }
+        if let Some(cr) = &self.check_result {
+            for (user_visible, canonical) in &cr.scope_map.handlers {
+                handler_canonical
+                    .entry(user_visible.clone())
+                    .or_insert_with(|| canonical.clone());
             }
         }
 
@@ -237,7 +251,48 @@ impl<'a> Lowerer<'a> {
                                 )
                             })
                             .count();
-                        ops.insert(op.node.name.clone(), runtime_param_count);
+                        let param_absorbed_effects = op
+                            .node
+                            .params
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(idx, (_, ty))| {
+                                let effs = collect_type_effects(ty);
+                                if effs.is_empty() {
+                                    None
+                                } else {
+                                    let mut sorted: Vec<String> =
+                                        effs.into_iter().map(|e| canonicalize_effect(&e)).collect();
+                                    sorted.sort();
+                                    Some((idx, sorted))
+                                }
+                            })
+                            .collect();
+                        ops.insert(
+                            op.node.name.clone(),
+                            super::EffectOpInfo {
+                                runtime_param_count,
+                                source_param_count: op.node.params.len(),
+                                runtime_param_positions: op
+                                    .node
+                                    .params
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(idx, (_, ty))| {
+                                        (!matches!(
+                                            ty,
+                                            crate::ast::TypeExpr::Named { name, .. }
+                                                if name
+                                                    == crate::typechecker::canonicalize_type_name(
+                                                        "Unit"
+                                                    )
+                                        ))
+                                        .then_some(idx)
+                                    })
+                                    .collect(),
+                                param_absorbed_effects,
+                            },
+                        );
                         self.op_to_effect
                             .insert(op.node.name.clone(), canonical_effect.clone());
                     }
@@ -353,7 +408,15 @@ impl<'a> Lowerer<'a> {
                 for eff_def in &info.effect_defs {
                     let mut ops_map = HashMap::new();
                     for op in &eff_def.ops {
-                        ops_map.insert(op.name.clone(), op.runtime_param_count);
+                        ops_map.insert(
+                            op.name.clone(),
+                            super::EffectOpInfo {
+                                source_param_count: op.source_param_count,
+                                runtime_param_count: op.runtime_param_count,
+                                runtime_param_positions: op.runtime_param_positions.clone(),
+                                param_absorbed_effects: op.param_absorbed_effects.clone(),
+                            },
+                        );
                         self.op_to_effect
                             .entry(op.name.clone())
                             .or_insert_with(|| eff_def.name.clone());
@@ -474,7 +537,15 @@ impl<'a> Lowerer<'a> {
         for eff_def in &info.effect_defs {
             let mut ops_map = HashMap::new();
             for op in &eff_def.ops {
-                ops_map.insert(op.name.clone(), op.runtime_param_count);
+                ops_map.insert(
+                    op.name.clone(),
+                    super::EffectOpInfo {
+                        source_param_count: op.source_param_count,
+                        runtime_param_count: op.runtime_param_count,
+                        runtime_param_positions: op.runtime_param_positions.clone(),
+                        param_absorbed_effects: op.param_absorbed_effects.clone(),
+                    },
+                );
                 self.op_to_effect
                     .insert(op.name.clone(), eff_def.name.clone());
             }

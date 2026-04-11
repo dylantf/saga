@@ -63,7 +63,14 @@ fn emit_from_program(
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    codegen::emit_module_with_context(module_name, &elaborated, &ctx, Some(&result), None, None)
+    codegen::emit_module_with_context(
+        module_name,
+        &elaborated,
+        &ctx,
+        Some(module_result.unwrap_or(&result)),
+        None,
+        None,
+    )
 }
 
 /// Parse and typecheck a source file with the given checker (project mode).
@@ -385,6 +392,70 @@ main () = {
             let out = emit_from_program(program, "main", checker);
             assert_contains(&out, "call 'erlang':'element'");
             assert_contains(&out, "call 'io':'format'");
+            assert_erlc_compiles(&out, "main");
+        },
+    );
+}
+
+#[test]
+fn imported_record_field_handler_bindings_inside_wrapped_block_lower() {
+    let db_module = r#"module Db
+
+pub effect Postgres {
+  fun ping : Unit -> Unit
+}
+
+pub effect Transaction {
+  fun transaction : (f: Unit -> a needs {Postgres}) -> a needs {Postgres}
+}
+
+pub record Db {
+  postgres: Handler Postgres,
+  transactions: Handler Transaction,
+}
+
+pub fun run : Unit -> Unit needs {Postgres, Transaction}
+run () = transaction! (fun () -> ping! ())
+
+pub fun connect : Unit -> Db
+connect () = {
+  Db {
+    postgres: handler for Postgres {
+      ping () = resume ()
+    },
+    transactions: handler for Transaction needs {Postgres} {
+      transaction f = {
+        let value = f ()
+        resume value
+      }
+    },
+  }
+}
+"#;
+
+    let main_src = r#"module Main
+import Std.IO (console, println)
+import Db (connect, run)
+
+main () = {
+  let db = connect ()
+  let pg = db.postgres
+  let tx = db.transactions
+  {
+    run ()
+    println "ok"
+  }
+} with {pg, tx, console}
+"#;
+
+    with_temp_project_files(
+        &[("lib/Db.saga", db_module)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'erlang':'element'");
+            assert_contains(&out, "_Handle_Db_Postgres_ping");
+            assert_contains(&out, "_Handle_Db_Transaction_transaction");
             assert_erlc_compiles(&out, "main");
         },
     );
@@ -1291,6 +1362,23 @@ import Std.DateTime as DateTime
 
 
 main () = DateTime.Clock.today! () with {DateTime.system_clock}
+";
+    let mut checker = make_project_checker();
+    let program = typecheck_source(src, &mut checker);
+    let _out = emit_from_program(&program, "main", &checker);
+}
+
+#[test]
+fn aliased_qualified_handler_binding_canonicalizes_for_lowering() {
+    let src = "
+module Main
+import Std.DateTime as DateTime
+
+
+main () = {
+  let clock = DateTime.system_clock
+  DateTime.Clock.today! () with {clock}
+}
 ";
     let mut checker = make_project_checker();
     let program = typecheck_source(src, &mut checker);

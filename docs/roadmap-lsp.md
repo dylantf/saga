@@ -73,6 +73,10 @@ lock-free hover/goto/completion.
 - [ ] Workspace support (multi-root projects)
 - [ ] Semantic tokens (richer syntax highlighting from type info)
 
+## Bugs
+
+- [ ] LSP needs to be restarted when adding a new module to a project
+
 ## Known issues
 
 - Completion is not context-aware: shows functions when typing a type name and vice versa. Currently we just filter out qualified names (`String.contains` etc.) from the default list, but ideally completion should know if you're in type position (after `:`, `->`) vs expression position (after `=`, inside blocks) and show only relevant items.

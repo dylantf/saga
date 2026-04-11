@@ -197,18 +197,21 @@ impl<'a> Lowerer<'a> {
                 .clone()
         };
         let effect_key = format!("{}.{}", effect_name, op_name);
+        let param_effects = self
+            .op_param_absorbed_effects(&effect_name, op_name)
+            .cloned();
 
         // Lower args (shared between direct and CPS paths).
         let runtime_param_count = self
             .effect_defs
             .get(&effect_name)
             .and_then(|effect| effect.ops.get(op_name))
-            .copied()
+            .map(|op| op.runtime_param_count)
             .unwrap_or(args.len());
         let mut unit_args_to_erase = args.len().saturating_sub(runtime_param_count);
         let mut param_vars = Vec::new();
         let mut bindings = Vec::new();
-        for arg in args {
+        for (arg_index, arg) in args.iter().enumerate() {
             let is_unit_literal = matches!(
                 arg.kind,
                 ExprKind::Lit {
@@ -221,7 +224,16 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let v = self.fresh();
-            let ce = self.lower_expr_value(arg);
+            let saved_ctx = self.lambda_effect_context.take();
+            if let Some(pe) = &param_effects
+                && let Some(effs) = pe.get(&arg_index)
+            {
+                self.lambda_effect_context = Some(effs.clone());
+            }
+            let ce = self
+                .lower_eta_reduced_effect_expr(arg)
+                .unwrap_or_else(|| self.lower_expr_value(arg));
+            self.lambda_effect_context = saved_ctx;
             bindings.push((v.clone(), ce));
             param_vars.push(v);
         }
@@ -591,10 +603,24 @@ impl<'a> Lowerer<'a> {
             self.current_handler_finally = Some(fb.as_ref().clone());
         }
 
+        let saved_effectful_vars = self.current_effectful_vars.clone();
+        if let Some(effect_name) = self.effect_for_handler_arm(arm)
+            && let Some(param_effs) = self
+                .op_param_absorbed_effects(&effect_name, &arm.op_name)
+                .cloned()
+        {
+            for (idx, effs) in &param_effs {
+                if let Some(Pat::Var { name, .. }) = arm.params.get(*idx) {
+                    self.current_effectful_vars
+                        .insert(name.clone(), effs.clone());
+                }
+            }
+        }
         let mut body_ce = self.lower_handler_owned_expr(&arm.body);
 
         self.current_handler_finally = saved_finally;
         self.current_handler_source_module = saved_source_module;
+        self.current_effectful_vars = saved_effectful_vars;
 
         // Bind arm's params (possibly patterns) to the positional handler args
         for (i, pat) in arm.params.iter().enumerate().rev() {
@@ -745,8 +771,13 @@ impl<'a> Lowerer<'a> {
     }
 
     fn pre_register_local_with_binding(&mut self, expr: &Expr, named_ref: &str) {
-        let ExprKind::Block { stmts, .. } = &expr.kind else {
-            return;
+        let mut current = expr;
+        let stmts = loop {
+            match &current.kind {
+                ExprKind::Block { stmts, .. } => break stmts,
+                ExprKind::With { expr: inner, .. } => current = inner,
+                _ => return,
+            }
         };
 
         for stmt in stmts {
