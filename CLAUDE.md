@@ -45,6 +45,12 @@ Key phases:
 5. **Lower**: Converts to Core Erlang IR with CPS transform for effect handlers. BEAM-native effects (e.g. Actor, Supervisor) skip CPS transformation and directly call foreign code, wrapped in Effect syntax
 6. **Emit**: Pretty-prints Core Erlang, invokes `erlc`, runs via `erl -noshell`
 
+Typechecker-specific documentation:
+
+- `docs/typechecking.md` - per-module pass structure, inference flow, and final validation passes
+- `docs/name-resolution.md` - canonicalization and `ScopeMap`
+- `docs/effect-implementation.md` - effect rows, handler checking, and CPS boundary
+
 ### Source Layout
 
 - `src/lexer.rs` - Tokenizer
@@ -103,3 +109,4 @@ Typechecker tests use `check(src)` which loads the prelude then checks the sourc
 - Never use `3.14` as a float literal in tests (clippy warning); use `std::f64::consts::PI` or simple values like `1.5`
 - Run `cargo clippy` when finishing tasks
 - Language docs live in `docs/`; `docs/roadmap.md` is the source of truth for project status
+- For typechecker work, start with `docs/typechecking.md` and then drill into `docs/name-resolution.md` or `docs/effect-implementation.md` as needed

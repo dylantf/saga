@@ -41,6 +41,8 @@ HM-style inference with traits, effects, and exhaustiveness checking. Multi-modu
 
 Includes a **name resolution** sub-pass (`src/typechecker/resolve.rs`) that runs after imports are processed and before inference. It rewrites bare names in the AST to canonical (module-qualified) form using the `ScopeMap` built from imports. For example, `Var { name: "map" }` becomes `Var { name: "Std.List.map" }`. The pass is scope-aware: local bindings shadow imports. See `docs/name-resolution.md` for full details.
 
+For a detailed walkthrough of the typechecker pipeline itself, including rough pass counts and what happens in each pass, see `docs/typechecking.md`.
+
 Key outputs:
 
 - `CheckResult`: type environment, trait evidence, scope_map, diagnostics
