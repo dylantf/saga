@@ -124,16 +124,22 @@ impl ModuleExports {
                     }
                 }
                 Decl::ImplDef {
+                    id,
                     trait_name,
+                    trait_name_span,
                     trait_type_args,
                     target_type,
+                    target_type_span,
                     ..
                 } => {
-                    // Resolve trait name to canonical form for impl key lookup
-                    let resolved = checker
-                        .resolve_trait_name(trait_name)
-                        .unwrap_or_else(|| trait_name.clone());
-                    let key = (resolved, trait_type_args.clone(), target_type.clone());
+                    let resolved_trait =
+                        checker.resolved_impl_trait_name(*id, *trait_name_span, trait_name);
+                    let resolved_target = checker.resolved_impl_target_type_name(
+                        *id,
+                        *target_type_span,
+                        target_type,
+                    );
+                    let key = (resolved_trait, trait_type_args.clone(), resolved_target);
                     if let Some(info) = checker.trait_state.impls.get(&key) {
                         trait_impls.insert(key, info.clone());
                     }
@@ -1293,6 +1299,26 @@ fn collect_codegen_info(
     scope_map: &super::ScopeMap,
 ) -> ModuleCodegenInfo {
     use crate::ast::Decl;
+
+    let canonical_type_name = |name: &str| -> String {
+        scope_map
+            .resolve_type(name)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| super::canonicalize_type_name(name).to_string())
+    };
+
+    let canonical_trait_type_args = |args: &[String]| -> Vec<String> {
+        args.iter()
+            .map(|arg| {
+                if arg.starts_with(|c: char| c.is_uppercase()) || arg.contains('.') {
+                    canonical_type_name(arg)
+                } else {
+                    arg.clone()
+                }
+            })
+            .collect()
+    };
+
     let mut effect_defs = Vec::new();
     let mut record_fields = Vec::new();
     let mut handler_defs = Vec::new();
@@ -1452,11 +1478,13 @@ fn collect_codegen_info(
                     .resolve_trait(trait_name)
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("{}.{}", module_name, trait_name));
+                let canonical_trait_type_args = canonical_trait_type_args(trait_type_args);
+                let canonical_target_type = canonical_type_name(target_type);
                 let dict_name = super::make_dict_name(
                     &canonical_trait,
-                    trait_type_args,
+                    &canonical_trait_type_args,
                     &erlang_module,
-                    target_type,
+                    &canonical_target_type,
                 );
                 let arity = where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
                 let var_to_idx: std::collections::HashMap<&str, usize> = type_params
@@ -1480,8 +1508,8 @@ fn collect_codegen_info(
                     .collect();
                 trait_impl_dicts.push(TraitImplDict {
                     trait_name: canonical_trait,
-                    trait_type_args: trait_type_args.clone(),
-                    target_type: target_type.clone(),
+                    trait_type_args: canonical_trait_type_args,
+                    target_type: canonical_target_type,
                     dict_name,
                     arity,
                     param_constraints,

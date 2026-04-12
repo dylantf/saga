@@ -96,8 +96,9 @@ impl Checker {
             }
         }
         self.process_imports(program)?;
+        self.resolution =
+            super::resolve::resolve_names(program, &self.scope_map, self.current_module.as_deref());
         self.register_definitions(program)?;
-        super::resolve::resolve_names(program, &self.scope_map);
         self.register_externals(program)?;
         let (annotations, annotation_constraints) = self.collect_annotations(program)?;
         let fun_vars = self.pre_bind_functions(program, &annotations);
@@ -491,18 +492,15 @@ impl Checker {
                 if !where_clause.is_empty() {
                     for bound in where_clause {
                         for (trait_name, _, trait_span) in &bound.traits {
-                            let resolved = self
-                                .resolve_trait_name(trait_name)
-                                .unwrap_or_else(|| trait_name.clone());
+                            let resolved = self.resolved_trait_name_at(*trait_span, trait_name);
                             self.lsp.type_references.push((*trait_span, resolved));
                         }
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
                         {
-                            for (trait_name, trait_type_args, _) in &bound.traits {
-                                let resolved_trait = self
-                                    .resolve_trait_name(trait_name)
-                                    .unwrap_or_else(|| trait_name.clone());
+                            for (trait_name, trait_type_args, trait_span) in &bound.traits {
+                                let resolved_trait =
+                                    self.resolved_trait_name_at(*trait_span, trait_name);
                                 let extra_types: Vec<Type> = trait_type_args
                                     .iter()
                                     .map(|arg_name| {
@@ -580,31 +578,13 @@ impl Checker {
                             e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
                             args.clone(),
                         ));
-                        let name = if let Some(info) = self.resolve_effect(&e.name) {
-                            info.source_module
-                                .as_ref()
-                                .map(|m| {
-                                    format!(
-                                        "{}.{}",
-                                        m,
-                                        e.name.rsplit('.').next().unwrap_or(&e.name)
-                                    )
-                                })
-                                .unwrap_or_else(|| {
-                                    // Local effect: qualify with current module
-                                    if let Some(m) = &self.current_module {
-                                        format!("{}.{}", m, e.name)
-                                    } else {
-                                        e.name.clone()
-                                    }
-                                })
-                        } else {
+                        let name = self.resolved_effect_name(e.span, &e.name);
+                        if !self.effects.contains_key(&name) {
                             self.collected_diagnostics.push(Diagnostic::error_at(
                                 e.span,
                                 format!("undefined effect: {}", e.name),
                             ));
-                            e.name.clone()
-                        };
+                        }
                         if let Some(prev_args) = seen_effects.get(&name) {
                             if prev_args != &args {
                                 let previous_display = self.prettify_type(&Type::Con(
@@ -676,21 +656,7 @@ impl Checker {
                                 .collect();
                             // Use canonical effect name so lookups against
                             // canonical-only self.effects succeed later.
-                            let canonical = self
-                                .resolve_effect(&eff.name)
-                                .and_then(|info| {
-                                    let short = eff.name.rsplit('.').next().unwrap_or(&eff.name);
-                                    info.source_module
-                                        .as_ref()
-                                        .map(|m| format!("{}.{}", m, short))
-                                })
-                                .unwrap_or_else(|| {
-                                    if let Some(m) = &self.current_module {
-                                        format!("{}.{}", m, eff.name)
-                                    } else {
-                                        eff.name.clone()
-                                    }
-                                });
+                            let canonical = self.resolved_effect_name(eff.span, &eff.name);
                             constraints.push((canonical, concrete_types));
                         }
                     }
@@ -705,9 +671,7 @@ impl Checker {
                     let mut constraints = Vec::new();
                     for bound in where_clause {
                         for (trait_name, _, trait_span) in &bound.traits {
-                            let resolved = self
-                                .resolve_trait_name(trait_name)
-                                .unwrap_or_else(|| trait_name.clone());
+                            let resolved = self.resolved_trait_name_at(*trait_span, trait_name);
                             self.lsp.type_references.push((*trait_span, resolved));
                         }
                         if let Some((_, var_id)) =
@@ -716,10 +680,9 @@ impl Checker {
                             self.trait_state
                                 .where_bound_var_names
                                 .insert(*var_id, bound.type_var.clone());
-                            for (trait_name, trait_type_args, _) in &bound.traits {
-                                let resolved_trait = self
-                                    .resolve_trait_name(trait_name)
-                                    .unwrap_or_else(|| trait_name.clone());
+                            for (trait_name, trait_type_args, trait_span) in &bound.traits {
+                                let resolved_trait =
+                                    self.resolved_trait_name_at(*trait_span, trait_name);
                                 let extra_types: Vec<Type> = trait_type_args
                                     .iter()
                                     .map(|arg_name| {
@@ -820,6 +783,7 @@ impl Checker {
         let mut errors: Vec<Diagnostic> = Vec::new();
         for decl in program {
             if let Decl::ImplDef {
+                id,
                 trait_name,
                 trait_name_span,
                 trait_type_args,
@@ -845,9 +809,12 @@ impl Checker {
                 }
                 let plain_methods: Vec<_> = methods.iter().map(|a| a.node.clone()).collect();
                 if let Err(e) = self.register_impl(
+                    *id,
                     trait_name,
+                    *trait_name_span,
                     trait_type_args,
                     target_type,
+                    *target_type_span,
                     type_params,
                     where_clause,
                     needs,
@@ -1756,26 +1723,7 @@ impl Checker {
                             .iter()
                             .map(|te| self.convert_user_type_expr(te, &mut params_list))
                             .collect();
-                        let resolved_name = if let Some(info) = self.resolve_effect(&e.name) {
-                            info.source_module
-                                .as_ref()
-                                .map(|m| {
-                                    format!(
-                                        "{}.{}",
-                                        m,
-                                        e.name.rsplit('.').next().unwrap_or(&e.name)
-                                    )
-                                })
-                                .unwrap_or_else(|| {
-                                    if let Some(m) = &self.current_module {
-                                        format!("{}.{}", m, e.name)
-                                    } else {
-                                        e.name.clone()
-                                    }
-                                })
-                        } else {
-                            e.name.clone()
-                        };
+                        let resolved_name = self.resolved_effect_name(e.span, &e.name);
                         EffectEntry::unnamed(resolved_name, args)
                     })
                     .collect();
@@ -1845,7 +1793,8 @@ impl Checker {
         let mut type_var_params: Vec<(String, u32)> = Vec::new();
         for effect_ref in effect_names {
             self.record_effect_ref(effect_ref);
-            if let Some(info) = self.resolve_effect(&effect_ref.name) {
+            let resolved_effect_name = self.resolved_effect_name(effect_ref.span, &effect_ref.name);
+            if let Some(info) = self.effects.get(&resolved_effect_name) {
                 let info = info.clone();
                 for (i, &param_id) in info.type_params.iter().enumerate() {
                     if let Some(type_arg_expr) = effect_ref.type_args.get(i) {
@@ -1870,9 +1819,7 @@ impl Checker {
                     .where_bound_var_names
                     .insert(*var_id, bound.type_var.clone());
                 for (trait_req, _, trait_span) in &bound.traits {
-                    let resolved_req = self
-                        .resolve_trait_name(trait_req)
-                        .unwrap_or_else(|| trait_req.clone());
+                    let resolved_req = self.resolved_trait_name_at(*trait_span, trait_req);
                     self.lsp
                         .type_references
                         .push((*trait_span, resolved_req.clone()));
@@ -1919,7 +1866,8 @@ impl Checker {
             let mut belongs_to_declared = false;
             let mut matched_op: Option<EffectOpSig> = None;
             for effect_ref in effect_names {
-                if let Some(info) = self.resolve_effect(&effect_ref.name)
+                let resolved_effect_name = self.resolved_effect_name(effect_ref.span, &effect_ref.name);
+                if let Some(info) = self.effects.get(&resolved_effect_name)
                     && let Some(op) = info.ops.iter().find(|o| o.name == arm.op_name)
                 {
                     if belongs_to_declared {

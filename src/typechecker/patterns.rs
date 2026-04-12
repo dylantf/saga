@@ -44,19 +44,10 @@ impl Checker {
                 span,
                 ..
             } => {
-                // Look up constructor by name, with scope_map resolution as fallback.
-                let resolved_ctor = self
-                    .scope_map
-                    .resolve_constructor(name)
-                    .map(|s| s.to_string());
+                let resolved_ctor = self.resolved_constructor_name(*id, name);
                 let ctor_scheme = self
                     .constructors
-                    .get(name)
-                    .or_else(|| {
-                        resolved_ctor
-                            .as_ref()
-                            .and_then(|r| self.constructors.get(r.as_str()))
-                    })
+                    .get(&resolved_ctor)
                     .cloned()
                     .ok_or_else(|| {
                         Diagnostic::error_at(
@@ -66,16 +57,7 @@ impl Checker {
                     })?;
                 // Record reference to constructor definition for find-references/rename
                 {
-                    let def_id = self
-                        .lsp
-                        .constructor_def_ids
-                        .get(name)
-                        .or_else(|| {
-                            resolved_ctor
-                                .as_ref()
-                                .and_then(|r| self.lsp.constructor_def_ids.get(r.as_str()))
-                        })
-                        .copied();
+                    let def_id = self.lsp.constructor_def_ids.get(&resolved_ctor).copied();
                     if let Some(def_id) = def_id {
                         self.record_reference(*id, *span, def_id);
                     }
@@ -103,10 +85,12 @@ impl Checker {
                 fields,
                 rest,
                 as_name,
+                id,
                 span,
                 ..
             } => {
-                let info = self.records.get(name).cloned().ok_or_else(|| {
+                let resolved_name = self.resolved_record_type_name(*id, name);
+                let info = self.records.get(&resolved_name).cloned().ok_or_else(|| {
                     Diagnostic::error_at(
                         *span,
                         format!("undefined record type in pattern: {}", name),
@@ -119,7 +103,7 @@ impl Checker {
                         start: span.start,
                         end: name_end,
                     },
-                    name.to_string(),
+                    resolved_name.clone(),
                 ));
                 // When `..` is absent, all fields must be listed
                 if !rest {
@@ -141,7 +125,7 @@ impl Checker {
                         ));
                     }
                 }
-                let (inst_fields, result_ty) = self.instantiate_record(name, &info);
+                let (inst_fields, result_ty) = self.instantiate_record(&resolved_name, &info);
                 self.unify_at(ty, &result_ty, *span)?;
 
                 for (fname, alias_pat) in fields {

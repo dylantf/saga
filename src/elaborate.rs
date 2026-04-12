@@ -67,6 +67,8 @@ struct Elaborator {
     let_dict_pat_ids: HashMap<String, HashSet<crate::ast::NodeId>>,
     /// Scope map values for canonical name bridging (user name -> canonical)
     scope_map_values: HashMap<String, String>,
+    /// Scope map types for canonical type-name bridging (user name -> canonical)
+    scope_map_types: HashMap<String, String>,
     /// Scope map traits for resolving bare trait names to canonical
     scope_map_traits: HashMap<String, String>,
     /// Per-node type information for resolving record names in FieldAccess/RecordUpdate.
@@ -76,6 +78,25 @@ struct Elaborator {
 }
 
 impl Elaborator {
+    fn canonical_type_name(&self, name: &str) -> String {
+        self.scope_map_types
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| crate::typechecker::canonicalize_type_name(name).to_string())
+    }
+
+    fn canonical_trait_type_args(&self, args: &[String]) -> Vec<String> {
+        args.iter()
+            .map(|arg| {
+                if arg.starts_with(|c: char| c.is_uppercase()) || arg.contains('.') {
+                    self.canonical_type_name(arg)
+                } else {
+                    arg.clone()
+                }
+            })
+            .collect()
+    }
+
     fn new(result: &CheckResult, module_name: &str) -> Self {
         // Build inferred dict params from checker's env (for functions without
         // explicit where clauses that still have inferred trait constraints).
@@ -187,6 +208,7 @@ impl Elaborator {
             let_binding_arities,
             let_dict_pat_ids,
             scope_map_values: result.scope_map.values.clone(),
+            scope_map_types: result.scope_map.types.clone(),
             scope_map_traits: result.scope_map.traits.clone(),
             type_at_node: result.type_at_node.clone(),
             sub: result.sub.clone(),
@@ -294,17 +316,19 @@ impl Elaborator {
                         .get(trait_name)
                         .cloned()
                         .unwrap_or_else(|| trait_name.clone());
+                    let canonical_trait_type_args = self.canonical_trait_type_args(trait_type_args);
+                    let canonical_target_type = self.canonical_type_name(target_type);
                     let dict_name = crate::typechecker::make_dict_name(
                         &canonical_trait,
-                        trait_type_args,
+                        &canonical_trait_type_args,
                         &self.erlang_module,
-                        target_type,
+                        &canonical_target_type,
                     );
                     self.dict_names.insert(
                         (
                             canonical_trait.clone(),
-                            trait_type_args.clone(),
-                            target_type.clone(),
+                            canonical_trait_type_args.clone(),
+                            canonical_target_type.clone(),
                         ),
                         dict_name,
                     );
@@ -335,8 +359,8 @@ impl Elaborator {
                     self.impl_dict_params.insert(
                         (
                             canonical_trait,
-                            trait_type_args.clone(),
-                            target_type.clone(),
+                            canonical_trait_type_args,
+                            canonical_target_type,
                         ),
                         params,
                     );
@@ -393,12 +417,14 @@ impl Elaborator {
                         .get(trait_name)
                         .cloned()
                         .unwrap_or_else(|| trait_name.clone());
+                    let canonical_trait_type_args = self.canonical_trait_type_args(trait_type_args);
+                    let canonical_target_type = self.canonical_type_name(target_type);
                     let dict_name = self
                         .dict_names
                         .get(&(
                             canonical_trait.clone(),
-                            trait_type_args.clone(),
-                            target_type.clone(),
+                            canonical_trait_type_args.clone(),
+                            canonical_target_type.clone(),
                         ))
                         .cloned()
                         .unwrap();

@@ -13,6 +13,7 @@ mod resolve;
 mod result;
 mod unify;
 pub use result::{CheckResult, LetDictInfo};
+pub(crate) use resolve::{ResolvedValue, ResolutionResult};
 
 #[cfg(test)]
 mod tests;
@@ -919,6 +920,8 @@ pub struct Checker {
     pub(crate) type_arity: HashMap<String, usize>,
     /// Name resolution map: user-visible names -> canonical names.
     pub(crate) scope_map: ScopeMap,
+    /// Authoritative source-level resolution result for the current program.
+    pub(crate) resolution: ResolutionResult,
     /// Evidence collected during constraint solving for the elaboration pass.
     pub(crate) evidence: Vec<TraitEvidence>,
     /// Dict params for let bindings with trait constraints.
@@ -1224,6 +1227,7 @@ impl Checker {
             adt_variants: HashMap::new(),
             type_arity: HashMap::new(),
             scope_map: ScopeMap::default(),
+            resolution: ResolutionResult::default(),
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
             collected_diagnostics: Vec::new(),
@@ -1353,6 +1357,79 @@ impl Checker {
             },
             effect_ref.name.clone(),
         ));
+    }
+
+    pub(crate) fn resolved_value_name(&self, node_id: crate::ast::NodeId, source: &str) -> String {
+        match self.resolution.value(node_id) {
+            Some(ResolvedValue::Local { name, .. }) => name.clone(),
+            Some(ResolvedValue::Global { lookup_name }) => lookup_name.clone(),
+            None => source.to_string(),
+        }
+    }
+
+    pub(crate) fn resolved_constructor_name(
+        &self,
+        node_id: crate::ast::NodeId,
+        source: &str,
+    ) -> String {
+        self.resolution
+            .constructor(node_id)
+            .unwrap_or(source)
+            .to_string()
+    }
+
+    pub(crate) fn resolved_type_name(&self, span: Span, source: &str) -> String {
+        self.resolution.type_ref(span).unwrap_or(source).to_string()
+    }
+
+    pub(crate) fn resolved_record_type_name(
+        &self,
+        node_id: crate::ast::NodeId,
+        source: &str,
+    ) -> String {
+        self.resolution.record_type(node_id).unwrap_or(source).to_string()
+    }
+
+    pub(crate) fn resolved_trait_name_at(&self, span: Span, source: &str) -> String {
+        self.resolution.trait_ref(span).unwrap_or(source).to_string()
+    }
+
+    pub(crate) fn resolved_impl_trait_name(
+        &self,
+        node_id: crate::ast::NodeId,
+        span: Span,
+        source: &str,
+    ) -> String {
+        self.resolution
+            .impl_trait_ref(node_id)
+            .or_else(|| self.resolution.trait_ref(span))
+            .unwrap_or(source)
+            .to_string()
+    }
+
+    pub(crate) fn resolved_effect_name(&self, span: Span, source: &str) -> String {
+        self.resolution.effect_ref(span).unwrap_or(source).to_string()
+    }
+
+    pub(crate) fn resolved_impl_target_type_name(
+        &self,
+        node_id: crate::ast::NodeId,
+        span: Span,
+        source: &str,
+    ) -> String {
+        self.resolution
+            .impl_target_type_ref(node_id)
+            .or_else(|| self.resolution.type_ref(span))
+            .unwrap_or(source)
+            .to_string()
+    }
+
+    pub(crate) fn resolved_handler_name(&self, span: Span, source: &str) -> String {
+        match self.resolution.handler_ref(span) {
+            Some(ResolvedValue::Local { name, .. }) => name.clone(),
+            Some(ResolvedValue::Global { lookup_name }) => lookup_name.clone(),
+            None => source.to_string(),
+        }
     }
 
     /// Emit warnings for module-level functions that are never referenced.

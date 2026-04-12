@@ -569,6 +569,15 @@ impl<'a> Lowerer<'a> {
     /// is appended after the arm body.
     fn build_op_handler_fun(&mut self, arm: &HandlerArm, source_module: Option<&str>) -> CExpr {
         let has_resume = arm.body.contains_resume();
+        let source_param_count = self
+            .effect_for_handler_arm(arm)
+            .and_then(|effect_name| {
+                self.effect_defs
+                    .get(&effect_name)
+                    .and_then(|info| info.ops.get(&arm.op_name))
+                    .map(|op| op.source_param_count)
+            })
+            .unwrap_or(arm.params.len());
 
         // If resume is never called, use `_` (Core Erlang wildcard) so the compiler
         // doesn't warn about the unused continuation parameter. Safe because
@@ -579,7 +588,7 @@ impl<'a> Lowerer<'a> {
         } else {
             "_".to_string()
         };
-        let param_vars: Vec<String> = (0..arm.params.len())
+        let param_vars: Vec<String> = (0..source_param_count)
             .map(|i| format!("_HArg{}", i))
             .collect();
 

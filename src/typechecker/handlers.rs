@@ -99,8 +99,14 @@ impl Checker {
         with_node_id: crate::ast::NodeId,
     ) -> Result<Type, Diagnostic> {
         // Check if this with-expression uses handlers that require runtime resource init.
-        // Handler names are already canonical at this point (resolve pass ran first).
-        let handler_names = handler.handler_names();
+        let handler_names: Vec<String> = match handler {
+            ast::Handler::Named(name, span) => vec![self.resolved_handler_name(*span, name)],
+            ast::Handler::Inline { .. } => handler
+                .named_refs()
+                .into_iter()
+                .map(|h| self.resolved_handler_name(h.span, &h.name))
+                .collect(),
+        };
         for name in &handler_names {
             if beam_interop::handler_needs_ets_table(name) {
                 self.needs_ets_ref_table = true;
@@ -114,12 +120,13 @@ impl Checker {
         let arm_stack_entry: std::collections::HashMap<String, (Span, Option<String>)> =
             match handler {
                 ast::Handler::Named(name, handler_span) => {
-                    if let Some(def_id) = self.env.def_id(name) {
+                    let resolved_name = self.resolved_handler_name(*handler_span, name);
+                    if let Some(def_id) = self.env.def_id(&resolved_name) {
                         let usage_id = crate::ast::NodeId::fresh();
                         self.record_reference(usage_id, *handler_span, def_id);
                     }
                     self.handlers
-                        .get(name)
+                        .get(&resolved_name)
                         .map(|h| {
                             let src = h.source_module.clone();
                             h.arm_spans
@@ -134,12 +141,12 @@ impl Checker {
                     for ann in items {
                         match &ann.node {
                             ast::HandlerItem::Named(named_ref) => {
-                                let n = &named_ref.name;
-                                if let Some(def_id) = self.env.def_id(n) {
+                                let n = self.resolved_handler_name(named_ref.span, &named_ref.name);
+                                if let Some(def_id) = self.env.def_id(&n) {
                                     let usage_id = crate::ast::NodeId::fresh();
                                     self.record_reference(usage_id, _with_span, def_id);
                                 }
-                                if let Some(h) = self.handlers.get(n) {
+                                if let Some(h) = self.handlers.get(&n) {
                                     let src = h.source_module.clone();
                                     map.extend(
                                         h.arm_spans
@@ -177,14 +184,16 @@ impl Checker {
         let expr_ty = self.infer_expr(expr)?;
         match handler {
             ast::Handler::Named(name, handler_span) => {
-                if let Some(def_id) = self.env.def_id(name) {
+                let resolved_name = self.resolved_handler_name(*handler_span, name);
+                if let Some(def_id) = self.env.def_id(&resolved_name) {
                     let usage_id = crate::ast::NodeId::fresh();
                     self.record_reference(usage_id, *handler_span, def_id);
                 }
             }
             ast::Handler::Inline { .. } => {
                 for named_ref in handler.named_refs() {
-                    if let Some(def_id) = self.env.def_id(&named_ref.name) {
+                    let resolved_name = self.resolved_handler_name(named_ref.span, &named_ref.name);
+                    if let Some(def_id) = self.env.def_id(&resolved_name) {
                         let usage_id = crate::ast::NodeId::fresh();
                         self.record_reference(usage_id, named_ref.span, def_id);
                     }
@@ -208,13 +217,14 @@ impl Checker {
         let with_span = expr.span;
         match handler {
             ast::Handler::Named(name, name_span) => {
-                if !self.handlers.contains_key(name) && self.env.get(name).is_none() {
+                let resolved_name = self.resolved_handler_name(*name_span, name);
+                if !self.handlers.contains_key(&resolved_name) && self.env.get(&resolved_name).is_none() {
                     return Err(Diagnostic::error_at(
                         *name_span,
                         format!("undefined handler: {}", name),
                     ));
                 }
-                if let Some(handler_info) = self.handlers.get(name).cloned() {
+                if let Some(handler_info) = self.handlers.get(&resolved_name).cloned() {
                     if let Some((param_ty, ret_ty)) = &handler_info.return_type {
                         let mapping: std::collections::HashMap<u32, Type> = handler_info
                             .forall
@@ -343,8 +353,13 @@ impl Checker {
 
                 // Inline handler arms
                 for arm in handler.inline_arms() {
+                    let resolved_qualifier = self
+                        .resolution
+                        .handler_arm_qualifier(arm.span)
+                        .or(arm.qualifier.as_deref())
+                        .map(|s| s.to_string());
                     let op_sig = self
-                        .lookup_effect_op(&arm.op_name, arm.qualifier.as_deref(), arm.span)
+                        .lookup_effect_op(&arm.op_name, resolved_qualifier.as_deref(), arm.span)
                         .ok();
 
                     let saved_env = self.env.clone();

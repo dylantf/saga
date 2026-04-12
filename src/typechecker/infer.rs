@@ -38,20 +38,19 @@ impl Checker {
             }),
 
             ExprKind::Var { name, .. } => {
-                let resolved_name = self
-                    .scope_map
-                    .resolve_value(name)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| name.clone());
-                // Try bare name first (locals), then resolved name (imports)
-                let env_lookup = self.env.get(name).or_else(|| self.env.get(&resolved_name));
+                let resolved_name = self.resolved_value_name(node_id, name);
+                let env_lookup = self.env.get(&resolved_name);
                 if let Some(scheme) = env_lookup {
                     let scheme = scheme.clone();
                     // Propagate effect type params from callee's annotations.
-                    let effect_key = if self.effect_meta.fun_type_constraints.contains_key(name) {
-                        name.clone()
-                    } else {
+                    let effect_key = if self
+                        .effect_meta
+                        .fun_type_constraints
+                        .contains_key(&resolved_name)
+                    {
                         resolved_name.clone()
+                    } else {
+                        name.clone()
                     };
                     if let Some(constraints) = self
                         .effect_meta
@@ -84,10 +83,7 @@ impl Checker {
                         ));
                     }
                     self.record_type(node_id, &ty);
-                    let def_id = self
-                        .env
-                        .def_id(name)
-                        .or_else(|| self.env.def_id(&resolved_name));
+                    let def_id = self.env.def_id(&resolved_name);
                     if let Some(def_id) = def_id {
                         self.record_reference(node_id, span, def_id);
                     }
@@ -101,25 +97,13 @@ impl Checker {
             }
 
             ExprKind::Constructor { name, .. } => {
-                let resolved_ctor = self
-                    .scope_map
-                    .resolve_constructor(name)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| name.clone());
-                let ctor_lookup = self
-                    .constructors
-                    .get(name)
-                    .or_else(|| self.constructors.get(&resolved_ctor));
+                let resolved_ctor = self.resolved_constructor_name(node_id, name);
+                let ctor_lookup = self.constructors.get(&resolved_ctor);
                 if let Some(scheme) = ctor_lookup {
                     let scheme = scheme.clone();
                     let (ty, _) = self.instantiate(&scheme);
                     self.record_type(node_id, &ty);
-                    let def_id = self
-                        .lsp
-                        .constructor_def_ids
-                        .get(name)
-                        .or_else(|| self.lsp.constructor_def_ids.get(&resolved_ctor))
-                        .copied();
+                    let def_id = self.lsp.constructor_def_ids.get(&resolved_ctor).copied();
                     if let Some(def_id) = def_id {
                         self.record_reference(node_id, span, def_id);
                     }
@@ -259,7 +243,8 @@ impl Checker {
             }
 
             ExprKind::RecordCreate { name, fields, .. } => {
-                self.infer_record_create(name, fields, span)
+                let resolved_name = self.resolved_record_type_name(node_id, name);
+                self.infer_record_create(&resolved_name, fields, span)
             }
 
             ExprKind::AnonRecordCreate { fields, .. } => self.infer_anon_record_create(fields),
@@ -279,7 +264,12 @@ impl Checker {
             ExprKind::EffectCall {
                 name, qualifier, ..
             } => {
-                let op_sig = self.lookup_effect_op(name, qualifier.as_deref(), span)?;
+                let resolved_qualifier = self
+                    .resolution
+                    .effect_call_qualifier(node_id)
+                    .or(qualifier.as_deref())
+                    .map(|s| s.to_string());
+                let op_sig = self.lookup_effect_op(name, resolved_qualifier.as_deref(), span)?;
 
                 // Record call site -> handler arm for LSP go-to-def
                 if let Some((arm_span, arm_module)) = self
@@ -317,7 +307,7 @@ impl Checker {
                     }
                 }
                 // Emit the effect onto the accumulator.
-                if let Some(effect_name) = self.effect_for_op(name, qualifier.as_deref()) {
+                if let Some(effect_name) = self.effect_for_op(name, resolved_qualifier.as_deref()) {
                     let effect_args = self.current_effect_args(&effect_name);
                     self.emit_effect(effect_name.clone(), effect_args);
                 }
@@ -357,49 +347,13 @@ impl Checker {
             ExprKind::QualifiedName {
                 module,
                 name,
-                canonical_module,
+                ..
             } => {
                 if name.is_empty() {
                     return Ok(self.fresh_var());
                 }
-                // Use canonical_module from resolve pass if available,
-                // otherwise fall back to user-written module (for auto-imports)
-                let effective_module = canonical_module.as_deref().unwrap_or(module);
-                let key = format!("{}.{}", effective_module, name);
-                // If not in env, try auto-importing the stdlib module on demand.
-                // This allows Std.X.y to work without an explicit import.
-                if self.env.get(&key).is_none() {
-                    let parts: Vec<String> = module.split('.').map(String::from).collect();
-                    if crate::typechecker::check_module::builtin_module_source(&parts).is_some()
-                        && !self.modules.exports.contains_key(module.as_str())
-                    {
-                        // Alias = full module name so only Std.X.y is registered
-                        if self
-                            .typecheck_import(&parts, Some(module), None, span)
-                            .is_ok()
-                        {
-                            // Register synthetic import so resolver/codegen can see it
-                            self.prelude_imports.push(crate::ast::Decl::Import {
-                                id: crate::ast::NodeId::fresh(),
-                                module_path: parts,
-                                alias: Some(module.clone()),
-                                exposing: None,
-                                span,
-                            });
-                        }
-                    }
-                }
-                let resolved_key = self
-                    .scope_map
-                    .resolve_value(&key)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| key.clone());
-                match self
-                    .env
-                    .get(&key)
-                    .or_else(|| self.env.get(&resolved_key))
-                    .cloned()
-                {
+                let key = self.resolved_value_name(node_id, &format!("{}.{}", module, name));
+                match self.env.get(&key).cloned() {
                     Some(scheme) => {
                         let (ty, constraints) = self.instantiate(&scheme);
                         for (trait_name, trait_ty, extra_types) in constraints {
@@ -412,10 +366,7 @@ impl Checker {
                             ));
                         }
                         self.record_type(node_id, &ty);
-                        let def_id = self
-                            .env
-                            .def_id(&key)
-                            .or_else(|| self.env.def_id(&resolved_key));
+                        let def_id = self.env.def_id(&key);
                         if let Some(def_id) = def_id {
                             self.record_reference(node_id, span, def_id);
                         }

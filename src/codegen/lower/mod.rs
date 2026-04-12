@@ -47,7 +47,8 @@ fn count_lambda_params(body: &Expr) -> usize {
 fn is_unit_type_expr(ty: &ast::TypeExpr) -> bool {
     match ty {
         ast::TypeExpr::Named { name, .. } => {
-            name == crate::typechecker::canonicalize_type_name("Unit")
+            crate::typechecker::canonicalize_type_name(name)
+                == crate::typechecker::canonicalize_type_name("Unit")
         }
         ast::TypeExpr::Labeled { inner, .. } => is_unit_type_expr(inner),
         _ => false,
