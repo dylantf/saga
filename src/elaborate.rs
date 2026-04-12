@@ -569,6 +569,7 @@ impl Elaborator {
                         .map(|ann| {
                             let arm = &ann.node;
                             Annotated::bare(HandlerArm {
+                                id: arm.id,
                                 op_name: arm.op_name.clone(),
                                 qualifier: arm.qualifier.clone(),
                                 params: arm.params.clone(),
@@ -583,6 +584,7 @@ impl Elaborator {
                         .collect();
                     let elab_return = body.return_clause.as_ref().map(|rc| {
                         Box::new(HandlerArm {
+                            id: rc.id,
                             op_name: rc.op_name.clone(),
                             qualifier: rc.qualifier.clone(),
                             params: rc.params.clone(),
@@ -1274,9 +1276,9 @@ impl Elaborator {
                 // For named handlers with where clauses, bind the dict variables
                 // so handler arm bodies (which reference e.g. `__dict_Show_a`) can
                 // capture them from the enclosing scope.
-                if let Handler::Named(handler_name, _) = handler.as_ref() {
+                if let Handler::Named(named) = handler.as_ref() {
                     if let Some(dict_param_info) =
-                        self.handler_dict_params.get(handler_name).cloned()
+                        self.handler_dict_params.get(&named.name).cloned()
                     {
                         let mut stmts: Vec<Annotated<Stmt>> = Vec::new();
                         let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
@@ -1333,6 +1335,7 @@ impl Elaborator {
                             .iter()
                             .map(|ann| {
                                 Annotated::bare(HandlerArm {
+                                    id: ann.node.id,
                                     op_name: ann.node.op_name.clone(),
                                     qualifier: ann.node.qualifier.clone(),
                                     params: ann.node.params.clone(),
@@ -1348,6 +1351,7 @@ impl Elaborator {
                             .collect(),
                         return_clause: body.return_clause.as_ref().map(|rc| {
                             Box::new(HandlerArm {
+                                id: rc.id,
                                 op_name: rc.op_name.clone(),
                                 qualifier: rc.qualifier.clone(),
                                 params: rc.params.clone(),
@@ -1438,13 +1442,14 @@ impl Elaborator {
 
     fn elaborate_handler(&mut self, handler: &Handler) -> Handler {
         match handler {
-            Handler::Named(_, _) => handler.clone(),
+            Handler::Named(_) => handler.clone(),
             Handler::Inline { items, .. } => Handler::Inline {
                 dangling_trivia: vec![],
                 items: items
                     .iter()
                     .map(|ann| {
                         let mut elaborate_arm = |arm: &HandlerArm| HandlerArm {
+                            id: arm.id,
                             op_name: arm.op_name.clone(),
                             qualifier: arm.qualifier.clone(),
                             params: arm.params.clone(),
@@ -1458,7 +1463,7 @@ impl Elaborator {
                         match &ann.node {
                             HandlerItem::Named(_) => ann.clone(),
                             HandlerItem::Arm(arm) => {
-                                Annotated::bare(HandlerItem::Arm(elaborate_arm(arm)))
+                            Annotated::bare(HandlerItem::Arm(elaborate_arm(arm)))
                             }
                             HandlerItem::Return(arm) => {
                                 Annotated::bare(HandlerItem::Return(elaborate_arm(arm)))

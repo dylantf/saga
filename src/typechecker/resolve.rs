@@ -7,8 +7,6 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
-use crate::token::Span;
-
 use super::ScopeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,9 +34,9 @@ pub struct ResolutionResult {
     pub impl_traits: HashMap<NodeId, String>,
     pub impl_target_types: HashMap<NodeId, String>,
     pub effects: HashMap<NodeId, String>,
-    pub handlers: HashMap<Span, ResolvedValue>,
+    pub handlers: HashMap<NodeId, ResolvedValue>,
     pub effect_call_qualifiers: HashMap<NodeId, String>,
-    pub handler_arm_qualifiers: HashMap<Span, String>,
+    pub handler_arm_qualifiers: HashMap<NodeId, String>,
 }
 
 impl ResolutionResult {
@@ -74,8 +72,8 @@ impl ResolutionResult {
         self.effects.get(&id).map(|s| s.as_str())
     }
 
-    pub fn handler_ref(&self, span: Span) -> Option<&ResolvedValue> {
-        self.handlers.get(&span)
+    pub fn handler_ref(&self, node_id: NodeId) -> Option<&ResolvedValue> {
+        self.handlers.get(&node_id)
     }
 
     pub fn effect_call_qualifier(&self, node_id: NodeId) -> Option<&str> {
@@ -84,8 +82,8 @@ impl ResolutionResult {
             .map(|s| s.as_str())
     }
 
-    pub fn handler_arm_qualifier(&self, span: Span) -> Option<&str> {
-        self.handler_arm_qualifiers.get(&span).map(|s| s.as_str())
+    pub fn handler_arm_qualifier(&self, node_id: NodeId) -> Option<&str> {
+        self.handler_arm_qualifiers.get(&node_id).map(|s| s.as_str())
     }
 }
 
@@ -349,6 +347,9 @@ impl<'a> Resolver<'a> {
         for bound in where_clause {
             for tr in &bound.traits {
                 self.record_trait_ref(tr.id, &tr.name);
+                for arg in &tr.type_args {
+                    self.resolve_type_expr(arg);
+                }
             }
         }
     }
@@ -394,7 +395,7 @@ impl<'a> Resolver<'a> {
             {
                 self.result
                     .handler_arm_qualifiers
-                    .insert(arm.node.span, resolved);
+                    .insert(arm.node.id, resolved);
             }
 
             self.push_value_scope();
@@ -496,9 +497,8 @@ impl<'a> Resolver<'a> {
                 ..
             } => {
                 self.record_trait_ref(*id, name);
-                for (supertrait, _span) in supertraits {
-                    // Supertraits don't have NodeIds in the AST yet; use a fresh one.
-                    self.record_trait_ref(NodeId::fresh(), supertrait);
+                for tr in supertraits {
+                    self.record_trait_ref(tr.id, &tr.name);
                 }
                 for method in methods {
                     for (_, texpr) in &method.node.params {
@@ -660,9 +660,9 @@ impl<'a> Resolver<'a> {
             } => {
                 self.resolve_expr(inner);
                 match handler.as_ref() {
-                    Handler::Named(name, span) => {
-                        if let Some(resolved) = self.resolve_handler_name(name) {
-                            self.result.handlers.insert(*span, resolved);
+                    Handler::Named(named) => {
+                        if let Some(resolved) = self.resolve_handler_name(&named.name) {
+                            self.result.handlers.insert(named.id, resolved);
                         }
                     }
                     Handler::Inline { items, .. } => {
@@ -670,7 +670,7 @@ impl<'a> Resolver<'a> {
                             match &item.node {
                                 HandlerItem::Named(named) => {
                                     if let Some(resolved) = self.resolve_handler_name(&named.name) {
-                                        self.result.handlers.insert(named.span, resolved);
+                                        self.result.handlers.insert(named.id, resolved);
                                     }
                                 }
                                 HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
@@ -679,7 +679,7 @@ impl<'a> Resolver<'a> {
                                     {
                                         self.result
                                             .handler_arm_qualifiers
-                                            .insert(arm.span, resolved);
+                                            .insert(arm.id, resolved);
                                     }
                                     self.push_value_scope();
                                     for pat in &arm.params {

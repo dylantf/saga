@@ -281,7 +281,7 @@ pub enum Decl {
         /// Type parameters: first is the self type, rest are extras.
         /// e.g. `trait ConvertTo a b` -> ["a", "b"]
         type_params: Vec<String>,
-        supertraits: Vec<(String, Span)>,
+        supertraits: Vec<TraitRef>,
         methods: Vec<Annotated<TraitMethod>>,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
@@ -1095,6 +1095,7 @@ pub struct EffectOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HandlerArm {
+    pub id: NodeId,
     pub op_name: String,
     /// Optional effect qualifier for disambiguation (e.g. `Logger` in `Logger.log`)
     pub qualifier: Option<String>,
@@ -1133,13 +1134,14 @@ pub struct TraitRef {
     pub id: NodeId,
     pub name: String,
     /// Extra type arguments, e.g. `b` in `ConvertTo b`
-    pub type_args: Vec<String>,
+    pub type_args: Vec<TypeExpr>,
     pub span: Span,
 }
 
 /// A named handler reference inside an inline `with` block (e.g. `console_log`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamedHandlerRef {
+    pub id: NodeId,
     pub name: String,
     pub span: Span,
 }
@@ -1160,7 +1162,7 @@ pub enum HandlerItem {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Handler {
     /// `expr with handler_name`
-    Named(String, Span),
+    Named(NamedHandlerRef),
     /// `expr with { h1, h2, op args = body }`
     Inline {
         /// Named handler references, inline handler arms, and return clause,
@@ -1175,7 +1177,7 @@ impl Handler {
     /// Iterator over named handler refs in this handler.
     pub fn named_refs(&self) -> impl Iterator<Item = &NamedHandlerRef> {
         let items: &[Annotated<HandlerItem>] = match self {
-            Handler::Named(..) => &[],
+            Handler::Named(_) => &[],
             Handler::Inline { items, .. } => items,
         };
         items.iter().filter_map(|ann| match &ann.node {
@@ -1187,7 +1189,7 @@ impl Handler {
     /// Iterator over inline handler arms (excludes return clauses).
     pub fn inline_arms(&self) -> impl Iterator<Item = &HandlerArm> {
         let items: &[Annotated<HandlerItem>] = match self {
-            Handler::Named(..) => &[],
+            Handler::Named(_) => &[],
             Handler::Inline { items, .. } => items,
         };
         items.iter().filter_map(|ann| match &ann.node {
@@ -1199,7 +1201,7 @@ impl Handler {
     /// Mutable iterator over inline handler arms (excludes return clauses).
     pub fn inline_arms_mut(&mut self) -> impl Iterator<Item = &mut HandlerArm> {
         let items: &mut [Annotated<HandlerItem>] = match self {
-            Handler::Named(..) => &mut [],
+            Handler::Named(_) => &mut [],
             Handler::Inline { items, .. } => items,
         };
         items.iter_mut().filter_map(|ann| match &mut ann.node {
@@ -1211,7 +1213,7 @@ impl Handler {
     /// The return clause, if any.
     pub fn return_clause(&self) -> Option<&HandlerArm> {
         match self {
-            Handler::Named(..) => None,
+            Handler::Named(_) => None,
             Handler::Inline { items, .. } => items.iter().find_map(|ann| match &ann.node {
                 HandlerItem::Return(arm) => Some(arm),
                 _ => None,
@@ -1222,7 +1224,7 @@ impl Handler {
     /// All handler names (for named handlers and named refs in inline blocks).
     pub fn handler_names(&self) -> Vec<&str> {
         match self {
-            Handler::Named(name, _) => vec![name.as_str()],
+            Handler::Named(named) => vec![named.name.as_str()],
             Handler::Inline { items, .. } => items
                 .iter()
                 .filter_map(|ann| match &ann.node {

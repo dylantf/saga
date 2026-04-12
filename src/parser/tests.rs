@@ -1967,7 +1967,7 @@ fn with_named_handler() {
                     ..
                 }
             ));
-            assert!(matches!(handler.as_ref(), Handler::Named(n, _) if n == "console_log"));
+            assert!(matches!(handler.as_ref(), Handler::Named(named) if named.name == "console_log"));
         }
         _ => panic!("expected With, got {:?}", expr),
     }
@@ -2252,7 +2252,8 @@ fn where_clause_with_trait_type_args() {
             assert_eq!(where_clause[0].traits.len(), 1);
             let tr = &where_clause[0].traits[0];
             assert_eq!(tr.name, "ConvertTo");
-            assert_eq!(tr.type_args, &["b"]);
+            let type_arg_names: Vec<&str> = tr.type_args.iter().map(|te| te.simple_name()).collect();
+            assert_eq!(type_arg_names, vec!["b"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
     }
@@ -2267,7 +2268,8 @@ fn where_clause_with_concrete_trait_type_arg() {
             assert_eq!(where_clause.len(), 1);
             let tr = &where_clause[0].traits[0];
             assert_eq!(tr.name, "ConvertTo");
-            assert_eq!(tr.type_args, &["Int"]);
+            let type_arg_names: Vec<&str> = tr.type_args.iter().map(|te| te.simple_name()).collect();
+            assert_eq!(type_arg_names, vec!["Int"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
     }
@@ -2331,7 +2333,7 @@ fn trait_def_with_supertraits() {
         } => {
             assert_eq!(name, "Ord");
             assert_eq!(type_params, &["a"]);
-            let st_names: Vec<&str> = supertraits.iter().map(|(n, _)| n.as_str()).collect();
+            let st_names: Vec<&str> = supertraits.iter().map(|tr| tr.name.as_str()).collect();
             assert_eq!(st_names, &["Eq"]);
             assert_eq!(methods.len(), 1);
             assert_eq!(methods[0].node.name, "compare");

@@ -284,16 +284,19 @@ impl<'a> Lowerer<'a> {
                     let canonical_effect = format!("{}.{}", source_module_name, name);
                     let mut ops = HashMap::new();
                     for op in operations {
+                        let is_runtime_unit_param = |ty: &crate::ast::TypeExpr| {
+                            matches!(
+                                ty,
+                                crate::ast::TypeExpr::Named { name, .. }
+                                    if crate::typechecker::canonicalize_type_name(name)
+                                        == crate::typechecker::canonicalize_type_name("Unit")
+                            )
+                        };
                         let runtime_param_count = op
                             .node
                             .params
                             .iter()
-                            .filter(|(_, ty)| {
-                                !matches!(
-                                    ty,
-                                    crate::ast::TypeExpr::Named { name, .. } if name == crate::typechecker::canonicalize_type_name("Unit")
-                                )
-                            })
+                            .filter(|(_, ty)| !is_runtime_unit_param(ty))
                             .count();
                         let param_absorbed_effects = op
                             .node
@@ -322,17 +325,7 @@ impl<'a> Lowerer<'a> {
                                     .params
                                     .iter()
                                     .enumerate()
-                                    .filter_map(|(idx, (_, ty))| {
-                                        (!matches!(
-                                            ty,
-                                            crate::ast::TypeExpr::Named { name, .. }
-                                                if name
-                                                    == crate::typechecker::canonicalize_type_name(
-                                                        "Unit"
-                                                    )
-                                        ))
-                                        .then_some(idx)
-                                    })
+                                    .filter_map(|(idx, (_, ty))| (!is_runtime_unit_param(ty)).then_some(idx))
                                     .collect(),
                                 param_absorbed_effects,
                             },

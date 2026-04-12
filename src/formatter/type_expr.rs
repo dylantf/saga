@@ -207,18 +207,22 @@ pub fn format_where_clause(bounds: &[TraitBound]) -> Doc {
     let bound_docs: Vec<Doc> = bounds
         .iter()
         .map(|b| {
-            let traits: Vec<String> = b
+            let trait_docs: Vec<Doc> = b
                 .traits
                 .iter()
                 .map(|tr| {
                     if tr.type_args.is_empty() {
-                        tr.name.clone()
+                        Doc::text(tr.name.clone())
                     } else {
-                        format!("{} {}", tr.name, tr.type_args.join(" "))
+                        let args: Vec<Doc> = tr.type_args.iter().map(format_type_expr).collect();
+                        docs![Doc::text(format!("{} ", tr.name)), Doc::join(Doc::text(" "), args)]
                     }
                 })
                 .collect();
-            Doc::text(format!("{}: {}", b.type_var, traits.join(" + ")))
+            docs![
+                Doc::text(format!("{}: ", b.type_var)),
+                Doc::join(Doc::text(" + "), trait_docs)
+            ]
         })
         .collect();
     docs![

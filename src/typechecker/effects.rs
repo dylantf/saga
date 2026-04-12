@@ -207,8 +207,8 @@ impl Checker {
     pub(crate) fn handler_handled_effects(&mut self, handler: &ast::Handler) -> HashSet<String> {
         let mut handled = HashSet::new();
         match handler {
-            ast::Handler::Named(name, span) => {
-                let resolved_name = self.resolved_handler_name(*span, name);
+            ast::Handler::Named(named) => {
+                let resolved_name = self.resolved_handler_name(named.id, &named.name);
                 if let Some(info) = self.handlers.get(&resolved_name) {
                     handled.extend(info.effects.iter().cloned());
                 } else if let Some(effects) = self.handler_effects_from_env(&resolved_name) {
@@ -217,7 +217,7 @@ impl Checker {
             }
             ast::Handler::Inline { .. } => {
                 for named_ref in handler.named_refs() {
-                    let resolved_name = self.resolved_handler_name(named_ref.span, &named_ref.name);
+                    let resolved_name = self.resolved_handler_name(named_ref.id, &named_ref.name);
                     if let Some(info) = self.handlers.get(&resolved_name) {
                         handled.extend(info.effects.iter().cloned());
                     } else if let Some(effects) = self.handler_effects_from_env(&resolved_name) {
@@ -227,7 +227,7 @@ impl Checker {
                 for arm in handler.inline_arms() {
                     let resolved_qualifier = self
                         .resolution
-                        .handler_arm_qualifier(arm.span)
+                        .handler_arm_qualifier(arm.id)
                         .or(arm.qualifier.as_deref());
                     if let Some(effect_name) =
                         self.effect_for_op(&arm.op_name, resolved_qualifier)

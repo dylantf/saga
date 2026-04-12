@@ -569,15 +569,26 @@ impl<'a> Lowerer<'a> {
     /// is appended after the arm body.
     fn build_op_handler_fun(&mut self, arm: &HandlerArm, source_module: Option<&str>) -> CExpr {
         let has_resume = arm.body.contains_resume();
-        let source_param_count = self
+        let op_info = self
             .effect_for_handler_arm(arm)
             .and_then(|effect_name| {
                 self.effect_defs
                     .get(&effect_name)
                     .and_then(|info| info.ops.get(&arm.op_name))
-                    .map(|op| op.source_param_count)
             })
+            .cloned();
+        let source_param_count = op_info
+            .as_ref()
+            .map(|op| op.source_param_count)
             .unwrap_or(arm.params.len());
+        let runtime_param_positions = op_info
+            .as_ref()
+            .map(|op| op.runtime_param_positions.clone())
+            .unwrap_or_else(|| (0..source_param_count).collect());
+        let runtime_param_count = op_info
+            .as_ref()
+            .map(|op| op.runtime_param_count)
+            .unwrap_or(source_param_count);
 
         // If resume is never called, use `_` (Core Erlang wildcard) so the compiler
         // doesn't warn about the unused continuation parameter. Safe because
@@ -588,7 +599,7 @@ impl<'a> Lowerer<'a> {
         } else {
             "_".to_string()
         };
-        let param_vars: Vec<String> = (0..source_param_count)
+        let param_vars: Vec<String> = (0..runtime_param_count)
             .map(|i| format!("_HArg{}", i))
             .collect();
 
@@ -631,10 +642,15 @@ impl<'a> Lowerer<'a> {
 
         // Bind arm's params (possibly patterns) to the positional handler args
         for (i, pat) in arm.params.iter().enumerate().rev() {
+            let bound_value = runtime_param_positions
+                .iter()
+                .position(|&source_idx| source_idx == i)
+                .map(|runtime_idx| CExpr::Var(param_vars[runtime_idx].clone()))
+                .unwrap_or_else(|| CExpr::Lit(CLit::Atom("unit".to_string())));
             let (var, wrapped_body) = self.destructure_pat(pat, body_ce);
             body_ce = CExpr::Let(
                 var,
-                Box::new(CExpr::Var(param_vars[i].clone())),
+                Box::new(bound_value),
                 Box::new(wrapped_body),
             );
         }
@@ -750,7 +766,9 @@ impl<'a> Lowerer<'a> {
 
     fn normalize_with_handler(&self, handler: &Handler) -> WithHandlerLayer {
         match handler {
-            Handler::Named(name, _) => WithHandlerLayer::Named { name: name.clone() },
+            Handler::Named(named) => WithHandlerLayer::Named {
+                name: named.name.clone(),
+            },
             Handler::Inline { items, .. } => {
                 let mut inline_arms = Vec::new();
                 let mut return_clause = None;

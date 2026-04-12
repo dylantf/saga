@@ -77,6 +77,11 @@ fn find_in_where_clause(bounds: &[TraitBound], offset: usize) -> Found {
             if contains_ident(&tr.span, offset) {
                 return Some((tr.name.clone(), tr.span, None));
             }
+            for ty in &tr.type_args {
+                if let Some(found) = find_in_type_expr(ty, offset) {
+                    return Some(found);
+                }
+            }
         }
     }
     None
@@ -180,6 +185,7 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
         Decl::ImplDef {
             trait_name,
             trait_name_span,
+            trait_type_args,
             target_type,
             target_type_span,
             where_clause,
@@ -193,6 +199,12 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             }
             if contains_ident(trait_name_span, offset) {
                 return Some((trait_name.clone(), *trait_name_span, None));
+            }
+            if let Some(r) = trait_type_args
+                .iter()
+                .find_map(|te| find_in_type_expr(te, offset))
+            {
+                return Some(r);
             }
             if contains_ident(target_type_span, offset) {
                 return Some((target_type.clone(), *target_type_span, None));
@@ -312,9 +324,9 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             if !contains(span, offset) {
                 return None;
             }
-            for (st_name, st_span) in supertraits {
-                if contains_ident(st_span, offset) {
-                    return Some((st_name.clone(), *st_span, None));
+            for tr in supertraits {
+                if contains_ident(&tr.span, offset) {
+                    return Some((tr.name.clone(), tr.span, None));
                 }
             }
             for method in methods {
@@ -397,8 +409,8 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
         ExprKind::FieldAccess { expr, .. } => find_in_expr(expr, offset),
         ExprKind::With { expr, handler, .. } => {
             match handler.as_ref() {
-                saga::ast::Handler::Named(name, span) if contains(span, offset) => {
-                    return Some((name.clone(), *span, None));
+                saga::ast::Handler::Named(named) if contains(&named.span, offset) => {
+                    return Some((named.name.clone(), named.span, None));
                 }
                 saga::ast::Handler::Inline { items, .. } => {
                     let all_arms: Vec<&saga::ast::HandlerArm> = items

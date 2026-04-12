@@ -1420,8 +1420,8 @@ impl Checker {
             .to_string()
     }
 
-    pub(crate) fn resolved_handler_name(&self, span: Span, source: &str) -> String {
-        match self.resolution.handler_ref(span) {
+    pub(crate) fn resolved_handler_name(&self, node_id: crate::ast::NodeId, source: &str) -> String {
+        match self.resolution.handler_ref(node_id) {
             Some(ResolvedValue::Local { name, .. }) => name.clone(),
             Some(ResolvedValue::Global { lookup_name }) => lookup_name.clone(),
             None => source.to_string(),

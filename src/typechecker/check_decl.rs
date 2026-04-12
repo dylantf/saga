@@ -495,26 +495,19 @@ impl Checker {
                             let resolved = self.resolved_trait_name_at(tr.id, &tr.name);
                             self.lsp.type_references.push((tr.span, resolved));
                         }
-                        if let Some((_, var_id)) =
-                            params_list.iter().find(|(n, _)| *n == bound.type_var)
+                        if let Some(var_id) = params_list
+                            .iter()
+                            .find(|(n, _)| *n == bound.type_var)
+                            .map(|(_, id)| *id)
                         {
                             for tr in &bound.traits {
                                 let resolved_trait =
                                     self.resolved_trait_name_at(tr.id, &tr.name);
                                 let extra_types: Vec<Type> = tr.type_args
                                     .iter()
-                                    .map(|arg_name| {
-                                        // Type variable (lowercase) -> Type::Var, concrete type (uppercase) -> Type::Con
-                                        if let Some((_, id)) =
-                                            params_list.iter().find(|(n, _)| n == arg_name)
-                                        {
-                                            Type::Var(*id)
-                                        } else {
-                                            Type::Con(arg_name.clone(), vec![])
-                                        }
-                                    })
+                                    .map(|te| self.convert_user_type_expr(te, &mut params_list))
                                     .collect();
-                                scheme_constraints.push((resolved_trait, *var_id, extra_types));
+                                scheme_constraints.push((resolved_trait, var_id, extra_types));
                             }
                         } else {
                             return Err(vec![Diagnostic::error_at(
@@ -674,28 +667,22 @@ impl Checker {
                             let resolved = self.resolved_trait_name_at(tr.id, &tr.name);
                             self.lsp.type_references.push((tr.span, resolved));
                         }
-                        if let Some((_, var_id)) =
-                            params_list.iter().find(|(n, _)| *n == bound.type_var)
+                        if let Some(var_id) = params_list
+                            .iter()
+                            .find(|(n, _)| *n == bound.type_var)
+                            .map(|(_, id)| *id)
                         {
                             self.trait_state
                                 .where_bound_var_names
-                                .insert(*var_id, bound.type_var.clone());
+                                .insert(var_id, bound.type_var.clone());
                             for tr in &bound.traits {
                                 let resolved_trait =
                                     self.resolved_trait_name_at(tr.id, &tr.name);
                                 let extra_types: Vec<Type> = tr.type_args
                                     .iter()
-                                    .map(|arg_name| {
-                                        if let Some((_, id)) =
-                                            params_list.iter().find(|(n, _)| n == arg_name)
-                                        {
-                                            Type::Var(*id)
-                                        } else {
-                                            Type::Con(arg_name.clone(), vec![])
-                                        }
-                                    })
+                                    .map(|te| self.convert_user_type_expr(te, &mut params_list))
                                     .collect();
-                                constraints.push((resolved_trait, *var_id, extra_types));
+                                constraints.push((resolved_trait, var_id, extra_types));
                             }
                         } else {
                             return Err(vec![Diagnostic::error_at(
@@ -2120,11 +2107,12 @@ impl Checker {
                                         .unwrap_or_else(|| tr.name.clone());
                                     let extra_var_ids: Vec<u32> = tr.type_args
                                         .iter()
-                                        .filter_map(|arg_name| {
-                                            type_var_params
+                                        .filter_map(|te| match te {
+                                            crate::ast::TypeExpr::Var { name, .. } => type_var_params
                                                 .iter()
-                                                .find(|(n, _)| n == arg_name)
-                                                .map(|(_, id)| *id)
+                                                .find(|(n, _)| n == name)
+                                                .map(|(_, id)| *id),
+                                            _ => None,
                                         })
                                         .collect();
                                     entry.push((resolved_trait, extra_var_ids));

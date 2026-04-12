@@ -747,7 +747,7 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
         } => {
             resolve_expr(inner, scope, map);
             match handler.as_ref() {
-                ast::Handler::Named(_, _) => {}
+                ast::Handler::Named(_) => {}
                 ast::Handler::Inline { items, .. } => {
                     for ann in items {
                         let arm = match &ann.node {

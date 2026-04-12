@@ -100,11 +100,11 @@ impl Checker {
     ) -> Result<Type, Diagnostic> {
         // Check if this with-expression uses handlers that require runtime resource init.
         let handler_names: Vec<String> = match handler {
-            ast::Handler::Named(name, span) => vec![self.resolved_handler_name(*span, name)],
+            ast::Handler::Named(named) => vec![self.resolved_handler_name(named.id, &named.name)],
             ast::Handler::Inline { .. } => handler
                 .named_refs()
                 .into_iter()
-                .map(|h| self.resolved_handler_name(h.span, &h.name))
+                .map(|h| self.resolved_handler_name(h.id, &h.name))
                 .collect(),
         };
         for name in &handler_names {
@@ -119,11 +119,11 @@ impl Checker {
         // Build op_name -> (arm_span, source_module) map for LSP go-to-def
         let arm_stack_entry: std::collections::HashMap<String, (Span, Option<String>)> =
             match handler {
-                ast::Handler::Named(name, handler_span) => {
-                    let resolved_name = self.resolved_handler_name(*handler_span, name);
+                ast::Handler::Named(named) => {
+                    let resolved_name = self.resolved_handler_name(named.id, &named.name);
                     if let Some(def_id) = self.env.def_id(&resolved_name) {
                         let usage_id = crate::ast::NodeId::fresh();
-                        self.record_reference(usage_id, *handler_span, def_id);
+                        self.record_reference(usage_id, named.span, def_id);
                     }
                     self.handlers
                         .get(&resolved_name)
@@ -141,7 +141,7 @@ impl Checker {
                     for ann in items {
                         match &ann.node {
                             ast::HandlerItem::Named(named_ref) => {
-                                let n = self.resolved_handler_name(named_ref.span, &named_ref.name);
+                                let n = self.resolved_handler_name(named_ref.id, &named_ref.name);
                                 if let Some(def_id) = self.env.def_id(&n) {
                                     let usage_id = crate::ast::NodeId::fresh();
                                     self.record_reference(usage_id, _with_span, def_id);
@@ -183,16 +183,16 @@ impl Checker {
         let saved_effs = self.save_effects();
         let expr_ty = self.infer_expr(expr)?;
         match handler {
-            ast::Handler::Named(name, handler_span) => {
-                let resolved_name = self.resolved_handler_name(*handler_span, name);
+            ast::Handler::Named(named) => {
+                let resolved_name = self.resolved_handler_name(named.id, &named.name);
                 if let Some(def_id) = self.env.def_id(&resolved_name) {
                     let usage_id = crate::ast::NodeId::fresh();
-                    self.record_reference(usage_id, *handler_span, def_id);
+                    self.record_reference(usage_id, named.span, def_id);
                 }
             }
             ast::Handler::Inline { .. } => {
                 for named_ref in handler.named_refs() {
-                    let resolved_name = self.resolved_handler_name(named_ref.span, &named_ref.name);
+                    let resolved_name = self.resolved_handler_name(named_ref.id, &named_ref.name);
                     if let Some(def_id) = self.env.def_id(&resolved_name) {
                         let usage_id = crate::ast::NodeId::fresh();
                         self.record_reference(usage_id, named_ref.span, def_id);
@@ -216,12 +216,12 @@ impl Checker {
 
         let with_span = expr.span;
         match handler {
-            ast::Handler::Named(name, name_span) => {
-                let resolved_name = self.resolved_handler_name(*name_span, name);
+            ast::Handler::Named(named) => {
+                let resolved_name = self.resolved_handler_name(named.id, &named.name);
                 if !self.handlers.contains_key(&resolved_name) && self.env.get(&resolved_name).is_none() {
                     return Err(Diagnostic::error_at(
-                        *name_span,
-                        format!("undefined handler: {}", name),
+                        named.span,
+                        format!("undefined handler: {}", named.name),
                     ));
                 }
                 if let Some(handler_info) = self.handlers.get(&resolved_name).cloned() {
@@ -355,7 +355,7 @@ impl Checker {
                 for arm in handler.inline_arms() {
                     let resolved_qualifier = self
                         .resolution
-                        .handler_arm_qualifier(arm.span)
+                        .handler_arm_qualifier(arm.id)
                         .or(arm.qualifier.as_deref())
                         .map(|s| s.to_string());
                     let op_sig = self

@@ -283,6 +283,48 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn current_front_resolution(&self) -> Option<&crate::typechecker::ResolutionResult> {
+        self.check_result
+            .as_ref()
+            .and_then(|cr| {
+                cr.module_check_results()
+                    .get(&self.current_source_module)
+                    .map(|m| &m.resolution)
+                    .or(Some(&cr.resolution))
+            })
+            .or_else(|| {
+                self.ctx
+                    .modules
+                    .get(&self.current_source_module)
+                    .map(|m| &m.front_resolution)
+            })
+    }
+
+    fn record_fields_for_name(&self, name: &str) -> Option<&Vec<String>> {
+        self.record_fields
+            .get(name)
+            .or_else(|| {
+                self.record_fields
+                    .get(crate::typechecker::canonicalize_type_name(name))
+            })
+            .or_else(|| {
+                let local_name = format!("{}.{}", self.current_source_module, name);
+                self.record_fields.get(&local_name)
+            })
+            .or_else(|| {
+                let mut matches = self
+                    .record_fields
+                    .iter()
+                    .filter(|(key, _)| key.rsplit('.').next() == Some(name));
+                let first = matches.next();
+                if matches.next().is_none() {
+                    first.map(|(_, fields)| fields)
+                } else {
+                    None
+                }
+            })
+    }
+
     fn lower_local_fun_ref(
         &mut self,
         name: &str,
@@ -1991,7 +2033,14 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::RecordCreate { name, fields, .. } => {
-                let order = self.record_fields.get(name).cloned().unwrap_or_default();
+                let resolved_name = self
+                    .current_front_resolution()
+                    .and_then(|r| r.record_type(expr.id))
+                    .unwrap_or(name);
+                let order = self
+                    .record_fields_for_name(resolved_name)
+                    .cloned()
+                    .unwrap_or_default();
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
                 let mut vars: Vec<String> = Vec::new();
@@ -2049,7 +2098,7 @@ impl<'a> Lowerer<'a> {
                     .as_deref()
                     .or_else(|| field_access_record_name(expr));
                 let idx = record_name
-                    .and_then(|rname| self.record_fields.get(rname))
+                    .and_then(|rname| self.record_fields_for_name(rname))
                     .and_then(|fields| fields.iter().position(|f| f == field))
                     .map(|pos| pos + 2) // +1 for tag, +1 for 1-based
                     .unwrap_or_else(|| {
@@ -2082,7 +2131,7 @@ impl<'a> Lowerer<'a> {
                     .as_deref()
                     .or_else(|| field_access_record_name(record));
                 let order = record_name
-                    .and_then(|rname| self.record_fields.get(rname))
+                    .and_then(|rname| self.record_fields_for_name(rname))
                     .cloned()
                     .unwrap_or_else(|| {
                         panic!("codegen: could not resolve record type for record update")

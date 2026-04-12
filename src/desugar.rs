@@ -221,8 +221,14 @@ fn desugar_expr(expr: &mut Expr) {
                     inner,
                     Box::new(Expr::synth(expr.span, ExprKind::Lit { value: Lit::Unit })),
                 );
-                let handler =
-                    std::mem::replace(handler, Box::new(Handler::Named(String::new(), expr.span)));
+                let handler = std::mem::replace(
+                    handler,
+                    Box::new(Handler::Named(NamedHandlerRef {
+                        id: NodeId::fresh(),
+                        name: String::new(),
+                        span: expr.span,
+                    })),
+                );
                 *expr = desugar_with_items(expr.id, expr.span, *inner_expr, *handler);
             }
         }
@@ -598,7 +604,7 @@ fn handler_items_to_layers(items: Vec<Annotated<HandlerItem>>) -> Vec<Handler> {
                         dangling_trivia: vec![],
                     });
                 }
-                layers.push(Handler::Named(named_ref.name, named_ref.span));
+                layers.push(Handler::Named(named_ref));
             }
             HandlerItem::Arm(_) | HandlerItem::Return(_) => inline_items.push(item),
         }
@@ -941,7 +947,7 @@ fn freshen_pat_ids(pat: &mut Pat) {
 
 fn freshen_handler_ids(handler: &mut Handler) {
     match handler {
-        Handler::Named(_, _) => {}
+        Handler::Named(_) => {}
         Handler::Inline { items, .. } => {
             for item in items {
                 match &mut item.node {
@@ -1254,7 +1260,7 @@ mod tests {
     fn single_named_desugars_to_named_handler() {
         let expr = parse_and_desugar("run () with {console_log}");
         let (_, handler) = unwrap_with(&expr);
-        assert!(matches!(handler, Handler::Named(name, _) if name == "console_log"));
+        assert!(matches!(handler, Handler::Named(named) if named.name == "console_log"));
     }
 
     #[test]
@@ -1290,7 +1296,7 @@ mod tests {
 
         // Inner: named handler
         let (_, inner_handler) = unwrap_with(inner);
-        assert!(matches!(inner_handler, Handler::Named(name, _) if name == "console_log"));
+        assert!(matches!(inner_handler, Handler::Named(named) if named.name == "console_log"));
     }
 
     #[test]
@@ -1311,7 +1317,7 @@ mod tests {
         }
 
         let (inner, mid_handler) = unwrap_with(mid);
-        assert!(matches!(mid_handler, Handler::Named(name, _) if name == "console_log"));
+        assert!(matches!(mid_handler, Handler::Named(named) if named.name == "console_log"));
 
         let (_, inner_handler) = unwrap_with(inner);
         match inner_handler {

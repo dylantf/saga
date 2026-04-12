@@ -105,7 +105,7 @@ impl Checker {
         &mut self,
         name: &str,
         type_params: &[String],
-        supertraits: &[(String, crate::token::Span)],
+        supertraits: &[ast::TraitRef],
         methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
         // Compute canonical name early — used in scheme constraints below
@@ -208,8 +208,9 @@ impl Checker {
         }
 
         // Record supertrait references for find-references
-        for (st_name, st_span) in supertraits {
-            self.lsp.type_references.push((*st_span, st_name.clone()));
+        for tr in supertraits {
+            let resolved = self.resolved_trait_name_at(tr.id, &tr.name);
+            self.lsp.type_references.push((tr.span, resolved));
         }
 
         // Also register scope_map entry for local traits: bare -> canonical
@@ -226,7 +227,7 @@ impl Checker {
         // Resolve supertrait names to canonical form
         let resolved_supertraits: Vec<String> = supertraits
             .iter()
-            .map(|(n, _)| self.resolve_trait_name(n).unwrap_or_else(|| n.clone()))
+            .map(|tr| self.resolved_trait_name_at(tr.id, &tr.name))
             .collect();
         self.trait_state.traits.insert(
             canonical_name,

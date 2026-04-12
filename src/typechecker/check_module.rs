@@ -136,11 +136,11 @@ impl ModuleExports {
                         *id,
                         target_type,
                     );
-                    let trait_type_arg_names: Vec<String> = trait_type_args
+                    let resolved_trait_type_args: Vec<String> = trait_type_args
                         .iter()
-                        .map(|te| te.simple_name().to_string())
+                        .map(|te| checker.resolved_type_name(te.id(), te.simple_name()))
                         .collect();
-                    let key = (resolved_trait, trait_type_arg_names, resolved_target);
+                    let key = (resolved_trait, resolved_trait_type_args, resolved_target);
                     if let Some(info) = checker.trait_state.impls.get(&key) {
                         trait_impls.insert(key, info.clone());
                     }
@@ -1300,6 +1300,15 @@ fn collect_codegen_info(
     scope_map: &super::ScopeMap,
 ) -> ModuleCodegenInfo {
     use crate::ast::Decl;
+    fn is_runtime_unit_param(ty: &crate::ast::TypeExpr) -> bool {
+        match ty {
+            crate::ast::TypeExpr::Named { name, .. } => {
+                super::canonicalize_type_name(name) == super::canonicalize_type_name("Unit")
+            }
+            crate::ast::TypeExpr::Labeled { inner, .. } => is_runtime_unit_param(inner),
+            _ => false,
+        }
+    }
 
     let canonical_type_name = |name: &str| -> String {
         scope_map
@@ -1356,25 +1365,13 @@ fn collect_codegen_info(
                             .params
                             .iter()
                             .enumerate()
-                            .filter_map(|(idx, (_, ty))| {
-                                (!matches!(
-                                    ty,
-                                    crate::ast::TypeExpr::Named { name, .. }
-                                        if name == super::canonicalize_type_name("Unit")
-                                ))
-                                .then_some(idx)
-                            })
+                            .filter_map(|(idx, (_, ty))| (!is_runtime_unit_param(ty)).then_some(idx))
                             .collect(),
                         runtime_param_count: op
                             .node
                             .params
                             .iter()
-                            .filter(|(_, ty)| {
-                                !matches!(
-                                    ty,
-                                    crate::ast::TypeExpr::Named { name, .. } if name == super::canonicalize_type_name("Unit")
-                                )
-                            })
+                            .filter(|(_, ty)| !is_runtime_unit_param(ty))
                             .count(),
                         param_absorbed_effects: effect_info
                             .ops
@@ -1481,7 +1478,13 @@ fn collect_codegen_info(
                     .unwrap_or_else(|| format!("{}.{}", module_name, trait_name));
                 let trait_type_arg_names: Vec<String> = trait_type_args
                     .iter()
-                    .map(|te| te.simple_name().to_string())
+                    .map(|te| match te {
+                        crate::ast::TypeExpr::Var { name, .. } => name.clone(),
+                        _ => scope_map
+                            .resolve_type(te.simple_name())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| canonical_type_name(te.simple_name())),
+                    })
                     .collect();
                 let canonical_trait_type_args = canonical_trait_type_args(&trait_type_arg_names);
                 let canonical_target_type = canonical_type_name(target_type);
