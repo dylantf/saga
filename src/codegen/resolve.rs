@@ -638,8 +638,8 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
             if let Some(scoped) = scope.resolve_unqualified(name) {
                 map.insert(expr.id, scoped_to_resolved(scoped));
             } else if name.contains('.') {
-                // Canonical-form Var from the pre-typecheck resolve pass
-                // (e.g. "Std.List.map" rewritten from bare "map").
+                // Module-qualified Var (e.g. "Std.List.map" from elaboration
+                // or dict names containing dots).
                 if let Some(scoped) = scope.resolve_qualified(name) {
                     map.insert(expr.id, scoped_to_resolved(scoped));
                 }

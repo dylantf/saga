@@ -930,6 +930,7 @@ pub fn build_project(profile: &str) -> ProjectBuild {
                     .unwrap_or_default(),
                 elaborated: normalized,
                 resolution,
+                front_resolution: mod_result.resolution.clone(),
             },
         );
     }
@@ -944,6 +945,7 @@ pub fn build_project(profile: &str) -> ProjectBuild {
                 codegen_info: Default::default(),
                 elaborated: main_elaborated,
                 resolution: codegen::resolve::ResolutionMap::new(),
+                front_resolution: result.resolution.clone(),
             },
         );
         let main_file = config.main_file();
@@ -1104,6 +1106,7 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
             codegen_info: Default::default(),
             elaborated,
             resolution: codegen::resolve::ResolutionMap::new(),
+            front_resolution: result.resolution.clone(),
         },
     );
 

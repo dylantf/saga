@@ -49,11 +49,21 @@ impl<'a> Lowerer<'a> {
                 }
             })
             .unwrap_or_else(|| module_name.to_string());
-        let canonicalize_effect = |bare: &str| -> String {
-            self.effect_canonical
-                .get(bare)
-                .cloned()
-                .unwrap_or_else(|| bare.to_string())
+        let mod_resolution = self
+            .ctx
+            .modules
+            .get(module_name)
+            .map(|m| &m.front_resolution);
+        let resolve_effect = |eff: &crate::ast::EffectRef| -> String {
+            mod_resolution
+                .and_then(|r| r.effect_ref(eff.id))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    self.effect_canonical
+                        .get(&eff.name)
+                        .cloned()
+                        .unwrap_or_else(|| eff.name.clone())
+                })
         };
 
         let mut pending_annotations: HashMap<String, PendingAnnotation> = HashMap::new();
@@ -67,15 +77,22 @@ impl<'a> Lowerer<'a> {
             {
                 let mut sorted_effects: Vec<String> = effects
                     .iter()
-                    .map(|e| canonicalize_effect(&e.name))
+                    .map(|e| resolve_effect(e))
                     .collect();
                 sorted_effects.sort();
                 let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
                 for (i, (_param_name, type_expr)) in params.iter().enumerate() {
                     let effs = collect_type_effects(type_expr);
                     if !effs.is_empty() {
-                        let mut sorted: Vec<String> =
-                            effs.into_iter().map(|e| canonicalize_effect(&e)).collect();
+                        let mut sorted: Vec<String> = effs
+                            .into_iter()
+                            .map(|e| {
+                                self.effect_canonical
+                                    .get(&e)
+                                    .cloned()
+                                    .unwrap_or(e)
+                            })
+                            .collect();
                         sorted.sort();
                         param_effs.insert(i, sorted);
                     }
@@ -215,6 +232,23 @@ impl<'a> Lowerer<'a> {
         self.effect_canonical = effect_canonical.clone();
         self.handler_canonical = handler_canonical.clone();
 
+        // Overlay effect_canonical with entries from the front-end resolution map.
+        // The resolution map is authoritative for names resolved during typechecking.
+        // Use or_insert so local EffectDef entries (which have module-qualified names
+        // like "_script.Log") aren't overridden by unqualified resolver entries.
+        if let Some(cr) = &self.check_result {
+            for canonical in cr.resolution.effects.values() {
+                if let Some(dot_pos) = canonical.rfind('.') {
+                    let bare = &canonical[dot_pos + 1..];
+                    effect_canonical
+                        .entry(bare.to_string())
+                        .or_insert_with(|| canonical.clone());
+                }
+                effect_canonical
+                    .entry(canonical.clone())
+                    .or_insert_with(|| canonical.clone());
+            }
+        }
         let canonicalize_effect = |bare: &str| -> String {
             effect_canonical
                 .get(bare)

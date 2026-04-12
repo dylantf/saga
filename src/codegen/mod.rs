@@ -16,6 +16,8 @@ pub struct CompiledModule {
     pub codegen_info: ModuleCodegenInfo,
     pub elaborated: ast::Program,
     pub resolution: resolve::ResolutionMap,
+    /// Front-end name resolution from the typechecker.
+    pub front_resolution: crate::typechecker::ResolutionResult,
 }
 
 /// Bundles the cross-module information needed by the lowerer.
@@ -67,6 +69,7 @@ pub fn compile_module_from_result(
         codegen_info: info,
         elaborated: normalized,
         resolution,
+        front_resolution: mod_result.resolution.clone(),
     })
 }
 

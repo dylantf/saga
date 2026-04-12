@@ -86,6 +86,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
                 codegen_info: info.clone(),
                 elaborated: Vec::new(),
                 resolution: codegen::resolve::ResolutionMap::new(),
+                front_resolution: Default::default(),
             },
         );
     }

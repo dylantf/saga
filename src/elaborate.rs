@@ -106,23 +106,14 @@ impl Elaborator {
             .to_string()
     }
 
-    #[allow(dead_code)]
     fn resolved_type_name(&self, id: crate::ast::NodeId, source: &str) -> String {
         self.resolution.type_ref(id).unwrap_or(source).to_string()
     }
 
-    /// Resolve trait type args by looking up each arg that is a type name.
-    fn resolved_trait_type_args(&self, args: &[String]) -> Vec<String> {
-        // Trait type args don't have individual spans in the AST, so we
-        // fall back to scope_map for these. TODO: add spans to trait type args.
+    /// Resolve trait type args via the resolution map.
+    fn resolved_trait_type_args(&self, args: &[crate::ast::TypeExpr]) -> Vec<String> {
         args.iter()
-            .map(|arg| {
-                if arg.starts_with(|c: char| c.is_uppercase()) || arg.contains('.') {
-                    crate::typechecker::canonicalize_type_name(arg).to_string()
-                } else {
-                    arg.clone()
-                }
-            })
+            .map(|te| self.resolved_type_name(te.id(), te.simple_name()))
             .collect()
     }
 
@@ -333,11 +324,7 @@ impl Elaborator {
                 } => {
                     let canonical_trait =
                         self.resolved_impl_trait_name(*id, trait_name);
-                    let trait_type_arg_names: Vec<String> = trait_type_args
-                        .iter()
-                        .map(|te| te.simple_name().to_string())
-                        .collect();
-                    let canonical_trait_type_args = self.resolved_trait_type_args(&trait_type_arg_names);
+                    let canonical_trait_type_args = self.resolved_trait_type_args(trait_type_args);
                     let canonical_target_type =
                         self.resolved_impl_target_type(*id, target_type);
                     let dict_name = crate::typechecker::make_dict_name(
@@ -437,11 +424,7 @@ impl Elaborator {
                 } => {
                     let canonical_trait =
                         self.resolved_impl_trait_name(*id, trait_name);
-                    let trait_type_arg_names: Vec<String> = trait_type_args
-                        .iter()
-                        .map(|te| te.simple_name().to_string())
-                        .collect();
-                    let canonical_trait_type_args = self.resolved_trait_type_args(&trait_type_arg_names);
+                    let canonical_trait_type_args = self.resolved_trait_type_args(trait_type_args);
                     let canonical_target_type =
                         self.resolved_impl_target_type(*id, target_type);
                     let dict_name = self

@@ -260,6 +260,7 @@ pub fn cmd_emit(file: &str) {
             codegen_info: Default::default(),
             elaborated: elaborated.clone(),
             resolution: codegen::resolve::ResolutionMap::new(),
+            front_resolution: result.resolution.clone(),
         },
     );
     let ctx = codegen::CodegenContext {
@@ -405,6 +406,7 @@ pub fn cmd_test(filter: Option<&str>) {
                 codegen_info: Default::default(),
                 elaborated: elaborated.clone(),
                 resolution: codegen::resolve::ResolutionMap::new(),
+                front_resolution: result.resolution.clone(),
             },
         );
 
