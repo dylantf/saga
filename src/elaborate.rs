@@ -849,8 +849,8 @@ impl Elaborator {
                 // The single-arg case above handles most uses; multi-arg
                 // is handled by the lowerer's collect_fun_call.
 
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::App {
                         func: Box::new(self.elaborate_expr(func)),
                         arg: Box::new(self.elaborate_expr(arg)),
@@ -927,8 +927,8 @@ impl Elaborator {
                 } else {
                     op.clone()
                 };
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::BinOp {
                         op: elaborated_op,
                         left: Box::new(self.elaborate_expr(left)),
@@ -937,8 +937,8 @@ impl Elaborator {
                 )
             }
 
-            ExprKind::UnaryMinus { expr: e } => Expr::synth(
-                span,
+            ExprKind::UnaryMinus { expr: e } => Expr::rebuild_like(
+                expr,
                 ExprKind::UnaryMinus {
                     expr: Box::new(self.elaborate_expr(e)),
                 },
@@ -949,8 +949,8 @@ impl Elaborator {
                 then_branch,
                 else_branch,
                 ..
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::If {
                     cond: Box::new(self.elaborate_expr(cond)),
                     then_branch: Box::new(self.elaborate_expr(then_branch)),
@@ -961,8 +961,8 @@ impl Elaborator {
 
             ExprKind::Case {
                 scrutinee, arms, ..
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::Case {
                     dangling_trivia: vec![],
                     scrutinee: Box::new(self.elaborate_expr(scrutinee)),
@@ -981,8 +981,8 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Block { stmts, .. } => Expr::synth(
-                span,
+            ExprKind::Block { stmts, .. } => Expr::rebuild_like(
+                expr,
                 ExprKind::Block {
                     dangling_trivia: vec![],
                     stmts: stmts
@@ -1131,8 +1131,8 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Lambda { params, body } => Expr::synth(
-                span,
+            ExprKind::Lambda { params, body } => Expr::rebuild_like(
+                expr,
                 ExprKind::Lambda {
                     params: params.clone(),
                     body: Box::new(self.elaborate_expr(body)),
@@ -1151,8 +1151,8 @@ impl Elaborator {
                 )
             }
 
-            ExprKind::RecordCreate { name, fields } => Expr::synth(
-                span,
+            ExprKind::RecordCreate { name, fields } => Expr::rebuild_like(
+                expr,
                 ExprKind::RecordCreate {
                     name: name.clone(),
                     fields: fields
@@ -1162,8 +1162,8 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::AnonRecordCreate { fields } => Expr::synth(
-                span,
+            ExprKind::AnonRecordCreate { fields } => Expr::rebuild_like(
+                expr,
                 ExprKind::AnonRecordCreate {
                     fields: fields
                         .iter()
@@ -1187,8 +1187,8 @@ impl Elaborator {
                 )
             }
 
-            ExprKind::Tuple { elements } => Expr::synth(
-                span,
+            ExprKind::Tuple { elements } => Expr::rebuild_like(
+                expr,
                 ExprKind::Tuple {
                     elements: elements.iter().map(|e| self.elaborate_expr(e)).collect(),
                 },
@@ -1199,8 +1199,8 @@ impl Elaborator {
                 success,
                 else_arms,
                 ..
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::Do {
                     dangling_trivia: vec![],
                     bindings: bindings
@@ -1253,8 +1253,8 @@ impl Elaborator {
                 name,
                 qualifier,
                 args,
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::EffectCall {
                     name: name.clone(),
                     qualifier: qualifier.clone(),
@@ -1263,8 +1263,8 @@ impl Elaborator {
             ),
 
             ExprKind::With { expr: e, handler } => {
-                let with_expr = Expr::synth(
-                    span,
+                let with_expr = Expr::rebuild_like(
+                    expr,
                     ExprKind::With {
                         expr: Box::new(self.elaborate_expr(e)),
                         handler: Box::new(self.elaborate_handler(handler)),
@@ -1321,8 +1321,8 @@ impl Elaborator {
                 }
             }
 
-            ExprKind::HandlerExpr { body } => Expr::synth(
-                span,
+            ExprKind::HandlerExpr { body } => Expr::rebuild_like(
+                expr,
                 ExprKind::HandlerExpr {
                     body: HandlerBody {
                         effects: body.effects.clone(),
@@ -1360,15 +1360,15 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Resume { value } => Expr::synth(
-                span,
+            ExprKind::Resume { value } => Expr::rebuild_like(
+                expr,
                 ExprKind::Resume {
                     value: Box::new(self.elaborate_expr(value)),
                 },
             ),
 
-            ExprKind::ForeignCall { module, func, args } => Expr::synth(
-                span,
+            ExprKind::ForeignCall { module, func, args } => Expr::rebuild_like(
+                expr,
                 ExprKind::ForeignCall {
                     module: module.clone(),
                     func: func.clone(),
@@ -1378,8 +1378,8 @@ impl Elaborator {
 
             ExprKind::Receive {
                 arms, after_clause, ..
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::Receive {
                     dangling_trivia: vec![],
                     arms: arms
@@ -1405,8 +1405,8 @@ impl Elaborator {
 
             ExprKind::Ascription { expr, .. } => self.elaborate_expr(expr),
 
-            ExprKind::BitString { segments } => Expr::synth(
-                span,
+            ExprKind::BitString { segments } => Expr::rebuild_like(
+                expr,
                 ExprKind::BitString {
                     segments: segments
                         .iter()

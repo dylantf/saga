@@ -122,8 +122,8 @@ impl Normalizer {
                 name,
                 qualifier,
                 args,
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::EffectCall {
                     name: name.clone(),
                     qualifier: qualifier.clone(),
@@ -136,8 +136,8 @@ impl Normalizer {
             ExprKind::App { func, arg } => {
                 let new_arg = self.normalize_and_lift(arg, lifted);
                 let new_func = self.normalize_effect_args(func, lifted);
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::App {
                         func: Box::new(new_func),
                         arg: Box::new(new_arg),
@@ -175,8 +175,8 @@ impl Normalizer {
             ExprKind::BinOp { op, left, right } => {
                 let new_left = self.normalize_and_lift(left, lifted);
                 let new_right = self.normalize_and_lift(right, lifted);
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::BinOp {
                         op: op.clone(),
                         left: Box::new(new_left),
@@ -189,8 +189,8 @@ impl Normalizer {
             ExprKind::App { func, arg } => {
                 let new_func = self.normalize_and_lift(func, lifted);
                 let new_arg = self.normalize_and_lift(arg, lifted);
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::App {
                         func: Box::new(new_func),
                         arg: Box::new(new_arg),
@@ -206,8 +206,8 @@ impl Normalizer {
                 ..
             } => {
                 let new_cond = self.normalize_and_lift(cond, lifted);
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::If {
                         cond: Box::new(new_cond),
                         then_branch: Box::new(self.normalize_expr(then_branch)),
@@ -233,8 +233,8 @@ impl Normalizer {
                         })
                     })
                     .collect();
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::Case {
                         scrutinee: Box::new(new_scrut),
                         arms: new_arms,
@@ -246,8 +246,8 @@ impl Normalizer {
             // Block: recursively normalize the block's statements.
             ExprKind::Block { stmts, .. } => {
                 let new_stmts = self.normalize_stmts(stmts);
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::Block {
                         stmts: new_stmts,
                         dangling_trivia: vec![],
@@ -261,8 +261,8 @@ impl Normalizer {
                     .iter()
                     .map(|e| self.normalize_and_lift(e, lifted))
                     .collect();
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::Tuple {
                         elements: new_elems,
                     },
@@ -272,8 +272,8 @@ impl Normalizer {
             // UnaryMinus
             ExprKind::UnaryMinus { expr: inner } => {
                 let new_inner = self.normalize_and_lift(inner, lifted);
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::UnaryMinus {
                         expr: Box::new(new_inner),
                     },
@@ -281,8 +281,8 @@ impl Normalizer {
             }
 
             // Lambda: normalize body in its own scope.
-            ExprKind::Lambda { params, body } => Expr::synth(
-                span,
+            ExprKind::Lambda { params, body } => Expr::rebuild_like(
+                expr,
                 ExprKind::Lambda {
                     params: params.clone(),
                     body: Box::new(self.normalize_expr(body)),
@@ -293,8 +293,8 @@ impl Normalizer {
             ExprKind::With {
                 expr: inner,
                 handler,
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::With {
                     expr: Box::new(self.normalize_expr(inner)),
                     handler: handler.clone(),
@@ -304,8 +304,8 @@ impl Normalizer {
             // Resume: normalize the value.
             ExprKind::Resume { value } => {
                 let new_val = self.normalize_and_lift(value, lifted);
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::Resume {
                         value: Box::new(new_val),
                     },
@@ -335,8 +335,8 @@ impl Normalizer {
                     .iter()
                     .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
                     .collect();
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::RecordCreate {
                         name: name.clone(),
                         fields: new_fields,
@@ -350,7 +350,7 @@ impl Normalizer {
                     .iter()
                     .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
                     .collect();
-                Expr::synth(span, ExprKind::AnonRecordCreate { fields: new_fields })
+                Expr::rebuild_like(expr, ExprKind::AnonRecordCreate { fields: new_fields })
             }
 
             // RecordUpdate: normalize record and field values.
@@ -385,8 +385,8 @@ impl Normalizer {
                     .iter()
                     .map(|(p, e)| (p.clone(), self.normalize_expr(e)))
                     .collect();
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::Do {
                         bindings: new_bindings,
                         success: Box::new(self.normalize_expr(success)),
@@ -409,8 +409,8 @@ impl Normalizer {
             // Elaboration-only nodes
             ExprKind::DictMethodAccess { dict, method_index } => {
                 let new_dict = self.normalize_and_lift(dict, lifted);
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::DictMethodAccess {
                         dict: Box::new(new_dict),
                         method_index: *method_index,
@@ -423,8 +423,8 @@ impl Normalizer {
                     .iter()
                     .map(|a| self.normalize_and_lift(a, lifted))
                     .collect();
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::ForeignCall {
                         module: module.clone(),
                         func: func.clone(),
@@ -438,8 +438,8 @@ impl Normalizer {
                 name,
                 qualifier,
                 args,
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::EffectCall {
                     name: name.clone(),
                     qualifier: qualifier.clone(),
@@ -449,8 +449,8 @@ impl Normalizer {
 
             ExprKind::Receive {
                 arms, after_clause, ..
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::Receive {
                     arms: arms
                         .iter()
@@ -490,7 +490,7 @@ impl Normalizer {
                         span: seg.span,
                     })
                     .collect();
-                Expr::synth(span, ExprKind::BitString { segments: new_segs })
+                Expr::rebuild_like(expr, ExprKind::BitString { segments: new_segs })
             }
 
             // Leaves: no sub-expressions to normalize.
