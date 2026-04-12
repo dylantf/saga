@@ -776,10 +776,10 @@ impl Checker {
             ExprKind::App { .. } => self.infer_app_chain_with_expected(expr, Some(expected)),
             ExprKind::Lambda { params, body } => {
                 let resolved_expected = self.sub.apply(expected);
-                if matches!(resolved_expected, Type::Fun(_, _, _)) {
-                    if let Some(ty) = self.infer_lambda_against(params, body, &resolved_expected)? {
-                        return Ok(ty);
-                    }
+                if matches!(resolved_expected, Type::Fun(_, _, _))
+                    && let Some(ty) = self.infer_lambda_against(params, body, &resolved_expected)?
+                {
+                    return Ok(ty);
                 }
                 let ty = self.infer_expr(expr)?;
                 self.unify_at(&ty, expected, expr.span)?;
@@ -908,7 +908,7 @@ impl Checker {
                     collect_declared_entries_applied(checker, ret, out);
                 }
             }
-            collect_declared_entries_applied(self, &param_shallow, &mut absorbed_entries);
+            collect_declared_entries_applied(self, param_shallow, &mut absorbed_entries);
             for entry in &absorbed_entries {
                 self.call_site_absorbed.insert(entry.name.clone());
             }

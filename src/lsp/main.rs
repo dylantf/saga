@@ -18,8 +18,9 @@ mod symbol_index;
 
 use diagnostics::CheckSnapshot;
 
-struct Backend {
-    client: Client,
+/// Shared mutable state accessed by both the LanguageServer methods (queries)
+/// and the background debounce task (typechecking).
+struct SharedState {
     /// Cached base checker per project root. Key is the project root path (or empty for no project).
     base_checkers: Mutex<std::collections::HashMap<String, typechecker::Checker>>,
     /// Last check result per file, for hover/goto queries.
@@ -32,7 +33,13 @@ struct Backend {
     symbol_index: Mutex<symbol_index::SymbolIndex>,
 }
 
-impl Backend {
+struct Backend {
+    client: Client,
+    shared: Arc<SharedState>,
+    check_tx: tokio::sync::mpsc::UnboundedSender<(Url, String)>,
+}
+
+impl SharedState {
     fn get_checker(&self, uri: &Url) -> typechecker::Checker {
         let project_root = uri
             .to_file_path()
@@ -101,7 +108,9 @@ impl Backend {
         let texts = self.document_texts.lock().ok()?;
         texts.get(uri).cloned()
     }
+}
 
+impl Backend {
     /// Ensure all project files are indexed in the symbol index, then collect
     /// all reference + definition locations for a symbol. Shared by references and rename.
     fn collect_all_symbol_locations(
@@ -198,7 +207,7 @@ impl Backend {
                     Err(_) => continue,
                 };
                 let needs_index = {
-                    let idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+                    let idx = self.shared.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
                     !idx.has_file(&file_uri)
                 };
                 if needs_index {
@@ -209,7 +218,7 @@ impl Backend {
                     if !source.contains(name) {
                         continue;
                     }
-                    let checker = self.get_checker(&file_uri);
+                    let checker = self.shared.get_checker(&file_uri);
                     let check_result =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             diagnostics::check(checker, &source)
@@ -217,7 +226,7 @@ impl Backend {
                     if let Ok(snap) = check_result
                         && let Some(ref prog) = snap.program
                     {
-                        let mut idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut idx = self.shared.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
                         idx.update_file(
                             &file_uri,
                             &snap.tc_result,
@@ -232,7 +241,7 @@ impl Backend {
 
         // Query the index for all references.
         let refs = {
-            let idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+            let idx = self.shared.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
             idx.query(&key)
         };
 
@@ -436,37 +445,31 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        self.document_texts
+        let text = params.text_document.text.clone();
+        self.shared
+            .document_texts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(uri.clone(), params.text_document.text.clone());
-        let diagnostics = self.check_file(uri.clone(), &params.text_document.text);
-        self.client
-            .publish_diagnostics(uri, diagnostics, None)
-            .await;
+            .insert(uri.clone(), text.clone());
+        let _ = self.check_tx.send((uri, text));
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         if let Some(change) = params.content_changes.into_iter().last() {
-            self.document_texts
+            self.shared
+                .document_texts
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(uri.clone(), change.text.clone());
-            let diagnostics = self.check_file(uri.clone(), &change.text);
-            self.client
-                .publish_diagnostics(uri, diagnostics, None)
-                .await;
+            let _ = self.check_tx.send((uri, change.text));
         }
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         if let Some(text) = &params.text {
             let uri = params.text_document.uri.clone();
-            let diagnostics = self.check_file(uri.clone(), text);
-            self.client
-                .publish_diagnostics(uri, diagnostics, None)
-                .await;
+            let _ = self.check_tx.send((uri, text.clone()));
         }
     }
 
@@ -476,7 +479,7 @@ impl LanguageServer for Backend {
             .text_document
             .uri
             .clone();
-        let Some(snap) = self.snapshot(&uri) else {
+        let Some(snap) = self.shared.snapshot(&uri) else {
             return Ok(None);
         };
         let tc_result = &snap.tc_result;
@@ -593,7 +596,7 @@ impl LanguageServer for Backend {
             .text_document
             .uri
             .clone();
-        let Some(snap) = self.snapshot(&uri) else {
+        let Some(snap) = self.shared.snapshot(&uri) else {
             return Ok(None);
         };
         let tc_result = &snap.tc_result;
@@ -730,14 +733,14 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position.text_document.uri.clone();
         let position = params.text_document_position.position;
 
-        let Some(snap) = self.snapshot(&uri) else {
+        let Some(snap) = self.shared.snapshot(&uri) else {
             return Ok(None);
         };
 
         // Use the latest editor text for dot-chain detection (may be ahead of
         // the snapshot due to async processing), falling back to the snapshot's
         // source if document_texts hasn't been populated yet.
-        let editor_source = self.document_text(&uri);
+        let editor_source = self.shared.document_text(&uri);
         let source = editor_source.as_deref().unwrap_or(&snap.source);
         let li = line_index::LineIndex::new(source);
         let offset =
@@ -781,7 +784,7 @@ impl LanguageServer for Backend {
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = params.text_document.uri.clone();
-        let Some(snap) = self.snapshot(&uri) else {
+        let Some(snap) = self.shared.snapshot(&uri) else {
             return Ok(None);
         };
         let tc_result = &snap.tc_result;
@@ -809,7 +812,7 @@ impl LanguageServer for Backend {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = params.text_document.uri.clone();
-        let Some(snap) = self.snapshot(&uri) else {
+        let Some(snap) = self.shared.snapshot(&uri) else {
             return Ok(None);
         };
 
@@ -831,7 +834,7 @@ impl LanguageServer for Backend {
             .text_document
             .uri
             .clone();
-        let Some(snap) = self.snapshot(&uri) else {
+        let Some(snap) = self.shared.snapshot(&uri) else {
             return Ok(None);
         };
         let tc_result = &snap.tc_result;
@@ -889,7 +892,7 @@ impl LanguageServer for Backend {
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let uri = params.text_document_position.text_document.uri.clone();
-        let Some(snap) = self.snapshot(&uri) else {
+        let Some(snap) = self.shared.snapshot(&uri) else {
             return Ok(None);
         };
         let program = snap.program.as_ref().unwrap();
@@ -926,7 +929,7 @@ impl LanguageServer for Backend {
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
         let uri = params.text_document.uri.clone();
-        let Some(snap) = self.snapshot(&uri) else {
+        let Some(snap) = self.shared.snapshot(&uri) else {
             return Ok(None);
         };
         let program = snap.program.as_ref().unwrap();
@@ -971,7 +974,7 @@ impl LanguageServer for Backend {
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
         let uri = params.text_document_position.text_document.uri.clone();
-        let Some(snap) = self.snapshot(&uri) else {
+        let Some(snap) = self.shared.snapshot(&uri) else {
             return Ok(None);
         };
         let program = snap.program.as_ref().unwrap();
@@ -1018,7 +1021,7 @@ impl LanguageServer for Backend {
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         let uri = params.text_document.uri;
-        let Some(snap) = self.snapshot(&uri) else {
+        let Some(snap) = self.shared.snapshot(&uri) else {
             return Ok(None);
         };
 
@@ -1063,17 +1066,96 @@ impl LanguageServer for Backend {
     }
 }
 
+/// Background task that debounces typecheck requests per-URI.
+///
+/// Each incoming `(Url, String)` resets a 300ms timer for that URI. When the
+/// timer fires (no new edits for that file), the check runs on the blocking
+/// thread pool so hover/completion remain responsive on the async event loop.
+async fn debounce_loop(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<(Url, String)>,
+    client: Client,
+    shared: Arc<SharedState>,
+) {
+    use std::collections::HashMap;
+    use tokio::time::{sleep_until, Duration, Instant};
+
+    let debounce = Duration::from_millis(300);
+    let mut pending: HashMap<Url, (String, Instant)> = HashMap::new();
+
+    loop {
+        // If nothing is pending, block until the next request arrives.
+        if pending.is_empty() {
+            match rx.recv().await {
+                Some((uri, text)) => {
+                    pending.insert(uri, (text, Instant::now() + debounce));
+                }
+                None => break,
+            }
+        }
+
+        // Wait for either the earliest deadline or a new request.
+        let next_deadline = pending.values().map(|(_, d)| *d).min().unwrap();
+
+        tokio::select! {
+            biased;
+            result = rx.recv() => {
+                match result {
+                    Some((uri, text)) => {
+                        pending.insert(uri, (text, Instant::now() + debounce));
+                    }
+                    None => break,
+                }
+            }
+            _ = sleep_until(next_deadline) => {
+                let now = Instant::now();
+                let expired: Vec<Url> = pending
+                    .iter()
+                    .filter(|(_, (_, deadline))| *deadline <= now)
+                    .map(|(uri, _)| uri.clone())
+                    .collect();
+
+                for uri in expired {
+                    let (text, _) = pending.remove(&uri).unwrap();
+                    let shared = Arc::clone(&shared);
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        let uri2 = uri.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            shared.check_file(uri2, &text)
+                        })
+                        .await;
+                        if let Ok(diagnostics) = result {
+                            client.publish_diagnostics(uri, diagnostics, None).await;
+                        }
+                    });
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) = LspService::new(|client| Backend {
-        client,
-        base_checkers: Mutex::new(std::collections::HashMap::new()),
-        last_check: Mutex::new(std::collections::HashMap::new()),
-        document_texts: Mutex::new(std::collections::HashMap::new()),
-        symbol_index: Mutex::new(symbol_index::SymbolIndex::default()),
+    let (check_tx, check_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let (service, socket) = LspService::new(|client| {
+        let shared = Arc::new(SharedState {
+            base_checkers: Mutex::new(std::collections::HashMap::new()),
+            last_check: Mutex::new(std::collections::HashMap::new()),
+            document_texts: Mutex::new(std::collections::HashMap::new()),
+            symbol_index: Mutex::new(symbol_index::SymbolIndex::default()),
+        });
+
+        tokio::spawn(debounce_loop(check_rx, client.clone(), Arc::clone(&shared)));
+
+        Backend {
+            client,
+            shared,
+            check_tx,
+        }
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }
