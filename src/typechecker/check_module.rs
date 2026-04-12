@@ -653,6 +653,10 @@ impl Checker {
         mod_checker.modules.codegen_info = self.modules.codegen_info.clone();
         mod_checker.modules.programs = self.modules.programs.clone();
         mod_checker.modules.map = self.modules.map.clone();
+        // Share the loading set so circular imports are detected across
+        // nested typecheck_import calls (child checkers need to see which
+        // modules are mid-load in their ancestors).
+        mod_checker.modules.loading = self.modules.loading.clone();
         mod_checker.current_module = Some(module_name.clone());
         mod_checker
             .check_program_inner(&mut program)
@@ -1137,15 +1141,19 @@ pub(super) fn resolve_import(
         }
     }
 
-    // Type names: bare, qualified, and aliased -> canonical (module-qualified)
+    // Type names: qualified and aliased -> canonical (always available)
+    // Bare entries are only added when there is no exposing clause
+    // (i.e. `import Foo` makes all types available, but `import Foo (Bar)`
+    // only makes `Bar` available as a bare name).
     for name in exports.type_arity.keys() {
         ScopeMap::register_qualified(&mut scope.types, module_name, prefix, name);
-        // Types also get a bare entry (e.g. "Maybe" -> "Std.Maybe.Maybe")
-        let type_canonical = format!("{}.{}", module_name, name);
-        scope
-            .types
-            .entry(name.clone())
-            .or_insert_with(|| type_canonical);
+        if exposing.is_none() {
+            let type_canonical = format!("{}.{}", module_name, name);
+            scope
+                .types
+                .entry(name.clone())
+                .or_insert_with(|| type_canonical);
+        }
     }
 
     // Exposed items: bare -> canonical, with validation

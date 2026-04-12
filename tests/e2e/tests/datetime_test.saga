@@ -1,4 +1,4 @@
-import Std.DateTime (ParseError, NaiveDateTime)
+import Std.DateTime (Date, ParseError, NaiveDateTime)
 import Std.Test (describe, test, assert_eq, assert_true)
 
 describe "DateTime" {

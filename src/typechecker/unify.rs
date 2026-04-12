@@ -386,11 +386,29 @@ impl Checker {
                 // After the resolve pass, names may already be canonical (e.g.
                 // "Std.Bool.Bool"). Try scope_map first, then accept the name
                 // as-is if it's already known (in type_arity or builtin table).
-                let resolved = self
-                    .scope_map
-                    .resolve_type(name)
+                let from_scope = self.scope_map.resolve_type(name);
+                let resolved = from_scope
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| super::canonicalize_type_name(name).to_string());
+
+                // If scope_map didn't resolve it, canonicalize_type_name didn't
+                // change it, it's not in type_arity, and it's not a known
+                // builtin canonical form (e.g. "Std.Base.Tuple" from parser
+                // desugaring), the type is genuinely unknown. Report the error
+                // here rather than letting a bare Type::Con propagate and cause
+                // confusing "expected Foo, got Foo" mismatches downstream.
+                if from_scope.is_none()
+                    && resolved == *name
+                    && !self.type_arity.contains_key(name)
+                    && !super::is_builtin_canonical(name)
+                {
+                    self.collected_diagnostics.push(
+                        Diagnostic::error(format!("unknown type '{name}'"))
+                            .with_span(*span),
+                    );
+                    return Type::Error;
+                }
+
                 Type::Con(resolved, vec![])
             }
             crate::ast::TypeExpr::Var { name, .. } => {
@@ -428,6 +446,7 @@ impl Checker {
                         }
                         Type::Con(name, args)
                     }
+                    Type::Error => Type::Error,
                     _ => {
                         // Shouldn't happen with well-formed type exprs
                         Type::Con("?".into(), vec![func_ty, arg_ty])

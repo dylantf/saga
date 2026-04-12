@@ -206,6 +206,15 @@ pub fn canonicalize_type_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// Check if a name is the canonical form of a known builtin type.
+/// Catches names like `"Std.Base.Tuple"` that were canonicalized by the
+/// resolve pass but aren't registered in type_arity (variadic types).
+pub fn is_builtin_canonical(name: &str) -> bool {
+    BUILTIN_TYPE_CANONICAL
+        .iter()
+        .any(|(_, canonical)| *canonical == name)
+}
+
 /// Get the bare (user-facing) name from a canonical type name.
 /// `"Std.Int.Int"` → `"Int"`, `"MyMod.Foo"` → `"Foo"`, `"Handler"` → `"Handler"`.
 pub fn bare_type_name(canonical: &str) -> &str {
