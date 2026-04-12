@@ -1021,17 +1021,19 @@ impl LanguageServer for Backend {
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         let uri = params.text_document.uri;
-        let Some(snap) = self.shared.snapshot(&uri) else {
+        // Use the latest editor text (updated immediately on each keystroke),
+        // not the snapshot source which may be stale due to debounced checking.
+        let Some(source) = self.shared.document_text(&uri) else {
             return Ok(None);
         };
 
         // Re-parse to get AnnotatedProgram (preserves comments/trivia)
-        let tokens = match lexer::Lexer::new(&snap.source).lex() {
+        let tokens = match lexer::Lexer::new(&source).lex() {
             Ok(t) => t,
             Err(_) => return Ok(None),
         };
         let mut p = parser::Parser::new(tokens);
-        p.test_mode = snap.source.contains("import Std.Test");
+        p.test_mode = source.contains("import Std.Test");
         let annotated = match p.parse_program_annotated() {
             Ok(prog) => prog,
             Err(_) => return Ok(None),
@@ -1053,7 +1055,7 @@ impl LanguageServer for Backend {
         let formatted = formatter::format(&annotated, width);
 
         // Replace the entire document
-        let last_line = snap.source.lines().count() as u32;
+        let last_line = source.lines().count() as u32;
         let range = Range {
             start: Position::new(0, 0),
             end: Position::new(last_line, 0),
