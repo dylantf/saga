@@ -121,6 +121,7 @@ impl NodeId {
 /// e.g. `Log` (no args), `State Int`, `State (MVector a)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectRef {
+    pub id: NodeId,
     pub name: String,
     pub type_args: Vec<TypeExpr>,
     pub span: Span,
@@ -295,8 +296,8 @@ pub enum Decl {
         doc: Vec<String>,
         trait_name: String,
         trait_name_span: Span,
-        /// Type arguments applied to the trait, e.g. ["NOK"] in `impl ConvertTo NOK for USD`
-        trait_type_args: Vec<String>,
+        /// Type arguments applied to the trait, e.g. `NOK` in `impl ConvertTo NOK for USD`
+        trait_type_args: Vec<TypeExpr>,
         target_type: String,
         target_type_span: Span,
         type_params: Vec<String>,
@@ -851,13 +852,22 @@ impl Pat {
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
     /// Concrete type: `Int`, `String`, `Option`
-    Named { name: String, span: Span },
+    Named {
+        id: NodeId,
+        name: String,
+        span: Span,
+    },
 
     /// Type variable: `a`, `b`, `e`
-    Var { name: String, span: Span },
+    Var {
+        id: NodeId,
+        name: String,
+        span: Span,
+    },
 
     /// `Option a`, `Result a e`
     App {
+        id: NodeId,
         func: Box<TypeExpr>,
         arg: Box<TypeExpr>,
         span: Span,
@@ -865,6 +875,7 @@ pub enum TypeExpr {
 
     /// `a -> b` or `a -> b needs {Eff}` or `a -> b needs {State Int, ..e}`
     Arrow {
+        id: NodeId,
         from: Box<TypeExpr>,
         to: Box<TypeExpr>,
         effects: Vec<EffectRef>,
@@ -875,6 +886,7 @@ pub enum TypeExpr {
 
     /// Anonymous record type: `{ street: String, city: String }`
     Record {
+        id: NodeId,
         fields: Vec<(String, TypeExpr)>,
         /// True if any field separator was on a new line - preserve multi-line layout.
         multiline: bool,
@@ -884,6 +896,7 @@ pub enum TypeExpr {
     /// Labeled parameter in a type expression: `(label: Type)`.
     /// Documentation-only — the label does not affect type semantics.
     Labeled {
+        id: NodeId,
         label: String,
         inner: Box<TypeExpr>,
         span: Span,
@@ -899,6 +912,26 @@ impl TypeExpr {
             | TypeExpr::Arrow { span, .. }
             | TypeExpr::Record { span, .. }
             | TypeExpr::Labeled { span, .. } => *span,
+        }
+    }
+
+    pub fn id(&self) -> NodeId {
+        match self {
+            TypeExpr::Named { id, .. }
+            | TypeExpr::Var { id, .. }
+            | TypeExpr::App { id, .. }
+            | TypeExpr::Arrow { id, .. }
+            | TypeExpr::Record { id, .. }
+            | TypeExpr::Labeled { id, .. } => *id,
+        }
+    }
+
+    /// Extract the simple name from a Named or Var type expression.
+    /// Panics on compound type expressions (App, Arrow, Record, Labeled).
+    pub fn simple_name(&self) -> &str {
+        match self {
+            TypeExpr::Named { name, .. } | TypeExpr::Var { name, .. } => name,
+            _ => panic!("simple_name called on compound TypeExpr"),
         }
     }
 }
@@ -1090,9 +1123,18 @@ pub struct HandlerBody {
 pub struct TraitBound {
     /// The type variable being constrained (e.g. `a`)
     pub type_var: String,
-    /// The required traits with optional type args and spans.
-    /// e.g. `Show` -> ("Show", [], span), `ConvertTo b` -> ("ConvertTo", ["b"], span)
-    pub traits: Vec<(String, Vec<String>, Span)>,
+    /// The required traits, e.g. `Show`, `ConvertTo b`
+    pub traits: Vec<TraitRef>,
+}
+
+/// A reference to a trait in a where clause or similar context.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitRef {
+    pub id: NodeId,
+    pub name: String,
+    /// Extra type arguments, e.g. `b` in `ConvertTo b`
+    pub type_args: Vec<String>,
+    pub span: Span,
 }
 
 /// A named handler reference inside an inline `with` block (e.g. `console_log`).

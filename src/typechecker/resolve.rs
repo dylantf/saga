@@ -31,11 +31,11 @@ pub struct ResolutionResult {
     pub values: HashMap<NodeId, ResolvedValue>,
     pub constructors: HashMap<NodeId, String>,
     pub record_types: HashMap<NodeId, String>,
-    pub types: HashMap<Span, String>,
-    pub traits: HashMap<Span, String>,
+    pub types: HashMap<NodeId, String>,
+    pub traits: HashMap<NodeId, String>,
     pub impl_traits: HashMap<NodeId, String>,
     pub impl_target_types: HashMap<NodeId, String>,
-    pub effects: HashMap<Span, String>,
+    pub effects: HashMap<NodeId, String>,
     pub handlers: HashMap<Span, ResolvedValue>,
     pub effect_call_qualifiers: HashMap<NodeId, String>,
     pub handler_arm_qualifiers: HashMap<Span, String>,
@@ -54,12 +54,12 @@ impl ResolutionResult {
         self.record_types.get(&node_id).map(|s| s.as_str())
     }
 
-    pub fn type_ref(&self, span: Span) -> Option<&str> {
-        self.types.get(&span).map(|s| s.as_str())
+    pub fn type_ref(&self, id: NodeId) -> Option<&str> {
+        self.types.get(&id).map(|s| s.as_str())
     }
 
-    pub fn trait_ref(&self, span: Span) -> Option<&str> {
-        self.traits.get(&span).map(|s| s.as_str())
+    pub fn trait_ref(&self, id: NodeId) -> Option<&str> {
+        self.traits.get(&id).map(|s| s.as_str())
     }
 
     pub fn impl_trait_ref(&self, node_id: NodeId) -> Option<&str> {
@@ -70,8 +70,8 @@ impl ResolutionResult {
         self.impl_target_types.get(&node_id).map(|s| s.as_str())
     }
 
-    pub fn effect_ref(&self, span: Span) -> Option<&str> {
-        self.effects.get(&span).map(|s| s.as_str())
+    pub fn effect_ref(&self, id: NodeId) -> Option<&str> {
+        self.effects.get(&id).map(|s| s.as_str())
     }
 
     pub fn handler_ref(&self, span: Span) -> Option<&ResolvedValue> {
@@ -79,7 +79,9 @@ impl ResolutionResult {
     }
 
     pub fn effect_call_qualifier(&self, node_id: NodeId) -> Option<&str> {
-        self.effect_call_qualifiers.get(&node_id).map(|s| s.as_str())
+        self.effect_call_qualifiers
+            .get(&node_id)
+            .map(|s| s.as_str())
     }
 
     pub fn handler_arm_qualifier(&self, span: Span) -> Option<&str> {
@@ -121,9 +123,7 @@ impl LocalModuleNames {
                         out.top_level_values.insert(method.node.name.clone());
                     }
                 }
-                Decl::TypeDef {
-                    name, variants, ..
-                } => {
+                Decl::TypeDef { name, variants, .. } => {
                     out.types.insert(name.clone(), qualify(name));
                     for variant in variants {
                         out.constructors.insert(variant.node.name.clone());
@@ -256,9 +256,11 @@ impl<'a> Resolver<'a> {
                 lookup_name: name.to_string(),
             });
         }
-        self.scope.resolve_value(name).map(|lookup_name| ResolvedValue::Global {
-            lookup_name: lookup_name.to_string(),
-        })
+        self.scope
+            .resolve_value(name)
+            .map(|lookup_name| ResolvedValue::Global {
+                lookup_name: lookup_name.to_string(),
+            })
     }
 
     fn resolve_handler_name(&self, name: &str) -> Option<ResolvedValue> {
@@ -322,21 +324,21 @@ impl<'a> Resolver<'a> {
             .or_else(|| name.contains('.').then(|| name.to_string()))
     }
 
-    fn record_type_ref(&mut self, span: Span, name: &str) {
+    fn record_type_ref(&mut self, id: NodeId, name: &str) {
         if let Some(resolved) = self.resolve_type_name(name) {
-            self.result.types.insert(span, resolved);
+            self.result.types.insert(id, resolved);
         }
     }
 
-    fn record_trait_ref(&mut self, span: Span, name: &str) {
+    fn record_trait_ref(&mut self, id: NodeId, name: &str) {
         if let Some(resolved) = self.resolve_trait_name(name) {
-            self.result.traits.insert(span, resolved);
+            self.result.traits.insert(id, resolved);
         }
     }
 
     fn record_effect_ref(&mut self, effect_ref: &EffectRef) {
         if let Some(resolved) = self.resolve_effect_name(&effect_ref.name) {
-            self.result.effects.insert(effect_ref.span, resolved);
+            self.result.effects.insert(effect_ref.id, resolved);
         }
         for arg in &effect_ref.type_args {
             self.resolve_type_expr(arg);
@@ -345,15 +347,15 @@ impl<'a> Resolver<'a> {
 
     fn resolve_where_clause(&mut self, where_clause: &[TraitBound]) {
         for bound in where_clause {
-            for (trait_name, _, span) in &bound.traits {
-                self.record_trait_ref(*span, trait_name);
+            for tr in &bound.traits {
+                self.record_trait_ref(tr.id, &tr.name);
             }
         }
     }
 
     fn resolve_type_expr(&mut self, texpr: &TypeExpr) {
         match texpr {
-            TypeExpr::Named { name, span } => self.record_type_ref(*span, name),
+            TypeExpr::Named { id, name, .. } => self.record_type_ref(*id, name),
             TypeExpr::Var { .. } => {}
             TypeExpr::App { func, arg, .. } => {
                 self.resolve_type_expr(func);
@@ -390,7 +392,9 @@ impl<'a> Resolver<'a> {
             if let Some(qualifier) = &arm.node.qualifier
                 && let Some(resolved) = self.resolve_effect_name(qualifier)
             {
-                self.result.handler_arm_qualifiers.insert(arm.node.span, resolved);
+                self.result
+                    .handler_arm_qualifiers
+                    .insert(arm.node.span, resolved);
             }
 
             self.push_value_scope();
@@ -485,15 +489,16 @@ impl<'a> Resolver<'a> {
             }
             Decl::HandlerDef { body, .. } => self.resolve_handler_body(body),
             Decl::TraitDef {
-                name_span,
+                id,
                 name,
                 supertraits,
                 methods,
                 ..
             } => {
-                self.record_trait_ref(*name_span, name);
-                for (supertrait, span) in supertraits {
-                    self.record_trait_ref(*span, supertrait);
+                self.record_trait_ref(*id, name);
+                for (supertrait, _span) in supertraits {
+                    // Supertraits don't have NodeIds in the AST yet; use a fresh one.
+                    self.record_trait_ref(NodeId::fresh(), supertrait);
                 }
                 for method in methods {
                     for (_, texpr) in &method.node.params {
@@ -505,9 +510,7 @@ impl<'a> Resolver<'a> {
             Decl::ImplDef {
                 id,
                 trait_name,
-                trait_name_span,
                 target_type,
-                target_type_span,
                 where_clause,
                 needs,
                 methods,
@@ -519,8 +522,8 @@ impl<'a> Resolver<'a> {
                 if let Some(resolved) = self.resolve_type_name(target_type) {
                     self.result.impl_target_types.insert(*id, resolved);
                 }
-                self.record_trait_ref(*trait_name_span, trait_name);
-                self.record_type_ref(*target_type_span, target_type);
+                self.record_trait_ref(*id, trait_name);
+                self.record_type_ref(*id, target_type);
                 self.resolve_where_clause(where_clause);
                 for effect_ref in needs {
                     self.record_effect_ref(effect_ref);

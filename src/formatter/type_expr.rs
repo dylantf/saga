@@ -210,11 +210,11 @@ pub fn format_where_clause(bounds: &[TraitBound]) -> Doc {
             let traits: Vec<String> = b
                 .traits
                 .iter()
-                .map(|(name, type_args, _)| {
-                    if type_args.is_empty() {
-                        name.clone()
+                .map(|tr| {
+                    if tr.type_args.is_empty() {
+                        tr.name.clone()
                     } else {
-                        format!("{} {}", name, type_args.join(" "))
+                        format!("{} {}", tr.name, tr.type_args.join(" "))
                     }
                 })
                 .collect();

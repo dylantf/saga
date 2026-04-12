@@ -249,6 +249,7 @@ fn normalize_decl(d: &mut Decl) {
         Decl::ImplDef {
             id,
             trait_name_span,
+            trait_type_args,
             target_type_span,
             where_clause,
             needs,
@@ -262,6 +263,9 @@ fn normalize_decl(d: &mut Decl) {
             *target_type_span = S;
             *span = S;
             dangling_trivia.clear();
+            for te in trait_type_args.iter_mut() {
+                normalize_type_expr(te);
+            }
             for tb in where_clause.iter_mut() {
                 normalize_trait_bound(tb);
             }
@@ -634,7 +638,7 @@ fn normalize_stmt(s: &mut Stmt) {
 fn normalize_type_expr(te: &mut TypeExpr) {
     match te {
         TypeExpr::Named { span, .. } | TypeExpr::Var { span, .. } => *span = S,
-        TypeExpr::App { func, arg, span } => {
+        TypeExpr::App { func, arg, span, .. } => {
             *span = S;
             normalize_type_expr(func);
             normalize_type_expr(arg);
@@ -645,6 +649,7 @@ fn normalize_type_expr(te: &mut TypeExpr) {
             effects,
             effect_row_var,
             span,
+            ..
         } => {
             *span = S;
             normalize_type_expr(from);
@@ -660,6 +665,7 @@ fn normalize_type_expr(te: &mut TypeExpr) {
             fields,
             multiline,
             span,
+            ..
         } => {
             *span = S;
             *multiline = false;
@@ -700,6 +706,12 @@ fn normalize_effect_op(op: &mut EffectOp) {
         normalize_type_expr(te);
     }
     normalize_type_expr(&mut op.return_type);
+    for er in op.effects.iter_mut() {
+        normalize_effect_ref(er);
+    }
+    if let Some((_, s)) = &mut op.effect_row_var {
+        *s = S;
+    }
 }
 
 fn normalize_handler(h: &mut Handler) {
@@ -722,6 +734,7 @@ fn normalize_handler(h: &mut Handler) {
 }
 
 fn normalize_effect_ref(er: &mut EffectRef) {
+    er.id = NodeId(0);
     er.span = S;
     for te in er.type_args.iter_mut() {
         normalize_type_expr(te);
@@ -729,8 +742,9 @@ fn normalize_effect_ref(er: &mut EffectRef) {
 }
 
 fn normalize_trait_bound(tb: &mut TraitBound) {
-    for (_, _, s) in tb.traits.iter_mut() {
-        *s = S;
+    for tr in tb.traits.iter_mut() {
+        tr.id = NodeId(0);
+        tr.span = S;
     }
 }
 

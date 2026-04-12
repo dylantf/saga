@@ -491,13 +491,15 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
     let mut parts = Vec::new();
     format_doc_preamble(doc, &mut parts);
 
+    let trait_type_arg_names: Vec<&str> =
+        trait_type_args.iter().map(|te| te.simple_name()).collect();
     let mut header = if trait_type_args.is_empty() {
         format!("impl {} for {}", trait_name, target_type)
     } else {
         format!(
             "impl {} {} for {}",
             trait_name,
-            trait_type_args.join(" "),
+            trait_type_arg_names.join(" "),
             target_type
         )
     };

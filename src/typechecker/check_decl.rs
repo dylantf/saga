@@ -491,17 +491,17 @@ impl Checker {
                 let mut scheme_constraints = Vec::new();
                 if !where_clause.is_empty() {
                     for bound in where_clause {
-                        for (trait_name, _, trait_span) in &bound.traits {
-                            let resolved = self.resolved_trait_name_at(*trait_span, trait_name);
-                            self.lsp.type_references.push((*trait_span, resolved));
+                        for tr in &bound.traits {
+                            let resolved = self.resolved_trait_name_at(tr.id, &tr.name);
+                            self.lsp.type_references.push((tr.span, resolved));
                         }
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
                         {
-                            for (trait_name, trait_type_args, trait_span) in &bound.traits {
+                            for tr in &bound.traits {
                                 let resolved_trait =
-                                    self.resolved_trait_name_at(*trait_span, trait_name);
-                                let extra_types: Vec<Type> = trait_type_args
+                                    self.resolved_trait_name_at(tr.id, &tr.name);
+                                let extra_types: Vec<Type> = tr.type_args
                                     .iter()
                                     .map(|arg_name| {
                                         // Type variable (lowercase) -> Type::Var, concrete type (uppercase) -> Type::Con
@@ -578,7 +578,7 @@ impl Checker {
                             e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
                             args.clone(),
                         ));
-                        let name = self.resolved_effect_name(e.span, &e.name);
+                        let name = self.resolved_effect_name(e.id, &e.name);
                         if !self.effects.contains_key(&name) {
                             self.collected_diagnostics.push(Diagnostic::error_at(
                                 e.span,
@@ -656,7 +656,7 @@ impl Checker {
                                 .collect();
                             // Use canonical effect name so lookups against
                             // canonical-only self.effects succeed later.
-                            let canonical = self.resolved_effect_name(eff.span, &eff.name);
+                            let canonical = self.resolved_effect_name(eff.id, &eff.name);
                             constraints.push((canonical, concrete_types));
                         }
                     }
@@ -670,9 +670,9 @@ impl Checker {
                 if !where_clause.is_empty() {
                     let mut constraints = Vec::new();
                     for bound in where_clause {
-                        for (trait_name, _, trait_span) in &bound.traits {
-                            let resolved = self.resolved_trait_name_at(*trait_span, trait_name);
-                            self.lsp.type_references.push((*trait_span, resolved));
+                        for tr in &bound.traits {
+                            let resolved = self.resolved_trait_name_at(tr.id, &tr.name);
+                            self.lsp.type_references.push((tr.span, resolved));
                         }
                         if let Some((_, var_id)) =
                             params_list.iter().find(|(n, _)| *n == bound.type_var)
@@ -680,10 +680,10 @@ impl Checker {
                             self.trait_state
                                 .where_bound_var_names
                                 .insert(*var_id, bound.type_var.clone());
-                            for (trait_name, trait_type_args, trait_span) in &bound.traits {
+                            for tr in &bound.traits {
                                 let resolved_trait =
-                                    self.resolved_trait_name_at(*trait_span, trait_name);
-                                let extra_types: Vec<Type> = trait_type_args
+                                    self.resolved_trait_name_at(tr.id, &tr.name);
+                                let extra_types: Vec<Type> = tr.type_args
                                     .iter()
                                     .map(|arg_name| {
                                         if let Some((_, id)) =
@@ -808,13 +808,15 @@ impl Checker {
                     self.record_effect_ref(eff);
                 }
                 let plain_methods: Vec<_> = methods.iter().map(|a| a.node.clone()).collect();
+                let resolved_trait_type_args: Vec<String> = trait_type_args
+                    .iter()
+                    .map(|te| self.resolved_type_name(te.id(), te.simple_name()))
+                    .collect();
                 if let Err(e) = self.register_impl(
                     *id,
                     trait_name,
-                    *trait_name_span,
-                    trait_type_args,
+                    &resolved_trait_type_args,
                     target_type,
-                    *target_type_span,
                     type_params,
                     where_clause,
                     needs,
@@ -1723,7 +1725,7 @@ impl Checker {
                             .iter()
                             .map(|te| self.convert_user_type_expr(te, &mut params_list))
                             .collect();
-                        let resolved_name = self.resolved_effect_name(e.span, &e.name);
+                        let resolved_name = self.resolved_effect_name(e.id, &e.name);
                         EffectEntry::unnamed(resolved_name, args)
                     })
                     .collect();
@@ -1793,7 +1795,7 @@ impl Checker {
         let mut type_var_params: Vec<(String, u32)> = Vec::new();
         for effect_ref in effect_names {
             self.record_effect_ref(effect_ref);
-            let resolved_effect_name = self.resolved_effect_name(effect_ref.span, &effect_ref.name);
+            let resolved_effect_name = self.resolved_effect_name(effect_ref.id, &effect_ref.name);
             if let Some(info) = self.effects.get(&resolved_effect_name) {
                 let info = info.clone();
                 for (i, &param_id) in info.type_params.iter().enumerate() {
@@ -1818,11 +1820,11 @@ impl Checker {
                 self.trait_state
                     .where_bound_var_names
                     .insert(*var_id, bound.type_var.clone());
-                for (trait_req, _, trait_span) in &bound.traits {
-                    let resolved_req = self.resolved_trait_name_at(*trait_span, trait_req);
+                for tr in &bound.traits {
+                    let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
                     self.lsp
                         .type_references
-                        .push((*trait_span, resolved_req.clone()));
+                        .push((tr.span, resolved_req.clone()));
                     self.trait_state
                         .where_bounds
                         .entry(*var_id)
@@ -1866,7 +1868,7 @@ impl Checker {
             let mut belongs_to_declared = false;
             let mut matched_op: Option<EffectOpSig> = None;
             for effect_ref in effect_names {
-                let resolved_effect_name = self.resolved_effect_name(effect_ref.span, &effect_ref.name);
+                let resolved_effect_name = self.resolved_effect_name(effect_ref.id, &effect_ref.name);
                 if let Some(info) = self.effects.get(&resolved_effect_name)
                     && let Some(op) = info.ops.iter().find(|o| o.name == arm.op_name)
                 {
@@ -2112,11 +2114,11 @@ impl Checker {
                                 let entry = where_constraints
                                     .entry((effect_ref.name.clone(), i))
                                     .or_default();
-                                for (trait_name, trait_type_args, _) in &bound.traits {
+                                for tr in &bound.traits {
                                     let resolved_trait = self
-                                        .resolve_trait_name(trait_name)
-                                        .unwrap_or_else(|| trait_name.clone());
-                                    let extra_var_ids: Vec<u32> = trait_type_args
+                                        .resolve_trait_name(&tr.name)
+                                        .unwrap_or_else(|| tr.name.clone());
+                                    let extra_var_ids: Vec<u32> = tr.type_args
                                         .iter()
                                         .filter_map(|arg_name| {
                                             type_var_params

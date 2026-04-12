@@ -126,20 +126,21 @@ impl ModuleExports {
                 Decl::ImplDef {
                     id,
                     trait_name,
-                    trait_name_span,
                     trait_type_args,
                     target_type,
-                    target_type_span,
                     ..
                 } => {
                     let resolved_trait =
-                        checker.resolved_impl_trait_name(*id, *trait_name_span, trait_name);
+                        checker.resolved_impl_trait_name(*id, trait_name);
                     let resolved_target = checker.resolved_impl_target_type_name(
                         *id,
-                        *target_type_span,
                         target_type,
                     );
-                    let key = (resolved_trait, trait_type_args.clone(), resolved_target);
+                    let trait_type_arg_names: Vec<String> = trait_type_args
+                        .iter()
+                        .map(|te| te.simple_name().to_string())
+                        .collect();
+                    let key = (resolved_trait, trait_type_arg_names, resolved_target);
                     if let Some(info) = checker.trait_state.impls.get(&key) {
                         trait_impls.insert(key, info.clone());
                     }
@@ -1478,7 +1479,11 @@ fn collect_codegen_info(
                     .resolve_trait(trait_name)
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("{}.{}", module_name, trait_name));
-                let canonical_trait_type_args = canonical_trait_type_args(trait_type_args);
+                let trait_type_arg_names: Vec<String> = trait_type_args
+                    .iter()
+                    .map(|te| te.simple_name().to_string())
+                    .collect();
+                let canonical_trait_type_args = canonical_trait_type_args(&trait_type_arg_names);
                 let canonical_target_type = canonical_type_name(target_type);
                 let dict_name = super::make_dict_name(
                     &canonical_trait,
@@ -1499,9 +1504,9 @@ fn collect_codegen_info(
                             .get(bound.type_var.as_str())
                             .copied()
                             .unwrap_or(0);
-                        bound.traits.iter().map(move |(t, _, _)| {
+                        bound.traits.iter().map(move |tr| {
                             let resolved =
-                                scope_map.resolve_trait(t).unwrap_or(t.as_str()).to_string();
+                                scope_map.resolve_trait(&tr.name).unwrap_or(tr.name.as_str()).to_string();
                             (resolved, idx)
                         })
                     })

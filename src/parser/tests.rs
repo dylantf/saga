@@ -1051,6 +1051,7 @@ fn fun_annotation_unit_param() {
             assert_eq!(
                 params[0].1,
                 TypeExpr::Named {
+                    id: NodeId::fresh(),
                     name: "Unit".into(),
                     span: Span { start: 0, end: 0 }
                 }
@@ -2206,7 +2207,7 @@ fn fun_annotation_with_where_clause() {
             let trait_names: Vec<&str> = where_clause[0]
                 .traits
                 .iter()
-                .map(|(t, _, _)| t.as_str())
+                .map(|tr| tr.name.as_str())
                 .collect();
             assert_eq!(trait_names, vec!["Show"]);
         }
@@ -2225,14 +2226,14 @@ fn fun_annotation_where_multiple_bounds() {
             let trait_names_0: Vec<&str> = where_clause[0]
                 .traits
                 .iter()
-                .map(|(t, _, _)| t.as_str())
+                .map(|tr| tr.name.as_str())
                 .collect();
             assert_eq!(trait_names_0, vec!["Show", "Eq"]);
             assert_eq!(where_clause[1].type_var, "b");
             let trait_names_1: Vec<&str> = where_clause[1]
                 .traits
                 .iter()
-                .map(|(t, _, _)| t.as_str())
+                .map(|tr| tr.name.as_str())
                 .collect();
             assert_eq!(trait_names_1, vec!["Ord"]);
         }
@@ -2249,9 +2250,9 @@ fn where_clause_with_trait_type_args() {
             assert_eq!(where_clause.len(), 1);
             assert_eq!(where_clause[0].type_var, "a");
             assert_eq!(where_clause[0].traits.len(), 1);
-            let (name, type_args, _) = &where_clause[0].traits[0];
-            assert_eq!(name, "ConvertTo");
-            assert_eq!(type_args, &["b"]);
+            let tr = &where_clause[0].traits[0];
+            assert_eq!(tr.name, "ConvertTo");
+            assert_eq!(tr.type_args, &["b"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
     }
@@ -2264,9 +2265,9 @@ fn where_clause_with_concrete_trait_type_arg() {
     match &decls[0] {
         Decl::FunSignature { where_clause, .. } => {
             assert_eq!(where_clause.len(), 1);
-            let (name, type_args, _) = &where_clause[0].traits[0];
-            assert_eq!(name, "ConvertTo");
-            assert_eq!(type_args, &["Int"]);
+            let tr = &where_clause[0].traits[0];
+            assert_eq!(tr.name, "ConvertTo");
+            assert_eq!(tr.type_args, &["Int"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
     }
@@ -2396,7 +2397,8 @@ fn impl_def_with_trait_type_args() {
             ..
         } => {
             assert_eq!(trait_name, "ConvertTo");
-            assert_eq!(trait_type_args, &["NOK"]);
+            let type_arg_names: Vec<&str> = trait_type_args.iter().map(|te| te.simple_name()).collect();
+            assert_eq!(type_arg_names, vec!["NOK"]);
             assert_eq!(target_type, "USD");
             assert_eq!(methods.len(), 1);
         }
@@ -2841,6 +2843,7 @@ fn handler_for_parameterized_effect() {
             assert_eq!(
                 body.effects[0].type_args[0],
                 TypeExpr::Named {
+                    id: NodeId::fresh(),
                     name: "Int".into(),
                     span: Span { start: 0, end: 0 }
                 }
@@ -2865,7 +2868,7 @@ fn handler_with_where_clause() {
             assert_eq!(body.where_clause.len(), 1);
             assert_eq!(body.where_clause[0].type_var, "a");
             assert_eq!(body.where_clause[0].traits.len(), 1);
-            assert_eq!(body.where_clause[0].traits[0].0, "Show");
+            assert_eq!(body.where_clause[0].traits[0].name, "Show");
             assert_eq!(body.arms.len(), 2);
         }
         _ => panic!("expected HandlerDef"),
@@ -2885,7 +2888,7 @@ fn handler_with_needs_and_where_clause() {
             assert_eq!(effect_names(&body.needs), vec!["Log"]);
             assert_eq!(body.where_clause.len(), 1);
             assert_eq!(body.where_clause[0].type_var, "a");
-            assert_eq!(body.where_clause[0].traits[0].0, "Show");
+            assert_eq!(body.where_clause[0].traits[0].name, "Show");
         }
         _ => panic!("expected HandlerDef"),
     }
@@ -2903,6 +2906,7 @@ fn fun_annotation_needs_parameterized_effect() {
             assert_eq!(
                 effects[0].type_args[0],
                 TypeExpr::Named {
+                    id: NodeId::fresh(),
                     name: "Int".into(),
                     span: Span { start: 0, end: 0 }
                 }
@@ -3028,7 +3032,7 @@ fn external_fun_with_where_clause() {
             let trait_names: Vec<&str> = where_clause[0]
                 .traits
                 .iter()
-                .map(|(t, _, _)| t.as_str())
+                .map(|tr| tr.name.as_str())
                 .collect();
             assert_eq!(trait_names, vec!["Show"]);
             assert_eq!(annotations.len(), 1);

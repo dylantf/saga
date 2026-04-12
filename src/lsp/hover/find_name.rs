@@ -73,9 +73,9 @@ fn find_in_exprs(exprs: &[Expr], offset: usize) -> Found {
 /// Search where clause trait bounds for trait names.
 fn find_in_where_clause(bounds: &[TraitBound], offset: usize) -> Found {
     for bound in bounds {
-        for (trait_name, _, trait_span) in &bound.traits {
-            if contains_ident(trait_span, offset) {
-                return Some((trait_name.clone(), *trait_span, None));
+        for tr in &bound.traits {
+            if contains_ident(&tr.span, offset) {
+                return Some((tr.name.clone(), tr.span, None));
             }
         }
     }
@@ -513,7 +513,7 @@ fn find_in_pat(pat: &Pat, offset: usize) -> Found {
 /// Find a type name at the given offset within a TypeExpr tree.
 fn find_in_type_expr(ty: &TypeExpr, offset: usize) -> Found {
     match ty {
-        TypeExpr::Named { name, span } if contains_ident(span, offset) => {
+        TypeExpr::Named { name, span, .. } if contains_ident(span, offset) => {
             Some((name.clone(), *span, None))
         }
         TypeExpr::App {

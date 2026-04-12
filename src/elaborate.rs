@@ -67,10 +67,8 @@ struct Elaborator {
     let_dict_pat_ids: HashMap<String, HashSet<crate::ast::NodeId>>,
     /// Scope map values for canonical name bridging (user name -> canonical)
     scope_map_values: HashMap<String, String>,
-    /// Scope map types for canonical type-name bridging (user name -> canonical)
-    scope_map_types: HashMap<String, String>,
-    /// Scope map traits for resolving bare trait names to canonical
-    scope_map_traits: HashMap<String, String>,
+    /// Front-end resolution result for looking up canonical names by span/node id.
+    resolution: crate::typechecker::ResolutionResult,
     /// Per-node type information for resolving record names in FieldAccess/RecordUpdate.
     type_at_node: HashMap<crate::ast::NodeId, Type>,
     /// Substitution for resolving type variables.
@@ -78,18 +76,49 @@ struct Elaborator {
 }
 
 impl Elaborator {
-    fn canonical_type_name(&self, name: &str) -> String {
-        self.scope_map_types
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| crate::typechecker::canonicalize_type_name(name).to_string())
+    fn resolved_trait_name(&self, id: crate::ast::NodeId, source: &str) -> String {
+        self.resolution
+            .trait_ref(id)
+            .unwrap_or(source)
+            .to_string()
     }
 
-    fn canonical_trait_type_args(&self, args: &[String]) -> Vec<String> {
+    fn resolved_impl_trait_name(
+        &self,
+        id: crate::ast::NodeId,
+        source: &str,
+    ) -> String {
+        self.resolution
+            .impl_trait_ref(id)
+            .or_else(|| self.resolution.trait_ref(id))
+            .unwrap_or(source)
+            .to_string()
+    }
+
+    fn resolved_impl_target_type(
+        &self,
+        id: crate::ast::NodeId,
+        source: &str,
+    ) -> String {
+        self.resolution
+            .impl_target_type_ref(id)
+            .unwrap_or(source)
+            .to_string()
+    }
+
+    #[allow(dead_code)]
+    fn resolved_type_name(&self, id: crate::ast::NodeId, source: &str) -> String {
+        self.resolution.type_ref(id).unwrap_or(source).to_string()
+    }
+
+    /// Resolve trait type args by looking up each arg that is a type name.
+    fn resolved_trait_type_args(&self, args: &[String]) -> Vec<String> {
+        // Trait type args don't have individual spans in the AST, so we
+        // fall back to scope_map for these. TODO: add spans to trait type args.
         args.iter()
             .map(|arg| {
                 if arg.starts_with(|c: char| c.is_uppercase()) || arg.contains('.') {
-                    self.canonical_type_name(arg)
+                    crate::typechecker::canonicalize_type_name(arg).to_string()
                 } else {
                     arg.clone()
                 }
@@ -208,8 +237,7 @@ impl Elaborator {
             let_binding_arities,
             let_dict_pat_ids,
             scope_map_values: result.scope_map.values.clone(),
-            scope_map_types: result.scope_map.types.clone(),
-            scope_map_traits: result.scope_map.traits.clone(),
+            resolution: result.resolution.clone(),
             type_at_node: result.type_at_node.clone(),
             sub: result.sub.clone(),
         }
@@ -225,13 +253,9 @@ impl Elaborator {
     fn dict_params_from_where(&self, where_clause: &[TraitBound]) -> Vec<(String, String)> {
         let mut dict_params = Vec::new();
         for bound in where_clause {
-            for (trait_name, _, _) in &bound.traits {
-                if trait_name != "Num" && trait_name != "Eq" {
-                    let resolved = self
-                        .scope_map_traits
-                        .get(trait_name)
-                        .cloned()
-                        .unwrap_or_else(|| trait_name.clone());
+            for tr in &bound.traits {
+                if tr.name != "Num" && tr.name != "Eq" {
+                    let resolved = self.resolved_trait_name(tr.id, &tr.name);
                     dict_params.push((resolved, bound.type_var.clone()));
                 }
             }
@@ -250,14 +274,10 @@ impl Elaborator {
             std::mem::take(&mut self.current_dict_params_by_var),
         );
         for bound in where_clause {
-            for (req_trait, _, _) in &bound.traits {
-                let resolved = self
-                    .scope_map_traits
-                    .get(req_trait)
-                    .cloned()
-                    .unwrap_or_else(|| req_trait.clone());
+            for tr in &bound.traits {
+                let resolved = self.resolved_trait_name(tr.id, &tr.name);
                 // Use bare trait name in param name to avoid dots in Erlang identifiers
-                let bare = req_trait.rsplit('.').next().unwrap_or(req_trait);
+                let bare = tr.name.rsplit('.').next().unwrap_or(&tr.name);
                 let param_name = format!("__dict_{}_{}", bare, bound.type_var);
                 self.current_dict_params
                     .insert(resolved.clone(), param_name.clone());
@@ -303,6 +323,7 @@ impl Elaborator {
                     }
                 }
                 Decl::ImplDef {
+                    id,
                     trait_name,
                     trait_type_args,
                     target_type,
@@ -310,14 +331,15 @@ impl Elaborator {
                     where_clause,
                     ..
                 } => {
-                    // Resolve trait name to canonical form
-                    let canonical_trait = self
-                        .scope_map_traits
-                        .get(trait_name)
-                        .cloned()
-                        .unwrap_or_else(|| trait_name.clone());
-                    let canonical_trait_type_args = self.canonical_trait_type_args(trait_type_args);
-                    let canonical_target_type = self.canonical_type_name(target_type);
+                    let canonical_trait =
+                        self.resolved_impl_trait_name(*id, trait_name);
+                    let trait_type_arg_names: Vec<String> = trait_type_args
+                        .iter()
+                        .map(|te| te.simple_name().to_string())
+                        .collect();
+                    let canonical_trait_type_args = self.resolved_trait_type_args(&trait_type_arg_names);
+                    let canonical_target_type =
+                        self.resolved_impl_target_type(*id, target_type);
                     let dict_name = crate::typechecker::make_dict_name(
                         &canonical_trait,
                         &canonical_trait_type_args,
@@ -341,21 +363,21 @@ impl Elaborator {
                         .enumerate()
                         .map(|(i, name)| (name.as_str(), i))
                         .collect();
-                    let scope_traits = &self.scope_map_traits;
-                    let params: Vec<(String, usize)> = where_clause
-                        .iter()
-                        .flat_map(|bound| {
-                            let idx = var_to_idx
-                                .get(bound.type_var.as_str())
-                                .copied()
-                                .unwrap_or(0);
-                            bound.traits.iter().map(move |(t, _, _)| {
-                                let resolved =
-                                    scope_traits.get(t).cloned().unwrap_or_else(|| t.clone());
-                                (resolved, idx)
-                            })
-                        })
-                        .collect();
+                    let mut params: Vec<(String, usize)> = Vec::new();
+                    for bound in where_clause {
+                        let idx = var_to_idx
+                            .get(bound.type_var.as_str())
+                            .copied()
+                            .unwrap_or(0);
+                        for tr in &bound.traits {
+                            let resolved = self
+                                .resolution
+                                .trait_ref(tr.id)
+                                .unwrap_or(&tr.name)
+                                .to_string();
+                            params.push((resolved, idx));
+                        }
+                    }
                     self.impl_dict_params.insert(
                         (
                             canonical_trait,
@@ -403,6 +425,7 @@ impl Elaborator {
             match decl {
                 // Emit DictConstructor for each impl
                 Decl::ImplDef {
+                    id,
                     trait_name,
                     trait_type_args,
                     target_type,
@@ -412,13 +435,15 @@ impl Elaborator {
                     span,
                     ..
                 } => {
-                    let canonical_trait = self
-                        .scope_map_traits
-                        .get(trait_name)
-                        .cloned()
-                        .unwrap_or_else(|| trait_name.clone());
-                    let canonical_trait_type_args = self.canonical_trait_type_args(trait_type_args);
-                    let canonical_target_type = self.canonical_type_name(target_type);
+                    let canonical_trait =
+                        self.resolved_impl_trait_name(*id, trait_name);
+                    let trait_type_arg_names: Vec<String> = trait_type_args
+                        .iter()
+                        .map(|te| te.simple_name().to_string())
+                        .collect();
+                    let canonical_trait_type_args = self.resolved_trait_type_args(&trait_type_arg_names);
+                    let canonical_target_type =
+                        self.resolved_impl_target_type(*id, target_type);
                     let dict_name = self
                         .dict_names
                         .get(&(
@@ -434,8 +459,8 @@ impl Elaborator {
                     // Build dict_params for conditional impls
                     let mut dict_params = Vec::new();
                     for bound in where_clause {
-                        for (req_trait, _, _) in &bound.traits {
-                            dict_params.push(format!("__dict_{}_{}", req_trait, bound.type_var));
+                        for tr in &bound.traits {
+                            dict_params.push(format!("__dict_{}_{}", tr.name, bound.type_var));
                         }
                     }
 

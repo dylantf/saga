@@ -1378,8 +1378,8 @@ impl Checker {
             .to_string()
     }
 
-    pub(crate) fn resolved_type_name(&self, span: Span, source: &str) -> String {
-        self.resolution.type_ref(span).unwrap_or(source).to_string()
+    pub(crate) fn resolved_type_name(&self, id: crate::ast::NodeId, source: &str) -> String {
+        self.resolution.type_ref(id).unwrap_or(source).to_string()
     }
 
     pub(crate) fn resolved_record_type_name(
@@ -1390,36 +1390,32 @@ impl Checker {
         self.resolution.record_type(node_id).unwrap_or(source).to_string()
     }
 
-    pub(crate) fn resolved_trait_name_at(&self, span: Span, source: &str) -> String {
-        self.resolution.trait_ref(span).unwrap_or(source).to_string()
+    pub(crate) fn resolved_trait_name_at(&self, id: crate::ast::NodeId, source: &str) -> String {
+        self.resolution.trait_ref(id).unwrap_or(source).to_string()
     }
 
     pub(crate) fn resolved_impl_trait_name(
         &self,
         node_id: crate::ast::NodeId,
-        span: Span,
         source: &str,
     ) -> String {
         self.resolution
             .impl_trait_ref(node_id)
-            .or_else(|| self.resolution.trait_ref(span))
             .unwrap_or(source)
             .to_string()
     }
 
-    pub(crate) fn resolved_effect_name(&self, span: Span, source: &str) -> String {
-        self.resolution.effect_ref(span).unwrap_or(source).to_string()
+    pub(crate) fn resolved_effect_name(&self, id: crate::ast::NodeId, source: &str) -> String {
+        self.resolution.effect_ref(id).unwrap_or(source).to_string()
     }
 
     pub(crate) fn resolved_impl_target_type_name(
         &self,
         node_id: crate::ast::NodeId,
-        span: Span,
         source: &str,
     ) -> String {
         self.resolution
             .impl_target_type_ref(node_id)
-            .or_else(|| self.resolution.type_ref(span))
             .unwrap_or(source)
             .to_string()
     }

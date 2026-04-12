@@ -245,10 +245,8 @@ impl Checker {
         &mut self,
         impl_id: ast::NodeId,
         trait_name: &str,
-        trait_name_span: Span,
         trait_type_args: &[String],
         target_type: &str,
-        target_type_span: Span,
         type_params: &[String],
         where_clause: &[ast::TraitBound],
         needs: &[ast::EffectRef],
@@ -256,7 +254,7 @@ impl Checker {
         span: Span,
     ) -> Result<(), Diagnostic> {
         // Resolve trait name to canonical form
-        let trait_name = self.resolved_impl_trait_name(impl_id, trait_name_span, trait_name);
+        let trait_name = self.resolved_impl_trait_name(impl_id, trait_name);
         let trait_name = trait_name.as_str();
         // Check the trait exists
         let trait_info = self
@@ -326,8 +324,7 @@ impl Checker {
         // Type-check each method body against the trait's expected signature.
         // Substitute the trait's type param with the concrete target type.
         // For parameterized impls (e.g. `impl Show for Box a`), use fresh vars for type params.
-        let resolved_target_type =
-            self.resolved_impl_target_type_name(impl_id, target_type_span, target_type);
+        let resolved_target_type = self.resolved_impl_target_type_name(impl_id, target_type);
         let target = if type_params.is_empty() {
             Type::Con(resolved_target_type.clone(), vec![])
         } else {
@@ -341,11 +338,11 @@ impl Checker {
                     self.trait_state
                         .where_bound_var_names
                         .insert(*var_id, bound.type_var.clone());
-                    for (trait_req, _, trait_span) in &bound.traits {
-                        let resolved_req = self.resolved_trait_name_at(*trait_span, trait_req);
+                    for tr in &bound.traits {
+                        let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
                         self.lsp
                             .type_references
-                            .push((*trait_span, resolved_req.clone()));
+                            .push((tr.span, resolved_req.clone()));
                         self.trait_state
                             .where_bounds
                             .entry(*var_id)
@@ -359,7 +356,7 @@ impl Checker {
 
         let declared_effects: std::collections::HashSet<String> = needs
             .iter()
-            .map(|e| self.resolved_effect_name(e.span, &e.name))
+            .map(|e| self.resolved_effect_name(e.id, &e.name))
             .collect();
 
         for m in methods {
@@ -499,13 +496,8 @@ impl Checker {
             let param_idx = type_params.iter().position(|p| p == &bound.type_var);
             match param_idx {
                 Some(idx) => {
-                    for (trait_req, _, _) in &bound.traits {
-                        let resolved_req = bound
-                            .traits
-                            .iter()
-                            .find(|(name, _, _)| name == trait_req)
-                            .map(|(name, _, span)| self.resolved_trait_name_at(*span, name))
-                            .unwrap_or_else(|| trait_req.clone());
+                    for tr in &bound.traits {
+                        let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
                         param_constraints.push((resolved_req, idx));
                     }
                 }

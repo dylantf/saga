@@ -377,15 +377,15 @@ impl Checker {
         params: &mut Vec<(String, u32)>,
     ) -> Type {
         match texpr {
-            crate::ast::TypeExpr::Named { name, span } => {
+            crate::ast::TypeExpr::Named { id, name, span } => {
                 // Record type reference for find-references (skip type variables/params)
                 if name.starts_with(|c: char| c.is_uppercase()) {
                     self.lsp
                         .type_references
-                        .push((*span, self.resolved_type_name(*span, name)));
+                        .push((*span, self.resolved_type_name(*id, name)));
                 }
-                let resolved = self.resolved_type_name(*span, name);
-                let had_resolution = self.resolution.type_ref(*span).is_some()
+                let resolved = self.resolved_type_name(*id, name);
+                let had_resolution = self.resolution.type_ref(*id).is_some()
                     || self.scope_map.resolve_type(name).is_some();
 
                 // If scope_map didn't resolve it, canonicalize_type_name didn't
@@ -470,14 +470,14 @@ impl Checker {
                                     start: e.span.start,
                                     end: name_end,
                                 },
-                                self.resolved_effect_name(e.span, &e.name),
+                                self.resolved_effect_name(e.id, &e.name),
                             ));
                             let args = e
                                 .type_args
                                 .iter()
                                 .map(|te| self.convert_type_expr(te, params))
                                 .collect();
-                            let name = self.resolved_effect_name(e.span, &e.name);
+                            let name = self.resolved_effect_name(e.id, &e.name);
                             if !self.effects.contains_key(&name) {
                                 self.collected_diagnostics.push(Diagnostic::error_at(
                                     e.span,
