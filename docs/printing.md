@@ -94,33 +94,3 @@ impl Show for User {
 ```
 
 Debug is opt-in via `deriving (Debug)` or manual impl, just like any other trait. The stdlib provides it for all built-in types. User types that want debug printing need to derive or implement it.
-
-### Migration from Current State
-
-1. Add Debug trait to `Std.Base`
-2. Move current structural Show impls (Maybe, Result, List, Dict, tuples, records) to Debug impls
-3. Keep Show impls for primitives (Int, Float, String, Bool, Unit) since their debug and display forms are identical
-4. String interpolation continues to desugar to `show` (no change)
-5. Add `dbg` builtin
-6. Update `panic`/`todo` to use Debug internally
-
-### Future: Effects-Based IO
-
-The builtins (`print`, `eprint`, `dbg`) are escape hatches for convenience and debugging. Production code should use effects:
-
-```
-effect Console {
-  fun write : (msg: String) -> Unit
-  fun write_error : (msg: String) -> Unit
-  fun read_line : Unit -> String
-}
-
-effect Logger {
-  fun error : (msg: String) -> Unit
-  fun warn : (msg: String) -> Unit
-  fun info : (msg: String) -> Unit
-  fun debug : (msg: String) -> Unit
-}
-```
-
-These live in `Std.Console` and `Std.Logger` respectively, imported explicitly. The builtins remain available for quick scripts and debugging regardless.

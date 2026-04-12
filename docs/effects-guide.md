@@ -304,6 +304,45 @@ main () = {
 }
 ```
 
+### Ordering: `with` blocks are nested handlers
+
+A `with` block is syntax sugar for nested `with` expressions. Lexical order
+determines nesting — the first handler is innermost:
+
+```
+expr with {a, b, c}
+# is equivalent to:
+((expr with a) with b) with c
+```
+
+When an effect operation is performed, the nearest enclosing handler gets the
+first chance to handle it. If that handler doesn't define the operation, it
+propagates outward to the next handler. So if `a` and `b` both define `log`,
+`a` handles it (it's innermost).
+
+This also means sibling handlers in the same `with` block do not satisfy each
+other's effect requirements. If an inline arm body uses `Log`, that `Log` must
+be handled by an outer scope, not by another entry in the same `with` block:
+
+```
+# Error: silent and the inline fail arm are siblings — silent doesn't
+# handle Log for the inline arm
+run () with {
+  silent,
+  fail msg = { log! msg; resume 0 },
+}
+
+# OK: nest them so silent is in scope for the fail arm's Log
+{ run () with { fail msg = { log! msg; resume 0 } } } with silent
+```
+
+When multiple handlers define `return` clauses, they compose through nesting —
+the value produced by one `return` clause becomes the input to the next. Given
+`expr with {a, b, c}`, the success value flows through `a.return`, then its
+result flows through `b.return`, then that result flows through `c.return`.
+
+### Combining handlers
+
 Handler values created inside the wrapped block can also be attached at the
 outer `with` boundary:
 
