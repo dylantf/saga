@@ -876,7 +876,20 @@ impl<'a> Lowerer<'a> {
                                 .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
                                 .collect();
                     }
-                    let base_arity = lower_params(params).len() + count_lambda_params(body);
+                    let mut base_arity = lower_params(params).len() + count_lambda_params(body);
+                    // For eta-reduced functions (e.g. `pg_text = coerce_value`),
+                    // the binding has 0 params but the type annotation declares a
+                    // higher arity. Use the annotation's arity so cross-module
+                    // callers (who derive arity from the type) find the right /N.
+                    if let Some(cr) = &self.check_result
+                        && let Some(scheme) = cr.env.get(name)
+                    {
+                        let declared_arity =
+                            util::arity_and_effects_from_type(&cr.sub.apply(&scheme.ty)).0;
+                        if declared_arity > base_arity {
+                            base_arity = declared_arity;
+                        }
+                    }
                     let arity = self.expanded_arity(base_arity, &effects);
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _, _)| n == name) {
                         // Additional clause: just add to existing group
@@ -1049,6 +1062,14 @@ impl<'a> Lowerer<'a> {
                     params_ce.extend(lower_params(lam_params));
                     body = lam_body;
                 }
+                // Eta-expand if the binding has fewer params than the type
+                // declares (e.g. `pg_text = coerce_value` with type String -> Value).
+                // Without this, the function is emitted as /0 but cross-module
+                // callers derive arity from the type and call /1.
+                let eta_count = base_arity.saturating_sub(params_ce.len());
+                let eta_params: Vec<String> =
+                    (0..eta_count).map(|i| format!("_Eta{}", i)).collect();
+                params_ce.extend(eta_params.clone());
                 params_ce.extend(handler_param_names.iter().cloned());
                 if has_effects {
                     params_ce.push("_ReturnK".to_string());
@@ -1056,11 +1077,17 @@ impl<'a> Lowerer<'a> {
                 // For non-block bodies, lower_block didn't run, so apply return_k.
                 // Special case: if the body is a terminal effect call, pass _ReturnK
                 // directly as K so abort-style handlers skip the rest (proper CPS).
-                let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
+                let mut body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
                     self.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())
                 } else {
                     self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
                 };
+                // Apply eta params to the body: `pg_text(_Eta0) = coerce_value(_Eta0)`
+                if !eta_params.is_empty() {
+                    let eta_args: Vec<CExpr> =
+                        eta_params.iter().map(|p| CExpr::Var(p.clone())).collect();
+                    body_ce = CExpr::Apply(Box::new(body_ce), eta_args);
+                }
                 CExpr::Fun(params_ce, Box::new(body_ce))
             } else {
                 // Multi-clause or single clause with a guard: generate fresh arg vars

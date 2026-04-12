@@ -1,20 +1,21 @@
-record User {
-  name: String,
-  age: Int,
-} deriving (Debug)
+type Foo = Foo String
 
-val sample_users = [
-  User { name: "Dylan", age: 30 },
-  User { name: "Alice", age: 27 },
-]
+impl Show for Foo {
+  show f = case f {
+    Foo s -> s
+  }
+}
 
-fun keyed_users : Unit -> List (Int, User)
-keyed_users () = {
-  List.enumerate sample_users
+type Bar = Bar String
+
+impl Show for Bar {
+  show (Bar s) = s
 }
 
 main () = {
-  let items = keyed_users ()
-  List.iter (fun (idx, user) -> println (debug user)) items
-  List.iter (fun user -> println (debug user)) sample_users
-} with {console}
+  let foo = Foo "foo string"
+  let bar = Bar "bar string"
+
+  println $"Foo: {foo}"
+  println $"Bar: {bar}"
+} with console

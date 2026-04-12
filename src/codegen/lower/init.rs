@@ -104,7 +104,17 @@ impl<'a> Lowerer<'a> {
                             effects: Vec::new(),
                             param_absorbed_effects: HashMap::new(),
                         });
-                    let base_arity = params.len() + count_lambda_params(body);
+                    let mut base_arity = params.len() + count_lambda_params(body);
+                    // Use annotation arity for eta-reduced functions (same fix as mod.rs)
+                    if let Some(cr) = &self.check_result
+                        && let Some(scheme) = cr.env.get(name)
+                    {
+                        let declared =
+                            super::util::arity_and_effects_from_type(&cr.sub.apply(&scheme.ty)).0;
+                        if declared > base_arity {
+                            base_arity = declared;
+                        }
+                    }
                     let arity = self.expanded_arity(base_arity, &effects);
                     let canonical = format!("{}.{}", source_module_name, name);
                     self.fun_info.entry(canonical).or_insert(FunInfo {
