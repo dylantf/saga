@@ -674,7 +674,6 @@ fn resolve_expr(
     map: &mut ResolutionMap,
     front_resolution: Option<&FrontResolutionResult>,
 ) {
-    let is_synthetic = expr.span.start == 0 && expr.span.end == 0;
     match &expr.kind {
         ExprKind::Var { name, .. } => {
             if scope.has_local_var(name) {
@@ -689,20 +688,7 @@ fn resolve_expr(
                             map.insert(expr.id, scoped_to_resolved(scoped));
                         }
                     }
-                    None => {
-                        if is_synthetic
-                            && let Some(scoped) = scope.resolve_unqualified(name)
-                        {
-                            // Compatibility path for desugared/elaborated bare function refs
-                            // that the front-end resolver never saw as source nodes.
-                            map.insert(expr.id, scoped_to_resolved(scoped));
-                        } else if is_synthetic
-                            && name.contains('.')
-                            && let Some(scoped) = scope.resolve_qualified(name)
-                        {
-                            map.insert(expr.id, scoped_to_resolved(scoped));
-                        }
-                    }
+                    None => {}
                 }
             } else if let Some(scoped) = scope.resolve_unqualified(name) {
                 map.insert(expr.id, scoped_to_resolved(scoped));
