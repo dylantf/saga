@@ -16,8 +16,7 @@ use init::{PendingAnnotation, extract_external};
 use pats::{lower_params, lower_pat};
 use util::{
     cerl_call, collect_ctor_call, collect_effect_call, collect_effect_call_expr, collect_fun_call,
-    collect_qualified_call, core_var, field_access_record_name, lower_lit, lower_string_to_binary,
-    process_string_escapes,
+    collect_qualified_call, core_var, lower_lit, lower_string_to_binary, process_string_escapes,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -919,6 +918,7 @@ impl<'a> Lowerer<'a> {
         let mut clause_groups: Vec<(String, usize, Vec<Clause>, crate::token::Span)> = Vec::new();
         let mut dict_constructors: Vec<(&str, &[String], &[Expr])> = Vec::new();
         let mut val_bindings: Vec<(&str, bool, &Expr)> = Vec::new(); // (name, is_inline, value)
+
         for decl in program {
             match decl {
                 Decl::FunBinding {
@@ -2128,10 +2128,8 @@ impl<'a> Lowerer<'a> {
                 field,
                 record_name: resolved_name,
             } => {
-                let record_name = resolved_name
+                let idx = resolved_name
                     .as_deref()
-                    .or_else(|| field_access_record_name(expr));
-                let idx = record_name
                     .and_then(|rname| self.record_fields_for_name(rname))
                     .and_then(|fields| fields.iter().position(|f| f == field))
                     .map(|pos| pos + 2) // +1 for tag, +1 for 1-based
@@ -2161,10 +2159,8 @@ impl<'a> Lowerer<'a> {
             } => {
                 let rec_var = self.fresh();
                 let rec_ce = self.lower_expr_value(record);
-                let record_name = resolved_name
+                let order = resolved_name
                     .as_deref()
-                    .or_else(|| field_access_record_name(record));
-                let order = record_name
                     .and_then(|rname| self.record_fields_for_name(rname))
                     .cloned()
                     .unwrap_or_else(|| {

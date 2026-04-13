@@ -224,16 +224,6 @@ pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Ve
     collect_effect_call_expr(expr).map(|(_, name, qualifier, args)| (name, qualifier, args))
 }
 
-/// Best-effort: return the record type name from an expression, for use when
-/// resolving field positions. Only works when the expression is a literal
-/// RecordCreate; otherwise the typechecker would need to be consulted.
-pub(super) fn field_access_record_name(expr: &Expr) -> Option<&str> {
-    if let ExprKind::RecordCreate { name, .. } = &expr.kind {
-        return Some(name.as_str());
-    }
-    None
-}
-
 /// Check if an expression contains effect calls nested inside if/case/block
 /// branches. These aren't detected by `collect_effect_call` (which only finds
 /// direct effect calls at the expression root) and need special CPS handling
