@@ -642,10 +642,9 @@ add a b = a + b
 double x = x * 2
 main () = add 1 2
 ";
-    let tokens = lexer::Lexer::new(src).lex().unwrap();
-    let mut program = parser::Parser::new(tokens).parse_program().unwrap();
-    saga::desugar::desugar_program(&mut program);
-    let out = codegen::emit_module("test", &program);
+    let mut checker = make_project_checker();
+    let program = typecheck_source(src, &mut checker);
+    let out = emit_from_program(&program, "test", &checker);
 
     let export_line = out.lines().next().unwrap();
     assert!(
