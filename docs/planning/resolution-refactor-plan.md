@@ -191,3 +191,52 @@ Keep or add regression tests for:
 - The refactor is **whole pipeline**, not typechecker-only.
 - Circular imports are **not** implemented in this pass; the new module-interface design must be compatible with later SCC support.
 - Existing import visibility rules and public-API annotation rules stay the same unless a test proves they are impossible to preserve cleanly.
+
+## Progress Checklist
+
+### Done
+
+- `ResolutionResult` is flowing through `CheckResult` and per-module check results.
+- Stable `NodeId` usage has been pushed further through resolution, elaboration, and lowering.
+- Trait refs, supertraits, trait extra type args, handler refs, and handler-arm effect qualifiers now participate in the source-keyed resolution path.
+- The main typechecker/codegen pipeline now treats front-end resolution as authoritative for ordinary source `Var` and `QualifiedName` meaning.
+- `codegen::emit_module(...)` has been removed so parser/desugar-only codegen is no longer a normal public path.
+- `emit_module_with_context(...)` now requires a real `CheckResult`, and the lowerer now requires checked semantic data instead of carrying a fake optional mode.
+- Lowering has been cut over away from several old canonicalization assumptions:
+  - effect-call lowering prefers front-end effect resolution
+  - handler refs prefer front-end handler resolution
+  - record field/layout lookup prefers resolved record identity
+  - qualified calls prefer resolved function metadata
+- Most backend fallback resolution for front-resolved source nodes has been removed from `src/codegen/resolve.rs`.
+- The lowerer now routes front-end resolution by semantic module more explicitly during imported handler lowering.
+
+### In Progress
+
+- Backend semantic consolidation:
+  - imported module semantic data is still read from a few different places (`front_resolution`, `codegen_info`, elaborated module, backend resolution map)
+  - the lowerer is being cleaned up to use more explicit per-module semantic access instead of ad hoc `ctx.modules` lookups
+- Backend resolver shrink:
+  - `src/codegen/resolve.rs` is no longer acting as the primary semantic resolver
+  - it still exists as a backend-oriented projection layer and may be reducible further
+- Remaining fallback audit:
+  - the highest-value fallback paths are gone
+  - a few lower-value compatibility patterns may still exist in rarer paths and need inspection
+
+### Remaining
+
+- Make imported module semantic access more explicit and uniform in codegen/lowering.
+- Decide whether `src/codegen/resolve.rs` should remain as a thin backend projection pass or be folded further into lowering/init helpers.
+- Audit remaining name/canonical-name lookups and classify them as:
+  - legitimate table-key lookup
+  - backend-only synthetic bookkeeping
+  - leftover semantic fallback to remove
+- Revisit the module/interface side of the plan:
+  - explicit module headers/interfaces
+  - graph-first import processing
+  - cycle-ready SCC architecture, while still rejecting cycles for now
+- Tighten docs/invariants so the new phase boundaries are written down clearly.
+
+### Current Phase
+
+- Phase name: **Backend Semantic Consolidation**
+- Immediate goal: remove the remaining ad hoc boundaries between front-end semantic data and imported-module codegen metadata so lowering reads one clearer per-module semantic bundle instead of reconstructing it piecemeal.

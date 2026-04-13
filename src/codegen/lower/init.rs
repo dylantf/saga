@@ -173,8 +173,8 @@ impl<'a> Lowerer<'a> {
                 effect_canonical.insert(name.clone(), format!("{}.{}", source_module_name, name));
             }
         }
-        for info in self.ctx.modules.values() {
-            for eff_def in &info.codegen_info.effect_defs {
+        for (_, module_semantics) in self.ctx.modules_semantics() {
+            for eff_def in &module_semantics.codegen_info.effect_defs {
                 // codegen_info effect names are already canonical
                 if let Some(dot_pos) = eff_def.name.rfind('.') {
                     let bare = &eff_def.name[dot_pos + 1..];
@@ -196,8 +196,8 @@ impl<'a> Lowerer<'a> {
                 handler_canonical.insert(name.clone(), format!("{}.{}", source_module_name, name));
             }
         }
-        for info in self.ctx.modules.values() {
-            for handler_name in &info.codegen_info.handler_defs {
+        for (_, module_semantics) in self.ctx.modules_semantics() {
+            for handler_name in &module_semantics.codegen_info.handler_defs {
                 if let Some(dot_pos) = handler_name.rfind('.') {
                     let bare = &handler_name[dot_pos + 1..];
                     handler_canonical
@@ -408,8 +408,8 @@ impl<'a> Lowerer<'a> {
         // so they're available even when not explicitly imported by user code. The
         // elaborator resolves dicts from all tc_codegen_info entries (not just direct
         // imports), so the lowerer must match that scope.
-        for (mod_name, compiled) in &self.ctx.modules {
-            let info = &compiled.codegen_info;
+        for (mod_name, module_semantics) in self.ctx.modules_semantics() {
+            let info = module_semantics.codegen_info;
             let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
             let erlang_name = util::module_name_to_erlang(&mod_path);
             for d in &info.trait_impl_dicts {
@@ -474,30 +474,28 @@ impl<'a> Lowerer<'a> {
                     self.fun_info.entry(canonical).or_insert(fi);
                 }
                 // Register Std handler bodies and external functions from elaborated programs
-                if let Some(elab_program) = self.ctx.elaborated_module(mod_name) {
-                    self.register_imported_module_local_funs(mod_name, elab_program);
-                    for decl in elab_program {
-                        match decl {
-                            Decl::HandlerDef { name, body, .. } => {
-                                let canonical_handler = canonicalize_handler(name);
-                                self.handler_defs
-                                    .entry(canonical_handler)
-                                    .or_insert(HandlerInfo {
-                                        effects: body
-                                            .effects
-                                            .iter()
-                                            .map(|e| canonicalize_effect(&e.name))
-                                            .collect(),
-                                        arms: body.arms.iter().map(|a| a.node.clone()).collect(),
-                                        return_clause: body.return_clause.clone(),
-                                        source_module: Some(mod_name.clone()),
-                                    });
-                            }
-                            Decl::FunSignature { .. } => {
-                                // External resolution handled by resolve.rs
-                            }
-                            _ => {}
+                self.register_imported_module_local_funs(mod_name, module_semantics.elaborated);
+                for decl in module_semantics.elaborated {
+                    match decl {
+                        Decl::HandlerDef { name, body, .. } => {
+                            let canonical_handler = canonicalize_handler(name);
+                            self.handler_defs
+                                .entry(canonical_handler)
+                                .or_insert(HandlerInfo {
+                                    effects: body
+                                        .effects
+                                        .iter()
+                                        .map(|e| canonicalize_effect(&e.name))
+                                        .collect(),
+                                    arms: body.arms.iter().map(|a| a.node.clone()).collect(),
+                                    return_clause: body.return_clause.clone(),
+                                    source_module: Some(mod_name.to_string()),
+                                });
                         }
+                        Decl::FunSignature { .. } => {
+                            // External resolution handled by resolve.rs
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -541,10 +539,10 @@ impl<'a> Lowerer<'a> {
         self.module_aliases
             .insert(prefix.clone(), erlang_name.clone());
 
-        let Some(compiled) = self.ctx.modules.get(&module_name) else {
+        let Some(module_semantics) = self.ctx.module_semantics(&module_name) else {
             return;
         };
-        let info = compiled.codegen_info.clone();
+        let info = module_semantics.codegen_info;
 
         // Determine which names are exposed unqualified.
         // None = qualified-only import, Some(list) = specific names exposed.
@@ -627,32 +625,29 @@ impl<'a> Lowerer<'a> {
         }
 
         // Register imported handler bodies and external functions from elaborated programs
-        if let Some(elab_program) = self.ctx.elaborated_module(&module_name) {
-            let elab_program = elab_program.clone();
-            self.register_imported_module_local_funs(&module_name, &elab_program);
-            for edecl in &elab_program {
-                match edecl {
-                    Decl::HandlerDef { name, body, .. } => {
-                        let canonical_effects: Vec<String> = body
-                            .effects
-                            .iter()
-                            .map(|e| self.canonicalize_effect(&e.name))
-                            .collect();
-                        let canonical_handler = format!("{}.{}", module_name, name);
-                        self.handler_defs
-                            .entry(canonical_handler)
-                            .or_insert(HandlerInfo {
-                                effects: canonical_effects,
-                                arms: body.arms.iter().map(|a| a.node.clone()).collect(),
-                                return_clause: body.return_clause.clone(),
-                                source_module: Some(module_name.clone()),
-                            });
-                    }
-                    Decl::FunSignature { .. } => {
-                        // External function resolution handled by resolve.rs
-                    }
-                    _ => {}
+        self.register_imported_module_local_funs(&module_name, module_semantics.elaborated);
+        for edecl in module_semantics.elaborated {
+            match edecl {
+                Decl::HandlerDef { name, body, .. } => {
+                    let canonical_effects: Vec<String> = body
+                        .effects
+                        .iter()
+                        .map(|e| self.canonicalize_effect(&e.name))
+                        .collect();
+                    let canonical_handler = format!("{}.{}", module_name, name);
+                    self.handler_defs
+                        .entry(canonical_handler)
+                        .or_insert(HandlerInfo {
+                            effects: canonical_effects,
+                            arms: body.arms.iter().map(|a| a.node.clone()).collect(),
+                            return_clause: body.return_clause.clone(),
+                            source_module: Some(module_name.clone()),
+                        });
                 }
+                Decl::FunSignature { .. } => {
+                    // External function resolution handled by resolve.rs
+                }
+                _ => {}
             }
         }
     }

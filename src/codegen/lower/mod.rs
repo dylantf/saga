@@ -260,8 +260,8 @@ impl<'a> Lowerer<'a> {
         name: &str,
         arity: usize,
     ) -> Option<(String, String)> {
-        self.ctx.modules.get(source_module).and_then(|compiled| {
-            compiled
+        self.ctx.module_semantics(source_module).and_then(|module_semantics| {
+            module_semantics
                 .codegen_info
                 .external_funs
                 .iter()
@@ -309,7 +309,7 @@ impl<'a> Lowerer<'a> {
             .or_else(|| {
                 (module_name == self.current_source_module).then_some(&self.check_result.resolution)
             })
-            .or_else(|| self.ctx.modules.get(module_name).map(|m| &m.front_resolution))
+            .or_else(|| self.ctx.module_semantics(module_name).map(|m| m.front_resolution))
     }
 
     fn current_front_resolution(&self) -> Option<&crate::typechecker::ResolutionResult> {
@@ -494,9 +494,9 @@ impl<'a> Lowerer<'a> {
                 updates.push((bare.to_string(), atom.clone()));
             }
         }
-        if let Some(compiled) = self.ctx.modules.get(source_module) {
+        if let Some(module_semantics) = self.ctx.module_semantics(source_module) {
             let erlang_mod = Self::module_name_to_erlang(source_module);
-            for decl in &compiled.elaborated {
+            for decl in module_semantics.elaborated {
                 match decl {
                     crate::ast::Decl::TypeDef { variants, .. } => {
                         for variant in variants {

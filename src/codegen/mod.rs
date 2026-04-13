@@ -20,6 +20,13 @@ pub struct CompiledModule {
     pub front_resolution: crate::typechecker::ResolutionResult,
 }
 
+pub struct ModuleSemantics<'a> {
+    pub codegen_info: &'a ModuleCodegenInfo,
+    pub elaborated: &'a ast::Program,
+    pub resolution: &'a resolve::ResolutionMap,
+    pub front_resolution: &'a crate::typechecker::ResolutionResult,
+}
+
 /// Bundles the cross-module information needed by the lowerer.
 #[derive(Default)]
 pub struct CodegenContext {
@@ -44,6 +51,31 @@ impl CodegenContext {
     /// Get elaborated program for a specific module.
     pub fn elaborated_module(&self, name: &str) -> Option<&ast::Program> {
         self.modules.get(name).map(|m| &m.elaborated)
+    }
+
+    pub fn module_semantics(&self, name: &str) -> Option<ModuleSemantics<'_>> {
+        self.modules.get(name).map(|m| ModuleSemantics {
+            codegen_info: &m.codegen_info,
+            elaborated: &m.elaborated,
+            resolution: &m.resolution,
+            front_resolution: &m.front_resolution,
+        })
+    }
+
+    pub fn modules_semantics(
+        &self,
+    ) -> impl Iterator<Item = (&str, ModuleSemantics<'_>)> + '_ {
+        self.modules.iter().map(|(name, m)| {
+            (
+                name.as_str(),
+                ModuleSemantics {
+                    codegen_info: &m.codegen_info,
+                    elaborated: &m.elaborated,
+                    resolution: &m.resolution,
+                    front_resolution: &m.front_resolution,
+                },
+            )
+        })
     }
 }
 
