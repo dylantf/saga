@@ -866,16 +866,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn effect_for_handler_arm(&self, arm: &HandlerArm) -> Option<String> {
-        if let Some(resolved) = self
-            .current_front_resolution()
-            .and_then(|r| r.handler_arm_qualifier(arm.id))
-        {
-            Some(resolved.to_string())
-        } else if let Some(ref q) = arm.qualifier {
-            Some(self.canonicalize_effect(q))
-        } else {
-            self.op_to_effect.get(&arm.op_name).cloned()
-        }
+        self.resolved_handler_arm_effect(arm)
     }
 
     fn static_arm_for_effect_op(
@@ -886,18 +877,7 @@ impl<'a> Lowerer<'a> {
     ) -> Option<(HandlerArm, Option<String>)> {
         info.arms
             .iter()
-            .find(|arm| {
-                if let Some(resolved) = self
-                    .current_front_resolution()
-                    .and_then(|r| r.handler_arm_qualifier(arm.id))
-                {
-                    resolved == eff && arm.op_name == op
-                } else if let Some(ref q) = arm.qualifier {
-                    self.canonicalize_effect(q) == eff && arm.op_name == op
-                } else {
-                    arm.op_name == op
-                }
-            })
+            .find(|arm| self.handler_arm_matches_effect_op(arm, eff, op))
             .cloned()
             .map(|arm| (arm, info.source_module.clone()))
     }

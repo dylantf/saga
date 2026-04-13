@@ -351,6 +351,12 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|| self.resolve_handler_name(fallback))
     }
 
+    fn has_resolved_handler_ref(&self, node_id: crate::ast::NodeId) -> bool {
+        self.current_front_resolution()
+            .and_then(|r| r.handler_ref(node_id))
+            .is_some()
+    }
+
     fn resolved_value_lookup_name(
         &self,
         node_id: crate::ast::NodeId,
@@ -383,6 +389,20 @@ impl<'a> Lowerer<'a> {
                 let local_name = format!("{}.{}", module_name, source_name);
                 self.record_fields_for_name(&local_name)
             })
+    }
+
+    fn resolved_handler_arm_effect(&self, arm: &HandlerArm) -> Option<String> {
+        self.current_front_resolution()
+            .and_then(|r| r.handler_arm_qualifier(arm.id))
+            .map(|resolved| resolved.to_string())
+            .or_else(|| arm.qualifier.as_ref().map(|q| self.canonicalize_effect(q)))
+            .or_else(|| self.op_to_effect.get(&arm.op_name).cloned())
+    }
+
+    fn handler_arm_matches_effect_op(&self, arm: &HandlerArm, eff: &str, op: &str) -> bool {
+        self.resolved_handler_arm_effect(arm)
+            .map(|resolved| resolved == eff && arm.op_name == op)
+            .unwrap_or_else(|| arm.op_name == op)
     }
 
     fn lower_local_fun_ref(

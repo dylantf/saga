@@ -1252,9 +1252,8 @@ impl<'a> Lowerer<'a> {
         // Direct handler reference: compile-time alias
         if let ExprKind::Var { name: handler_name } = &value.kind
             && let Some(canonical) = self
-                .current_front_resolution()
-                .and_then(|r| r.handler_ref(value.id))
-                .map(|_| self.resolved_handler_binding_name(value.id, handler_name))
+                .has_resolved_handler_ref(value.id)
+                .then(|| self.resolved_handler_binding_name(value.id, handler_name))
                 .or_else(|| self.resolve_handler_name_opt(handler_name))
         {
             self.handler_canonical.insert(name.to_string(), canonical);
