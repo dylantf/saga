@@ -67,7 +67,7 @@ fn emit_from_program(
         module_name,
         &elaborated,
         &ctx,
-        Some(module_result.unwrap_or(&result)),
+        module_result.unwrap_or(&result),
         None,
         None,
     )
@@ -487,7 +487,7 @@ main () = 42
         "main",
         &elaborated,
         &ctx,
-        Some(&result),
+        &result,
         None,
         Some("main"),
     );

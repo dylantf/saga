@@ -299,7 +299,7 @@ pub fn emit_module(
     module_name: &str,
     elaborated: &ast::Program,
     ctx: &codegen::CodegenContext,
-    check_result: Option<&typechecker::CheckResult>,
+    check_result: &typechecker::CheckResult,
     build_dir: &Path,
     source_file: Option<&codegen::SourceFile>,
     entry_export: Option<&str>,
@@ -513,7 +513,10 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
         prelude_imports: result.prelude_imports.clone(),
     };
     for (module_name, compiled) in &compiled_modules {
-        let check_result = result.module_check_results().get(module_name);
+        let check_result = result
+            .module_check_results()
+            .get(module_name)
+            .expect("compiled std module missing module check result");
         emit_module(
             module_name,
             &compiled.elaborated,
@@ -920,7 +923,7 @@ pub fn build_project(profile: &str) -> ProjectBuild {
             &normalized,
             codegen_info_map,
             &result.prelude_imports,
-            Some(&mod_result.resolution),
+            &mod_result.resolution,
         );
         compiled_modules.insert(
             module_name.clone(),
@@ -996,7 +999,7 @@ pub fn build_project(profile: &str) -> ProjectBuild {
             &erlang_name,
             &compiled.elaborated,
             &ctx,
-            check_result,
+            check_result.unwrap_or(&result),
             &build_dir,
             sf,
             if *module_name == "Main" {
@@ -1125,7 +1128,7 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
         &module_name,
         &compiled_modules[&module_name].elaborated,
         &ctx,
-        Some(&result),
+        &result,
         &build_dir,
         Some(&script_source),
         Some("main"),

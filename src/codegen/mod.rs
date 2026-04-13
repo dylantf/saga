@@ -64,7 +64,7 @@ pub fn compile_module_from_result(
         &normalized,
         codegen_info,
         &result.prelude_imports,
-        Some(&mod_result.resolution),
+        &mod_result.resolution,
     );
     Some(CompiledModule {
         codegen_info: info,
@@ -72,11 +72,6 @@ pub fn compile_module_from_result(
         resolution,
         front_resolution: mod_result.resolution.clone(),
     })
-}
-
-pub fn emit_module(module_name: &str, program: &ast::Program) -> String {
-    let ctx = CodegenContext::default();
-    emit_module_with_context(module_name, program, &ctx, None, None, None)
 }
 
 /// Source file path and source text for error location tracking.
@@ -91,7 +86,7 @@ pub fn emit_module_with_context(
     module_name: &str,
     program: &ast::Program,
     ctx: &CodegenContext,
-    check_result: Option<&crate::typechecker::CheckResult>,
+    check_result: &crate::typechecker::CheckResult,
     source_file: Option<&SourceFile>,
     entry_export: Option<&str>,
 ) -> String {
@@ -103,12 +98,11 @@ pub fn emit_module_with_context(
         &codegen_info,
         &ctx.prelude_imports,
     );
-    let front_resolution = check_result.and_then(|cr| {
-        cr.module_check_results()
-            .get(module_name)
-            .map(|m| &m.resolution)
-            .or(Some(&cr.resolution))
-    });
+    let front_resolution = check_result
+        .module_check_results()
+        .get(module_name)
+        .map(|m| &m.resolution)
+        .unwrap_or(&check_result.resolution);
     let mut resolution_map = resolve::resolve_names(
         module_name,
         &program,
@@ -127,7 +121,7 @@ pub fn emit_module_with_context(
         ctx,
         constructor_atoms,
         resolution_map,
-        check_result,
+        Some(check_result),
         source_info,
         entry_export.map(str::to_string),
     )

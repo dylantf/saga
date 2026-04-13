@@ -34,7 +34,7 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
         "_script",
         &elaborated,
         &ctx,
-        Some(&result),
+        &result,
         source_file,
         None,
     )

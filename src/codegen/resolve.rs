@@ -397,7 +397,7 @@ pub fn resolve_names(
     program: &Program,
     codegen_info: &HashMap<String, ModuleCodegenInfo>,
     prelude_imports: &[Decl],
-    front_resolution: Option<&FrontResolutionResult>,
+    front_resolution: &FrontResolutionResult,
 ) -> ResolutionMap {
     let source_module_name = program
         .iter()
@@ -600,7 +600,7 @@ fn resolve_program(
     program: &Program,
     scope: &mut Scope<'_>,
     map: &mut ResolutionMap,
-    front_resolution: Option<&FrontResolutionResult>,
+    front_resolution: &FrontResolutionResult,
 ) {
     for decl in program {
         resolve_decl(decl, scope, map, front_resolution);
@@ -611,7 +611,7 @@ fn resolve_decl(
     decl: &Decl,
     scope: &mut Scope<'_>,
     map: &mut ResolutionMap,
-    front_resolution: Option<&FrontResolutionResult>,
+    front_resolution: &FrontResolutionResult,
 ) {
     match decl {
         Decl::FunBinding { params, body, .. } => {
@@ -648,7 +648,7 @@ fn resolve_handler_body_names(
     body: &ast::HandlerBody,
     scope: &mut Scope<'_>,
     map: &mut ResolutionMap,
-    front_resolution: Option<&FrontResolutionResult>,
+    front_resolution: &FrontResolutionResult,
 ) {
     for arm in &body.arms {
         let param_names: HashSet<String> =
@@ -672,7 +672,7 @@ fn resolve_expr(
     expr: &Expr,
     scope: &mut Scope<'_>,
     map: &mut ResolutionMap,
-    front_resolution: Option<&FrontResolutionResult>,
+    front_resolution: &FrontResolutionResult,
 ) {
     match &expr.kind {
         ExprKind::Var { name, .. } => {
@@ -680,8 +680,8 @@ fn resolve_expr(
                 // Locally bound variable, not a function ref.
             } else if let Some(scoped) = scope.resolve_local_fun(name) {
                 map.insert(expr.id, scoped_to_resolved(scoped));
-            } else if let Some(front) = front_resolution {
-                match front.value(expr.id) {
+            } else {
+                match front_resolution.value(expr.id) {
                     Some(crate::typechecker::ResolvedValue::Local { .. }) => {}
                     Some(crate::typechecker::ResolvedValue::Global { lookup_name }) => {
                         if let Some(scoped) = scope.resolve_global_lookup(lookup_name) {
@@ -690,25 +690,16 @@ fn resolve_expr(
                     }
                     None => {}
                 }
-            } else if let Some(scoped) = scope.resolve_unqualified(name) {
-                map.insert(expr.id, scoped_to_resolved(scoped));
-            } else if name.contains('.')
-                && let Some(scoped) = scope.resolve_qualified(name)
-            {
-                // Compatibility path for elaborated module-qualified Vars and dict names.
-                map.insert(expr.id, scoped_to_resolved(scoped));
             }
             // If locally bound or not in module scope -> not in map ->
             // lowerer treats as local variable (CExpr::Var).
         }
         ExprKind::QualifiedName { module, name, .. } => {
-            if let Some(front) = front_resolution {
-                if let Some(crate::typechecker::ResolvedValue::Global { lookup_name }) =
-                    front.value(expr.id)
-                    && let Some(scoped) = scope.resolve_global_lookup(lookup_name)
-                {
-                    map.insert(expr.id, scoped_to_resolved(scoped));
-                }
+            if let Some(crate::typechecker::ResolvedValue::Global { lookup_name }) =
+                front_resolution.value(expr.id)
+                && let Some(scoped) = scope.resolve_global_lookup(lookup_name)
+            {
+                map.insert(expr.id, scoped_to_resolved(scoped));
             } else {
                 let qualified = format!("{}.{}", module, name);
                 if let Some(scoped) = scope.resolve_qualified(&qualified) {

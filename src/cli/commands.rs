@@ -276,7 +276,7 @@ pub fn cmd_emit(file: &str) {
         &erlang_name,
         &elaborated,
         &ctx,
-        Some(&result),
+        &result,
         Some(&source_file),
         Some("main"),
     );
@@ -424,7 +424,7 @@ pub fn cmd_test(filter: Option<&str>) {
             "_test",
             &elaborated,
             &test_ctx,
-            Some(&result),
+            &result,
             Some(&test_source_file),
             Some("main"),
         );
