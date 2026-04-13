@@ -299,12 +299,6 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn resolve_module_local_fun(&self, name: &str) -> Option<&ScopedName> {
-        match self.module.get(name) {
-            Some(ScopedName::LocalFun { .. }) => self.module.get(name),
-            _ => None,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -696,7 +690,9 @@ fn resolve_expr(
                         }
                     }
                     None => {
-                        if let Some(scoped) = scope.resolve_unqualified(name) {
+                        if is_synthetic
+                            && let Some(scoped) = scope.resolve_unqualified(name)
+                        {
                             // Compatibility path for desugared/elaborated bare function refs
                             // that the front-end resolver never saw as source nodes.
                             map.insert(expr.id, scoped_to_resolved(scoped));
@@ -704,8 +700,6 @@ fn resolve_expr(
                             && name.contains('.')
                             && let Some(scoped) = scope.resolve_qualified(name)
                         {
-                            map.insert(expr.id, scoped_to_resolved(scoped));
-                        } else if let Some(scoped) = scope.resolve_module_local_fun(name) {
                             map.insert(expr.id, scoped_to_resolved(scoped));
                         }
                     }
@@ -728,11 +722,6 @@ fn resolve_expr(
                     && let Some(scoped) = scope.resolve_global_lookup(lookup_name)
                 {
                     map.insert(expr.id, scoped_to_resolved(scoped));
-                } else if is_synthetic {
-                    let qualified = format!("{}.{}", module, name);
-                    if let Some(scoped) = scope.resolve_qualified(&qualified) {
-                        map.insert(expr.id, scoped_to_resolved(scoped));
-                    }
                 }
             } else {
                 let qualified = format!("{}.{}", module, name);

@@ -746,8 +746,10 @@ impl Elaborator {
                     if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
                         let elab_arg = self.elaborate_expr(arg);
                         // Build the call with dict args prepended
-                        let mut result: Expr =
-                            Expr::synth(func.span, ExprKind::Var { name: name.clone() });
+                        let mut result: Expr = Expr::rebuild_like(
+                            func,
+                            ExprKind::Var { name: name.clone() },
+                        );
                         let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                         for (trait_name, _type_var) in &dict_param_info {
                             let occ = trait_occurrences.entry(trait_name).or_insert(0);
@@ -764,8 +766,8 @@ impl Elaborator {
                             }
                             *occ += 1;
                         }
-                        return Expr::synth(
-                            span,
+                        return Expr::rebuild_like(
+                            expr,
                             ExprKind::App {
                                 func: Box::new(result),
                                 arg: Box::new(elab_arg),
@@ -820,8 +822,8 @@ impl Elaborator {
                             }
                             *occ += 1;
                         }
-                        return Expr::synth(
-                            span,
+                        return Expr::rebuild_like(
+                            expr,
                             ExprKind::App {
                                 func: Box::new(result),
                                 arg: Box::new(elab_arg),
