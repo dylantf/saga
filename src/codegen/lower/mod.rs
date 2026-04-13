@@ -292,22 +292,28 @@ impl<'a> Lowerer<'a> {
             .filter(|m| !m.is_empty())
     }
 
-    fn current_front_resolution(&self) -> Option<&crate::typechecker::ResolutionResult> {
-        let module_name = self
-            .current_handler_source_module
+    fn current_semantic_module_name(&self) -> &str {
+        self.current_handler_source_module
             .as_deref()
-            .unwrap_or(&self.current_source_module);
+            .unwrap_or(&self.current_source_module)
+    }
+
+    fn front_resolution_for_module(
+        &self,
+        module_name: &str,
+    ) -> Option<&crate::typechecker::ResolutionResult> {
         self.check_result
             .module_check_results()
             .get(module_name)
             .map(|m| &m.resolution)
-            .or(Some(&self.check_result.resolution))
             .or_else(|| {
-                self.ctx
-                    .modules
-                    .get(module_name)
-                    .map(|m| &m.front_resolution)
+                (module_name == self.current_source_module).then_some(&self.check_result.resolution)
             })
+            .or_else(|| self.ctx.modules.get(module_name).map(|m| &m.front_resolution))
+    }
+
+    fn current_front_resolution(&self) -> Option<&crate::typechecker::ResolutionResult> {
+        self.front_resolution_for_module(self.current_semantic_module_name())
     }
 
     fn resolved_effect_call_name(
@@ -368,10 +374,7 @@ impl<'a> Lowerer<'a> {
         node_id: crate::ast::NodeId,
         source_name: &str,
     ) -> Option<&Vec<String>> {
-        let module_name = self
-            .current_handler_source_module
-            .as_deref()
-            .unwrap_or(&self.current_source_module);
+        let module_name = self.current_semantic_module_name();
         self.current_front_resolution()
             .and_then(|r| r.record_type(node_id))
             .and_then(|name| self.record_fields_for_name(name))

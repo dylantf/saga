@@ -49,11 +49,7 @@ impl<'a> Lowerer<'a> {
                 }
             })
             .unwrap_or_else(|| module_name.to_string());
-        let mod_resolution = self
-            .ctx
-            .modules
-            .get(module_name)
-            .map(|m| &m.front_resolution);
+        let mod_resolution = self.front_resolution_for_module(&source_module_name);
         let resolve_effect = |eff: &crate::ast::EffectRef| -> String {
             mod_resolution
                 .and_then(|r| r.effect_ref(eff.id))
