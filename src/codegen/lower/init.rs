@@ -386,6 +386,118 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn register_imported_effect_defs(&mut self, info: &crate::typechecker::ModuleCodegenInfo) {
+        for eff_def in &info.effect_defs {
+            let mut ops_map = HashMap::new();
+            for op in &eff_def.ops {
+                ops_map.insert(
+                    op.name.clone(),
+                    super::EffectOpInfo {
+                        source_param_count: op.source_param_count,
+                        runtime_param_count: op.runtime_param_count,
+                        runtime_param_positions: op.runtime_param_positions.clone(),
+                        param_absorbed_effects: op.param_absorbed_effects.clone(),
+                    },
+                );
+                self.op_to_effect
+                    .insert(op.name.clone(), eff_def.name.clone());
+            }
+            self.effect_defs
+                .insert(eff_def.name.clone(), EffectInfo { ops: ops_map });
+        }
+    }
+
+    fn register_imported_exports(
+        &mut self,
+        module_name: &str,
+        prefix: &str,
+        exposing: Option<&[String]>,
+        info: &crate::typechecker::ModuleCodegenInfo,
+    ) {
+        let is_exposed = |name: &str| match exposing {
+            None => false,
+            Some(names) => names.iter().any(|n| n == name),
+        };
+        let exported_names: std::collections::HashSet<&str> =
+            info.exports.iter().map(|(n, _)| n.as_str()).collect();
+
+        for (name, scheme) in &info.exports {
+            let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
+            let effects = self.canonicalize_effects(effects);
+            let dict_param_count = util::dict_param_count(&scheme.constraints);
+            let expanded_arity = self.expanded_arity(base_arity, &effects) + dict_param_count;
+            let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
+            let param_effs: HashMap<usize, Vec<String>> = param_effs
+                .into_iter()
+                .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
+                .collect();
+
+            let alias_qualified = format!("{}.{}", prefix, name);
+            let fi = FunInfo {
+                arity: expanded_arity,
+                effects: effects.clone(),
+                param_absorbed_effects: param_effs.clone(),
+            };
+            self.fun_info.insert(alias_qualified, fi.clone());
+            let canonical = format!("{}.{}", module_name, name);
+            self.fun_info.entry(canonical).or_insert(fi);
+
+            if is_exposed(name) && exported_names.contains(name.as_str()) {
+                self.fun_info.entry(name.clone()).or_insert(FunInfo {
+                    arity: expanded_arity,
+                    effects,
+                    param_absorbed_effects: param_effs,
+                });
+            }
+        }
+    }
+
+    fn register_imported_records_and_dicts(
+        &mut self,
+        module_name: &str,
+        info: &crate::typechecker::ModuleCodegenInfo,
+    ) {
+        for (rec_name, fields) in &info.record_fields {
+            let canonical = format!("{}.{}", module_name, rec_name);
+            self.record_fields.insert(canonical, fields.clone());
+        }
+
+        for d in &info.trait_impl_dicts {
+            self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
+                arity: d.arity,
+                ..Default::default()
+            });
+        }
+    }
+
+    fn register_imported_handler_defs(&mut self, module_name: &str, program: &ast::Program) {
+        self.register_imported_module_local_funs(module_name, program);
+        for decl in program {
+            match decl {
+                Decl::HandlerDef { name, body, .. } => {
+                    let canonical_effects: Vec<String> = body
+                        .effects
+                        .iter()
+                        .map(|e| self.canonicalize_effect(&e.name))
+                        .collect();
+                    let canonical_handler = format!("{}.{}", module_name, name);
+                    self.handler_defs
+                        .entry(canonical_handler)
+                        .or_insert(HandlerInfo {
+                            effects: canonical_effects,
+                            arms: body.arms.iter().map(|a| a.node.clone()).collect(),
+                            return_clause: body.return_clause.clone(),
+                            source_module: Some(module_name.to_string()),
+                        });
+                }
+                Decl::FunSignature { .. } => {
+                    // External function resolution handled by resolve.rs
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn register_imported_module_local_funs(&mut self, module_name: &str, program: &ast::Program) {
         let (_, source_module_name) = Self::source_module_info(program, module_name);
         let mod_resolution = self.front_resolution_for_module(&source_module_name);
@@ -544,113 +656,10 @@ impl<'a> Lowerer<'a> {
             return;
         };
         let info = module_semantics.codegen_info;
-
-        // Determine which names are exposed unqualified.
-        // None = qualified-only import, Some(list) = specific names exposed.
-        let is_exposed = |name: &str| -> bool {
-            match exposing {
-                None => false,
-                Some(names) => names.iter().any(|n| n == name),
-            }
-        };
-
-        // Register imported effect definitions FIRST so expanded_arity can look them up.
-        for eff_def in &info.effect_defs {
-            let mut ops_map = HashMap::new();
-            for op in &eff_def.ops {
-                ops_map.insert(
-                    op.name.clone(),
-                    super::EffectOpInfo {
-                        source_param_count: op.source_param_count,
-                        runtime_param_count: op.runtime_param_count,
-                        runtime_param_positions: op.runtime_param_positions.clone(),
-                        param_absorbed_effects: op.param_absorbed_effects.clone(),
-                    },
-                );
-                self.op_to_effect
-                    .insert(op.name.clone(), eff_def.name.clone());
-            }
-            self.effect_defs
-                .insert(eff_def.name.clone(), EffectInfo { ops: ops_map });
-        }
-
-        let exported_names: std::collections::HashSet<&str> =
-            info.exports.iter().map(|(n, _)| n.as_str()).collect();
-
-        // Register imported functions
-        for (name, scheme) in &info.exports {
-            let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
-            let effects = self.canonicalize_effects(effects);
-            let dict_param_count = util::dict_param_count(&scheme.constraints);
-            let expanded_arity = self.expanded_arity(base_arity, &effects) + dict_param_count;
-            let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
-            // Canonicalize absorbed effect names too
-            let param_effs: HashMap<usize, Vec<String>> = param_effs
-                .into_iter()
-                .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
-                .collect();
-
-            // Register under alias form (e.g. "String.reverse") and canonical (e.g. "Std.String.reverse")
-            let alias_qualified = format!("{}.{}", prefix, name);
-            let fi = FunInfo {
-                arity: expanded_arity,
-                effects: effects.clone(),
-                param_absorbed_effects: param_effs.clone(),
-            };
-            self.fun_info.insert(alias_qualified, fi.clone());
-            let canonical = format!("{}.{}", module_name, name);
-            self.fun_info.entry(canonical).or_insert(fi);
-
-            // Register unqualified form only for exposed names
-            if is_exposed(name) && exported_names.contains(name.as_str()) {
-                self.fun_info.entry(name.clone()).or_insert(FunInfo {
-                    arity: expanded_arity,
-                    effects,
-                    param_absorbed_effects: param_effs,
-                });
-            }
-        }
-
-        // Register imported record field orders (canonical key)
-        for (rec_name, fields) in &info.record_fields {
-            let canonical = format!("{}.{}", module_name, rec_name);
-            self.record_fields.insert(canonical, fields.clone());
-        }
-
-        // Register imported trait impl dicts for cross-module calls
-        for d in &info.trait_impl_dicts {
-            self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
-                arity: d.arity,
-                ..Default::default()
-            });
-        }
-
-        // Register imported handler bodies and external functions from elaborated programs
-        self.register_imported_module_local_funs(&module_name, module_semantics.elaborated);
-        for edecl in module_semantics.elaborated {
-            match edecl {
-                Decl::HandlerDef { name, body, .. } => {
-                    let canonical_effects: Vec<String> = body
-                        .effects
-                        .iter()
-                        .map(|e| self.canonicalize_effect(&e.name))
-                        .collect();
-                    let canonical_handler = format!("{}.{}", module_name, name);
-                    self.handler_defs
-                        .entry(canonical_handler)
-                        .or_insert(HandlerInfo {
-                            effects: canonical_effects,
-                            arms: body.arms.iter().map(|a| a.node.clone()).collect(),
-                            return_clause: body.return_clause.clone(),
-                            source_module: Some(module_name.clone()),
-                        });
-                }
-                Decl::FunSignature { .. } => {
-                    // External function resolution handled by resolve.rs
-                }
-                _ => {}
-            }
-        }
+        self.register_imported_effect_defs(info);
+        self.register_imported_exports(&module_name, &prefix, exposing.as_deref(), info);
+        self.register_imported_records_and_dicts(&module_name, info);
+        self.register_imported_handler_defs(&module_name, module_semantics.elaborated);
     }
 
     /// Walk the AST to find anonymous record types and register them in record_fields.
