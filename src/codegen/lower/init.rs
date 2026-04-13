@@ -75,8 +75,7 @@ impl<'a> Lowerer<'a> {
                 ..
             } = decl
             {
-                let mut sorted_effects: Vec<String> =
-                    effects.iter().map(|e| resolve_effect(e)).collect();
+                let mut sorted_effects: Vec<String> = effects.iter().map(&resolve_effect).collect();
                 sorted_effects.sort();
                 let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
                 for (i, (_param_name, type_expr)) in params.iter().enumerate() {

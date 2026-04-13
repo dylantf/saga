@@ -87,6 +87,15 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
     ) -> CExpr {
         if let Some((module, func_name, head, args)) = super::util::collect_qualified_call(expr) {
+            if let Some(call) = self.lower_resolved_fun_call(
+                func_name,
+                head,
+                &args,
+                return_k.clone(),
+                Some(&expr.span),
+            ) {
+                return call;
+            }
             return self.lower_qualified_call(
                 module,
                 func_name,
@@ -1241,9 +1250,12 @@ impl<'a> Lowerer<'a> {
 
         // Direct handler reference: compile-time alias
         if let ExprKind::Var { name: handler_name } = &value.kind
-            && self.resolve_handler_name_opt(handler_name).is_some()
+            && let Some(canonical) = self
+                .current_front_resolution()
+                .and_then(|r| r.handler_ref(value.id))
+                .map(|_| self.resolved_handler_binding_name(value.id, handler_name))
+                .or_else(|| self.resolve_handler_name_opt(handler_name))
         {
-            let canonical = self.resolve_handler_name(handler_name);
             self.handler_canonical.insert(name.to_string(), canonical);
             return;
         }
@@ -1384,7 +1396,7 @@ impl<'a> Lowerer<'a> {
     /// Walks through variable references, if/else branches, and handler expressions.
     fn resolve_handle_value(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
-            ExprKind::Var { name } => Some(self.resolve_handler_name(name)),
+            ExprKind::Var { name } => Some(self.resolved_handler_binding_name(expr.id, name)),
             ExprKind::HandlerExpr { .. } => {
                 // Handler expressions registered under synthetic name
                 let synthetic = format!("__handler_expr_{}", expr.id.0);

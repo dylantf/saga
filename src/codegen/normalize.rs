@@ -116,7 +116,6 @@ impl Normalizer {
     /// Normalize the arguments of an effect call (or App-chain around one),
     /// but keep the effect call itself in place.
     fn normalize_effect_args(&mut self, expr: &Expr, lifted: &mut Vec<Stmt>) -> Expr {
-        let span = expr.span;
         match &expr.kind {
             ExprKind::EffectCall {
                 name,
@@ -169,7 +168,6 @@ impl Normalizer {
     /// Walk an expression's sub-expressions, lifting any nested effect calls.
     /// The expression itself is NOT an effect call (that's handled by the caller).
     fn walk_expr(&mut self, expr: &Expr, lifted: &mut Vec<Stmt>) -> Expr {
-        let span = expr.span;
         match &expr.kind {
             // Binary op: left-to-right normalization of operands.
             ExprKind::BinOp { op, left, right } => {

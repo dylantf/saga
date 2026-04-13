@@ -103,7 +103,6 @@ impl Checker {
             ast::Handler::Named(named) => vec![self.resolved_handler_name(named.id, &named.name)],
             ast::Handler::Inline { .. } => handler
                 .named_refs()
-                .into_iter()
                 .map(|h| self.resolved_handler_name(h.id, &h.name))
                 .collect(),
         };

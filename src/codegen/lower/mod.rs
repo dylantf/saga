@@ -283,6 +283,16 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn resolved_param_absorbed_effects(
+        &self,
+        node_id: crate::ast::NodeId,
+        fallback: &str,
+    ) -> Option<HashMap<usize, Vec<String>>> {
+        self.resolved_fun_info(node_id, fallback)
+            .map(|f| f.param_absorbed_effects.clone())
+            .filter(|m| !m.is_empty())
+    }
+
     fn current_front_resolution(&self) -> Option<&crate::typechecker::ResolutionResult> {
         self.check_result
             .as_ref()
@@ -1606,6 +1616,14 @@ impl<'a> Lowerer<'a> {
             {
                 return self.lower_ctor(func_name, args);
             }
+            if let Some(call) =
+                self.lower_resolved_fun_call(func_name, head, &args, None, Some(&expr.span))
+            {
+                return call;
+            }
+            if self.resolved.contains_key(&head.id) {
+                return self.lower_generic_apply(head, &args);
+            }
             return self.lower_qualified_call(
                 module,
                 func_name,
@@ -2438,7 +2456,7 @@ impl<'a> Lowerer<'a> {
             .map(|effs| self.effect_handler_ops(effs))
             .unwrap_or_default();
 
-        let callee_param_effs = self.param_absorbed_effects(&qualified).cloned();
+        let callee_param_effs = self.resolved_param_absorbed_effects(head.id, &qualified);
 
         use super::resolve::ResolvedName;
 
@@ -2447,11 +2465,7 @@ impl<'a> Lowerer<'a> {
         // args and takes the remaining ones as fresh parameters. Without this,
         // an under-applied qualified call like `String.replace "m" ""` would
         // lower to `call std_string:replace/2`, which doesn't exist.
-        let total_arity = self.resolved.get(&head.id).map(|r| match r {
-            ResolvedName::ImportedFun { arity, .. } | ResolvedName::LocalFun { arity, .. } => {
-                *arity
-            }
-        });
+        let total_arity = self.resolved_fun_info(head.id, &qualified).map(|f| f.arity);
         let effect_count = callee_ops.len();
         let return_k_count = if effect_count > 0 { 1 } else { 0 };
         if let Some(arity) = total_arity {
