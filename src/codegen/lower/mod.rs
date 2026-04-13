@@ -294,18 +294,22 @@ impl<'a> Lowerer<'a> {
     }
 
     fn current_front_resolution(&self) -> Option<&crate::typechecker::ResolutionResult> {
+        let module_name = self
+            .current_handler_source_module
+            .as_deref()
+            .unwrap_or(&self.current_source_module);
         self.check_result
             .as_ref()
             .and_then(|cr| {
                 cr.module_check_results()
-                    .get(&self.current_source_module)
+                    .get(module_name)
                     .map(|m| &m.resolution)
                     .or(Some(&cr.resolution))
             })
             .or_else(|| {
                 self.ctx
                     .modules
-                    .get(&self.current_source_module)
+                    .get(module_name)
                     .map(|m| &m.front_resolution)
             })
     }
@@ -345,28 +349,40 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|| self.resolve_handler_name(fallback))
     }
 
+    fn resolved_value_lookup_name(
+        &self,
+        node_id: crate::ast::NodeId,
+        fallback: &str,
+    ) -> String {
+        self.current_front_resolution()
+            .and_then(|r| r.value(node_id))
+            .map(|resolved| match resolved {
+                crate::typechecker::ResolvedValue::Local { name, .. } => name.clone(),
+                crate::typechecker::ResolvedValue::Global { lookup_name } => lookup_name.clone(),
+            })
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
     fn record_fields_for_name(&self, name: &str) -> Option<&Vec<String>> {
-        self.record_fields
-            .get(name)
+        self.record_fields.get(name)
+    }
+
+    fn resolved_record_fields(
+        &self,
+        node_id: crate::ast::NodeId,
+        source_name: &str,
+    ) -> Option<&Vec<String>> {
+        let module_name = self
+            .current_handler_source_module
+            .as_deref()
+            .unwrap_or(&self.current_source_module);
+        self.current_front_resolution()
+            .and_then(|r| r.record_type(node_id))
+            .and_then(|name| self.record_fields_for_name(name))
+            .or_else(|| self.record_fields_for_name(source_name))
             .or_else(|| {
-                self.record_fields
-                    .get(crate::typechecker::canonicalize_type_name(name))
-            })
-            .or_else(|| {
-                let local_name = format!("{}.{}", self.current_source_module, name);
-                self.record_fields.get(&local_name)
-            })
-            .or_else(|| {
-                let mut matches = self
-                    .record_fields
-                    .iter()
-                    .filter(|(key, _)| key.rsplit('.').next() == Some(name));
-                let first = matches.next();
-                if matches.next().is_none() {
-                    first.map(|(_, fields)| fields)
-                } else {
-                    None
-                }
+                let local_name = format!("{}.{}", module_name, source_name);
+                self.record_fields_for_name(&local_name)
             })
     }
 
@@ -2085,12 +2101,8 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::RecordCreate { name, fields, .. } => {
-                let resolved_name = self
-                    .current_front_resolution()
-                    .and_then(|r| r.record_type(expr.id))
-                    .unwrap_or(name);
                 let order = self
-                    .record_fields_for_name(resolved_name)
+                    .resolved_record_fields(expr.id, name)
                     .cloned()
                     .unwrap_or_default();
                 let field_map: HashMap<&str, &Expr> =
@@ -2148,7 +2160,7 @@ impl<'a> Lowerer<'a> {
             } => {
                 let idx = resolved_name
                     .as_deref()
-                    .and_then(|rname| self.record_fields_for_name(rname))
+                    .and_then(|rname| self.record_fields.get(rname))
                     .and_then(|fields| fields.iter().position(|f| f == field))
                     .map(|pos| pos + 2) // +1 for tag, +1 for 1-based
                     .unwrap_or_else(|| {
@@ -2179,7 +2191,7 @@ impl<'a> Lowerer<'a> {
                 let rec_ce = self.lower_expr_value(record);
                 let order = resolved_name
                     .as_deref()
-                    .and_then(|rname| self.record_fields_for_name(rname))
+                    .and_then(|rname| self.record_fields.get(rname))
                     .cloned()
                     .unwrap_or_else(|| {
                         panic!("codegen: could not resolve record type for record update")

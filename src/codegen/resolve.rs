@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, ComprehensionQualifier, Decl, Expr, ExprKind, NodeId, Pat, Program, Stmt};
 use crate::codegen::lower::init::extract_external;
-use crate::typechecker::ModuleCodegenInfo;
+use crate::typechecker::{ModuleCodegenInfo, ResolutionResult as FrontResolutionResult};
 
 /// Map from constructor name -> mangled Erlang atom.
 /// Contains both bare ("NotFound") and qualified ("Std.File.NotFound") entries.
@@ -253,19 +253,30 @@ impl<'a> Scope<'a> {
         self.local_funs.pop();
     }
 
+    fn has_local_var(&self, name: &str) -> bool {
+        self.locals.iter().rev().any(|frame| frame.contains(name))
+    }
+
+    fn resolve_local_fun(&self, name: &str) -> Option<&ScopedName> {
+        for frame in self.local_funs.iter().rev() {
+            if let Some(scoped) = frame.get(name) {
+                return Some(scoped);
+            }
+        }
+        None
+    }
+
     /// Resolve an unqualified name.
     /// Returns None if it's a local variable (block resolution).
     /// Returns Some(ScopedName) if it's a local function, module-level, or imported.
     fn resolve_unqualified(&self, name: &str) -> Option<&ScopedName> {
         // 1. Local variables shadow everything
-        if self.locals.iter().rev().any(|frame| frame.contains(name)) {
+        if self.has_local_var(name) {
             return None;
         }
         // 2. Local functions shadow module scope
-        for frame in self.local_funs.iter().rev() {
-            if let Some(scoped) = frame.get(name) {
-                return Some(scoped);
-            }
+        if let Some(scoped) = self.resolve_local_fun(name) {
+            return Some(scoped);
         }
         // 3. Module scope
         self.module.get(name)
@@ -274,6 +285,25 @@ impl<'a> Scope<'a> {
     /// Resolve a qualified name (e.g. "List.map").
     fn resolve_qualified(&self, qualified: &str) -> Option<&ScopedName> {
         self.qualified.get(qualified)
+    }
+
+    fn resolve_global_lookup(&self, lookup_name: &str) -> Option<&ScopedName> {
+        if lookup_name.contains('.') {
+            self.qualified
+                .get(lookup_name)
+                .or_else(|| self.module.get(lookup_name))
+        } else {
+            self.module
+                .get(lookup_name)
+                .or_else(|| self.qualified.get(lookup_name))
+        }
+    }
+
+    fn resolve_module_local_fun(&self, name: &str) -> Option<&ScopedName> {
+        match self.module.get(name) {
+            Some(ScopedName::LocalFun { .. }) => self.module.get(name),
+            _ => None,
+        }
     }
 }
 
@@ -373,6 +403,7 @@ pub fn resolve_names(
     program: &Program,
     codegen_info: &HashMap<String, ModuleCodegenInfo>,
     prelude_imports: &[Decl],
+    front_resolution: Option<&FrontResolutionResult>,
 ) -> ResolutionMap {
     let source_module_name = program
         .iter()
@@ -562,7 +593,7 @@ pub fn resolve_names(
     // Step 4: Walk the AST with scope-aware resolution.
     let mut lexical = Scope::new(&scope, &qualified_scope);
     let mut map = ResolutionMap::new();
-    resolve_program(program, &mut lexical, &mut map);
+    resolve_program(program, &mut lexical, &mut map, front_resolution);
 
     map
 }
@@ -571,38 +602,48 @@ pub fn resolve_names(
 // Scope-aware AST walk
 // ---------------------------------------------------------------------------
 
-fn resolve_program(program: &Program, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
+fn resolve_program(
+    program: &Program,
+    scope: &mut Scope<'_>,
+    map: &mut ResolutionMap,
+    front_resolution: Option<&FrontResolutionResult>,
+) {
     for decl in program {
-        resolve_decl(decl, scope, map);
+        resolve_decl(decl, scope, map, front_resolution);
     }
 }
 
-fn resolve_decl(decl: &Decl, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
+fn resolve_decl(
+    decl: &Decl,
+    scope: &mut Scope<'_>,
+    map: &mut ResolutionMap,
+    front_resolution: Option<&FrontResolutionResult>,
+) {
     match decl {
         Decl::FunBinding { params, body, .. } => {
             // Function parameters shadow module-level names within the body
             let param_vars = collect_pats_vars(params);
             scope.push(param_vars);
-            resolve_expr(body, scope, map);
+            resolve_expr(body, scope, map, front_resolution);
             scope.pop();
         }
         Decl::Let { value, .. } | Decl::Val { value, .. } => {
-            resolve_expr(value, scope, map);
+            resolve_expr(value, scope, map, front_resolution);
         }
         Decl::HandlerDef { body, .. } => {
-            resolve_handler_body_names(body, scope, map);
+            resolve_handler_body_names(body, scope, map, front_resolution);
         }
         Decl::ImplDef { methods, .. } => {
             for method in methods {
                 let param_vars = collect_pats_vars(&method.node.params);
                 scope.push(param_vars);
-                resolve_expr(&method.node.body, scope, map);
+                resolve_expr(&method.node.body, scope, map, front_resolution);
                 scope.pop();
             }
         }
         Decl::DictConstructor { methods, .. } => {
             for method in methods {
-                resolve_expr(method, scope, map);
+                resolve_expr(method, scope, map, front_resolution);
             }
         }
         _ => {}
@@ -613,54 +654,101 @@ fn resolve_handler_body_names(
     body: &ast::HandlerBody,
     scope: &mut Scope<'_>,
     map: &mut ResolutionMap,
+    front_resolution: Option<&FrontResolutionResult>,
 ) {
     for arm in &body.arms {
         let param_names: HashSet<String> =
             arm.node.params.iter().flat_map(collect_pat_vars).collect();
         scope.push(param_names);
-        resolve_expr(&arm.node.body, scope, map);
+        resolve_expr(&arm.node.body, scope, map, front_resolution);
         if let Some(ref fb) = arm.node.finally_block {
-            resolve_expr(fb, scope, map);
+            resolve_expr(fb, scope, map, front_resolution);
         }
         scope.pop();
     }
     if let Some(rc) = &body.return_clause {
         let param_names: HashSet<String> = rc.params.iter().flat_map(collect_pat_vars).collect();
         scope.push(param_names);
-        resolve_expr(&rc.body, scope, map);
+        resolve_expr(&rc.body, scope, map, front_resolution);
         scope.pop();
     }
 }
 
-fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
+fn resolve_expr(
+    expr: &Expr,
+    scope: &mut Scope<'_>,
+    map: &mut ResolutionMap,
+    front_resolution: Option<&FrontResolutionResult>,
+) {
+    let is_synthetic = expr.span.start == 0 && expr.span.end == 0;
     match &expr.kind {
         ExprKind::Var { name, .. } => {
-            if let Some(scoped) = scope.resolve_unqualified(name) {
+            if scope.has_local_var(name) {
+                // Locally bound variable, not a function ref.
+            } else if let Some(scoped) = scope.resolve_local_fun(name) {
                 map.insert(expr.id, scoped_to_resolved(scoped));
-            } else if name.contains('.') {
-                // Module-qualified Var (e.g. "Std.List.map" from elaboration
-                // or dict names containing dots).
-                if let Some(scoped) = scope.resolve_qualified(name) {
-                    map.insert(expr.id, scoped_to_resolved(scoped));
+            } else if let Some(front) = front_resolution {
+                match front.value(expr.id) {
+                    Some(crate::typechecker::ResolvedValue::Local { .. }) => {}
+                    Some(crate::typechecker::ResolvedValue::Global { lookup_name }) => {
+                        if let Some(scoped) = scope.resolve_global_lookup(lookup_name) {
+                            map.insert(expr.id, scoped_to_resolved(scoped));
+                        }
+                    }
+                    None => {
+                        if let Some(scoped) = scope.resolve_unqualified(name) {
+                            // Compatibility path for desugared/elaborated bare function refs
+                            // that the front-end resolver never saw as source nodes.
+                            map.insert(expr.id, scoped_to_resolved(scoped));
+                        } else if is_synthetic
+                            && name.contains('.')
+                            && let Some(scoped) = scope.resolve_qualified(name)
+                        {
+                            map.insert(expr.id, scoped_to_resolved(scoped));
+                        } else if let Some(scoped) = scope.resolve_module_local_fun(name) {
+                            map.insert(expr.id, scoped_to_resolved(scoped));
+                        }
+                    }
                 }
+            } else if let Some(scoped) = scope.resolve_unqualified(name) {
+                map.insert(expr.id, scoped_to_resolved(scoped));
+            } else if name.contains('.')
+                && let Some(scoped) = scope.resolve_qualified(name)
+            {
+                // Compatibility path for elaborated module-qualified Vars and dict names.
+                map.insert(expr.id, scoped_to_resolved(scoped));
             }
             // If locally bound or not in module scope -> not in map ->
             // lowerer treats as local variable (CExpr::Var).
         }
         ExprKind::QualifiedName { module, name, .. } => {
-            let qualified = format!("{}.{}", module, name);
-            if let Some(scoped) = scope.resolve_qualified(&qualified) {
-                map.insert(expr.id, scoped_to_resolved(scoped));
+            if let Some(front) = front_resolution {
+                if let Some(crate::typechecker::ResolvedValue::Global { lookup_name }) =
+                    front.value(expr.id)
+                    && let Some(scoped) = scope.resolve_global_lookup(lookup_name)
+                {
+                    map.insert(expr.id, scoped_to_resolved(scoped));
+                } else if is_synthetic {
+                    let qualified = format!("{}.{}", module, name);
+                    if let Some(scoped) = scope.resolve_qualified(&qualified) {
+                        map.insert(expr.id, scoped_to_resolved(scoped));
+                    }
+                }
+            } else {
+                let qualified = format!("{}.{}", module, name);
+                if let Some(scoped) = scope.resolve_qualified(&qualified) {
+                    map.insert(expr.id, scoped_to_resolved(scoped));
+                }
             }
         }
         ExprKind::App { func, arg, .. } => {
-            resolve_expr(func, scope, map);
-            resolve_expr(arg, scope, map);
+            resolve_expr(func, scope, map, front_resolution);
+            resolve_expr(arg, scope, map, front_resolution);
         }
         ExprKind::Lambda { params, body, .. } => {
             let param_vars = collect_pats_vars(params);
             scope.push(param_vars);
-            resolve_expr(body, scope, map);
+            resolve_expr(body, scope, map, front_resolution);
             scope.pop();
         }
         ExprKind::Block { stmts, .. } => {
@@ -674,7 +762,7 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
                 match &stmt.node {
                     Stmt::Let { pattern, value, .. } => {
                         // Resolve the value BEFORE adding the binding (no self-reference)
-                        resolve_expr(value, scope, map);
+                        resolve_expr(value, scope, map, front_resolution);
                         // Add pattern vars to the block frame for subsequent stmts
                         let new_vars = collect_pat_vars(pattern);
                         block_locals.extend(new_vars);
@@ -704,11 +792,11 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
                         // Params shadow within the body
                         let param_vars = collect_pats_vars(params);
                         scope.push(param_vars);
-                        resolve_expr(body, scope, map);
+                        resolve_expr(body, scope, map, front_resolution);
                         scope.pop();
                     }
                     Stmt::Expr(e) => {
-                        resolve_expr(e, scope, map);
+                        resolve_expr(e, scope, map, front_resolution);
                     }
                 }
             }
@@ -721,22 +809,22 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
             else_branch,
             ..
         } => {
-            resolve_expr(cond, scope, map);
-            resolve_expr(then_branch, scope, map);
-            resolve_expr(else_branch, scope, map);
+            resolve_expr(cond, scope, map, front_resolution);
+            resolve_expr(then_branch, scope, map, front_resolution);
+            resolve_expr(else_branch, scope, map, front_resolution);
         }
         ExprKind::Case {
             scrutinee, arms, ..
         } => {
-            resolve_expr(scrutinee, scope, map);
+            resolve_expr(scrutinee, scope, map, front_resolution);
             for arm in arms {
                 // Pattern vars are in scope for the guard and body
                 let arm_vars = collect_pat_vars(&arm.node.pattern);
                 scope.push(arm_vars);
                 if let Some(g) = &arm.node.guard {
-                    resolve_expr(g, scope, map);
+                    resolve_expr(g, scope, map, front_resolution);
                 }
-                resolve_expr(&arm.node.body, scope, map);
+                resolve_expr(&arm.node.body, scope, map, front_resolution);
                 scope.pop();
             }
         }
@@ -745,7 +833,7 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
             handler,
             ..
         } => {
-            resolve_expr(inner, scope, map);
+            resolve_expr(inner, scope, map, front_resolution);
             match handler.as_ref() {
                 ast::Handler::Named(_) => {}
                 ast::Handler::Inline { items, .. } => {
@@ -757,9 +845,9 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
                         let param_names: HashSet<String> =
                             arm.params.iter().flat_map(collect_pat_vars).collect();
                         scope.push(param_names);
-                        resolve_expr(&arm.body, scope, map);
+                        resolve_expr(&arm.body, scope, map, front_resolution);
                         if let Some(ref fb) = arm.finally_block {
-                            resolve_expr(fb, scope, map);
+                            resolve_expr(fb, scope, map, front_resolution);
                         }
                         scope.pop();
                     }
@@ -767,36 +855,36 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
             }
         }
         ExprKind::BinOp { left, right, .. } => {
-            resolve_expr(left, scope, map);
-            resolve_expr(right, scope, map);
+            resolve_expr(left, scope, map, front_resolution);
+            resolve_expr(right, scope, map, front_resolution);
         }
         ExprKind::UnaryMinus { expr: inner, .. } | ExprKind::Ascription { expr: inner, .. } => {
-            resolve_expr(inner, scope, map);
+            resolve_expr(inner, scope, map, front_resolution);
         }
         ExprKind::Tuple { elements, .. } => {
             for e in elements {
-                resolve_expr(e, scope, map);
+                resolve_expr(e, scope, map, front_resolution);
             }
         }
         ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
             for (_, _, e) in fields {
-                resolve_expr(e, scope, map);
+                resolve_expr(e, scope, map, front_resolution);
             }
         }
         ExprKind::RecordUpdate { record, fields, .. } => {
-            resolve_expr(record, scope, map);
+            resolve_expr(record, scope, map, front_resolution);
             for (_, _, e) in fields {
-                resolve_expr(e, scope, map);
+                resolve_expr(e, scope, map, front_resolution);
             }
         }
         ExprKind::FieldAccess { expr: record, .. } => {
-            resolve_expr(record, scope, map);
+            resolve_expr(record, scope, map, front_resolution);
         }
         ExprKind::EffectCall { .. } => {
             // Effect calls are resolved dynamically by the lowerer
         }
         ExprKind::Resume { value, .. } => {
-            resolve_expr(value, scope, map);
+            resolve_expr(value, scope, map, front_resolution);
         }
         ExprKind::Do {
             bindings,
@@ -809,22 +897,22 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
             let mut do_locals = HashSet::new();
             scope.push(do_locals.clone());
             for (pat, e) in bindings {
-                resolve_expr(e, scope, map);
+                resolve_expr(e, scope, map, front_resolution);
                 let new_vars = collect_pat_vars(pat);
                 do_locals.extend(new_vars);
                 scope.pop();
                 scope.push(do_locals.clone());
             }
-            resolve_expr(success, scope, map);
+            resolve_expr(success, scope, map, front_resolution);
             scope.pop();
             // Else arms have their own pattern scopes
             for arm in else_arms {
                 let arm_vars = collect_pat_vars(&arm.node.pattern);
                 scope.push(arm_vars);
                 if let Some(g) = &arm.node.guard {
-                    resolve_expr(g, scope, map);
+                    resolve_expr(g, scope, map, front_resolution);
                 }
-                resolve_expr(&arm.node.body, scope, map);
+                resolve_expr(&arm.node.body, scope, map, front_resolution);
                 scope.pop();
             }
         }
@@ -835,21 +923,21 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
                 let arm_vars = collect_pat_vars(&arm.node.pattern);
                 scope.push(arm_vars);
                 if let Some(g) = &arm.node.guard {
-                    resolve_expr(g, scope, map);
+                    resolve_expr(g, scope, map, front_resolution);
                 }
-                resolve_expr(&arm.node.body, scope, map);
+                resolve_expr(&arm.node.body, scope, map, front_resolution);
                 scope.pop();
             }
             if let Some((timeout, body)) = after_clause {
-                resolve_expr(timeout, scope, map);
-                resolve_expr(body, scope, map);
+                resolve_expr(timeout, scope, map, front_resolution);
+                resolve_expr(body, scope, map, front_resolution);
             }
         }
         ExprKind::HandlerExpr { body } => {
-            resolve_handler_body_names(body, scope, map);
+            resolve_handler_body_names(body, scope, map, front_resolution);
         }
         ExprKind::DictMethodAccess { dict, .. } => {
-            resolve_expr(dict, scope, map);
+            resolve_expr(dict, scope, map, front_resolution);
         }
         ExprKind::DictRef { name, .. } => {
             // Dict refs are trait dictionary constructors - resolve like Var
@@ -859,13 +947,13 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
         }
         ExprKind::ForeignCall { args, .. } => {
             for arg in args {
-                resolve_expr(arg, scope, map);
+                resolve_expr(arg, scope, map, front_resolution);
             }
         }
         ExprKind::StringInterp { parts, .. } => {
             for part in parts {
                 if let ast::StringPart::Expr(e) = part {
-                    resolve_expr(e, scope, map);
+                    resolve_expr(e, scope, map, front_resolution);
                 }
             }
         }
@@ -878,32 +966,32 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
             for q in qualifiers {
                 match q {
                     ComprehensionQualifier::Generator(pat, e) => {
-                        resolve_expr(e, scope, map);
+                        resolve_expr(e, scope, map, front_resolution);
                         let new_vars = collect_pat_vars(pat);
                         comp_locals.extend(new_vars);
                         scope.pop();
                         scope.push(comp_locals.clone());
                     }
                     ComprehensionQualifier::Let(pat, e) => {
-                        resolve_expr(e, scope, map);
+                        resolve_expr(e, scope, map, front_resolution);
                         let new_vars = collect_pat_vars(pat);
                         comp_locals.extend(new_vars);
                         scope.pop();
                         scope.push(comp_locals.clone());
                     }
                     ComprehensionQualifier::Guard(e) => {
-                        resolve_expr(e, scope, map);
+                        resolve_expr(e, scope, map, front_resolution);
                     }
                 }
             }
-            resolve_expr(body, scope, map);
+            resolve_expr(body, scope, map, front_resolution);
             scope.pop();
         }
         ExprKind::BitString { segments } => {
             for seg in segments {
-                resolve_expr(&seg.value, scope, map);
+                resolve_expr(&seg.value, scope, map, front_resolution);
                 if let Some(size) = &seg.size {
-                    resolve_expr(size, scope, map);
+                    resolve_expr(size, scope, map, front_resolution);
                 }
             }
         }
@@ -913,21 +1001,21 @@ fn resolve_expr(expr: &Expr, scope: &mut Scope<'_>, map: &mut ResolutionMap) {
         // Sugar nodes should be desugared before this pass
         ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {
             for seg in segments {
-                resolve_expr(&seg.node, scope, map);
+                resolve_expr(&seg.node, scope, map, front_resolution);
             }
         }
         ExprKind::PipeBack { segments } | ExprKind::ComposeForward { segments } => {
             for seg in segments {
-                resolve_expr(&seg.node, scope, map);
+                resolve_expr(&seg.node, scope, map, front_resolution);
             }
         }
         ExprKind::Cons { head, tail, .. } => {
-            resolve_expr(head, scope, map);
-            resolve_expr(tail, scope, map);
+            resolve_expr(head, scope, map, front_resolution);
+            resolve_expr(tail, scope, map, front_resolution);
         }
         ExprKind::ListLit { elements, .. } => {
             for e in elements {
-                resolve_expr(e, scope, map);
+                resolve_expr(e, scope, map, front_resolution);
             }
         }
     }

@@ -1209,11 +1209,17 @@ impl<'a> Lowerer<'a> {
         match &expr.kind {
             ExprKind::HandlerExpr { .. } => true,
             ExprKind::Var { name } => {
-                self.resolve_handler_name_opt(name).is_some()
+                let resolved_name = self.resolved_handler_binding_name(expr.id, name);
+                self.handler_defs.contains_key(&resolved_name)
+                    || self.handle_dynamic_vars.contains_key(&resolved_name)
+                    || self.handle_cond_vars.contains_key(&resolved_name)
+                    || self.resolve_handler_name_opt(name).is_some()
                     || self
                         .check_result
                         .as_ref()
-                        .is_some_and(|cr| cr.handlers.contains_key(name))
+                        .is_some_and(|cr| {
+                            cr.handlers.contains_key(&resolved_name) || cr.handlers.contains_key(name)
+                        })
             }
             ExprKind::If {
                 then_branch,
@@ -1343,14 +1349,20 @@ impl<'a> Lowerer<'a> {
         }
 
         if let ExprKind::Var { name } = &expr.kind
-            && let Some(scheme) = cr.env.get(name)
+            && let Some(scheme) = cr
+                .env
+                .get(&self.resolved_value_lookup_name(expr.id, name))
+                .or_else(|| cr.env.get(name))
             && let Some(effects) = self.dynamic_handler_info_from_type(&scheme.ty)
         {
             return Some((effects, false));
         }
 
-        if let Some((func_name, _, args)) = collect_fun_call(expr)
-            && let Some(scheme) = cr.env.get(func_name)
+        if let Some((func_name, head_expr, args)) = collect_fun_call(expr)
+            && let Some(scheme) = cr
+                .env
+                .get(&self.resolved_value_lookup_name(head_expr.id, func_name))
+                .or_else(|| cr.env.get(func_name))
         {
             let mut ty = scheme.ty.clone();
             let arg_count = args.len();

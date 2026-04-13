@@ -920,6 +920,7 @@ pub fn build_project(profile: &str) -> ProjectBuild {
             &normalized,
             codegen_info_map,
             &result.prelude_imports,
+            Some(&mod_result.resolution),
         );
         compiled_modules.insert(
             module_name.clone(),

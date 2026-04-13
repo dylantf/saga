@@ -64,6 +64,7 @@ pub fn compile_module_from_result(
         &normalized,
         codegen_info,
         &result.prelude_imports,
+        Some(&mod_result.resolution),
     );
     Some(CompiledModule {
         codegen_info: info,
@@ -102,8 +103,19 @@ pub fn emit_module_with_context(
         &codegen_info,
         &ctx.prelude_imports,
     );
-    let mut resolution_map =
-        resolve::resolve_names(module_name, &program, &codegen_info, &ctx.prelude_imports);
+    let front_resolution = check_result.and_then(|cr| {
+        cr.module_check_results()
+            .get(module_name)
+            .map(|m| &m.resolution)
+            .or(Some(&cr.resolution))
+    });
+    let mut resolution_map = resolve::resolve_names(
+        module_name,
+        &program,
+        &codegen_info,
+        &ctx.prelude_imports,
+        front_resolution,
+    );
     // Merge in pre-computed resolution maps from all compiled modules.
     // Their NodeIds don't overlap with ours, so this is a simple extend.
     for compiled in ctx.modules.values() {
