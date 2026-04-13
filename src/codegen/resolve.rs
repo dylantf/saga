@@ -141,6 +141,19 @@ fn module_name_to_erlang(path: &[String]) -> String {
         .join("_")
 }
 
+fn source_module_name(program: &Program, module_name: &str) -> String {
+    program
+        .iter()
+        .find_map(|decl| {
+            if let Decl::ModuleDecl { path, .. } = decl {
+                Some(path.join("."))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| module_name.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2+3: Function/variable name resolution
 // ---------------------------------------------------------------------------
@@ -399,190 +412,22 @@ pub fn resolve_names(
     prelude_imports: &[Decl],
     front_resolution: &FrontResolutionResult,
 ) -> ResolutionMap {
-    let source_module_name = program
-        .iter()
-        .find_map(|decl| {
-            if let Decl::ModuleDecl { path, .. } = decl {
-                Some(path.join("."))
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| module_name.to_string());
+    let source_module_name = source_module_name(program, module_name);
     let mut scope: HashMap<String, ScopedName> = HashMap::new();
     let mut qualified_scope: HashMap<String, ScopedName> = HashMap::new();
-
-    // Step 1: Register local functions (highest priority)
-    let mut local_funs: HashMap<String, usize> = HashMap::new();
-    for decl in program {
-        match decl {
-            Decl::FunBinding { name, params, .. } => {
-                local_funs.entry(name.clone()).or_insert(params.len());
-            }
-            Decl::Val { name, .. } => {
-                local_funs.entry(name.clone()).or_insert(0);
-            }
-            Decl::FunSignature {
-                name,
-                params,
-                annotations,
-                ..
-            } => {
-                if extract_external(annotations).is_none() {
-                    // Signature without body: register arity from params
-                    local_funs.entry(name.clone()).or_insert(params.len());
-                } else {
-                    // @external functions lower to generated local wrappers with
-                    // the same source-level arity.
-                    local_funs.entry(name.clone()).or_insert(params.len());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Register local functions (overrides externals with same name).
-    // Effects for local functions are tracked by the lowerer's fun_info (from init_module).
-    for (name, arity) in &local_funs {
-        scope.insert(
-            name.clone(),
-            ScopedName::LocalFun {
-                name: name.clone(),
-                source_module: Some(source_module_name.clone()),
-                canonical_name: format!("{}.{}", source_module_name, name),
-                arity: *arity,
-                effects: Vec::new(),
-            },
-        );
-    }
-
-    // Build effect op count map from all modules for CPS arity calculation.
-    // Effect names -> number of ops (e.g. "TestRunner" -> 3).
-    let mut effect_op_counts: HashMap<String, usize> = HashMap::new();
-    for info in codegen_info.values() {
-        for eff_def in &info.effect_defs {
-            effect_op_counts
-                .entry(eff_def.name.clone())
-                .or_insert(eff_def.ops.len());
-        }
-    }
-
-    // Step 2: Register imports (lower priority than local, prelude < user)
-    // Process prelude imports first, then user imports override them.
-    let import_decls: Vec<&Decl> = prelude_imports
-        .iter()
-        .chain(program.iter().filter(|d| matches!(d, Decl::Import { .. })))
-        .collect();
-
-    for decl in &import_decls {
-        if let Decl::Import {
-            module_path,
-            alias: import_alias,
-            exposing,
-            ..
-        } = decl
-        {
-            let mod_name = module_path.join(".");
-            let mod_path_strs: Vec<String> = module_path.to_vec();
-            let erlang_mod = module_name_to_erlang(&mod_path_strs);
-            let alias = import_alias
-                .as_deref()
-                .unwrap_or_else(|| module_path.last().map(|s| s.as_str()).unwrap_or(""));
-            let alias_differs = alias != mod_name;
-
-            let info = match codegen_info.get(&mod_name) {
-                Some(info) => info,
-                None => continue,
-            };
-
-            let is_exposed = |name: &str| -> bool {
-                match exposing {
-                    None => false, // qualified-only import
-                    Some(names) => names.iter().any(|n| n == name),
-                }
-            };
-
-            // Build effect lookup for this module
-            let fun_effects_map: HashMap<&str, &Vec<String>> = info
-                .fun_effects
-                .iter()
-                .map(|(n, effs)| (n.as_str(), effs))
-                .collect();
-
-            // Register exported functions
-            for (name, scheme) in &info.exports {
-                let (arity, _) =
-                    crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
-                let dict_params =
-                    crate::codegen::lower::util::dict_param_count(&scheme.constraints);
-                let effects = fun_effects_map
-                    .get(name.as_str())
-                    .cloned()
-                    .cloned()
-                    .unwrap_or_default();
-                // Compute CPS-expanded arity: user args + dict params + handler params + ReturnK
-                let handler_param_count: usize = effects
-                    .iter()
-                    .map(|eff| effect_op_counts.get(eff).copied().unwrap_or(0))
-                    .sum();
-                let return_k = if handler_param_count > 0 { 1 } else { 0 };
-                let expanded_arity = arity + dict_params + handler_param_count + return_k;
-
-                let scoped = ScopedName::ImportedFun {
-                    erlang_mod: erlang_mod.clone(),
-                    name: name.clone(),
-                    source_module: mod_name.clone(),
-                    canonical_name: format!("{}.{}", mod_name, name),
-                    arity: expanded_arity,
-                    effects,
-                };
-
-                // Canonical: full module path (e.g. "Std.String.replace")
-                let canonical = format!("{}.{}", mod_name, name);
-                qualified_scope
-                    .entry(canonical)
-                    .or_insert_with(|| scoped.clone());
-
-                // Alias: short prefix (e.g. "String.replace") if different
-                if alias_differs {
-                    let aliased = format!("{}.{}", alias, name);
-                    qualified_scope
-                        .entry(aliased)
-                        .or_insert_with(|| scoped.clone());
-                }
-
-                // Register unqualified form only if exposed and not shadowed by local
-                if is_exposed(name) && !local_funs.contains_key(name) {
-                    scope.entry(name.clone()).or_insert(scoped);
-                }
-            }
-
-            // NOTE: We intentionally do NOT register private externals from
-            // other modules into the bare scope. They are accessible through
-            // their module's own pre-computed ResolutionMap (merged in by
-            // emit_module_with_context) when inlining handler bodies.
-        }
-    }
-
-    // Step 3: Register trait impl dicts from all modules.
-    // The elaborator generates DictRef nodes that reference dicts from any module,
-    // not just explicitly imported ones.
-    for (mod_name, info) in codegen_info {
-        let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
-        let erlang_mod = module_name_to_erlang(&mod_path);
-        for d in &info.trait_impl_dicts {
-            scope
-                .entry(d.dict_name.clone())
-                .or_insert(ScopedName::ImportedFun {
-                    erlang_mod: erlang_mod.clone(),
-                    name: d.dict_name.clone(),
-                    source_module: mod_name.clone(),
-                    canonical_name: d.dict_name.clone(),
-                    arity: d.arity,
-                    effects: Vec::new(),
-                });
-        }
-    }
+    let local_funs = collect_local_fun_arities(program);
+    register_local_scope_funs(&mut scope, &local_funs, &source_module_name);
+    let effect_op_counts = build_effect_op_counts(codegen_info);
+    register_import_scopes(
+        program,
+        prelude_imports,
+        codegen_info,
+        &local_funs,
+        &effect_op_counts,
+        &mut scope,
+        &mut qualified_scope,
+    );
+    register_trait_impl_dicts(codegen_info, &mut scope);
 
     // Step 4: Walk the AST with scope-aware resolution.
     let mut lexical = Scope::new(&scope, &qualified_scope);
@@ -1017,5 +862,179 @@ fn scoped_to_resolved(scoped: &ScopedName) -> ResolvedName {
             arity: *arity,
             effects: effects.clone(),
         },
+    }
+}
+
+fn collect_local_fun_arities(program: &Program) -> HashMap<String, usize> {
+    let mut local_funs: HashMap<String, usize> = HashMap::new();
+    for decl in program {
+        match decl {
+            Decl::FunBinding { name, params, .. } => {
+                local_funs.entry(name.clone()).or_insert(params.len());
+            }
+            Decl::Val { name, .. } => {
+                local_funs.entry(name.clone()).or_insert(0);
+            }
+            Decl::FunSignature {
+                name,
+                params,
+                annotations,
+                ..
+            } => {
+                let _ = extract_external(annotations);
+                local_funs.entry(name.clone()).or_insert(params.len());
+            }
+            _ => {}
+        }
+    }
+    local_funs
+}
+
+fn register_local_scope_funs(
+    scope: &mut HashMap<String, ScopedName>,
+    local_funs: &HashMap<String, usize>,
+    source_module_name: &str,
+) {
+    for (name, arity) in local_funs {
+        scope.insert(
+            name.clone(),
+            ScopedName::LocalFun {
+                name: name.clone(),
+                source_module: Some(source_module_name.to_string()),
+                canonical_name: format!("{}.{}", source_module_name, name),
+                arity: *arity,
+                effects: Vec::new(),
+            },
+        );
+    }
+}
+
+fn build_effect_op_counts(
+    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+) -> HashMap<String, usize> {
+    let mut effect_op_counts: HashMap<String, usize> = HashMap::new();
+    for info in codegen_info.values() {
+        for eff_def in &info.effect_defs {
+            effect_op_counts
+                .entry(eff_def.name.clone())
+                .or_insert(eff_def.ops.len());
+        }
+    }
+    effect_op_counts
+}
+
+fn register_import_scopes(
+    program: &Program,
+    prelude_imports: &[Decl],
+    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+    local_funs: &HashMap<String, usize>,
+    effect_op_counts: &HashMap<String, usize>,
+    scope: &mut HashMap<String, ScopedName>,
+    qualified_scope: &mut HashMap<String, ScopedName>,
+) {
+    let import_decls: Vec<&Decl> = prelude_imports
+        .iter()
+        .chain(program.iter().filter(|d| matches!(d, Decl::Import { .. })))
+        .collect();
+
+    for decl in &import_decls {
+        if let Decl::Import {
+            module_path,
+            alias: import_alias,
+            exposing,
+            ..
+        } = decl
+        {
+            let mod_name = module_path.join(".");
+            let mod_path_strs: Vec<String> = module_path.to_vec();
+            let erlang_mod = module_name_to_erlang(&mod_path_strs);
+            let alias = import_alias
+                .as_deref()
+                .unwrap_or_else(|| module_path.last().map(|s| s.as_str()).unwrap_or(""));
+            let alias_differs = alias != mod_name;
+
+            let info = match codegen_info.get(&mod_name) {
+                Some(info) => info,
+                None => continue,
+            };
+
+            let is_exposed = |name: &str| -> bool {
+                match exposing {
+                    None => false,
+                    Some(names) => names.iter().any(|n| n == name),
+                }
+            };
+
+            let fun_effects_map: HashMap<&str, &Vec<String>> = info
+                .fun_effects
+                .iter()
+                .map(|(n, effs)| (n.as_str(), effs))
+                .collect();
+
+            for (name, scheme) in &info.exports {
+                let (arity, _) =
+                    crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
+                let dict_params =
+                    crate::codegen::lower::util::dict_param_count(&scheme.constraints);
+                let effects = fun_effects_map
+                    .get(name.as_str())
+                    .cloned()
+                    .cloned()
+                    .unwrap_or_default();
+                let handler_param_count: usize = effects
+                    .iter()
+                    .map(|eff| effect_op_counts.get(eff).copied().unwrap_or(0))
+                    .sum();
+                let return_k = if handler_param_count > 0 { 1 } else { 0 };
+                let expanded_arity = arity + dict_params + handler_param_count + return_k;
+
+                let scoped = ScopedName::ImportedFun {
+                    erlang_mod: erlang_mod.clone(),
+                    name: name.clone(),
+                    source_module: mod_name.clone(),
+                    canonical_name: format!("{}.{}", mod_name, name),
+                    arity: expanded_arity,
+                    effects,
+                };
+
+                let canonical = format!("{}.{}", mod_name, name);
+                qualified_scope
+                    .entry(canonical)
+                    .or_insert_with(|| scoped.clone());
+
+                if alias_differs {
+                    let aliased = format!("{}.{}", alias, name);
+                    qualified_scope
+                        .entry(aliased)
+                        .or_insert_with(|| scoped.clone());
+                }
+
+                if is_exposed(name) && !local_funs.contains_key(name) {
+                    scope.entry(name.clone()).or_insert(scoped);
+                }
+            }
+        }
+    }
+}
+
+fn register_trait_impl_dicts(
+    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+    scope: &mut HashMap<String, ScopedName>,
+) {
+    for (mod_name, info) in codegen_info {
+        let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
+        let erlang_mod = module_name_to_erlang(&mod_path);
+        for d in &info.trait_impl_dicts {
+            scope
+                .entry(d.dict_name.clone())
+                .or_insert(ScopedName::ImportedFun {
+                    erlang_mod: erlang_mod.clone(),
+                    name: d.dict_name.clone(),
+                    source_module: mod_name.clone(),
+                    canonical_name: d.dict_name.clone(),
+                    arity: d.arity,
+                    effects: Vec::new(),
+                });
+        }
     }
 }
