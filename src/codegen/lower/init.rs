@@ -75,10 +75,8 @@ impl<'a> Lowerer<'a> {
                 ..
             } = decl
             {
-                let mut sorted_effects: Vec<String> = effects
-                    .iter()
-                    .map(|e| resolve_effect(e))
-                    .collect();
+                let mut sorted_effects: Vec<String> =
+                    effects.iter().map(|e| resolve_effect(e)).collect();
                 sorted_effects.sort();
                 let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
                 for (i, (_param_name, type_expr)) in params.iter().enumerate() {
@@ -86,12 +84,7 @@ impl<'a> Lowerer<'a> {
                     if !effs.is_empty() {
                         let mut sorted: Vec<String> = effs
                             .into_iter()
-                            .map(|e| {
-                                self.effect_canonical
-                                    .get(&e)
-                                    .cloned()
-                                    .unwrap_or(e)
-                            })
+                            .map(|e| self.effect_canonical.get(&e).cloned().unwrap_or(e))
                             .collect();
                         sorted.sort();
                         param_effs.insert(i, sorted);
@@ -325,7 +318,9 @@ impl<'a> Lowerer<'a> {
                                     .params
                                     .iter()
                                     .enumerate()
-                                    .filter_map(|(idx, (_, ty))| (!is_runtime_unit_param(ty)).then_some(idx))
+                                    .filter_map(|(idx, (_, ty))| {
+                                        (!is_runtime_unit_param(ty)).then_some(idx)
+                                    })
                                     .collect(),
                                 param_absorbed_effects,
                             },

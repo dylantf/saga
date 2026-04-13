@@ -77,17 +77,10 @@ struct Elaborator {
 
 impl Elaborator {
     fn resolved_trait_name(&self, id: crate::ast::NodeId, source: &str) -> String {
-        self.resolution
-            .trait_ref(id)
-            .unwrap_or(source)
-            .to_string()
+        self.resolution.trait_ref(id).unwrap_or(source).to_string()
     }
 
-    fn resolved_impl_trait_name(
-        &self,
-        id: crate::ast::NodeId,
-        source: &str,
-    ) -> String {
+    fn resolved_impl_trait_name(&self, id: crate::ast::NodeId, source: &str) -> String {
         self.resolution
             .impl_trait_ref(id)
             .or_else(|| self.resolution.trait_ref(id))
@@ -95,11 +88,7 @@ impl Elaborator {
             .to_string()
     }
 
-    fn resolved_impl_target_type(
-        &self,
-        id: crate::ast::NodeId,
-        source: &str,
-    ) -> String {
+    fn resolved_impl_target_type(&self, id: crate::ast::NodeId, source: &str) -> String {
         self.resolution
             .impl_target_type_ref(id)
             .unwrap_or(source)
@@ -322,11 +311,9 @@ impl Elaborator {
                     where_clause,
                     ..
                 } => {
-                    let canonical_trait =
-                        self.resolved_impl_trait_name(*id, trait_name);
+                    let canonical_trait = self.resolved_impl_trait_name(*id, trait_name);
                     let canonical_trait_type_args = self.resolved_trait_type_args(trait_type_args);
-                    let canonical_target_type =
-                        self.resolved_impl_target_type(*id, target_type);
+                    let canonical_target_type = self.resolved_impl_target_type(*id, target_type);
                     let dict_name = crate::typechecker::make_dict_name(
                         &canonical_trait,
                         &canonical_trait_type_args,
@@ -422,11 +409,9 @@ impl Elaborator {
                     span,
                     ..
                 } => {
-                    let canonical_trait =
-                        self.resolved_impl_trait_name(*id, trait_name);
+                    let canonical_trait = self.resolved_impl_trait_name(*id, trait_name);
                     let canonical_trait_type_args = self.resolved_trait_type_args(trait_type_args);
-                    let canonical_target_type =
-                        self.resolved_impl_target_type(*id, target_type);
+                    let canonical_target_type = self.resolved_impl_target_type(*id, target_type);
                     let dict_name = self
                         .dict_names
                         .get(&(
@@ -1463,7 +1448,7 @@ impl Elaborator {
                         match &ann.node {
                             HandlerItem::Named(_) => ann.clone(),
                             HandlerItem::Arm(arm) => {
-                            Annotated::bare(HandlerItem::Arm(elaborate_arm(arm)))
+                                Annotated::bare(HandlerItem::Arm(elaborate_arm(arm)))
                             }
                             HandlerItem::Return(arm) => {
                                 Annotated::bare(HandlerItem::Return(elaborate_arm(arm)))

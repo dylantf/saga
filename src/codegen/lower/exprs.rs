@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use super::pats::{self, lower_pat};
 use super::util::{
-    arity_and_effects_from_type, binop_call, collect_effect_call, collect_fun_call, core_var,
+    arity_and_effects_from_type, binop_call, collect_effect_call_expr, collect_fun_call, core_var,
     has_nested_effect_call, lower_string_to_binary, mangle_ctor_atom,
     param_absorbed_effects_from_type, pat_binding_var,
 };
@@ -168,9 +168,9 @@ impl<'a> Lowerer<'a> {
         expr: &Expr,
         return_k: Option<CExpr>,
     ) -> CExpr {
-        if let Some((op_name, qualifier, args)) = collect_effect_call(expr) {
+        if let Some((head_expr, op_name, qualifier, args)) = collect_effect_call_expr(expr) {
             let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
-            self.lower_effect_call(op_name, qualifier, &args_owned, return_k)
+            self.lower_effect_call(head_expr.id, op_name, qualifier, &args_owned, return_k)
         } else if self.has_nested_effectful_expr(expr) {
             let k_var = self.fresh();
             let k_ce = return_k.expect("nested terminal effectful expr requires return_k");
@@ -261,9 +261,10 @@ impl<'a> Lowerer<'a> {
     /// Lower an expression in a context where successful completion should
     /// flow to the explicit continuation `k_var`.
     fn lower_terminal_effectful_expr_to_k(&mut self, expr: &Expr, k_var: &str) -> CExpr {
-        if let Some((op_name, qualifier, args)) = collect_effect_call(expr) {
+        if let Some((head_expr, op_name, qualifier, args)) = collect_effect_call_expr(expr) {
             let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
             self.lower_effect_call(
+                head_expr.id,
                 op_name,
                 qualifier,
                 &args_owned,
@@ -889,19 +890,18 @@ impl<'a> Lowerer<'a> {
                 // Effect calls may be bare (EffectCall) or wrapped in App nodes
                 // (App(EffectCall, arg1), arg2, ...).
                 let effect_info = match first {
-                    Stmt::Expr(e) => {
-                        collect_effect_call(e).map(|(name, qual, args)| (None, name, qual, args))
-                    }
-                    Stmt::Let { pattern, value, .. } => collect_effect_call(value)
-                        .map(|(name, qual, args)| (Some(pattern), name, qual, args)),
+                    Stmt::Expr(e) => collect_effect_call_expr(e)
+                        .map(|(head, name, qual, args)| (None, head.id, name, qual, args)),
+                    Stmt::Let { pattern, value, .. } => collect_effect_call_expr(value)
+                        .map(|(head, name, qual, args)| (Some(pattern), head.id, name, qual, args)),
                     Stmt::LetFun { .. } => None,
                 };
 
-                if let Some((pat, op_name, qualifier, args)) = effect_info {
+                if let Some((pat, effect_call_id, op_name, qualifier, args)) = effect_info {
                     let k = self.lower_rest_block_k_with_return_k(pat, rest, return_k);
                     // We need to own the args for lower_effect_call
                     let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
-                    self.lower_effect_call(op_name, qualifier, &args_owned, Some(k))
+                    self.lower_effect_call(effect_call_id, op_name, qualifier, &args_owned, Some(k))
                 } else {
                     // Check if value expression has effect calls nested in branches.
                     // If so, build a continuation K from the remaining statements and
@@ -1053,19 +1053,24 @@ impl<'a> Lowerer<'a> {
             [Stmt::Let { value, .. }] => self.lower_branch_with_k(value, k_var),
             [first, rest @ ..] => {
                 let effect_info = match first {
-                    Stmt::Expr(e) => {
-                        collect_effect_call(e).map(|(name, qual, args)| (None, name, qual, args))
-                    }
-                    Stmt::Let { pattern, value, .. } => collect_effect_call(value)
-                        .map(|(name, qual, args)| (Some(pattern), name, qual, args)),
+                    Stmt::Expr(e) => collect_effect_call_expr(e)
+                        .map(|(head, name, qual, args)| (None, head.id, name, qual, args)),
+                    Stmt::Let { pattern, value, .. } => collect_effect_call_expr(value)
+                        .map(|(head, name, qual, args)| (Some(pattern), head.id, name, qual, args)),
                     Stmt::LetFun { .. } => None,
                 };
 
-                if let Some((pat, op_name, qualifier, args)) = effect_info {
+                if let Some((pat, effect_call_id, op_name, qualifier, args)) = effect_info {
                     // Direct effect call at statement level: CPS with rest -> K-threaded
                     let inner_k = self.lower_rest_block_with_k_k(pat, rest, k_var);
                     let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
-                    self.lower_effect_call(op_name, qualifier, &args_owned, Some(inner_k))
+                    self.lower_effect_call(
+                        effect_call_id,
+                        op_name,
+                        qualifier,
+                        &args_owned,
+                        Some(inner_k),
+                    )
                 } else {
                     let (pat_opt, value_expr) = match first {
                         Stmt::Let { pattern, value, .. } => (Some(pattern), value),

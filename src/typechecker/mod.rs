@@ -12,8 +12,8 @@ mod records;
 mod resolve;
 mod result;
 mod unify;
+pub(crate) use resolve::{ResolutionResult, ResolvedValue};
 pub use result::{CheckResult, LetDictInfo};
-pub(crate) use resolve::{ResolvedValue, ResolutionResult};
 
 #[cfg(test)]
 mod tests;
@@ -1387,7 +1387,10 @@ impl Checker {
         node_id: crate::ast::NodeId,
         source: &str,
     ) -> String {
-        self.resolution.record_type(node_id).unwrap_or(source).to_string()
+        self.resolution
+            .record_type(node_id)
+            .unwrap_or(source)
+            .to_string()
     }
 
     pub(crate) fn resolved_trait_name_at(&self, id: crate::ast::NodeId, source: &str) -> String {
@@ -1420,7 +1423,11 @@ impl Checker {
             .to_string()
     }
 
-    pub(crate) fn resolved_handler_name(&self, node_id: crate::ast::NodeId, source: &str) -> String {
+    pub(crate) fn resolved_handler_name(
+        &self,
+        node_id: crate::ast::NodeId,
+        source: &str,
+    ) -> String {
         match self.resolution.handler_ref(node_id) {
             Some(ResolvedValue::Local { name, .. }) => name.clone(),
             Some(ResolvedValue::Global { lookup_name }) => lookup_name.clone(),

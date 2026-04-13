@@ -1440,7 +1440,8 @@ main () = {
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(
-        err.message.contains("type mismatch: expected String, got Unit"),
+        err.message
+            .contains("type mismatch: expected String, got Unit"),
         "got: {}",
         err.message
     );
@@ -1458,7 +1459,8 @@ main () = {
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(
-        err.message.contains("type mismatch: expected String, got Unit"),
+        err.message
+            .contains("type mismatch: expected String, got Unit"),
         "got: {}",
         err.message
     );

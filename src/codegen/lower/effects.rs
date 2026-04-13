@@ -67,7 +67,7 @@ enum OpHandlerPlan {
 
 enum WithHandlerLayer {
     Named {
-        name: String,
+        reference: crate::ast::NamedHandlerRef,
     },
     Inline {
         arms: Vec<HandlerArm>,
@@ -182,20 +182,16 @@ impl<'a> Lowerer<'a> {
     /// (standalone effect call not in a block), we use an identity continuation.
     pub(super) fn lower_effect_call(
         &mut self,
+        node_id: crate::ast::NodeId,
         op_name: &str,
         qualifier: Option<&str>,
         args: &[Expr],
         continuation: Option<CExpr>,
     ) -> CExpr {
         // Resolve the effect name (canonical form).
-        let effect_name = if let Some(q) = qualifier {
-            self.canonicalize_effect(q)
-        } else {
-            self.op_to_effect
-                .get(op_name)
-                .unwrap_or_else(|| panic!("unknown effect operation: {}", op_name))
-                .clone()
-        };
+        let effect_name = self
+            .resolved_effect_call_name(node_id, op_name, qualifier)
+            .unwrap_or_else(|| panic!("unknown effect operation: {}", op_name));
         let effect_key = format!("{}.{}", effect_name, op_name);
 
         // Lower args (shared between direct and CPS paths).
@@ -393,9 +389,9 @@ impl<'a> Lowerer<'a> {
 
         let mut condition_bindings: Vec<(String, CExpr)> = Vec::new();
         let named_item = match &normalized {
-            WithHandlerLayer::Named { name } => {
-                self.pre_register_local_with_binding(expr, name);
-                let item = self.resolve_named_handler_item(name);
+            WithHandlerLayer::Named { reference } => {
+                self.pre_register_local_with_binding(expr, &reference.name);
+                let item = self.resolve_named_handler_item(reference);
                 if let NamedHandlerItem::Conditional {
                     cond_var, cond_ce, ..
                 } = &item
@@ -648,11 +644,7 @@ impl<'a> Lowerer<'a> {
                 .map(|runtime_idx| CExpr::Var(param_vars[runtime_idx].clone()))
                 .unwrap_or_else(|| CExpr::Lit(CLit::Atom("unit".to_string())));
             let (var, wrapped_body) = self.destructure_pat(pat, body_ce);
-            body_ce = CExpr::Let(
-                var,
-                Box::new(bound_value),
-                Box::new(wrapped_body),
-            );
+            body_ce = CExpr::Let(var, Box::new(bound_value), Box::new(wrapped_body));
         }
 
         // For abort handlers (no resume) with finally: append cleanup after body.
@@ -767,7 +759,7 @@ impl<'a> Lowerer<'a> {
     fn normalize_with_handler(&self, handler: &Handler) -> WithHandlerLayer {
         match handler {
             Handler::Named(named) => WithHandlerLayer::Named {
-                name: named.name.clone(),
+                reference: named.clone(),
             },
             Handler::Inline { items, .. } => {
                 let mut inline_arms = Vec::new();
@@ -816,7 +808,11 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn resolve_named_handler_item(&self, name: &str) -> NamedHandlerItem {
+    fn resolve_named_handler_item(
+        &self,
+        reference: &crate::ast::NamedHandlerRef,
+    ) -> NamedHandlerItem {
+        let name = &reference.name;
         if let Some((tuple_var, effects, has_return)) = self.handle_dynamic_vars.get(name).cloned()
         {
             return NamedHandlerItem::Dynamic {
@@ -855,7 +851,7 @@ impl<'a> Lowerer<'a> {
                 else_info,
             };
         }
-        let canonical = self.resolve_handler_name(name);
+        let canonical = self.resolved_handler_binding_name(reference.id, name);
         let info = self
             .handler_defs
             .get(&canonical)
@@ -870,7 +866,12 @@ impl<'a> Lowerer<'a> {
     }
 
     fn effect_for_handler_arm(&self, arm: &HandlerArm) -> Option<String> {
-        if let Some(ref q) = arm.qualifier {
+        if let Some(resolved) = self
+            .current_front_resolution()
+            .and_then(|r| r.handler_arm_qualifier(arm.id))
+        {
+            Some(resolved.to_string())
+        } else if let Some(ref q) = arm.qualifier {
             Some(self.canonicalize_effect(q))
         } else {
             self.op_to_effect.get(&arm.op_name).cloned()
@@ -886,7 +887,12 @@ impl<'a> Lowerer<'a> {
         info.arms
             .iter()
             .find(|arm| {
-                if let Some(ref q) = arm.qualifier {
+                if let Some(resolved) = self
+                    .current_front_resolution()
+                    .and_then(|r| r.handler_arm_qualifier(arm.id))
+                {
+                    resolved == eff && arm.op_name == op
+                } else if let Some(ref q) = arm.qualifier {
                     self.canonicalize_effect(q) == eff && arm.op_name == op
                 } else {
                     arm.op_name == op
@@ -1076,11 +1082,7 @@ impl<'a> Lowerer<'a> {
     /// that escape those bindings. Without this, naive walking treats inner
     /// shadowing names (e.g. a handler lambda that rebinds `Conn = _HArg0`)
     /// as references to the outer name, producing spurious dependencies.
-    fn collect_free_var_refs(
-        expr: &CExpr,
-        bound: &mut HashSet<String>,
-        out: &mut HashSet<String>,
-    ) {
+    fn collect_free_var_refs(expr: &CExpr, bound: &mut HashSet<String>, out: &mut HashSet<String>) {
         match expr {
             CExpr::Var(v) => {
                 if !bound.contains(v) {

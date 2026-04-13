@@ -1967,7 +1967,9 @@ fn with_named_handler() {
                     ..
                 }
             ));
-            assert!(matches!(handler.as_ref(), Handler::Named(named) if named.name == "console_log"));
+            assert!(
+                matches!(handler.as_ref(), Handler::Named(named) if named.name == "console_log")
+            );
         }
         _ => panic!("expected With, got {:?}", expr),
     }
@@ -2252,7 +2254,8 @@ fn where_clause_with_trait_type_args() {
             assert_eq!(where_clause[0].traits.len(), 1);
             let tr = &where_clause[0].traits[0];
             assert_eq!(tr.name, "ConvertTo");
-            let type_arg_names: Vec<&str> = tr.type_args.iter().map(|te| te.simple_name()).collect();
+            let type_arg_names: Vec<&str> =
+                tr.type_args.iter().map(|te| te.simple_name()).collect();
             assert_eq!(type_arg_names, vec!["b"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
@@ -2268,7 +2271,8 @@ fn where_clause_with_concrete_trait_type_arg() {
             assert_eq!(where_clause.len(), 1);
             let tr = &where_clause[0].traits[0];
             assert_eq!(tr.name, "ConvertTo");
-            let type_arg_names: Vec<&str> = tr.type_args.iter().map(|te| te.simple_name()).collect();
+            let type_arg_names: Vec<&str> =
+                tr.type_args.iter().map(|te| te.simple_name()).collect();
             assert_eq!(type_arg_names, vec!["Int"]);
         }
         _ => panic!("expected FunAnnotation, got {:?}", decls[0]),
@@ -2399,7 +2403,8 @@ fn impl_def_with_trait_type_args() {
             ..
         } => {
             assert_eq!(trait_name, "ConvertTo");
-            let type_arg_names: Vec<&str> = trait_type_args.iter().map(|te| te.simple_name()).collect();
+            let type_arg_names: Vec<&str> =
+                trait_type_args.iter().map(|te| te.simple_name()).collect();
             assert_eq!(type_arg_names, vec!["NOK"]);
             assert_eq!(target_type, "USD");
             assert_eq!(methods.len(), 1);

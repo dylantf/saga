@@ -45,16 +45,16 @@ impl Checker {
                 ..
             } => {
                 let resolved_ctor = self.resolved_constructor_name(*id, name);
-                let ctor_scheme = self
-                    .constructors
-                    .get(&resolved_ctor)
-                    .cloned()
-                    .ok_or_else(|| {
-                        Diagnostic::error_at(
-                            *span,
-                            format!("undefined constructor in pattern: {}", name),
-                        )
-                    })?;
+                let ctor_scheme =
+                    self.constructors
+                        .get(&resolved_ctor)
+                        .cloned()
+                        .ok_or_else(|| {
+                            Diagnostic::error_at(
+                                *span,
+                                format!("undefined constructor in pattern: {}", name),
+                            )
+                        })?;
                 // Record reference to constructor definition for find-references/rename
                 {
                     let def_id = self.lsp.constructor_def_ids.get(&resolved_ctor).copied();

@@ -501,9 +501,9 @@ impl Checker {
                             .map(|(_, id)| *id)
                         {
                             for tr in &bound.traits {
-                                let resolved_trait =
-                                    self.resolved_trait_name_at(tr.id, &tr.name);
-                                let extra_types: Vec<Type> = tr.type_args
+                                let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
+                                let extra_types: Vec<Type> = tr
+                                    .type_args
                                     .iter()
                                     .map(|te| self.convert_user_type_expr(te, &mut params_list))
                                     .collect();
@@ -676,9 +676,9 @@ impl Checker {
                                 .where_bound_var_names
                                 .insert(var_id, bound.type_var.clone());
                             for tr in &bound.traits {
-                                let resolved_trait =
-                                    self.resolved_trait_name_at(tr.id, &tr.name);
-                                let extra_types: Vec<Type> = tr.type_args
+                                let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
+                                let extra_types: Vec<Type> = tr
+                                    .type_args
                                     .iter()
                                     .map(|te| self.convert_user_type_expr(te, &mut params_list))
                                     .collect();
@@ -1855,7 +1855,8 @@ impl Checker {
             let mut belongs_to_declared = false;
             let mut matched_op: Option<EffectOpSig> = None;
             for effect_ref in effect_names {
-                let resolved_effect_name = self.resolved_effect_name(effect_ref.id, &effect_ref.name);
+                let resolved_effect_name =
+                    self.resolved_effect_name(effect_ref.id, &effect_ref.name);
                 if let Some(info) = self.effects.get(&resolved_effect_name)
                     && let Some(op) = info.ops.iter().find(|o| o.name == arm.op_name)
                 {
@@ -2105,13 +2106,16 @@ impl Checker {
                                     let resolved_trait = self
                                         .resolve_trait_name(&tr.name)
                                         .unwrap_or_else(|| tr.name.clone());
-                                    let extra_var_ids: Vec<u32> = tr.type_args
+                                    let extra_var_ids: Vec<u32> = tr
+                                        .type_args
                                         .iter()
                                         .filter_map(|te| match te {
-                                            crate::ast::TypeExpr::Var { name, .. } => type_var_params
-                                                .iter()
-                                                .find(|(n, _)| n == name)
-                                                .map(|(_, id)| *id),
+                                            crate::ast::TypeExpr::Var { name, .. } => {
+                                                type_var_params
+                                                    .iter()
+                                                    .find(|(n, _)| n == name)
+                                                    .map(|(_, id)| *id)
+                                            }
                                             _ => None,
                                         })
                                         .collect();

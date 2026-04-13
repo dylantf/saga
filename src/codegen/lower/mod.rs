@@ -15,8 +15,9 @@ use errors::{ErrorInfo, ErrorKind, SourceInfo};
 use init::{PendingAnnotation, extract_external};
 use pats::{lower_params, lower_pat};
 use util::{
-    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_qualified_call,
-    core_var, field_access_record_name, lower_lit, lower_string_to_binary, process_string_escapes,
+    cerl_call, collect_ctor_call, collect_effect_call, collect_effect_call_expr, collect_fun_call,
+    collect_qualified_call, core_var, field_access_record_name, lower_lit, lower_string_to_binary,
+    process_string_escapes,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -298,6 +299,41 @@ impl<'a> Lowerer<'a> {
                     .get(&self.current_source_module)
                     .map(|m| &m.front_resolution)
             })
+    }
+
+    fn resolved_effect_call_name(
+        &self,
+        node_id: crate::ast::NodeId,
+        op_name: &str,
+        qualifier: Option<&str>,
+    ) -> Option<String> {
+        self.current_front_resolution()
+            .and_then(|r| r.effect_call_qualifier(node_id))
+            .map(|s| s.to_string())
+            .or_else(|| qualifier.map(|q| self.canonicalize_effect(q)))
+            .or_else(|| self.op_to_effect.get(op_name).cloned())
+    }
+
+    fn resolved_handler_binding_name(&self, node_id: crate::ast::NodeId, fallback: &str) -> String {
+        let normalize_lookup = |lookup_name: &str| {
+            if self.handle_dynamic_vars.contains_key(lookup_name)
+                || self.handle_cond_vars.contains_key(lookup_name)
+                || self.handler_defs.contains_key(lookup_name)
+            {
+                lookup_name.to_string()
+            } else {
+                self.resolve_handler_name(lookup_name)
+            }
+        };
+        self.current_front_resolution()
+            .and_then(|r| r.handler_ref(node_id))
+            .map(|resolved| match resolved {
+                crate::typechecker::ResolvedValue::Local { name, .. } => normalize_lookup(name),
+                crate::typechecker::ResolvedValue::Global { lookup_name } => {
+                    normalize_lookup(lookup_name)
+                }
+            })
+            .unwrap_or_else(|| self.resolve_handler_name(fallback))
     }
 
     fn record_fields_for_name(&self, name: &str) -> Option<&Vec<String>> {
@@ -648,14 +684,11 @@ impl<'a> Lowerer<'a> {
 
     fn lower_eta_reduced_effect_op_ref(
         &mut self,
+        node_id: crate::ast::NodeId,
         op_name: &str,
         qualifier: Option<&str>,
     ) -> Option<CExpr> {
-        let effect_name = if let Some(q) = qualifier {
-            self.canonicalize_effect(q)
-        } else {
-            self.op_to_effect.get(op_name)?.clone()
-        };
+        let effect_name = self.resolved_effect_call_name(node_id, op_name, qualifier)?;
         let key = format!("{}.{}", effect_name, op_name);
         let op_info = self
             .effect_defs
@@ -713,7 +746,7 @@ impl<'a> Lowerer<'a> {
     fn lower_eta_reduced_effect_expr(&mut self, expr: &Expr) -> Option<CExpr> {
         let mut args = Vec::new();
         let mut current = expr;
-        let (op_name, qualifier) = loop {
+        let (effect_call_id, op_name, qualifier) = loop {
             match &current.kind {
                 ExprKind::App { func, arg, .. } => {
                     args.push(arg.as_ref());
@@ -723,7 +756,7 @@ impl<'a> Lowerer<'a> {
                     name, qualifier, ..
                 } => {
                     args.reverse();
-                    break (name.as_str(), qualifier.as_deref());
+                    break (current.id, name.as_str(), qualifier.as_deref());
                 }
                 _ => return None,
             }
@@ -732,7 +765,7 @@ impl<'a> Lowerer<'a> {
         if !args.is_empty() {
             return None;
         }
-        self.lower_eta_reduced_effect_op_ref(op_name, qualifier)
+        self.lower_eta_reduced_effect_op_ref(effect_call_id, op_name, qualifier)
     }
 
     /// Check if an expression contains effectful calls nested inside if/case/block
@@ -1549,8 +1582,9 @@ impl<'a> Lowerer<'a> {
             return self.lower_ctor(ctor_name, args);
         }
 
-        if let Some((op_name, qualifier, args)) = collect_effect_call(expr) {
+        if let Some((head_expr, op_name, qualifier, args)) = collect_effect_call_expr(expr) {
             return self.lower_effect_call(
+                head_expr.id,
                 op_name,
                 qualifier,
                 &args.into_iter().cloned().collect::<Vec<_>>(),
@@ -2295,8 +2329,10 @@ impl<'a> Lowerer<'a> {
                 args,
                 ..
             } => self
-                .lower_eta_reduced_effect_op_ref(name, qualifier.as_deref())
-                .unwrap_or_else(|| self.lower_effect_call(name, qualifier.as_deref(), args, None)),
+                .lower_eta_reduced_effect_op_ref(expr.id, name, qualifier.as_deref())
+                .unwrap_or_else(|| {
+                    self.lower_effect_call(expr.id, name, qualifier.as_deref(), args, None)
+                }),
 
             // `expr with handler` -- attaches handler(s) to a computation
             ExprKind::With { expr, handler, .. } => self.lower_with(expr, handler),

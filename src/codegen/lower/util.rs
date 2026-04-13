@@ -188,7 +188,9 @@ pub(super) fn collect_ctor_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
 
 /// Peel a chain of App nodes to find an EffectCall head and its arguments.
 /// Returns `Some((op_name, qualifier, args))` if found.
-pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Vec<&Expr>)> {
+pub(super) fn collect_effect_call_expr(
+    expr: &Expr,
+) -> Option<(&Expr, &str, Option<&str>, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
@@ -211,11 +213,15 @@ pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Ve
                 if args.is_empty() {
                     return None;
                 }
-                return Some((name.as_str(), qualifier.as_deref(), args));
+                return Some((current, name.as_str(), qualifier.as_deref(), args));
             }
             _ => return None,
         }
     }
+}
+
+pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Vec<&Expr>)> {
+    collect_effect_call_expr(expr).map(|(_, name, qualifier, args)| (name, qualifier, args))
 }
 
 /// Best-effort: return the record type name from an expression, for use when

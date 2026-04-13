@@ -130,12 +130,8 @@ impl ModuleExports {
                     target_type,
                     ..
                 } => {
-                    let resolved_trait =
-                        checker.resolved_impl_trait_name(*id, trait_name);
-                    let resolved_target = checker.resolved_impl_target_type_name(
-                        *id,
-                        target_type,
-                    );
+                    let resolved_trait = checker.resolved_impl_trait_name(*id, trait_name);
+                    let resolved_target = checker.resolved_impl_target_type_name(*id, target_type);
                     let resolved_trait_type_args: Vec<String> = trait_type_args
                         .iter()
                         .map(|te| checker.resolved_type_name(te.id(), te.simple_name()))
@@ -1365,7 +1361,9 @@ fn collect_codegen_info(
                             .params
                             .iter()
                             .enumerate()
-                            .filter_map(|(idx, (_, ty))| (!is_runtime_unit_param(ty)).then_some(idx))
+                            .filter_map(|(idx, (_, ty))| {
+                                (!is_runtime_unit_param(ty)).then_some(idx)
+                            })
                             .collect(),
                         runtime_param_count: op
                             .node
@@ -1508,8 +1506,10 @@ fn collect_codegen_info(
                             .copied()
                             .unwrap_or(0);
                         bound.traits.iter().map(move |tr| {
-                            let resolved =
-                                scope_map.resolve_trait(&tr.name).unwrap_or(tr.name.as_str()).to_string();
+                            let resolved = scope_map
+                                .resolve_trait(&tr.name)
+                                .unwrap_or(tr.name.as_str())
+                                .to_string();
                             (resolved, idx)
                         })
                     })

@@ -229,8 +229,7 @@ impl Checker {
                         .resolution
                         .handler_arm_qualifier(arm.id)
                         .or(arm.qualifier.as_deref());
-                    if let Some(effect_name) =
-                        self.effect_for_op(&arm.op_name, resolved_qualifier)
+                    if let Some(effect_name) = self.effect_for_op(&arm.op_name, resolved_qualifier)
                     {
                         handled.insert(effect_name);
                     }

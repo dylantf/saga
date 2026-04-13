@@ -6,8 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::*;
 use super::ScopeMap;
+use crate::ast::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocalBindingId(pub u32);
@@ -83,7 +83,9 @@ impl ResolutionResult {
     }
 
     pub fn handler_arm_qualifier(&self, node_id: NodeId) -> Option<&str> {
-        self.handler_arm_qualifiers.get(&node_id).map(|s| s.as_str())
+        self.handler_arm_qualifiers
+            .get(&node_id)
+            .map(|s| s.as_str())
     }
 }
 
@@ -677,9 +679,7 @@ impl<'a> Resolver<'a> {
                                     if let Some(qualifier) = &arm.qualifier
                                         && let Some(resolved) = self.resolve_effect_name(qualifier)
                                     {
-                                        self.result
-                                            .handler_arm_qualifiers
-                                            .insert(arm.id, resolved);
+                                        self.result.handler_arm_qualifiers.insert(arm.id, resolved);
                                     }
                                     self.push_value_scope();
                                     for pat in &arm.params {

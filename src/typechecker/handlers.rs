@@ -218,7 +218,9 @@ impl Checker {
         match handler {
             ast::Handler::Named(named) => {
                 let resolved_name = self.resolved_handler_name(named.id, &named.name);
-                if !self.handlers.contains_key(&resolved_name) && self.env.get(&resolved_name).is_none() {
+                if !self.handlers.contains_key(&resolved_name)
+                    && self.env.get(&resolved_name).is_none()
+                {
                     return Err(Diagnostic::error_at(
                         named.span,
                         format!("undefined handler: {}", named.name),

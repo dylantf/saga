@@ -344,11 +344,7 @@ impl Checker {
                 ))
             }
 
-            ExprKind::QualifiedName {
-                module,
-                name,
-                ..
-            } => {
+            ExprKind::QualifiedName { module, name, .. } => {
                 if name.is_empty() {
                     return Ok(self.fresh_var());
                 }

@@ -399,10 +399,8 @@ impl Checker {
                     && !self.type_arity.contains_key(name)
                     && !super::is_builtin_canonical(name)
                 {
-                    self.collected_diagnostics.push(
-                        Diagnostic::error(format!("unknown type '{name}'"))
-                            .with_span(*span),
-                    );
+                    self.collected_diagnostics
+                        .push(Diagnostic::error(format!("unknown type '{name}'")).with_span(*span));
                     return Type::Error;
                 }
 
