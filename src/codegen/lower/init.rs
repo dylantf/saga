@@ -38,17 +38,356 @@ pub(super) struct PendingAnnotation {
 }
 
 impl<'a> Lowerer<'a> {
-    fn register_imported_module_local_funs(&mut self, module_name: &str, program: &ast::Program) {
+    fn source_module_info(program: &ast::Program, module_name: &str) -> (bool, String) {
+        let has_module_decl = program.iter().any(|d| matches!(d, Decl::ModuleDecl { .. }));
         let source_module_name = program
             .iter()
-            .find_map(|decl| {
-                if let Decl::ModuleDecl { path, .. } = decl {
+            .find_map(|d| {
+                if let Decl::ModuleDecl { path, .. } = d {
                     Some(path.join("."))
                 } else {
                     None
                 }
             })
             .unwrap_or_else(|| module_name.to_string());
+        (has_module_decl, source_module_name)
+    }
+
+    fn canonical_name(map: &HashMap<String, String>, bare: &str) -> String {
+        map.get(bare).cloned().unwrap_or_else(|| bare.to_string())
+    }
+
+    fn initialize_canonical_name_maps(
+        &mut self,
+        program: &ast::Program,
+        source_module_name: &str,
+    ) -> (HashMap<String, String>, HashMap<String, String>) {
+        let mut effect_canonical: HashMap<String, String> = HashMap::new();
+        for decl in program {
+            if let Decl::EffectDef { name, .. } = decl {
+                effect_canonical.insert(name.clone(), format!("{}.{}", source_module_name, name));
+            }
+        }
+        for (_, module_semantics) in self.ctx.modules_semantics() {
+            for eff_def in &module_semantics.codegen_info.effect_defs {
+                if let Some(dot_pos) = eff_def.name.rfind('.') {
+                    let bare = &eff_def.name[dot_pos + 1..];
+                    effect_canonical
+                        .entry(bare.to_string())
+                        .or_insert_with(|| eff_def.name.clone());
+                }
+            }
+        }
+        for (user_visible, canonical) in &self.check_result.scope_map.effects {
+            effect_canonical
+                .entry(user_visible.clone())
+                .or_insert_with(|| canonical.clone());
+        }
+
+        let mut handler_canonical: HashMap<String, String> = HashMap::new();
+        for decl in program {
+            if let Decl::HandlerDef { name, .. } = decl {
+                handler_canonical.insert(name.clone(), format!("{}.{}", source_module_name, name));
+            }
+        }
+        for (_, module_semantics) in self.ctx.modules_semantics() {
+            for handler_name in &module_semantics.codegen_info.handler_defs {
+                if let Some(dot_pos) = handler_name.rfind('.') {
+                    let bare = &handler_name[dot_pos + 1..];
+                    handler_canonical
+                        .entry(bare.to_string())
+                        .or_insert_with(|| handler_name.clone());
+                }
+            }
+        }
+        for (user_visible, canonical) in &self.check_result.scope_map.handlers {
+            handler_canonical
+                .entry(user_visible.clone())
+                .or_insert_with(|| canonical.clone());
+        }
+
+        self.effect_canonical = effect_canonical.clone();
+        self.handler_canonical = handler_canonical.clone();
+
+        for canonical in self.check_result.resolution.effects.values() {
+            if let Some(dot_pos) = canonical.rfind('.') {
+                let bare = &canonical[dot_pos + 1..];
+                effect_canonical
+                    .entry(bare.to_string())
+                    .or_insert_with(|| canonical.clone());
+            }
+            effect_canonical
+                .entry(canonical.clone())
+                .or_insert_with(|| canonical.clone());
+        }
+
+        (effect_canonical, handler_canonical)
+    }
+
+    fn register_local_module_decls(
+        &mut self,
+        program: &ast::Program,
+        module_name: &str,
+        source_module_name: &str,
+        has_module_decl: bool,
+        effect_canonical: &HashMap<String, String>,
+        pending_annotations: &mut HashMap<String, PendingAnnotation>,
+    ) {
+        let canonicalize_effect = |bare: &str| Self::canonical_name(effect_canonical, bare);
+
+        for decl in program {
+            match decl {
+                Decl::RecordDef { name, fields, .. } => {
+                    let field_names = fields.iter().map(|a| a.node.0.clone()).collect();
+                    let key = if has_module_decl {
+                        format!("{}.{}", source_module_name, name)
+                    } else {
+                        name.clone()
+                    };
+                    self.record_fields.insert(key, field_names);
+                }
+                Decl::TypeDef { .. } => {
+                    // Constructor atom mangling is handled by resolve::build_constructor_atoms
+                }
+                Decl::EffectDef {
+                    name, operations, ..
+                } => {
+                    let canonical_effect = format!("{}.{}", source_module_name, name);
+                    let mut ops = HashMap::new();
+                    for op in operations {
+                        let is_runtime_unit_param = |ty: &crate::ast::TypeExpr| {
+                            matches!(
+                                ty,
+                                crate::ast::TypeExpr::Named { name, .. }
+                                    if crate::typechecker::canonicalize_type_name(name)
+                                        == crate::typechecker::canonicalize_type_name("Unit")
+                            )
+                        };
+                        let runtime_param_count = op
+                            .node
+                            .params
+                            .iter()
+                            .filter(|(_, ty)| !is_runtime_unit_param(ty))
+                            .count();
+                        let param_absorbed_effects = op
+                            .node
+                            .params
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(idx, (_, ty))| {
+                                let effs = collect_type_effects(ty);
+                                if effs.is_empty() {
+                                    None
+                                } else {
+                                    let mut sorted: Vec<String> = effs
+                                        .into_iter()
+                                        .map(|e| canonicalize_effect(&e))
+                                        .collect();
+                                    sorted.sort();
+                                    Some((idx, sorted))
+                                }
+                            })
+                            .collect();
+                        ops.insert(
+                            op.node.name.clone(),
+                            super::EffectOpInfo {
+                                runtime_param_count,
+                                source_param_count: op.node.params.len(),
+                                runtime_param_positions: op
+                                    .node
+                                    .params
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(idx, (_, ty))| {
+                                        (!is_runtime_unit_param(ty)).then_some(idx)
+                                    })
+                                    .collect(),
+                                param_absorbed_effects,
+                            },
+                        );
+                        self.op_to_effect
+                            .insert(op.node.name.clone(), canonical_effect.clone());
+                    }
+                    self.effect_defs
+                        .insert(canonical_effect, EffectInfo { ops });
+                }
+                Decl::HandlerDef { name, body, .. } => {
+                    let canonical_handler = format!("{}.{}", source_module_name, name);
+                    self.handler_defs.insert(
+                        canonical_handler,
+                        HandlerInfo {
+                            effects: body
+                                .effects
+                                .iter()
+                                .map(|e| canonicalize_effect(&e.name))
+                                .collect(),
+                            arms: body.arms.iter().map(|a| a.node.clone()).collect(),
+                            return_clause: body.return_clause.clone(),
+                            source_module: Some(module_name.to_string()),
+                        },
+                    );
+                }
+                Decl::FunSignature {
+                    public,
+                    name,
+                    effects,
+                    params,
+                    annotations,
+                    ..
+                } => {
+                    if *public {
+                        self.pub_names.insert(name.clone());
+                    }
+                    if let Some((_erl_module, _erl_func)) = extract_external(annotations) {
+                        let real_arity = params.len();
+                        let mut sorted_effects = Vec::new();
+                        if !effects.is_empty() {
+                            sorted_effects = effects
+                                .iter()
+                                .map(|e| canonicalize_effect(&e.name))
+                                .collect();
+                            sorted_effects.sort();
+                        }
+                        let expanded_arity = self.expanded_arity(real_arity, &sorted_effects);
+                        self.fun_info.insert(
+                            name.clone(),
+                            FunInfo {
+                                arity: expanded_arity,
+                                effects: sorted_effects,
+                                param_absorbed_effects: HashMap::new(),
+                            },
+                        );
+                    } else {
+                        let mut sorted_effects: Vec<String> = effects
+                            .iter()
+                            .map(|e| canonicalize_effect(&e.name))
+                            .collect();
+                        sorted_effects.sort();
+                        let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
+                        for (i, (_param_name, type_expr)) in params.iter().enumerate() {
+                            let effs = collect_type_effects(type_expr);
+                            if !effs.is_empty() {
+                                let mut sorted: Vec<String> =
+                                    effs.into_iter().map(|e| canonicalize_effect(&e)).collect();
+                                sorted.sort();
+                                param_effs.insert(i, sorted);
+                            }
+                        }
+                        pending_annotations.insert(
+                            name.clone(),
+                            PendingAnnotation {
+                                effects: sorted_effects,
+                                param_absorbed_effects: param_effs,
+                            },
+                        );
+                    }
+                }
+                Decl::Val { public, name, .. } => {
+                    if *public {
+                        self.pub_names.insert(name.clone());
+                    }
+                    self.fun_info.insert(name.clone(), FunInfo::default());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn register_std_module_semantics(
+        &mut self,
+        effect_canonical: &HashMap<String, String>,
+        handler_canonical: &HashMap<String, String>,
+    ) {
+        let canonicalize_effect = |bare: &str| Self::canonical_name(effect_canonical, bare);
+        let canonicalize_handler = |bare: &str| Self::canonical_name(handler_canonical, bare);
+
+        for (mod_name, module_semantics) in self.ctx.modules_semantics() {
+            let info = module_semantics.codegen_info;
+            let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
+            let erlang_name = util::module_name_to_erlang(&mod_path);
+            for d in &info.trait_impl_dicts {
+                self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
+                    arity: d.arity,
+                    ..Default::default()
+                });
+            }
+            if mod_name.starts_with("Std.") {
+                let alias = mod_path.last().unwrap().clone();
+                self.module_aliases
+                    .entry(alias.clone())
+                    .or_insert_with(|| erlang_name.clone());
+
+                for eff_def in &info.effect_defs {
+                    let mut ops_map = HashMap::new();
+                    for op in &eff_def.ops {
+                        ops_map.insert(
+                            op.name.clone(),
+                            super::EffectOpInfo {
+                                source_param_count: op.source_param_count,
+                                runtime_param_count: op.runtime_param_count,
+                                runtime_param_positions: op.runtime_param_positions.clone(),
+                                param_absorbed_effects: op.param_absorbed_effects.clone(),
+                            },
+                        );
+                        self.op_to_effect
+                            .entry(op.name.clone())
+                            .or_insert_with(|| eff_def.name.clone());
+                    }
+                    self.effect_defs
+                        .entry(eff_def.name.clone())
+                        .or_insert(EffectInfo { ops: ops_map });
+                }
+
+                for (name, scheme) in &info.exports {
+                    let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
+                    let effects = self.canonicalize_effects(effects);
+                    let dict_param_count = util::dict_param_count(&scheme.constraints);
+                    let expanded_arity =
+                        self.expanded_arity(base_arity, &effects) + dict_param_count;
+                    let param_absorbed = util::param_absorbed_effects_from_type(&scheme.ty);
+                    let param_absorbed: HashMap<usize, Vec<String>> = param_absorbed
+                        .into_iter()
+                        .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
+                        .collect();
+                    let fi = FunInfo {
+                        arity: expanded_arity,
+                        effects,
+                        param_absorbed_effects: param_absorbed,
+                    };
+                    let alias_qualified = format!("{}.{}", mod_path.last().unwrap(), name);
+                    self.fun_info.entry(alias_qualified).or_insert(fi.clone());
+                    let canonical = format!("{}.{}", mod_name, name);
+                    self.fun_info.entry(canonical).or_insert(fi);
+                }
+
+                self.register_imported_module_local_funs(mod_name, module_semantics.elaborated);
+                for decl in module_semantics.elaborated {
+                    match decl {
+                        Decl::HandlerDef { name, body, .. } => {
+                            let canonical_handler = canonicalize_handler(name);
+                            self.handler_defs
+                                .entry(canonical_handler)
+                                .or_insert(HandlerInfo {
+                                    effects: body
+                                        .effects
+                                        .iter()
+                                        .map(|e| canonicalize_effect(&e.name))
+                                        .collect(),
+                                    arms: body.arms.iter().map(|a| a.node.clone()).collect(),
+                                    return_clause: body.return_clause.clone(),
+                                    source_module: Some(mod_name.to_string()),
+                                });
+                        }
+                        Decl::FunSignature { .. } => {}
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    fn register_imported_module_local_funs(&mut self, module_name: &str, program: &ast::Program) {
+        let (_, source_module_name) = Self::source_module_info(program, module_name);
         let mod_resolution = self.front_resolution_for_module(&source_module_name);
         let resolve_effect = |eff: &crate::ast::EffectRef| -> String {
             mod_resolution
@@ -150,356 +489,18 @@ impl<'a> Lowerer<'a> {
         program: &ast::Program,
     ) -> HashMap<String, PendingAnnotation> {
         let mut pending_annotations: HashMap<String, PendingAnnotation> = HashMap::new();
-
-        // Build bare->canonical effect name resolver from all sources.
-        // Local effects: "Log" -> "MyModule.Log"
-        // Imported effects: "Assert" -> "Std.Test.Assert" (from codegen_info)
-        // Use source module name (e.g. "Std.Test") for canonical effect names so they
-        // match the typechecker's naming (which also uses source module names).
-        let has_module_decl = program.iter().any(|d| matches!(d, Decl::ModuleDecl { .. }));
-        let source_module_name = program
-            .iter()
-            .find_map(|d| {
-                if let Decl::ModuleDecl { path, .. } = d {
-                    Some(path.join("."))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| module_name.to_string());
-        let mut effect_canonical: HashMap<String, String> = HashMap::new();
-        for decl in program {
-            if let Decl::EffectDef { name, .. } = decl {
-                effect_canonical.insert(name.clone(), format!("{}.{}", source_module_name, name));
-            }
-        }
-        for (_, module_semantics) in self.ctx.modules_semantics() {
-            for eff_def in &module_semantics.codegen_info.effect_defs {
-                // codegen_info effect names are already canonical
-                if let Some(dot_pos) = eff_def.name.rfind('.') {
-                    let bare = &eff_def.name[dot_pos + 1..];
-                    effect_canonical
-                        .entry(bare.to_string())
-                        .or_insert_with(|| eff_def.name.clone());
-                }
-            }
-        }
-        for (user_visible, canonical) in &self.check_result.scope_map.effects {
-            effect_canonical
-                .entry(user_visible.clone())
-                .or_insert_with(|| canonical.clone());
-        }
-        // Also build bare->canonical for handler names.
-        let mut handler_canonical: HashMap<String, String> = HashMap::new();
-        for decl in program {
-            if let Decl::HandlerDef { name, .. } = decl {
-                handler_canonical.insert(name.clone(), format!("{}.{}", source_module_name, name));
-            }
-        }
-        for (_, module_semantics) in self.ctx.modules_semantics() {
-            for handler_name in &module_semantics.codegen_info.handler_defs {
-                if let Some(dot_pos) = handler_name.rfind('.') {
-                    let bare = &handler_name[dot_pos + 1..];
-                    handler_canonical
-                        .entry(bare.to_string())
-                        .or_insert_with(|| handler_name.clone());
-                }
-            }
-        }
-        for (user_visible, canonical) in &self.check_result.scope_map.handlers {
-            handler_canonical
-                .entry(user_visible.clone())
-                .or_insert_with(|| canonical.clone());
-        }
-
-        // Store the canonical maps on self now so methods like
-        // canonicalize_effect/canonicalize_effects work during init.
-        self.effect_canonical = effect_canonical.clone();
-        self.handler_canonical = handler_canonical.clone();
-
-        // Overlay effect_canonical with entries from the front-end resolution map.
-        // The resolution map is authoritative for names resolved during typechecking.
-        // Use or_insert so local EffectDef entries (which have module-qualified names
-        // like "_script.Log") aren't overridden by unqualified resolver entries.
-        for canonical in self.check_result.resolution.effects.values() {
-            if let Some(dot_pos) = canonical.rfind('.') {
-                let bare = &canonical[dot_pos + 1..];
-                effect_canonical
-                    .entry(bare.to_string())
-                    .or_insert_with(|| canonical.clone());
-            }
-            effect_canonical
-                .entry(canonical.clone())
-                .or_insert_with(|| canonical.clone());
-        }
-        let canonicalize_effect = |bare: &str| -> String {
-            effect_canonical
-                .get(bare)
-                .cloned()
-                .unwrap_or_else(|| bare.to_string())
-        };
-        let canonicalize_handler = |bare: &str| -> String {
-            handler_canonical
-                .get(bare)
-                .cloned()
-                .unwrap_or_else(|| bare.to_string())
-        };
-
-        // Collect record field orders, effect definitions, handler definitions,
-        // and function effect requirements.
-        for decl in program {
-            match decl {
-                Decl::RecordDef { name, fields, .. } => {
-                    let field_names = fields.iter().map(|a| a.node.0.clone()).collect();
-                    let key = if has_module_decl {
-                        format!("{}.{}", source_module_name, name)
-                    } else {
-                        name.clone()
-                    };
-                    self.record_fields.insert(key, field_names);
-                }
-                Decl::TypeDef { .. } => {
-                    // Constructor atom mangling is handled by resolve::build_constructor_atoms
-                }
-                Decl::EffectDef {
-                    name, operations, ..
-                } => {
-                    let canonical_effect = format!("{}.{}", source_module_name, name);
-                    let mut ops = HashMap::new();
-                    for op in operations {
-                        let is_runtime_unit_param = |ty: &crate::ast::TypeExpr| {
-                            matches!(
-                                ty,
-                                crate::ast::TypeExpr::Named { name, .. }
-                                    if crate::typechecker::canonicalize_type_name(name)
-                                        == crate::typechecker::canonicalize_type_name("Unit")
-                            )
-                        };
-                        let runtime_param_count = op
-                            .node
-                            .params
-                            .iter()
-                            .filter(|(_, ty)| !is_runtime_unit_param(ty))
-                            .count();
-                        let param_absorbed_effects = op
-                            .node
-                            .params
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(idx, (_, ty))| {
-                                let effs = collect_type_effects(ty);
-                                if effs.is_empty() {
-                                    None
-                                } else {
-                                    let mut sorted: Vec<String> =
-                                        effs.into_iter().map(|e| canonicalize_effect(&e)).collect();
-                                    sorted.sort();
-                                    Some((idx, sorted))
-                                }
-                            })
-                            .collect();
-                        ops.insert(
-                            op.node.name.clone(),
-                            super::EffectOpInfo {
-                                runtime_param_count,
-                                source_param_count: op.node.params.len(),
-                                runtime_param_positions: op
-                                    .node
-                                    .params
-                                    .iter()
-                                    .enumerate()
-                                    .filter_map(|(idx, (_, ty))| {
-                                        (!is_runtime_unit_param(ty)).then_some(idx)
-                                    })
-                                    .collect(),
-                                param_absorbed_effects,
-                            },
-                        );
-                        self.op_to_effect
-                            .insert(op.node.name.clone(), canonical_effect.clone());
-                    }
-                    self.effect_defs
-                        .insert(canonical_effect, EffectInfo { ops });
-                }
-                Decl::HandlerDef { name, body, .. } => {
-                    let canonical_handler = format!("{}.{}", source_module_name, name);
-                    self.handler_defs.insert(
-                        canonical_handler,
-                        HandlerInfo {
-                            effects: body
-                                .effects
-                                .iter()
-                                .map(|e| canonicalize_effect(&e.name))
-                                .collect(),
-                            arms: body.arms.iter().map(|a| a.node.clone()).collect(),
-                            return_clause: body.return_clause.clone(),
-                            source_module: Some(module_name.to_string()),
-                        },
-                    );
-                }
-                Decl::FunSignature {
-                    public,
-                    name,
-                    effects,
-                    params,
-                    annotations,
-                    ..
-                } => {
-                    if *public {
-                        self.pub_names.insert(name.clone());
-                    }
-                    if let Some((_erl_module, _erl_func)) = extract_external(annotations) {
-                        // @external function: resolution handled by resolve.rs
-                        let real_arity = params.len();
-                        let mut sorted_effects = Vec::new();
-                        if !effects.is_empty() {
-                            sorted_effects = effects
-                                .iter()
-                                .map(|e| canonicalize_effect(&e.name))
-                                .collect();
-                            sorted_effects.sort();
-                        }
-                        let expanded_arity = self.expanded_arity(real_arity, &sorted_effects);
-                        self.fun_info.insert(
-                            name.clone(),
-                            FunInfo {
-                                arity: expanded_arity,
-                                effects: sorted_effects,
-                                param_absorbed_effects: HashMap::new(),
-                            },
-                        );
-                    } else {
-                        // Regular function signature
-                        let mut sorted_effects: Vec<String> = effects
-                            .iter()
-                            .map(|e| canonicalize_effect(&e.name))
-                            .collect();
-                        sorted_effects.sort();
-                        let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
-                        for (i, (_param_name, type_expr)) in params.iter().enumerate() {
-                            let effs = collect_type_effects(type_expr);
-                            if !effs.is_empty() {
-                                let mut sorted: Vec<String> =
-                                    effs.into_iter().map(|e| canonicalize_effect(&e)).collect();
-                                sorted.sort();
-                                param_effs.insert(i, sorted);
-                            }
-                        }
-                        pending_annotations.insert(
-                            name.clone(),
-                            PendingAnnotation {
-                                effects: sorted_effects,
-                                param_absorbed_effects: param_effs,
-                            },
-                        );
-                    }
-                }
-                Decl::Val { public, name, .. } => {
-                    if *public {
-                        self.pub_names.insert(name.clone());
-                    }
-                    self.fun_info.insert(name.clone(), FunInfo::default());
-                }
-                _ => {}
-            }
-        }
-
-        // Register trait impl dicts and constructors from all modules in codegen_info
-        // so they're available even when not explicitly imported by user code. The
-        // elaborator resolves dicts from all tc_codegen_info entries (not just direct
-        // imports), so the lowerer must match that scope.
-        for (mod_name, module_semantics) in self.ctx.modules_semantics() {
-            let info = module_semantics.codegen_info;
-            let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
-            let erlang_name = util::module_name_to_erlang(&mod_path);
-            for d in &info.trait_impl_dicts {
-                self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
-                    arity: d.arity,
-                    ..Default::default()
-                });
-            }
-            if mod_name.starts_with("Std.") {
-                // Register the prelude's module alias so qualified calls like
-                // `List.map` resolve to `std_list:map` instead of `list:map`.
-                let alias = mod_path.last().unwrap().clone();
-                self.module_aliases
-                    .entry(alias.clone())
-                    .or_insert_with(|| erlang_name.clone());
-
-                // Register Std effect definitions so expanded_arity can look up op counts.
-                for eff_def in &info.effect_defs {
-                    let mut ops_map = HashMap::new();
-                    for op in &eff_def.ops {
-                        ops_map.insert(
-                            op.name.clone(),
-                            super::EffectOpInfo {
-                                source_param_count: op.source_param_count,
-                                runtime_param_count: op.runtime_param_count,
-                                runtime_param_positions: op.runtime_param_positions.clone(),
-                                param_absorbed_effects: op.param_absorbed_effects.clone(),
-                            },
-                        );
-                        self.op_to_effect
-                            .entry(op.name.clone())
-                            .or_insert_with(|| eff_def.name.clone());
-                    }
-                    self.effect_defs
-                        .entry(eff_def.name.clone())
-                        .or_insert(EffectInfo { ops: ops_map });
-                }
-
-                // Register Std exports under qualified names only (e.g. List.map, Dict.to_list).
-                // Unqualified names are only registered when explicitly imported via
-                // exposing lists, handled by the user import processing below.
-                for (name, scheme) in &info.exports {
-                    let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
-                    let effects = self.canonicalize_effects(effects);
-                    let dict_param_count = util::dict_param_count(&scheme.constraints);
-                    let expanded_arity =
-                        self.expanded_arity(base_arity, &effects) + dict_param_count;
-                    let param_absorbed = util::param_absorbed_effects_from_type(&scheme.ty);
-                    let param_absorbed: HashMap<usize, Vec<String>> = param_absorbed
-                        .into_iter()
-                        .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
-                        .collect();
-                    let fi = FunInfo {
-                        arity: expanded_arity,
-                        effects,
-                        param_absorbed_effects: param_absorbed,
-                    };
-                    // Register under short alias (e.g. "List.map") and canonical (e.g. "Std.List.map")
-                    let alias_qualified = format!("{}.{}", mod_path.last().unwrap(), name);
-                    self.fun_info.entry(alias_qualified).or_insert(fi.clone());
-                    let canonical = format!("{}.{}", mod_name, name);
-                    self.fun_info.entry(canonical).or_insert(fi);
-                }
-                // Register Std handler bodies and external functions from elaborated programs
-                self.register_imported_module_local_funs(mod_name, module_semantics.elaborated);
-                for decl in module_semantics.elaborated {
-                    match decl {
-                        Decl::HandlerDef { name, body, .. } => {
-                            let canonical_handler = canonicalize_handler(name);
-                            self.handler_defs
-                                .entry(canonical_handler)
-                                .or_insert(HandlerInfo {
-                                    effects: body
-                                        .effects
-                                        .iter()
-                                        .map(|e| canonicalize_effect(&e.name))
-                                        .collect(),
-                                    arms: body.arms.iter().map(|a| a.node.clone()).collect(),
-                                    return_clause: body.return_clause.clone(),
-                                    source_module: Some(mod_name.to_string()),
-                                });
-                        }
-                        Decl::FunSignature { .. } => {
-                            // External resolution handled by resolve.rs
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
+        let (has_module_decl, source_module_name) = Self::source_module_info(program, module_name);
+        let (effect_canonical, handler_canonical) =
+            self.initialize_canonical_name_maps(program, &source_module_name);
+        self.register_local_module_decls(
+            program,
+            module_name,
+            &source_module_name,
+            has_module_decl,
+            &effect_canonical,
+            &mut pending_annotations,
+        );
+        self.register_std_module_semantics(&effect_canonical, &handler_canonical);
 
         // Process prelude imports first so stdlib names are available,
         // then user imports (which can override prelude names).
