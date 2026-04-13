@@ -121,7 +121,7 @@ pub fn emit_module_with_context(
         ctx,
         constructor_atoms,
         resolution_map,
-        Some(check_result),
+        check_result,
         source_info,
         entry_export.map(str::to_string),
     )

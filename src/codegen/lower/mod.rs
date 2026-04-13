@@ -183,8 +183,7 @@ pub struct Lowerer<'a> {
     effect_canonical: HashMap<String, String>,
     /// Typechecker result for the module currently being lowered.
     /// Provides resolved types, handler info, effect info, etc.
-    /// None for modules compiled without full typechecking (e.g. codegen tests).
-    check_result: Option<crate::typechecker::CheckResult>,
+    check_result: crate::typechecker::CheckResult,
     /// Conditional handle bindings: name -> (cond_var, cond_expr, then_canonical, else_canonical).
     /// Used during lower_with to generate conditional handler dispatch.
     handle_cond_vars: HashMap<String, (String, CExpr, String, String)>,
@@ -203,7 +202,7 @@ impl<'a> Lowerer<'a> {
         ctx: &'a super::CodegenContext,
         constructor_atoms: super::resolve::ConstructorAtoms,
         resolved: super::resolve::ResolutionMap,
-        check_result: Option<&crate::typechecker::CheckResult>,
+        check_result: &crate::typechecker::CheckResult,
         source_info: Option<SourceInfo>,
         entry_export: Option<String>,
     ) -> Self {
@@ -234,7 +233,7 @@ impl<'a> Lowerer<'a> {
             inline_vals: HashMap::new(),
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
-            check_result: check_result.cloned(),
+            check_result: check_result.clone(),
             handle_cond_vars: HashMap::new(),
             handle_dynamic_vars: HashMap::new(),
             entry_export,
@@ -299,13 +298,10 @@ impl<'a> Lowerer<'a> {
             .as_deref()
             .unwrap_or(&self.current_source_module);
         self.check_result
-            .as_ref()
-            .and_then(|cr| {
-                cr.module_check_results()
-                    .get(module_name)
-                    .map(|m| &m.resolution)
-                    .or(Some(&cr.resolution))
-            })
+            .module_check_results()
+            .get(module_name)
+            .map(|m| &m.resolution)
+            .or(Some(&self.check_result.resolution))
             .or_else(|| {
                 self.ctx
                     .modules
@@ -964,11 +960,8 @@ impl<'a> Lowerer<'a> {
                             effects: Vec::new(),
                             param_absorbed_effects: HashMap::new(),
                         });
-                    if effects.is_empty()
-                        && let Some(cr) = &self.check_result
-                        && let Some(scheme) = cr.env.get(name)
-                    {
-                        let resolved_ty = cr.sub.apply(&scheme.ty);
+                    if effects.is_empty() && let Some(scheme) = self.check_result.env.get(name) {
+                        let resolved_ty = self.check_result.sub.apply(&scheme.ty);
                         effects = self.canonicalize_effects(
                             util::arity_and_effects_from_type(&resolved_ty).1,
                         );
@@ -983,11 +976,11 @@ impl<'a> Lowerer<'a> {
                     // the binding has 0 params but the type annotation declares a
                     // higher arity. Use the annotation's arity so cross-module
                     // callers (who derive arity from the type) find the right /N.
-                    if let Some(cr) = &self.check_result
-                        && let Some(scheme) = cr.env.get(name)
-                    {
-                        let declared_arity =
-                            util::arity_and_effects_from_type(&cr.sub.apply(&scheme.ty)).0;
+                    if let Some(scheme) = self.check_result.env.get(name) {
+                        let declared_arity = util::arity_and_effects_from_type(
+                            &self.check_result.sub.apply(&scheme.ty),
+                        )
+                        .0;
                         if declared_arity > base_arity {
                             base_arity = declared_arity;
                         }
@@ -1301,20 +1294,14 @@ impl<'a> Lowerer<'a> {
         }
 
         // If the program uses ets_ref, prepend ETS table creation to main's body.
-        if self
-            .check_result
-            .as_ref()
-            .is_some_and(|cr| cr.needs_ets_ref_table)
+        if self.check_result.needs_ets_ref_table
             && let Some(main_def) = fun_defs.iter_mut().find(|f| f.name == "main")
         {
             main_def.body = Self::wrap_with_ets_init(main_def.body.clone());
         }
 
         // If the program uses beam_vec, prepend ETS table creation for saga_vec_store.
-        if self
-            .check_result
-            .as_ref()
-            .is_some_and(|cr| cr.needs_vec_table)
+        if self.check_result.needs_vec_table
             && let Some(main_def) = fun_defs.iter_mut().find(|f| f.name == "main")
         {
             main_def.body = Self::wrap_with_vec_init(main_def.body.clone());

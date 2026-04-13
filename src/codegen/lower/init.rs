@@ -115,11 +115,12 @@ impl<'a> Lowerer<'a> {
                         });
                     let mut base_arity = params.len() + count_lambda_params(body);
                     // Use annotation arity for eta-reduced functions (same fix as mod.rs)
-                    if let Some(cr) = &self.check_result
-                        && let Some(scheme) = cr.env.get(name)
-                    {
+                    if let Some(scheme) = self.check_result.env.get(name) {
                         let declared =
-                            super::util::arity_and_effects_from_type(&cr.sub.apply(&scheme.ty)).0;
+                            super::util::arity_and_effects_from_type(
+                                &self.check_result.sub.apply(&scheme.ty),
+                            )
+                            .0;
                         if declared > base_arity {
                             base_arity = declared;
                         }
@@ -187,12 +188,10 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-        if let Some(cr) = &self.check_result {
-            for (user_visible, canonical) in &cr.scope_map.effects {
-                effect_canonical
-                    .entry(user_visible.clone())
-                    .or_insert_with(|| canonical.clone());
-            }
+        for (user_visible, canonical) in &self.check_result.scope_map.effects {
+            effect_canonical
+                .entry(user_visible.clone())
+                .or_insert_with(|| canonical.clone());
         }
         // Also build bare->canonical for handler names.
         let mut handler_canonical: HashMap<String, String> = HashMap::new();
@@ -211,12 +210,10 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-        if let Some(cr) = &self.check_result {
-            for (user_visible, canonical) in &cr.scope_map.handlers {
-                handler_canonical
-                    .entry(user_visible.clone())
-                    .or_insert_with(|| canonical.clone());
-            }
+        for (user_visible, canonical) in &self.check_result.scope_map.handlers {
+            handler_canonical
+                .entry(user_visible.clone())
+                .or_insert_with(|| canonical.clone());
         }
 
         // Store the canonical maps on self now so methods like
@@ -228,18 +225,16 @@ impl<'a> Lowerer<'a> {
         // The resolution map is authoritative for names resolved during typechecking.
         // Use or_insert so local EffectDef entries (which have module-qualified names
         // like "_script.Log") aren't overridden by unqualified resolver entries.
-        if let Some(cr) = &self.check_result {
-            for canonical in cr.resolution.effects.values() {
-                if let Some(dot_pos) = canonical.rfind('.') {
-                    let bare = &canonical[dot_pos + 1..];
-                    effect_canonical
-                        .entry(bare.to_string())
-                        .or_insert_with(|| canonical.clone());
-                }
+        for canonical in self.check_result.resolution.effects.values() {
+            if let Some(dot_pos) = canonical.rfind('.') {
+                let bare = &canonical[dot_pos + 1..];
                 effect_canonical
-                    .entry(canonical.clone())
+                    .entry(bare.to_string())
                     .or_insert_with(|| canonical.clone());
             }
+            effect_canonical
+                .entry(canonical.clone())
+                .or_insert_with(|| canonical.clone());
         }
         let canonicalize_effect = |bare: &str| -> String {
             effect_canonical

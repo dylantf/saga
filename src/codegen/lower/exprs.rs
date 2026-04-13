@@ -684,8 +684,7 @@ impl<'a> Lowerer<'a> {
                 let source_arity = pats::lower_params(clauses[0].0).len();
                 let (arity, effects, param_absorbed_effects) = self
                     .check_result
-                    .as_ref()
-                    .and_then(|cr| cr.resolved_type_for_node(fun_id))
+                    .resolved_type_for_node(fun_id)
                     .map(|ty| {
                         let (base_arity, effects) = arity_and_effects_from_type(&ty);
                         let effects = self.canonicalize_effects(effects);
@@ -1214,12 +1213,8 @@ impl<'a> Lowerer<'a> {
                     || self.handle_dynamic_vars.contains_key(&resolved_name)
                     || self.handle_cond_vars.contains_key(&resolved_name)
                     || self.resolve_handler_name_opt(name).is_some()
-                    || self
-                        .check_result
-                        .as_ref()
-                        .is_some_and(|cr| {
-                            cr.handlers.contains_key(&resolved_name) || cr.handlers.contains_key(name)
-                        })
+                    || self.check_result.handlers.contains_key(&resolved_name)
+                    || self.check_result.handlers.contains_key(name)
             }
             ExprKind::If {
                 then_branch,
@@ -1312,36 +1307,36 @@ impl<'a> Lowerer<'a> {
 
         // Dynamic handler: RHS is an arbitrary expression (e.g. function call).
         // Look up effect names from the typechecker's check result.
-        if let Some(cr) = &self.check_result {
-            let dynamic_info = cr
-                .handlers
-                .get(name)
-                .map(|info| {
-                    let effects = info
-                        .effects
-                        .iter()
-                        .map(|e| self.canonicalize_effect(e))
-                        .collect();
-                    let has_return = info.return_type.is_some();
-                    (effects, has_return)
-                })
-                .or_else(|| {
-                    cr.type_at_node
-                        .get(&value.id)
-                        .and_then(|ty| self.dynamic_handler_info_from_type(ty))
-                        .map(|effects| (effects, false))
-                });
-            let dynamic_info = dynamic_info.or_else(|| self.dynamic_handler_info_from_expr(value));
-            if let Some((effects, has_return)) = dynamic_info {
-                let var = self.fresh();
-                self.handle_dynamic_vars
-                    .insert(name.to_string(), (var, effects, has_return));
-            }
+        let dynamic_info = self
+            .check_result
+            .handlers
+            .get(name)
+            .map(|info| {
+                let effects = info
+                    .effects
+                    .iter()
+                    .map(|e| self.canonicalize_effect(e))
+                    .collect();
+                let has_return = info.return_type.is_some();
+                (effects, has_return)
+            })
+            .or_else(|| {
+                self.check_result
+                    .type_at_node
+                    .get(&value.id)
+                    .and_then(|ty| self.dynamic_handler_info_from_type(ty))
+                    .map(|effects| (effects, false))
+            });
+        let dynamic_info = dynamic_info.or_else(|| self.dynamic_handler_info_from_expr(value));
+        if let Some((effects, has_return)) = dynamic_info {
+            let var = self.fresh();
+            self.handle_dynamic_vars
+                .insert(name.to_string(), (var, effects, has_return));
         }
     }
 
     fn dynamic_handler_info_from_expr(&self, expr: &Expr) -> Option<(Vec<String>, bool)> {
-        let cr = self.check_result.as_ref()?;
+        let cr = &self.check_result;
         if let Some(ty) = cr.type_at_node.get(&expr.id)
             && let Some(effects) = self.dynamic_handler_info_from_type(ty)
         {
