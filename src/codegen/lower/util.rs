@@ -5,7 +5,26 @@ use std::collections::{BTreeSet, HashMap};
 
 /// Look up a constructor's mangled Erlang atom from the pre-computed table.
 /// Falls back to the bare name if not found.
-pub(super) fn mangle_ctor_atom(name: &str, constructor_atoms: &HashMap<String, String>) -> String {
+///
+/// When `origin_module` is set (e.g. lowering an imported handler body),
+/// the lookup tries the source module's qualified entry first, then falls
+/// back to direct mangling before the normal bare-name path.
+pub(super) fn mangle_ctor_atom(
+    name: &str,
+    constructor_atoms: &HashMap<String, String>,
+    origin_module: Option<&str>,
+) -> String {
+    if let Some(origin) = origin_module {
+        let qualified = format!("{}.{}", origin, name);
+        if let Some(atom) = constructor_atoms.get(&qualified) {
+            return atom.clone();
+        }
+        // Direct mangle: "Std.File" -> "std_file", then "std_file_NotFound"
+        if name.starts_with(|c: char| c.is_uppercase()) {
+            let erlang_mod = origin.to_lowercase().replace('.', "_");
+            return format!("{}_{}", erlang_mod, name);
+        }
+    }
     if let Some(atom) = constructor_atoms.get(name) {
         return atom.clone();
     }

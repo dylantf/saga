@@ -20,6 +20,7 @@ pub(super) fn lower_pat(
     pat: &Pat,
     record_fields: &HashMap<String, Vec<String>>,
     constructor_atoms: &HashMap<String, String>,
+    origin_module: Option<&str>,
 ) -> CPat {
     match pat {
         Pat::Wildcard { .. } => CPat::Wildcard,
@@ -44,13 +45,13 @@ pub(super) fn lower_pat(
         Pat::Tuple { elements, .. } => CPat::Tuple(
             elements
                 .iter()
-                .map(|p| lower_pat(p, record_fields, constructor_atoms))
+                .map(|p| lower_pat(p, record_fields, constructor_atoms, origin_module))
                 .collect(),
         ),
         Pat::Constructor { name, args, .. } => match name.as_str() {
             "Cons" if args.len() == 2 => CPat::Cons(
-                Box::new(lower_pat(&args[0], record_fields, constructor_atoms)),
-                Box::new(lower_pat(&args[1], record_fields, constructor_atoms)),
+                Box::new(lower_pat(&args[0], record_fields, constructor_atoms, origin_module)),
+                Box::new(lower_pat(&args[1], record_fields, constructor_atoms, origin_module)),
             ),
             "Nil" if args.is_empty() => CPat::Nil,
             // Booleans are bare atoms to match Erlang's native true/false
@@ -64,11 +65,11 @@ pub(super) fn lower_pat(
                 ))
             }
             _ => {
-                let atom = mangle_ctor_atom(name, constructor_atoms);
+                let atom = mangle_ctor_atom(name, constructor_atoms, origin_module);
                 let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
                 elems.extend(
                     args.iter()
-                        .map(|p| lower_pat(p, record_fields, constructor_atoms)),
+                        .map(|p| lower_pat(p, record_fields, constructor_atoms, origin_module)),
                 );
                 CPat::Tuple(elems)
             }
@@ -80,7 +81,7 @@ pub(super) fn lower_pat(
             ..
         } => {
             // Records are tagged tuples in declared field order.
-            let atom = mangle_ctor_atom(name, constructor_atoms);
+            let atom = mangle_ctor_atom(name, constructor_atoms, origin_module);
             let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
             if let Some(order) = record_fields.get(name) {
                 let field_map: HashMap<&str, Option<&Pat>> = fields
@@ -89,7 +90,9 @@ pub(super) fn lower_pat(
                     .collect();
                 for field_name in order {
                     match field_map.get(field_name.as_str()) {
-                        Some(Some(p)) => elems.push(lower_pat(p, record_fields, constructor_atoms)),
+                        Some(Some(p)) => {
+                            elems.push(lower_pat(p, record_fields, constructor_atoms, origin_module))
+                        }
                         // Field without alias: bind to a var named after the field
                         Some(None) => elems.push(CPat::Var(core_var(field_name))),
                         None => elems.push(CPat::Wildcard),
@@ -98,7 +101,9 @@ pub(super) fn lower_pat(
             } else {
                 for (_, alias) in fields {
                     match alias {
-                        Some(p) => elems.push(lower_pat(p, record_fields, constructor_atoms)),
+                        Some(p) => {
+                            elems.push(lower_pat(p, record_fields, constructor_atoms, origin_module))
+                        }
                         None => elems.push(CPat::Wildcard),
                     }
                 }
@@ -122,7 +127,9 @@ pub(super) fn lower_pat(
                 .collect();
             for field_name in &sorted_fields {
                 match field_map.get(field_name) {
-                    Some(Some(p)) => elems.push(lower_pat(p, record_fields, constructor_atoms)),
+                    Some(Some(p)) => {
+                        elems.push(lower_pat(p, record_fields, constructor_atoms, origin_module))
+                    }
                     Some(None) => elems.push(CPat::Var(core_var(field_name))),
                     None => elems.push(CPat::Wildcard),
                 }
@@ -136,14 +143,16 @@ pub(super) fn lower_pat(
                 .iter()
                 .map(|&b| CBinSeg::Byte(b))
                 .collect();
-            let tail = lower_pat(rest, record_fields, constructor_atoms);
+            let tail = lower_pat(rest, record_fields, constructor_atoms, origin_module);
             segs.push(CBinSeg::BinaryAll(tail));
             CPat::Binary(segs)
         }
         Pat::BitStringPat { segments, .. } => {
             let segs = segments
                 .iter()
-                .map(|seg| lower_bit_segment_pat(seg, record_fields, constructor_atoms))
+                .map(|seg| {
+                    lower_bit_segment_pat(seg, record_fields, constructor_atoms, origin_module)
+                })
                 .collect();
             CPat::Binary(segs)
         }
@@ -157,6 +166,7 @@ fn lower_bit_segment_pat(
     seg: &crate::ast::BitSegment<Pat>,
     record_fields: &std::collections::HashMap<String, Vec<String>>,
     constructor_atoms: &std::collections::HashMap<String, String>,
+    origin_module: Option<&str>,
 ) -> CBinSeg<CPat> {
     use super::util::{
         resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size,
@@ -164,7 +174,7 @@ fn lower_bit_segment_pat(
     use crate::ast::BitSegSpec;
 
     let is_binary = seg.specs.contains(&BitSegSpec::Binary);
-    let pat = lower_pat(&seg.value, record_fields, constructor_atoms);
+    let pat = lower_pat(&seg.value, record_fields, constructor_atoms, origin_module);
 
     if is_binary && seg.size.is_none() {
         return CBinSeg::BinaryAll(pat);

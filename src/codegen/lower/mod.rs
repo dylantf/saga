@@ -297,6 +297,29 @@ impl<'a> Lowerer<'a> {
             .unwrap_or(&self.current_source_module)
     }
 
+    /// When lowering code from an imported handler, returns the handler's
+    /// source module so constructor atoms and patterns resolve against the
+    /// correct module. Returns `None` when lowering the current module's
+    /// own code (the common case).
+    fn handler_origin_module(&self) -> Option<&str> {
+        self.current_handler_source_module
+            .as_deref()
+            .filter(|m| *m != self.current_source_module)
+    }
+
+    /// Check whether a name refers to a known constructor, accounting for
+    /// the current handler origin module if lowering imported handler code.
+    fn is_known_constructor(&self, name: &str) -> bool {
+        if self.constructor_atoms.contains_key(name) {
+            return true;
+        }
+        if let Some(origin) = self.handler_origin_module() {
+            let qualified = format!("{}.{}", origin, name);
+            return self.constructor_atoms.contains_key(&qualified);
+        }
+        false
+    }
+
     fn front_resolution_for_module(
         &self,
         module_name: &str,
@@ -558,57 +581,6 @@ impl<'a> Lowerer<'a> {
             CExpr::Call(erlang_mod, target_name, call_args)
         } else {
             CExpr::Apply(Box::new(CExpr::FunRef(name.to_string(), arity)), call_args)
-        }
-    }
-
-    fn push_source_module_ctor_aliases(
-        &mut self,
-        source_module: Option<&str>,
-    ) -> Vec<(String, Option<String>)> {
-        let Some(source_module) = source_module else {
-            return Vec::new();
-        };
-        let mut scoped_aliases = Vec::new();
-        let mut updates = Vec::new();
-        let prefix = format!("{source_module}.");
-        for (qualified, atom) in &self.constructor_atoms {
-            if let Some(bare) = qualified.strip_prefix(&prefix)
-                && !bare.contains('.')
-            {
-                updates.push((bare.to_string(), atom.clone()));
-            }
-        }
-        if let Some(module_semantics) = self.ctx.module_semantics(source_module) {
-            let erlang_mod = Self::module_name_to_erlang(source_module);
-            for decl in module_semantics.elaborated {
-                match decl {
-                    crate::ast::Decl::TypeDef { variants, .. } => {
-                        for variant in variants {
-                            let ctor = variant.node.name.clone();
-                            updates.push((ctor.clone(), format!("{}_{}", erlang_mod, ctor)));
-                        }
-                    }
-                    crate::ast::Decl::RecordDef { name, .. } => {
-                        updates.push((name.clone(), format!("{}_{}", erlang_mod, name)));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        for (bare, atom) in updates {
-            let previous = self.constructor_atoms.insert(bare.clone(), atom);
-            scoped_aliases.push((bare, previous));
-        }
-        scoped_aliases
-    }
-
-    fn pop_source_module_ctor_aliases(&mut self, aliases: Vec<(String, Option<String>)>) {
-        for (bare, previous) in aliases.into_iter().rev() {
-            if let Some(prev) = previous {
-                self.constructor_atoms.insert(bare, prev);
-            } else {
-                self.constructor_atoms.remove(&bare);
-            }
         }
     }
 
@@ -1280,7 +1252,7 @@ impl<'a> Lowerer<'a> {
                     .map(|(params, guard, body)| {
                         // Pattern only matches user params, not handler params
                         let pat = if base_arity == 1 {
-                            lower_pat(&params[0], &self.record_fields, &self.constructor_atoms)
+                            lower_pat(&params[0], &self.record_fields, &self.constructor_atoms, self.handler_origin_module())
                         } else if base_arity == 0 {
                             // No user params to match on -- use wildcard
                             CPat::Wildcard
@@ -1289,7 +1261,7 @@ impl<'a> Lowerer<'a> {
                                 params
                                     .iter()
                                     .map(|p| {
-                                        lower_pat(p, &self.record_fields, &self.constructor_atoms)
+                                        lower_pat(p, &self.record_fields, &self.constructor_atoms, self.handler_origin_module())
                                     })
                                     .collect(),
                             )
@@ -1695,8 +1667,8 @@ impl<'a> Lowerer<'a> {
         }
         if let Some((module, func_name, head, args)) = qualified_call {
             let qualified = format!("{}.{}", module, func_name);
-            if self.constructor_atoms.contains_key(&qualified)
-                || self.constructor_atoms.contains_key(func_name)
+            if self.is_known_constructor(&qualified)
+                || self.is_known_constructor(func_name)
             {
                 return self.lower_ctor(func_name, args);
             }
@@ -1988,12 +1960,12 @@ impl<'a> Lowerer<'a> {
                         CExpr::Tuple(param_vars.iter().map(|v| CExpr::Var(v.clone())).collect())
                     };
                     let pat = if params.len() == 1 {
-                        lower_pat(&params[0], &self.record_fields, &self.constructor_atoms)
+                        lower_pat(&params[0], &self.record_fields, &self.constructor_atoms, self.handler_origin_module())
                     } else {
                         CPat::Tuple(
                             params
                                 .iter()
-                                .map(|p| lower_pat(p, &self.record_fields, &self.constructor_atoms))
+                                .map(|p| lower_pat(p, &self.record_fields, &self.constructor_atoms, self.handler_origin_module()))
                                 .collect(),
                         )
                     };
@@ -2049,6 +2021,7 @@ impl<'a> Lowerer<'a> {
                                                 &args[1],
                                                 &self.record_fields,
                                                 &self.constructor_atoms,
+                                                self.handler_origin_module(),
                                             ),
                                             None,
                                         )
@@ -2057,6 +2030,7 @@ impl<'a> Lowerer<'a> {
                                     &args[0],
                                     &self.record_fields,
                                     &self.constructor_atoms,
+                                    self.handler_origin_module(),
                                 );
                                 let tuple_pat = beam_interop::build_system_msg_pattern(
                                     name, pid_pat, reason_pat,
@@ -2068,6 +2042,7 @@ impl<'a> Lowerer<'a> {
                                         &arm.pattern,
                                         &self.record_fields,
                                         &self.constructor_atoms,
+                                        self.handler_origin_module(),
                                     ),
                                     None,
                                 )
@@ -2078,6 +2053,7 @@ impl<'a> Lowerer<'a> {
                                     &arm.pattern,
                                     &self.record_fields,
                                     &self.constructor_atoms,
+                                    self.handler_origin_module(),
                                 ),
                                 None,
                             )
@@ -2117,8 +2093,8 @@ impl<'a> Lowerer<'a> {
             ExprKind::QualifiedName { module, name, .. } => {
                 // Check if this is a qualified constructor with no args (e.g. M.Nothing)
                 let qualified = format!("{}.{}", module, name);
-                if self.constructor_atoms.contains_key(&qualified)
-                    || self.constructor_atoms.contains_key(name.as_str())
+                if self.is_known_constructor(&qualified)
+                    || self.is_known_constructor(name)
                 {
                     return self.lower_ctor(name, vec![]);
                 }
@@ -2186,7 +2162,7 @@ impl<'a> Lowerer<'a> {
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
-                let atom = util::mangle_ctor_atom(name, &self.constructor_atoms);
+                let atom = util::mangle_ctor_atom(name, &self.constructor_atoms, self.handler_origin_module());
                 let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
                 elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
                 let tuple = CExpr::Tuple(elems);
