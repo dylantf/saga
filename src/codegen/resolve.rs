@@ -547,6 +547,11 @@ fn resolve_expr(
                 map.insert(expr.id, scoped_to_resolved(scoped));
             } else {
                 let qualified = format!("{}.{}", module, name);
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "debug: backend resolve fell back to string-based QualifiedName lookup for '{}' ({:?})",
+                    qualified, expr.id
+                );
                 if let Some(scoped) = scope.resolve_qualified(&qualified) {
                     map.insert(expr.id, scoped_to_resolved(scoped));
                 }

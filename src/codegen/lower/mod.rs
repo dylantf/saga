@@ -67,7 +67,6 @@ struct HandlerInfo {
 }
 
 /// Stored effect definition: maps op_name -> lowering metadata.
-#[allow(dead_code)]
 struct EffectInfo {
     ops: HashMap<String, EffectOpInfo>,
 }
@@ -768,7 +767,12 @@ impl<'a> Lowerer<'a> {
 
         for (eff, op) in &handler_ops {
             let key = format!("{}.{}", eff, op);
-            let param = self.current_handler_params.get(&key).unwrap();
+            let param = self.current_handler_params.get(&key).unwrap_or_else(|| {
+                panic!(
+                    "internal lowering error: missing handler param binding for '{}'",
+                    key
+                )
+            });
             call_args.push(CExpr::Var(param.clone()));
         }
 
@@ -2229,8 +2233,8 @@ impl<'a> Lowerer<'a> {
                     .map(|pos| pos + 2) // +1 for tag, +1 for 1-based
                     .unwrap_or_else(|| {
                         panic!(
-                            "codegen: could not resolve record type for field access '.{}'",
-                            field
+                            "codegen: could not resolve record type for field access '.{}' at node {:?} (record_name={:?})",
+                            field, expr.id, resolved_name
                         )
                     }) as i64;
                 let v = self.fresh();
@@ -2258,7 +2262,10 @@ impl<'a> Lowerer<'a> {
                     .and_then(|rname| self.record_fields.get(rname))
                     .cloned()
                     .unwrap_or_else(|| {
-                        panic!("codegen: could not resolve record type for record update")
+                        panic!(
+                            "codegen: could not resolve record type for record update at node {:?} (record_name={:?})",
+                            expr.id, resolved_name
+                        )
                     });
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
