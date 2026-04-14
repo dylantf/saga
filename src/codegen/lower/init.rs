@@ -656,6 +656,13 @@ impl<'a> Lowerer<'a> {
         // Register anonymous record types found in record field types and expressions.
         Self::collect_anon_records_from_program(program, &mut self.record_fields);
 
+        // Pre-register qualified constructor atoms for private constructors from
+        // handler source modules. Public constructors are already registered by
+        // build_constructor_atoms, but private ones (used inside imported handler
+        // bodies) are not. Register them under qualified names only so they don't
+        // shadow bare-name BEAM overrides or local constructors.
+        self.register_handler_source_module_ctors();
+
         pending_annotations
     }
 
@@ -818,6 +825,53 @@ impl<'a> Lowerer<'a> {
                 Self::collect_anon_records_from_expr(right, record_fields);
             }
             _ => {}
+        }
+    }
+
+    /// Register qualified constructor atoms for private constructors from
+    /// handler source modules. These are needed when lowering imported handler
+    /// bodies that reference private constructors from their defining module.
+    fn register_handler_source_module_ctors(&mut self) {
+        let source_modules: Vec<String> = self
+            .handler_defs
+            .values()
+            .filter_map(|info| info.source_module.as_ref())
+            .filter(|m| m.as_str() != self.current_source_module)
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        for source_module in &source_modules {
+            let erlang_mod = Self::module_name_to_erlang(source_module);
+            if let Some(semantics) = self.ctx.module_semantics(source_module) {
+                for decl in semantics.elaborated {
+                    match decl {
+                        crate::ast::Decl::TypeDef { variants, .. } => {
+                            for variant in variants {
+                                let ctor = &variant.node.name;
+                                let qualified = format!("{}.{}", source_module, ctor);
+                                if !self.constructor_atoms.contains_key(&qualified) {
+                                    self.constructor_atoms.insert(
+                                        qualified,
+                                        format!("{}_{}", erlang_mod, ctor),
+                                    );
+                                }
+                            }
+                        }
+                        crate::ast::Decl::RecordDef { name, .. } => {
+                            let qualified = format!("{}.{}", source_module, name);
+                            if !self.constructor_atoms.contains_key(&qualified) {
+                                self.constructor_atoms.insert(
+                                    qualified,
+                                    format!("{}_{}", erlang_mod, name),
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 }
