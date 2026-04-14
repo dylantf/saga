@@ -1,3 +1,4 @@
+#@ Test framework with assertions, grouping, and focused/skipped test support.
 module Std.Test
 
 import Std.Base
@@ -7,6 +8,7 @@ import Std.Process
 import Std.String
 import Std.Time (monotonic_ms)
 
+#@ Effect for recording test assertions.
 pub effect Assert {
   fun assert : (ok: Bool) -> (msg: String) -> Unit
 }
@@ -18,12 +20,14 @@ type TestEntry =
   | GroupStart String
   | GroupEnd
 
+#@ Effect for reporting test results and managing test groups.
 pub effect TestRunner {
   fun report_test : (name: String) -> (failures: List String) -> (mode: TestMode) -> (elapsed_ms: Int) -> Unit
   fun enter_group : (name: String) -> Unit
   fun leave_group : Unit -> Unit
 }
 
+#@ Internal state tracked during test execution.
 record TestState {
   passed: Int,
   failed: Int,
@@ -221,6 +225,7 @@ assert_eq a b =
   if a == b then assert! True ""
   else assert! False $"Expected {debug b}, got {debug a}"
 
+#@ Assert that two values are not equal.
 pub fun assert_neq : (a: x) -> (b: x) -> Unit
   needs {Assert}
   where {x: Debug + Eq}
@@ -228,9 +233,11 @@ assert_neq a b =
   if a != b then assert! True ""
   else assert! False $"Expected {debug a} to not equal {debug b}"
 
+#@ Assert that the first value is greater than the second.
 pub fun assert_gt : a -> a -> Unit needs {Assert} where {a: Debug + Ord}
 assert_gt a b = assert! (a > b) $"Expected {debug a} > {debug b}"
 
+#@ Assert that the first value is less than the second.
 pub fun assert_lt : (a: x) -> (b: x) -> Unit
   needs {Assert}
   where {x: Debug + Ord}

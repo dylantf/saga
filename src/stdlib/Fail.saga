@@ -1,5 +1,7 @@
+#@ Short-circuit failure effect, parameterized by the error type.
 module Std.Fail
 
+#@ Effect for computations that can fail with an error of type `e`.
 pub effect Fail e {
   fun fail : e -> a
 }

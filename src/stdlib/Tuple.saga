@@ -1,11 +1,14 @@
+#@ Operations on tuples.
 module Std.Tuple
 
 impl Debug for Unit {
   debug _ = "()"
 }
 
+#@ Returns the first element of a pair.
 pub fun fst : (t: (a, b)) -> a
 fst (x, _) = x
 
+#@ Returns the second element of a pair.
 pub fun snd : (t: (a, b)) -> b
 snd (_, y) = y

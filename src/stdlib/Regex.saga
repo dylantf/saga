@@ -1,18 +1,24 @@
+#@ Regular expression matching and replacement using POSIX-style patterns.
 module Std.Regex
 
 import Std.Maybe as Maybe (Maybe)
 
+#@ Returns True if the string matches the pattern.
 @external("erlang", "std_regex_bridge", "match")
 pub fun match : (pattern: String) -> (s: String) -> Bool
 
+#@ Returns the first match of the pattern in the string, or Nothing.
 @external("erlang", "std_regex_bridge", "find")
 pub fun find : (pattern: String) -> (s: String) -> Maybe String
 
+#@ Returns all non-overlapping matches of the pattern in the string.
 @external("erlang", "std_regex_bridge", "find_all")
 pub fun find_all : (pattern: String) -> (s: String) -> List String
 
+#@ Replaces the first match of the pattern with the replacement string.
 @external("erlang", "std_regex_bridge", "replace")
 pub fun replace : (pattern: String) -> (s: String) -> (replacement: String) -> String
 
+#@ Replaces all matches of the pattern with the replacement string.
 @external("erlang", "std_regex_bridge", "replace_all")
 pub fun replace_all : (pattern: String) -> (s: String) -> (replacement: String) -> String

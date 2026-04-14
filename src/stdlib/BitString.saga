@@ -1,3 +1,4 @@
+#@ Operations on raw binary data (Erlang bitstrings).
 module Std.BitString
 
 import Std.Maybe (Maybe)

@@ -1,3 +1,4 @@
+#@ Integer conversion, arithmetic, and bitwise operations.
 module Std.Int
 
 impl Show for Int {
@@ -8,42 +9,54 @@ impl Debug for Int {
   debug x = to_string x
 }
 
+#@ Converts an integer to a float.
 @external("erlang", "erlang", "float")
 pub fun to_float : Int -> Float
 
 @external("erlang", "erlang", "integer_to_binary")
 fun to_string : Int -> String
 
+#@ Parses a string as an integer. Returns Nothing if the string is not a valid integer.
 @external("erlang", "std_int_bridge", "parse")
 pub fun parse : (s: String) -> Maybe Int
 
+#@ Adds two integers.
 pub fun add : Int -> Int -> Int
 add x y = x + y
 
+#@ Subtracts the second integer from the first.
 pub fun sub : Int -> Int -> Int
 sub x y = x - y
 
+#@ Multiplies two integers.
 pub fun mul : Int -> Int -> Int
 mul x y = x * y
 
+#@ Integer division, truncating towards zero.
 pub fun div : Int -> Int -> Int
 div x y = x / y
 
+#@ Returns the remainder of integer division.
 pub fun mod : Int -> Int -> Int
 mod x y = x % y
 
+#@ Returns the absolute value.
 pub fun abs : Int -> Int
 abs x = if x < 0 then 0 - x else x
 
+#@ Returns the smaller of two integers.
 pub fun min : Int -> Int -> Int
 min a b = if a < b then a else b
 
+#@ Returns the larger of two integers.
 pub fun max : Int -> Int -> Int
 max a b = if a > b then a else b
 
+#@ Clamps a value to the range [low, high].
 pub fun clamp : Int -> Int -> Int -> Int
 clamp low high x = min high (max low x)
 
+#@ Returns -1 for negative, 0 for zero, 1 for positive.
 pub fun sign : Int -> Int
 sign x = if x < 0 then 0 - 1 else if x > 0 then 1 else 0
 

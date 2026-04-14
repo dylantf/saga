@@ -1,3 +1,4 @@
+#@ Boolean operations.
 module Std.Bool
 
 impl Show for Bool {
@@ -14,6 +15,7 @@ impl Debug for Bool {
   }
 }
 
+#@ Negates a boolean value.
 pub fun not : Bool -> Bool
 not True = False
 not False = True

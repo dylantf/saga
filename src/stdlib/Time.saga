@@ -1,3 +1,4 @@
+#@ Monotonic time for measuring durations.
 module Std.Time
 
 #@ Returns the current monotonic time in milliseconds.

@@ -1,3 +1,4 @@
+#@ Mutable references via an algebraic effect, with process-local and ETS-backed handlers.
 module Std.Ref
 
 #@ Opaque mutable reference handle. At runtime this is an Erlang reference

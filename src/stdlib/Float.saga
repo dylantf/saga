@@ -1,3 +1,4 @@
+#@ Floating-point conversion and arithmetic operations.
 module Std.Float
 
 impl Show for Float {
@@ -11,32 +12,42 @@ impl Debug for Float {
 @external("erlang", "std_float_bridge", "to_string")
 fun to_string : (x: Float) -> String
 
+#@ Truncates a float towards zero, returning an integer.
 @external("erlang", "erlang", "trunc")
 pub fun trunc : (x: Float) -> Int
 
+#@ Rounds a float to the nearest integer.
 @external("erlang", "erlang", "round")
 pub fun round : (x: Float) -> Int
 
+#@ Rounds a float down to the nearest integer.
 @external("erlang", "erlang", "floor")
 pub fun floor : (x: Float) -> Int
 
+#@ Rounds a float up to the nearest integer.
 @external("erlang", "erlang", "ceil")
 pub fun ceil : (x: Float) -> Int
 
+#@ Parses a string as a float. Returns Nothing if the string is not a valid float.
 @external("erlang", "std_float_bridge", "parse")
 pub fun parse : (s: String) -> Maybe Float
 
+#@ Adds two floats.
 pub fun add : Float -> Float -> Float
 add x y = x + y
 
+#@ Subtracts the second float from the first.
 pub fun sub : Float -> Float -> Float
 sub x y = x - y
 
+#@ Multiplies two floats.
 pub fun mul : Float -> Float -> Float
 mul x y = x * y
 
+#@ Divides the first float by the second.
 pub fun div : Float -> Float -> Float
 div x y = x / y
 
+#@ Returns the remainder of dividing the first float by the second.
 pub fun mod : Float -> Float -> Float
 mod x y = x % y

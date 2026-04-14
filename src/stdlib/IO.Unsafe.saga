@@ -1,3 +1,5 @@
+#@ Low-level I/O primitives that bypass the Stdio effect.
+#@ Used internally by handler implementations.
 module Std.IO.Unsafe
 
 #@ Writes a string directly to stdout, bypassing the Stdio effect.

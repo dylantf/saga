@@ -91,7 +91,8 @@ pub fn set_decl_doc(decl: &mut Decl, doc: Vec<String>) {
         | Decl::EffectDef { doc: d, .. }
         | Decl::HandlerDef { doc: d, .. }
         | Decl::TraitDef { doc: d, .. }
-        | Decl::ImplDef { doc: d, .. } => *d = doc,
+        | Decl::ImplDef { doc: d, .. }
+        | Decl::ModuleDecl { doc: d, .. } => *d = doc,
         _ => {}
     }
 }
@@ -321,6 +322,7 @@ pub enum Decl {
     /// `module Foo.Bar`
     ModuleDecl {
         id: NodeId,
+        doc: Vec<String>,
         path: Vec<String>,
         span: Span,
     },

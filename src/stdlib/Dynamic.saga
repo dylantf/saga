@@ -1,3 +1,4 @@
+#@ Type-safe decoding of dynamically typed BEAM values.
 module Std.Dynamic
 
 # --- Core types ---

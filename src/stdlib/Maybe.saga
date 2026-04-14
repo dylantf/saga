@@ -1,3 +1,4 @@
+#@ Optional values: a type-safe alternative to null.
 module Std.Maybe
 
 impl Debug for Maybe a where {a: Debug} {
@@ -7,6 +8,7 @@ impl Debug for Maybe a where {a: Debug} {
   }
 }
 
+#@ A value that is either present (Just) or absent (Nothing).
 pub type Maybe a =
   | Nothing
   | Just a

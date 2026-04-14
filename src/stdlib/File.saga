@@ -1,5 +1,7 @@
+#@ File system operations through an algebraic effect.
 module Std.File
 
+#@ Errors that can occur during file operations.
 pub type FileError =
   | NotFound
   | PermissionDenied
@@ -10,6 +12,7 @@ pub type FileError =
   | Other String
   deriving (Debug)
 
+#@ Effect for reading, writing, and querying files.
 pub effect File {
   fun read : String -> Result String FileError
   fun write : String -> String -> Result Unit FileError
@@ -33,6 +36,7 @@ fun delete_file : (path: String) -> Result Unit FileError
 @external("erlang", "std_file_bridge", "file_exists")
 fun file_exists : (path: String) -> Bool
 
+#@ Handler that delegates to the real file system.
 pub handler fs for File {
   read path = resume (read_file path)
   write path content = resume (write_file path content)

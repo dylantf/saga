@@ -2,6 +2,7 @@ pub mod build;
 pub mod color;
 pub mod commands;
 pub mod diagnostics;
+pub mod docs;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

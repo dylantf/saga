@@ -75,6 +75,12 @@ enum Command {
         #[arg(long)]
         width: Option<usize>,
     },
+    /// Generate documentation
+    Docs {
+        /// Output directory (default: _build/docs/)
+        #[arg(long, short)]
+        output: Option<String>,
+    },
 }
 
 fn main() {
@@ -120,6 +126,12 @@ fn main() {
             width,
         } => {
             cli::commands::cmd_fmt(&file, write, debug, width);
+        }
+        Command::Docs { output } => {
+            let output_dir = output
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("_build/docs"));
+            cli::docs::generate_docs(&output_dir);
         }
     }
 }

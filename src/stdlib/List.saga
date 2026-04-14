@@ -1,3 +1,4 @@
+#@ Operations on linked lists: transforming, searching, sorting, and more.
 module Std.List
 
 import Std.Base (Ordering)
@@ -78,6 +79,7 @@ pub fun append : (xs: List a) -> (ys: List a) -> List a
 @external("erlang", "lists", "flatmap")
 pub fun flat_map : (f: a -> List b) -> (xs: List a) -> List b
 
+#@ Maps a function over a list and keeps only the Just results.
 pub fun filter_map : (f: a -> Maybe b) -> (xs: List a) -> List b
 filter_map f xs = case xs {
   [] -> []

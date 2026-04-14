@@ -1,71 +1,97 @@
+#@ Mathematical constants and functions for floating-point arithmetic.
 module Std.Math
 
+#@ The ratio of a circle's circumference to its diameter.
 pub val pi = 3.141592653589793
+
+#@ Euler's number, the base of the natural logarithm.
 pub val e = 2.718281828459045
+
+#@ Two times pi. The ratio of a circle's circumference to its radius.
 pub val tau = 6.283185307179586
 
 # --- Functions that need domain validation (via bridge) ---
 
+#@ Square root. Panics on negative input.
 @external("erlang", "std_math_bridge", "sqrt")
 pub fun sqrt : Float -> Float
 
+#@ Raises the first argument to the power of the second.
 @external("erlang", "std_math_bridge", "pow")
 pub fun pow : Float -> Float -> Float
 
+#@ Natural logarithm (base e). Panics on non-positive input.
 @external("erlang", "std_math_bridge", "log")
 pub fun log : Float -> Float
 
+#@ Base-2 logarithm. Panics on non-positive input.
 @external("erlang", "std_math_bridge", "log2")
 pub fun log2 : Float -> Float
 
+#@ Base-10 logarithm. Panics on non-positive input.
 @external("erlang", "std_math_bridge", "log10")
 pub fun log10 : Float -> Float
 
+#@ Arcsine in radians. Input must be in [-1, 1].
 @external("erlang", "std_math_bridge", "asin")
 pub fun asin : Float -> Float
 
+#@ Arccosine in radians. Input must be in [-1, 1].
 @external("erlang", "std_math_bridge", "acos")
 pub fun acos : Float -> Float
 
+#@ Two-argument arctangent in radians.
 @external("erlang", "std_math_bridge", "atan2")
 pub fun atan2 : Float -> Float -> Float
 
 # --- Functions that are always safe (direct Erlang calls) ---
 
+#@ Exponential function (e raised to the given power).
 @external("erlang", "math", "exp")
 pub fun exp : Float -> Float
 
+#@ Sine in radians.
 @external("erlang", "math", "sin")
 pub fun sin : Float -> Float
 
+#@ Cosine in radians.
 @external("erlang", "math", "cos")
 pub fun cos : Float -> Float
 
+#@ Tangent in radians.
 @external("erlang", "math", "tan")
 pub fun tan : Float -> Float
 
+#@ Arctangent in radians.
 @external("erlang", "math", "atan")
 pub fun atan : Float -> Float
 
 # --- Pure helpers ---
 
+#@ Returns the absolute value.
 pub fun abs : Float -> Float
 abs x = if x < 0.0 then 0.0 - x else x
 
+#@ Returns the smaller of two floats.
 pub fun min : Float -> Float -> Float
 min a b = if a < b then a else b
 
+#@ Returns the larger of two floats.
 pub fun max : Float -> Float -> Float
 max a b = if a > b then a else b
 
+#@ Clamps a value to the range [low, high].
 pub fun clamp : Float -> Float -> Float -> Float
 clamp low high x = min high (max low x)
 
+#@ Returns -1.0 for negative, 0.0 for zero, 1.0 for positive.
 pub fun sign : Float -> Float
 sign x = if x < 0.0 then 0.0 - 1.0 else if x > 0.0 then 1.0 else 0.0
 
+#@ Converts degrees to radians.
 pub fun deg_to_rad : Float -> Float
 deg_to_rad d = d * pi / 180.0
 
+#@ Converts radians to degrees.
 pub fun rad_to_deg : Float -> Float
 rad_to_deg r = r * 180.0 / pi

@@ -1,3 +1,4 @@
+#@ Low-level process control: exiting the VM and catching panics.
 module Std.Process
 
 #@ Immediately terminates the VM with the given exit code.

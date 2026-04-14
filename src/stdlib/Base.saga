@@ -1,16 +1,18 @@
+#@ Core traits and primitive type class instances.
+#@ Loaded before all other modules; cannot import from other modules.
 module Std.Base
 
-# Base traits and primitive impls. Loaded before all other modules,
-# therefore cannot import from other modules.
-
+#@ Convert a value to a human-readable string.
 pub trait Show a {
   fun show : a -> String
 }
 
+#@ Convert a value to a programmer-facing debug representation.
 pub trait Debug a {
   fun debug : a -> String
 }
 
+#@ Types that support an associative combine operation.
 pub trait Semigroup a {
   fun combine : a -> a -> a
 }
@@ -36,12 +38,15 @@ impl Semigroup for BitString {
   combine a b = semigroup_bitstring_combine a b
 }
 
+#@ Result of comparing two values.
 pub type Ordering = Lt | Eq | Gt deriving (Show, Debug, Eq)
 
+#@ Types with a total ordering.
 pub trait Ord a where {a: Eq} {
   fun compare : a -> a -> Ordering
 }
 
+#@ Types that can be converted to and from integers.
 pub trait Enum a {
   fun to_enum : a -> Int
   fun from_enum : Int -> a

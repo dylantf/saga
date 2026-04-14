@@ -1,3 +1,4 @@
+#@ Immutable key-value dictionaries backed by Erlang maps.
 module Std.Dict
 
 import Std.List as List

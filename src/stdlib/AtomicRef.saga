@@ -1,3 +1,4 @@
+#@ Process-safe mutable references backed by ETS with a lock server.
 module Std.AtomicRef
 
 import Std.Actor (Process, Actor, Monitor, beam_actor)

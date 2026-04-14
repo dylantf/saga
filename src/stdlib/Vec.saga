@@ -1,3 +1,4 @@
+#@ Mutable vectors via an algebraic effect, backed by ETS composite keys.
 module Std.Vec
 
 #@ Opaque mutable vector handle. At runtime this is an Erlang reference

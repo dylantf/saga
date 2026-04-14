@@ -1,5 +1,7 @@
+#@ Computations that can succeed (Ok) or fail (Err) with a typed error.
 module Std.Result
 
+#@ A value that is either a success (Ok) or a failure (Err).
 pub type Result a b =
   | Ok a
   | Err b

@@ -1,3 +1,4 @@
+#@ Unicode string operations: slicing, searching, casing, and more.
 module Std.String
 
 import Std.Maybe (Maybe)

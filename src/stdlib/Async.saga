@@ -1,14 +1,17 @@
+#@ Lightweight async/await built on top of the Actor model.
 module Std.Async
 
 import Std.Actor (Process, Actor)
 
 opaque type Future a = Future(Pid a)
 
+#@ Async effect for spawning concurrent computations and awaiting their results.
 pub effect Async {
   fun async : (f: Unit -> a) -> Future a
   fun await : (future: Future a) -> a
 }
 
+#@ Default handler for Async that spawns an actor per async call.
 pub handler async_handler for Async needs {Process, Actor a} {
   async f = {
     let caller = self! ()
@@ -25,6 +28,7 @@ pub handler async_handler for Async needs {Process, Actor a} {
   }
 }
 
+#@ Awaits all futures in order and collects the results into a list.
 pub fun all : (futures: List (Future a)) -> List a needs {Async}
 all futures = case futures {
   [] -> []

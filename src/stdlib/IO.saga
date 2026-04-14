@@ -1,3 +1,4 @@
+#@ Standard I/O effect for printing and reading from the console.
 module Std.IO
 
 import Std.String
@@ -7,12 +8,14 @@ import Std.IO.Unsafe (print_stdout, print_stderr, read_stdin)
 @builtin
 pub fun dbg : a -> Unit where {a: Debug}
 
+#@ Effect for standard I/O: printing to stdout/stderr and reading from stdin.
 pub effect Stdio {
   fun print : String -> Unit
   fun eprint : String -> Unit
   fun read : String -> String
 }
 
+#@ Default handler that prints to the real console.
 pub handler console for Stdio {
   print message = {
     print_stdout message
@@ -28,8 +31,10 @@ pub handler console for Stdio {
   }
 }
 
+#@ Prints a string to stdout followed by a newline.
 pub fun println : String -> Unit needs {Stdio}
 println message = Stdio.print! (message <> "\n")
 
+#@ Prints a string to stderr followed by a newline.
 pub fun eprintln : String -> Unit needs {Stdio}
 eprintln message = Stdio.eprint! (message <> "\n")

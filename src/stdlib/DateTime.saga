@@ -1,9 +1,11 @@
+#@ Date, time, and datetime types with formatting, parsing, and arithmetic.
 module Std.DateTime
 
 import Std.Int
 import Std.Maybe
 import Std.String
 
+#@ Errors that can occur when parsing a datetime string.
 pub type ParseError =
   | UnexpectedEnd
   | InvalidDigits String
@@ -12,12 +14,14 @@ pub type ParseError =
   | MissingField String
   deriving (Show, Debug, Eq)
 
+#@ A calendar date (year, month, day).
 pub record Date {
   year: Int,
   month: Int,
   day: Int,
 } deriving (Show, Debug, Eq)
 
+#@ A time of day with microsecond precision.
 pub record Time {
   hour: Int,
   minute: Int,
@@ -25,6 +29,7 @@ pub record Time {
   microsecond: Int,
 } deriving (Show, Debug, Eq)
 
+#@ A date and time without timezone information.
 pub record NaiveDateTime {
   year: Int,
   month: Int,
@@ -70,12 +75,14 @@ impl Ord for NaiveDateTime {
   }
 }
 
+#@ Effect for accessing the current wall-clock time.
 pub effect Clock {
   fun now : Unit -> NaiveDateTime
   fun today : Unit -> Date
   fun time_of_day : Unit -> Time
 }
 
+#@ Combines a Date and Time into a NaiveDateTime.
 pub fun from_date_time : Date -> Time -> NaiveDateTime
 from_date_time d t = NaiveDateTime {
   year: d.year,
@@ -87,6 +94,7 @@ from_date_time d t = NaiveDateTime {
   microsecond: t.microsecond,
 }
 
+#@ Constructs a NaiveDateTime from individual components. Microsecond is set to 0.
 pub fun new : (year: Int) -> (month: Int) -> (day: Int) -> (hour: Int) -> (minute: Int) -> (second: Int) -> NaiveDateTime
 new year month day hour minute second = NaiveDateTime {
   year: year,
@@ -98,9 +106,11 @@ new year month day hour minute second = NaiveDateTime {
   microsecond: 0,
 }
 
+#@ Extracts the date portion of a NaiveDateTime.
 pub fun to_date : NaiveDateTime -> Date
 to_date dt = Date { year: dt.year, month: dt.month, day: dt.day }
 
+#@ Extracts the time portion of a NaiveDateTime.
 pub fun to_time : NaiveDateTime -> Time
 to_time dt = Time {
   hour: dt.hour,
@@ -243,34 +253,43 @@ format_loop fmt dt acc = case fmt {
   }
 }
 
+#@ Formats a NaiveDateTime as an ISO 8601 string ("YYYY-MM-DDTHH:MM:SS").
 pub fun to_iso8601 : NaiveDateTime -> String
 to_iso8601 dt = format "%FT%T" dt
 
 # --- Calendar operations ---
 
+#@ Returns the day of the week (1 = Monday, 7 = Sunday).
 @external("erlang", "std_datetime_bridge", "day_of_week")
 pub fun day_of_week : Date -> Int
 
+#@ Returns True if the given year is a leap year.
 @external("erlang", "std_datetime_bridge", "is_leap_year")
 pub fun is_leap_year : Int -> Bool
 
+#@ Returns the number of days in the given month for the given year.
 @external("erlang", "std_datetime_bridge", "days_in_month")
 pub fun days_in_month : (year: Int) -> (month: Int) -> Int
 
+#@ Returns True if the date is a valid calendar date.
 @external("erlang", "std_datetime_bridge", "valid_date")
 pub fun valid_date : Date -> Bool
 
 # --- Arithmetic ---
 
+#@ Adds the given number of seconds to a datetime.
 @external("erlang", "std_datetime_bridge", "add_seconds")
 pub fun add_seconds : Int -> NaiveDateTime -> NaiveDateTime
 
+#@ Adds the given number of days to a datetime.
 @external("erlang", "std_datetime_bridge", "add_days")
 pub fun add_days : Int -> NaiveDateTime -> NaiveDateTime
 
+#@ Adds the given number of hours to a datetime.
 pub fun add_hours : Int -> NaiveDateTime -> NaiveDateTime
 add_hours n dt = add_seconds (n * 3600) dt
 
+#@ Adds the given number of minutes to a datetime.
 pub fun add_minutes : Int -> NaiveDateTime -> NaiveDateTime
 add_minutes n dt = add_seconds (n * 60) dt
 
@@ -282,6 +301,7 @@ floor_div a b =
 fun floor_mod : Int -> Int -> Int
 floor_mod a b = a - floor_div a b * b
 
+#@ Adds the given number of months to a datetime, clamping the day if needed.
 pub fun add_months : Int -> NaiveDateTime -> NaiveDateTime
 add_months n dt = {
   let total = dt.month + n - 1
@@ -292,9 +312,11 @@ add_months n dt = {
   { dt | year: y, month: m, day: d }
 }
 
+#@ Adds the given number of years to a datetime.
 pub fun add_years : Int -> NaiveDateTime -> NaiveDateTime
 add_years n dt = add_months (n * 12) dt
 
+#@ Returns the difference in seconds between two datetimes (a - b).
 @external("erlang", "std_datetime_bridge", "diff_seconds")
 pub fun diff_seconds : NaiveDateTime -> NaiveDateTime -> Int
 
@@ -543,6 +565,7 @@ fun today_utc : Unit -> Date
 @external("erlang", "std_datetime_bridge", "time_of_day_utc")
 fun time_of_day_utc : Unit -> Time
 
+#@ Handler that reads the system clock in UTC.
 pub handler system_clock for Clock {
   now () = resume now_utc ()
   today () = resume today_utc ()

@@ -1366,6 +1366,7 @@ impl Parser {
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::ModuleDecl {
             id: NodeId::fresh(),
+            doc: Vec::new(),
             path,
             span: start.to(end),
         })

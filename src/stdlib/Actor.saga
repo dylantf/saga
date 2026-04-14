@@ -1,3 +1,5 @@
+#@ Concurrency primitives for the BEAM actor model.
+#@ Provides process spawning, message passing, monitoring, linking, and timers.
 module Std.Actor
 
 #@ Process identifier, parameterized by the message type the process accepts.
