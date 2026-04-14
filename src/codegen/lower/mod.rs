@@ -259,14 +259,16 @@ impl<'a> Lowerer<'a> {
         name: &str,
         arity: usize,
     ) -> Option<(String, String)> {
-        self.ctx.module_semantics(source_module).and_then(|module_semantics| {
-            module_semantics
-                .codegen_info
-                .external_funs
-                .iter()
-                .find(|(fun_name, _, _, fun_arity)| fun_name == name && *fun_arity == arity)
-                .map(|(_, erl_mod, erl_fun, _)| (erl_mod.clone(), erl_fun.clone()))
-        })
+        self.ctx
+            .module_semantics(source_module)
+            .and_then(|module_semantics| {
+                module_semantics
+                    .codegen_info
+                    .external_funs
+                    .iter()
+                    .find(|(fun_name, _, _, fun_arity)| fun_name == name && *fun_arity == arity)
+                    .map(|(_, erl_mod, erl_fun, _)| (erl_mod.clone(), erl_fun.clone()))
+            })
     }
 
     fn resolved_fun_info(&self, node_id: crate::ast::NodeId, fallback: &str) -> Option<&FunInfo> {
@@ -331,7 +333,11 @@ impl<'a> Lowerer<'a> {
             .or_else(|| {
                 (module_name == self.current_source_module).then_some(&self.check_result.resolution)
             })
-            .or_else(|| self.ctx.module_semantics(module_name).map(|m| m.front_resolution))
+            .or_else(|| {
+                self.ctx
+                    .module_semantics(module_name)
+                    .map(|m| m.front_resolution)
+            })
     }
 
     fn current_value_ref(
@@ -400,10 +406,7 @@ impl<'a> Lowerer<'a> {
             .or_else(|| self.op_to_effect.get(op_name).cloned())
     }
 
-    fn resolved_handler_binding_name(
-        &self,
-        node_id: crate::ast::NodeId,
-    ) -> Option<String> {
+    fn resolved_handler_binding_name(&self, node_id: crate::ast::NodeId) -> Option<String> {
         let normalize_lookup = |lookup_name: &str| {
             if self.handle_dynamic_vars.contains_key(lookup_name)
                 || self.handle_cond_vars.contains_key(lookup_name)
@@ -440,11 +443,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn resolved_env_lookup_name(
-        &self,
-        node_id: crate::ast::NodeId,
-        fallback: &str,
-    ) -> String {
+    fn resolved_env_lookup_name(&self, node_id: crate::ast::NodeId, fallback: &str) -> String {
         use super::resolve::ResolvedName;
 
         match self.resolved.get(&node_id) {
@@ -1013,7 +1012,9 @@ impl<'a> Lowerer<'a> {
                             effects: Vec::new(),
                             param_absorbed_effects: HashMap::new(),
                         });
-                    if effects.is_empty() && let Some(scheme) = self.check_result.env.get(name) {
+                    if effects.is_empty()
+                        && let Some(scheme) = self.check_result.env.get(name)
+                    {
                         let resolved_ty = self.check_result.sub.apply(&scheme.ty);
                         effects = self.canonicalize_effects(
                             util::arity_and_effects_from_type(&resolved_ty).1,
@@ -1252,7 +1253,12 @@ impl<'a> Lowerer<'a> {
                     .map(|(params, guard, body)| {
                         // Pattern only matches user params, not handler params
                         let pat = if base_arity == 1 {
-                            lower_pat(&params[0], &self.record_fields, &self.constructor_atoms, self.handler_origin_module())
+                            lower_pat(
+                                &params[0],
+                                &self.record_fields,
+                                &self.constructor_atoms,
+                                self.handler_origin_module(),
+                            )
                         } else if base_arity == 0 {
                             // No user params to match on -- use wildcard
                             CPat::Wildcard
@@ -1261,7 +1267,12 @@ impl<'a> Lowerer<'a> {
                                 params
                                     .iter()
                                     .map(|p| {
-                                        lower_pat(p, &self.record_fields, &self.constructor_atoms, self.handler_origin_module())
+                                        lower_pat(
+                                            p,
+                                            &self.record_fields,
+                                            &self.constructor_atoms,
+                                            self.handler_origin_module(),
+                                        )
                                     })
                                     .collect(),
                             )
@@ -1667,9 +1678,7 @@ impl<'a> Lowerer<'a> {
         }
         if let Some((module, func_name, head, args)) = qualified_call {
             let qualified = format!("{}.{}", module, func_name);
-            if self.is_known_constructor(&qualified)
-                || self.is_known_constructor(func_name)
-            {
+            if self.is_known_constructor(&qualified) || self.is_known_constructor(func_name) {
                 return self.lower_ctor(func_name, args);
             }
             if let Some(call) =
@@ -1960,12 +1969,24 @@ impl<'a> Lowerer<'a> {
                         CExpr::Tuple(param_vars.iter().map(|v| CExpr::Var(v.clone())).collect())
                     };
                     let pat = if params.len() == 1 {
-                        lower_pat(&params[0], &self.record_fields, &self.constructor_atoms, self.handler_origin_module())
+                        lower_pat(
+                            &params[0],
+                            &self.record_fields,
+                            &self.constructor_atoms,
+                            self.handler_origin_module(),
+                        )
                     } else {
                         CPat::Tuple(
                             params
                                 .iter()
-                                .map(|p| lower_pat(p, &self.record_fields, &self.constructor_atoms, self.handler_origin_module()))
+                                .map(|p| {
+                                    lower_pat(
+                                        p,
+                                        &self.record_fields,
+                                        &self.constructor_atoms,
+                                        self.handler_origin_module(),
+                                    )
+                                })
                                 .collect(),
                         )
                     };
@@ -2093,9 +2114,7 @@ impl<'a> Lowerer<'a> {
             ExprKind::QualifiedName { module, name, .. } => {
                 // Check if this is a qualified constructor with no args (e.g. M.Nothing)
                 let qualified = format!("{}.{}", module, name);
-                if self.is_known_constructor(&qualified)
-                    || self.is_known_constructor(name)
-                {
+                if self.is_known_constructor(&qualified) || self.is_known_constructor(name) {
                     return self.lower_ctor(name, vec![]);
                 }
                 use super::resolve::ResolvedName;
@@ -2162,7 +2181,11 @@ impl<'a> Lowerer<'a> {
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
-                let atom = util::mangle_ctor_atom(name, &self.constructor_atoms, self.handler_origin_module());
+                let atom = util::mangle_ctor_atom(
+                    name,
+                    &self.constructor_atoms,
+                    self.handler_origin_module(),
+                );
                 let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
                 elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
                 let tuple = CExpr::Tuple(elems);

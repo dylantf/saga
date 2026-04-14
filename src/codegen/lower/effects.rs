@@ -412,7 +412,8 @@ impl<'a> Lowerer<'a> {
                         handled_effects.push(effect.clone());
                     }
                     if arm.qualifier.is_some() {
-                        inline_arms_by_op.insert(format!("{}.{}", effect, arm.op_name), arm.clone());
+                        inline_arms_by_op
+                            .insert(format!("{}.{}", effect, arm.op_name), arm.clone());
                     } else {
                         inline_arms_by_op.insert(arm.op_name.clone(), arm.clone());
                     }
@@ -843,12 +844,14 @@ impl<'a> Lowerer<'a> {
                 else_info,
             };
         }
-        let canonical = self.resolved_handler_binding_name(reference.id).unwrap_or_else(|| {
-            panic!(
-                "internal lowering error: missing handler resolution for '{}' ({:?})",
-                name, reference.id
-            )
-        });
+        let canonical = self
+            .resolved_handler_binding_name(reference.id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "internal lowering error: missing handler resolution for '{}' ({:?})",
+                    name, reference.id
+                )
+            });
         let info = self
             .handler_defs
             .get(&canonical)

@@ -483,14 +483,8 @@ main () = 42
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    let out = codegen::emit_module_with_context(
-        "main",
-        &elaborated,
-        &ctx,
-        &result,
-        None,
-        Some("main"),
-    );
+    let out =
+        codegen::emit_module_with_context("main", &elaborated, &ctx, &result, None, Some("main"));
 
     assert_contains(&out, "module 'main' ['main'/1]");
     assert_erlc_compiles(&out, "main");

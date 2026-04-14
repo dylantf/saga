@@ -62,9 +62,7 @@ impl CodegenContext {
         })
     }
 
-    pub fn modules_semantics(
-        &self,
-    ) -> impl Iterator<Item = (&str, ModuleSemantics<'_>)> + '_ {
+    pub fn modules_semantics(&self) -> impl Iterator<Item = (&str, ModuleSemantics<'_>)> + '_ {
         self.modules.iter().map(|(name, m)| {
             (
                 name.as_str(),

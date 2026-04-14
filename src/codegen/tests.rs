@@ -30,14 +30,7 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    emit_module_with_context(
-        "_script",
-        &elaborated,
-        &ctx,
-        &result,
-        source_file,
-        None,
-    )
+    emit_module_with_context("_script", &elaborated, &ctx, &result, source_file, None)
 }
 
 /// Assert that `emit(src)` contains `needle` as a substring.
@@ -253,12 +246,17 @@ fn binop_concat() {
     // In the full pipeline, <> elaborates through the Semigroup dictionary for String.
     let out = emit(r#"main () = "a" <> "b""#);
     assert!(
-        out.contains("___dict_Std_Base_Semigroup")
-            || out.contains("__dict_Std_Base_Semigroup"),
+        out.contains("___dict_Std_Base_Semigroup") || out.contains("__dict_Std_Base_Semigroup"),
         "expected Semigroup dictionary-based concat lowering\n{out}"
     );
-    assert!(out.contains("#{#<97>"), "missing left string literal\n{out}");
-    assert!(out.contains("#{#<98>"), "missing right string literal\n{out}");
+    assert!(
+        out.contains("#{#<97>"),
+        "missing left string literal\n{out}"
+    );
+    assert!(
+        out.contains("#{#<98>"),
+        "missing right string literal\n{out}"
+    );
 }
 
 // --- If/else ---

@@ -82,7 +82,8 @@ impl<'a> Lowerer<'a> {
             ast::TypeExpr::Record { fields, .. } => {
                 let mut effect_names = BTreeSet::new();
                 for (_, field_ty) in fields {
-                    effect_names.extend(self.resolved_type_effects_for_module(module_name, field_ty));
+                    effect_names
+                        .extend(self.resolved_type_effects_for_module(module_name, field_ty));
                 }
                 effect_names
             }
@@ -209,13 +210,12 @@ impl<'a> Lowerer<'a> {
                             .iter()
                             .enumerate()
                             .filter_map(|(idx, (_, ty))| {
-                                let effs = self.resolved_type_effects_for_module(source_module_name, ty);
+                                let effs =
+                                    self.resolved_type_effects_for_module(source_module_name, ty);
                                 if effs.is_empty() {
                                     None
                                 } else {
-                                    let mut sorted: Vec<String> = effs
-                                        .into_iter()
-                                        .collect();
+                                    let mut sorted: Vec<String> = effs.into_iter().collect();
                                     sorted.sort();
                                     Some((idx, sorted))
                                 }
@@ -307,8 +307,10 @@ impl<'a> Lowerer<'a> {
                             .unwrap_or_else(|| {
                                 let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
                                 for (i, (_param_name, type_expr)) in params.iter().enumerate() {
-                                    let effs = self
-                                        .resolved_type_effects_for_module(source_module_name, type_expr);
+                                    let effs = self.resolved_type_effects_for_module(
+                                        source_module_name,
+                                        type_expr,
+                                    );
                                     if !effs.is_empty() {
                                         let mut sorted: Vec<String> = effs.into_iter().collect();
                                         sorted.sort();
@@ -559,9 +561,7 @@ impl<'a> Lowerer<'a> {
                     let effs =
                         self.resolved_type_effects_for_module(&source_module_name, type_expr);
                     if !effs.is_empty() {
-                        let mut sorted: Vec<String> = effs
-                            .into_iter()
-                            .collect();
+                        let mut sorted: Vec<String> = effs.into_iter().collect();
                         sorted.sort();
                         param_effs.insert(i, sorted);
                     }
@@ -593,11 +593,10 @@ impl<'a> Lowerer<'a> {
                     let mut base_arity = params.len() + count_lambda_params(body);
                     // Use annotation arity for eta-reduced functions (same fix as mod.rs)
                     if let Some(scheme) = self.check_result.env.get(name) {
-                        let declared =
-                            super::util::arity_and_effects_from_type(
-                                &self.check_result.sub.apply(&scheme.ty),
-                            )
-                            .0;
+                        let declared = super::util::arity_and_effects_from_type(
+                            &self.check_result.sub.apply(&scheme.ty),
+                        )
+                        .0;
                         if declared > base_arity {
                             base_arity = declared;
                         }
@@ -851,22 +850,16 @@ impl<'a> Lowerer<'a> {
                             for variant in variants {
                                 let ctor = &variant.node.name;
                                 let qualified = format!("{}.{}", source_module, ctor);
-                                if !self.constructor_atoms.contains_key(&qualified) {
-                                    self.constructor_atoms.insert(
-                                        qualified,
-                                        format!("{}_{}", erlang_mod, ctor),
-                                    );
-                                }
+                                self.constructor_atoms
+                                    .entry(qualified)
+                                    .or_insert_with(|| format!("{}_{}", erlang_mod, ctor));
                             }
                         }
                         crate::ast::Decl::RecordDef { name, .. } => {
                             let qualified = format!("{}.{}", source_module, name);
-                            if !self.constructor_atoms.contains_key(&qualified) {
-                                self.constructor_atoms.insert(
-                                    qualified,
-                                    format!("{}_{}", erlang_mod, name),
-                                );
-                            }
+                            self.constructor_atoms
+                                .entry(qualified)
+                                .or_insert_with(|| format!("{}_{}", erlang_mod, name));
                         }
                         _ => {}
                     }

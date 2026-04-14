@@ -388,12 +388,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    fn resolve_scoped_pattern_body(
-        &mut self,
-        pattern: &Pat,
-        guard: Option<&Expr>,
-        body: &Expr,
-    ) {
+    fn resolve_scoped_pattern_body(&mut self, pattern: &Pat, guard: Option<&Expr>, body: &Expr) {
         self.resolve_pat(pattern);
         self.push_value_scope();
         self.bind_pattern(pattern);
@@ -671,7 +666,9 @@ impl<'a> Resolver<'a> {
                 self.resolve_expr(then_branch);
                 self.resolve_expr(else_branch);
             }
-            ExprKind::Case { scrutinee, arms, .. } => {
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
                 self.resolve_expr(scrutinee);
                 self.resolve_case_arms(arms);
             }
@@ -706,7 +703,10 @@ impl<'a> Resolver<'a> {
             ExprKind::EffectCall {
                 qualifier, args, ..
             } => self.resolve_effect_call_expr(expr.id, qualifier.as_deref(), args),
-            ExprKind::With { expr: inner, handler } => {
+            ExprKind::With {
+                expr: inner,
+                handler,
+            } => {
                 self.resolve_expr(inner);
                 self.resolve_with_handler(handler);
             }

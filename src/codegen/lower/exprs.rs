@@ -317,7 +317,12 @@ impl<'a> Lowerer<'a> {
         let mut result = Vec::new();
 
         for arm in arms {
-            let pat = lower_pat(&arm.pattern, &self.record_fields, &self.constructor_atoms, self.handler_origin_module());
+            let pat = lower_pat(
+                &arm.pattern,
+                &self.record_fields,
+                &self.constructor_atoms,
+                self.handler_origin_module(),
+            );
 
             match &arm.guard {
                 None => {
@@ -349,7 +354,12 @@ impl<'a> Lowerer<'a> {
         for arm in arms.iter().rev() {
             let rest_var = self.fresh();
             let rest_ref = CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
-            let pat = lower_pat(&arm.pattern, &self.record_fields, &self.constructor_atoms, self.handler_origin_module());
+            let pat = lower_pat(
+                &arm.pattern,
+                &self.record_fields,
+                &self.constructor_atoms,
+                self.handler_origin_module(),
+            );
             let body_ce = self.lower_expr(&arm.body);
 
             let current = match &arm.guard {
@@ -509,7 +519,8 @@ impl<'a> Lowerer<'a> {
                     vars.push(var.clone());
                     bindings.push((var, val));
                 }
-                let atom = mangle_ctor_atom(name, &self.constructor_atoms, self.handler_origin_module());
+                let atom =
+                    mangle_ctor_atom(name, &self.constructor_atoms, self.handler_origin_module());
                 let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
                 elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
                 let tuple = CExpr::Tuple(elems);
@@ -619,7 +630,12 @@ impl<'a> Lowerer<'a> {
             return (var, body);
         }
         let tmp = self.fresh();
-        let cpat = lower_pat(pat, &self.record_fields, &self.constructor_atoms, self.handler_origin_module());
+        let cpat = lower_pat(
+            pat,
+            &self.record_fields,
+            &self.constructor_atoms,
+            self.handler_origin_module(),
+        );
         let mut arms = vec![CArm {
             pat: cpat,
             guard: None,
@@ -1014,8 +1030,12 @@ impl<'a> Lowerer<'a> {
                 let arms_ce: Vec<CArm> = arms
                     .iter()
                     .map(|arm| {
-                        let pat =
-                            lower_pat(&arm.pattern, &self.record_fields, &self.constructor_atoms, self.handler_origin_module());
+                        let pat = lower_pat(
+                            &arm.pattern,
+                            &self.record_fields,
+                            &self.constructor_atoms,
+                            self.handler_origin_module(),
+                        );
                         let guard_ce = arm.guard.as_ref().map(|g| self.lower_expr_value(g));
                         let body_ce = self.lower_branch_with_k(&arm.body, k_var);
                         CArm {
@@ -1140,7 +1160,12 @@ impl<'a> Lowerer<'a> {
         let else_arms_ce: Vec<CArm> = else_arms
             .iter()
             .map(|arm| CArm {
-                pat: lower_pat(&arm.pattern, &self.record_fields, &self.constructor_atoms, self.handler_origin_module()),
+                pat: lower_pat(
+                    &arm.pattern,
+                    &self.record_fields,
+                    &self.constructor_atoms,
+                    self.handler_origin_module(),
+                ),
                 guard: arm.guard.as_ref().map(|g| self.lower_expr_value(g)),
                 body: self.lower_expr(&arm.body),
             })
@@ -1154,7 +1179,12 @@ impl<'a> Lowerer<'a> {
             let fail_var = self.fresh();
             let val_ce = self.lower_expr_value(expr);
 
-            let success_pat = lower_pat(pat, &self.record_fields, &self.constructor_atoms, self.handler_origin_module());
+            let success_pat = lower_pat(
+                pat,
+                &self.record_fields,
+                &self.constructor_atoms,
+                self.handler_origin_module(),
+            );
             // If the success pattern is a catch-all (e.g. Just(x) lowers to a
             // bare variable), put the else arms first so they get a chance to
             // match before the catch-all swallows everything.
@@ -1209,14 +1239,15 @@ impl<'a> Lowerer<'a> {
     pub(super) fn is_handler_value(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::HandlerExpr { .. } => true,
-            ExprKind::Var { name } => self
-                .known_handler_binding_name(expr.id, name)
-                .is_some_and(|resolved_name| {
-                    self.check_result.handlers.contains_key(&resolved_name)
-                        || self.handler_defs.contains_key(&resolved_name)
-                        || self.handle_dynamic_vars.contains_key(&resolved_name)
-                        || self.handle_cond_vars.contains_key(&resolved_name)
-                }),
+            ExprKind::Var { name } => {
+                self.known_handler_binding_name(expr.id, name)
+                    .is_some_and(|resolved_name| {
+                        self.check_result.handlers.contains_key(&resolved_name)
+                            || self.handler_defs.contains_key(&resolved_name)
+                            || self.handle_dynamic_vars.contains_key(&resolved_name)
+                            || self.handle_cond_vars.contains_key(&resolved_name)
+                    })
+            }
             ExprKind::If {
                 then_branch,
                 else_branch,
@@ -1339,9 +1370,7 @@ impl<'a> Lowerer<'a> {
         }
 
         if let ExprKind::Var { name } = &expr.kind
-            && let Some(scheme) = cr
-                .env
-                .get(&self.resolved_env_lookup_name(expr.id, name))
+            && let Some(scheme) = cr.env.get(&self.resolved_env_lookup_name(expr.id, name))
             && let Some(effects) = self.dynamic_handler_info_from_type(&scheme.ty)
         {
             return Some((effects, false));

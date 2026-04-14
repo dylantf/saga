@@ -50,8 +50,18 @@ pub(super) fn lower_pat(
         ),
         Pat::Constructor { name, args, .. } => match name.as_str() {
             "Cons" if args.len() == 2 => CPat::Cons(
-                Box::new(lower_pat(&args[0], record_fields, constructor_atoms, origin_module)),
-                Box::new(lower_pat(&args[1], record_fields, constructor_atoms, origin_module)),
+                Box::new(lower_pat(
+                    &args[0],
+                    record_fields,
+                    constructor_atoms,
+                    origin_module,
+                )),
+                Box::new(lower_pat(
+                    &args[1],
+                    record_fields,
+                    constructor_atoms,
+                    origin_module,
+                )),
             ),
             "Nil" if args.is_empty() => CPat::Nil,
             // Booleans are bare atoms to match Erlang's native true/false
@@ -90,9 +100,12 @@ pub(super) fn lower_pat(
                     .collect();
                 for field_name in order {
                     match field_map.get(field_name.as_str()) {
-                        Some(Some(p)) => {
-                            elems.push(lower_pat(p, record_fields, constructor_atoms, origin_module))
-                        }
+                        Some(Some(p)) => elems.push(lower_pat(
+                            p,
+                            record_fields,
+                            constructor_atoms,
+                            origin_module,
+                        )),
                         // Field without alias: bind to a var named after the field
                         Some(None) => elems.push(CPat::Var(core_var(field_name))),
                         None => elems.push(CPat::Wildcard),
@@ -101,9 +114,12 @@ pub(super) fn lower_pat(
             } else {
                 for (_, alias) in fields {
                     match alias {
-                        Some(p) => {
-                            elems.push(lower_pat(p, record_fields, constructor_atoms, origin_module))
-                        }
+                        Some(p) => elems.push(lower_pat(
+                            p,
+                            record_fields,
+                            constructor_atoms,
+                            origin_module,
+                        )),
                         None => elems.push(CPat::Wildcard),
                     }
                 }
@@ -127,9 +143,12 @@ pub(super) fn lower_pat(
                 .collect();
             for field_name in &sorted_fields {
                 match field_map.get(field_name) {
-                    Some(Some(p)) => {
-                        elems.push(lower_pat(p, record_fields, constructor_atoms, origin_module))
-                    }
+                    Some(Some(p)) => elems.push(lower_pat(
+                        p,
+                        record_fields,
+                        constructor_atoms,
+                        origin_module,
+                    )),
                     Some(None) => elems.push(CPat::Var(core_var(field_name))),
                     None => elems.push(CPat::Wildcard),
                 }
