@@ -1222,8 +1222,8 @@ pub fn build_exit_reason_to_erlang(
     constructor_atoms: &HashMap<String, String>,
     fresh: &mut dyn FnMut() -> String,
 ) -> CExpr {
-    let error_atom = mangle_ctor_atom("Error", constructor_atoms);
-    let other_atom = mangle_ctor_atom("Other", constructor_atoms);
+    let error_atom = mangle_ctor_atom("Error", constructor_atoms, None);
+    let other_atom = mangle_ctor_atom("Other", constructor_atoms, None);
 
     let mut arms: Vec<CArm> = Vec::new();
 
@@ -1276,12 +1276,12 @@ pub fn build_exit_reason_from_erlang(
     constructor_atoms: &HashMap<String, String>,
     fresh: &mut dyn FnMut() -> String,
 ) -> CExpr {
-    let normal = mangle_ctor_atom("Normal", constructor_atoms);
-    let shutdown = mangle_ctor_atom("Shutdown", constructor_atoms);
-    let killed = mangle_ctor_atom("Killed", constructor_atoms);
-    let noproc = mangle_ctor_atom("Noproc", constructor_atoms);
-    let error = mangle_ctor_atom("Error", constructor_atoms);
-    let other = mangle_ctor_atom("Other", constructor_atoms);
+    let normal = mangle_ctor_atom("Normal", constructor_atoms, None);
+    let shutdown = mangle_ctor_atom("Shutdown", constructor_atoms, None);
+    let killed = mangle_ctor_atom("Killed", constructor_atoms, None);
+    let noproc = mangle_ctor_atom("Noproc", constructor_atoms, None);
+    let error = mangle_ctor_atom("Error", constructor_atoms, None);
+    let other = mangle_ctor_atom("Other", constructor_atoms, None);
 
     let other_var = fresh();
     let fmt_var = fresh();
