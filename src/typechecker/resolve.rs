@@ -382,6 +382,107 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    fn resolve_exprs(&mut self, exprs: &[Expr]) {
+        for expr in exprs {
+            self.resolve_expr(expr);
+        }
+    }
+
+    fn resolve_scoped_pattern_body(
+        &mut self,
+        pattern: &Pat,
+        guard: Option<&Expr>,
+        body: &Expr,
+    ) {
+        self.resolve_pat(pattern);
+        self.push_value_scope();
+        self.bind_pattern(pattern);
+        if let Some(guard) = guard {
+            self.resolve_expr(guard);
+        }
+        self.resolve_expr(body);
+        self.pop_value_scope();
+    }
+
+    fn resolve_scoped_params_body(
+        &mut self,
+        params: &[Pat],
+        body: &Expr,
+        finally_expr: Option<&Expr>,
+    ) {
+        self.push_value_scope();
+        for pat in params {
+            self.resolve_pat(pat);
+            self.bind_pattern(pat);
+        }
+        self.resolve_expr(body);
+        if let Some(finally_expr) = finally_expr {
+            self.resolve_expr(finally_expr);
+        }
+        self.pop_value_scope();
+    }
+
+    fn resolve_case_arms(&mut self, arms: &[Annotated<CaseArm>]) {
+        for arm in arms {
+            self.resolve_scoped_pattern_body(
+                &arm.node.pattern,
+                arm.node.guard.as_ref(),
+                &arm.node.body,
+            );
+        }
+    }
+
+    fn resolve_effect_call_expr(
+        &mut self,
+        expr_id: NodeId,
+        qualifier: Option<&str>,
+        args: &[Expr],
+    ) {
+        if let Some(qualifier) = qualifier
+            && let Some(resolved) = self.resolve_effect_name(qualifier)
+        {
+            self.result.effect_call_qualifiers.insert(expr_id, resolved);
+        }
+        self.resolve_exprs(args);
+    }
+
+    fn resolve_handler_item(&mut self, item: &HandlerItem) {
+        match item {
+            HandlerItem::Named(named) => {
+                if let Some(resolved) = self.resolve_handler_name(&named.name) {
+                    self.result.handlers.insert(named.id, resolved);
+                }
+            }
+            HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
+                if let Some(qualifier) = &arm.qualifier
+                    && let Some(resolved) = self.resolve_effect_name(qualifier)
+                {
+                    self.result.handler_arm_qualifiers.insert(arm.id, resolved);
+                }
+                self.resolve_scoped_params_body(
+                    &arm.params,
+                    &arm.body,
+                    arm.finally_block.as_deref(),
+                );
+            }
+        }
+    }
+
+    fn resolve_with_handler(&mut self, handler: &Handler) {
+        match handler {
+            Handler::Named(named) => {
+                if let Some(resolved) = self.resolve_handler_name(&named.name) {
+                    self.result.handlers.insert(named.id, resolved);
+                }
+            }
+            Handler::Inline { items, .. } => {
+                for item in items {
+                    self.resolve_handler_item(&item.node);
+                }
+            }
+        }
+    }
+
     fn resolve_handler_body(&mut self, body: &HandlerBody) {
         for effect_ref in &body.effects {
             self.record_effect_ref(effect_ref);
@@ -392,34 +493,11 @@ impl<'a> Resolver<'a> {
         self.resolve_where_clause(&body.where_clause);
 
         for arm in &body.arms {
-            if let Some(qualifier) = &arm.node.qualifier
-                && let Some(resolved) = self.resolve_effect_name(qualifier)
-            {
-                self.result
-                    .handler_arm_qualifiers
-                    .insert(arm.node.id, resolved);
-            }
-
-            self.push_value_scope();
-            for pat in &arm.node.params {
-                self.resolve_pat(pat);
-                self.bind_pattern(pat);
-            }
-            self.resolve_expr(&arm.node.body);
-            if let Some(finally_expr) = &arm.node.finally_block {
-                self.resolve_expr(finally_expr);
-            }
-            self.pop_value_scope();
+            self.resolve_handler_item(&HandlerItem::Arm(arm.node.clone()));
         }
 
         if let Some(ret) = &body.return_clause {
-            self.push_value_scope();
-            for pat in &ret.params {
-                self.resolve_pat(pat);
-                self.bind_pattern(pat);
-            }
-            self.resolve_expr(&ret.body);
-            self.pop_value_scope();
+            self.resolve_scoped_params_body(&ret.params, &ret.body, None);
         }
     }
 
@@ -593,20 +671,9 @@ impl<'a> Resolver<'a> {
                 self.resolve_expr(then_branch);
                 self.resolve_expr(else_branch);
             }
-            ExprKind::Case {
-                scrutinee, arms, ..
-            } => {
+            ExprKind::Case { scrutinee, arms, .. } => {
                 self.resolve_expr(scrutinee);
-                for arm in arms {
-                    self.resolve_pat(&arm.node.pattern);
-                    self.push_value_scope();
-                    self.bind_pattern(&arm.node.pattern);
-                    if let Some(guard) = &arm.node.guard {
-                        self.resolve_expr(guard);
-                    }
-                    self.resolve_expr(&arm.node.body);
-                    self.pop_value_scope();
-                }
+                self.resolve_case_arms(arms);
             }
             ExprKind::Block { stmts, .. } => {
                 self.push_value_scope();
@@ -616,13 +683,7 @@ impl<'a> Resolver<'a> {
                 self.pop_value_scope();
             }
             ExprKind::Lambda { params, body } => {
-                self.push_value_scope();
-                for pat in params {
-                    self.resolve_pat(pat);
-                    self.bind_pattern(pat);
-                }
-                self.resolve_expr(body);
-                self.pop_value_scope();
+                self.resolve_scoped_params_body(params, body, None);
             }
             ExprKind::FieldAccess { expr, .. } => self.resolve_expr(expr),
             ExprKind::RecordCreate { name, fields } => {
@@ -633,11 +694,9 @@ impl<'a> Resolver<'a> {
                     self.resolve_expr(field_expr);
                 }
             }
-            ExprKind::AnonRecordCreate { fields } => {
-                for (_, _, field_expr) in fields {
-                    self.resolve_expr(field_expr);
-                }
-            }
+            ExprKind::AnonRecordCreate { fields } => fields
+                .iter()
+                .for_each(|(_, _, field_expr)| self.resolve_expr(field_expr)),
             ExprKind::RecordUpdate { record, fields, .. } => {
                 self.resolve_expr(record);
                 for (_, _, field_expr) in fields {
@@ -646,63 +705,13 @@ impl<'a> Resolver<'a> {
             }
             ExprKind::EffectCall {
                 qualifier, args, ..
-            } => {
-                if let Some(qualifier) = qualifier
-                    && let Some(resolved) = self.resolve_effect_name(qualifier)
-                {
-                    self.result.effect_call_qualifiers.insert(expr.id, resolved);
-                }
-                for arg in args {
-                    self.resolve_expr(arg);
-                }
-            }
-            ExprKind::With {
-                expr: inner,
-                handler,
-            } => {
+            } => self.resolve_effect_call_expr(expr.id, qualifier.as_deref(), args),
+            ExprKind::With { expr: inner, handler } => {
                 self.resolve_expr(inner);
-                match handler.as_ref() {
-                    Handler::Named(named) => {
-                        if let Some(resolved) = self.resolve_handler_name(&named.name) {
-                            self.result.handlers.insert(named.id, resolved);
-                        }
-                    }
-                    Handler::Inline { items, .. } => {
-                        for item in items {
-                            match &item.node {
-                                HandlerItem::Named(named) => {
-                                    if let Some(resolved) = self.resolve_handler_name(&named.name) {
-                                        self.result.handlers.insert(named.id, resolved);
-                                    }
-                                }
-                                HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
-                                    if let Some(qualifier) = &arm.qualifier
-                                        && let Some(resolved) = self.resolve_effect_name(qualifier)
-                                    {
-                                        self.result.handler_arm_qualifiers.insert(arm.id, resolved);
-                                    }
-                                    self.push_value_scope();
-                                    for pat in &arm.params {
-                                        self.resolve_pat(pat);
-                                        self.bind_pattern(pat);
-                                    }
-                                    self.resolve_expr(&arm.body);
-                                    if let Some(finally_expr) = &arm.finally_block {
-                                        self.resolve_expr(finally_expr);
-                                    }
-                                    self.pop_value_scope();
-                                }
-                            }
-                        }
-                    }
-                }
+                self.resolve_with_handler(handler);
             }
             ExprKind::Resume { value } => self.resolve_expr(value),
-            ExprKind::Tuple { elements } => {
-                for element in elements {
-                    self.resolve_expr(element);
-                }
-            }
+            ExprKind::Tuple { elements } => self.resolve_exprs(elements),
             ExprKind::Do {
                 bindings,
                 success,
@@ -717,31 +726,12 @@ impl<'a> Resolver<'a> {
                 }
                 self.resolve_expr(success);
                 self.pop_value_scope();
-
-                for arm in else_arms {
-                    self.resolve_pat(&arm.node.pattern);
-                    self.push_value_scope();
-                    self.bind_pattern(&arm.node.pattern);
-                    if let Some(guard) = &arm.node.guard {
-                        self.resolve_expr(guard);
-                    }
-                    self.resolve_expr(&arm.node.body);
-                    self.pop_value_scope();
-                }
+                self.resolve_case_arms(else_arms);
             }
             ExprKind::Receive {
                 arms, after_clause, ..
             } => {
-                for arm in arms {
-                    self.resolve_pat(&arm.node.pattern);
-                    self.push_value_scope();
-                    self.bind_pattern(&arm.node.pattern);
-                    if let Some(guard) = &arm.node.guard {
-                        self.resolve_expr(guard);
-                    }
-                    self.resolve_expr(&arm.node.body);
-                    self.pop_value_scope();
-                }
+                self.resolve_case_arms(arms);
                 if let Some((timeout, body)) = after_clause {
                     self.resolve_expr(timeout);
                     self.resolve_expr(body);
