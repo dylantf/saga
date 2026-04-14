@@ -1427,3 +1427,73 @@ main () = greet \"world\" with {
     let out = emit_from_program(&program, "main", &checker);
     assert_contains(&out, "call 'logger':'greet'");
 }
+
+#[test]
+fn imported_handler_private_constructors_mangled_in_expressions_and_patterns() {
+    // Private constructors from an imported handler's source module must be
+    // mangled consistently in both expressions and case/destructure patterns.
+    // Regression: patterns inside handler bodies used bare atoms (e.g. 'Ack')
+    // while expressions used mangled atoms (e.g. 'mylib_Ack').
+    let lib = r#"module MyLib
+
+pub effect Wrap {
+  fun wrap : String -> String
+}
+
+type Wrapper = Wrapped String
+
+pub handler my_wrapper for Wrap {
+  wrap s = case Wrapped s {
+    Wrapped v -> resume v
+  }
+}
+"#;
+
+    let main = "module Main\nimport MyLib (my_wrapper, Wrap)\n\nmain () = {\n  wrap! \"hello\"\n} with {my_wrapper}\n";
+
+    with_temp_project_files(&[("MyLib.saga", lib)], main, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        // Constructor in expression must use the mangled atom
+        assert_contains(&out, "'mylib_Wrapped'");
+        // Pattern must also use the mangled atom, not bare 'Wrapped'
+        assert!(
+            !out.contains("<{'Wrapped',"),
+            "case pattern should use mangled 'mylib_Wrapped', not bare 'Wrapped':\n{out}"
+        );
+    });
+}
+
+#[test]
+fn imported_handler_prelude_constructors_use_beam_overrides() {
+    // When an imported handler body uses prelude constructors (Ok, Err),
+    // they must use BEAM override atoms (ok, error), not the handler's
+    // source-module mangling. Regression: Ok/Err were mangled as
+    // 'mylib_Ok'/'mylib_Err' instead of 'ok'/'error'.
+    let lib = r#"module MyLib
+
+pub effect Store {
+  fun save : String -> Result String String
+}
+
+pub handler my_store for Store {
+  save key = resume (Ok key)
+}
+"#;
+
+    let main = "module Main\nimport MyLib (my_store, Store)\n\nmain () = {\n  case save! \"test\" {\n    Ok v -> v\n    Err _ -> \"failed\"\n  }\n} with {my_store}\n";
+
+    with_temp_project_files(&[("MyLib.saga", lib)], main, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        // Handler body must use BEAM override 'ok', not 'mylib_Ok'
+        assert!(
+            !out.contains("mylib_Ok"),
+            "handler body should use BEAM override 'ok', not 'mylib_Ok':\n{out}"
+        );
+        assert!(
+            !out.contains("mylib_Err"),
+            "handler body should use BEAM override 'error', not 'mylib_Err':\n{out}"
+        );
+        // The case match at the call site should also use 'ok'/'error'
+        assert_contains(&out, "'ok'");
+    });
+}

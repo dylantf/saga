@@ -165,6 +165,19 @@ pub fn cmd_new(name: &str, lib: bool) {
         })
         .collect();
 
+    // Write .gitignore
+    fs::write(
+        dir.join(".gitignore"),
+        "_build/\ndeps/\n.DS_Store\nerl_crash.dump",
+    )
+    .unwrap();
+
+    let src_dir = dir.join("src");
+    fs::create_dir_all(&src_dir).unwrap_or_else(|e| {
+        eprintln!("Error creating src directory: {}", e);
+        std::process::exit(1);
+    });
+
     if lib {
         let project_toml = format!(
             r#"[project]
@@ -175,15 +188,15 @@ module = "{module_name}"
 expose = []
 
 # [bin]
-# main = "Main.saga"
+# main = "src/Main.saga"
 
 # [deps]
-# some-lib = {{ path = "../some-lib" }}
+# saga_pgo = {{ git = "https://github.com/dylantf/saga_pgo" }}
 "#
         );
         fs::write(dir.join("project.toml"), project_toml).unwrap();
         fs::write(
-            dir.join(format!("{module_name}.saga")),
+            src_dir.join(format!("{module_name}.saga")),
             format!("module {module_name}\n"),
         )
         .unwrap();
@@ -193,7 +206,7 @@ expose = []
 name = "{name}"
 
 [bin]
-main = "Main.saga"
+main = "src/Main.saga"
 
 # [library]
 # module = "{module_name}"
@@ -205,8 +218,8 @@ main = "Main.saga"
         );
         fs::write(dir.join("project.toml"), project_toml).unwrap();
         fs::write(
-            dir.join("Main.saga"),
-            "module Main\n\nimport Std.IO (console)\n\n\nmain () = {\n  println \"hello!\"\n} with console\n",
+            src_dir.join("Main.saga"),
+            "module Main\n\nimport Std.IO (console)\n\nmain () = {\n  println \"Hello, world!\"\n} with console\n",
         )
         .unwrap();
     }

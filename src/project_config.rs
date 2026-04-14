@@ -180,12 +180,12 @@ impl ProjectConfig {
         self.project.tests_dir.as_deref().unwrap_or("tests")
     }
 
-    /// The main entry point file. Defaults to "Main.saga".
+    /// The main entry point file. Defaults to "src/Main.saga".
     pub fn main_file(&self) -> &str {
         self.bin
             .as_ref()
             .and_then(|b| b.main.as_deref())
-            .unwrap_or("Main.saga")
+            .unwrap_or("src/Main.saga")
     }
 
     /// Whether this project can be run (has a binary entry point).
