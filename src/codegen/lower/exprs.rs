@@ -1207,15 +1207,15 @@ impl<'a> Lowerer<'a> {
     pub(super) fn is_handler_value(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::HandlerExpr { .. } => true,
-            ExprKind::Var { name } => {
-                let resolved_name = self.resolved_handler_binding_name(expr.id, name);
-                self.handler_defs.contains_key(&resolved_name)
-                    || self.handle_dynamic_vars.contains_key(&resolved_name)
-                    || self.handle_cond_vars.contains_key(&resolved_name)
-                    || self.resolve_handler_name_opt(name).is_some()
-                    || self.check_result.handlers.contains_key(&resolved_name)
-                    || self.check_result.handlers.contains_key(name)
-            }
+            ExprKind::Var { name } => self
+                .known_handler_binding_name(expr.id, name)
+                .is_some_and(|resolved_name| {
+                    self.check_result.handlers.contains_key(&resolved_name)
+                        || self.handler_defs.contains_key(&resolved_name)
+                        || self.handle_dynamic_vars.contains_key(&resolved_name)
+                        || self.handle_cond_vars.contains_key(&resolved_name)
+                })
+                || self.check_result.handlers.contains_key(name),
             ExprKind::If {
                 then_branch,
                 else_branch,
@@ -1251,10 +1251,7 @@ impl<'a> Lowerer<'a> {
 
         // Direct handler reference: compile-time alias
         if let ExprKind::Var { name: handler_name } = &value.kind
-            && let Some(canonical) = self
-                .has_resolved_handler_ref(value.id)
-                .then(|| self.resolved_handler_binding_name(value.id, handler_name))
-                .or_else(|| self.resolve_handler_name_opt(handler_name))
+            && let Some(canonical) = self.known_handler_binding_name(value.id, handler_name)
         {
             self.handler_canonical.insert(name.to_string(), canonical);
             return;
@@ -1345,7 +1342,7 @@ impl<'a> Lowerer<'a> {
         if let ExprKind::Var { name } = &expr.kind
             && let Some(scheme) = cr
                 .env
-                .get(&self.resolved_value_lookup_name(expr.id, name))
+                .get(&self.resolved_env_lookup_name(expr.id, name))
                 .or_else(|| cr.env.get(name))
             && let Some(effects) = self.dynamic_handler_info_from_type(&scheme.ty)
         {
@@ -1355,7 +1352,7 @@ impl<'a> Lowerer<'a> {
         if let Some((func_name, head_expr, args)) = collect_fun_call(expr)
             && let Some(scheme) = cr
                 .env
-                .get(&self.resolved_value_lookup_name(head_expr.id, func_name))
+                .get(&self.resolved_env_lookup_name(head_expr.id, func_name))
                 .or_else(|| cr.env.get(func_name))
         {
             let mut ty = scheme.ty.clone();
@@ -1402,7 +1399,7 @@ impl<'a> Lowerer<'a> {
     /// Walks through variable references, if/else branches, and handler expressions.
     fn resolve_handle_value(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
-            ExprKind::Var { name } => Some(self.resolved_handler_binding_name(expr.id, name)),
+            ExprKind::Var { name } => self.known_handler_binding_name(expr.id, name),
             ExprKind::HandlerExpr { .. } => {
                 // Handler expressions registered under synthetic name
                 let synthetic = format!("__handler_expr_{}", expr.id.0);

@@ -500,18 +500,6 @@ impl<'a> Lowerer<'a> {
 
     fn register_imported_module_local_funs(&mut self, module_name: &str, program: &ast::Program) {
         let (_, source_module_name) = Self::source_module_info(program, module_name);
-        let mod_resolution = self.front_resolution_for_module(&source_module_name);
-        let resolve_effect = |eff: &crate::ast::EffectRef| -> String {
-            mod_resolution
-                .and_then(|r| r.effect_ref(eff.id))
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    self.effect_canonical
-                        .get(&eff.name)
-                        .cloned()
-                        .unwrap_or_else(|| eff.name.clone())
-                })
-        };
 
         let mut pending_annotations: HashMap<String, PendingAnnotation> = HashMap::new();
         for decl in program {
@@ -522,7 +510,10 @@ impl<'a> Lowerer<'a> {
                 ..
             } = decl
             {
-                let mut sorted_effects: Vec<String> = effects.iter().map(&resolve_effect).collect();
+                let mut sorted_effects: Vec<String> = effects
+                    .iter()
+                    .map(|eff| self.resolved_effect_ref_for_module(&source_module_name, eff))
+                    .collect();
                 sorted_effects.sort();
                 let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
                 for (i, (_param_name, type_expr)) in params.iter().enumerate() {

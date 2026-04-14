@@ -312,8 +312,51 @@ impl<'a> Lowerer<'a> {
             .or_else(|| self.ctx.module_semantics(module_name).map(|m| m.front_resolution))
     }
 
-    fn current_front_resolution(&self) -> Option<&crate::typechecker::ResolutionResult> {
+    fn current_handler_ref(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<&crate::typechecker::ResolvedValue> {
         self.front_resolution_for_module(self.current_semantic_module_name())
+            .and_then(|r| r.handler_ref(node_id))
+    }
+
+    fn current_value_ref(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<&crate::typechecker::ResolvedValue> {
+        self.front_resolution_for_module(self.current_semantic_module_name())
+            .and_then(|r| r.value(node_id))
+    }
+
+    fn current_record_type_name(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+        self.front_resolution_for_module(self.current_semantic_module_name())
+            .and_then(|r| r.record_type(node_id))
+    }
+
+    fn current_effect_call_qualifier(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+        self.front_resolution_for_module(self.current_semantic_module_name())
+            .and_then(|r| r.effect_call_qualifier(node_id))
+    }
+
+    fn current_handler_arm_qualifier(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+        self.front_resolution_for_module(self.current_semantic_module_name())
+            .and_then(|r| r.handler_arm_qualifier(node_id))
+    }
+
+    fn resolved_effect_ref_for_module(
+        &self,
+        module_name: &str,
+        effect_ref: &crate::ast::EffectRef,
+    ) -> String {
+        self.front_resolution_for_module(module_name)
+            .and_then(|r| r.effect_ref(effect_ref.id))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                self.effect_canonical
+                    .get(&effect_ref.name)
+                    .cloned()
+                    .unwrap_or_else(|| effect_ref.name.clone())
+            })
     }
 
     fn resolved_effect_call_name(
@@ -322,8 +365,7 @@ impl<'a> Lowerer<'a> {
         op_name: &str,
         qualifier: Option<&str>,
     ) -> Option<String> {
-        self.current_front_resolution()
-            .and_then(|r| r.effect_call_qualifier(node_id))
+        self.current_effect_call_qualifier(node_id)
             .map(|s| s.to_string())
             .or_else(|| qualifier.map(|q| self.canonicalize_effect(q)))
             .or_else(|| self.op_to_effect.get(op_name).cloned())
@@ -340,8 +382,7 @@ impl<'a> Lowerer<'a> {
                 self.resolve_handler_name(lookup_name)
             }
         };
-        self.current_front_resolution()
-            .and_then(|r| r.handler_ref(node_id))
+        self.current_handler_ref(node_id)
             .map(|resolved| match resolved {
                 crate::typechecker::ResolvedValue::Local { name, .. } => normalize_lookup(name),
                 crate::typechecker::ResolvedValue::Global { lookup_name } => {
@@ -351,24 +392,42 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|| self.resolve_handler_name(fallback))
     }
 
-    fn has_resolved_handler_ref(&self, node_id: crate::ast::NodeId) -> bool {
-        self.current_front_resolution()
-            .and_then(|r| r.handler_ref(node_id))
-            .is_some()
+    fn known_handler_binding_name(
+        &self,
+        node_id: crate::ast::NodeId,
+        fallback: &str,
+    ) -> Option<String> {
+        let resolved = self.resolved_handler_binding_name(node_id, fallback);
+        if self.handler_defs.contains_key(&resolved)
+            || self.handle_dynamic_vars.contains_key(&resolved)
+            || self.handle_cond_vars.contains_key(&resolved)
+        {
+            Some(resolved)
+        } else {
+            None
+        }
     }
 
-    fn resolved_value_lookup_name(
+    fn resolved_env_lookup_name(
         &self,
         node_id: crate::ast::NodeId,
         fallback: &str,
     ) -> String {
-        self.current_front_resolution()
-            .and_then(|r| r.value(node_id))
-            .map(|resolved| match resolved {
-                crate::typechecker::ResolvedValue::Local { name, .. } => name.clone(),
-                crate::typechecker::ResolvedValue::Global { lookup_name } => lookup_name.clone(),
-            })
-            .unwrap_or_else(|| fallback.to_string())
+        use super::resolve::ResolvedName;
+
+        match self.resolved.get(&node_id) {
+            Some(ResolvedName::LocalFun { name, .. }) => name.clone(),
+            Some(ResolvedName::ImportedFun { canonical_name, .. }) => canonical_name.clone(),
+            None => self
+                .current_value_ref(node_id)
+                .map(|resolved| match resolved {
+                    crate::typechecker::ResolvedValue::Local { name, .. } => name.clone(),
+                    crate::typechecker::ResolvedValue::Global { lookup_name } => {
+                        lookup_name.clone()
+                    }
+                })
+                .unwrap_or_else(|| fallback.to_string()),
+        }
     }
 
     fn record_fields_for_name(&self, name: &str) -> Option<&Vec<String>> {
@@ -381,8 +440,7 @@ impl<'a> Lowerer<'a> {
         source_name: &str,
     ) -> Option<&Vec<String>> {
         let module_name = self.current_semantic_module_name();
-        self.current_front_resolution()
-            .and_then(|r| r.record_type(node_id))
+        self.current_record_type_name(node_id)
             .and_then(|name| self.record_fields_for_name(name))
             .or_else(|| self.record_fields_for_name(source_name))
             .or_else(|| {
@@ -392,8 +450,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn resolved_handler_arm_effect(&self, arm: &HandlerArm) -> Option<String> {
-        self.current_front_resolution()
-            .and_then(|r| r.handler_arm_qualifier(arm.id))
+        self.current_handler_arm_qualifier(arm.id)
             .map(|resolved| resolved.to_string())
             .or_else(|| arm.qualifier.as_ref().map(|q| self.canonicalize_effect(q)))
             .or_else(|| self.op_to_effect.get(&arm.op_name).cloned())
@@ -622,17 +679,6 @@ impl<'a> Lowerer<'a> {
             .get(name)
             .cloned()
             .unwrap_or_else(|| name.to_string())
-    }
-
-    /// Try to resolve a handler name to a known handler definition.
-    /// Returns Some(canonical) if the handler exists in handler_defs, None otherwise.
-    fn resolve_handler_name_opt(&self, name: &str) -> Option<String> {
-        let canonical = self.resolve_handler_name(name);
-        if self.handler_defs.contains_key(&canonical) {
-            Some(canonical)
-        } else {
-            None
-        }
     }
 
     /// Given a list of effect names (from a `needs` clause), return all
