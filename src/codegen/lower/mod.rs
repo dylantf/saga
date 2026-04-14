@@ -474,8 +474,7 @@ impl<'a> Lowerer<'a> {
 
     fn handler_arm_matches_effect_op(&self, arm: &HandlerArm, eff: &str, op: &str) -> bool {
         self.resolved_handler_arm_effect(arm)
-            .map(|resolved| resolved == eff && arm.op_name == op)
-            .unwrap_or_else(|| arm.op_name == op)
+            .is_some_and(|resolved| resolved == eff && arm.op_name == op)
     }
 
     fn lower_local_fun_ref(

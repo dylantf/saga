@@ -1,178 +1,275 @@
 # Name Resolution
 
+## Status
+
+This document describes the **current** resolver architecture after the
+resolution refactor.
+
+The big shift is:
+
+- name resolution is now a real front-end phase
+- the authoritative output is `ResolutionResult`, keyed by source `NodeId`
+- later phases mostly consume semantic identities instead of re-resolving
+  source strings
+
+Some narrow specialized lookups still exist in the typechecker and lowerer,
+especially around effects and trait-related metadata, but the old
+"canonicalize the AST and then guess again later" model is no longer the main
+contract.
+
 ## Overview
 
-Every imported name is stored once under a **canonical** (module-qualified) form. A `ScopeMap` on the `Checker` struct maps all user-visible name forms to their canonical names. A pre-typecheck AST rewriting pass (`resolve_names`) canonicalizes names in the program before inference runs.
+The compiler now has two distinct resolution layers:
 
-## ScopeMap
+1. **Front-end resolution** in `src/typechecker/resolve.rs`
+2. **Backend/callable resolution** in `src/codegen/resolve.rs`
+
+They solve different problems.
+
+### Front-end resolution
+
+The front-end resolver runs after imports are processed and before body
+inference. It records the semantic identity of source AST nodes in a
+`ResolutionResult`.
+
+This layer answers questions like:
+
+- what value does this `Var` refer to?
+- which constructor does this pattern use?
+- which effect does this `EffectRef` mean?
+- which handler does this `with name` reference?
+- which record type does this field access/update belong to?
+
+### Backend resolution
+
+The backend resolver is narrower. It answers lowering-specific questions like:
+
+- is this callable a local function or imported function?
+- what BEAM module/function does it call?
+- what arity/effect metadata should be used for CPS lowering?
+
+It is no longer intended to be a second general-purpose resolver for source
+syntax.
+
+## Core Data Structures
+
+### `ScopeMap`
+
+`ScopeMap` still exists and is still useful, but its role is narrower than it
+used to be.
+
+It is primarily:
+
+- an import/global scope construction artifact
+- a way to map user-visible import forms to canonical names
+- a helper for diagnostics, tooling, and a few remaining specialized lookups
+
+It is **not** the main semantic lookup path for ordinary source expressions
+during lowering anymore.
+
+### `ResolutionResult`
+
+The authoritative front-end output is `ResolutionResult` in
+`src/typechecker/resolve.rs`.
+
+It stores semantic identity per source node:
 
 ```rust
-pub struct ScopeMap {
-    pub values: HashMap<String, String>,       // functions, let bindings
-    pub types: HashMap<String, String>,        // type names
-    pub constructors: HashMap<String, String>, // data constructors
-    pub effects: HashMap<String, String>,      // effect names
-    pub traits: HashMap<String, String>,       // trait names
-    pub origins: HashMap<String, String>,      // canonical name -> source module
+pub struct ResolutionResult {
+    pub values: HashMap<NodeId, ResolvedValue>,
+    pub constructors: HashMap<NodeId, String>,
+    pub record_types: HashMap<NodeId, String>,
+    pub types: HashMap<NodeId, String>,
+    pub traits: HashMap<NodeId, String>,
+    pub impl_traits: HashMap<NodeId, String>,
+    pub impl_target_types: HashMap<NodeId, String>,
+    pub effects: HashMap<NodeId, String>,
+    pub handlers: HashMap<NodeId, ResolvedValue>,
+    pub effect_call_qualifiers: HashMap<NodeId, String>,
+    pub handler_arm_qualifiers: HashMap<NodeId, String>,
 }
 ```
 
-Each field maps user-visible name forms to canonical names. For example, after `import Std.List as List exposing (map)`:
+The exact value types vary by namespace, but the important rule is:
 
-```
-values["Std.List.map"] = "Std.List.map"   // canonical
-values["List.map"]     = "Std.List.map"   // aliased
-values["map"]          = "Std.List.map"   // bare (exposed)
-origins["Std.List.map"] = "Std.List"      // source module
-```
+- **key by source identity**
+- **store semantic meaning explicitly**
 
-Methods: `resolve_value`, `resolve_type`, `resolve_constructor`, `resolve_effect`, `resolve_trait`, `origin_of`, `is_import`, `merge`.
+### `ResolvedValue`
 
-## Canonical Name Forms
-
-| Kind | Example | Canonical form |
-|------|---------|---------------|
-| Function | `map` from `Std.List` | `Std.List.map` |
-| Constructor | `Just` from `Std.Maybe` | `Std.Maybe.Just` |
-| Type | `Maybe` from `Std.Maybe` | `Maybe` (types use bare names internally) |
-| Trait | `Show` from `Std.Base` | `Std.Base.Show` |
-| Trait method | `show` from `Show` in `Std.Base` | `Std.Base.Show.show` |
-| Effect | `Fail` from `Std.Fail` | `Std.Fail.Fail` |
-| Handler | `exec_handler` from `Std.Test` | `Std.Test.exec_handler` |
-
-## Pipeline
-
-Name resolution happens in four stages during typechecking:
-
-### 1. `resolve_import` builds the ScopeMap
-
-`resolve_import` (`check_module.rs`) is a pure function that takes a module's exports and import parameters and produces a `ScopeMap`. It computes all user-visible-name to canonical-name mappings for the import.
-
-For each import, it creates entries for:
-- **Values**: canonical (`Std.List.map`), aliased (`List.map`), and bare when exposed (`map`)
-- **Constructors**: same three forms
-- **Types**: qualified to bare (`Std.Maybe.Maybe` -> `Maybe`, `Maybe.Maybe` -> `Maybe`)
-- **Effects**: canonical + aliased qualified. Bare when exposed.
-- **Traits**: canonical + aliased + always bare (traits are available for `impl`/`where` from any import, regardless of exposing clause)
-- **Trait methods**: always bare to canonical (trait methods are always unqualified in user code)
-- **Origins**: every canonical name maps to its source module
-
-`inject_exports` merges the `ScopeMap` from `resolve_import` and registers checker state:
-- Canonical bindings in `TypeEnv` (one entry per import)
-- Canonical constructors in `constructors` map
-- Trait methods under both bare and canonical names in env
-- Traits under canonical name in `trait_state.traits`
-- Effects under canonical name only in `self.effects`
-- Handlers under qualified name always, bare only when exposed
-
-### 2. `resolve_names` rewrites the AST
-
-After all imports are processed, `resolve_names` (`resolve.rs`) rewrites the parsed AST in place, replacing user-visible names with their canonical forms:
-
-- `Var { name: "map" }` -> `Var { name: "Std.List.map" }`
-- `Constructor { name: "Just" }` -> `Constructor { name: "Std.Maybe.Just" }`
-- `Pat::Constructor { name: "Just" }` -> `Pat::Constructor { name: "Std.Maybe.Just" }`
-- `QualifiedName { module: "List", name: "map" }` -> fills `canonical_module: Some("Std.List")`
-
-The pass is **scope-aware**: local bindings shadow imports. The `locals` set tracks names from:
-- Function parameters and let bindings
-- Lambda parameters and case pattern bindings
-- Locally-defined functions, vals, and trait methods
-- Record pattern fields (`User { name }` binds `name`)
-- String prefix patterns (`"prefix" <> rest` binds `rest`)
-
-Names in the locals set are NOT rewritten, preserving correct shadowing.
-
-### 3. Typechecker lookups (fallback)
-
-After the resolve pass, most names are already canonical. The typechecker's inference pass uses scope_map as a fallback for any names the resolve pass didn't handle:
+Value-like names resolve to:
 
 ```rust
-// Var lookup: try direct first (works for locals and resolved imports), then scope_map
-let env_lookup = env.get(name).or_else(|| env.get(scope_map.resolve_value(name)));
+pub enum ResolvedValue {
+    Local {
+        binding_id: LocalBindingId,
+        name: String,
+    },
+    Global {
+        lookup_name: String,
+    },
+}
 ```
 
-Local definitions (function params, let bindings) are found directly by bare name in env. Imports are found by canonical name (which the resolve pass wrote into the AST).
+This lets later phases distinguish:
 
-### 4. Specialized resolution
+- lexical locals
+- global/imported values
 
-Some name categories have their own resolution beyond the general scope_map:
+without re-deriving that from source spelling.
 
-**Effects** (`resolve_effect` in `effects.rs`): Tries scope_map resolution, then local module prefix, then auto-import for fully-qualified Std names. Effect ops in qualified calls (`File.write!`) are resolved through scope_map in `lookup_effect_op`.
+## What Resolves Early
 
-**Traits** (`resolve_trait_name` in `check_traits.rs`): Tries exact match in `trait_state.traits`, then scope_map, then local module prefix. Used for where clauses, impl declarations, and constraint checking. Builtin traits `Num` and `Eq` stay bare since they have no module; `Semigroup` resolves through `Std.Base`.
+The front-end resolver now resolves these categories before body inference:
 
-## Storage: Single-Registration Principle
+- value references
+- constructor references
+- type references
+- trait references
+- impl trait refs
+- impl target type refs
+- effect refs
+- handler refs
+- effect-call qualifiers
+- handler-arm qualifiers
+- record type identity for record-driven expressions
 
-Each binding is stored once under its canonical name. The ScopeMap handles all user-facing name resolution.
+That is the main boundary change from the old system.
 
-| Category | Storage | Key form |
-|----------|---------|----------|
-| Values/functions | `env` (TypeEnv) | `"Std.List.map"` |
-| Constructors | `constructors` | `"Std.Maybe.Just"` |
-| Effects | `effects` | `"Std.Fail.Fail"` |
-| Traits | `trait_state.traits` | `"Std.Base.Show"` |
-| Types | `type_arity` | `"Maybe"` (bare is canonical for types) |
-| Trait methods | `env` | bare (`"show"`) + canonical (`"Std.Base.Show.show"`) |
-| Import origins | `scope_map.origins` | canonical -> module |
+## What Still Resolves Late
 
-Trait methods are the exception: they need both bare (for impl bodies where the method is called by bare name) and canonical (for after the resolve pass rewrites Var nodes).
+Some things still legitimately happen after front-end resolution:
 
-## Import Visibility
+- trait impl selection / evidence choice
+- effect row solving
+- some effect op lookup paths in the typechecker
+- backend callable dispatch metadata
 
-| Import form | Qualified access | Bare access |
-|-------------|-----------------|-------------|
-| `import Logger` | `Logger.greet`, `Logger.Log` | none (except traits and trait methods) |
-| `import Logger (greet, Log)` | same as above | `greet`, `Log` |
+That is normal. The important distinction is:
 
-Traits and their methods are always available from any import — you don't need to expose `Show` to write `impl Show for MyType` or use `show` in a where clause. This matches Haskell's typeclass behavior.
+- **names resolve early**
+- **instances, rows, and lowering metadata can still be computed later**
 
-Effects, handlers, functions, types, and constructors require explicit exposing for bare access.
+## Lexical Scope Model
 
-## Effect Registration
+The front-end resolver no longer relies on the old "just suppress imported
+rewrites with a `HashSet<String>`" model as its main abstraction.
 
-Effects use two sub-passes during declaration registration to allow forward references:
+It now uses explicit lexical scopes and stable local binding ids for values.
 
-1. **Stub pass**: registers all effect names and type params with empty ops
-2. **Op pass**: fills in op signatures via `convert_type_expr`
+Conceptually:
 
-This allows effects in the same module to reference each other (e.g. `Process` referencing `Actor` in Std.Actor).
+- imported/global names come from `ScopeMap`
+- lexical bindings are tracked by real scope frames
+- each use site resolves to either:
+  - a local binding identity
+  - a global canonical lookup key
 
-Effect ops are NOT registered in `scope_map.values` — they use `EffectCall` syntax (`op!`), not `Var` references, so they live in a separate namespace.
+This is why the current resolver is much less fragile around shadowing.
 
-## Trait Canonicalization
+## Canonical Names
 
-Trait names follow the same canonical pattern as effects:
+Canonical names still matter, but mainly as **stable table keys** rather than
+as the whole meaning of a source node.
 
-- `trait Show` defined in `Std.Base` is registered as `"Std.Base.Show"` in `trait_state.traits`
-- Where clause `{a: Show}` resolves `"Show"` to `"Std.Base.Show"` through scope_map
-- `impl Show for Int` resolves the trait name before looking up the trait definition
-- Scheme constraints carry canonical trait names (e.g. `("Std.Base.Show", var_id, [])`)
-- Evidence (`TraitEvidence.trait_name`) uses canonical names
-- Builtin traits `Num` and `Eq` have no module and keep bare names
+Examples:
 
-**Dict naming**: Dict constructor names use canonical trait and type names with dots mangled to underscores (e.g. `__dict_Std_Base_Show_std_int_Std_Int_Int`), built via `typechecker::make_dict_name`. Dict parameter names (for where-clause type variables) use bare trait names since they're local variables: `__dict_Show_a`, not `__dict_Std_Base_Show_a`.
+| Kind | Canonical key |
+|------|---------------|
+| Function | `Std.List.map` |
+| Constructor | `Std.Maybe.Just` |
+| Trait | `Std.Base.Show` |
+| Trait method | `Std.Base.Show.show` |
+| Effect | `Std.Fail.Fail` |
+| Handler | `Std.Test.exec_handler` |
 
-**Well-known trait constants**: The elaborator defines `SHOW`, `DEBUG`, `ORD` constants for canonical names used in special-cased codegen (tuple Show inlining, Ord comparison desugaring).
+Types are still a special case in a few places: some type-related tables use
+the existing canonical/bare conventions already present in the typechecker.
 
-## Codegen
+## Current Pipeline Role
 
-The codegen resolver (`src/codegen/resolve.rs`) is a separate concern. It runs post-elaboration and maps NodeIds to `ResolvedName` variants (`LocalFun`, `ImportedFun`, `ExternalFun`). It handles canonical Var names by looking up in `qualified_scope` when a name contains `.`.
+The effective front-end pipeline is:
 
-The lowerer uses `canonicalize_effect` to resolve user-written effect qualifiers (e.g. `"File"` from `File.write!`) to canonical form for handler param lookup.
+1. lex
+2. parse
+3. derive
+4. desugar
+5. process imports / build scope
+6. run `resolve_names`
+7. typecheck using `ResolutionResult`
+8. elaborate
+9. normalize
+10. backend resolution + lowering
+
+For the typechecker pipeline in more detail, see `docs/typechecking.md`.
+
+## Typechecker Consumption
+
+The typechecker now consumes `ResolutionResult` directly in many important
+paths.
+
+Examples:
+
+- `ExprKind::Var` uses resolved value identity
+- constructors use resolved constructor identity
+- effect calls use resolved effect-call qualifiers
+- trait refs and impl refs are recorded through resolved ids
+
+There are still a few narrower specialized helpers for effects/traits, but the
+ordinary expression path is now substantially more resolver-driven than before.
+
+## Lowering Consumption
+
+Lowering now consumes front-end resolution through narrow semantic helpers
+instead of re-resolving source names directly.
+
+Examples:
+
+- resolved handler refs
+- resolved effect-call qualifiers
+- resolved handler-arm qualifiers
+- resolved record type names
+- resolved effect refs for module-local/imported metadata
+
+The lowerer still has backend-specific maps, but those are now mostly about:
+
+- callable identity
+- BEAM module/function targets
+- CPS arity/effect threading
+- constructor atom mangling
+
+not general-purpose source-name interpretation.
+
+## Why This Document Still Exists
+
+Yes, this doc is still worth keeping.
+
+`docs/typechecking.md` explains the overall checker pipeline.
+This doc explains the narrower but very important question:
+
+- what resolution means now
+- what data structures carry it
+- which phase owns which kind of semantic identity
+
+That is still useful enough to justify a separate page.
+
+## Remaining Cleanup
+
+The refactor is largely complete, but a few follow-up seams still exist:
+
+- some specialized effect lookups in the typechecker
+- some canonical-name normalization of already-typed effect metadata
+- possible future symbol-id unification beyond canonical string keys
+
+Those are now incremental cleanup tasks, not signs that the resolver boundary
+failed.
 
 ## Key Files
 
-- `src/typechecker/mod.rs` — `ScopeMap` struct and methods
-- `src/typechecker/check_module.rs` — `resolve_import` (builds ScopeMap), `inject_exports` (registers checker state), `collect_codegen_info` (resolves trait/effect names for codegen)
-- `src/typechecker/resolve.rs` — AST name rewriting pass (scope-aware, handles all pattern types)
-- `src/typechecker/infer.rs` — Var/Constructor/QualifiedName lookups with scope_map fallback
-- `src/typechecker/effects.rs` — `resolve_effect`, `lookup_effect_op` (resolves qualifier through scope_map)
-- `src/typechecker/check_traits.rs` — `resolve_trait_name`, `register_trait_def` (canonical), `register_impl` (resolves trait name)
-- `src/typechecker/check_decl.rs` — where clause processing (resolves trait names), constraint checking (resolves + bare fallback for builtin impls)
-- `src/typechecker/patterns.rs` — constructor pattern resolution via scope_map
-- `src/typechecker/result.rs` — `CheckResult` with scope_map, `resolve_effect` for LSP
-- `src/elaborate.rs` — dict naming (canonical keys, bare param names), trait method dispatch, `SHOW`/`DEBUG`/`ORD` constants
-- `src/derive.rs` — handles qualified trait names in `deriving` clauses (strips to bare)
-- `src/codegen/lower/effects.rs` — `canonicalize_effect` for effect op qualifier resolution
-- `src/lsp/hover/type_display.rs` — uses bare name when recursing into module ASTs for definition summaries
+- `src/typechecker/resolve.rs` — front-end source resolution
+- `src/typechecker/check_module.rs` — import processing and scope construction
+- `src/typechecker/check_decl.rs` — checker pipeline orchestration
+- `src/typechecker/infer.rs` — main consumer of front-end resolution in inference
+- `src/typechecker/result.rs` — `CheckResult` and stored `ResolutionResult`
+- `src/codegen/resolve.rs` — backend/callable resolution for lowering
+- `src/codegen/lower/` — consumers of semantic resolution during lowering
