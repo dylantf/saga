@@ -1,5 +1,28 @@
 # Resolution Refactor
 
+## Status
+
+This refactor is now **largely complete**.
+
+The main goals were achieved:
+
+- front-end name resolution is now a real phase boundary
+- the authoritative front-end output is `ResolutionResult`
+- `CheckResult` carries source-level resolution forward
+- elaboration and lowering preserve and consume source identity much more consistently
+- backend codegen no longer acts as a second general-purpose resolver for ordinary source nodes
+
+What remains is mostly follow-up cleanup and future architecture work, not core
+resolution redesign:
+
+- some specialized trait/effect lookup remains, which is acceptable because
+  those systems still have legitimate late-phase work
+- backend normalization still uses canonical names as table keys in a few places
+- module-interface / SCC-ready import processing is still a later extension
+
+This document is still useful as the historical design record for the refactor.
+For the **current** resolver architecture, see `docs/name-resolution.md`.
+
 ## Summary
 
 The current name-resolution story is conceptually close to what we want, but the phase boundary is too soft.
@@ -19,14 +42,15 @@ But we also still have:
 
 That combination makes name resolution advisory rather than authoritative.
 
-This refactor aims to make resolution a real phase boundary:
+This refactor aimed to make resolution a real phase boundary:
 
 - build module/global scope first
 - resolve all names once
 - store resolved identity in one authoritative form
 - make typechecking consume resolved identities only
 
-The resolver should be designed with eventual SCC/circular-import support in mind, but the first version should still reject cycles.
+The resolver was designed with eventual SCC/circular-import support in mind,
+but cycle support itself is still future work.
 
 ## Problem
 
@@ -133,7 +157,7 @@ not:
 
 - resolution should depend on fully typechecked imported bodies
 
-## Current State
+## Original Starting State
 
 Relevant files:
 
@@ -155,9 +179,15 @@ Current behavior includes:
 - `check_traits.rs::resolve_trait_name` still resolves traits late
 - pattern matching still performs constructor fallback lookup
 
-That means “resolved” currently means “mostly resolved.”
+That was the core problem this refactor set out to fix: “resolved” often meant
+“mostly resolved.”
 
 ## Proposed Architecture
+
+Most of the sections below are still directionally correct, but they should now
+be read as the architecture we were targeting rather than a description of the
+current implementation. The current implementation is described in
+`docs/name-resolution.md`.
 
 ## 1. Separate Global Scope from Lexical Scope
 

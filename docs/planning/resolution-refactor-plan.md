@@ -209,22 +209,25 @@ Keep or add regression tests for:
   - qualified calls prefer resolved function metadata
 - Most backend fallback resolution for front-resolved source nodes has been removed from `src/codegen/resolve.rs`.
 - The lowerer now routes front-end resolution by semantic module more explicitly during imported handler lowering.
+- Backend semantic consolidation landed:
+  - imported module semantic data is now accessed through clearer `ModuleSemantics`-style views
+  - `emit_module_with_context(...)` and lowering require checked semantic data
+  - the lowerer no longer keeps the old fake optional-check-result mode
+- The remaining high-value fallback removal work is done:
+  - handler/effect lowering now prefers resolved semantic identity
+  - handler aliasing no longer rescues raw source names for ordinary source nodes
+  - dynamic handler/env lookup no longer retries raw env names after resolved lookup
+  - inline handler-arm dispatch keys now reuse resolved effect identity
 
 ### In Progress
 
-- Backend semantic consolidation:
-  - imported module semantic data is still read from a few different places (`front_resolution`, `codegen_info`, elaborated module, backend resolution map)
-  - the lowerer is being cleaned up to use more explicit per-module semantic access instead of ad hoc `ctx.modules` lookups
 - Backend resolver shrink:
   - `src/codegen/resolve.rs` is no longer acting as the primary semantic resolver
   - it still exists as a backend-oriented projection layer and may be reducible further
-- Remaining fallback audit:
-  - the highest-value fallback paths are gone
-  - a few lower-value compatibility patterns may still exist in rarer paths and need inspection
+- Optional cleanup and documentation polish
 
 ### Remaining
 
-- Make imported module semantic access more explicit and uniform in codegen/lowering.
 - Decide whether `src/codegen/resolve.rs` should remain as a thin backend projection pass or be folded further into lowering/init helpers.
 - Audit remaining name/canonical-name lookups and classify them as:
   - legitimate table-key lookup
@@ -238,5 +241,5 @@ Keep or add regression tests for:
 
 ### Current Phase
 
-- Phase name: **Backend Semantic Consolidation**
-- Immediate goal: remove the remaining ad hoc boundaries between front-end semantic data and imported-module codegen metadata so lowering reads one clearer per-module semantic bundle instead of reconstructing it piecemeal.
+- Phase name: **Post-Refactor Cleanup**
+- Immediate goal: preserve the cleaner phase boundaries in docs and future follow-up work, rather than continuing the core rewrite itself.

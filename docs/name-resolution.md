@@ -12,8 +12,9 @@ The big shift is:
 - later phases mostly consume semantic identities instead of re-resolving
   source strings
 
-Some narrow specialized lookups still exist in the typechecker and lowerer,
-especially around effects and trait-related metadata, but the old
+The architecture here is now the normal compiler contract, not an in-progress
+experiment. Some narrow specialized lookups still exist in the typechecker and
+lowerer, especially around effects and trait-related metadata, but the old
 "canonicalize the AST and then guess again later" model is no longer the main
 contract.
 
