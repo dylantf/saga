@@ -1214,8 +1214,7 @@ impl<'a> Lowerer<'a> {
                         || self.handler_defs.contains_key(&resolved_name)
                         || self.handle_dynamic_vars.contains_key(&resolved_name)
                         || self.handle_cond_vars.contains_key(&resolved_name)
-                })
-                || self.check_result.handlers.contains_key(name),
+                }),
             ExprKind::If {
                 then_branch,
                 else_branch,
@@ -1341,7 +1340,6 @@ impl<'a> Lowerer<'a> {
             && let Some(scheme) = cr
                 .env
                 .get(&self.resolved_env_lookup_name(expr.id, name))
-                .or_else(|| cr.env.get(name))
             && let Some(effects) = self.dynamic_handler_info_from_type(&scheme.ty)
         {
             return Some((effects, false));
@@ -1351,7 +1349,6 @@ impl<'a> Lowerer<'a> {
             && let Some(scheme) = cr
                 .env
                 .get(&self.resolved_env_lookup_name(head_expr.id, func_name))
-                .or_else(|| cr.env.get(func_name))
         {
             let mut ty = scheme.ty.clone();
             let arg_count = args.len();

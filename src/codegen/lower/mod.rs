@@ -312,14 +312,6 @@ impl<'a> Lowerer<'a> {
             .or_else(|| self.ctx.module_semantics(module_name).map(|m| m.front_resolution))
     }
 
-    fn current_handler_ref(
-        &self,
-        node_id: crate::ast::NodeId,
-    ) -> Option<&crate::typechecker::ResolvedValue> {
-        self.front_resolution_for_module(self.current_semantic_module_name())
-            .and_then(|r| r.handler_ref(node_id))
-    }
-
     fn current_value_ref(
         &self,
         node_id: crate::ast::NodeId,
@@ -379,15 +371,17 @@ impl<'a> Lowerer<'a> {
         &self,
         node_id: crate::ast::NodeId,
         op_name: &str,
-        qualifier: Option<&str>,
+        _qualifier: Option<&str>,
     ) -> Option<String> {
         self.current_effect_call_qualifier(node_id)
             .map(|s| s.to_string())
-            .or_else(|| qualifier.map(|q| self.canonicalize_effect(q)))
             .or_else(|| self.op_to_effect.get(op_name).cloned())
     }
 
-    fn resolved_handler_binding_name(&self, node_id: crate::ast::NodeId, fallback: &str) -> String {
+    fn resolved_handler_binding_name(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<String> {
         let normalize_lookup = |lookup_name: &str| {
             if self.handle_dynamic_vars.contains_key(lookup_name)
                 || self.handle_cond_vars.contains_key(lookup_name)
@@ -398,22 +392,22 @@ impl<'a> Lowerer<'a> {
                 self.resolve_handler_name(lookup_name)
             }
         };
-        self.current_handler_ref(node_id)
+        self.front_resolution_for_module(self.current_semantic_module_name())
+            .and_then(|r| r.handler_ref(node_id).or_else(|| r.value(node_id)))
             .map(|resolved| match resolved {
                 crate::typechecker::ResolvedValue::Local { name, .. } => normalize_lookup(name),
                 crate::typechecker::ResolvedValue::Global { lookup_name } => {
                     normalize_lookup(lookup_name)
                 }
             })
-            .unwrap_or_else(|| self.resolve_handler_name(fallback))
     }
 
     fn known_handler_binding_name(
         &self,
         node_id: crate::ast::NodeId,
-        fallback: &str,
+        _fallback: &str,
     ) -> Option<String> {
-        let resolved = self.resolved_handler_binding_name(node_id, fallback);
+        let resolved = self.resolved_handler_binding_name(node_id)?;
         if self.handler_defs.contains_key(&resolved)
             || self.handle_dynamic_vars.contains_key(&resolved)
             || self.handle_cond_vars.contains_key(&resolved)
@@ -468,7 +462,6 @@ impl<'a> Lowerer<'a> {
     fn resolved_handler_arm_effect(&self, arm: &HandlerArm) -> Option<String> {
         self.current_handler_arm_qualifier(arm.id)
             .map(|resolved| resolved.to_string())
-            .or_else(|| arm.qualifier.as_ref().map(|q| self.canonicalize_effect(q)))
             .or_else(|| self.op_to_effect.get(&arm.op_name).cloned())
     }
 
