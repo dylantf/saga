@@ -1,17 +1,11 @@
-#[cfg(test)]
-use super::emit_module;
 use super::{CodegenContext, emit_module_with_context};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::{derive, desugar, elaborate, typechecker};
 
-/// Parse `src` and emit Core Erlang for a single-file script module.
-/// Skips typechecking and elaboration - only tests basic lowering.
+/// Parse, typecheck, elaborate, and emit Core Erlang for a single-file script module.
 fn emit(src: &str) -> String {
-    let tokens = Lexer::new(src).lex().expect("lex error");
-    let mut program = Parser::new(tokens).parse_program().expect("parse error");
-    desugar::desugar_program(&mut program);
-    emit_module("_script", &program)
+    emit_full(src)
 }
 
 /// Parse, typecheck, elaborate, and emit Core Erlang - mirrors the real compiler pipeline.
@@ -40,7 +34,7 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
         "_script",
         &elaborated,
         &ctx,
-        Some(&result),
+        &result,
         source_file,
         None,
     )
@@ -256,11 +250,15 @@ fn binop_add() {
 
 #[test]
 fn binop_concat() {
-    // <> emits binary concat: #{#<A>('all',8,'binary',...),#<B>('all',8,'binary',...)}#
-    assert_contains(
-        r#"main () = "a" <> "b""#,
-        "('all',8,'binary',['unsigned'|['big']])",
+    // In the full pipeline, <> elaborates through the Semigroup dictionary for String.
+    let out = emit(r#"main () = "a" <> "b""#);
+    assert!(
+        out.contains("___dict_Std_Base_Semigroup")
+            || out.contains("__dict_Std_Base_Semigroup"),
+        "expected Semigroup dictionary-based concat lowering\n{out}"
     );
+    assert!(out.contains("#{#<97>"), "missing left string literal\n{out}");
+    assert!(out.contains("#{#<98>"), "missing right string literal\n{out}");
 }
 
 // --- If/else ---
@@ -554,7 +552,7 @@ effect Fail {
 
 fun process : Unit -> Unit needs {Fail}
 process () = {
-  let x = if True then fail! \"oops\" else 42
+  let x = if True then fail! \"oops\" else ()
   x
 }
 ";

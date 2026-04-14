@@ -43,6 +43,7 @@ impl Parser {
             end: end.end,
         };
         Ok(EffectRef {
+            id: NodeId::fresh(),
             name,
             type_args,
             span,
@@ -596,6 +597,7 @@ impl Parser {
                     let body = self.parse_expr(0)?;
                     let arm_end = body.span;
                     return_clause = Some(Box::new(HandlerArm {
+                        id: NodeId::fresh(),
                         op_name: "return".to_string(),
                         qualifier: None,
                         params: vec![param],
@@ -634,6 +636,7 @@ impl Parser {
                     let trailing_comment = self.take_trailing_comment(self.pos - 1);
                     arms.push(Annotated {
                         node: HandlerArm {
+                            id: NodeId::fresh(),
                             op_name,
                             qualifier: None,
                             params,
@@ -666,6 +669,7 @@ impl Parser {
                     let trailing_comment = self.take_trailing_comment(self.pos.saturating_sub(1));
                     recovered_arms.push(Annotated {
                         node: HandlerArm {
+                            id: NodeId::fresh(),
                             op_name,
                             qualifier: None,
                             params,
@@ -755,13 +759,23 @@ impl Parser {
                 self.expect(Token::Colon)?;
                 let st_name = self.parse_upper_name()?;
                 let st_span = self.tokens[self.pos - 1].span;
-                supertraits.push((st_name, st_span));
+                supertraits.push(crate::ast::TraitRef {
+                    id: NodeId::fresh(),
+                    name: st_name,
+                    type_args: vec![],
+                    span: st_span,
+                });
 
                 while *self.peek() == Token::Plus {
                     self.advance();
                     let st_name = self.parse_upper_name()?;
                     let st_span = self.tokens[self.pos - 1].span;
-                    supertraits.push((st_name, st_span));
+                    supertraits.push(crate::ast::TraitRef {
+                        id: NodeId::fresh(),
+                        name: st_name,
+                        type_args: vec![],
+                        span: st_span,
+                    });
                 }
             }
 
@@ -841,11 +855,32 @@ impl Parser {
                 && !matches!(self.peek(), Token::Plus | Token::Comma | Token::RBrace)
             {
                 match self.peek() {
-                    Token::UpperIdent(_) => type_args.push(self.parse_upper_name()?),
-                    _ => type_args.push(self.expect_ident()?),
+                    Token::UpperIdent(_) => {
+                        let name = self.parse_upper_name()?;
+                        let span = self.tokens[self.pos - 1].span;
+                        type_args.push(TypeExpr::Named {
+                            id: NodeId::fresh(),
+                            name,
+                            span,
+                        });
+                    }
+                    _ => {
+                        let name = self.expect_ident()?;
+                        let span = self.tokens[self.pos - 1].span;
+                        type_args.push(TypeExpr::Var {
+                            id: NodeId::fresh(),
+                            name,
+                            span,
+                        });
+                    }
                 }
             }
-            let mut traits = vec![(name, type_args, span)];
+            let mut traits = vec![crate::ast::TraitRef {
+                id: NodeId::fresh(),
+                name,
+                type_args,
+                span,
+            }];
             while *self.peek() == Token::Plus {
                 self.advance();
                 let name = self.parse_upper_name()?;
@@ -855,11 +890,32 @@ impl Parser {
                     && !matches!(self.peek(), Token::Plus | Token::Comma | Token::RBrace)
                 {
                     match self.peek() {
-                        Token::UpperIdent(_) => type_args.push(self.parse_upper_name()?),
-                        _ => type_args.push(self.expect_ident()?),
+                        Token::UpperIdent(_) => {
+                            let name = self.parse_upper_name()?;
+                            let span = self.tokens[self.pos - 1].span;
+                            type_args.push(TypeExpr::Named {
+                                id: NodeId::fresh(),
+                                name,
+                                span,
+                            });
+                        }
+                        _ => {
+                            let name = self.expect_ident()?;
+                            let span = self.tokens[self.pos - 1].span;
+                            type_args.push(TypeExpr::Var {
+                                id: NodeId::fresh(),
+                                name,
+                                span,
+                            });
+                        }
                     }
                 }
-                traits.push((name, type_args, span));
+                traits.push(crate::ast::TraitRef {
+                    id: NodeId::fresh(),
+                    name,
+                    type_args,
+                    span,
+                });
             }
             bounds.push(crate::ast::TraitBound { type_var, traits });
         }
@@ -875,15 +931,27 @@ impl Parser {
         let trait_name_span = self.tokens[self.pos - 1].span;
 
         // Parse optional trait type args: `impl ConvertTo NOK for USD`
-        // These are uppercase names (concrete types) or lowercase (type vars) before `for`
+        // These are type names (concrete or variable) before `for`
         let mut trait_type_args = Vec::new();
         while !matches!(self.peek(), Token::For) {
             match self.peek() {
                 Token::UpperIdent(_) => {
-                    trait_type_args.push(self.parse_upper_name()?);
+                    let name = self.parse_upper_name()?;
+                    let span = self.tokens[self.pos - 1].span;
+                    trait_type_args.push(TypeExpr::Named {
+                        id: NodeId::fresh(),
+                        name,
+                        span,
+                    });
                 }
                 Token::Ident(_) => {
-                    trait_type_args.push(self.expect_ident()?);
+                    let name = self.expect_ident()?;
+                    let span = self.tokens[self.pos - 1].span;
+                    trait_type_args.push(TypeExpr::Var {
+                        id: NodeId::fresh(),
+                        name,
+                        span,
+                    });
                 }
                 _ => break,
             }
@@ -1087,6 +1155,7 @@ impl Parser {
             let arg = self.parse_type_atom()?;
             let span = seg_start.to(arg.span());
             left = TypeExpr::App {
+                id: NodeId::fresh(),
                 func: Box::new(left),
                 arg: Box::new(arg),
                 span,
@@ -1121,6 +1190,7 @@ impl Parser {
             let arg = self.parse_type_atom()?;
             let span = start.to(arg.span());
             left = TypeExpr::App {
+                id: NodeId::fresh(),
                 func: Box::new(left),
                 arg: Box::new(arg),
                 span,
@@ -1158,6 +1228,7 @@ impl Parser {
             let end = self.tokens[self.pos - 1].span;
             let span = start.to(end);
             Ok(TypeExpr::Arrow {
+                id: NodeId::fresh(),
                 from: Box::new(left),
                 to: Box::new(right),
                 effects: needs,
@@ -1185,11 +1256,13 @@ impl Parser {
                     name = format!("{}.{}", name, segment);
                 }
                 Ok(TypeExpr::Named {
+                    id: NodeId::fresh(),
                     name,
                     span: start.to(end),
                 })
             }
             Token::Ident(s) => Ok(TypeExpr::Var {
+                id: NodeId::fresh(),
                 name: s,
                 span: start,
             }),
@@ -1202,6 +1275,7 @@ impl Parser {
                     let end = self.tokens[self.pos].span;
                     self.expect(Token::RParen)?;
                     return Ok(TypeExpr::Labeled {
+                        id: NodeId::fresh(),
                         label,
                         inner: Box::new(inner),
                         span: start.to(end),
@@ -1222,12 +1296,14 @@ impl Parser {
                     self.expect(Token::RParen)?;
                     let span = start.to(end);
                     let mut result = TypeExpr::Named {
+                        id: NodeId::fresh(),
                         name: "Tuple".into(),
                         span,
                     };
                     for elem in elements {
                         let elem_span = start.to(elem.span());
                         result = TypeExpr::App {
+                            id: NodeId::fresh(),
                             func: Box::new(result),
                             arg: Box::new(elem),
                             span: elem_span,
@@ -1260,6 +1336,7 @@ impl Parser {
                 let end = self.tokens[self.pos].span;
                 self.expect(Token::RBrace)?;
                 Ok(TypeExpr::Record {
+                    id: NodeId::fresh(),
                     fields,
                     multiline,
                     span: start.to(end),

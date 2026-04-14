@@ -623,6 +623,7 @@ impl Parser {
         }
         Ok(Annotated {
             node: HandlerItem::Named(NamedHandlerRef {
+                id: NodeId::fresh(),
                 name,
                 span: name_start.to(name_end),
             }),
@@ -678,6 +679,7 @@ impl Parser {
         let trailing_comment = self.take_trailing_comment(self.pos - 1);
         Ok(Annotated {
             node: HandlerItem::Arm(HandlerArm {
+                id: NodeId::fresh(),
                 op_name: name,
                 qualifier,
                 params,
@@ -703,6 +705,7 @@ impl Parser {
         let trailing_comment = self.take_trailing_comment(self.pos - 1);
         Ok(Annotated {
             node: HandlerItem::Return(HandlerArm {
+                id: NodeId::fresh(),
                 op_name: "return".to_string(),
                 qualifier: None,
                 params: vec![param],
@@ -796,7 +799,11 @@ impl Parser {
                 };
                 name = format!("{name}.{segment}");
             }
-            Ok(Handler::Named(name, handler_span))
+            Ok(Handler::Named(NamedHandlerRef {
+                id: NodeId::fresh(),
+                name,
+                span: handler_span,
+            }))
         }
     }
 

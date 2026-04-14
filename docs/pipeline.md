@@ -2,7 +2,7 @@
 
 ## Overview
 
-```
+```text
 Source (.saga)
   -> Lexer (src/lexer.rs)
   -> Parser (src/parser/)
@@ -10,10 +10,10 @@ Source (.saga)
   -> Derive Expansion (src/derive.rs)
   -> Desugar (src/desugar.rs)
   -> Typecheck (src/typechecker/)
-     includes: Name Resolution (src/typechecker/resolve.rs)
+     includes: front-end Name Resolution (src/typechecker/resolve.rs)
   -> Elaborate (src/elaborate.rs)
   -> Normalize (src/codegen/normalize.rs)
-  -> Codegen Resolve (src/codegen/resolve.rs)
+  -> Backend Resolve (src/codegen/resolve.rs)
   -> Lower (src/codegen/lower/)
   -> Core Erlang AST (src/codegen/cerl.rs)
   -> Print -> .core file
@@ -25,122 +25,196 @@ Source (.saga)
 
 ### Parse
 
-Hand-written Pratt parser. Produces `Vec<Decl>` (the `Program` type). Each AST node gets a unique `NodeId` assigned at creation time.
+Hand-written Pratt parser. Produces `Vec<Decl>` (the `Program` type). Each AST
+node gets a stable `NodeId` at creation time.
 
 ### Derive Expansion
 
-Generates trait impl declarations from `deriving` clauses (e.g. `deriving (Show, Debug, Eq)`).
+Generates trait impl declarations from `deriving` clauses such as
+`deriving (Show, Debug, Eq)`.
 
 ### Desugar
 
-Transforms sugar nodes into core AST forms: pipes, composition, list literals, string interpolation, cons, etc. Does NOT desugar `do/else` (that's handled in lowering).
+Transforms surface sugar into core AST forms: pipes, composition, list
+literals, string interpolation, comprehensions, and related conveniences.
 
 ### Typecheck
 
-HM-style inference with traits, effects, and exhaustiveness checking. Multi-module: scans all `.saga` files to build a module map, resolves imports by declared module name.
+HM-style inference with traits, effects, exhaustiveness checking, and
+multi-module import processing.
 
-Includes a **name resolution** sub-pass (`src/typechecker/resolve.rs`) that runs after imports are processed and before inference. It rewrites bare names in the AST to canonical (module-qualified) form using the `ScopeMap` built from imports. For example, `Var { name: "map" }` becomes `Var { name: "Std.List.map" }`. The pass is scope-aware: local bindings shadow imports. See `docs/name-resolution.md` for full details.
+This phase includes a real front-end name-resolution pass in
+`src/typechecker/resolve.rs`. The important current contract is:
 
-For a detailed walkthrough of the typechecker pipeline itself, including rough pass counts and what happens in each pass, see `docs/typechecking.md`.
+- imports are processed first and global scope is built
+- `resolve_names` records semantic identity in `ResolutionResult`
+- type inference consumes that resolution result
+- the AST stays mostly source-shaped; in-place canonical string rewriting is no
+  longer the primary contract
+
+So the typechecker does **not** primarily mean “rewrite the AST to canonical
+names and hope later phases agree.” It means “produce explicit semantic
+resolution keyed by source identity, then typecheck against that.”
+
+For the typechecker pipeline in more detail, including rough pass counts, see
+`docs/typechecking.md`.
+
+For the resolver architecture specifically, see `docs/name-resolution.md`.
 
 Key outputs:
 
-- `CheckResult`: type environment, trait evidence, scope_map, diagnostics
-- `ModuleCodegenInfo` per module: exports, constructors, external functions, trait impl dicts, effect definitions, handler definitions
-- Prelude import declarations (stored in `CheckResult.prelude_imports`)
+- `CheckResult`
+  - type environment
+  - diagnostics
+  - trait/effect/handler metadata
+  - `ResolutionResult`
+  - per-node type information
+  - module codegen metadata
+- per-module `CheckResult`s for imported modules
+- `ModuleCodegenInfo` per module
+- prelude imports used later by codegen
 
 ### Elaborate
 
-Transforms trait method calls into explicit dictionary passing. Runs per-module. Takes the parsed program + `CheckResult`, produces a new program with:
+Transforms trait method calls into explicit dictionary passing. Runs per module.
+Takes the parsed program plus `CheckResult`, and produces a new program with:
 
 - `DictConstructor` declarations replacing `ImplDef`
 - `DictRef` and `DictMethodAccess` expressions replacing trait method calls
 - `ForeignCall` expressions for `@external` functions
-- Dictionary parameters added to functions with `where` clauses
+- explicit dictionary parameters on functions with `where` clauses
+
+Elaboration now preserves source identity more carefully than before, so later
+phases can keep using front-end semantic metadata where the expression is still
+semantically the same source node.
 
 ### Normalize
 
-Effect normalization pre-pass. Adjusts the AST for CPS transformation in the lowerer.
+Effect normalization pre-pass. Prepares the elaborated AST for the CPS-aware
+lowerer.
 
-### Codegen Resolve (src/codegen/resolve.rs)
+### Backend Resolve (`src/codegen/resolve.rs`)
 
-Pre-computes two lookup tables consumed by the lowerer:
+This phase is now a **backend-oriented projection layer**, not a second
+general-purpose source resolver.
 
-**ConstructorAtoms** (`HashMap<String, String>`): Maps constructor names to their mangled Erlang atoms. Handles BEAM convention overrides (Ok->ok, Err->error, Nothing->undefined, True->true, etc.), module-prefixed mangling (NotFound -> std_file_NotFound), and qualified forms (Std.File.NotFound -> std_file_NotFound).
+It produces:
 
-**ResolutionMap** (`HashMap<NodeId, ResolvedName>`): Maps each `Var`, `QualifiedName`, and `DictRef` AST node to its resolved target:
+- `ConstructorAtoms`
+  - constructor name -> mangled Erlang atom
+- `ResolutionMap`
+  - `NodeId -> ResolvedName` for callable/backend dispatch decisions
 
-- `LocalFun { name, arity, effects }` - top-level function in the current module
-- `ImportedFun { erlang_mod, name, arity, effects }` - function from another module
-- `ExternalFun { erlang_mod, erlang_func, arity }` - `@external` FFI function
-- Not in map = local variable (function param, let binding, lambda param)
+The backend resolver uses front-end `ResolutionResult` and codegen metadata to
+answer lowering-specific questions such as:
 
-Each resolved name carries its effect requirements so the lowerer can determine CPS threading without a separate lookup.
+- is this callable local, imported, or external?
+- what Erlang module/function should be called?
+- what arity/effect metadata should lowering use?
 
-Resolution is per-Var-node. Whether a name appears bare (`to_list`) or as a call head (`to_list t`), the same NodeId gets the same resolution. The lowerer reads the head Var's resolution to decide between `call` (cross-module) and `apply` (local).
+What it is **not** supposed to do anymore:
 
-**Per-module resolution maps**: Each module gets its own `ResolutionMap` computed when it's compiled, stored in `CompiledModule.resolution`. When lowering a user module, all imported modules' pre-computed maps are merged in. This means handler bodies, impl methods, and dict constructors from Std modules have their names already resolved against their source module's scope, with no re-resolution needed.
+- re-decide the meaning of ordinary source `Var` or `QualifiedName` nodes from
+  raw spelling
+- paper over missing front-end semantic resolution for ordinary source nodes
 
-### Lower (src/codegen/lower/)
+### Lower (`src/codegen/lower/`)
 
-Converts the elaborated AST into a Core Erlang AST (`CModule`). This is the most complex phase:
+Converts the normalized AST into Core Erlang (`CModule`).
 
-- **CPS transformation** for algebraic effects: effectful functions get handler parameters and return continuations added
-- **Handler inlining**: `expr with handler_name` inlines the handler's arms as CPS callbacks
-- **Saturated vs partial application detection**: compares arg count against resolved arity
-- **Effect threading**: passes handler params through call chains automatically
+This phase is responsible for:
 
-The lowerer consumes:
+- CPS transformation for algebraic effects
+- handler lowering and inlining
+- saturated vs partial application detection
+- handler parameter / return continuation threading
+- runtime-specific data layout and call shaping
 
-- `CodegenContext.modules` (all `CompiledModule` bundles)
-- `constructor_atoms` from the resolver (constructor name -> Erlang atom)
-- `resolved` (merged resolution map) from the resolver (NodeId -> call target)
-- `fun_info` (arity, effects, param absorbed effects) built during `init_module`
+The lowerer consumes two different semantic layers:
 
-**Name resolution vs CPS are cleanly separated:**
+- front-end `ResolutionResult`
+  - source-level semantic identity
+  - handlers, effect-call qualifiers, handler-arm qualifiers, record type
+    identity, value identity
+- backend `ResolutionMap`
+  - callable/backend dispatch identity
+  - local vs imported vs external fun decisions
+  - arity/effect metadata needed for lowering
 
-- The `ResolutionMap` (from `resolve.rs`) answers "what does this name refer to?" for every `Var`, `QualifiedName`, and `DictRef` node. It carries the target module, function name, arity, and effects. The lowerer reads it via `self.resolved.get(&node_id)`.
-- `FunInfo` (from `init_module`) tracks CPS metadata for local functions: expanded arity (including handler params), effect requirements, and per-parameter absorbed effects. This is NOT name resolution -- it's about how to thread handler parameters and return continuations.
-- `module_aliases` maps source-level module names to Erlang atom names (e.g. "List" -> "std_list"). Used as a fallback in `lower_qualified_call` for unresolved qualified names.
-- `effect_defs`, `handler_defs`, `op_to_effect` handle dynamic effect dispatch (which handler params are in scope depends on the `with` block, not static resolution).
+That split is intentional:
 
-What the lowerer does NOT do:
-
-- Name resolution. All name -> module mapping is done by the resolver.
-- Constructor mangling. All constructor -> atom mapping is done by the resolver.
+- front-end resolution answers “what source declaration does this node mean?”
+- backend resolution answers “how should this callable lower on the BEAM side?”
 
 ### Emit
 
-Pretty-prints the Core Erlang AST to a `.core` file. Then `erlc` compiles it to `.beam`, and `erl` runs it.
+Pretty-prints Core Erlang to a `.core` file. Then `erlc` compiles it to `.beam`
+and `erl` runs it.
 
-## Data Flow: CompiledModule
+## Data Flow: `CheckResult`
 
-All per-module compilation results are bundled into `CompiledModule`:
+`CheckResult` is the main semantic product of the front end.
+
+Important data used downstream includes:
+
+- `env`
+- `traits`
+- `effects`
+- `handlers`
+- `type_at_node`
+- `let_effect_bindings`
+- `prelude_imports`
+- `resolution`
+- module codegen info and per-module check results
+
+`scope_map` still exists, but it is now mainly:
+
+- import/global scope construction state
+- a diagnostics/tooling helper
+- support for a few narrower specialized lookups
+
+It is no longer the main semantic lookup path for lowering ordinary source
+nodes.
+
+## Data Flow: `CompiledModule`
+
+Per-module codegen results are bundled into `CompiledModule`:
 
 ```rust
 struct CompiledModule {
-    codegen_info: ModuleCodegenInfo,  // from typechecker
-    elaborated: Program,              // from elaborator
-    resolution: ResolutionMap,        // from resolver
+    codegen_info: ModuleCodegenInfo,
+    elaborated: Program,
+    resolution: ResolutionMap,
+    front_resolution: ResolutionResult,
 }
 ```
 
-`CodegenContext` carries `modules: HashMap<String, CompiledModule>` plus `prelude_imports` and `let_effect_bindings`. This is the single source of truth for all cross-module information during lowering.
+`CodegenContext` carries:
 
-## Build Orchestration (src/cli/build.rs)
+- `modules: HashMap<String, CompiledModule>`
+- `prelude_imports`
+- `let_effect_bindings`
+
+This is the cross-module semantic bundle the lowerer uses for imported modules.
+
+## Build Orchestration (`src/cli/build.rs`)
 
 ### Single file (`saga run file.saga`)
 
-1. Parse + typecheck (loads prelude, scans Std modules)
-2. `compile_std_modules`: for each Std module, elaborate + normalize + resolve -> `CompiledModule`
-3. Elaborate user code
-4. `emit_module_with_context`: resolve user code, merge all module resolutions, lower, print
-5. `erlc` all `.core` files, `erl` to run
+1. Parse + typecheck the entry file
+2. Typecheck/load stdlib modules
+3. Compile imported modules to `CompiledModule`
+4. Elaborate + normalize the user module
+5. Run backend resolve + lower + emit with `emit_module_with_context(...)`
+6. Compile `.core` with `erlc` and run with `erl`
 
 ### Project (`saga build`)
 
-Same as single file but also processes user-defined modules and a `Main` module. User modules get elaborated but don't currently get pre-computed resolution maps (they're resolved inline during `emit_module_with_context`).
+Same general shape, but repeated across project modules plus `Main`. Modules are
+typechecked first, then compiled into `CompiledModule` bundles that carry both
+front-end and backend resolution data.
 
 ### Test (`saga test`)
 
-Builds the project first, then for each test file: typecheck, elaborate, emit. Reuses the project's compiled modules to avoid recompilation.
+Builds the project first, then compiles each test module through the same
+checked pipeline, reusing compiled module context where possible.

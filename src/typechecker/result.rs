@@ -78,6 +78,8 @@ pub struct CheckResult {
     pub prelude_imports: Vec<crate::ast::Decl>,
     /// Name resolution map: user-visible names -> canonical names.
     pub scope_map: super::ScopeMap,
+    /// Authoritative source-level resolution result.
+    pub resolution: super::ResolutionResult,
     /// Whether any `with ets_ref` appears in the program, requiring the
     /// `saga_ref_store` ETS table to be created at VM startup.
     pub needs_ets_ref_table: bool,
@@ -349,6 +351,7 @@ impl Checker {
             imported_docs: self.lsp.imported_docs.clone(),
             prelude_imports: self.prelude_imports.clone(),
             scope_map: self.scope_map.clone(),
+            resolution: self.resolution.clone(),
             needs_ets_ref_table: self.needs_ets_ref_table,
             needs_vec_table: self.needs_vec_table,
         }

@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, BitSegSpec, Expr, ExprKind, Lit, Pat, Stmt, TypeExpr};
+use crate::ast::{BinOp, BitSegSpec, Expr, ExprKind, Lit, Pat, Stmt};
 use crate::codegen::cerl::{BinSegFlags, BinSegSize, BinSegType, CBinSeg, CExpr, CLit, Endianness};
 use crate::typechecker::Type;
 use std::collections::{BTreeSet, HashMap};
@@ -188,7 +188,9 @@ pub(super) fn collect_ctor_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
 
 /// Peel a chain of App nodes to find an EffectCall head and its arguments.
 /// Returns `Some((op_name, qualifier, args))` if found.
-pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Vec<&Expr>)> {
+pub(super) fn collect_effect_call_expr(
+    expr: &Expr,
+) -> Option<(&Expr, &str, Option<&str>, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
@@ -211,21 +213,15 @@ pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Ve
                 if args.is_empty() {
                     return None;
                 }
-                return Some((name.as_str(), qualifier.as_deref(), args));
+                return Some((current, name.as_str(), qualifier.as_deref(), args));
             }
             _ => return None,
         }
     }
 }
 
-/// Best-effort: return the record type name from an expression, for use when
-/// resolving field positions. Only works when the expression is a literal
-/// RecordCreate; otherwise the typechecker would need to be consulted.
-pub(super) fn field_access_record_name(expr: &Expr) -> Option<&str> {
-    if let ExprKind::RecordCreate { name, .. } = &expr.kind {
-        return Some(name.as_str());
-    }
-    None
+pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Vec<&Expr>)> {
+    collect_effect_call_expr(expr).map(|(_, name, qualifier, args)| (name, qualifier, args))
 }
 
 /// Check if an expression contains effect calls nested inside if/case/block
@@ -252,34 +248,6 @@ pub(super) fn has_nested_effect_call(expr: &Expr) -> bool {
 /// Check if an expression is or contains an effect call (direct or nested).
 fn branch_has_effect(expr: &Expr) -> bool {
     collect_effect_call(expr).is_some() || has_nested_effect_call(expr)
-}
-
-/// Recursively collect all effect names from `needs` clauses in a TypeExpr.
-pub(super) fn collect_type_effects(ty: &TypeExpr) -> BTreeSet<String> {
-    match ty {
-        TypeExpr::Arrow {
-            from, to, effects, ..
-        } => {
-            let mut effs: BTreeSet<String> = effects.iter().map(|e| e.name.clone()).collect();
-            effs.extend(collect_type_effects(from));
-            effs.extend(collect_type_effects(to));
-            effs
-        }
-        TypeExpr::App { func, arg, .. } => {
-            let mut effects = collect_type_effects(func);
-            effects.extend(collect_type_effects(arg));
-            effects
-        }
-        TypeExpr::Record { fields, .. } => {
-            let mut effects = BTreeSet::new();
-            for (_, ty) in fields {
-                effects.extend(collect_type_effects(ty));
-            }
-            effects
-        }
-        TypeExpr::Labeled { inner, .. } => collect_type_effects(inner),
-        TypeExpr::Named { .. } | TypeExpr::Var { .. } => BTreeSet::new(),
-    }
 }
 
 /// Convert a module path like `["Foo", "Bar", "Baz"]` to an Erlang module atom

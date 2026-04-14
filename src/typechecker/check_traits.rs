@@ -105,7 +105,7 @@ impl Checker {
         &mut self,
         name: &str,
         type_params: &[String],
-        supertraits: &[(String, crate::token::Span)],
+        supertraits: &[ast::TraitRef],
         methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
         // Compute canonical name early — used in scheme constraints below
@@ -208,8 +208,9 @@ impl Checker {
         }
 
         // Record supertrait references for find-references
-        for (st_name, st_span) in supertraits {
-            self.lsp.type_references.push((*st_span, st_name.clone()));
+        for tr in supertraits {
+            let resolved = self.resolved_trait_name_at(tr.id, &tr.name);
+            self.lsp.type_references.push((tr.span, resolved));
         }
 
         // Also register scope_map entry for local traits: bare -> canonical
@@ -226,7 +227,7 @@ impl Checker {
         // Resolve supertrait names to canonical form
         let resolved_supertraits: Vec<String> = supertraits
             .iter()
-            .map(|(n, _)| self.resolve_trait_name(n).unwrap_or_else(|| n.clone()))
+            .map(|tr| self.resolved_trait_name_at(tr.id, &tr.name))
             .collect();
         self.trait_state.traits.insert(
             canonical_name,
@@ -243,6 +244,7 @@ impl Checker {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn register_impl(
         &mut self,
+        impl_id: ast::NodeId,
         trait_name: &str,
         trait_type_args: &[String],
         target_type: &str,
@@ -253,9 +255,7 @@ impl Checker {
         span: Span,
     ) -> Result<(), Diagnostic> {
         // Resolve trait name to canonical form
-        let trait_name = self
-            .resolve_trait_name(trait_name)
-            .unwrap_or_else(|| trait_name.to_string());
+        let trait_name = self.resolved_impl_trait_name(impl_id, trait_name);
         let trait_name = trait_name.as_str();
         // Check the trait exists
         let trait_info = self
@@ -325,8 +325,9 @@ impl Checker {
         // Type-check each method body against the trait's expected signature.
         // Substitute the trait's type param with the concrete target type.
         // For parameterized impls (e.g. `impl Show for Box a`), use fresh vars for type params.
+        let resolved_target_type = self.resolved_impl_target_type_name(impl_id, target_type);
         let target = if type_params.is_empty() {
-            Type::Con(target_type.into(), vec![])
+            Type::Con(resolved_target_type.clone(), vec![])
         } else {
             let param_vars: Vec<Type> = type_params.iter().map(|_| self.fresh_var()).collect();
             // Register where clause bounds on the fresh type vars so method bodies
@@ -338,13 +339,11 @@ impl Checker {
                     self.trait_state
                         .where_bound_var_names
                         .insert(*var_id, bound.type_var.clone());
-                    for (trait_req, _, trait_span) in &bound.traits {
-                        let resolved_req = self
-                            .resolve_trait_name(trait_req)
-                            .unwrap_or_else(|| trait_req.clone());
+                    for tr in &bound.traits {
+                        let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
                         self.lsp
                             .type_references
-                            .push((*trait_span, resolved_req.clone()));
+                            .push((tr.span, resolved_req.clone()));
                         self.trait_state
                             .where_bounds
                             .entry(*var_id)
@@ -353,27 +352,12 @@ impl Checker {
                     }
                 }
             }
-            Type::Con(target_type.into(), param_vars)
+            Type::Con(resolved_target_type.clone(), param_vars)
         };
 
         let declared_effects: std::collections::HashSet<String> = needs
             .iter()
-            .map(|e| {
-                self.resolve_effect(&e.name)
-                    .and_then(|info| {
-                        let short = e.name.rsplit('.').next().unwrap_or(&e.name);
-                        info.source_module
-                            .as_ref()
-                            .map(|m| format!("{}.{}", m, short))
-                    })
-                    .unwrap_or_else(|| {
-                        if let Some(m) = &self.current_module {
-                            format!("{}.{}", m, e.name)
-                        } else {
-                            e.name.clone()
-                        }
-                    })
-            })
+            .map(|e| self.resolved_effect_name(e.id, &e.name))
             .collect();
 
         for m in methods {
@@ -513,10 +497,8 @@ impl Checker {
             let param_idx = type_params.iter().position(|p| p == &bound.type_var);
             match param_idx {
                 Some(idx) => {
-                    for (trait_req, _, _) in &bound.traits {
-                        let resolved_req = self
-                            .resolve_trait_name(trait_req)
-                            .unwrap_or_else(|| trait_req.clone());
+                    for tr in &bound.traits {
+                        let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
                         param_constraints.push((resolved_req, idx));
                     }
                 }
@@ -535,7 +517,7 @@ impl Checker {
         let key = (
             trait_name.to_string(),
             trait_type_args.to_vec(),
-            target_type.to_string(),
+            resolved_target_type,
         );
         if self.trait_state.impls.contains_key(&key) {
             let args_str = if trait_type_args.is_empty() {

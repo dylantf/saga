@@ -67,8 +67,8 @@ struct Elaborator {
     let_dict_pat_ids: HashMap<String, HashSet<crate::ast::NodeId>>,
     /// Scope map values for canonical name bridging (user name -> canonical)
     scope_map_values: HashMap<String, String>,
-    /// Scope map traits for resolving bare trait names to canonical
-    scope_map_traits: HashMap<String, String>,
+    /// Front-end resolution result for looking up canonical names by span/node id.
+    resolution: crate::typechecker::ResolutionResult,
     /// Per-node type information for resolving record names in FieldAccess/RecordUpdate.
     type_at_node: HashMap<crate::ast::NodeId, Type>,
     /// Substitution for resolving type variables.
@@ -76,6 +76,36 @@ struct Elaborator {
 }
 
 impl Elaborator {
+    fn resolved_trait_name(&self, id: crate::ast::NodeId, source: &str) -> String {
+        self.resolution.trait_ref(id).unwrap_or(source).to_string()
+    }
+
+    fn resolved_impl_trait_name(&self, id: crate::ast::NodeId, source: &str) -> String {
+        self.resolution
+            .impl_trait_ref(id)
+            .or_else(|| self.resolution.trait_ref(id))
+            .unwrap_or(source)
+            .to_string()
+    }
+
+    fn resolved_impl_target_type(&self, id: crate::ast::NodeId, source: &str) -> String {
+        self.resolution
+            .impl_target_type_ref(id)
+            .unwrap_or(source)
+            .to_string()
+    }
+
+    fn resolved_type_name(&self, id: crate::ast::NodeId, source: &str) -> String {
+        self.resolution.type_ref(id).unwrap_or(source).to_string()
+    }
+
+    /// Resolve trait type args via the resolution map.
+    fn resolved_trait_type_args(&self, args: &[crate::ast::TypeExpr]) -> Vec<String> {
+        args.iter()
+            .map(|te| self.resolved_type_name(te.id(), te.simple_name()))
+            .collect()
+    }
+
     fn new(result: &CheckResult, module_name: &str) -> Self {
         // Build inferred dict params from checker's env (for functions without
         // explicit where clauses that still have inferred trait constraints).
@@ -187,7 +217,7 @@ impl Elaborator {
             let_binding_arities,
             let_dict_pat_ids,
             scope_map_values: result.scope_map.values.clone(),
-            scope_map_traits: result.scope_map.traits.clone(),
+            resolution: result.resolution.clone(),
             type_at_node: result.type_at_node.clone(),
             sub: result.sub.clone(),
         }
@@ -203,13 +233,9 @@ impl Elaborator {
     fn dict_params_from_where(&self, where_clause: &[TraitBound]) -> Vec<(String, String)> {
         let mut dict_params = Vec::new();
         for bound in where_clause {
-            for (trait_name, _, _) in &bound.traits {
-                if trait_name != "Num" && trait_name != "Eq" {
-                    let resolved = self
-                        .scope_map_traits
-                        .get(trait_name)
-                        .cloned()
-                        .unwrap_or_else(|| trait_name.clone());
+            for tr in &bound.traits {
+                if tr.name != "Num" && tr.name != "Eq" {
+                    let resolved = self.resolved_trait_name(tr.id, &tr.name);
                     dict_params.push((resolved, bound.type_var.clone()));
                 }
             }
@@ -228,14 +254,10 @@ impl Elaborator {
             std::mem::take(&mut self.current_dict_params_by_var),
         );
         for bound in where_clause {
-            for (req_trait, _, _) in &bound.traits {
-                let resolved = self
-                    .scope_map_traits
-                    .get(req_trait)
-                    .cloned()
-                    .unwrap_or_else(|| req_trait.clone());
+            for tr in &bound.traits {
+                let resolved = self.resolved_trait_name(tr.id, &tr.name);
                 // Use bare trait name in param name to avoid dots in Erlang identifiers
-                let bare = req_trait.rsplit('.').next().unwrap_or(req_trait);
+                let bare = tr.name.rsplit('.').next().unwrap_or(&tr.name);
                 let param_name = format!("__dict_{}_{}", bare, bound.type_var);
                 self.current_dict_params
                     .insert(resolved.clone(), param_name.clone());
@@ -281,6 +303,7 @@ impl Elaborator {
                     }
                 }
                 Decl::ImplDef {
+                    id,
                     trait_name,
                     trait_type_args,
                     target_type,
@@ -288,23 +311,20 @@ impl Elaborator {
                     where_clause,
                     ..
                 } => {
-                    // Resolve trait name to canonical form
-                    let canonical_trait = self
-                        .scope_map_traits
-                        .get(trait_name)
-                        .cloned()
-                        .unwrap_or_else(|| trait_name.clone());
+                    let canonical_trait = self.resolved_impl_trait_name(*id, trait_name);
+                    let canonical_trait_type_args = self.resolved_trait_type_args(trait_type_args);
+                    let canonical_target_type = self.resolved_impl_target_type(*id, target_type);
                     let dict_name = crate::typechecker::make_dict_name(
                         &canonical_trait,
-                        trait_type_args,
+                        &canonical_trait_type_args,
                         &self.erlang_module,
-                        target_type,
+                        &canonical_target_type,
                     );
                     self.dict_names.insert(
                         (
                             canonical_trait.clone(),
-                            trait_type_args.clone(),
-                            target_type.clone(),
+                            canonical_trait_type_args.clone(),
+                            canonical_target_type.clone(),
                         ),
                         dict_name,
                     );
@@ -317,26 +337,26 @@ impl Elaborator {
                         .enumerate()
                         .map(|(i, name)| (name.as_str(), i))
                         .collect();
-                    let scope_traits = &self.scope_map_traits;
-                    let params: Vec<(String, usize)> = where_clause
-                        .iter()
-                        .flat_map(|bound| {
-                            let idx = var_to_idx
-                                .get(bound.type_var.as_str())
-                                .copied()
-                                .unwrap_or(0);
-                            bound.traits.iter().map(move |(t, _, _)| {
-                                let resolved =
-                                    scope_traits.get(t).cloned().unwrap_or_else(|| t.clone());
-                                (resolved, idx)
-                            })
-                        })
-                        .collect();
+                    let mut params: Vec<(String, usize)> = Vec::new();
+                    for bound in where_clause {
+                        let idx = var_to_idx
+                            .get(bound.type_var.as_str())
+                            .copied()
+                            .unwrap_or(0);
+                        for tr in &bound.traits {
+                            let resolved = self
+                                .resolution
+                                .trait_ref(tr.id)
+                                .unwrap_or(&tr.name)
+                                .to_string();
+                            params.push((resolved, idx));
+                        }
+                    }
                     self.impl_dict_params.insert(
                         (
                             canonical_trait,
-                            trait_type_args.clone(),
-                            target_type.clone(),
+                            canonical_trait_type_args,
+                            canonical_target_type,
                         ),
                         params,
                     );
@@ -379,6 +399,7 @@ impl Elaborator {
             match decl {
                 // Emit DictConstructor for each impl
                 Decl::ImplDef {
+                    id,
                     trait_name,
                     trait_type_args,
                     target_type,
@@ -388,17 +409,15 @@ impl Elaborator {
                     span,
                     ..
                 } => {
-                    let canonical_trait = self
-                        .scope_map_traits
-                        .get(trait_name)
-                        .cloned()
-                        .unwrap_or_else(|| trait_name.clone());
+                    let canonical_trait = self.resolved_impl_trait_name(*id, trait_name);
+                    let canonical_trait_type_args = self.resolved_trait_type_args(trait_type_args);
+                    let canonical_target_type = self.resolved_impl_target_type(*id, target_type);
                     let dict_name = self
                         .dict_names
                         .get(&(
                             canonical_trait.clone(),
-                            trait_type_args.clone(),
-                            target_type.clone(),
+                            canonical_trait_type_args.clone(),
+                            canonical_target_type.clone(),
                         ))
                         .cloned()
                         .unwrap();
@@ -408,8 +427,8 @@ impl Elaborator {
                     // Build dict_params for conditional impls
                     let mut dict_params = Vec::new();
                     for bound in where_clause {
-                        for (req_trait, _, _) in &bound.traits {
-                            dict_params.push(format!("__dict_{}_{}", req_trait, bound.type_var));
+                        for tr in &bound.traits {
+                            dict_params.push(format!("__dict_{}_{}", tr.name, bound.type_var));
                         }
                     }
 
@@ -535,6 +554,7 @@ impl Elaborator {
                         .map(|ann| {
                             let arm = &ann.node;
                             Annotated::bare(HandlerArm {
+                                id: arm.id,
                                 op_name: arm.op_name.clone(),
                                 qualifier: arm.qualifier.clone(),
                                 params: arm.params.clone(),
@@ -549,6 +569,7 @@ impl Elaborator {
                         .collect();
                     let elab_return = body.return_clause.as_ref().map(|rc| {
                         Box::new(HandlerArm {
+                            id: rc.id,
                             op_name: rc.op_name.clone(),
                             qualifier: rc.qualifier.clone(),
                             params: rc.params.clone(),
@@ -725,8 +746,10 @@ impl Elaborator {
                     if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
                         let elab_arg = self.elaborate_expr(arg);
                         // Build the call with dict args prepended
-                        let mut result: Expr =
-                            Expr::synth(func.span, ExprKind::Var { name: name.clone() });
+                        let mut result: Expr = Expr::rebuild_like(
+                            func,
+                            ExprKind::Var { name: name.clone() },
+                        );
                         let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                         for (trait_name, _type_var) in &dict_param_info {
                             let occ = trait_occurrences.entry(trait_name).or_insert(0);
@@ -743,8 +766,8 @@ impl Elaborator {
                             }
                             *occ += 1;
                         }
-                        return Expr::synth(
-                            span,
+                        return Expr::rebuild_like(
+                            expr,
                             ExprKind::App {
                                 func: Box::new(result),
                                 arg: Box::new(elab_arg),
@@ -799,8 +822,8 @@ impl Elaborator {
                             }
                             *occ += 1;
                         }
-                        return Expr::synth(
-                            span,
+                        return Expr::rebuild_like(
+                            expr,
                             ExprKind::App {
                                 func: Box::new(result),
                                 arg: Box::new(elab_arg),
@@ -815,8 +838,8 @@ impl Elaborator {
                 // The single-arg case above handles most uses; multi-arg
                 // is handled by the lowerer's collect_fun_call.
 
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::App {
                         func: Box::new(self.elaborate_expr(func)),
                         arg: Box::new(self.elaborate_expr(arg)),
@@ -893,8 +916,8 @@ impl Elaborator {
                 } else {
                     op.clone()
                 };
-                Expr::synth(
-                    span,
+                Expr::rebuild_like(
+                    expr,
                     ExprKind::BinOp {
                         op: elaborated_op,
                         left: Box::new(self.elaborate_expr(left)),
@@ -903,8 +926,8 @@ impl Elaborator {
                 )
             }
 
-            ExprKind::UnaryMinus { expr: e } => Expr::synth(
-                span,
+            ExprKind::UnaryMinus { expr: e } => Expr::rebuild_like(
+                expr,
                 ExprKind::UnaryMinus {
                     expr: Box::new(self.elaborate_expr(e)),
                 },
@@ -915,8 +938,8 @@ impl Elaborator {
                 then_branch,
                 else_branch,
                 ..
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::If {
                     cond: Box::new(self.elaborate_expr(cond)),
                     then_branch: Box::new(self.elaborate_expr(then_branch)),
@@ -927,8 +950,8 @@ impl Elaborator {
 
             ExprKind::Case {
                 scrutinee, arms, ..
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::Case {
                     dangling_trivia: vec![],
                     scrutinee: Box::new(self.elaborate_expr(scrutinee)),
@@ -947,8 +970,8 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Block { stmts, .. } => Expr::synth(
-                span,
+            ExprKind::Block { stmts, .. } => Expr::rebuild_like(
+                expr,
                 ExprKind::Block {
                     dangling_trivia: vec![],
                     stmts: stmts
@@ -1097,8 +1120,8 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Lambda { params, body } => Expr::synth(
-                span,
+            ExprKind::Lambda { params, body } => Expr::rebuild_like(
+                expr,
                 ExprKind::Lambda {
                     params: params.clone(),
                     body: Box::new(self.elaborate_expr(body)),
@@ -1117,8 +1140,8 @@ impl Elaborator {
                 )
             }
 
-            ExprKind::RecordCreate { name, fields } => Expr::synth(
-                span,
+            ExprKind::RecordCreate { name, fields } => Expr::rebuild_like(
+                expr,
                 ExprKind::RecordCreate {
                     name: name.clone(),
                     fields: fields
@@ -1128,8 +1151,8 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::AnonRecordCreate { fields } => Expr::synth(
-                span,
+            ExprKind::AnonRecordCreate { fields } => Expr::rebuild_like(
+                expr,
                 ExprKind::AnonRecordCreate {
                     fields: fields
                         .iter()
@@ -1153,8 +1176,8 @@ impl Elaborator {
                 )
             }
 
-            ExprKind::Tuple { elements } => Expr::synth(
-                span,
+            ExprKind::Tuple { elements } => Expr::rebuild_like(
+                expr,
                 ExprKind::Tuple {
                     elements: elements.iter().map(|e| self.elaborate_expr(e)).collect(),
                 },
@@ -1165,8 +1188,8 @@ impl Elaborator {
                 success,
                 else_arms,
                 ..
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::Do {
                     dangling_trivia: vec![],
                     bindings: bindings
@@ -1219,8 +1242,8 @@ impl Elaborator {
                 name,
                 qualifier,
                 args,
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::EffectCall {
                     name: name.clone(),
                     qualifier: qualifier.clone(),
@@ -1229,8 +1252,8 @@ impl Elaborator {
             ),
 
             ExprKind::With { expr: e, handler } => {
-                let with_expr = Expr::synth(
-                    span,
+                let with_expr = Expr::rebuild_like(
+                    expr,
                     ExprKind::With {
                         expr: Box::new(self.elaborate_expr(e)),
                         handler: Box::new(self.elaborate_handler(handler)),
@@ -1240,9 +1263,9 @@ impl Elaborator {
                 // For named handlers with where clauses, bind the dict variables
                 // so handler arm bodies (which reference e.g. `__dict_Show_a`) can
                 // capture them from the enclosing scope.
-                if let Handler::Named(handler_name, _) = handler.as_ref() {
+                if let Handler::Named(named) = handler.as_ref() {
                     if let Some(dict_param_info) =
-                        self.handler_dict_params.get(handler_name).cloned()
+                        self.handler_dict_params.get(&named.name).cloned()
                     {
                         let mut stmts: Vec<Annotated<Stmt>> = Vec::new();
                         let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
@@ -1287,8 +1310,8 @@ impl Elaborator {
                 }
             }
 
-            ExprKind::HandlerExpr { body } => Expr::synth(
-                span,
+            ExprKind::HandlerExpr { body } => Expr::rebuild_like(
+                expr,
                 ExprKind::HandlerExpr {
                     body: HandlerBody {
                         effects: body.effects.clone(),
@@ -1299,6 +1322,7 @@ impl Elaborator {
                             .iter()
                             .map(|ann| {
                                 Annotated::bare(HandlerArm {
+                                    id: ann.node.id,
                                     op_name: ann.node.op_name.clone(),
                                     qualifier: ann.node.qualifier.clone(),
                                     params: ann.node.params.clone(),
@@ -1314,6 +1338,7 @@ impl Elaborator {
                             .collect(),
                         return_clause: body.return_clause.as_ref().map(|rc| {
                             Box::new(HandlerArm {
+                                id: rc.id,
                                 op_name: rc.op_name.clone(),
                                 qualifier: rc.qualifier.clone(),
                                 params: rc.params.clone(),
@@ -1326,15 +1351,15 @@ impl Elaborator {
                 },
             ),
 
-            ExprKind::Resume { value } => Expr::synth(
-                span,
+            ExprKind::Resume { value } => Expr::rebuild_like(
+                expr,
                 ExprKind::Resume {
                     value: Box::new(self.elaborate_expr(value)),
                 },
             ),
 
-            ExprKind::ForeignCall { module, func, args } => Expr::synth(
-                span,
+            ExprKind::ForeignCall { module, func, args } => Expr::rebuild_like(
+                expr,
                 ExprKind::ForeignCall {
                     module: module.clone(),
                     func: func.clone(),
@@ -1344,8 +1369,8 @@ impl Elaborator {
 
             ExprKind::Receive {
                 arms, after_clause, ..
-            } => Expr::synth(
-                span,
+            } => Expr::rebuild_like(
+                expr,
                 ExprKind::Receive {
                     dangling_trivia: vec![],
                     arms: arms
@@ -1371,8 +1396,8 @@ impl Elaborator {
 
             ExprKind::Ascription { expr, .. } => self.elaborate_expr(expr),
 
-            ExprKind::BitString { segments } => Expr::synth(
-                span,
+            ExprKind::BitString { segments } => Expr::rebuild_like(
+                expr,
                 ExprKind::BitString {
                     segments: segments
                         .iter()
@@ -1404,13 +1429,14 @@ impl Elaborator {
 
     fn elaborate_handler(&mut self, handler: &Handler) -> Handler {
         match handler {
-            Handler::Named(_, _) => handler.clone(),
+            Handler::Named(_) => handler.clone(),
             Handler::Inline { items, .. } => Handler::Inline {
                 dangling_trivia: vec![],
                 items: items
                     .iter()
                     .map(|ann| {
                         let mut elaborate_arm = |arm: &HandlerArm| HandlerArm {
+                            id: arm.id,
                             op_name: arm.op_name.clone(),
                             qualifier: arm.qualifier.clone(),
                             params: arm.params.clone(),

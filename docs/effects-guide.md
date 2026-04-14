@@ -16,7 +16,7 @@ effect Log {
 }
 
 effect Fail {
-  fun fail : String -> Never
+  fun fail : String -> a
 }
 
 effect Http {
@@ -635,7 +635,8 @@ fun impossible : Int -> String
 impossible x = panic "this case should never happen"
 ```
 
-Both return `Never`, so they work anywhere a value is expected. The difference
+Both return `-> a` (a free type variable that unifies with anything), so they
+work anywhere a value is expected. The difference
 is intent:
 
 - `panic "msg"` - logic error, unreachable code. Something is fundamentally wrong.

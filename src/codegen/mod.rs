@@ -16,6 +16,15 @@ pub struct CompiledModule {
     pub codegen_info: ModuleCodegenInfo,
     pub elaborated: ast::Program,
     pub resolution: resolve::ResolutionMap,
+    /// Front-end name resolution from the typechecker.
+    pub front_resolution: crate::typechecker::ResolutionResult,
+}
+
+pub struct ModuleSemantics<'a> {
+    pub codegen_info: &'a ModuleCodegenInfo,
+    pub elaborated: &'a ast::Program,
+    pub resolution: &'a resolve::ResolutionMap,
+    pub front_resolution: &'a crate::typechecker::ResolutionResult,
 }
 
 /// Bundles the cross-module information needed by the lowerer.
@@ -43,6 +52,31 @@ impl CodegenContext {
     pub fn elaborated_module(&self, name: &str) -> Option<&ast::Program> {
         self.modules.get(name).map(|m| &m.elaborated)
     }
+
+    pub fn module_semantics(&self, name: &str) -> Option<ModuleSemantics<'_>> {
+        self.modules.get(name).map(|m| ModuleSemantics {
+            codegen_info: &m.codegen_info,
+            elaborated: &m.elaborated,
+            resolution: &m.resolution,
+            front_resolution: &m.front_resolution,
+        })
+    }
+
+    pub fn modules_semantics(
+        &self,
+    ) -> impl Iterator<Item = (&str, ModuleSemantics<'_>)> + '_ {
+        self.modules.iter().map(|(name, m)| {
+            (
+                name.as_str(),
+                ModuleSemantics {
+                    codegen_info: &m.codegen_info,
+                    elaborated: &m.elaborated,
+                    resolution: &m.resolution,
+                    front_resolution: &m.front_resolution,
+                },
+            )
+        })
+    }
 }
 
 /// Compile a single module from a CheckResult into a CompiledModule.
@@ -62,17 +96,14 @@ pub fn compile_module_from_result(
         &normalized,
         codegen_info,
         &result.prelude_imports,
+        &mod_result.resolution,
     );
     Some(CompiledModule {
         codegen_info: info,
         elaborated: normalized,
         resolution,
+        front_resolution: mod_result.resolution.clone(),
     })
-}
-
-pub fn emit_module(module_name: &str, program: &ast::Program) -> String {
-    let ctx = CodegenContext::default();
-    emit_module_with_context(module_name, program, &ctx, None, None, None)
 }
 
 /// Source file path and source text for error location tracking.
@@ -87,7 +118,7 @@ pub fn emit_module_with_context(
     module_name: &str,
     program: &ast::Program,
     ctx: &CodegenContext,
-    check_result: Option<&crate::typechecker::CheckResult>,
+    check_result: &crate::typechecker::CheckResult,
     source_file: Option<&SourceFile>,
     entry_export: Option<&str>,
 ) -> String {
@@ -99,8 +130,18 @@ pub fn emit_module_with_context(
         &codegen_info,
         &ctx.prelude_imports,
     );
-    let mut resolution_map =
-        resolve::resolve_names(module_name, &program, &codegen_info, &ctx.prelude_imports);
+    let front_resolution = check_result
+        .module_check_results()
+        .get(module_name)
+        .map(|m| &m.resolution)
+        .unwrap_or(&check_result.resolution);
+    let mut resolution_map = resolve::resolve_names(
+        module_name,
+        &program,
+        &codegen_info,
+        &ctx.prelude_imports,
+        front_resolution,
+    );
     // Merge in pre-computed resolution maps from all compiled modules.
     // Their NodeIds don't overlap with ours, so this is a simple extend.
     for compiled in ctx.modules.values() {

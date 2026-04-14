@@ -377,19 +377,16 @@ impl Checker {
         params: &mut Vec<(String, u32)>,
     ) -> Type {
         match texpr {
-            crate::ast::TypeExpr::Named { name, span } => {
+            crate::ast::TypeExpr::Named { id, name, span } => {
                 // Record type reference for find-references (skip type variables/params)
                 if name.starts_with(|c: char| c.is_uppercase()) {
-                    self.lsp.type_references.push((*span, name.clone()));
+                    self.lsp
+                        .type_references
+                        .push((*span, self.resolved_type_name(*id, name)));
                 }
-                // Resolve type names to canonical form.
-                // After the resolve pass, names may already be canonical (e.g.
-                // "Std.Bool.Bool"). Try scope_map first, then accept the name
-                // as-is if it's already known (in type_arity or builtin table).
-                let from_scope = self.scope_map.resolve_type(name);
-                let resolved = from_scope
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| super::canonicalize_type_name(name).to_string());
+                let resolved = self.resolved_type_name(*id, name);
+                let had_resolution = self.resolution.type_ref(*id).is_some()
+                    || self.scope_map.resolve_type(name).is_some();
 
                 // If scope_map didn't resolve it, canonicalize_type_name didn't
                 // change it, it's not in type_arity, and it's not a known
@@ -397,15 +394,13 @@ impl Checker {
                 // desugaring), the type is genuinely unknown. Report the error
                 // here rather than letting a bare Type::Con propagate and cause
                 // confusing "expected Foo, got Foo" mismatches downstream.
-                if from_scope.is_none()
-                    && resolved == *name
+                if resolved == *name
+                    && !had_resolution
                     && !self.type_arity.contains_key(name)
                     && !super::is_builtin_canonical(name)
                 {
-                    self.collected_diagnostics.push(
-                        Diagnostic::error(format!("unknown type '{name}'"))
-                            .with_span(*span),
-                    );
+                    self.collected_diagnostics
+                        .push(Diagnostic::error(format!("unknown type '{name}'")).with_span(*span));
                     return Type::Error;
                 }
 
@@ -473,33 +468,20 @@ impl Checker {
                                     start: e.span.start,
                                     end: name_end,
                                 },
-                                e.name.clone(),
+                                self.resolved_effect_name(e.id, &e.name),
                             ));
                             let args = e
                                 .type_args
                                 .iter()
                                 .map(|te| self.convert_type_expr(te, params))
                                 .collect();
-                            // Canonicalize effect name so it matches canonical-only self.effects
-                            let name = if let Some(info) = self.resolve_effect(&e.name) {
-                                let short = e.name.rsplit('.').next().unwrap_or(&e.name);
-                                info.source_module
-                                    .as_ref()
-                                    .map(|m| format!("{}.{}", m, short))
-                                    .unwrap_or_else(|| {
-                                        if let Some(m) = &self.current_module {
-                                            format!("{}.{}", m, e.name)
-                                        } else {
-                                            e.name.clone()
-                                        }
-                                    })
-                            } else {
+                            let name = self.resolved_effect_name(e.id, &e.name);
+                            if !self.effects.contains_key(&name) {
                                 self.collected_diagnostics.push(Diagnostic::error_at(
                                     e.span,
                                     format!("undefined effect: {}", e.name),
                                 ));
-                                e.name.clone()
-                            };
+                            }
                             super::EffectEntry::unnamed(name, args)
                         })
                         .collect();

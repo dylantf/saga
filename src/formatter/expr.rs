@@ -714,7 +714,7 @@ fn format_comma_list_inner(open: Doc, close: &str, items: Vec<Doc>, spaced: bool
 
 fn format_handler(handler: &Handler) -> Doc {
     match handler {
-        Handler::Named(name, _) => Doc::text(name),
+        Handler::Named(named) => Doc::text(&named.name),
         Handler::Inline {
             items,
             dangling_trivia,

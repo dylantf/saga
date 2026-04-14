@@ -1,5 +1,23 @@
 # Imported Handler Origin Context
 
+## Status
+
+Step 1 from the refactor path below is done: `current_handler_source_module` and
+`HandlerInfo.source_module` now carry source-module identity through imported
+handler lowering, and local function calls and constructor lookups route through
+that. The original bug (imported handlers losing source-module identity) is fixed
+and tested.
+
+Steps 2 and 3 are still open. Constructor atoms are still handled by
+`push_source_module_ctor_aliases` / `pop_source_module_ctor_aliases`, which
+temporarily mutates the shared `constructor_atoms` map and restores it afterward.
+That is the save/restore-of-shared-mutable-state pattern that this doc proposes
+replacing with origin-aware helpers like `ctor_atom_for(name, origin_module)`.
+
+The current approach works and is tested, but the underlying design smell remains:
+if another dimension of cross-module lowering is added, the same class of bug
+could recur.
+
 ## Summary
 
 We hit a subtle lowering bug when a handler defined in one module was imported and inlined into another.

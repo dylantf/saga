@@ -260,6 +260,7 @@ pub fn cmd_emit(file: &str) {
             codegen_info: Default::default(),
             elaborated: elaborated.clone(),
             resolution: codegen::resolve::ResolutionMap::new(),
+            front_resolution: result.resolution.clone(),
         },
     );
     let ctx = codegen::CodegenContext {
@@ -275,7 +276,7 @@ pub fn cmd_emit(file: &str) {
         &erlang_name,
         &elaborated,
         &ctx,
-        Some(&result),
+        &result,
         Some(&source_file),
         Some("main"),
     );
@@ -405,6 +406,7 @@ pub fn cmd_test(filter: Option<&str>) {
                 codegen_info: Default::default(),
                 elaborated: elaborated.clone(),
                 resolution: codegen::resolve::ResolutionMap::new(),
+                front_resolution: result.resolution.clone(),
             },
         );
 
@@ -422,7 +424,7 @@ pub fn cmd_test(filter: Option<&str>) {
             "_test",
             &elaborated,
             &test_ctx,
-            Some(&result),
+            &result,
             Some(&test_source_file),
             Some("main"),
         );

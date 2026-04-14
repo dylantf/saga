@@ -236,7 +236,7 @@ effect FileSystem {
 }
 
 effect Fail {
-  fun fail : String -> Never
+  fun fail : String -> a
 }
 
 # Functions declare which effects they use
@@ -821,15 +821,16 @@ print <| show <| add 1 2
 
 12. **`panic`, `todo`, and process control** - `panic "msg"` and `todo ()`
     are language builtins, not effects. They crash the program by default --
-    no handler, no propagation, no `!`. Return type is `Never` so they work
-    in any position. `panic` is for unreachable code / logic errors. `todo`
+    no handler, no propagation, no `!`. They return `-> a` (a free type
+    variable), which unifies with any expected type, so they work in any
+    position. `panic` is for unreachable code / logic errors. `todo`
     is for unfinished code.
 
     Unhandled panics print to stderr and exit with code 1. Panics can be
     caught at recovery boundaries with `catch_panic` (see item 13).
 
-    For explicit exit codes, `Std.Process` provides `exit : Int -> Never`
-    (immediate halt) and `shutdown : Int -> Never` (graceful VM shutdown).
+    For explicit exit codes, `Std.Process` provides `exit : Int -> a`
+    (immediate halt) and `shutdown : Int -> a` (graceful VM shutdown).
 
     ```
     import Std.Process

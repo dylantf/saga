@@ -191,7 +191,7 @@ pub fn type_definition_summary(
                 let supers = if supertraits.is_empty() {
                     String::new()
                 } else {
-                    let names: Vec<&str> = supertraits.iter().map(|(n, _)| n.as_str()).collect();
+                    let names: Vec<&str> = supertraits.iter().map(|tr| tr.name.as_str()).collect();
                     format!(" where {{{}}}", names.join(", "))
                 };
                 let method_strs: Vec<String> = methods

@@ -8,7 +8,6 @@ use super::pat::format_pat_atom;
 use super::type_expr::*;
 use crate::ast::*;
 use crate::docs;
-use crate::token::Span;
 
 pub fn format_import(
     path: &[String],
@@ -366,7 +365,7 @@ pub fn format_trait_def(
     public: bool,
     name: &str,
     type_params: &[String],
-    supertraits: &[(String, Span)],
+    supertraits: &[TraitRef],
     methods: &[Annotated<TraitMethod>],
     dangling: &[Trivia],
 ) -> Doc {
@@ -387,10 +386,7 @@ pub fn format_trait_def(
 
     let self_param = type_params.first().map(|s| s.as_str()).unwrap_or("a");
     if !supertraits.is_empty() {
-        let st_names: Vec<&str> = supertraits
-            .iter()
-            .map(|(n, _): &(String, Span)| n.as_str())
-            .collect();
+        let st_names: Vec<&str> = supertraits.iter().map(|tr| tr.name.as_str()).collect();
         parts.push(Doc::text(format!(
             " where {{{}: {}}}",
             self_param,
@@ -491,13 +487,15 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
     let mut parts = Vec::new();
     format_doc_preamble(doc, &mut parts);
 
+    let trait_type_arg_names: Vec<&str> =
+        trait_type_args.iter().map(|te| te.simple_name()).collect();
     let mut header = if trait_type_args.is_empty() {
         format!("impl {} for {}", trait_name, target_type)
     } else {
         format!(
             "impl {} {} for {}",
             trait_name,
-            trait_type_args.join(" "),
+            trait_type_arg_names.join(" "),
             target_type
         )
     };

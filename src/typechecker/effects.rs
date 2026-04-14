@@ -49,9 +49,8 @@ impl Checker {
     // --- Effect lookup ---
 
     /// Look up an effect by name. Effects are stored under canonical names
-    /// (e.g. "Std.Fail.Fail"). This resolves bare ("Fail"), aliased ("Fail.Fail"),
-    /// and canonical ("Std.Fail.Fail") forms by suffix-matching against keys.
-    /// For fully-qualified Std names, triggers auto-import if the module isn't loaded.
+    /// (e.g. "Std.Fail.Fail"). This helper is for internal canonical/effect-map
+    /// lookups, not for repairing unresolved source names during inference.
     pub(crate) fn resolve_effect(&mut self, name: &str) -> Option<super::EffectDefInfo> {
         // Try exact match first (canonical)
         if let Some(info) = self.effects.get(name) {
@@ -68,32 +67,6 @@ impl Checker {
             let local_key = format!("{}.{}", module, name);
             if let Some(info) = self.effects.get(&local_key) {
                 return Some(info.clone());
-            }
-        }
-        // Try auto-importing for fully-qualified Std effect names
-        if let Some(dot_pos) = name.rfind('.') {
-            let module_path = &name[..dot_pos];
-            let parts: Vec<String> = module_path.split('.').map(String::from).collect();
-            if crate::typechecker::check_module::builtin_module_source(&parts).is_some()
-                && !self.modules.exports.contains_key(module_path)
-            {
-                let span = Span { start: 0, end: 0 };
-                if self
-                    .typecheck_import(&parts, Some(module_path), None, span)
-                    .is_ok()
-                {
-                    self.prelude_imports.push(crate::ast::Decl::Import {
-                        id: crate::ast::NodeId::fresh(),
-                        module_path: parts,
-                        alias: Some(module_path.to_string()),
-                        exposing: None,
-                        span,
-                    });
-                }
-                // Retry after auto-import
-                if let Some(info) = self.effects.get(name) {
-                    return Some(info.clone());
-                }
             }
         }
         None
@@ -234,24 +207,29 @@ impl Checker {
     pub(crate) fn handler_handled_effects(&mut self, handler: &ast::Handler) -> HashSet<String> {
         let mut handled = HashSet::new();
         match handler {
-            ast::Handler::Named(name, _) => {
-                if let Some(info) = self.handlers.get(name) {
+            ast::Handler::Named(named) => {
+                let resolved_name = self.resolved_handler_name(named.id, &named.name);
+                if let Some(info) = self.handlers.get(&resolved_name) {
                     handled.extend(info.effects.iter().cloned());
-                } else if let Some(effects) = self.handler_effects_from_env(name) {
+                } else if let Some(effects) = self.handler_effects_from_env(&resolved_name) {
                     handled.extend(effects);
                 }
             }
             ast::Handler::Inline { .. } => {
                 for named_ref in handler.named_refs() {
-                    if let Some(info) = self.handlers.get(&named_ref.name) {
+                    let resolved_name = self.resolved_handler_name(named_ref.id, &named_ref.name);
+                    if let Some(info) = self.handlers.get(&resolved_name) {
                         handled.extend(info.effects.iter().cloned());
-                    } else if let Some(effects) = self.handler_effects_from_env(&named_ref.name) {
+                    } else if let Some(effects) = self.handler_effects_from_env(&resolved_name) {
                         handled.extend(effects);
                     }
                 }
                 for arm in handler.inline_arms() {
-                    if let Some(effect_name) =
-                        self.effect_for_op(&arm.op_name, arm.qualifier.as_deref())
+                    let resolved_qualifier = self
+                        .resolution
+                        .handler_arm_qualifier(arm.id)
+                        .or(arm.qualifier.as_deref());
+                    if let Some(effect_name) = self.effect_for_op(&arm.op_name, resolved_qualifier)
                     {
                         handled.insert(effect_name);
                     }

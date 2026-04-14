@@ -124,16 +124,19 @@ impl ModuleExports {
                     }
                 }
                 Decl::ImplDef {
+                    id,
                     trait_name,
                     trait_type_args,
                     target_type,
                     ..
                 } => {
-                    // Resolve trait name to canonical form for impl key lookup
-                    let resolved = checker
-                        .resolve_trait_name(trait_name)
-                        .unwrap_or_else(|| trait_name.clone());
-                    let key = (resolved, trait_type_args.clone(), target_type.clone());
+                    let resolved_trait = checker.resolved_impl_trait_name(*id, trait_name);
+                    let resolved_target = checker.resolved_impl_target_type_name(*id, target_type);
+                    let resolved_trait_type_args: Vec<String> = trait_type_args
+                        .iter()
+                        .map(|te| checker.resolved_type_name(te.id(), te.simple_name()))
+                        .collect();
+                    let key = (resolved_trait, resolved_trait_type_args, resolved_target);
                     if let Some(info) = checker.trait_state.impls.get(&key) {
                         trait_impls.insert(key, info.clone());
                     }
@@ -1293,6 +1296,35 @@ fn collect_codegen_info(
     scope_map: &super::ScopeMap,
 ) -> ModuleCodegenInfo {
     use crate::ast::Decl;
+    fn is_runtime_unit_param(ty: &crate::ast::TypeExpr) -> bool {
+        match ty {
+            crate::ast::TypeExpr::Named { name, .. } => {
+                super::canonicalize_type_name(name) == super::canonicalize_type_name("Unit")
+            }
+            crate::ast::TypeExpr::Labeled { inner, .. } => is_runtime_unit_param(inner),
+            _ => false,
+        }
+    }
+
+    let canonical_type_name = |name: &str| -> String {
+        scope_map
+            .resolve_type(name)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| super::canonicalize_type_name(name).to_string())
+    };
+
+    let canonical_trait_type_args = |args: &[String]| -> Vec<String> {
+        args.iter()
+            .map(|arg| {
+                if arg.starts_with(|c: char| c.is_uppercase()) || arg.contains('.') {
+                    canonical_type_name(arg)
+                } else {
+                    arg.clone()
+                }
+            })
+            .collect()
+    };
+
     let mut effect_defs = Vec::new();
     let mut record_fields = Vec::new();
     let mut handler_defs = Vec::new();
@@ -1330,24 +1362,14 @@ fn collect_codegen_info(
                             .iter()
                             .enumerate()
                             .filter_map(|(idx, (_, ty))| {
-                                (!matches!(
-                                    ty,
-                                    crate::ast::TypeExpr::Named { name, .. }
-                                        if name == super::canonicalize_type_name("Unit")
-                                ))
-                                .then_some(idx)
+                                (!is_runtime_unit_param(ty)).then_some(idx)
                             })
                             .collect(),
                         runtime_param_count: op
                             .node
                             .params
                             .iter()
-                            .filter(|(_, ty)| {
-                                !matches!(
-                                    ty,
-                                    crate::ast::TypeExpr::Named { name, .. } if name == super::canonicalize_type_name("Unit")
-                                )
-                            })
+                            .filter(|(_, ty)| !is_runtime_unit_param(ty))
                             .count(),
                         param_absorbed_effects: effect_info
                             .ops
@@ -1452,11 +1474,23 @@ fn collect_codegen_info(
                     .resolve_trait(trait_name)
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("{}.{}", module_name, trait_name));
+                let trait_type_arg_names: Vec<String> = trait_type_args
+                    .iter()
+                    .map(|te| match te {
+                        crate::ast::TypeExpr::Var { name, .. } => name.clone(),
+                        _ => scope_map
+                            .resolve_type(te.simple_name())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| canonical_type_name(te.simple_name())),
+                    })
+                    .collect();
+                let canonical_trait_type_args = canonical_trait_type_args(&trait_type_arg_names);
+                let canonical_target_type = canonical_type_name(target_type);
                 let dict_name = super::make_dict_name(
                     &canonical_trait,
-                    trait_type_args,
+                    &canonical_trait_type_args,
                     &erlang_module,
-                    target_type,
+                    &canonical_target_type,
                 );
                 let arity = where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
                 let var_to_idx: std::collections::HashMap<&str, usize> = type_params
@@ -1471,17 +1505,19 @@ fn collect_codegen_info(
                             .get(bound.type_var.as_str())
                             .copied()
                             .unwrap_or(0);
-                        bound.traits.iter().map(move |(t, _, _)| {
-                            let resolved =
-                                scope_map.resolve_trait(t).unwrap_or(t.as_str()).to_string();
+                        bound.traits.iter().map(move |tr| {
+                            let resolved = scope_map
+                                .resolve_trait(&tr.name)
+                                .unwrap_or(tr.name.as_str())
+                                .to_string();
                             (resolved, idx)
                         })
                     })
                     .collect();
                 trait_impl_dicts.push(TraitImplDict {
                     trait_name: canonical_trait,
-                    trait_type_args: trait_type_args.clone(),
-                    target_type: target_type.clone(),
+                    trait_type_args: canonical_trait_type_args,
+                    target_type: canonical_target_type,
                     dict_name,
                     arity,
                     param_constraints,

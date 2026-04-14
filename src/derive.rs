@@ -119,7 +119,12 @@ fn derive_record_stringify(
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec![(trait_name.into(), vec![], Span { start: 0, end: 0 })],
+            traits: vec![TraitRef {
+                id: NodeId::fresh(),
+                name: trait_name.into(),
+                type_args: vec![],
+                span: Span { start: 0, end: 0 },
+            }],
         })
         .collect();
 
@@ -421,7 +426,12 @@ fn derive_stringify(
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec![(trait_name.into(), vec![], Span { start: 0, end: 0 })],
+            traits: vec![TraitRef {
+                id: NodeId::fresh(),
+                name: trait_name.into(),
+                type_args: vec![],
+                span: Span { start: 0, end: 0 },
+            }],
         })
         .collect();
 
@@ -618,7 +628,12 @@ fn derive_ord(
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec![("Ord".into(), vec![], Span { start: 0, end: 0 })],
+            traits: vec![TraitRef {
+                id: NodeId::fresh(),
+                name: "Ord".into(),
+                type_args: vec![],
+                span: Span { start: 0, end: 0 },
+            }],
         })
         .collect();
 
@@ -748,7 +763,12 @@ fn derive_marker_trait(
         .iter()
         .map(|tp| TraitBound {
             type_var: tp.clone(),
-            traits: vec![(trait_name.into(), vec![], Span { start: 0, end: 0 })],
+            traits: vec![TraitRef {
+                id: NodeId::fresh(),
+                name: trait_name.into(),
+                type_args: vec![],
+                span: Span { start: 0, end: 0 },
+            }],
         })
         .collect();
 

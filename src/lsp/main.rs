@@ -207,7 +207,11 @@ impl Backend {
                     Err(_) => continue,
                 };
                 let needs_index = {
-                    let idx = self.shared.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+                    let idx = self
+                        .shared
+                        .symbol_index
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     !idx.has_file(&file_uri)
                 };
                 if needs_index {
@@ -226,7 +230,11 @@ impl Backend {
                     if let Ok(snap) = check_result
                         && let Some(ref prog) = snap.program
                     {
-                        let mut idx = self.shared.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut idx = self
+                            .shared
+                            .symbol_index
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
                         idx.update_file(
                             &file_uri,
                             &snap.tc_result,
@@ -241,7 +249,11 @@ impl Backend {
 
         // Query the index for all references.
         let refs = {
-            let idx = self.shared.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
+            let idx = self
+                .shared
+                .symbol_index
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             idx.query(&key)
         };
 
@@ -1079,7 +1091,7 @@ async fn debounce_loop(
     shared: Arc<SharedState>,
 ) {
     use std::collections::HashMap;
-    use tokio::time::{sleep_until, Duration, Instant};
+    use tokio::time::{Duration, Instant, sleep_until};
 
     let debounce = Duration::from_millis(300);
     let mut pending: HashMap<Url, (String, Instant)> = HashMap::new();

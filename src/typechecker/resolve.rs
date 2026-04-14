@@ -1,617 +1,874 @@
-//! Name resolution pass: rewrites AST names to canonical (module-qualified) form.
+//! Front-end name resolution: records semantic identity for source AST nodes
+//! without rewriting source spelling in place.
 //!
-//! Runs after imports are processed (scope_map is complete), before the main
-//! typechecking passes. Transforms:
-//! - `Var { name: "map" }` -> `Var { name: "Std.List.map" }` (if not locally bound)
-//! - `QualifiedName { module: "List", name: "map" }` -> fills `canonical_module`
-//! - `Constructor { name: "Just" }` -> `Constructor { name: "Std.Maybe.Just" }` (if in scope_map)
-//! - `Pat::Constructor { name: "Just" }` -> `Pat::Constructor { name: "Std.Maybe.Just" }`
-//!
-//! The pass is scope-aware: local bindings (function params, let bindings,
-//! lambda params, case pattern bindings) shadow imported names.
+//! Runs after imports are processed (scope_map is complete), before inference.
+//! The output is an authoritative `ResolutionResult` keyed by source identity.
 
-use std::collections::HashSet;
-
-use crate::ast::*;
+use std::collections::{HashMap, HashSet};
 
 use super::ScopeMap;
+use crate::ast::*;
 
-/// Rewrite a handler name to its canonical form if it's not locally shadowed.
-fn canonicalize_handler_name(name: &mut String, scope: &ScopeMap, locals: &HashSet<String>) {
-    if !locals.contains(name.as_str())
-        && let Some(canonical) = scope.resolve_handler(name)
-    {
-        *name = canonical.to_string();
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LocalBindingId(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedValue {
+    Local {
+        binding_id: LocalBindingId,
+        name: String,
+    },
+    Global {
+        /// Exact lookup key to use in the checker env/constructor/handler maps.
+        lookup_name: String,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResolutionResult {
+    pub values: HashMap<NodeId, ResolvedValue>,
+    pub constructors: HashMap<NodeId, String>,
+    pub record_types: HashMap<NodeId, String>,
+    pub types: HashMap<NodeId, String>,
+    pub traits: HashMap<NodeId, String>,
+    pub impl_traits: HashMap<NodeId, String>,
+    pub impl_target_types: HashMap<NodeId, String>,
+    pub effects: HashMap<NodeId, String>,
+    pub handlers: HashMap<NodeId, ResolvedValue>,
+    pub effect_call_qualifiers: HashMap<NodeId, String>,
+    pub handler_arm_qualifiers: HashMap<NodeId, String>,
+}
+
+impl ResolutionResult {
+    pub fn value(&self, node_id: NodeId) -> Option<&ResolvedValue> {
+        self.values.get(&node_id)
+    }
+
+    pub fn constructor(&self, node_id: NodeId) -> Option<&str> {
+        self.constructors.get(&node_id).map(|s| s.as_str())
+    }
+
+    pub fn record_type(&self, node_id: NodeId) -> Option<&str> {
+        self.record_types.get(&node_id).map(|s| s.as_str())
+    }
+
+    pub fn type_ref(&self, id: NodeId) -> Option<&str> {
+        self.types.get(&id).map(|s| s.as_str())
+    }
+
+    pub fn trait_ref(&self, id: NodeId) -> Option<&str> {
+        self.traits.get(&id).map(|s| s.as_str())
+    }
+
+    pub fn impl_trait_ref(&self, node_id: NodeId) -> Option<&str> {
+        self.impl_traits.get(&node_id).map(|s| s.as_str())
+    }
+
+    pub fn impl_target_type_ref(&self, node_id: NodeId) -> Option<&str> {
+        self.impl_target_types.get(&node_id).map(|s| s.as_str())
+    }
+
+    pub fn effect_ref(&self, id: NodeId) -> Option<&str> {
+        self.effects.get(&id).map(|s| s.as_str())
+    }
+
+    pub fn handler_ref(&self, node_id: NodeId) -> Option<&ResolvedValue> {
+        self.handlers.get(&node_id)
+    }
+
+    pub fn effect_call_qualifier(&self, node_id: NodeId) -> Option<&str> {
+        self.effect_call_qualifiers
+            .get(&node_id)
+            .map(|s| s.as_str())
+    }
+
+    pub fn handler_arm_qualifier(&self, node_id: NodeId) -> Option<&str> {
+        self.handler_arm_qualifiers
+            .get(&node_id)
+            .map(|s| s.as_str())
     }
 }
 
-/// Rewrite an effect qualifier to its canonical form.
-fn canonicalize_effect_qualifier(qualifier: &mut Option<String>, scope: &ScopeMap) {
-    if let Some(q) = qualifier
-        && let Some(canonical) = scope.resolve_effect(q)
-    {
-        *q = canonical.to_string();
+#[derive(Default)]
+struct LocalModuleNames {
+    top_level_values: HashSet<String>,
+    constructors: HashSet<String>,
+    types: HashMap<String, String>,
+    traits: HashMap<String, String>,
+    effects: HashMap<String, String>,
+    handlers: HashSet<String>,
+}
+
+impl LocalModuleNames {
+    fn collect(program: &[Decl], current_module: Option<&str>) -> Self {
+        let mut out = Self::default();
+
+        let qualify = |name: &str| -> String {
+            current_module
+                .map(|m| format!("{}.{}", m, name))
+                .unwrap_or_else(|| name.to_string())
+        };
+
+        for decl in program {
+            match decl {
+                Decl::FunBinding { name, .. }
+                | Decl::FunSignature { name, .. }
+                | Decl::Val { name, .. }
+                | Decl::Let { name, .. } => {
+                    out.top_level_values.insert(name.clone());
+                }
+                Decl::TraitDef { name, methods, .. } => {
+                    out.traits.insert(name.clone(), qualify(name));
+                    for method in methods {
+                        out.top_level_values.insert(method.node.name.clone());
+                    }
+                }
+                Decl::TypeDef { name, variants, .. } => {
+                    out.types.insert(name.clone(), qualify(name));
+                    for variant in variants {
+                        out.constructors.insert(variant.node.name.clone());
+                    }
+                }
+                Decl::RecordDef { name, .. } => {
+                    out.types.insert(name.clone(), qualify(name));
+                    out.constructors.insert(name.clone());
+                }
+                Decl::EffectDef { name, .. } => {
+                    out.effects.insert(name.clone(), qualify(name));
+                }
+                Decl::HandlerDef { name, .. } => {
+                    out.handlers.insert(name.clone());
+                    out.top_level_values.insert(name.clone());
+                }
+                _ => {}
+            }
+        }
+
+        out
     }
 }
 
-/// Rewrite type names in a TypeExpr to canonical form.
-fn resolve_type_expr(texpr: &mut TypeExpr, scope: &ScopeMap) {
-    match texpr {
-        TypeExpr::Named { name, .. } => {
-            if let Some(canonical) = scope.resolve_type(name) {
-                *name = canonical.to_string();
-            } else {
-                // Builtin type canonicalization (Int -> Std.Int.Int, etc.)
-                let canonical = super::canonicalize_type_name(name);
-                if canonical != name {
-                    *name = canonical.to_string();
-                }
-            }
-        }
-        TypeExpr::App { func, arg, .. } => {
-            resolve_type_expr(func, scope);
-            resolve_type_expr(arg, scope);
-        }
-        TypeExpr::Arrow {
-            from, to, effects, ..
-        } => {
-            resolve_type_expr(from, scope);
-            resolve_type_expr(to, scope);
-            for eff in effects {
-                if let Some(canonical) = scope.resolve_effect(&eff.name) {
-                    eff.name = canonical.to_string();
-                }
-                for arg in &mut eff.type_args {
-                    resolve_type_expr(arg, scope);
-                }
-            }
-        }
-        TypeExpr::Record { fields, .. } => {
-            for (_, field_ty) in fields {
-                resolve_type_expr(field_ty, scope);
-            }
-        }
-        TypeExpr::Labeled { inner, .. } => {
-            resolve_type_expr(inner, scope);
-        }
-        TypeExpr::Var { .. } => {}
-    }
+struct Resolver<'a> {
+    scope: &'a ScopeMap,
+    locals: LocalModuleNames,
+    result: ResolutionResult,
+    value_scopes: Vec<HashMap<String, ResolvedValue>>,
+    next_binding_id: u32,
 }
 
-/// Collect all variable names bound by a pattern.
-fn collect_pat_bindings(pat: &Pat, out: &mut HashSet<String>) {
-    match pat {
-        Pat::Var { name, .. } => {
-            out.insert(name.clone());
+impl<'a> Resolver<'a> {
+    fn new(scope: &'a ScopeMap, locals: LocalModuleNames) -> Self {
+        Self {
+            scope,
+            locals,
+            result: ResolutionResult::default(),
+            value_scopes: Vec::new(),
+            next_binding_id: 0,
         }
-        Pat::Constructor { args, .. } => {
-            for arg in args {
-                collect_pat_bindings(arg, out);
+    }
+
+    fn into_result(self) -> ResolutionResult {
+        self.result
+    }
+
+    fn push_value_scope(&mut self) {
+        self.value_scopes.push(HashMap::new());
+    }
+
+    fn pop_value_scope(&mut self) {
+        self.value_scopes.pop();
+    }
+
+    fn bind_local_name(&mut self, name: String) {
+        let binding = ResolvedValue::Local {
+            binding_id: LocalBindingId(self.next_binding_id),
+            name: name.clone(),
+        };
+        self.next_binding_id += 1;
+        if let Some(scope) = self.value_scopes.last_mut() {
+            scope.insert(name, binding);
+        }
+    }
+
+    fn bind_pattern(&mut self, pat: &Pat) {
+        match pat {
+            Pat::Wildcard { .. } | Pat::Lit { .. } => {}
+            Pat::Var { name, .. } => self.bind_local_name(name.clone()),
+            Pat::Constructor { args, .. } => {
+                for arg in args {
+                    self.bind_pattern(arg);
+                }
             }
-        }
-        Pat::Tuple { elements, .. } => {
-            for p in elements {
-                collect_pat_bindings(p, out);
+            Pat::Record {
+                fields, as_name, ..
+            } => {
+                for (field_name, alias) in fields {
+                    if let Some(pat) = alias {
+                        self.bind_pattern(pat);
+                    } else {
+                        self.bind_local_name(field_name.clone());
+                    }
+                }
+                if let Some(name) = as_name {
+                    self.bind_local_name(name.clone());
+                }
             }
-        }
-        Pat::ConsPat { head, tail, .. } => {
-            collect_pat_bindings(head, out);
-            collect_pat_bindings(tail, out);
-        }
-        Pat::Record {
-            fields, as_name, ..
-        } => {
-            for (field_name, alias) in fields {
-                match alias {
-                    Some(p) => collect_pat_bindings(p, out),
-                    None => {
-                        out.insert(field_name.clone());
+            Pat::AnonRecord { fields, .. } => {
+                for (field_name, alias) in fields {
+                    if let Some(pat) = alias {
+                        self.bind_pattern(pat);
+                    } else {
+                        self.bind_local_name(field_name.clone());
                     }
                 }
             }
-            if let Some(name) = as_name {
-                out.insert(name.clone());
+            Pat::Tuple { elements, .. } | Pat::ListPat { elements, .. } => {
+                for pat in elements {
+                    self.bind_pattern(pat);
+                }
             }
-        }
-        Pat::AnonRecord { fields, .. } => {
-            for (field_name, alias) in fields {
-                match alias {
-                    Some(p) => collect_pat_bindings(p, out),
-                    None => {
-                        out.insert(field_name.clone());
-                    }
+            Pat::StringPrefix { rest, .. } => self.bind_pattern(rest),
+            Pat::BitStringPat { segments, .. } => {
+                for seg in segments {
+                    self.bind_pattern(&seg.value);
+                }
+            }
+            Pat::ConsPat { head, tail, .. } => {
+                self.bind_pattern(head);
+                self.bind_pattern(tail);
+            }
+            Pat::Or { patterns, .. } => {
+                if let Some(first) = patterns.first() {
+                    self.bind_pattern(first);
                 }
             }
         }
-        Pat::StringPrefix { rest, .. } => {
-            collect_pat_bindings(rest, out);
-        }
-        _ => {}
     }
-}
 
-/// Resolve names in a program using the scope_map built from imports.
-/// Local definitions (type constructors, function names) shadow imports.
-pub(crate) fn resolve_names(program: &mut [Decl], scope_map: &ScopeMap) {
-    // Collect locally-defined constructor names so we don't resolve them to imports
-    let mut local_ctors: HashSet<String> = HashSet::new();
-    let mut local_funs: HashSet<String> = HashSet::new();
-    for decl in program.iter() {
+    fn resolve_value_name(&self, name: &str) -> Option<ResolvedValue> {
+        for scope in self.value_scopes.iter().rev() {
+            if let Some(resolved) = scope.get(name) {
+                return Some(resolved.clone());
+            }
+        }
+        if self.locals.top_level_values.contains(name) {
+            return Some(ResolvedValue::Global {
+                lookup_name: name.to_string(),
+            });
+        }
+        self.scope
+            .resolve_value(name)
+            .map(|lookup_name| ResolvedValue::Global {
+                lookup_name: lookup_name.to_string(),
+            })
+    }
+
+    fn resolve_handler_name(&self, name: &str) -> Option<ResolvedValue> {
+        if let Some(local) = self.resolve_value_name(name) {
+            return Some(local);
+        }
+        if self.locals.handlers.contains(name) {
+            return Some(ResolvedValue::Global {
+                lookup_name: name.to_string(),
+            });
+        }
+        self.scope
+            .resolve_handler(name)
+            .map(|lookup_name| ResolvedValue::Global {
+                lookup_name: lookup_name.to_string(),
+            })
+    }
+
+    fn resolve_constructor_name(&self, name: &str) -> Option<String> {
+        if self.locals.constructors.contains(name) {
+            return Some(name.to_string());
+        }
+        self.scope.resolve_constructor(name).map(|s| s.to_string())
+    }
+
+    fn resolve_type_name(&self, name: &str) -> Option<String> {
+        if let Some(local) = self.locals.types.get(name) {
+            return Some(local.clone());
+        }
+        if let Some(imported) = self.scope.resolve_type(name) {
+            return Some(imported.to_string());
+        }
+        let builtin = super::canonicalize_type_name(name);
+        if builtin != name || super::is_builtin_canonical(name) || name.contains('.') {
+            return Some(builtin.to_string());
+        }
+        None
+    }
+
+    fn resolve_trait_name(&self, name: &str) -> Option<String> {
+        if let Some(local) = self.locals.traits.get(name) {
+            return Some(local.clone());
+        }
+        if let Some(imported) = self.scope.resolve_trait(name) {
+            return Some(imported.to_string());
+        }
+        match name {
+            "Num" | "Eq" => Some(name.to_string()),
+            _ if name.contains('.') => Some(name.to_string()),
+            _ => None,
+        }
+    }
+
+    fn resolve_effect_name(&self, name: &str) -> Option<String> {
+        if let Some(local) = self.locals.effects.get(name) {
+            return Some(local.clone());
+        }
+        self.scope
+            .resolve_effect(name)
+            .map(|s| s.to_string())
+            .or_else(|| name.contains('.').then(|| name.to_string()))
+    }
+
+    fn record_type_ref(&mut self, id: NodeId, name: &str) {
+        if let Some(resolved) = self.resolve_type_name(name) {
+            self.result.types.insert(id, resolved);
+        }
+    }
+
+    fn record_trait_ref(&mut self, id: NodeId, name: &str) {
+        if let Some(resolved) = self.resolve_trait_name(name) {
+            self.result.traits.insert(id, resolved);
+        }
+    }
+
+    fn record_effect_ref(&mut self, effect_ref: &EffectRef) {
+        if let Some(resolved) = self.resolve_effect_name(&effect_ref.name) {
+            self.result.effects.insert(effect_ref.id, resolved);
+        }
+        for arg in &effect_ref.type_args {
+            self.resolve_type_expr(arg);
+        }
+    }
+
+    fn resolve_where_clause(&mut self, where_clause: &[TraitBound]) {
+        for bound in where_clause {
+            for tr in &bound.traits {
+                self.record_trait_ref(tr.id, &tr.name);
+                for arg in &tr.type_args {
+                    self.resolve_type_expr(arg);
+                }
+            }
+        }
+    }
+
+    fn resolve_type_expr(&mut self, texpr: &TypeExpr) {
+        match texpr {
+            TypeExpr::Named { id, name, .. } => self.record_type_ref(*id, name),
+            TypeExpr::Var { .. } => {}
+            TypeExpr::App { func, arg, .. } => {
+                self.resolve_type_expr(func);
+                self.resolve_type_expr(arg);
+            }
+            TypeExpr::Arrow {
+                from, to, effects, ..
+            } => {
+                self.resolve_type_expr(from);
+                self.resolve_type_expr(to);
+                for effect_ref in effects {
+                    self.record_effect_ref(effect_ref);
+                }
+            }
+            TypeExpr::Record { fields, .. } => {
+                for (_, field_ty) in fields {
+                    self.resolve_type_expr(field_ty);
+                }
+            }
+            TypeExpr::Labeled { inner, .. } => self.resolve_type_expr(inner),
+        }
+    }
+
+    fn resolve_exprs(&mut self, exprs: &[Expr]) {
+        for expr in exprs {
+            self.resolve_expr(expr);
+        }
+    }
+
+    fn resolve_scoped_pattern_body(
+        &mut self,
+        pattern: &Pat,
+        guard: Option<&Expr>,
+        body: &Expr,
+    ) {
+        self.resolve_pat(pattern);
+        self.push_value_scope();
+        self.bind_pattern(pattern);
+        if let Some(guard) = guard {
+            self.resolve_expr(guard);
+        }
+        self.resolve_expr(body);
+        self.pop_value_scope();
+    }
+
+    fn resolve_scoped_params_body(
+        &mut self,
+        params: &[Pat],
+        body: &Expr,
+        finally_expr: Option<&Expr>,
+    ) {
+        self.push_value_scope();
+        for pat in params {
+            self.resolve_pat(pat);
+            self.bind_pattern(pat);
+        }
+        self.resolve_expr(body);
+        if let Some(finally_expr) = finally_expr {
+            self.resolve_expr(finally_expr);
+        }
+        self.pop_value_scope();
+    }
+
+    fn resolve_case_arms(&mut self, arms: &[Annotated<CaseArm>]) {
+        for arm in arms {
+            self.resolve_scoped_pattern_body(
+                &arm.node.pattern,
+                arm.node.guard.as_ref(),
+                &arm.node.body,
+            );
+        }
+    }
+
+    fn resolve_effect_call_expr(
+        &mut self,
+        expr_id: NodeId,
+        qualifier: Option<&str>,
+        args: &[Expr],
+    ) {
+        if let Some(qualifier) = qualifier
+            && let Some(resolved) = self.resolve_effect_name(qualifier)
+        {
+            self.result.effect_call_qualifiers.insert(expr_id, resolved);
+        }
+        self.resolve_exprs(args);
+    }
+
+    fn resolve_handler_item(&mut self, item: &HandlerItem) {
+        match item {
+            HandlerItem::Named(named) => {
+                if let Some(resolved) = self.resolve_handler_name(&named.name) {
+                    self.result.handlers.insert(named.id, resolved);
+                }
+            }
+            HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
+                if let Some(qualifier) = &arm.qualifier
+                    && let Some(resolved) = self.resolve_effect_name(qualifier)
+                {
+                    self.result.handler_arm_qualifiers.insert(arm.id, resolved);
+                }
+                self.resolve_scoped_params_body(
+                    &arm.params,
+                    &arm.body,
+                    arm.finally_block.as_deref(),
+                );
+            }
+        }
+    }
+
+    fn resolve_with_handler(&mut self, handler: &Handler) {
+        match handler {
+            Handler::Named(named) => {
+                if let Some(resolved) = self.resolve_handler_name(&named.name) {
+                    self.result.handlers.insert(named.id, resolved);
+                }
+            }
+            Handler::Inline { items, .. } => {
+                for item in items {
+                    self.resolve_handler_item(&item.node);
+                }
+            }
+        }
+    }
+
+    fn resolve_handler_body(&mut self, body: &HandlerBody) {
+        for effect_ref in &body.effects {
+            self.record_effect_ref(effect_ref);
+        }
+        for effect_ref in &body.needs {
+            self.record_effect_ref(effect_ref);
+        }
+        self.resolve_where_clause(&body.where_clause);
+
+        for arm in &body.arms {
+            self.resolve_handler_item(&HandlerItem::Arm(arm.node.clone()));
+        }
+
+        if let Some(ret) = &body.return_clause {
+            self.resolve_scoped_params_body(&ret.params, &ret.body, None);
+        }
+    }
+
+    fn resolve_decl(&mut self, decl: &Decl) {
         match decl {
+            Decl::FunSignature {
+                params,
+                return_type,
+                effects,
+                where_clause,
+                ..
+            } => {
+                for (_, texpr) in params {
+                    self.resolve_type_expr(texpr);
+                }
+                self.resolve_type_expr(return_type);
+                for effect_ref in effects {
+                    self.record_effect_ref(effect_ref);
+                }
+                self.resolve_where_clause(where_clause);
+            }
+            Decl::FunBinding {
+                params,
+                body,
+                guard,
+                ..
+            } => {
+                self.push_value_scope();
+                for pat in params {
+                    self.resolve_pat(pat);
+                    self.bind_pattern(pat);
+                }
+                self.resolve_expr(body);
+                if let Some(guard) = guard {
+                    self.resolve_expr(guard);
+                }
+                self.pop_value_scope();
+            }
+            Decl::Let {
+                annotation, value, ..
+            } => {
+                if let Some(annotation) = annotation {
+                    self.resolve_type_expr(annotation);
+                }
+                self.resolve_expr(value);
+            }
+            Decl::Val { value, .. } => self.resolve_expr(value),
             Decl::TypeDef { variants, .. } => {
                 for variant in variants {
-                    local_ctors.insert(variant.node.name.clone());
+                    for (_, texpr) in &variant.node.fields {
+                        self.resolve_type_expr(texpr);
+                    }
                 }
             }
-            Decl::FunBinding { name, .. } | Decl::FunSignature { name, .. } => {
-                local_funs.insert(name.clone());
+            Decl::RecordDef { fields, .. } => {
+                for field in fields {
+                    self.resolve_type_expr(&field.node.1);
+                }
             }
-            Decl::Val { name, .. } => {
-                local_funs.insert(name.clone());
+            Decl::EffectDef { operations, .. } => {
+                for op in operations {
+                    for (_, texpr) in &op.node.params {
+                        self.resolve_type_expr(texpr);
+                    }
+                    self.resolve_type_expr(&op.node.return_type);
+                    for effect_ref in &op.node.effects {
+                        self.record_effect_ref(effect_ref);
+                    }
+                }
             }
-            Decl::TraitDef { methods, .. } => {
+            Decl::HandlerDef { body, .. } => self.resolve_handler_body(body),
+            Decl::TraitDef {
+                id,
+                name,
+                supertraits,
+                methods,
+                ..
+            } => {
+                self.record_trait_ref(*id, name);
+                for tr in supertraits {
+                    self.record_trait_ref(tr.id, &tr.name);
+                }
                 for method in methods {
-                    local_funs.insert(method.node.name.clone());
+                    for (_, texpr) in &method.node.params {
+                        self.resolve_type_expr(texpr);
+                    }
+                    self.resolve_type_expr(&method.node.return_type);
                 }
             }
-            _ => {}
+            Decl::ImplDef {
+                id,
+                trait_name,
+                target_type,
+                where_clause,
+                needs,
+                methods,
+                ..
+            } => {
+                if let Some(resolved) = self.resolve_trait_name(trait_name) {
+                    self.result.impl_traits.insert(*id, resolved);
+                }
+                if let Some(resolved) = self.resolve_type_name(target_type) {
+                    self.result.impl_target_types.insert(*id, resolved);
+                }
+                self.record_trait_ref(*id, trait_name);
+                self.record_type_ref(*id, target_type);
+                self.resolve_where_clause(where_clause);
+                for effect_ref in needs {
+                    self.record_effect_ref(effect_ref);
+                }
+                for method in methods {
+                    self.push_value_scope();
+                    for pat in &method.node.params {
+                        self.resolve_pat(pat);
+                        self.bind_pattern(pat);
+                    }
+                    self.resolve_expr(&method.node.body);
+                    self.pop_value_scope();
+                }
+            }
+            Decl::TopExpr { value, .. } => self.resolve_expr(value),
+            Decl::DictConstructor { methods, .. } => {
+                for method in methods {
+                    self.resolve_expr(method);
+                }
+            }
+            Decl::Import { .. } | Decl::ModuleDecl { .. } => {}
         }
     }
 
-    let effective_scope = if local_ctors.is_empty() {
-        scope_map.clone()
-    } else {
-        let mut scope = scope_map.clone();
-        for name in &local_ctors {
-            scope.constructors.remove(name);
-            // Also remove from values since constructors appear there too
-            scope.values.remove(name);
-        }
-        scope
-    };
-
-    for decl in program.iter_mut() {
-        resolve_decl(decl, &effective_scope, &local_funs);
-    }
-}
-
-fn resolve_decl(decl: &mut Decl, scope: &ScopeMap, local_funs: &HashSet<String>) {
-    match decl {
-        Decl::FunSignature {
-            params,
-            return_type,
-            effects,
-            ..
-        } => {
-            for (_, texpr) in params.iter_mut() {
-                resolve_type_expr(texpr, scope);
-            }
-            resolve_type_expr(return_type, scope);
-            for eff in effects.iter_mut() {
-                if let Some(canonical) = scope.resolve_effect(&eff.name) {
-                    eff.name = canonical.to_string();
-                }
-                for arg in &mut eff.type_args {
-                    resolve_type_expr(arg, scope);
+    fn resolve_expr(&mut self, expr: &Expr) {
+        match &expr.kind {
+            ExprKind::Lit { .. } => {}
+            ExprKind::Var { name } => {
+                if let Some(resolved) = self.resolve_value_name(name) {
+                    self.result.values.insert(expr.id, resolved);
                 }
             }
-        }
-        Decl::FunBinding {
-            params,
-            body,
-            guard,
-            ..
-        } => {
-            let mut locals = local_funs.clone();
-            for p in params.iter_mut() {
-                resolve_pat(p, scope);
-                collect_pat_bindings(p, &mut locals);
-            }
-            resolve_expr(body, scope, &locals);
-            if let Some(g) = guard {
-                resolve_expr(g, scope, &locals);
-            }
-        }
-        Decl::Val { value, .. } | Decl::Let { value, .. } => {
-            resolve_expr(value, scope, local_funs);
-        }
-        Decl::TypeDef { variants, .. } => {
-            for variant in variants.iter_mut() {
-                for (_, texpr) in &mut variant.node.fields {
-                    resolve_type_expr(texpr, scope);
+            ExprKind::Constructor { name } => {
+                if let Some(resolved) = self.resolve_constructor_name(name) {
+                    self.result.constructors.insert(expr.id, resolved);
                 }
             }
-        }
-        Decl::RecordDef { fields, .. } => {
-            for field in fields.iter_mut() {
-                resolve_type_expr(&mut field.node.1, scope);
-            }
-        }
-        Decl::ImplDef {
-            target_type,
-            methods,
-            ..
-        } => {
-            // Resolve the target type name (e.g. "Ordering" -> "Std.Base.Ordering")
-            if let Some(canonical) = scope.resolve_type(target_type) {
-                *target_type = canonical.to_string();
-            } else {
-                let canonical = super::canonicalize_type_name(target_type);
-                if canonical != target_type {
-                    *target_type = canonical.to_string();
+            ExprKind::QualifiedName { module, name, .. } => {
+                let qualified = format!("{}.{}", module, name);
+                if let Some(resolved) = self.scope.resolve_value(&qualified) {
+                    self.result.values.insert(
+                        expr.id,
+                        ResolvedValue::Global {
+                            lookup_name: resolved.to_string(),
+                        },
+                    );
                 }
             }
-            for method in methods.iter_mut() {
-                let m = &mut method.node;
-                let mut locals = local_funs.clone();
-                for p in m.params.iter_mut() {
-                    resolve_pat(p, scope);
-                    collect_pat_bindings(p, &mut locals);
+            ExprKind::App { func, arg } => {
+                self.resolve_expr(func);
+                self.resolve_expr(arg);
+            }
+            ExprKind::BinOp { left, right, .. } => {
+                self.resolve_expr(left);
+                self.resolve_expr(right);
+            }
+            ExprKind::UnaryMinus { expr, .. } => self.resolve_expr(expr),
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.resolve_expr(cond);
+                self.resolve_expr(then_branch);
+                self.resolve_expr(else_branch);
+            }
+            ExprKind::Case { scrutinee, arms, .. } => {
+                self.resolve_expr(scrutinee);
+                self.resolve_case_arms(arms);
+            }
+            ExprKind::Block { stmts, .. } => {
+                self.push_value_scope();
+                for stmt in stmts {
+                    self.resolve_stmt(&stmt.node);
                 }
-                resolve_expr(&mut m.body, scope, &locals);
+                self.pop_value_scope();
             }
-        }
-        Decl::TraitDef { methods, .. } => {
-            for method in methods.iter_mut() {
-                let m = &mut method.node;
-                for (_, texpr) in &mut m.params {
-                    resolve_type_expr(texpr, scope);
+            ExprKind::Lambda { params, body } => {
+                self.resolve_scoped_params_body(params, body, None);
+            }
+            ExprKind::FieldAccess { expr, .. } => self.resolve_expr(expr),
+            ExprKind::RecordCreate { name, fields } => {
+                if let Some(resolved) = self.resolve_type_name(name) {
+                    self.result.record_types.insert(expr.id, resolved);
                 }
-                resolve_type_expr(&mut m.return_type, scope);
-            }
-        }
-        Decl::EffectDef { operations, .. } => {
-            for op in operations.iter_mut() {
-                for (_, texpr) in &mut op.node.params {
-                    resolve_type_expr(texpr, scope);
-                }
-                resolve_type_expr(&mut op.node.return_type, scope);
-            }
-        }
-        Decl::HandlerDef { body, .. } => {
-            resolve_handler_body(body, scope, local_funs);
-        }
-        _ => {}
-    }
-}
-
-fn collect_pat_vars(pat: &Pat, vars: &mut HashSet<String>) {
-    match pat {
-        Pat::Var { name, .. } => {
-            vars.insert(name.clone());
-        }
-        Pat::Tuple { elements, .. } => {
-            for e in elements {
-                collect_pat_vars(e, vars);
-            }
-        }
-        Pat::Constructor { args, .. } => {
-            for a in args {
-                collect_pat_vars(a, vars);
-            }
-        }
-        Pat::Record {
-            fields, as_name, ..
-        } => {
-            for (name, alias) in fields {
-                if let Some(p) = alias {
-                    collect_pat_vars(p, vars);
-                } else {
-                    vars.insert(name.clone());
+                for (_, _, field_expr) in fields {
+                    self.resolve_expr(field_expr);
                 }
             }
-            if let Some(n) = as_name {
-                vars.insert(n.clone());
-            }
-        }
-        Pat::AnonRecord { fields, .. } => {
-            for (name, alias) in fields {
-                if let Some(p) = alias {
-                    collect_pat_vars(p, vars);
-                } else {
-                    vars.insert(name.clone());
+            ExprKind::AnonRecordCreate { fields } => fields
+                .iter()
+                .for_each(|(_, _, field_expr)| self.resolve_expr(field_expr)),
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                self.resolve_expr(record);
+                for (_, _, field_expr) in fields {
+                    self.resolve_expr(field_expr);
                 }
             }
-        }
-        Pat::ConsPat { head, tail, .. } => {
-            collect_pat_vars(head, vars);
-            collect_pat_vars(tail, vars);
-        }
-        Pat::StringPrefix { rest, .. } => {
-            collect_pat_vars(rest, vars);
-        }
-        _ => {}
-    }
-}
-
-fn resolve_handler_body(body: &mut HandlerBody, scope: &ScopeMap, local_funs: &HashSet<String>) {
-    for arm in body.arms.iter_mut() {
-        canonicalize_effect_qualifier(&mut arm.node.qualifier, scope);
-        let mut locals = local_funs.clone();
-        for pat in &arm.node.params {
-            collect_pat_vars(pat, &mut locals);
-        }
-        resolve_expr(&mut arm.node.body, scope, &locals);
-    }
-    if let Some(ret) = &mut body.return_clause {
-        let mut locals = local_funs.clone();
-        for pat in &ret.params {
-            collect_pat_vars(pat, &mut locals);
-        }
-        resolve_expr(&mut ret.body, scope, &locals);
-    }
-}
-
-fn resolve_expr(expr: &mut Expr, scope: &ScopeMap, locals: &HashSet<String>) {
-    match &mut expr.kind {
-        // Resolve the canonical module path for qualified names.
-        // `module` is preserved for codegen; `canonical_module` is used by the typechecker.
-        ExprKind::QualifiedName {
-            module,
-            name,
-            canonical_module,
-        } => {
-            let key = format!("{}.{}", module, name);
-            if let Some(canonical) = scope.resolve_value(&key)
-                && let Some(dot_pos) = canonical.rfind('.')
-            {
-                *canonical_module = Some(canonical[..dot_pos].to_string());
+            ExprKind::EffectCall {
+                qualifier, args, ..
+            } => self.resolve_effect_call_expr(expr.id, qualifier.as_deref(), args),
+            ExprKind::With { expr: inner, handler } => {
+                self.resolve_expr(inner);
+                self.resolve_with_handler(handler);
             }
-        }
-
-        ExprKind::Var { name, .. } => {
-            if !locals.contains(name.as_str())
-                && let Some(canonical) = scope.resolve_value(name)
-            {
-                *name = canonical.to_string();
-            }
-        }
-
-        ExprKind::Constructor { name } => {
-            if let Some(canonical) = scope.resolve_constructor(name) {
-                *name = canonical.to_string();
-            }
-        }
-
-        ExprKind::App { func, arg, .. } => {
-            resolve_expr(func, scope, locals);
-            resolve_expr(arg, scope, locals);
-        }
-        ExprKind::BinOp { left, right, .. } => {
-            resolve_expr(left, scope, locals);
-            resolve_expr(right, scope, locals);
-        }
-        ExprKind::UnaryMinus { expr, .. } => resolve_expr(expr, scope, locals),
-        ExprKind::If {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            resolve_expr(cond, scope, locals);
-            resolve_expr(then_branch, scope, locals);
-            resolve_expr(else_branch, scope, locals);
-        }
-        ExprKind::Block { stmts, .. } => {
-            // Block statements accumulate bindings: let x = ... makes x
-            // visible in subsequent statements.
-            let mut block_locals = locals.clone();
-            for stmt in stmts.iter_mut() {
-                resolve_stmt(&mut stmt.node, scope, &mut block_locals);
-            }
-        }
-        ExprKind::Lambda { body, params, .. } => {
-            let mut inner = locals.clone();
-            for p in params.iter_mut() {
-                resolve_pat(p, scope);
-                collect_pat_bindings(p, &mut inner);
-            }
-            resolve_expr(body, scope, &inner);
-        }
-        ExprKind::Case {
-            scrutinee, arms, ..
-        } => {
-            resolve_expr(scrutinee, scope, locals);
-            for arm in arms.iter_mut() {
-                let arm = &mut arm.node;
-                resolve_pat(&mut arm.pattern, scope);
-                let mut arm_locals = locals.clone();
-                collect_pat_bindings(&arm.pattern, &mut arm_locals);
-                if let Some(g) = &mut arm.guard {
-                    resolve_expr(g, scope, &arm_locals);
+            ExprKind::Resume { value } => self.resolve_expr(value),
+            ExprKind::Tuple { elements } => self.resolve_exprs(elements),
+            ExprKind::Do {
+                bindings,
+                success,
+                else_arms,
+                ..
+            } => {
+                self.push_value_scope();
+                for (pat, value) in bindings {
+                    self.resolve_pat(pat);
+                    self.resolve_expr(value);
+                    self.bind_pattern(pat);
                 }
-                resolve_expr(&mut arm.body, scope, &arm_locals);
+                self.resolve_expr(success);
+                self.pop_value_scope();
+                self.resolve_case_arms(else_arms);
             }
-        }
-        ExprKind::Tuple { elements, .. } => {
-            for e in elements.iter_mut() {
-                resolve_expr(e, scope, locals);
-            }
-        }
-        ExprKind::RecordCreate { name, fields, .. } => {
-            if let Some(canonical) = scope.resolve_type(name) {
-                *name = canonical.to_string();
-            } else {
-                let canonical = super::canonicalize_type_name(name);
-                if canonical != name {
-                    *name = canonical.to_string();
+            ExprKind::Receive {
+                arms, after_clause, ..
+            } => {
+                self.resolve_case_arms(arms);
+                if let Some((timeout, body)) = after_clause {
+                    self.resolve_expr(timeout);
+                    self.resolve_expr(body);
                 }
             }
-            for f in fields.iter_mut() {
-                resolve_expr(&mut f.2, scope, locals);
-            }
-        }
-        ExprKind::RecordUpdate { record, fields, .. } => {
-            resolve_expr(record, scope, locals);
-            for f in fields.iter_mut() {
-                resolve_expr(&mut f.2, scope, locals);
-            }
-        }
-        ExprKind::FieldAccess { expr, .. } => {
-            resolve_expr(expr, scope, locals);
-        }
-        ExprKind::With { expr, handler } => {
-            resolve_expr(expr, scope, locals);
-            match handler.as_mut() {
-                Handler::Named(name, _) => {
-                    canonicalize_handler_name(name, scope, locals);
-                }
-                Handler::Inline { items, .. } => {
-                    for ann in items.iter_mut() {
-                        match &mut ann.node {
-                            HandlerItem::Named(named_ref) => {
-                                canonicalize_handler_name(&mut named_ref.name, scope, locals);
-                            }
-                            HandlerItem::Arm(arm) => {
-                                canonicalize_effect_qualifier(&mut arm.qualifier, scope);
-                                let mut arm_locals = locals.clone();
-                                for pat in &arm.params {
-                                    collect_pat_vars(pat, &mut arm_locals);
-                                }
-                                resolve_expr(&mut arm.body, scope, &arm_locals);
-                            }
-                            HandlerItem::Return(ret) => {
-                                let mut ret_locals = locals.clone();
-                                for pat in &ret.params {
-                                    collect_pat_vars(pat, &mut ret_locals);
-                                }
-                                resolve_expr(&mut ret.body, scope, &ret_locals);
-                            }
-                        }
+            ExprKind::BitString { segments } => {
+                for seg in segments {
+                    self.resolve_expr(&seg.value);
+                    if let Some(size) = &seg.size {
+                        self.resolve_expr(size);
                     }
                 }
             }
-        }
-        ExprKind::Do {
-            bindings,
-            success,
-            else_arms,
-            ..
-        } => {
-            let mut do_locals = locals.clone();
-            for (pat, val) in bindings.iter_mut() {
-                resolve_pat(pat, scope);
-                resolve_expr(val, scope, &do_locals);
-                collect_pat_bindings(pat, &mut do_locals);
+            ExprKind::Ascription { expr, type_expr } => {
+                self.resolve_expr(expr);
+                self.resolve_type_expr(type_expr);
             }
-            resolve_expr(success, scope, &do_locals);
-            for arm in else_arms.iter_mut() {
-                let arm = &mut arm.node;
-                resolve_pat(&mut arm.pattern, scope);
-                let mut arm_locals = locals.clone();
-                collect_pat_bindings(&arm.pattern, &mut arm_locals);
-                if let Some(g) = &mut arm.guard {
-                    resolve_expr(g, scope, &arm_locals);
+            ExprKind::HandlerExpr { body } => self.resolve_handler_body(body),
+            ExprKind::Pipe { .. }
+            | ExprKind::BinOpChain { .. }
+            | ExprKind::PipeBack { .. }
+            | ExprKind::ComposeForward { .. }
+            | ExprKind::Cons { .. }
+            | ExprKind::ListLit { .. }
+            | ExprKind::StringInterp { .. }
+            | ExprKind::ListComprehension { .. } => {
+                unreachable!("surface syntax should be desugared before resolution")
+            }
+            ExprKind::DictMethodAccess { dict, .. } => self.resolve_expr(dict),
+            ExprKind::DictRef { .. } | ExprKind::ForeignCall { .. } => {}
+        }
+    }
+
+    fn resolve_pat(&mut self, pat: &Pat) {
+        match pat {
+            Pat::Constructor { id, name, args, .. } => {
+                if let Some(resolved) = self.resolve_constructor_name(name) {
+                    self.result.constructors.insert(*id, resolved);
                 }
-                resolve_expr(&mut arm.body, scope, &arm_locals);
-            }
-        }
-        ExprKind::Receive {
-            arms, after_clause, ..
-        } => {
-            for arm in arms.iter_mut() {
-                let arm = &mut arm.node;
-                resolve_pat(&mut arm.pattern, scope);
-                let mut arm_locals = locals.clone();
-                collect_pat_bindings(&arm.pattern, &mut arm_locals);
-                if let Some(g) = &mut arm.guard {
-                    resolve_expr(g, scope, &arm_locals);
+                for arg in args {
+                    self.resolve_pat(arg);
                 }
-                resolve_expr(&mut arm.body, scope, &arm_locals);
             }
-            if let Some((timeout, body)) = after_clause {
-                resolve_expr(timeout, scope, locals);
-                resolve_expr(body, scope, locals);
-            }
-        }
-        ExprKind::EffectCall {
-            qualifier, args, ..
-        } => {
-            canonicalize_effect_qualifier(qualifier, scope);
-            for a in args.iter_mut() {
-                resolve_expr(a, scope, locals);
-            }
-        }
-        ExprKind::Resume { value, .. } => {
-            resolve_expr(value, scope, locals);
-        }
-        ExprKind::ListComprehension {
-            body, qualifiers, ..
-        } => {
-            let mut comp_locals = locals.clone();
-            for qual in qualifiers.iter_mut() {
-                match qual {
-                    ComprehensionQualifier::Generator(pat, iterable) => {
-                        resolve_expr(iterable, scope, &comp_locals);
-                        resolve_pat(pat, scope);
-                        collect_pat_bindings(pat, &mut comp_locals);
-                    }
-                    ComprehensionQualifier::Guard(expr) => {
-                        resolve_expr(expr, scope, &comp_locals);
-                    }
-                    ComprehensionQualifier::Let(pat, val) => {
-                        resolve_expr(val, scope, &comp_locals);
-                        resolve_pat(pat, scope);
-                        collect_pat_bindings(pat, &mut comp_locals);
+            Pat::Record { name, fields, .. } => {
+                if let Some(resolved) = self.resolve_type_name(name) {
+                    self.result.record_types.insert(pat.id(), resolved);
+                }
+                for (_, alias) in fields {
+                    if let Some(alias) = alias {
+                        self.resolve_pat(alias);
                     }
                 }
             }
-            resolve_expr(body, scope, &comp_locals);
+            Pat::AnonRecord { fields, .. } => {
+                for (_, alias) in fields {
+                    if let Some(alias) = alias {
+                        self.resolve_pat(alias);
+                    }
+                }
+            }
+            Pat::Tuple { elements, .. } | Pat::ListPat { elements, .. } => {
+                for pat in elements {
+                    self.resolve_pat(pat);
+                }
+            }
+            Pat::StringPrefix { rest, .. } => self.resolve_pat(rest),
+            Pat::BitStringPat { segments, .. } => {
+                for seg in segments {
+                    self.resolve_pat(&seg.value);
+                    if let Some(size) = &seg.size {
+                        self.resolve_expr(size);
+                    }
+                }
+            }
+            Pat::ConsPat { head, tail, .. } => {
+                self.resolve_pat(head);
+                self.resolve_pat(tail);
+            }
+            Pat::Or { patterns, .. } => {
+                for pat in patterns {
+                    self.resolve_pat(pat);
+                }
+            }
+            Pat::Wildcard { .. } | Pat::Var { .. } | Pat::Lit { .. } => {}
         }
-        _ => {}
+    }
+
+    fn resolve_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Expr(expr) => self.resolve_expr(expr),
+            Stmt::Let {
+                pattern,
+                annotation,
+                value,
+                ..
+            } => {
+                if let Some(annotation) = annotation {
+                    self.resolve_type_expr(annotation);
+                }
+                self.resolve_pat(pattern);
+                self.resolve_expr(value);
+                self.bind_pattern(pattern);
+            }
+            Stmt::LetFun {
+                name,
+                params,
+                body,
+                guard,
+                ..
+            } => {
+                self.bind_local_name(name.clone());
+                self.push_value_scope();
+                for pat in params {
+                    self.resolve_pat(pat);
+                    self.bind_pattern(pat);
+                }
+                if let Some(guard) = guard {
+                    self.resolve_expr(guard);
+                }
+                self.resolve_expr(body);
+                self.pop_value_scope();
+            }
+        }
     }
 }
 
-fn resolve_pat(pat: &mut Pat, scope: &ScopeMap) {
-    match pat {
-        Pat::Constructor { name, args, .. } => {
-            if let Some(canonical) = scope.resolve_constructor(name) {
-                *name = canonical.to_string();
-            }
-            for arg in args.iter_mut() {
-                resolve_pat(arg, scope);
-            }
-        }
-        Pat::Tuple { elements, .. } => {
-            for p in elements.iter_mut() {
-                resolve_pat(p, scope);
-            }
-        }
-        Pat::ConsPat { head, tail, .. } => {
-            resolve_pat(head, scope);
-            resolve_pat(tail, scope);
-        }
-        _ => {}
+/// Resolve names in a source program using the import/global scope and local
+/// module declarations, returning an authoritative resolution map.
+pub(crate) fn resolve_names(
+    program: &[Decl],
+    scope_map: &ScopeMap,
+    current_module: Option<&str>,
+) -> ResolutionResult {
+    let locals = LocalModuleNames::collect(program, current_module);
+    let mut resolver = Resolver::new(scope_map, locals);
+    for decl in program {
+        resolver.resolve_decl(decl);
     }
-}
-
-fn resolve_stmt(stmt: &mut Stmt, scope: &ScopeMap, locals: &mut HashSet<String>) {
-    match stmt {
-        Stmt::Expr(expr) => resolve_expr(expr, scope, locals),
-        Stmt::Let { value, pattern, .. } => {
-            resolve_pat(pattern, scope);
-            // Value is evaluated before the binding takes effect
-            resolve_expr(value, scope, locals);
-            collect_pat_bindings(pattern, locals);
-        }
-        Stmt::LetFun {
-            name,
-            params,
-            body,
-            guard,
-            ..
-        } => {
-            // The function name itself is local
-            locals.insert(name.clone());
-            let mut inner = locals.clone();
-            for p in params.iter_mut() {
-                resolve_pat(p, scope);
-                collect_pat_bindings(p, &mut inner);
-            }
-            resolve_expr(body, scope, &inner);
-            if let Some(g) = guard {
-                resolve_expr(g, scope, &inner);
-            }
-        }
-    }
+    resolver.into_result()
 }

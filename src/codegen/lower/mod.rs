@@ -15,8 +15,8 @@ use errors::{ErrorInfo, ErrorKind, SourceInfo};
 use init::{PendingAnnotation, extract_external};
 use pats::{lower_params, lower_pat};
 use util::{
-    cerl_call, collect_ctor_call, collect_effect_call, collect_fun_call, collect_qualified_call,
-    core_var, field_access_record_name, lower_lit, lower_string_to_binary, process_string_escapes,
+    cerl_call, collect_ctor_call, collect_effect_call, collect_effect_call_expr, collect_fun_call,
+    collect_qualified_call, core_var, lower_lit, lower_string_to_binary, process_string_escapes,
 };
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -47,7 +47,8 @@ fn count_lambda_params(body: &Expr) -> usize {
 fn is_unit_type_expr(ty: &ast::TypeExpr) -> bool {
     match ty {
         ast::TypeExpr::Named { name, .. } => {
-            name == crate::typechecker::canonicalize_type_name("Unit")
+            crate::typechecker::canonicalize_type_name(name)
+                == crate::typechecker::canonicalize_type_name("Unit")
         }
         ast::TypeExpr::Labeled { inner, .. } => is_unit_type_expr(inner),
         _ => false,
@@ -66,7 +67,6 @@ struct HandlerInfo {
 }
 
 /// Stored effect definition: maps op_name -> lowering metadata.
-#[allow(dead_code)]
 struct EffectInfo {
     ops: HashMap<String, EffectOpInfo>,
 }
@@ -182,8 +182,7 @@ pub struct Lowerer<'a> {
     effect_canonical: HashMap<String, String>,
     /// Typechecker result for the module currently being lowered.
     /// Provides resolved types, handler info, effect info, etc.
-    /// None for modules compiled without full typechecking (e.g. codegen tests).
-    check_result: Option<crate::typechecker::CheckResult>,
+    check_result: crate::typechecker::CheckResult,
     /// Conditional handle bindings: name -> (cond_var, cond_expr, then_canonical, else_canonical).
     /// Used during lower_with to generate conditional handler dispatch.
     handle_cond_vars: HashMap<String, (String, CExpr, String, String)>,
@@ -202,7 +201,7 @@ impl<'a> Lowerer<'a> {
         ctx: &'a super::CodegenContext,
         constructor_atoms: super::resolve::ConstructorAtoms,
         resolved: super::resolve::ResolutionMap,
-        check_result: Option<&crate::typechecker::CheckResult>,
+        check_result: &crate::typechecker::CheckResult,
         source_info: Option<SourceInfo>,
         entry_export: Option<String>,
     ) -> Self {
@@ -233,7 +232,7 @@ impl<'a> Lowerer<'a> {
             inline_vals: HashMap::new(),
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
-            check_result: check_result.cloned(),
+            check_result: check_result.clone(),
             handle_cond_vars: HashMap::new(),
             handle_dynamic_vars: HashMap::new(),
             entry_export,
@@ -260,8 +259,8 @@ impl<'a> Lowerer<'a> {
         name: &str,
         arity: usize,
     ) -> Option<(String, String)> {
-        self.ctx.modules.get(source_module).and_then(|compiled| {
-            compiled
+        self.ctx.module_semantics(source_module).and_then(|module_semantics| {
+            module_semantics
                 .codegen_info
                 .external_funs
                 .iter()
@@ -280,6 +279,194 @@ impl<'a> Lowerer<'a> {
                 .or_else(|| self.fun_info.get(fallback)),
             None => self.fun_info.get(fallback),
         }
+    }
+
+    fn resolved_param_absorbed_effects(
+        &self,
+        node_id: crate::ast::NodeId,
+        fallback: &str,
+    ) -> Option<HashMap<usize, Vec<String>>> {
+        self.resolved_fun_info(node_id, fallback)
+            .map(|f| f.param_absorbed_effects.clone())
+            .filter(|m| !m.is_empty())
+    }
+
+    fn current_semantic_module_name(&self) -> &str {
+        self.current_handler_source_module
+            .as_deref()
+            .unwrap_or(&self.current_source_module)
+    }
+
+    fn front_resolution_for_module(
+        &self,
+        module_name: &str,
+    ) -> Option<&crate::typechecker::ResolutionResult> {
+        self.check_result
+            .module_check_results()
+            .get(module_name)
+            .map(|m| &m.resolution)
+            .or_else(|| {
+                (module_name == self.current_source_module).then_some(&self.check_result.resolution)
+            })
+            .or_else(|| self.ctx.module_semantics(module_name).map(|m| m.front_resolution))
+    }
+
+    fn current_value_ref(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<&crate::typechecker::ResolvedValue> {
+        self.front_resolution_for_module(self.current_semantic_module_name())
+            .and_then(|r| r.value(node_id))
+    }
+
+    fn current_record_type_name(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+        self.front_resolution_for_module(self.current_semantic_module_name())
+            .and_then(|r| r.record_type(node_id))
+    }
+
+    fn current_effect_call_qualifier(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+        self.front_resolution_for_module(self.current_semantic_module_name())
+            .and_then(|r| r.effect_call_qualifier(node_id))
+    }
+
+    fn current_handler_arm_qualifier(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+        self.front_resolution_for_module(self.current_semantic_module_name())
+            .and_then(|r| r.handler_arm_qualifier(node_id))
+    }
+
+    fn resolved_effect_ref_for_module(
+        &self,
+        module_name: &str,
+        effect_ref: &crate::ast::EffectRef,
+    ) -> String {
+        self.front_resolution_for_module(module_name)
+            .and_then(|r| r.effect_ref(effect_ref.id))
+            .map(|resolved| {
+                self.effect_canonical
+                    .get(resolved)
+                    .cloned()
+                    .unwrap_or_else(|| resolved.to_string())
+            })
+            .unwrap_or_else(|| {
+                self.effect_canonical
+                    .get(&effect_ref.name)
+                    .cloned()
+                    .unwrap_or_else(|| effect_ref.name.clone())
+            })
+    }
+
+    fn resolved_effect_refs_for_module(
+        &self,
+        module_name: &str,
+        effect_refs: &[crate::ast::EffectRef],
+    ) -> Vec<String> {
+        effect_refs
+            .iter()
+            .map(|effect_ref| self.resolved_effect_ref_for_module(module_name, effect_ref))
+            .collect()
+    }
+
+    fn resolved_effect_call_name(
+        &self,
+        node_id: crate::ast::NodeId,
+        op_name: &str,
+        _qualifier: Option<&str>,
+    ) -> Option<String> {
+        self.current_effect_call_qualifier(node_id)
+            .map(|s| s.to_string())
+            .or_else(|| self.op_to_effect.get(op_name).cloned())
+    }
+
+    fn resolved_handler_binding_name(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<String> {
+        let normalize_lookup = |lookup_name: &str| {
+            if self.handle_dynamic_vars.contains_key(lookup_name)
+                || self.handle_cond_vars.contains_key(lookup_name)
+                || self.handler_defs.contains_key(lookup_name)
+            {
+                lookup_name.to_string()
+            } else {
+                self.resolve_handler_name(lookup_name)
+            }
+        };
+        self.front_resolution_for_module(self.current_semantic_module_name())
+            .and_then(|r| r.handler_ref(node_id).or_else(|| r.value(node_id)))
+            .map(|resolved| match resolved {
+                crate::typechecker::ResolvedValue::Local { name, .. } => normalize_lookup(name),
+                crate::typechecker::ResolvedValue::Global { lookup_name } => {
+                    normalize_lookup(lookup_name)
+                }
+            })
+    }
+
+    fn known_handler_binding_name(
+        &self,
+        node_id: crate::ast::NodeId,
+        _fallback: &str,
+    ) -> Option<String> {
+        let resolved = self.resolved_handler_binding_name(node_id)?;
+        if self.handler_defs.contains_key(&resolved)
+            || self.handle_dynamic_vars.contains_key(&resolved)
+            || self.handle_cond_vars.contains_key(&resolved)
+        {
+            Some(resolved)
+        } else {
+            None
+        }
+    }
+
+    fn resolved_env_lookup_name(
+        &self,
+        node_id: crate::ast::NodeId,
+        fallback: &str,
+    ) -> String {
+        use super::resolve::ResolvedName;
+
+        match self.resolved.get(&node_id) {
+            Some(ResolvedName::LocalFun { name, .. }) => name.clone(),
+            Some(ResolvedName::ImportedFun { canonical_name, .. }) => canonical_name.clone(),
+            None => self
+                .current_value_ref(node_id)
+                .map(|resolved| match resolved {
+                    crate::typechecker::ResolvedValue::Local { name, .. } => name.clone(),
+                    crate::typechecker::ResolvedValue::Global { lookup_name } => {
+                        lookup_name.clone()
+                    }
+                })
+                .unwrap_or_else(|| fallback.to_string()),
+        }
+    }
+
+    fn record_fields_for_name(&self, name: &str) -> Option<&Vec<String>> {
+        self.record_fields.get(name)
+    }
+
+    fn resolved_record_fields(
+        &self,
+        node_id: crate::ast::NodeId,
+        source_name: &str,
+    ) -> Option<&Vec<String>> {
+        let module_name = self.current_semantic_module_name();
+        self.current_record_type_name(node_id)
+            .and_then(|name| self.record_fields_for_name(name))
+            .or_else(|| self.record_fields_for_name(source_name))
+            .or_else(|| {
+                let local_name = format!("{}.{}", module_name, source_name);
+                self.record_fields_for_name(&local_name)
+            })
+    }
+
+    fn resolved_handler_arm_effect(&self, arm: &HandlerArm) -> Option<String> {
+        self.current_handler_arm_qualifier(arm.id)
+            .map(|resolved| resolved.to_string())
+            .or_else(|| self.op_to_effect.get(&arm.op_name).cloned())
+    }
+
+    fn handler_arm_matches_effect_op(&self, arm: &HandlerArm, eff: &str, op: &str) -> bool {
+        self.resolved_handler_arm_effect(arm)
+            .is_some_and(|resolved| resolved == eff && arm.op_name == op)
     }
 
     fn lower_local_fun_ref(
@@ -391,9 +578,9 @@ impl<'a> Lowerer<'a> {
                 updates.push((bare.to_string(), atom.clone()));
             }
         }
-        if let Some(compiled) = self.ctx.modules.get(source_module) {
+        if let Some(module_semantics) = self.ctx.module_semantics(source_module) {
             let erlang_mod = Self::module_name_to_erlang(source_module);
-            for decl in &compiled.elaborated {
+            for decl in module_semantics.elaborated {
                 match decl {
                     crate::ast::Decl::TypeDef { variants, .. } => {
                         for variant in variants {
@@ -501,17 +688,6 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|| name.to_string())
     }
 
-    /// Try to resolve a handler name to a known handler definition.
-    /// Returns Some(canonical) if the handler exists in handler_defs, None otherwise.
-    fn resolve_handler_name_opt(&self, name: &str) -> Option<String> {
-        let canonical = self.resolve_handler_name(name);
-        if self.handler_defs.contains_key(&canonical) {
-            Some(canonical)
-        } else {
-            None
-        }
-    }
-
     /// Given a list of effect names (from a `needs` clause), return all
     /// (effect_name, op_name) pairs. This is the single source of truth for
     /// what handler params a function needs.
@@ -591,7 +767,12 @@ impl<'a> Lowerer<'a> {
 
         for (eff, op) in &handler_ops {
             let key = format!("{}.{}", eff, op);
-            let param = self.current_handler_params.get(&key).unwrap();
+            let param = self.current_handler_params.get(&key).unwrap_or_else(|| {
+                panic!(
+                    "internal lowering error: missing handler param binding for '{}'",
+                    key
+                )
+            });
             call_args.push(CExpr::Var(param.clone()));
         }
 
@@ -605,14 +786,11 @@ impl<'a> Lowerer<'a> {
 
     fn lower_eta_reduced_effect_op_ref(
         &mut self,
+        node_id: crate::ast::NodeId,
         op_name: &str,
         qualifier: Option<&str>,
     ) -> Option<CExpr> {
-        let effect_name = if let Some(q) = qualifier {
-            self.canonicalize_effect(q)
-        } else {
-            self.op_to_effect.get(op_name)?.clone()
-        };
+        let effect_name = self.resolved_effect_call_name(node_id, op_name, qualifier)?;
         let key = format!("{}.{}", effect_name, op_name);
         let op_info = self
             .effect_defs
@@ -670,7 +848,7 @@ impl<'a> Lowerer<'a> {
     fn lower_eta_reduced_effect_expr(&mut self, expr: &Expr) -> Option<CExpr> {
         let mut args = Vec::new();
         let mut current = expr;
-        let (op_name, qualifier) = loop {
+        let (effect_call_id, op_name, qualifier) = loop {
             match &current.kind {
                 ExprKind::App { func, arg, .. } => {
                     args.push(arg.as_ref());
@@ -680,7 +858,7 @@ impl<'a> Lowerer<'a> {
                     name, qualifier, ..
                 } => {
                     args.reverse();
-                    break (name.as_str(), qualifier.as_deref());
+                    break (current.id, name.as_str(), qualifier.as_deref());
                 }
                 _ => return None,
             }
@@ -689,7 +867,7 @@ impl<'a> Lowerer<'a> {
         if !args.is_empty() {
             return None;
         }
-        self.lower_eta_reduced_effect_op_ref(op_name, qualifier)
+        self.lower_eta_reduced_effect_op_ref(effect_call_id, op_name, qualifier)
     }
 
     /// Check if an expression contains effectful calls nested inside if/case/block
@@ -843,6 +1021,7 @@ impl<'a> Lowerer<'a> {
         let mut clause_groups: Vec<(String, usize, Vec<Clause>, crate::token::Span)> = Vec::new();
         let mut dict_constructors: Vec<(&str, &[String], &[Expr])> = Vec::new();
         let mut val_bindings: Vec<(&str, bool, &Expr)> = Vec::new(); // (name, is_inline, value)
+
         for decl in program {
             match decl {
                 Decl::FunBinding {
@@ -862,11 +1041,8 @@ impl<'a> Lowerer<'a> {
                             effects: Vec::new(),
                             param_absorbed_effects: HashMap::new(),
                         });
-                    if effects.is_empty()
-                        && let Some(cr) = &self.check_result
-                        && let Some(scheme) = cr.env.get(name)
-                    {
-                        let resolved_ty = cr.sub.apply(&scheme.ty);
+                    if effects.is_empty() && let Some(scheme) = self.check_result.env.get(name) {
+                        let resolved_ty = self.check_result.sub.apply(&scheme.ty);
                         effects = self.canonicalize_effects(
                             util::arity_and_effects_from_type(&resolved_ty).1,
                         );
@@ -881,11 +1057,11 @@ impl<'a> Lowerer<'a> {
                     // the binding has 0 params but the type annotation declares a
                     // higher arity. Use the annotation's arity so cross-module
                     // callers (who derive arity from the type) find the right /N.
-                    if let Some(cr) = &self.check_result
-                        && let Some(scheme) = cr.env.get(name)
-                    {
-                        let declared_arity =
-                            util::arity_and_effects_from_type(&cr.sub.apply(&scheme.ty)).0;
+                    if let Some(scheme) = self.check_result.env.get(name) {
+                        let declared_arity = util::arity_and_effects_from_type(
+                            &self.check_result.sub.apply(&scheme.ty),
+                        )
+                        .0;
                         if declared_arity > base_arity {
                             base_arity = declared_arity;
                         }
@@ -1199,20 +1375,14 @@ impl<'a> Lowerer<'a> {
         }
 
         // If the program uses ets_ref, prepend ETS table creation to main's body.
-        if self
-            .check_result
-            .as_ref()
-            .is_some_and(|cr| cr.needs_ets_ref_table)
+        if self.check_result.needs_ets_ref_table
             && let Some(main_def) = fun_defs.iter_mut().find(|f| f.name == "main")
         {
             main_def.body = Self::wrap_with_ets_init(main_def.body.clone());
         }
 
         // If the program uses beam_vec, prepend ETS table creation for saga_vec_store.
-        if self
-            .check_result
-            .as_ref()
-            .is_some_and(|cr| cr.needs_vec_table)
+        if self.check_result.needs_vec_table
             && let Some(main_def) = fun_defs.iter_mut().find(|f| f.name == "main")
         {
             main_def.body = Self::wrap_with_vec_init(main_def.body.clone());
@@ -1506,8 +1676,9 @@ impl<'a> Lowerer<'a> {
             return self.lower_ctor(ctor_name, args);
         }
 
-        if let Some((op_name, qualifier, args)) = collect_effect_call(expr) {
+        if let Some((head_expr, op_name, qualifier, args)) = collect_effect_call_expr(expr) {
             return self.lower_effect_call(
+                head_expr.id,
                 op_name,
                 qualifier,
                 &args.into_iter().cloned().collect::<Vec<_>>(),
@@ -1528,6 +1699,14 @@ impl<'a> Lowerer<'a> {
                 || self.constructor_atoms.contains_key(func_name)
             {
                 return self.lower_ctor(func_name, args);
+            }
+            if let Some(call) =
+                self.lower_resolved_fun_call(func_name, head, &args, None, Some(&expr.span))
+            {
+                return call;
+            }
+            if self.resolved.contains_key(&head.id) {
+                return self.lower_generic_apply(head, &args);
             }
             return self.lower_qualified_call(
                 module,
@@ -1990,7 +2169,10 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::RecordCreate { name, fields, .. } => {
-                let order = self.record_fields.get(name).cloned().unwrap_or_default();
+                let order = self
+                    .resolved_record_fields(expr.id, name)
+                    .cloned()
+                    .unwrap_or_default();
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
                 let mut vars: Vec<String> = Vec::new();
@@ -2044,17 +2226,15 @@ impl<'a> Lowerer<'a> {
                 field,
                 record_name: resolved_name,
             } => {
-                let record_name = resolved_name
+                let idx = resolved_name
                     .as_deref()
-                    .or_else(|| field_access_record_name(expr));
-                let idx = record_name
                     .and_then(|rname| self.record_fields.get(rname))
                     .and_then(|fields| fields.iter().position(|f| f == field))
                     .map(|pos| pos + 2) // +1 for tag, +1 for 1-based
                     .unwrap_or_else(|| {
                         panic!(
-                            "codegen: could not resolve record type for field access '.{}'",
-                            field
+                            "codegen: could not resolve record type for field access '.{}' at node {:?} (record_name={:?})",
+                            field, expr.id, resolved_name
                         )
                     }) as i64;
                 let v = self.fresh();
@@ -2077,14 +2257,15 @@ impl<'a> Lowerer<'a> {
             } => {
                 let rec_var = self.fresh();
                 let rec_ce = self.lower_expr_value(record);
-                let record_name = resolved_name
+                let order = resolved_name
                     .as_deref()
-                    .or_else(|| field_access_record_name(record));
-                let order = record_name
                     .and_then(|rname| self.record_fields.get(rname))
                     .cloned()
                     .unwrap_or_else(|| {
-                        panic!("codegen: could not resolve record type for record update")
+                        panic!(
+                            "codegen: could not resolve record type for record update at node {:?} (record_name={:?})",
+                            expr.id, resolved_name
+                        )
                     });
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
@@ -2245,8 +2426,10 @@ impl<'a> Lowerer<'a> {
                 args,
                 ..
             } => self
-                .lower_eta_reduced_effect_op_ref(name, qualifier.as_deref())
-                .unwrap_or_else(|| self.lower_effect_call(name, qualifier.as_deref(), args, None)),
+                .lower_eta_reduced_effect_op_ref(expr.id, name, qualifier.as_deref())
+                .unwrap_or_else(|| {
+                    self.lower_effect_call(expr.id, name, qualifier.as_deref(), args, None)
+                }),
 
             // `expr with handler` -- attaches handler(s) to a computation
             ExprKind::With { expr, handler, .. } => self.lower_with(expr, handler),
@@ -2356,7 +2539,7 @@ impl<'a> Lowerer<'a> {
             .map(|effs| self.effect_handler_ops(effs))
             .unwrap_or_default();
 
-        let callee_param_effs = self.param_absorbed_effects(&qualified).cloned();
+        let callee_param_effs = self.resolved_param_absorbed_effects(head.id, &qualified);
 
         use super::resolve::ResolvedName;
 
@@ -2365,11 +2548,7 @@ impl<'a> Lowerer<'a> {
         // args and takes the remaining ones as fresh parameters. Without this,
         // an under-applied qualified call like `String.replace "m" ""` would
         // lower to `call std_string:replace/2`, which doesn't exist.
-        let total_arity = self.resolved.get(&head.id).map(|r| match r {
-            ResolvedName::ImportedFun { arity, .. } | ResolvedName::LocalFun { arity, .. } => {
-                *arity
-            }
-        });
+        let total_arity = self.resolved_fun_info(head.id, &qualified).map(|f| f.arity);
         let effect_count = callee_ops.len();
         let return_k_count = if effect_count > 0 { 1 } else { 0 };
         if let Some(arity) = total_arity {
