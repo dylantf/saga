@@ -350,13 +350,29 @@ impl<'a> Lowerer<'a> {
     ) -> String {
         self.front_resolution_for_module(module_name)
             .and_then(|r| r.effect_ref(effect_ref.id))
-            .map(|s| s.to_string())
+            .map(|resolved| {
+                self.effect_canonical
+                    .get(resolved)
+                    .cloned()
+                    .unwrap_or_else(|| resolved.to_string())
+            })
             .unwrap_or_else(|| {
                 self.effect_canonical
                     .get(&effect_ref.name)
                     .cloned()
                     .unwrap_or_else(|| effect_ref.name.clone())
             })
+    }
+
+    fn resolved_effect_refs_for_module(
+        &self,
+        module_name: &str,
+        effect_refs: &[crate::ast::EffectRef],
+    ) -> Vec<String> {
+        effect_refs
+            .iter()
+            .map(|effect_ref| self.resolved_effect_ref_for_module(module_name, effect_ref))
+            .collect()
     }
 
     fn resolved_effect_call_name(

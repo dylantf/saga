@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, BitSegSpec, Expr, ExprKind, Lit, Pat, Stmt, TypeExpr};
+use crate::ast::{BinOp, BitSegSpec, Expr, ExprKind, Lit, Pat, Stmt};
 use crate::codegen::cerl::{BinSegFlags, BinSegSize, BinSegType, CBinSeg, CExpr, CLit, Endianness};
 use crate::typechecker::Type;
 use std::collections::{BTreeSet, HashMap};
@@ -248,34 +248,6 @@ pub(super) fn has_nested_effect_call(expr: &Expr) -> bool {
 /// Check if an expression is or contains an effect call (direct or nested).
 fn branch_has_effect(expr: &Expr) -> bool {
     collect_effect_call(expr).is_some() || has_nested_effect_call(expr)
-}
-
-/// Recursively collect all effect names from `needs` clauses in a TypeExpr.
-pub(super) fn collect_type_effects(ty: &TypeExpr) -> BTreeSet<String> {
-    match ty {
-        TypeExpr::Arrow {
-            from, to, effects, ..
-        } => {
-            let mut effs: BTreeSet<String> = effects.iter().map(|e| e.name.clone()).collect();
-            effs.extend(collect_type_effects(from));
-            effs.extend(collect_type_effects(to));
-            effs
-        }
-        TypeExpr::App { func, arg, .. } => {
-            let mut effects = collect_type_effects(func);
-            effects.extend(collect_type_effects(arg));
-            effects
-        }
-        TypeExpr::Record { fields, .. } => {
-            let mut effects = BTreeSet::new();
-            for (_, ty) in fields {
-                effects.extend(collect_type_effects(ty));
-            }
-            effects
-        }
-        TypeExpr::Labeled { inner, .. } => collect_type_effects(inner),
-        TypeExpr::Named { .. } | TypeExpr::Var { .. } => BTreeSet::new(),
-    }
 }
 
 /// Convert a module path like `["Foo", "Bar", "Baz"]` to an Erlang module atom

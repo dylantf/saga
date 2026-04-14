@@ -1259,11 +1259,9 @@ impl<'a> Lowerer<'a> {
         // Handler expression: register arms directly under synthetic name
         if let ExprKind::HandlerExpr { body } = &value.kind {
             let synthetic = format!("__handler_expr_{}", value.id.0);
-            let canonical_effects = body
-                .effects
-                .iter()
-                .map(|e| self.canonicalize_effect(&e.name))
-                .collect();
+            let semantic_module_name = self.current_semantic_module_name().to_string();
+            let canonical_effects =
+                self.resolved_effect_refs_for_module(&semantic_module_name, &body.effects);
             self.handler_defs.insert(
                 synthetic.clone(),
                 super::HandlerInfo {

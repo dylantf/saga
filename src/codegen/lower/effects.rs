@@ -679,11 +679,9 @@ impl<'a> Lowerer<'a> {
     /// The tuple layout is: ops sorted alphabetically by "Effect.op" key,
     /// with an optional return clause lambda as the last element.
     pub(super) fn lower_handler_expr_to_tuple(&mut self, body: &crate::ast::HandlerBody) -> CExpr {
-        let canonical_effects: Vec<String> = body
-            .effects
-            .iter()
-            .map(|e| self.canonicalize_effect(&e.name))
-            .collect();
+        let semantic_module_name = self.current_semantic_module_name().to_string();
+        let canonical_effects =
+            self.resolved_effect_refs_for_module(&semantic_module_name, &body.effects);
         let handler_ops = self.effect_handler_ops(&canonical_effects);
 
         // Index arms by op name for quick lookup

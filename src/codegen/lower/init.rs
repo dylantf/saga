@@ -2,9 +2,9 @@
 /// function metadata, imports, and type constructors from the program's
 /// declarations and imported module codegen info.
 use crate::ast::{self, Decl};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
-use super::util::{self, collect_type_effects};
+use super::util;
 use super::{EffectInfo, FunInfo, HandlerInfo, Lowerer};
 
 fn count_lambda_params(body: &ast::Expr) -> usize {
@@ -55,6 +55,42 @@ impl<'a> Lowerer<'a> {
 
     fn canonical_name(map: &HashMap<String, String>, bare: &str) -> String {
         map.get(bare).cloned().unwrap_or_else(|| bare.to_string())
+    }
+
+    fn resolved_type_effects_for_module(
+        &self,
+        module_name: &str,
+        ty: &ast::TypeExpr,
+    ) -> BTreeSet<String> {
+        match ty {
+            ast::TypeExpr::Arrow {
+                from, to, effects, ..
+            } => {
+                let mut effect_names: BTreeSet<String> = effects
+                    .iter()
+                    .map(|eff| self.resolved_effect_ref_for_module(module_name, eff))
+                    .collect();
+                effect_names.extend(self.resolved_type_effects_for_module(module_name, from));
+                effect_names.extend(self.resolved_type_effects_for_module(module_name, to));
+                effect_names
+            }
+            ast::TypeExpr::App { func, arg, .. } => {
+                let mut effect_names = self.resolved_type_effects_for_module(module_name, func);
+                effect_names.extend(self.resolved_type_effects_for_module(module_name, arg));
+                effect_names
+            }
+            ast::TypeExpr::Record { fields, .. } => {
+                let mut effect_names = BTreeSet::new();
+                for (_, field_ty) in fields {
+                    effect_names.extend(self.resolved_type_effects_for_module(module_name, field_ty));
+                }
+                effect_names
+            }
+            ast::TypeExpr::Labeled { inner, .. } => {
+                self.resolved_type_effects_for_module(module_name, inner)
+            }
+            ast::TypeExpr::Named { .. } | ast::TypeExpr::Var { .. } => BTreeSet::new(),
+        }
     }
 
     fn initialize_canonical_name_maps(
@@ -130,11 +166,9 @@ impl<'a> Lowerer<'a> {
         module_name: &str,
         source_module_name: &str,
         has_module_decl: bool,
-        effect_canonical: &HashMap<String, String>,
+        _effect_canonical: &HashMap<String, String>,
         pending_annotations: &mut HashMap<String, PendingAnnotation>,
     ) {
-        let canonicalize_effect = |bare: &str| Self::canonical_name(effect_canonical, bare);
-
         for decl in program {
             match decl {
                 Decl::RecordDef { name, fields, .. } => {
@@ -175,13 +209,12 @@ impl<'a> Lowerer<'a> {
                             .iter()
                             .enumerate()
                             .filter_map(|(idx, (_, ty))| {
-                                let effs = collect_type_effects(ty);
+                                let effs = self.resolved_type_effects_for_module(source_module_name, ty);
                                 if effs.is_empty() {
                                     None
                                 } else {
                                     let mut sorted: Vec<String> = effs
                                         .into_iter()
-                                        .map(|e| canonicalize_effect(&e))
                                         .collect();
                                     sorted.sort();
                                     Some((idx, sorted))
@@ -216,11 +249,8 @@ impl<'a> Lowerer<'a> {
                     self.handler_defs.insert(
                         canonical_handler,
                         HandlerInfo {
-                            effects: body
-                                .effects
-                                .iter()
-                                .map(|e| canonicalize_effect(&e.name))
-                                .collect(),
+                            effects: self
+                                .resolved_effect_refs_for_module(source_module_name, &body.effects),
                             arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                             return_clause: body.return_clause.clone(),
                             source_module: Some(module_name.to_string()),
@@ -244,7 +274,7 @@ impl<'a> Lowerer<'a> {
                         if !effects.is_empty() {
                             sorted_effects = effects
                                 .iter()
-                                .map(|e| canonicalize_effect(&e.name))
+                                .map(|e| self.resolved_effect_ref_for_module(source_module_name, e))
                                 .collect();
                             sorted_effects.sort();
                         }
@@ -260,19 +290,33 @@ impl<'a> Lowerer<'a> {
                     } else {
                         let mut sorted_effects: Vec<String> = effects
                             .iter()
-                            .map(|e| canonicalize_effect(&e.name))
+                            .map(|e| self.resolved_effect_ref_for_module(source_module_name, e))
                             .collect();
                         sorted_effects.sort();
-                        let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
-                        for (i, (_param_name, type_expr)) in params.iter().enumerate() {
-                            let effs = collect_type_effects(type_expr);
-                            if !effs.is_empty() {
-                                let mut sorted: Vec<String> =
-                                    effs.into_iter().map(|e| canonicalize_effect(&e)).collect();
-                                sorted.sort();
-                                param_effs.insert(i, sorted);
-                            }
-                        }
+                        let param_effs: HashMap<usize, Vec<String>> = self
+                            .check_result
+                            .env
+                            .get(name)
+                            .map(|scheme| {
+                                let resolved_ty = self.check_result.sub.apply(&scheme.ty);
+                                util::param_absorbed_effects_from_type(&resolved_ty)
+                                    .into_iter()
+                                    .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
+                                    .collect()
+                            })
+                            .unwrap_or_else(|| {
+                                let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
+                                for (i, (_param_name, type_expr)) in params.iter().enumerate() {
+                                    let effs = self
+                                        .resolved_type_effects_for_module(source_module_name, type_expr);
+                                    if !effs.is_empty() {
+                                        let mut sorted: Vec<String> = effs.into_iter().collect();
+                                        sorted.sort();
+                                        param_effs.insert(i, sorted);
+                                    }
+                                }
+                                param_effs
+                            });
                         pending_annotations.insert(
                             name.clone(),
                             PendingAnnotation {
@@ -295,10 +339,9 @@ impl<'a> Lowerer<'a> {
 
     fn register_std_module_semantics(
         &mut self,
-        effect_canonical: &HashMap<String, String>,
+        _effect_canonical: &HashMap<String, String>,
         handler_canonical: &HashMap<String, String>,
     ) {
-        let canonicalize_effect = |bare: &str| Self::canonical_name(effect_canonical, bare);
         let canonicalize_handler = |bare: &str| Self::canonical_name(handler_canonical, bare);
 
         for (mod_name, module_semantics) in self.ctx.modules_semantics() {
@@ -365,14 +408,12 @@ impl<'a> Lowerer<'a> {
                     match decl {
                         Decl::HandlerDef { name, body, .. } => {
                             let canonical_handler = canonicalize_handler(name);
+                            let resolved_effects =
+                                self.resolved_effect_refs_for_module(mod_name, &body.effects);
                             self.handler_defs
                                 .entry(canonical_handler)
                                 .or_insert(HandlerInfo {
-                                    effects: body
-                                        .effects
-                                        .iter()
-                                        .map(|e| canonicalize_effect(&e.name))
-                                        .collect(),
+                                    effects: resolved_effects,
                                     arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                                     return_clause: body.return_clause.clone(),
                                     source_module: Some(mod_name.to_string()),
@@ -472,14 +513,12 @@ impl<'a> Lowerer<'a> {
 
     fn register_imported_handler_defs(&mut self, module_name: &str, program: &ast::Program) {
         self.register_imported_module_local_funs(module_name, program);
+        let (_, source_module_name) = Self::source_module_info(program, module_name);
         for decl in program {
             match decl {
                 Decl::HandlerDef { name, body, .. } => {
-                    let canonical_effects: Vec<String> = body
-                        .effects
-                        .iter()
-                        .map(|e| self.canonicalize_effect(&e.name))
-                        .collect();
+                    let canonical_effects =
+                        self.resolved_effect_refs_for_module(&source_module_name, &body.effects);
                     let canonical_handler = format!("{}.{}", module_name, name);
                     self.handler_defs
                         .entry(canonical_handler)
@@ -517,11 +556,11 @@ impl<'a> Lowerer<'a> {
                 sorted_effects.sort();
                 let mut param_effs: HashMap<usize, Vec<String>> = HashMap::new();
                 for (i, (_param_name, type_expr)) in params.iter().enumerate() {
-                    let effs = collect_type_effects(type_expr);
+                    let effs =
+                        self.resolved_type_effects_for_module(&source_module_name, type_expr);
                     if !effs.is_empty() {
                         let mut sorted: Vec<String> = effs
                             .into_iter()
-                            .map(|e| self.effect_canonical.get(&e).cloned().unwrap_or(e))
                             .collect();
                         sorted.sort();
                         param_effs.insert(i, sorted);
