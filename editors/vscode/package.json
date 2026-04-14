@@ -1,8 +1,15 @@
 {
-  "name": "saga",
-  "displayName": "saga",
-  "description": "Language support for the saga programming language",
-  "version": "0.2.0",
+  "name": "saga-lsp",
+  "displayName": "Saga LSP",
+  "description": "LSP and syntax highlighting for the Saga programming language",
+  "publisher": "dylantf",
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dylantf/saga"
+  },
+  "icon": "sagalogo-bg.png",
   "engines": {
     "vscode": "^1.75.0"
   },
@@ -34,6 +41,16 @@
         "path": "./syntaxes/saga.tmLanguage.json"
       }
     ],
+    "configuration": {
+      "title": "saga",
+      "properties": {
+        "saga.lsp.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the saga-lsp binary. If empty, looks for saga-lsp on PATH."
+        }
+      }
+    },
     "commands": [
       {
         "command": "saga.restartServer",

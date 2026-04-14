@@ -1,13 +1,18 @@
-# saga VS Code Extension
+# Saga Language - VS Code Extension
 
-Syntax highlighting for `.saga` files.
+Language support for the [Saga](https://github.com/dylantf/saga) programming language.
 
-## Installation
+## Features
 
-Symlink this directory into your VS Code extensions folder:
+- Syntax highlighting
+- Diagnostics (errors and warnings)
+- Go to definition
+- Hover information
+- Completions
+- Code actions
 
-```
-ln -s /path/to/saga/editors/vscode ~/.vscode/extensions/saga
-```
+## Requirements
 
-Then reload VS Code (Ctrl+Shift+P -> "Developer: Reload Window").
+The `saga-lsp` binary must be on your PATH.
+
+Or set a custom path in settings: **Saga > Lsp: Path**
