@@ -103,6 +103,10 @@ pub fun is_lower : (s: String) -> Bool
 @external("erlang", "std_string_bridge", "is_whitespace")
 pub fun is_whitespace : (s: String) -> Bool
 
+#@ Returns the length of the raw bytes of the string.
+@external("erlang", "erlang", "byte_size")
+pub fun byte_size : String -> Int
+
 #@ Repeats a string n times.
 pub fun repeat : (n: Int) -> (s: String) -> String
 repeat n s =
