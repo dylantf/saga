@@ -622,12 +622,13 @@ fn install_deps_recursive(
         };
 
         // Compile Erlang sources, unless the checkout is unchanged AND already
-        // built. rebar3 if rebar.config present, erlc otherwise. Compile -pa
-        // flags are computed from top_project_root/deps/ since all siblings
-        // live there.
+        // built. Build tool selection: erlang.mk > rebar3 > erlc.
         let already_built = reused && crate::hex::is_compiled(top_project_root, dep_name);
         if already_built {
             eprintln!("{}{} {} (already built)", indent, dim("Skipping"), dep_name);
+        } else if dep_path.join("erlang.mk").exists() {
+            eprintln!("{}{} {} (erlang.mk)...", indent, dim("Compiling"), dep_name);
+            crate::hex::compile_with_erlang_mk(&dep_path, dep_name, top_project_root)?;
         } else if dep_path.join("rebar.config").exists() {
             eprintln!("{}{} {} (rebar3)...", indent, dim("Compiling"), dep_name);
             crate::hex::compile_with_rebar3(&dep_path, dep_name, top_project_root)?;
@@ -639,13 +640,10 @@ fn install_deps_recursive(
                         .any(|e| e.path().extension().is_some_and(|ext| ext == "erl"))
                 })
                 .unwrap_or(false)
+            && !crate::hex::is_compiled(top_project_root, dep_name)
         {
-            // Has .erl files in src/ — compile them with erlc
-            let ebin_dir = dep_path.join("ebin");
-            if !ebin_dir.exists() {
-                eprintln!("{}{} {} (erlang)...", indent, dim("Compiling"), dep_name);
-                crate::hex::compile_erlang(&dep_path, dep_name, top_project_root)?;
-            }
+            eprintln!("{}{} {} (erlc)...", indent, dim("Compiling"), dep_name);
+            crate::hex::compile_erlang(&dep_path, dep_name, top_project_root)?;
         }
 
         // Recurse into the dep's own dependencies. top_project_root is

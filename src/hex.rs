@@ -13,8 +13,18 @@ pub fn package_ebin_dir(project_root: &Path, name: &str) -> PathBuf {
 }
 
 /// Whether a dependency is already compiled in this project.
+/// Checks for `.beam` files in ebin/, not just the directory existing,
+/// because Hex packages can ship an ebin/ with only a `.app` file.
 pub fn is_compiled(project_root: &Path, name: &str) -> bool {
-    package_ebin_dir(project_root, name).exists()
+    let ebin = package_ebin_dir(project_root, name);
+    ebin.exists()
+        && std::fs::read_dir(&ebin)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .any(|e| e.path().extension().is_some_and(|ext| ext == "beam"))
+            })
+            .unwrap_or(false)
 }
 
 /// Global cache directory for Hex tarball downloads.
@@ -204,6 +214,46 @@ pub fn download_and_extract(
 
 // --- Compilation ---
 
+/// Compile a package using erlang.mk (make app).
+/// `pkg_dir` is the directory containing the Makefile and erlang.mk.
+/// `project_root` is used to set DEPS_DIR so erlang.mk finds sibling deps.
+/// Returns the ebin directory path.
+pub fn compile_with_erlang_mk(
+    pkg_dir: &Path,
+    name: &str,
+    project_root: &Path,
+) -> Result<PathBuf, String> {
+    let ebin_dir = pkg_dir.join("ebin");
+    let deps_dir = project_root.join("deps");
+
+    // Remove pre-existing ebin/ from the Hex tarball (contains only .app,
+    // no .beam files). erlang.mk treats an existing ebin/ as "already built"
+    // and skips compilation.
+    if ebin_dir.exists() {
+        let _ = std::fs::remove_dir_all(&ebin_dir);
+    }
+
+    let status = std::process::Command::new("make")
+        .args(["app"])
+        .current_dir(pkg_dir)
+        .env("DEPS_DIR", &deps_dir)
+        .status()
+        .map_err(|e| format!("failed to run make: {}", e))?;
+
+    if !status.success() {
+        return Err(format!("make app failed for '{}'", name));
+    }
+
+    if !ebin_dir.exists() {
+        return Err(format!(
+            "make app compiled '{}' but no ebin directory was produced",
+            name
+        ));
+    }
+
+    Ok(ebin_dir)
+}
+
 /// Compile a package using rebar3 bare compile.
 /// `pkg_dir` is the directory containing the source and rebar.config.
 /// `project_root` is used to find dependency ebin dirs for `--paths`.
@@ -334,10 +384,6 @@ pub fn compile_erlang(pkg_dir: &Path, name: &str, project_root: &Path) -> Result
     let src_dir = pkg_dir.join("src");
     let ebin_dir = pkg_dir.join("ebin");
 
-    if ebin_dir.exists() {
-        return Ok(ebin_dir);
-    }
-
     if !src_dir.exists() {
         return Err(format!("dependency '{}' has no src/ directory", name));
     }
@@ -398,16 +444,22 @@ pub fn compile_erlang(pkg_dir: &Path, name: &str, project_root: &Path) -> Result
 }
 
 /// Compile Erlang source files in a Hex package to .beam files.
-/// Uses raw erlc for simple packages, rebar3 for packages with NIFs/hooks.
+/// Selects the build tool based on what the package contains:
+/// - erlang.mk file -> make app
+/// - rebar.config -> rebar3 bare compile
+/// - otherwise -> raw erlc
+///
 /// Returns the ebin directory path.
 pub fn compile_package(project_root: &Path, name: &str) -> Result<PathBuf, String> {
     let pkg_dir = package_dir(project_root, name);
 
-    if pkg_dir.join("ebin").exists() {
+    if is_compiled(project_root, name) {
         return Ok(pkg_dir.join("ebin"));
     }
 
-    if pkg_dir.join("rebar.config").exists() {
+    if pkg_dir.join("erlang.mk").exists() {
+        compile_with_erlang_mk(&pkg_dir, name, project_root)
+    } else if pkg_dir.join("rebar.config").exists() {
         compile_with_rebar3(&pkg_dir, name, project_root)
     } else {
         compile_erlang(&pkg_dir, name, project_root)
