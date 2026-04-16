@@ -1,6 +1,20 @@
-fun some_fun : String -> (Unit -> Unit needs {Stdio})
-some_fun msg = fun () -> println msg
+effect Outer {
+  fun register : (Unit -> Unit needs {Inner}) -> Unit
+}
+
+effect Inner {
+  fun ping : Unit -> Unit
+}
+
+fun do_stuff : Unit -> Unit needs {Outer}
+do_stuff () = register! (fun () -> ping! ())
+
+handler collect_outer for Outer {
+  register _ = resume ()
+  return _ = []
+}
 
 main () = {
-  some_fun "hello" () with console
+  let bodies = do_stuff () with collect_outer
+  println (show (List.length bodies)) with console
 }
