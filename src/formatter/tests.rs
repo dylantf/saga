@@ -1485,6 +1485,15 @@ fn fun_sig_arrow_return_type_no_parens() {
 }
 
 #[test]
+fn fun_sig_arrow_return_type_with_effects_gets_parens() {
+    // Return type arrow with `needs` must be parenthesized to preserve scoping
+    assert_eq!(
+        fmt80("fun some_fun : String -> (Unit -> Unit needs {Stdio})"),
+        "fun some_fun : String -> (Unit -> Unit needs {Stdio})\n"
+    );
+}
+
+#[test]
 fn effect_op_arrow_param_gets_parens() {
     let src = "effect Scope {\n  fun acquire_scoped : (Unit -> a) -> (a -> Unit) -> a\n}";
     let result = fmt80(src);

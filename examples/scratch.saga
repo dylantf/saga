@@ -1,21 +1,6 @@
-type Foo = Foo String
-
-impl Show for Foo {
-  show f = case f {
-    Foo s -> s
-  }
-}
-
-type Bar = Bar String
-
-impl Show for Bar {
-  show (Bar s) = s
-}
+fun some_fun : String -> (Unit -> Unit needs {Stdio})
+some_fun msg = fun () -> println msg
 
 main () = {
-  let foo = Foo "foo string"
-  let bar = Bar "bar string"
-
-  println $"Foo: {foo}"
-  println $"Bar: {bar}"
-} with console
+  some_fun "hello" () with console
+}

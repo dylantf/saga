@@ -165,7 +165,20 @@ pub fn format_arrow_chain(params: &[(String, TypeExpr)], return_type: &TypeExpr)
             }
         })
         .collect();
-    parts.push(format_type_expr(return_type));
+    // If the return type is an arrow with effects, wrap in parens to preserve
+    // the scoping of `needs` — otherwise `A -> B -> C needs {E}` re-parses
+    // with `needs {E}` on the whole signature instead of just the inner arrow.
+    let ret_doc = match return_type {
+        TypeExpr::Arrow {
+            effects,
+            effect_row_var,
+            ..
+        } if !effects.is_empty() || effect_row_var.is_some() => {
+            docs![Doc::text("("), format_type_expr(return_type), Doc::text(")")]
+        }
+        _ => format_type_expr(return_type),
+    };
+    parts.push(ret_doc);
     Doc::join(Doc::text(" -> "), parts)
 }
 
