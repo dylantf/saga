@@ -43,6 +43,10 @@ pub fn format_type_expr(ty: &TypeExpr) -> Doc {
                 TypeExpr::App { .. } if collect_tuple_args(arg).is_none() => {
                     docs![Doc::text("("), format_type_expr(arg), Doc::text(")")]
                 }
+                // Arrow args need parens too — `List (a -> b)` vs `List a -> b`
+                TypeExpr::Arrow { .. } => {
+                    docs![Doc::text("("), format_type_expr(arg), Doc::text(")")]
+                }
                 _ => format_type_expr(arg),
             };
             docs![format_type_expr(func), Doc::text(" "), arg_doc]

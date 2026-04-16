@@ -1494,6 +1494,20 @@ fn fun_sig_arrow_return_type_with_effects_gets_parens() {
 }
 
 #[test]
+fn type_app_arrow_arg_gets_parens() {
+    // Arrow inside a type application needs parens: `List (a -> b)` not `List a -> b`
+    assert_eq!(
+        fmt80("fun run_all : List (Unit -> Unit needs {Reg}) -> Int"),
+        "fun run_all : List (Unit -> Unit needs {Reg}) -> Int\n"
+    );
+    // Also without effects
+    assert_eq!(
+        fmt80("fun foo : List (a -> b) -> Int"),
+        "fun foo : List (a -> b) -> Int\n"
+    );
+}
+
+#[test]
 fn effect_op_arrow_param_gets_parens() {
     let src = "effect Scope {\n  fun acquire_scoped : (Unit -> a) -> (a -> Unit) -> a\n}";
     let result = fmt80(src);
