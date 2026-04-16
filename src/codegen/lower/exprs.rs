@@ -11,7 +11,7 @@ use super::pats;
 use super::util::{
     arity_and_effects_from_type, binop_call, collect_effect_call_expr, collect_fun_call, core_var,
     has_nested_effect_call, lower_string_to_binary, mangle_ctor_atom,
-    param_absorbed_effects_from_type, pat_binding_var,
+    param_absorbed_effects_from_type, param_types_from_type, pat_binding_var,
 };
 use super::{FunInfo, LowerMode, Lowerer};
 
@@ -691,7 +691,7 @@ impl<'a> Lowerer<'a> {
 
                 // Build the function body (same logic as top-level multi-clause funs)
                 let source_arity = pats::lower_params(clauses[0].0).len();
-                let (arity, effects, param_absorbed_effects) = self
+                let (arity, effects, param_absorbed_effects, param_types) = self
                     .check_result
                     .resolved_type_for_node(fun_id)
                     .map(|ty| {
@@ -704,9 +704,10 @@ impl<'a> Lowerer<'a> {
                             .into_iter()
                             .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
                             .collect::<HashMap<usize, Vec<String>>>();
-                        (expanded_arity, effects, param_absorbed_effects)
+                        let param_types = param_types_from_type(&ty);
+                        (expanded_arity, effects, param_absorbed_effects, param_types)
                     })
-                    .unwrap_or_else(|| (source_arity, Vec::new(), HashMap::new()));
+                    .unwrap_or_else(|| (source_arity, Vec::new(), HashMap::new(), Vec::new()));
                 let param_names: Vec<String> = (0..arity).map(|i| format!("_LF{}", i)).collect();
 
                 // Register in fun_info BEFORE lowering body so recursive
@@ -717,6 +718,7 @@ impl<'a> Lowerer<'a> {
                         arity,
                         effects: effects.clone(),
                         param_absorbed_effects: param_absorbed_effects.clone(),
+                        param_types: param_types.clone(),
                     },
                 );
 

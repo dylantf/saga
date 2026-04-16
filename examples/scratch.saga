@@ -1,20 +1,40 @@
-effect Outer {
-  fun register : (Unit -> Unit needs {Inner}) -> Unit
+effect Reg {
+  fun reg : String -> Unit
 }
 
-effect Inner {
-  fun ping : Unit -> Unit
+handler noop for Reg {
+  reg _ = resume ()
 }
 
-fun do_stuff : Unit -> Unit needs {Outer}
-do_stuff () = register! (fun () -> ping! ())
-
-handler collect_outer for Outer {
-  register _ = resume ()
+handler collect for Reg {
+  reg e = {
+    let r = resume ()
+    e :: r
+  }
   return _ = []
 }
 
-main () = {
-  let bodies = do_stuff () with collect_outer
-  println (show (List.length bodies)) with console
+fun run : (Unit -> Unit needs {Reg}) -> List String
+run f = f () with collect
+
+fun run_all : List (Unit -> Unit needs {Reg}) -> Int
+run_all fns = case fns {
+  [] -> 0
+  f :: rest -> {
+    let entries = run f
+    List.length entries + run_all rest
+  }
 }
+
+main () = {
+  let total =
+    run_all [
+      fun () -> reg! "a",
+      fun () ->
+        {
+          reg! "b"
+          reg! "c"
+        },
+    ]
+  println (show total)
+} with {console, noop}

@@ -320,6 +320,17 @@ pub(super) fn param_absorbed_effects_from_type(ty: &Type) -> HashMap<usize, Vec<
     result
 }
 
+/// Extract the source-level parameter types from a function type.
+pub(super) fn param_types_from_type(ty: &Type) -> Vec<Type> {
+    let mut params = Vec::new();
+    let mut current = ty;
+    while let Type::Fun(param, ret, _) = current {
+        params.push((**param).clone());
+        current = ret;
+    }
+    params
+}
+
 /// Collect effect names from a Fun type (used for parameter types).
 fn collect_effarrow_effects(ty: &Type) -> Vec<String> {
     let mut effects = BTreeSet::new();
