@@ -5,6 +5,22 @@ pub record Point {
   y: Int,
 }
 
+pub trait Describe a {
+  fun describe_it : a -> String
+}
+
+impl Describe for Point {
+  describe_it p = $"({p.x}, {p.y})"
+}
+
+pub trait Verbose a where {a: Describe} {
+  fun verbose : a -> String
+}
+
+impl Verbose for Point {
+  verbose p = $"Point: {describe_it p}"
+}
+
 pub fun add : (a: Int) -> (b: Int) -> Int
 add a b = a + b
 

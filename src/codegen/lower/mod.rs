@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use errors::{ErrorInfo, ErrorKind, SourceInfo};
 use init::{PendingAnnotation, extract_external};
-use pats::{lower_params, lower_pat};
+use pats::lower_params;
 use util::{
     cerl_call, collect_ctor_call, collect_effect_call, collect_effect_call_expr, collect_fun_call,
     collect_qualified_call, core_var, lower_lit, lower_string_to_binary, process_string_escapes,
@@ -1253,9 +1253,8 @@ impl<'a> Lowerer<'a> {
                     .map(|(params, guard, body)| {
                         // Pattern only matches user params, not handler params
                         let pat = if base_arity == 1 {
-                            lower_pat(
+                            self.lower_pat(
                                 &params[0],
-                                &self.record_fields,
                                 &self.constructor_atoms,
                                 self.handler_origin_module(),
                             )
@@ -1267,9 +1266,8 @@ impl<'a> Lowerer<'a> {
                                 params
                                     .iter()
                                     .map(|p| {
-                                        lower_pat(
+                                        self.lower_pat(
                                             p,
-                                            &self.record_fields,
                                             &self.constructor_atoms,
                                             self.handler_origin_module(),
                                         )
@@ -1969,9 +1967,8 @@ impl<'a> Lowerer<'a> {
                         CExpr::Tuple(param_vars.iter().map(|v| CExpr::Var(v.clone())).collect())
                     };
                     let pat = if params.len() == 1 {
-                        lower_pat(
+                        self.lower_pat(
                             &params[0],
-                            &self.record_fields,
                             &self.constructor_atoms,
                             self.handler_origin_module(),
                         )
@@ -1980,9 +1977,8 @@ impl<'a> Lowerer<'a> {
                             params
                                 .iter()
                                 .map(|p| {
-                                    lower_pat(
+                                    self.lower_pat(
                                         p,
-                                        &self.record_fields,
                                         &self.constructor_atoms,
                                         self.handler_origin_module(),
                                     )
@@ -2038,18 +2034,16 @@ impl<'a> Lowerer<'a> {
                                         (CPat::Var(raw.clone()), Some((core_var(var_name), raw)))
                                     } else {
                                         (
-                                            lower_pat(
+                                            self.lower_pat(
                                                 &args[1],
-                                                &self.record_fields,
                                                 &self.constructor_atoms,
                                                 self.handler_origin_module(),
                                             ),
                                             None,
                                         )
                                     };
-                                let pid_pat = lower_pat(
+                                let pid_pat = self.lower_pat(
                                     &args[0],
-                                    &self.record_fields,
                                     &self.constructor_atoms,
                                     self.handler_origin_module(),
                                 );
@@ -2059,9 +2053,8 @@ impl<'a> Lowerer<'a> {
                                 (tuple_pat, wrapper)
                             } else {
                                 (
-                                    lower_pat(
+                                    self.lower_pat(
                                         &arm.pattern,
-                                        &self.record_fields,
                                         &self.constructor_atoms,
                                         self.handler_origin_module(),
                                     ),
@@ -2070,9 +2063,8 @@ impl<'a> Lowerer<'a> {
                             }
                         } else {
                             (
-                                lower_pat(
+                                self.lower_pat(
                                     &arm.pattern,
-                                    &self.record_fields,
                                     &self.constructor_atoms,
                                     self.handler_origin_module(),
                                 ),

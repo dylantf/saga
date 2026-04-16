@@ -334,7 +334,13 @@ fn render_effect_decl(out: &mut String, decl: &Decl) {
     // Render individual operation docs if they have any
     for op in operations {
         if !op.node.doc.is_empty() {
-            writeln!(out, "**{}**: {}", op.node.name, op.node.doc.join(" ").trim()).unwrap();
+            writeln!(
+                out,
+                "**{}**: {}",
+                op.node.name,
+                op.node.doc.join(" ").trim()
+            )
+            .unwrap();
             writeln!(out).unwrap();
         }
     }
@@ -352,14 +358,18 @@ fn render_handler_decl(out: &mut String, decl: &Decl) {
     writeln!(out, "```saga").unwrap();
     write!(out, "handler {}", name).unwrap();
     if !body.effects.is_empty() {
-        let effs: Vec<String> = body.effects.iter().map(|e| {
-            let mut s = e.name.clone();
-            for arg in &e.type_args {
-                s.push(' ');
-                s.push_str(&format_type_expr(arg));
-            }
-            s
-        }).collect();
+        let effs: Vec<String> = body
+            .effects
+            .iter()
+            .map(|e| {
+                let mut s = e.name.clone();
+                for arg in &e.type_args {
+                    s.push(' ');
+                    s.push_str(&format_type_expr(arg));
+                }
+                s
+            })
+            .collect();
         write!(out, " for {}", effs.join(", ")).unwrap();
     }
     if !body.needs.is_empty() {
@@ -457,7 +467,11 @@ fn format_type_expr(ty: &TypeExpr) -> String {
             format!("{} {}", format_type_expr(func), format_type_expr_atom(arg))
         }
         TypeExpr::Arrow {
-            from, to, effects, effect_row_var, ..
+            from,
+            to,
+            effects,
+            effect_row_var,
+            ..
         } => {
             let arrow = format!("{} -> {}", format_type_expr(from), format_type_expr(to));
             if effects.is_empty() {

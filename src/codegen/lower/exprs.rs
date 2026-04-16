@@ -7,7 +7,7 @@ use crate::token::Span;
 use crate::typechecker::Type;
 use std::collections::HashMap;
 
-use super::pats::{self, lower_pat};
+use super::pats;
 use super::util::{
     arity_and_effects_from_type, binop_call, collect_effect_call_expr, collect_fun_call, core_var,
     has_nested_effect_call, lower_string_to_binary, mangle_ctor_atom,
@@ -317,9 +317,8 @@ impl<'a> Lowerer<'a> {
         let mut result = Vec::new();
 
         for arm in arms {
-            let pat = lower_pat(
+            let pat = self.lower_pat(
                 &arm.pattern,
-                &self.record_fields,
                 &self.constructor_atoms,
                 self.handler_origin_module(),
             );
@@ -354,9 +353,8 @@ impl<'a> Lowerer<'a> {
         for arm in arms.iter().rev() {
             let rest_var = self.fresh();
             let rest_ref = CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
-            let pat = lower_pat(
+            let pat = self.lower_pat(
                 &arm.pattern,
-                &self.record_fields,
                 &self.constructor_atoms,
                 self.handler_origin_module(),
             );
@@ -630,12 +628,7 @@ impl<'a> Lowerer<'a> {
             return (var, body);
         }
         let tmp = self.fresh();
-        let cpat = lower_pat(
-            pat,
-            &self.record_fields,
-            &self.constructor_atoms,
-            self.handler_origin_module(),
-        );
+        let cpat = self.lower_pat(pat, &self.constructor_atoms, self.handler_origin_module());
         let mut arms = vec![CArm {
             pat: cpat,
             guard: None,
@@ -786,26 +779,14 @@ impl<'a> Lowerer<'a> {
                         .iter()
                         .map(|(params, guard, body)| {
                             let pat = if base_arity == 1 {
-                                pats::lower_pat(
-                                    &params[0],
-                                    &self.record_fields,
-                                    &self.constructor_atoms,
-                                    None,
-                                )
+                                self.lower_pat(&params[0], &self.constructor_atoms, None)
                             } else if base_arity == 0 {
                                 CPat::Wildcard
                             } else {
                                 CPat::Values(
                                     params
                                         .iter()
-                                        .map(|p| {
-                                            pats::lower_pat(
-                                                p,
-                                                &self.record_fields,
-                                                &self.constructor_atoms,
-                                                None,
-                                            )
-                                        })
+                                        .map(|p| self.lower_pat(p, &self.constructor_atoms, None))
                                         .collect(),
                                 )
                             };
@@ -1030,9 +1011,8 @@ impl<'a> Lowerer<'a> {
                 let arms_ce: Vec<CArm> = arms
                     .iter()
                     .map(|arm| {
-                        let pat = lower_pat(
+                        let pat = self.lower_pat(
                             &arm.pattern,
-                            &self.record_fields,
                             &self.constructor_atoms,
                             self.handler_origin_module(),
                         );
@@ -1160,9 +1140,8 @@ impl<'a> Lowerer<'a> {
         let else_arms_ce: Vec<CArm> = else_arms
             .iter()
             .map(|arm| CArm {
-                pat: lower_pat(
+                pat: self.lower_pat(
                     &arm.pattern,
-                    &self.record_fields,
                     &self.constructor_atoms,
                     self.handler_origin_module(),
                 ),
@@ -1179,12 +1158,8 @@ impl<'a> Lowerer<'a> {
             let fail_var = self.fresh();
             let val_ce = self.lower_expr_value(expr);
 
-            let success_pat = lower_pat(
-                pat,
-                &self.record_fields,
-                &self.constructor_atoms,
-                self.handler_origin_module(),
-            );
+            let success_pat =
+                self.lower_pat(pat, &self.constructor_atoms, self.handler_origin_module());
             // If the success pattern is a catch-all (e.g. Just(x) lowers to a
             // bare variable), put the else arms first so they get a chance to
             // match before the catch-all swallows everything.

@@ -1,2 +1,5 @@
 [project]
 name = "module-test"
+
+[bin]
+main = "Main.saga"
