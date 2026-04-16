@@ -1,11 +1,26 @@
 const vscode = require("vscode");
+const path = require("path");
+const fs = require("fs");
+const os = require("os");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 
 let client;
 
-function createClient() {
+function findServerCommand() {
   const config = vscode.workspace.getConfiguration("saga");
-  const serverCommand = config.get("lsp.path") || "saga-lsp";
+  const configured = config.get("lsp.path");
+  if (configured) return configured;
+
+  // Check ~/.saga/bin/saga-lsp as a fallback since VS Code on macOS
+  // may not inherit the user's shell PATH
+  const homeBin = path.join(os.homedir(), ".saga", "bin", "saga-lsp");
+  if (fs.existsSync(homeBin)) return homeBin;
+
+  return "saga-lsp";
+}
+
+function createClient() {
+  const serverCommand = findServerCommand();
 
   const serverOptions = {
     command: serverCommand,
