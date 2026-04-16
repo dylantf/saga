@@ -2,6 +2,7 @@ use crate::ast::{Lit, Pat};
 use crate::codegen::cerl::{CBinSeg, CLit, CPat};
 use std::collections::HashMap;
 
+use super::Lowerer;
 use super::util::{core_var, lower_lit, mangle_ctor_atom, process_string_escapes};
 
 /// Map a function's parameter patterns to Core Erlang variable names.
@@ -16,199 +17,183 @@ pub(super) fn lower_params(params: &[Pat]) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn lower_pat(
-    pat: &Pat,
-    record_fields: &HashMap<String, Vec<String>>,
-    constructor_atoms: &HashMap<String, String>,
-    origin_module: Option<&str>,
-) -> CPat {
-    match pat {
-        Pat::Wildcard { .. } => CPat::Wildcard,
-        Pat::Var { name, .. } => CPat::Var(core_var(name)),
-        Pat::Lit { value, .. } => match value {
-            Lit::String(s, kind) => {
-                let resolved = if kind.is_multiline() {
-                    process_string_escapes(s)
-                } else {
-                    s.clone()
-                };
-                CPat::Binary(
-                    resolved
-                        .as_bytes()
-                        .iter()
-                        .map(|&b| CBinSeg::Byte(b))
-                        .collect(),
-                )
-            }
-            _ => CPat::Lit(lower_lit(value)),
-        },
-        Pat::Tuple { elements, .. } => CPat::Tuple(
-            elements
-                .iter()
-                .map(|p| lower_pat(p, record_fields, constructor_atoms, origin_module))
-                .collect(),
-        ),
-        Pat::Constructor { name, args, .. } => match name.as_str() {
-            "Cons" if args.len() == 2 => CPat::Cons(
-                Box::new(lower_pat(
-                    &args[0],
-                    record_fields,
-                    constructor_atoms,
-                    origin_module,
-                )),
-                Box::new(lower_pat(
-                    &args[1],
-                    record_fields,
-                    constructor_atoms,
-                    origin_module,
-                )),
+impl Lowerer<'_> {
+    pub(super) fn lower_pat(
+        &self,
+        pat: &Pat,
+        constructor_atoms: &HashMap<String, String>,
+        origin_module: Option<&str>,
+    ) -> CPat {
+        match pat {
+            Pat::Wildcard { .. } => CPat::Wildcard,
+            Pat::Var { name, .. } => CPat::Var(core_var(name)),
+            Pat::Lit { value, .. } => match value {
+                Lit::String(s, kind) => {
+                    let resolved = if kind.is_multiline() {
+                        process_string_escapes(s)
+                    } else {
+                        s.clone()
+                    };
+                    CPat::Binary(
+                        resolved
+                            .as_bytes()
+                            .iter()
+                            .map(|&b| CBinSeg::Byte(b))
+                            .collect(),
+                    )
+                }
+                _ => CPat::Lit(lower_lit(value)),
+            },
+            Pat::Tuple { elements, .. } => CPat::Tuple(
+                elements
+                    .iter()
+                    .map(|p| self.lower_pat(p, constructor_atoms, origin_module))
+                    .collect(),
             ),
-            "Nil" if args.is_empty() => CPat::Nil,
-            // Booleans are bare atoms to match Erlang's native true/false
-            "True" if args.is_empty() => CPat::Lit(CLit::Atom("true".to_string())),
-            "False" if args.is_empty() => CPat::Lit(CLit::Atom("false".to_string())),
-            _ if args.is_empty() && super::beam_interop::exit_reason_bare_atom(name).is_some() => {
-                CPat::Lit(CLit::Atom(
-                    super::beam_interop::exit_reason_bare_atom(name)
-                        .unwrap()
-                        .to_string(),
-                ))
-            }
-            _ => {
+            Pat::Constructor { name, args, .. } => match name.as_str() {
+                "Cons" if args.len() == 2 => CPat::Cons(
+                    Box::new(self.lower_pat(&args[0], constructor_atoms, origin_module)),
+                    Box::new(self.lower_pat(&args[1], constructor_atoms, origin_module)),
+                ),
+                "Nil" if args.is_empty() => CPat::Nil,
+                // Booleans are bare atoms to match Erlang's native true/false
+                "True" if args.is_empty() => CPat::Lit(CLit::Atom("true".to_string())),
+                "False" if args.is_empty() => CPat::Lit(CLit::Atom("false".to_string())),
+                _ if args.is_empty()
+                    && super::beam_interop::exit_reason_bare_atom(name).is_some() =>
+                {
+                    CPat::Lit(CLit::Atom(
+                        super::beam_interop::exit_reason_bare_atom(name)
+                            .unwrap()
+                            .to_string(),
+                    ))
+                }
+                _ => {
+                    let atom = mangle_ctor_atom(name, constructor_atoms, origin_module);
+                    let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
+                    elems.extend(
+                        args.iter()
+                            .map(|p| self.lower_pat(p, constructor_atoms, origin_module)),
+                    );
+                    CPat::Tuple(elems)
+                }
+            },
+            Pat::Record {
+                id,
+                name,
+                fields,
+                as_name,
+                ..
+            } => {
+                // Records are tagged tuples in declared field order.
                 let atom = mangle_ctor_atom(name, constructor_atoms, origin_module);
                 let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
-                elems.extend(
-                    args.iter()
-                        .map(|p| lower_pat(p, record_fields, constructor_atoms, origin_module)),
-                );
-                CPat::Tuple(elems)
+                if let Some(order) = self.resolved_record_fields(*id, name) {
+                    let field_map: HashMap<&str, Option<&Pat>> = fields
+                        .iter()
+                        .map(|(n, p)| (n.as_str(), p.as_ref()))
+                        .collect();
+                    for field_name in order {
+                        match field_map.get(field_name.as_str()) {
+                            Some(Some(p)) => {
+                                elems.push(self.lower_pat(p, constructor_atoms, origin_module))
+                            }
+                            // Field without alias: bind to a var named after the field
+                            Some(None) => elems.push(CPat::Var(core_var(field_name))),
+                            None => elems.push(CPat::Wildcard),
+                        }
+                    }
+                } else {
+                    for (_, alias) in fields {
+                        match alias {
+                            Some(p) => {
+                                elems.push(self.lower_pat(p, constructor_atoms, origin_module))
+                            }
+                            None => elems.push(CPat::Wildcard),
+                        }
+                    }
+                }
+                let tuple_pat = CPat::Tuple(elems);
+                match as_name {
+                    Some(var) => CPat::Alias(core_var(var), Box::new(tuple_pat)),
+                    None => tuple_pat,
+                }
             }
-        },
-        Pat::Record {
-            name,
-            fields,
-            as_name,
-            ..
-        } => {
-            // Records are tagged tuples in declared field order.
-            let atom = mangle_ctor_atom(name, constructor_atoms, origin_module);
-            let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
-            if let Some(order) = record_fields.get(name) {
+            Pat::AnonRecord { fields, .. } => {
+                // Anonymous records are tagged tuples with a deterministic tag.
+                let field_names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+                let tag = crate::ast::anon_record_tag(&field_names);
+                let mut sorted_fields: Vec<&str> = field_names.clone();
+                sorted_fields.sort();
+                let mut elems = vec![CPat::Lit(CLit::Atom(tag))];
                 let field_map: HashMap<&str, Option<&Pat>> = fields
                     .iter()
                     .map(|(n, p)| (n.as_str(), p.as_ref()))
                     .collect();
-                for field_name in order {
-                    match field_map.get(field_name.as_str()) {
-                        Some(Some(p)) => elems.push(lower_pat(
-                            p,
-                            record_fields,
-                            constructor_atoms,
-                            origin_module,
-                        )),
-                        // Field without alias: bind to a var named after the field
+                for field_name in &sorted_fields {
+                    match field_map.get(field_name) {
+                        Some(Some(p)) => {
+                            elems.push(self.lower_pat(p, constructor_atoms, origin_module))
+                        }
                         Some(None) => elems.push(CPat::Var(core_var(field_name))),
                         None => elems.push(CPat::Wildcard),
                     }
                 }
-            } else {
-                for (_, alias) in fields {
-                    match alias {
-                        Some(p) => elems.push(lower_pat(
-                            p,
-                            record_fields,
-                            constructor_atoms,
-                            origin_module,
-                        )),
-                        None => elems.push(CPat::Wildcard),
-                    }
-                }
+                CPat::Tuple(elems)
             }
-            let tuple_pat = CPat::Tuple(elems);
-            match as_name {
-                Some(var) => CPat::Alias(core_var(var), Box::new(tuple_pat)),
-                None => tuple_pat,
+            Pat::StringPrefix { prefix, rest, .. } => {
+                // "abc" <> rest  =>  #{#<97>(...),#<98>(...),#<99>(...),#<Rest>('all',8,'binary',...)}#
+                let mut segs: Vec<CBinSeg<CPat>> = prefix
+                    .as_bytes()
+                    .iter()
+                    .map(|&b| CBinSeg::Byte(b))
+                    .collect();
+                let tail = self.lower_pat(rest, constructor_atoms, origin_module);
+                segs.push(CBinSeg::BinaryAll(tail));
+                CPat::Binary(segs)
             }
-        }
-        Pat::AnonRecord { fields, .. } => {
-            // Anonymous records are tagged tuples with a deterministic tag.
-            let field_names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
-            let tag = crate::ast::anon_record_tag(&field_names);
-            let mut sorted_fields: Vec<&str> = field_names.clone();
-            sorted_fields.sort();
-            let mut elems = vec![CPat::Lit(CLit::Atom(tag))];
-            let field_map: HashMap<&str, Option<&Pat>> = fields
-                .iter()
-                .map(|(n, p)| (n.as_str(), p.as_ref()))
-                .collect();
-            for field_name in &sorted_fields {
-                match field_map.get(field_name) {
-                    Some(Some(p)) => elems.push(lower_pat(
-                        p,
-                        record_fields,
-                        constructor_atoms,
-                        origin_module,
-                    )),
-                    Some(None) => elems.push(CPat::Var(core_var(field_name))),
-                    None => elems.push(CPat::Wildcard),
-                }
+            Pat::BitStringPat { segments, .. } => {
+                let segs = segments
+                    .iter()
+                    .map(|seg| self.lower_bit_segment_pat(seg, constructor_atoms, origin_module))
+                    .collect();
+                CPat::Binary(segs)
             }
-            CPat::Tuple(elems)
-        }
-        Pat::StringPrefix { prefix, rest, .. } => {
-            // "abc" <> rest  =>  #{#<97>(...),#<98>(...),#<99>(...),#<Rest>('all',8,'binary',...)}#
-            let mut segs: Vec<CBinSeg<CPat>> = prefix
-                .as_bytes()
-                .iter()
-                .map(|&b| CBinSeg::Byte(b))
-                .collect();
-            let tail = lower_pat(rest, record_fields, constructor_atoms, origin_module);
-            segs.push(CBinSeg::BinaryAll(tail));
-            CPat::Binary(segs)
-        }
-        Pat::BitStringPat { segments, .. } => {
-            let segs = segments
-                .iter()
-                .map(|seg| {
-                    lower_bit_segment_pat(seg, record_fields, constructor_atoms, origin_module)
-                })
-                .collect();
-            CPat::Binary(segs)
-        }
-        Pat::ListPat { .. } | Pat::ConsPat { .. } | Pat::Or { .. } => {
-            unreachable!("surface syntax should be desugared before codegen")
+            Pat::ListPat { .. } | Pat::ConsPat { .. } | Pat::Or { .. } => {
+                unreachable!("surface syntax should be desugared before codegen")
+            }
         }
     }
-}
 
-fn lower_bit_segment_pat(
-    seg: &crate::ast::BitSegment<Pat>,
-    record_fields: &std::collections::HashMap<String, Vec<String>>,
-    constructor_atoms: &std::collections::HashMap<String, String>,
-    origin_module: Option<&str>,
-) -> CBinSeg<CPat> {
-    use super::util::{
-        resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size,
-    };
-    use crate::ast::BitSegSpec;
+    fn lower_bit_segment_pat(
+        &self,
+        seg: &crate::ast::BitSegment<Pat>,
+        constructor_atoms: &std::collections::HashMap<String, String>,
+        origin_module: Option<&str>,
+    ) -> CBinSeg<CPat> {
+        use super::util::{
+            resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size,
+        };
+        use crate::ast::BitSegSpec;
 
-    let is_binary = seg.specs.contains(&BitSegSpec::Binary);
-    let pat = lower_pat(&seg.value, record_fields, constructor_atoms, origin_module);
+        let is_binary = seg.specs.contains(&BitSegSpec::Binary);
+        let pat = self.lower_pat(&seg.value, constructor_atoms, origin_module);
 
-    if is_binary && seg.size.is_none() {
-        return CBinSeg::BinaryAll(pat);
-    }
+        if is_binary && seg.size.is_none() {
+            return CBinSeg::BinaryAll(pat);
+        }
 
-    let (type_name, default_size, unit) = resolve_bit_segment_meta(&seg.specs);
-    let flags = resolve_bit_segment_flags(&seg.specs);
-    let size = seg.size.as_ref().map(|s| super::lower_size_expr(s));
-    let size_expr = resolve_bit_segment_size(size, &type_name, default_size);
+        let (type_name, default_size, unit) = resolve_bit_segment_meta(&seg.specs);
+        let flags = resolve_bit_segment_flags(&seg.specs);
+        let size = seg.size.as_ref().map(|s| super::lower_size_expr(s));
+        let size_expr = resolve_bit_segment_size(size, &type_name, default_size);
 
-    CBinSeg::Segment {
-        value: pat,
-        size: size_expr,
-        unit,
-        type_name,
-        flags,
+        CBinSeg::Segment {
+            value: pat,
+            size: size_expr,
+            unit,
+            type_name,
+            flags,
+        }
     }
 }

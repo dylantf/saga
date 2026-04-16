@@ -285,6 +285,7 @@ impl<'a> Lowerer<'a> {
                                 arity: expanded_arity,
                                 effects: sorted_effects,
                                 param_absorbed_effects: HashMap::new(),
+                                param_types: Vec::new(),
                             },
                         );
                     } else {
@@ -398,6 +399,7 @@ impl<'a> Lowerer<'a> {
                         arity: expanded_arity,
                         effects,
                         param_absorbed_effects: param_absorbed,
+                        param_types: util::param_types_from_type(&scheme.ty),
                     };
                     let alias_qualified = format!("{}.{}", mod_path.last().unwrap(), name);
                     self.fun_info.entry(alias_qualified).or_insert(fi.clone());
@@ -480,6 +482,7 @@ impl<'a> Lowerer<'a> {
                 arity: expanded_arity,
                 effects: effects.clone(),
                 param_absorbed_effects: param_effs.clone(),
+                param_types: util::param_types_from_type(&scheme.ty),
             };
             self.fun_info.insert(alias_qualified, fi.clone());
             let canonical = format!("{}.{}", module_name, name);
@@ -490,6 +493,7 @@ impl<'a> Lowerer<'a> {
                     arity: expanded_arity,
                     effects,
                     param_absorbed_effects: param_effs,
+                    param_types: util::param_types_from_type(&scheme.ty),
                 });
             }
         }
@@ -602,11 +606,18 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                     let arity = self.expanded_arity(base_arity, &effects);
+                    let param_types = self
+                        .check_result
+                        .env
+                        .get(name)
+                        .map(|scheme| util::param_types_from_type(&self.check_result.sub.apply(&scheme.ty)))
+                        .unwrap_or_default();
                     let canonical = format!("{}.{}", source_module_name, name);
                     self.fun_info.entry(canonical).or_insert(FunInfo {
                         arity,
                         effects,
                         param_absorbed_effects,
+                        param_types,
                     });
                 }
                 Decl::Val { name, .. } => {

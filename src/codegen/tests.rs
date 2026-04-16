@@ -136,6 +136,160 @@ main () = {
 }
 
 #[test]
+fn effectful_callbacks_in_lists_get_lowered_handler_params() {
+    let src = r#"
+effect Reg {
+  fun reg : String -> Unit
+}
+
+handler noop for Reg {
+  reg _ = resume ()
+}
+
+fun run : (Unit -> Unit needs {Reg}) -> List String
+run f = f () with {
+  reg e = {
+    let rest = resume ()
+    e :: rest
+  }
+  return _ = []
+}
+
+fun run_all : List (Unit -> Unit needs {Reg}) -> Int
+run_all fns = case fns {
+  [] -> 0
+  f :: rest -> List.length (run f) + run_all rest
+}
+
+main () = run_all [fun () -> reg! "a"] with noop
+"#;
+    let out = emit_full(src);
+    assert!(
+        out.contains("fun (_Arg0, _Handle__script_Reg_reg, _ReturnK) ->"),
+        "expected list callback lambda to receive lowered handler params\n{out}"
+    );
+}
+
+#[test]
+fn handler_returned_lambdas_capture_outer_effect_handlers() {
+    let src = r#"
+effect Log {
+  fun log : String -> Unit
+}
+
+effect Step {
+  fun step : Unit -> Unit
+}
+
+handler noop for Log {
+  log _ = resume ()
+}
+
+handler exec for Step needs {Log} {
+  step () = {
+    let k = resume ()
+    fun state -> {
+      log! "ok"
+      k state
+    }
+  }
+  return _ = fun state -> state
+}
+
+fun run : (Unit -> Unit needs {Step}) -> Unit
+  needs {Log}
+run body = {
+  let state_fn = { body () } with exec
+  state_fn ()
+}
+
+main () = run (fun () -> step! ()) with noop
+"#;
+    let out = emit_full(src);
+    assert!(
+        out.contains("fun (State) ->"),
+        "expected handler-returned lambda to stay unary and capture outer handlers\n{out}"
+    );
+    assert!(
+        !out.contains("fun (State, _Handle__script_Log_log"),
+        "handler-returned lambda unexpectedly took outer effect handlers as params\n{out}"
+    );
+}
+
+#[test]
+fn effectful_callbacks_in_records_get_lowered_handler_params() {
+    let src = r#"
+effect Reg {
+  fun reg : String -> Unit
+}
+
+record Holder {
+  cb: Unit -> Unit needs {Reg}
+}
+
+handler noop for Reg {
+  reg _ = resume ()
+}
+
+fun run : (Unit -> Unit needs {Reg}) -> List String
+run f = f () with {
+  reg e = {
+    let rest = resume ()
+    e :: rest
+  }
+  return _ = []
+}
+
+fun run_holder : Holder -> Int
+run_holder h = List.length (run h.cb)
+
+main () = run_holder (Holder { cb: fun () -> reg! "a" }) with noop
+"#;
+    let out = emit_full(src);
+    assert!(
+        out.contains("fun (_Arg0, _Handle__script_Reg_reg, _ReturnK) ->"),
+        "expected record-contained callback lambda to receive lowered handler params\n{out}"
+    );
+}
+
+#[test]
+fn effectful_callbacks_in_adts_get_lowered_handler_params() {
+    let src = r#"
+effect Reg {
+  fun reg : String -> Unit
+}
+
+type Wrap
+  = Wrap (Unit -> Unit needs {Reg})
+
+handler noop for Reg {
+  reg _ = resume ()
+}
+
+fun run : (Unit -> Unit needs {Reg}) -> List String
+run f = f () with {
+  reg e = {
+    let rest = resume ()
+    e :: rest
+  }
+  return _ = []
+}
+
+fun run_wrap : Wrap -> Int
+run_wrap w = case w {
+  Wrap f -> List.length (run f)
+}
+
+main () = run_wrap (Wrap (fun () -> reg! "a")) with noop
+"#;
+    let out = emit_full(src);
+    assert!(
+        out.contains("fun (_Arg0, _Handle__script_Reg_reg, _ReturnK) ->"),
+        "expected ADT-contained callback lambda to receive lowered handler params\n{out}"
+    );
+}
+
+#[test]
 fn block_local_effectful_let_fun_value_uses_lowered_fun_arity() {
     let src = r#"
 effect State s {

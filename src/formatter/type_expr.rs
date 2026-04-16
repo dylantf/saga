@@ -43,6 +43,10 @@ pub fn format_type_expr(ty: &TypeExpr) -> Doc {
                 TypeExpr::App { .. } if collect_tuple_args(arg).is_none() => {
                     docs![Doc::text("("), format_type_expr(arg), Doc::text(")")]
                 }
+                // Arrow args need parens too — `List (a -> b)` vs `List a -> b`
+                TypeExpr::Arrow { .. } => {
+                    docs![Doc::text("("), format_type_expr(arg), Doc::text(")")]
+                }
                 _ => format_type_expr(arg),
             };
             docs![format_type_expr(func), Doc::text(" "), arg_doc]
@@ -174,7 +178,11 @@ pub fn format_arrow_chain(params: &[(String, TypeExpr)], return_type: &TypeExpr)
             effect_row_var,
             ..
         } if !effects.is_empty() || effect_row_var.is_some() => {
-            docs![Doc::text("("), format_type_expr(return_type), Doc::text(")")]
+            docs![
+                Doc::text("("),
+                format_type_expr(return_type),
+                Doc::text(")")
+            ]
         }
         _ => format_type_expr(return_type),
     };

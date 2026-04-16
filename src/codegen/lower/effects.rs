@@ -193,16 +193,24 @@ impl<'a> Lowerer<'a> {
         let effect_key = format!("{}.{}", effect_name, op_name);
 
         // Lower args (shared between direct and CPS paths).
-        let runtime_param_count = self
+        let op_info = self
             .effect_defs
             .get(&effect_name)
-            .and_then(|effect| effect.ops.get(op_name))
+            .and_then(|effect| effect.ops.get(op_name));
+        let runtime_param_count = op_info
             .map(|op| op.runtime_param_count)
             .unwrap_or(args.len());
+        let op_param_absorbed = op_info.and_then(|op| {
+            if op.param_absorbed_effects.is_empty() {
+                None
+            } else {
+                Some(op.param_absorbed_effects.clone())
+            }
+        });
         let mut unit_args_to_erase = args.len().saturating_sub(runtime_param_count);
         let mut param_vars = Vec::new();
         let mut bindings = Vec::new();
-        for arg in args {
+        for (source_idx, arg) in args.iter().enumerate() {
             let is_unit_literal = matches!(
                 arg.kind,
                 ExprKind::Lit {
@@ -215,13 +223,36 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let v = self.fresh();
-            // Effect call args are not CPS-expanded: BEAM-native ops (e.g.
-            // spawn) wrap their callback as a value-shape thunk and can't
-            // supply CPS handlers, and user-defined op handlers receive the
-            // callback as a captured-handler closure too. So clear any
-            // ambient lambda_effect_context here — it only applies to
-            // ordinary (App) HOF parameters.
+            // Effect call args are generally not CPS-expanded — the handler
+            // arm receives the callback as a plain value. However, if the op's
+            // parameter declares effects that are NOT already available in the
+            // enclosing scope's handler params, the lambda needs its own handler
+            // params so the handler arm can supply them via lower_effectful_var_call.
+            //
+            // If the callback's effects ARE in scope (e.g. spawn's callback
+            // needs {Actor} and Actor handler params are already threaded), the
+            // lambda captures them via closure — no extra params needed.
             let saved_ctx = self.lambda_effect_context.take();
+            if let Some(ref pae) = op_param_absorbed
+                && let Some(effs) = pae.get(&source_idx)
+            {
+                // Only add handler params for effects not already capturable
+                // from the enclosing scope.
+                let uncapturable: Vec<String> = effs
+                    .iter()
+                    .filter(|eff| {
+                        let ops = self.effect_handler_ops(&[(*eff).clone()]);
+                        ops.iter().any(|(e, op)| {
+                            let key = format!("{}.{}", e, op);
+                            !self.current_handler_params.contains_key(&key)
+                        })
+                    })
+                    .cloned()
+                    .collect();
+                if !uncapturable.is_empty() {
+                    self.lambda_effect_context = Some(uncapturable);
+                }
+            }
             let ce = self
                 .lower_eta_reduced_effect_expr(arg)
                 .unwrap_or_else(|| self.lower_expr_value(arg));

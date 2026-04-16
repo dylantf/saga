@@ -281,17 +281,20 @@ impl Elaborator {
         // Pass 1: Collect trait method info and function where clauses
         for decl in program {
             match decl {
-                Decl::TraitDef { name, methods, .. } => {
+                Decl::TraitDef {
+                    id, name, methods, ..
+                } => {
+                    let resolved_name = self.resolved_trait_name(*id, name);
                     for (idx, ann) in methods.iter().enumerate() {
                         let method = &ann.node;
                         if let Some((existing_trait, _)) = self.trait_methods.get(&method.name) {
                             panic!(
                                 "trait method `{}` is defined in both `{}` and `{}`",
-                                method.name, existing_trait, name
+                                method.name, existing_trait, resolved_name
                             );
                         }
                         self.trait_methods
-                            .insert(method.name.clone(), (name.clone(), idx));
+                            .insert(method.name.clone(), (resolved_name.clone(), idx));
                     }
                 }
                 Decl::FunSignature {

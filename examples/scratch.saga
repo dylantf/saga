@@ -1,6 +1,40 @@
-fun some_fun : String -> (Unit -> Unit needs {Stdio})
-some_fun msg = fun () -> println msg
+effect Reg {
+  fun reg : String -> Unit
+}
+
+handler noop for Reg {
+  reg _ = resume ()
+}
+
+handler collect for Reg {
+  reg e = {
+    let r = resume ()
+    e :: r
+  }
+  return _ = []
+}
+
+fun run : (Unit -> Unit needs {Reg}) -> List String
+run f = f () with collect
+
+fun run_all : List (Unit -> Unit needs {Reg}) -> Int
+run_all fns = case fns {
+  [] -> 0
+  f :: rest -> {
+    let entries = run f
+    List.length entries + run_all rest
+  }
+}
 
 main () = {
-  some_fun "hello" () with console
-}
+  let total =
+    run_all [
+      fun () -> reg! "a",
+      fun () ->
+        {
+          reg! "b"
+          reg! "c"
+        },
+    ]
+  println (show total)
+} with {console, noop}

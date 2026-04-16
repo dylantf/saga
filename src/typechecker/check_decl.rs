@@ -2095,12 +2095,14 @@ impl Checker {
                 // Find which effect and param index this var corresponds to
                 for effect_ref in effect_names {
                     if let Some(info) = self.resolve_effect(&effect_ref.name) {
+                        let canonical_effect =
+                            self.resolved_effect_name(effect_ref.id, &effect_ref.name);
                         for (i, &param_id) in info.type_params.iter().enumerate() {
                             if let Some(mapped_ty) = handler_type_mapping.get(&param_id)
                                 && matches!(mapped_ty, Type::Var(id) if *id == *var_id)
                             {
                                 let entry = where_constraints
-                                    .entry((effect_ref.name.clone(), i))
+                                    .entry((canonical_effect.clone(), i))
                                     .or_default();
                                 for tr in &bound.traits {
                                     let resolved_trait = self

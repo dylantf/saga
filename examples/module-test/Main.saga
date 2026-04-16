@@ -1,6 +1,14 @@
 module Main
 
-import MathLib (add, double, math_handler)
+import MathLib (Point, Describe, add, double, math_handler)
+
+quadrant p = case p {
+  Point { x, y } when x > 0 && y > 0 -> "Q1"
+  Point { x, y } when x > 0 && y < 0 -> "Q2"
+  Point { x, y } when x < 0 && y < 0 -> "Q3"
+  Point { x, y } when x < 0 && y > 0 -> "Q4"
+  _ -> "other"
+}
 
 main () = {
   println (show (add 10 20))
@@ -13,4 +21,8 @@ main () = {
   println (snd pair)
 
   println (show (multiply! 2 3)) with {math_handler}
+
+  let p = Point { x: 2, y: 2 }
+  println (describe_it p)
+  println (quadrant p)
 } with {console}
