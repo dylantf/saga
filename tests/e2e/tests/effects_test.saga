@@ -1,7 +1,7 @@
 module EffectsTest
 
 import Std.Fail (Fail)
-import Std.Test (Register, describe, test, skip, assert_eq, assert_true)
+import Std.Test (Testing, describe, test, skip, assert_eq, assert_true)
 
 # --- Effect declarations ---
 
@@ -370,7 +370,7 @@ counter_bubble_outer () = counter_bubble_c () with {
 # --- Tests ---
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "effects" (fun () -> {
     describe "basic effect and handler" (fun () -> {

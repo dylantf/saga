@@ -603,9 +603,9 @@ bs1 <> bs2                       # concatenation
 ```
 module MathTest
 
-import Std.Test (Register, describe, test, skip, assert_eq, assert_neq)
+import Std.Test (Testing, describe, test, skip, assert_eq, assert_neq)
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "Math" (fun () -> {
     test "addition" (fun () -> {

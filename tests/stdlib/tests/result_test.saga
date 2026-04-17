@@ -2,7 +2,7 @@ module ResultTest
 
 import Std.Result as Result
 import Std.Test (
-  Register,
+  Testing,
   describe,
   test,
   assert_eq,
@@ -25,7 +25,7 @@ fun int_nothing : Unit -> Maybe Int
 int_nothing () = Nothing
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "Result" (fun () -> {
     describe "is_ok" (fun () -> {

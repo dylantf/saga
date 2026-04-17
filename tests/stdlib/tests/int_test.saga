@@ -1,10 +1,10 @@
 module IntTest
 
-import Std.Test (Register, describe, test, assert_eq, assert_true, assert_false, assert_just, assert_nothing)
+import Std.Test (Testing, describe, test, assert_eq, assert_true, assert_false, assert_just, assert_nothing)
 import Std.Int as Int
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "Int" (fun () -> {
 

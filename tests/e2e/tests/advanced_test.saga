@@ -1,7 +1,7 @@
 module AdvancedTest
 
 import Std.BitString as BitString
-import Std.Test (Register, describe, test, assert_eq, assert_true, assert_false)
+import Std.Test (Testing, describe, test, assert_eq, assert_true, assert_false)
 
 # --- Types for deriving tests ---
 
@@ -101,7 +101,7 @@ quicksort xs = case xs {
 # --- Tests ---
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "deriving" (fun () -> {
 

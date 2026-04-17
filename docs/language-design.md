@@ -637,17 +637,17 @@ up after N failures - all in userspace, no language support needed.
 
 Tests use the effect system, but test authoring is entirely library-level.
 `Std.Test` defines `Test` (for assertions inside an individual test body) and
-`Register` (for registering tests and groups during collection). The `test`,
+`Testing` (for registering tests and groups during collection). The `test`,
 `describe`, `skip`, and `only` helpers are ordinary functions, not language
 primitives.
 
 ```
 module MathTest
 
-import Std.Test (Register, describe, test, skip, assert_eq)
+import Std.Test (Testing, describe, test, skip, assert_eq)
 import MathLib (add, double)
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "MathLib" (fun () -> {
     describe "add" (fun () -> {
@@ -680,7 +680,7 @@ single BEAM VM.
 
 Under the hood:
 
-- `test` / `skip` / `only` perform `Register` to capture names, modes, and
+- `test` / `skip` / `only` perform `Testing` to capture names, modes, and
   thunks
 - `describe` performs `enter_group!` / `leave_group!` to preserve structure
 - `run_modules` collects all selected modules first, applies global `only`,

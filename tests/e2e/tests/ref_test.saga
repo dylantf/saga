@@ -2,7 +2,7 @@ module RefTest
 
 import Std.Ref (MutRef, Ref, beam_ref, ets_ref)
 import Std.Actor (Process, Actor, Timer, beam_actor)
-import Std.Test (Register, describe, test, assert_eq)
+import Std.Test (Testing, describe, test, assert_eq)
 
 # --- Helper functions ---
 
@@ -58,7 +58,7 @@ shared_ref_writer r amount = {
 
 # --- Tests ---
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "Ref effect (beam_ref)" (fun () -> {
     test "new and get" (fun () -> {

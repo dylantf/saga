@@ -10,7 +10,7 @@ import Std.Actor (
   Shutdown,
   Killed
 )
-import Std.Test (Register, describe, test, assert_eq)
+import Std.Test (Testing, describe, test, assert_eq)
 
 type CounterMsg =
   | Increment Int
@@ -181,7 +181,7 @@ test_link_unlink () = {
 }
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "Actor" (fun () -> {
 

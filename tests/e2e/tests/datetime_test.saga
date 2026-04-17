@@ -1,10 +1,10 @@
 module DatetimeTest
 
 import Std.DateTime (Date, ParseError, NaiveDateTime)
-import Std.Test (Register, describe, test, assert_eq, assert_true)
+import Std.Test (Testing, describe, test, assert_eq, assert_true)
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "DateTime" (fun () -> {
 

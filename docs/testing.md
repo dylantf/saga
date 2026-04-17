@@ -7,7 +7,7 @@ Spec for saga's built-in testing support.
 ## Overview
 
 Tests are ordinary saga modules discovered from the project's `tests/` directory. Each test
-module exports a `tests` function that uses the `Std.Test.Register` effect to register test
+module exports a `tests` function that uses the `Std.Test.Testing` effect to register test
 groups and test bodies. `saga test` collects all selected test modules, generates a synthetic
 entry module, compiles everything through the normal project pipeline, and runs the suite in a
 single BEAM VM.
@@ -41,7 +41,7 @@ tests_dir = "src/tests"    # default: "tests"
 ```
 
 `saga test` discovers all `.saga` files under the configured test directory. Selected test
-files must declare a module and export `pub fun tests : Unit -> Unit needs {Register}`.
+files must declare a module and export `pub fun tests : Unit -> Unit needs {Testing}`.
 
 Test files are regular modules. They import the code under test and only see `pub` items.
 
@@ -56,9 +56,9 @@ desugaring.
 module MathTest
 
 import Math
-import Std.Test (Register, describe, test, skip, assert_eq)
+import Std.Test (Testing, describe, test, skip, assert_eq)
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "addition" (fun () -> {
     test "positive numbers" (fun () -> {
@@ -90,7 +90,7 @@ pub effect Test {
   fun assert : (ok: Bool) -> (msg: String) -> Unit
 }
 
-pub effect Register {
+pub effect Testing {
   fun register_test : (name: String) -> (mode: TestMode) -> (body: Unit -> Unit needs {Test}) -> Unit
   fun enter_group : (name: String) -> Unit
   fun leave_group : Unit -> Unit
@@ -110,7 +110,7 @@ assert_even n =
   assert! (n % 2 == 0) $"Expected an even number, got {show n}"
 ```
 
-`Register` is used by `test`, `describe`, `skip`, and `only` during suite collection. Test
+`Testing` is used by `test`, `describe`, `skip`, and `only` during suite collection. Test
 modules usually only mention it in the type of their exported `tests` function.
 
 ---

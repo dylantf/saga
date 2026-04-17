@@ -2,7 +2,7 @@ module ListTest
 
 import Std.List as List
 import Std.Test (
-  Register,
+  Testing,
   describe,
   test,
   assert_eq,
@@ -14,7 +14,7 @@ import Std.Test (
 )
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "List" (fun () -> {
 

@@ -1,10 +1,10 @@
 module TimeTest
 
-import Std.Test (Register, describe, test, assert_eq, assert_true)
+import Std.Test (Testing, describe, test, assert_eq, assert_true)
 import Std.Time (monotonic_ms)
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "Std.Time" (fun () -> {
     describe "monotonic_ms" (fun () -> {

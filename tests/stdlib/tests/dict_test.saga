@@ -3,7 +3,7 @@ module DictTest
 import Std.Dict
 import Std.List
 import Std.Test (
-  Register,
+  Testing,
   describe,
   test,
   assert_eq,
@@ -14,7 +14,7 @@ import Std.Test (
 )
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "Dict" (fun () -> {
 

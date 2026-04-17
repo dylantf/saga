@@ -17,10 +17,10 @@ import Std.Dynamic (
   optional
 )
 import Std.List as List
-import Std.Test (Register, describe, test, assert_eq)
+import Std.Test (Testing, describe, test, assert_eq)
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "Dynamic" (fun () -> {
 

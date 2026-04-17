@@ -1,6 +1,6 @@
 module PatternMatchingTest
 
-import Std.Test (Register, describe, test, assert_eq, assert_true, assert_false)
+import Std.Test (Testing, describe, test, assert_eq, assert_true, assert_false)
 
 # --- Types for testing ---
 
@@ -190,7 +190,7 @@ guarded_gate_chain n ok = do {
 # --- Tests ---
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "pattern matching" (fun () -> {
 

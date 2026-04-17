@@ -1,11 +1,11 @@
 module PanicTest
 
-import Std.Test (Register, describe, test, assert_panics, assert_ok, assert_err)
+import Std.Test (Testing, describe, test, assert_panics, assert_ok, assert_err)
 import Std.List as List
 import Std.Process (catch_panic)
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "panic recovery" (fun () -> {
     test "List.head on empty list panics" (fun () -> {

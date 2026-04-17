@@ -1,9 +1,9 @@
 module FloatTest
 
-import Std.Test (Register, describe, test, assert_eq)
+import Std.Test (Testing, describe, test, assert_eq)
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "Float" (fun () -> {
     describe "parse" (fun () -> {

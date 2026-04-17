@@ -1,10 +1,10 @@
 module MaybeTest
 
-import Std.Test (Register, describe, test, assert_eq, assert_true, assert_false, assert_nothing, assert_panics)
+import Std.Test (Testing, describe, test, assert_eq, assert_true, assert_false, assert_nothing, assert_panics)
 import Std.Maybe as Maybe
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "Maybe" (fun () -> {
 

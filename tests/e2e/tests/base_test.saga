@@ -1,9 +1,9 @@
 module BaseTest
 
-import Std.Test (Register, describe, test, assert_eq, assert_true, assert_false)
+import Std.Test (Testing, describe, test, assert_eq, assert_true, assert_false)
 
 
-pub fun tests : Unit -> Unit needs {Register}
+pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "basics" (fun () -> {
 
